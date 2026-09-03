@@ -100,7 +100,9 @@ class CensusTests(unittest.TestCase):
         p = c["pairs"]
         self.assertEqual(sorted(p), ["assistant", "control_request/can_use_tool", "control_response/can_use_tool", "system/init"])
         self.assertEqual(p["control_request/can_use_tool"]["payload_keys"], ["input", "subtype", "tool_name"])
-        self.assertEqual(p["control_response/can_use_tool"]["payload_keys"], ["behavior"])
+        # payload_keys is the `response` envelope (§4.4); body_keys is what it wraps
+        self.assertEqual(p["control_response/can_use_tool"]["payload_keys"], ["request_id", "response", "subtype"])
+        self.assertEqual(p["control_response/can_use_tool"]["body_keys"], ["behavior"])
         self.assertEqual(p["assistant"]["block_types"], ["text", "tool_use"])
         self.assertEqual(p["assistant"]["count"], 2)
         # required keys = keys present in every frame of the pair; keys = union
@@ -116,14 +118,66 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(m["pairs"]["system/init"]["required_keys"], ["capabilities", "subtype", "type"])
         self.assertIn("assistant", m["pairs"])  # pairs only in one side are kept as recorded
 
-    def test_merge_required_records_an_empty_flag_list_rather_than_inheriting_one(self):
-        # A run whose `claude --help` came back empty must not silently keep the previous
-        # flag list, or the drift check goes quiet exactly when the CLI stopped answering.
+    def test_merge_required_tells_an_empty_flag_list_from_an_uncaptured_one(self):
+        # help_text="" is a run whose `claude --help` answered and declared nothing: record
+        # the empty list so later diffs alarm. help_text=None is a run that never captured
+        # the help at all, which is no evidence, so the previous list stands.
         previous = census.census([frame("system", subtype="init")], help_text="  --foo  x\n")
-        current = census.census([frame("system", subtype="init")])
-        merged = census.merge_required(previous, current)
-        self.assertEqual(merged["flags"], [])
+        answered_empty = census.census([frame("system", subtype="init")], help_text="")
+        never_captured = census.census([frame("system", subtype="init")])
+        self.assertEqual(answered_empty["flags"], [])
+        self.assertIsNone(never_captured["flags"])
+        self.assertEqual(census.merge_required(previous, answered_empty)["flags"], [])
+        self.assertEqual(census.merge_required(previous, never_captured)["flags"], ["--foo"])
+        # recording the empty list is what makes the loss visible to a later diff
+        merged = census.merge_required(previous, answered_empty)
         self.assertEqual(census.diff(merged, previous, "exact"), ["flags: added --foo"])
+
+    def test_a_control_response_records_its_envelope_and_its_body_separately(self):
+        frames = [
+            frame("control_request", request_id="r1", request={"subtype": "get_usage"}),
+            frame("control_request", request_id="r2", request={"subtype": "get_usage"}),
+            frame("control_response", response={"subtype": "success", "request_id": "r1", "response": {"tokens": 1}}),
+            frame("control_response", response={"subtype": "error", "request_id": "r2", "error": "nope"}),
+        ]
+        p = census.census(frames)["pairs"]["control_response/get_usage"]
+        # the envelope discriminates success from error; both always carry subtype+request_id
+        self.assertEqual(p["payload_keys"], ["error", "request_id", "response", "subtype"])
+        self.assertEqual(p["required_payload_keys"], ["request_id", "subtype"])
+        # the error frame carries no body at all, and an absent body is not an empty one,
+        # so it must not empty the recorded body shape
+        self.assertEqual(p["body_keys"], ["tokens"])
+        self.assertEqual(p["required_body_keys"], ["tokens"])
+
+    def test_a_pair_with_no_body_at_all_omits_the_body_fields(self):
+        p = census.census([
+            frame("control_request", request_id="r9", request={"subtype": "get_usage"}),
+            frame("control_response", response={"subtype": "error", "request_id": "r9", "error": "nope"}),
+        ])["pairs"]["control_response/get_usage"]
+        self.assertNotIn("body_keys", p)
+        self.assertNotIn("required_body_keys", p)
+
+    def test_merge_required_lets_no_body_less_recording_empty_the_body_shape(self):
+        with_body = census.census([
+            frame("control_request", request_id="r1", request={"subtype": "get_usage"}),
+            frame("control_response", response={"subtype": "success", "request_id": "r1", "response": {"tokens": 1}}),
+        ])
+        no_body = census.census([
+            frame("control_request", request_id="r2", request={"subtype": "get_usage"}),
+            frame("control_response", response={"subtype": "error", "request_id": "r2", "error": "nope"}),
+        ])
+        for previous, current in ((with_body, no_body), (no_body, with_body)):
+            merged = census.merge_required(previous, current)["pairs"]["control_response/get_usage"]
+            self.assertEqual(merged["required_body_keys"], ["tokens"])
+            self.assertEqual(merged["body_keys"], ["tokens"])
+
+    def test_keep_alive_frames_are_excluded(self):
+        c = census.census([frame("keep_alive"), frame("system", subtype="init"), frame("keep_alive")])
+        self.assertEqual(sorted(c["pairs"]), ["system/init"])
+
+    def test_frames_that_are_not_dicts_are_skipped(self):
+        c = census.census(["not a frame", None, 7, frame("system", subtype="init")])
+        self.assertEqual(sorted(c["pairs"]), ["system/init"])
 
 
 class DiffTests(unittest.TestCase):
@@ -141,10 +195,14 @@ class DiffTests(unittest.TestCase):
             frame("afleet_invented", x=1),
         ], help_text="  --foo  x\n  --bar  y\n", version="2.1.260")
         lines = census.diff(rec, obs, "exact")
-        self.assertIn("added pair afleet_invented", lines)
-        self.assertIn("system/init: removed keys tools", lines)
-        self.assertIn("capabilities: added z", lines)
-        self.assertIn("flags: added --bar", lines)
+        # full equality, so a spurious extra drift line fails the test too
+        self.assertEqual(lines, [
+            "added pair afleet_invented",
+            "system/init: removed keys tools",
+            "system/init: removed required keys tools",
+            "capabilities: added z",
+            "flags: added --bar",
+        ])
         self.assertNotIn("version", " ".join(lines))  # version is informational
 
     def test_required_mode_ignores_optional_keys_and_counts(self):
@@ -159,6 +217,54 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(census.diff(rec, obs, "required"), [])
         obs2 = census.census([frame("assistant", message={"content": []})])
         self.assertEqual(census.diff(rec, obs2, "required"), ["assistant: removed required payload keys role"])
+
+    def test_a_removed_pair_alarms_in_both_modes(self):
+        rec = self.base()
+        obs = census.census([frame("system", subtype="init", capabilities=["a"], tools=[])],
+                            help_text="  --foo  x\n", version="2.1.259")
+        self.assertEqual(census.diff(rec, obs, "exact"), ["removed pair assistant"])
+        self.assertEqual(census.diff(rec, obs, "required"), ["removed pair assistant"])
+
+    def test_required_mode_alarms_on_a_removed_top_level_key(self):
+        rec = census.census([frame("system", subtype="init", capabilities=["a"], tools=[])])
+        obs = census.census([frame("system", subtype="init", capabilities=["a"])])
+        self.assertEqual(census.diff(rec, obs, "required"), ["system/init: removed required keys tools"])
+
+    def test_exact_mode_alarms_when_a_key_stops_being_required(self):
+        # identical unions, different required sets: only the required comparison sees it
+        rec = census.census([frame("assistant", message={"role": "assistant", "content": []})])
+        obs = census.merge_required(
+            census.census([frame("assistant", message={"role": "assistant", "content": []})]),
+            census.census([frame("assistant", message={"content": []})]),
+        )
+        self.assertEqual(rec["pairs"]["assistant"]["payload_keys"], obs["pairs"]["assistant"]["payload_keys"])
+        self.assertEqual(census.diff(rec, obs, "exact"), ["assistant: removed required payload keys role"])
+
+    def test_required_mode_alarms_on_a_removed_required_body_key(self):
+        rec = census.census([
+            frame("control_request", request_id="r1", request={"subtype": "get_usage"}),
+            frame("control_response", response={"subtype": "success", "request_id": "r1", "response": {"tokens": 1}}),
+        ])
+        obs = census.census([
+            frame("control_request", request_id="r1", request={"subtype": "get_usage"}),
+            frame("control_response", response={"subtype": "success", "request_id": "r1", "response": {}}),
+        ])
+        self.assertEqual(census.diff(rec, obs, "required"),
+                         ["control_response/get_usage: removed required body keys tokens"])
+
+    def test_an_unknown_mode_raises_rather_than_relaxing_the_gate(self):
+        with self.assertRaises(ValueError):
+            census.diff(self.base(), self.base(), "Exact")
+        with self.assertRaises(ValueError):
+            census.diff(self.base(), self.base(), "")
+
+    def test_diff_tolerates_an_uncaptured_flag_list_on_either_side(self):
+        captured = census.census([frame("system", subtype="init")], help_text="  --foo  x\n")
+        uncaptured = census.census([frame("system", subtype="init")])
+        self.assertIsNone(uncaptured["flags"])
+        self.assertEqual(census.diff(uncaptured, uncaptured, "exact"), [])
+        self.assertEqual(census.diff(uncaptured, captured, "exact"), ["flags: added --foo"])
+        self.assertEqual(census.diff(captured, uncaptured, "exact"), ["flags: removed --foo"])
 
     def test_identical_census_has_no_diff(self):
         self.assertEqual(census.diff(self.base(), self.base(), "exact"), [])
