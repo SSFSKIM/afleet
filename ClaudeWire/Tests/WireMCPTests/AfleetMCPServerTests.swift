@@ -20,6 +20,15 @@ final class AfleetMCPServerTests: XCTestCase {
         guard case .response(.response(let resp)) = r1 else { return XCTFail("\(r1)") }
         XCTAssertEqual(resp.id, .number(1)); XCTAssertEqual(resp.result["serverInfo"]?["name"], .string("afleet"))
         XCTAssertEqual(resp.result["serverInfo"]?["version"], .string("0.1.0")); XCTAssertNotNil(resp.result["capabilities"]?["tools"]); XCTAssertNil(inv1)
+        // A supported revision is agreed to as asked.
+        XCTAssertEqual(resp.result["protocolVersion"], .string("2025-06-18"))
+        // A revision outside our supported set is NOT echoed back. The engine's own list now leads
+        // with 2025-11-25 (bundle 2.1.258:143537) and it sends its newest (679251), so echoing would
+        // have afleet claim a surface it does not implement. We answer with what we do speak, which
+        // is still inside the engine's list, so its `!r.includes(...)` check (679254) passes.
+        let (newer, _) = await s.handle(req(11, "initialize", .object(["protocolVersion": .string("2025-11-25")])))
+        guard case .response(.response(let negotiated)) = newer else { return XCTFail("\(newer)") }
+        XCTAssertEqual(negotiated.result["protocolVersion"], .string("2025-06-18"))
         let (r2, _) = await s.handle(.notification(.init(method: "notifications/initialized")))
         guard case .notificationAck = r2 else { return XCTFail("\(r2)") }
     }
@@ -47,9 +56,34 @@ final class AfleetMCPServerTests: XCTestCase {
         guard case .response(.response(let resp)) = r else { return XCTFail() }
         XCTAssertEqual(resp.result["isError"], .bool(true)); XCTAssertNil(inv)
         XCTAssertTrue(resp.result["content"]?[0]?["text"]?.stringValue?.contains("nope.txt") ?? false)
-        let (r2, _) = await s.handle(req(7, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .string("a.txt"), "status": .string("normal")])])))
-        guard case .response(.error(let e)) = r2 else { return XCTFail() }
-        XCTAssertEqual(e.error.code, -32602)
+        // A bare-string `files` is coerced to a one-element array, matching the built-in's Zod
+        // preprocess (bundle 2.1.258:485919) rather than rejecting an unambiguous input. This amends
+        // the plan's assertion; see "Fix round 1" in the task-6 report for the reasoning.
+        let (r2, inv2) = await s.handle(req(7, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .string("a.txt"), "status": .string("normal")])])))
+        guard case .response(.response(let coerced)) = r2 else { return XCTFail("\(r2)") }
+        XCTAssertEqual(coerced.result["isError"], .bool(false))
+        XCTAssertEqual(coerced.result["content"]?[0]?["text"], .string("Sent 1 file to the user: a.txt"))
+        guard case .sentFile(let coercedPaths, _, _, _) = inv2 else { return XCTFail("\(String(describing: inv2))") }
+        XCTAssertEqual(coercedPaths.map(\.lastPathComponent), ["a.txt"])
+        // The assertion the bare-string case was standing in for: a `files` that is neither a string
+        // nor a non-empty array of strings stays a protocol error.
+        for bad: JSONValue in [.integer(5), .array([]), .array([.integer(1), .integer(2)]), .null] {
+            let (badReply, _) = await s.handle(req(70, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": bad, "status": .string("normal")])])))
+            guard case .response(.error(let badErr)) = badReply else { return XCTFail("files: \(bad) should be a protocol error, got \(badReply)") }
+            XCTAssertEqual(badErr.error.code, -32602, "files: \(bad)")
+        }
+        // A bad `status` and a bad `display` are protocol errors too.
+        let (badStatus, _) = await s.handle(req(71, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("a.txt")]), "status": .string("urgent")])])))
+        guard case .response(.error(let statusErr)) = badStatus else { return XCTFail("\(badStatus)") }
+        XCTAssertEqual(statusErr.error.code, -32602)
+        let (badDisplay, _) = await s.handle(req(72, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("a.txt")]), "status": .string("normal"), "display": .string("popup")])])))
+        guard case .response(.error(let displayErr)) = badDisplay else { return XCTFail("\(badDisplay)") }
+        XCTAssertEqual(displayErr.error.code, -32602)
+        // A directory is readable but not sendable: a runtime failure, not a protocol error, and it
+        // must not carry a host invocation.
+        let (dir, dirInv) = await s.handle(req(73, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string(".")]), "status": .string("normal")])])))
+        guard case .response(.response(let dirResp)) = dir else { return XCTFail("\(dir)") }
+        XCTAssertEqual(dirResp.result["isError"], .bool(true)); XCTAssertNil(dirInv)
         let (r3, _) = await s.handle(req(8, "tools/call", .object(["name": .string("no_such_tool"), "arguments": .object([:])])))
         guard case .response(.error(let e3)) = r3 else { return XCTFail() }
         XCTAssertEqual(e3.error.code, -32602)

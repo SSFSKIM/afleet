@@ -20,15 +20,38 @@ public struct SendUserFileTool: MCPTool {
                  "required": .array([.string("files"), .string("status")])])
     }
     public func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
-        guard let files = arguments["files"]?.arrayValue, files.allSatisfy({ $0.stringValue != nil }), !files.isEmpty else { throw MCPArgumentError("files must be a non-empty array of strings") }
+        // A bare string is coerced to a one-element array, mirroring the built-in's Zod preprocess
+        // (`fs((e) => typeof e === "string" ? [e] : e, R(i()).min(1))`, bundle 2.1.258:485919). The
+        // model was trained against a runtime that accepts this, so its output distribution includes
+        // it; and "a.txt" means exactly ["a.txt"], so rejecting it buys no disambiguation and costs a
+        // turn. Anything else non-conforming is still a protocol error.
+        let files: [JSONValue]
+        switch arguments["files"] {
+        case .string(let one): files = [.string(one)]
+        case .array(let many): files = many
+        default: throw MCPArgumentError("files must be a non-empty array of strings")
+        }
+        guard !files.isEmpty, files.allSatisfy({ $0.stringValue != nil }) else { throw MCPArgumentError("files must be a non-empty array of strings") }
         guard let status = arguments["status"]?.stringValue, ["normal", "proactive"].contains(status) else { throw MCPArgumentError("status must be 'normal' or 'proactive'") }
         let display = arguments["display"]?.stringValue
         if let display, !["render", "attach"].contains(display) { throw MCPArgumentError("display must be 'render' or 'attach'") }
         let root = context.cwd.standardizedFileURL
         var resolved: [URL] = []
         for f in files.compactMap(\.stringValue) {
-            let url = (f.hasPrefix("/") ? URL(fileURLWithPath: f) : root.appendingPathComponent(f)).standardizedFileURL
-            guard FileManager.default.isReadableFile(atPath: url.path) else { return .text("Cannot read \(f): no such file or not readable", isError: true) }
+            // `~` is expanded before the absolute-path test, so `~/report.pdf` does not become
+            // `<cwd>/~/report.pdf`. A relative path resolves against the channel cwd and a `..` may
+            // walk out of it; that is intended, not a hole — this tool deliberately accepts any
+            // absolute path the model can read, so confining the relative form would be an
+            // inconsistency rather than a boundary.
+            let expanded = (f as NSString).expandingTildeInPath
+            let url = (expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : root.appendingPathComponent(expanded)).standardizedFileURL
+            // isReadableFile(atPath:) is also true for a readable directory, which would report a send
+            // Task 10 cannot perform; the built-in resolves per-file metadata and cannot reach that state.
+            var isDirectory: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            guard exists, !isDirectory.boolValue, FileManager.default.isReadableFile(atPath: url.path) else {
+                return .text("Cannot send \(f): no such file, not readable, or a directory", isError: true)
+            }
             resolved.append(url)
         }
         let names = resolved.map(\.lastPathComponent).joined(separator: ", ")

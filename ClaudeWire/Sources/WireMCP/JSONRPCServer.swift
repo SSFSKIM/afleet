@@ -26,6 +26,19 @@ public protocol MCPTool: Sendable {
 public enum MCPReply: Sendable { case response(JSONRPCMessage), notificationAck }
 
 public actor AfleetMCPServer {
+    /// The MCP protocol revisions whose surface afleet actually implements.
+    ///
+    /// The engine, acting as the MCP client, sends the newest entry of its own supported list
+    /// (bundle 2.1.258 cli.pretty.js:679251) and then rejects a reply outside that list
+    /// (`if (!r.includes(a.protocolVersion)) throw`, 679254). Its list now leads with
+    /// `2025-11-25` (143537), so echoing whatever the client asked for would have afleet assert
+    /// it speaks a revision newer than the surface below, and would silently agree to any
+    /// behaviour a future revision makes mandatory. Every entry here is also in the engine's
+    /// list, so the negotiated value always passes its check.
+    public static let supportedProtocolVersions: Set<String> = ["2025-06-18", "2025-03-26", "2024-11-05"]
+    /// Answered when the client asks for a revision outside `supportedProtocolVersions`.
+    public static let preferredProtocolVersion = "2025-06-18"
+
     public let serverVersion: String
     public let cwd: URL
     private let tools: [String: any MCPTool]
@@ -49,8 +62,11 @@ public actor AfleetMCPServer {
         case .request(let r):
             switch r.method {
             case "initialize":
+                let requested = r.params?["protocolVersion"]?.stringValue
+                let negotiated = requested.flatMap { Self.supportedProtocolVersions.contains($0) ? $0 : nil }
+                    ?? Self.preferredProtocolVersion
                 return (.response(.response(.init(id: r.id, result: .object([
-                    "protocolVersion": r.params?["protocolVersion"] ?? .string("2025-06-18"),
+                    "protocolVersion": .string(negotiated),
                     "capabilities": .object(["tools": .object([:])]),
                     "serverInfo": .object(["name": .string("afleet"), "version": .string(serverVersion)]),
                 ])))), nil)
@@ -72,13 +88,22 @@ public actor AfleetMCPServer {
                 defer { inFlight[r.id] = nil }
                 do {
                     let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-                    return (.response(.response(.init(id: r.id, result: .object(["content": .array(result.content), "isError": .bool(result.isError)])))), result.hostInvocation)
+                    // A failure never carries a host invocation out of this actor. Task 10 turns the
+                    // invocation into a user-visible item ("file sent"), so letting one ride an
+                    // isError result would announce something that did not happen. No tool sets both
+                    // today; this guards the contract for the ones that come later.
+                    let invocation = result.isError ? nil : result.hostInvocation
+                    return (.response(.response(.init(id: r.id, result: .object(["content": .array(result.content), "isError": .bool(result.isError)])))), invocation)
                 } catch let e as MCPArgumentError {
                     return (.response(.error(.init(id: r.id, error: .init(code: -32602, message: e.message)))), nil)
                 } catch is CancellationError {
                     return (.response(.error(.init(id: r.id, error: .init(code: -32800, message: "Request cancelled")))), nil)
                 } catch {
-                    return (.response(.response(.init(id: r.id, result: .object(["content": .array([.object(["type": .string("text"), "text": .string(String(describing: error))])]), "isError": .bool(true)])))), nil)
+                    // An unexpected throw stays a runtime failure (isError), not a protocol error —
+                    // but this text is model-visible, and a Foundation error's description carries the
+                    // full filesystem path it failed on. Summarise instead of echoing it.
+                    let summary = "Tool \(name) failed unexpectedly (\(type(of: error)))"
+                    return (.response(.response(.init(id: r.id, result: .object(["content": .array([.object(["type": .string("text"), "text": .string(summary)])]), "isError": .bool(true)])))), nil)
                 }
             default:
                 return (.response(.error(.init(id: r.id, error: .init(code: -32601, message: "Method not found: \(r.method)")))), nil)
