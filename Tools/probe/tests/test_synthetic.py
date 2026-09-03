@@ -45,7 +45,7 @@ class SyntheticDialogFixturesTests(unittest.TestCase):
         self.assertEqual(sorted(os.path.basename(p) for p in self.paths), ["dialog-fable-overage", "dialog-refusal-fallback"])
         for p in self.paths:
             meta = read_json(os.path.join(p, "fixture.json"))
-            self.assertTrue(meta["synthetic"]); self.assertTrue(meta["hypothesis"]); self.assertFalse(meta["census"])
+            self.assertTrue(meta["synthetic"]); self.assertFalse(meta["hypothesis"]); self.assertFalse(meta["census"])
             self.assertEqual(meta["review"]["reviewer"], "")
             errors, _ = verify.verify_fixture(p)
             # Matched exactly, not by substring: `verify` formats a scanner hit as a
@@ -129,7 +129,7 @@ class SyntheticDialogFixturesTests(unittest.TestCase):
                     self.assertIsInstance(f["frame"]["is_error"], bool)
                     self.assertEqual(f["frame"]["is_error"], f["frame"]["subtype"] != "success")
 
-    def test_each_fixture_carries_a_readme_naming_itself_and_the_hypothesis(self):
+    def test_each_fixture_carries_a_readme_naming_itself_and_the_baseline_it_was_confirmed_against(self):
         for p in self.paths:
             with open(os.path.join(p, "README.md"), encoding="utf-8") as fh:
                 text = fh.read()

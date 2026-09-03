@@ -15,8 +15,14 @@ the pair so no consumer reads the missing field as a fifth outcome.
 event before the wire and the parity inventory rates it "Dropped (45.9.2)", so a fixture
 carrying one would assert a frame no host can receive.
 
-They stay `hypothesis: true` until the same strings are extracted from the installed 2.1.259
-binary.
+S6 has since extracted the same strings from the installed 2.1.259 binary --
+`Tools/probe/spikes/extract_dialog_enums.py` finds each dialog kind and each frame subtype at
+its own definition site and requires the payload keys, the enum values and `default:
+"cancelled"` to sit inside a bounded window after it -- so both fixtures now carry
+`hypothesis: false`. `synthetic: true` stays, because how the engine reaches these shapes is
+still unrecorded and a synthetic fixture is never baseline evidence by itself. `CLI_VERSION`
+still reads `2.1.257-bundle`: that bundle is where the frames were authored, and the cleared
+flag is the separate claim that the installed baseline agrees with it.
 
 Two properties this module owes the rest of the pipeline.
 
@@ -28,8 +34,8 @@ would make the output differ between machines while removing nothing, because no
 ever came off a machine. `redaction.json` still carries the full six-rule manifest at zero
 counts, which is what §4.4 asks for and what REVIEW.md item 4 has a reviewer confirm.
 
-*Nothing is invented beyond the bundle.* These fixtures are `hypothesis: true`, and every
-field they carry is a claim later children will build gates on, so a frame holds the keys the
+*Nothing is invented beyond the bundle.* Every field these fixtures carry is a claim later
+children build gates on, so a frame holds the keys the
 bundle shows and no more. A plausible-looking `result` frame with an invented `total_cost_usd`
 would enter the census as a required key that no evidence supports.
 """
@@ -228,7 +234,7 @@ def _prompts(frames):
     return [rec["frame"]["message"]["content"] for rec in frames if rec["frame"].get("type") == "user"]
 
 
-REFUSAL_README = """# dialog-refusal-fallback (synthetic, hypothesis)
+REFUSAL_README = """# dialog-refusal-fallback (synthetic, shapes confirmed on 2.1.259)
 
 What it shows: the CLI asking the host to resolve a model refusal. Four turns each stream a
 partial assistant message, open a `request_user_dialog` of kind `refusal_fallback_prompt`
@@ -269,22 +275,23 @@ only three dialog families cross the wire and that every other kind "resolves to
 default immediately, whatever the host declares in `supportedDialogKinds`" -- which would mean
 an undeclared kind never reaches a host to be left unanswered. `undeclared_probe_kind` is also
 a synthetic placeholder: no binary contains that string, and a recording would have to
-substitute a real kind outside the forwarded set. S6 should settle both.
+substitute a real kind outside the forwarded set. A recording should settle both.
 
 Serves item 62 and spike S6.
 
-**These shapes are hypotheses.** Nothing here was recorded. Every field is read out of the
+**These shapes are synthetic, and confirmed against the baseline.** Nothing here was recorded. Every field is read out of the
 2.1.257 bundle: `chunk-1kg58a1a.js` for the dialog kind, its
 `{originalModel, fallbackModel, apiRefusalCategory?, guidanceText?, retractedMessageUuids?}`
 payload, its `retry_fallback | edit_prompt | cancelled` result enum with `default:
 "cancelled"`, and the decline branch that yields the tombstones; `chunk-sct99ax9.js` for the
-`assistant.supersedes`, `tombstone` and `system/model_refusal_fallback` schemas. The baseline
-binary is 2.1.259, so `fixture.json` carries `synthetic: true` and `hypothesis: true`, the
-fixture is excluded from `diff`, and every gate resting on it stays provisional until S6
-extracts the same strings from the installed 2.1.259 binary and clears the flag (spec §4.7).
-A synthetic fixture is never baseline evidence by itself.
+`assistant.supersedes`, `tombstone` and `system/model_refusal_fallback` schemas. S6 then found
+each of those definitions exactly once in the installed 2.1.259 baseline binary, with every
+payload key, every enum value and `default: "cancelled"` inside its own definition's window,
+so `fixture.json` carries `hypothesis: false` (spec §4.7). `synthetic: true` stays, and with
+it the exclusion from `diff`: a synthetic fixture is never baseline evidence by itself, and
+the list below is what no schema states and therefore what the extraction could not reach.
 
-What S6 should settle, because the bundle does not:
+What a recording should settle, because no schema states it:
 
 1. **Both `content` strings are partly placeholders.** The CLI assembles the refusal prose
    from a prefix, a category-dependent safeguards sentence, an edit hint and a learn-more URL.
@@ -311,7 +318,7 @@ Rebuild with `make synthetic`, which overwrites this directory and drops the rev
 back to unsigned; walk `Fixtures/REVIEW.md` and `make sign` again afterwards.
 """
 
-FABLE_README = """# dialog-fable-overage (synthetic, hypothesis)
+FABLE_README = """# dialog-fable-overage (synthetic, shapes confirmed on 2.1.259)
 
 What it shows: the CLI asking the host for consent before spending past a Fable balance.
 Five turns each open a `request_user_dialog` of kind `fable_overage_consent_prompt` and cover
@@ -333,16 +340,18 @@ afleet replays against.
 
 Serves item 62 and spike S6.
 
-**These shapes are hypotheses.** Nothing here was recorded. Every field is read out of the
+**These shapes are synthetic, and confirmed against the baseline.** Nothing here was recorded. Every field is read out of the
 2.1.257 bundle modules -- `chunk-1kg58a1a.js` for the dialog kind, its
 `{overagesEnabled, modelName?, balanceCents?, currency?}` payload and its
 `consent | switch_default | cancelled` result enum with `default: "cancelled"`, and
 `chunk-sct99ax9.js` for the `system/model_consent_fallback` schema, whose ten fields this
-fixture's frames carry exactly. The baseline binary is 2.1.259, so `fixture.json` carries
-`synthetic: true` and `hypothesis: true`, the fixture is excluded from `diff`, and every gate
-resting on it stays provisional until S6 extracts the same strings from the installed 2.1.259
-binary and clears the flag (spec §4.7). A synthetic fixture is never baseline evidence by
-itself.
+fixture's frames carry exactly. S6 then found both definitions in the installed 2.1.259
+baseline binary, the dialog with its four payload keys, its `consent | switch_default |
+cancelled` result enum and `default: "cancelled"`, and the frame with the same enum on
+`choice` beside `original_model`, `original_model_name`, `fallback_model` and
+`persisted_as_default`, so `fixture.json` carries `hypothesis: false` (spec §4.7).
+`synthetic: true` stays, and with it the exclusion from `diff`: a synthetic fixture is never
+baseline evidence by itself.
 
 Each `model_consent_fallback.content` is built from the template the CLI builds it with --
 `Switched to <fallback> <"— now your default model" | "for this session"> · <original>
@@ -351,7 +360,7 @@ rather than contradicting it, and the `/model to change` instruction a GUI has t
 visible. The two model display names substituted into the template are this fixture's own
 synthetic models.
 
-One reading S6 should confirm on a recording: the fifth turn's close path carries no `result`,
+One reading a recording should confirm: the fifth turn's close path carries no `result`,
 and the schema's `default: "cancelled"` makes it behave as `cancelled`, so it and the fourth
 turn produce the same frames. The message uuids here are readable synthetic ids rather than
 RFC 4122 uuids, and the timestamps are chosen for a fast replay rather than measured.
@@ -361,7 +370,8 @@ back to unsigned; walk `Fixtures/REVIEW.md` and `make sign` again afterwards.
 """
 
 
-COMMON_NOTES = ["hand-written from the 2.1.257 bundle modules; shapes unconfirmed on 2.1.259",
+COMMON_NOTES = ["hand-written from the 2.1.257 bundle modules; the payload shapes, result enums and frame "
+                "subtypes were then confirmed at their own definition sites in the installed 2.1.259 binary (S6)",
                 "no process ran, so launch is empty and exit_code is null",
                 "message uuids are readable synthetic ids, not RFC 4122 uuids; the bundle types these fields as uuids",
                 "timestamps are synthetic deltas chosen so a replay is quick, not measured intervals",
@@ -381,7 +391,7 @@ def _write(root, name, sid, frames, purpose, serves, readme, extra_notes=()):
                     fh.write(json.dumps({"type": f["type"], "uuid": f.get("uuid"), "cwd": CWD, "message": f["message"]}) + "\n")
         meta = {"name": name, "scenario": None, "purpose": purpose, "serves": serves, "spikes": ["S6"], "recorded_at": "2026-09-04T00:00:00Z",
                 "cli_version": CLI_VERSION, "session_id": sid, "cwd": CWD, "launch": {"argv": [], "env": {}}, "prompts": _prompts(frames),
-                "census": False, "deterministic": False, "isolation": "none", "synthetic": True, "hypothesis": True,
+                "census": False, "deterministic": False, "isolation": "none", "synthetic": True, "hypothesis": False,
                 "late_responses": [], "withdrawn_requests": [],
                 "notes": list(COMMON_NOTES) + list(extra_notes),
                 "exit_code": None,

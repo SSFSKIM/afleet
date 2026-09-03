@@ -1,4 +1,4 @@
-# dialog-refusal-fallback (synthetic, hypothesis)
+# dialog-refusal-fallback (synthetic, shapes confirmed on 2.1.259)
 
 What it shows: the CLI asking the host to resolve a model refusal. Four turns each stream a
 partial assistant message, open a `request_user_dialog` of kind `refusal_fallback_prompt`
@@ -39,22 +39,23 @@ only three dialog families cross the wire and that every other kind "resolves to
 default immediately, whatever the host declares in `supportedDialogKinds`" -- which would mean
 an undeclared kind never reaches a host to be left unanswered. `undeclared_probe_kind` is also
 a synthetic placeholder: no binary contains that string, and a recording would have to
-substitute a real kind outside the forwarded set. S6 should settle both.
+substitute a real kind outside the forwarded set. A recording should settle both.
 
 Serves item 62 and spike S6.
 
-**These shapes are hypotheses.** Nothing here was recorded. Every field is read out of the
+**These shapes are synthetic, and confirmed against the baseline.** Nothing here was recorded. Every field is read out of the
 2.1.257 bundle: `chunk-1kg58a1a.js` for the dialog kind, its
 `{originalModel, fallbackModel, apiRefusalCategory?, guidanceText?, retractedMessageUuids?}`
 payload, its `retry_fallback | edit_prompt | cancelled` result enum with `default:
 "cancelled"`, and the decline branch that yields the tombstones; `chunk-sct99ax9.js` for the
-`assistant.supersedes`, `tombstone` and `system/model_refusal_fallback` schemas. The baseline
-binary is 2.1.259, so `fixture.json` carries `synthetic: true` and `hypothesis: true`, the
-fixture is excluded from `diff`, and every gate resting on it stays provisional until S6
-extracts the same strings from the installed 2.1.259 binary and clears the flag (spec §4.7).
-A synthetic fixture is never baseline evidence by itself.
+`assistant.supersedes`, `tombstone` and `system/model_refusal_fallback` schemas. S6 then found
+each of those definitions exactly once in the installed 2.1.259 baseline binary, with every
+payload key, every enum value and `default: "cancelled"` inside its own definition's window,
+so `fixture.json` carries `hypothesis: false` (spec §4.7). `synthetic: true` stays, and with
+it the exclusion from `diff`: a synthetic fixture is never baseline evidence by itself, and
+the list below is what no schema states and therefore what the extraction could not reach.
 
-What S6 should settle, because the bundle does not:
+What a recording should settle, because no schema states it:
 
 1. **Both `content` strings are partly placeholders.** The CLI assembles the refusal prose
    from a prefix, a category-dependent safeguards sentence, an edit hint and a learn-more URL.

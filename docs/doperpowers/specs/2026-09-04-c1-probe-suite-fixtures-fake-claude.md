@@ -878,3 +878,34 @@ Pending — written at finish.
   are present in every extracted bundle from 2.1.220 through 2.1.258, and the parent confirms
   them in the installed 2.1.259. Carried to the parent's S8 finding when `control-shapes`
   records.
+- 2026-09-04: S6's baseline extraction closes; the two synthetic dialog fixtures leave
+  `hypothesis`. `Tools/probe/spikes/extract_dialog_enums.py` reads
+  `~/.local/share/claude/versions/2.1.259` (200,225,968 bytes, JavaScript embedded) and tests
+  structurally rather than by presence: for each shape it locates that shape's *own*
+  definition site and requires every payload key, enum value and default to fall inside a
+  bounded window after it, so a hit ties the fields to that definition and not merely to a
+  200 MB file. Four sites, each found exactly once, every needle in window. The dialogs read
+  `kind:"refusal_fallback_prompt",payload:m(()=>c({originalModel:i(),fallbackModel:i(),apiRefusalCategory:i().nullable().optional(),guidanceText:i().optional(),retractedMessageUuids:R(i()).optional()...})),result:m(()=>ee(["retry_fallback","edit_prompt","cancelled"])),default:"cancelled"`
+  and
+  `kind:"fable_overage_consent_prompt",payload:m(()=>c({overagesEnabled:M(),modelName:tp(hKt).optional(),balanceCents:A().nullable().optional(),currency:i().nullable().optional()})),result:m(()=>ee(["consent","switch_default","cancelled"])),default:"cancelled"`
+  -- payload keys, result enums and `default: "cancelled"` identical to the 2.1.257 reading
+  `synthetic/dialogs.py` records, and identical to the payload keys the two fixtures send.
+  The frames those answers produce are confirmed at their own definitions too:
+  `subtype:x("model_consent_fallback"),choice:ee(["consent","switch_default","cancelled"])`
+  with `original_model`, `original_model_name`, `fallback_model` and `persisted_as_default`,
+  and `subtype:x("model_refusal_fallback"),trigger:x("refusal"),direction:ee(["retry","revert","sticky"]),scope:ee(["session","local"])`
+  with `request_id`, `api_refusal_category`, `api_refusal_explanation`,
+  `retracted_message_uuids` and `refused_user_message_uuid`. One correction to the plan the
+  script came from: it expected `model_consent_fallback` inside the overage *dialog's* window.
+  It is not there and should not be -- it is a stream-json system subtype carrying a schema of
+  its own, so the script checks it at that schema instead. Widening the dialog's window until
+  the string appeared would have proved only that a 200 MB file contains it. §4.7's condition
+  is met, so both fixtures carry `hypothesis: false` and item 62 is no longer provisional;
+  `synthetic: true` stays, and with it the `diff` exclusion, because how the engine reaches
+  these shapes is still unrecorded. `cli_version` stays `2.1.257-bundle`: that bundle is where
+  the frames were authored, and the cleared flag is the separate claim that the installed
+  baseline agrees. Anchored on the quoted strings rather than offsets, which drift with every
+  build. This settles S6's extraction half only; the questions the schemas do not state --
+  the decline legs' `result` subtype, the placeholder copy, the park deadline, whether an
+  undeclared kind reaches a host at all -- still need a recording, and S10, S11, S12 and S17
+  still need live sessions, so their notes belong on the parent when those can run.

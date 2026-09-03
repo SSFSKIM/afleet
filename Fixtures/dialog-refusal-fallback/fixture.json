@@ -4,7 +4,7 @@
  "cwd": "/private/tmp/afleet-fixtures/synthetic",
  "deterministic": false,
  "exit_code": null,
- "hypothesis": true,
+ "hypothesis": false,
  "isolation": "none",
  "late_responses": [],
  "launch": {
@@ -13,7 +13,7 @@
  },
  "name": "dialog-refusal-fallback",
  "notes": [
-  "hand-written from the 2.1.257 bundle modules; shapes unconfirmed on 2.1.259",
+  "hand-written from the 2.1.257 bundle modules; the payload shapes, result enums and frame subtypes were then confirmed at their own definition sites in the installed 2.1.259 binary (S6)",
   "no process ran, so launch is empty and exit_code is null",
   "message uuids are readable synthetic ids, not RFC 4122 uuids; the bundle types these fields as uuids",
   "timestamps are synthetic deltas chosen so a replay is quick, not measured intervals",
