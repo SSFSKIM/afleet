@@ -236,6 +236,36 @@ def _check_frames(frames):
     return errors
 
 
+def _evidence_from_this_run(recorded, recount):
+    """An accumulated census restricted to what the latest run holds evidence about.
+
+    §4.4 accumulates a model-driven scenario's census across re-recordings, while
+    `frames.ndjson` holds only the newest run, so `census.json` legitimately describes pairs
+    and body shapes those frames do not contain. §4.4's removed-pair alarm is about a binary
+    that stopped producing a pair, which is `diff`'s comparison against a fresh live run --
+    a different question from this one, which only asks whether a census describes its own
+    file. Reading the accumulation as drift would fail every re-recording, and only ever the
+    second one, after the live sessions have been paid for.
+
+    Dropping what this run says nothing about leaves the direction the recount exists for
+    untouched: `diff` reads the observed side for added pairs and for the key sets a required
+    set is checked against, so a census that under-describes its own frames still fails.
+    """
+    pairs = {}
+    for name, rec in recorded["pairs"].items():
+        observed = recount["pairs"].get(name)
+        if observed is None:
+            continue                      # a pair only an earlier recording produced
+        if "body_keys" not in observed:
+            # `merge_required`'s own rule read from the other side: a run that carried no body
+            # for a pair holds no evidence about that body's shape, so it neither confirms nor
+            # contradicts what an earlier run recorded. Without this an accumulated body
+            # survives a run of nothing but error responses and is reported as removed.
+            rec = {k: v for k, v in rec.items() if k not in ("body_keys", "required_body_keys")}
+        pairs[name] = rec
+    return dict(recorded, pairs=pairs)
+
+
 def _check_census(fx):
     """`census.json` against `frames.ndjson`, for every fixture including a synthetic one.
 
@@ -260,8 +290,13 @@ def _check_census(fx):
     # recount at all; it is checked against fixture.json above, which is the claim worth
     # making about it.
     recount["flags"] = recorded.get("flags")
+    # Exact mode is left alone. `record` merges only when `deterministic` is false, so a
+    # deterministic fixture's census never accumulates and a pair or a body it holds that its
+    # own frames do not is real drift.
+    mode = "exact" if meta.get("deterministic") else "required"
+    expected = recorded if mode == "exact" else _evidence_from_this_run(recorded, recount)
     try:
-        drift = census.diff(recorded, recount, "exact" if meta.get("deterministic") else "required")
+        drift = census.diff(expected, recount, mode)
     except (KeyError, TypeError, AttributeError):
         # A pair record of the wrong shape, which the top-level guard above cannot see.
         return errors + ["census.json has a pair record the comparison cannot read"]

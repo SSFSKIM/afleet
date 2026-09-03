@@ -96,6 +96,21 @@ def append_frame(path, rec):
     write(os.path.join(path, "census.json"), json.dumps(c))
 
 
+def accumulate(path, earlier_extra=(), previous=None):
+    """Rewrite census.json as `record` does on a re-recording: the stored census merged with
+    the new run's.
+
+    `earlier_extra` are frames the *earlier* run had and this one does not, which is how an
+    accumulated census comes to name a pair `frames.ndjson` no longer holds. Pass `previous`
+    instead when the earlier census is already in hand.
+    """
+    frames = [r["frame"] for r in fixture.load(path)["frames"] if "frame" in r]
+    latest = census.census(frames, help_text=HELP, version="2.1.259")
+    if previous is None:
+        previous = census.census(frames + list(earlier_extra), help_text=HELP, version="2.1.259")
+    write(os.path.join(path, "census.json"), json.dumps(census.merge_required(previous, latest)))
+
+
 def rewrite_frames(path, mutate):
     """Apply `mutate` to every frame in frames.ndjson and write it back.
 
@@ -270,6 +285,46 @@ class VerifyTests(unittest.TestCase):
         c = read_json(os.path.join(d2, "census.json")); c["pairs"]["system/init"] = "not a record"
         write(os.path.join(d2, "census.json"), json.dumps(c))
         self.assertTrue(any("cannot read" in e for e in self.errors(d2)))
+
+    def test_an_accumulated_census_may_hold_a_pair_the_latest_run_did_not_produce(self):
+        """`record` merges a model-driven census across re-recordings (§4.4); the frames are one run.
+
+        Only the second recording of a scenario reaches this, which is after the live sessions
+        have been paid for. Both halves are pinned so the tolerance cannot spread to the strict
+        path, which never accumulates because `record` merges only when `deterministic` is false.
+        """
+        for name, deterministic in (("demo", False), ("demo2", True)):
+            d = build_fixture(self.root, name=name, deterministic=deterministic)
+            accumulate(d, [{"type": "control_request", "request_id": "r9",
+                            "request": {"subtype": "rewind_conversation"}}])
+            if deterministic:
+                self.assertTrue(any("removed pair" in e for e in self.errors(d)))
+            else:
+                self.assertEqual(self.errors(d), [])
+
+    def test_an_accumulated_body_survives_a_run_that_carried_none(self):
+        """The same accumulation one level down, which `merge_required` creates deliberately.
+
+        It keeps a body an earlier run recorded rather than intersecting it away, so a run of
+        nothing but error responses leaves the census holding a body shape its own frames do
+        not show. That is accumulation, not a removed required key.
+        """
+        def to_error(f):
+            if f.get("type") == "control_response" and (f.get("response") or {}).get("request_id") == "c1":
+                f["response"] = {"subtype": "error", "request_id": "c1", "error": "denied"}
+
+        d = build_fixture(self.root, deterministic=False)
+        earlier = read_json(os.path.join(d, "census.json"))   # the run whose response carried a body
+        rewrite_frames(d, to_error)
+        accumulate(d, previous=earlier)
+        self.assertEqual(self.errors(d), [])
+
+    def test_the_census_must_still_not_under_describe_its_own_frames(self):
+        """The direction the recount exists for, which the accumulation tolerance leaves intact."""
+        d = build_fixture(self.root, deterministic=False)
+        c = read_json(os.path.join(d, "census.json")); del c["pairs"]["system/init"]
+        write(os.path.join(d, "census.json"), json.dumps(c))
+        self.assertTrue(any("added pair system/init" in e for e in self.errors(d)))
 
     def test_a_reused_request_id_is_reported(self):
         """The second request takes the id's state entry, so the first stops being checked."""
