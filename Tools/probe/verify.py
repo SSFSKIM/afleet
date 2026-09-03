@@ -117,6 +117,14 @@ def _lifecycle(frames, late_ok):
                 # cancelling its own request. Anything else leaves the request open, so a host
                 # request that is never answered cannot be excused by a cancel line carrying
                 # its id.
+                #
+                # `harness.Session.cancel` sends the other shape, and the `control-shapes`
+                # scenario uses it on a `claude_oauth_wait_for_completion` that does not come
+                # back, so the first recording of that scenario meets this error by design.
+                # Strict on purpose: whether the CLI answers a request the host has cancelled is
+                # a protocol fact, so §4.2 is amended by a recording that shows one, not by a
+                # reading of what cancellation probably does. A hit here is evidence for S8, not
+                # a fixture defect to work around.
                 errors.append("cancel for %s travels %s against a %s-originated request; only the CLI may cancel its own"
                               % (rid, d, origin))
             elif status == "open":
