@@ -83,6 +83,9 @@ def main():
         print("Options:\n  -p, --print  x\n  --input-format <f>  y\n  --permission-prompt-tool <t>  z\n"); return 0
     threading.Thread(target=reader, daemon=True).start()
     threading.Thread(target=responder, daemon=True).start()
+    if "no_initialize" in FEATURES:
+        wait(lambda m: m.get("type") == "__eof__", 60)   # never answer the handshake
+        return 0
     init = wait(lambda m: m.get("type") == "control_request" and (m.get("request") or {}).get("subtype") == "initialize", 10)
     if init is None:
         return 4

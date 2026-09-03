@@ -1,6 +1,8 @@
 import json
 import os
+import shutil
 import sys
+import threading
 import tempfile
 import time
 import unittest
@@ -57,11 +59,23 @@ class LaunchTests(unittest.TestCase):
 class SessionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="afleet-harness-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        # The variable is read by a subprocess, so leaving it set leaks into any sibling
+        # test module in the same discovery run that spawns one.
+        self.addCleanup(self._restore_features, os.environ.get("STAND_IN_FEATURES"))
         self.redactor = redact.Redactor(home="/Users/probe", hostname="probe-mac")
+
+    @staticmethod
+    def _restore_features(previous):
+        if previous is None:
+            os.environ.pop("STAND_IN_FEATURES", None)
+        else:
+            os.environ["STAND_IN_FEATURES"] = previous
 
     def run_session(self, features, **kw):
         os.environ["STAND_IN_FEATURES"] = ",".join(features)
         s = harness.Session(make_launch(self.tmp, **kw), self.redactor)
+        self.addCleanup(s.close)          # a test that fails early must not orphan a child
         init = s.start(timeout=10)
         self.assertEqual(init["current_model"], "haiku")
         return s
@@ -152,7 +166,8 @@ class SessionTests(unittest.TestCase):
         saw = {c["frame"]["what"]: c["frame"] for c in s.frames() if c.get("frame", {}).get("subtype") == "stand_in_saw"}
         self.assertEqual(saw["dialog_declared"]["response"], {"behavior": "cancelled"})
         # `cancel`, not `decline`: settling without making a decision the scenario did not
-        # make, which is what the CLI itself answers (parity 31-27 line 228).
+        # make, which is what the CLI itself answers (parity 31-27, the "Any error during
+        # elicitation" row, 31 §15.2).
         self.assertEqual(saw["elicitation"]["response"], {"action": "cancel"})
 
     def test_a_scenario_policy_overrides_the_neutral_defaults(self):
@@ -177,6 +192,63 @@ class SessionTests(unittest.TestCase):
         back = [c for c in captured if c["dir"] == "out" and c.get("frame", {}).get("response", {}).get("request_id") == rid]
         self.assertEqual(len(back), 1)
         self.assertLess(captured.index(sent[0]), captured.index(back[0]))
+
+    def test_concurrent_sends_are_captured_in_the_order_they_are_written(self):
+        """Two threads sending at once must record in the order they wrote, or the fixture
+        says the host answered B before A when it answered A first."""
+        s = self.run_session([])
+        record = s._record
+
+        def slow_record(direction, frame):
+            recorded = record(direction, frame)
+            if (frame.get("request") or {}).get("note") == "A":
+                time.sleep(0.15)      # descheduled between recording and writing
+            return recorded
+
+        s._record = slow_record
+        first = threading.Thread(target=s.request_async, args=("probe_order",), kwargs={"note": "A"})
+        first.start()
+        time.sleep(0.03)
+        s.request_async("probe_order", note="B")
+        first.join(10)
+        s.send_user("go"); s.wait_result(10); s.close()
+        captured = s.frames()
+        recorded_order = [c["frame"]["request"]["note"] for c in captured
+                          if c["dir"] == "in" and c.get("frame", {}).get("request", {}).get("subtype") == "probe_order"]
+        # The stand-in answers strictly in the order it read the requests, so the order of
+        # the answers coming back is the order they went out on the wire.
+        wire_order = [c["frame"]["response"]["response"]["note"] for c in captured
+                      if c["dir"] == "out" and (c.get("frame", {}).get("response", {}).get("response") or {}).get("echo") == "probe_order"]
+        self.assertEqual(recorded_order, ["A", "B"])
+        self.assertEqual(wire_order, recorded_order)
+
+    def test_stderr_tail_is_redacted_at_the_source(self):
+        s = self.run_session([])
+        s._stderr.append("failed at /Users/probe/x on probe-mac\n")
+        self.assertEqual(s.stderr_tail(), "failed at ~/x on <host>\n")
+        s.send_user("go"); s.wait_result(10); s.close()
+
+    def test_a_failed_handshake_does_not_leave_the_child_running(self):
+        os.environ["STAND_IN_FEATURES"] = "no_initialize"
+        s = harness.Session(make_launch(self.tmp), self.redactor)
+        self.addCleanup(s.close)
+        with self.assertRaises(RuntimeError):
+            s.start(timeout=1)
+        self.assertIsNotNone(s.proc.poll())        # reaped, not orphaned holding the session id
+
+    def test_close_is_bounded_when_a_writer_holds_the_stdin_lock(self):
+        """§6.7's 5 s bound has to hold even when a dispatch thread is wedged mid-write:
+        otherwise SIGTERM waits on the very writer only SIGTERM can unblock."""
+        s = self.run_session([])
+        s.send_user("go"); s.wait_result(10)
+        s.proc.stdin.close()          # the child sees EOF and exits of its own accord
+        s._write_lock.acquire()       # a wedged writer never gives the lock back
+        try:
+            t0 = time.time(); code = s.close(); dt = time.time() - t0
+        finally:
+            s._write_lock.release()
+        self.assertIsNotNone(code)    # close returned at all
+        self.assertLess(dt, 11.0)
 
     def test_request_round_trip_and_close_sequence_with_a_stubborn_child(self):
         s = self.run_session(["ignore_end_session"])

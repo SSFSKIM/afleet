@@ -1,5 +1,7 @@
 """Launch line, redact-then-capture, control correlation, answer policies, MCP mini-server (spec §4.3)."""
 import atexit
+import collections
+import copy
 import json
 import os
 import shutil
@@ -43,6 +45,8 @@ SEND_USER_FILE_TOOL = {
 }
 # Above this length an all-letter host name stops behaving like a word one meets in prose.
 HOSTNAME_WORD_LIMIT = 8
+# §6.7 specifies a stderr *ring*; an unbounded list grows without limit on a chatty child.
+STDERR_RING_LINES = 2000
 
 
 def word_shaped_hostname(hostname):
@@ -147,7 +151,7 @@ class MCPServer:
     """Minimal JSON-RPC 2.0 server for the in-process `afleet` MCP server."""
     def __init__(self, cwd, tools=None):
         self.cwd = cwd
-        self.tools = tools or [SEND_USER_FILE_TOOL]
+        self.tools = copy.deepcopy(tools or [SEND_USER_FILE_TOOL])   # never hand out the module constant
         self.calls = []
 
     def handle(self, msg):
@@ -183,7 +187,9 @@ class Session:
         self.launch = launch
         self.redactor = redactor
         check_recording_hostname(redactor.hostname)
-        self.initialize = dict(INITIALIZE if initialize is None else initialize)
+        # Deep, not shallow: a scenario reaching into `session.initialize["hooks"]` would
+        # otherwise edit the module-level constant and change every later Session.
+        self.initialize = copy.deepcopy(INITIALIZE if initialize is None else initialize)
         self.declared = set(declared_dialog_kinds if declared_dialog_kinds is not None else self.initialize.get("supportedDialogKinds", []))
         self.spill_after = spill_after
         self.policies = {"can_use_tool": "allow"}
@@ -209,7 +215,7 @@ class Session:
         self._wait_cursor = 0
         self.system_init = None
         self.proc = None
-        self._stderr = []
+        self._stderr = collections.deque(maxlen=STDERR_RING_LINES)
 
     # ---- capture
     def _now_ms(self):
@@ -231,13 +237,21 @@ class Session:
             rs = dict(self._pending)
             rs.update(self._inbound_subtypes)
             red = self.redactor.redact_frame(frame, direction, rs)
+            # Known fidelity limit, accepted deliberately: `t` is stamped after redaction
+            # returns, so a frame's timestamp carries its own redaction cost and any wait
+            # behind another recording thread. That is the price of stamping under the lock,
+            # which is what makes the timestamps monotonic; a fixture whose times do not
+            # increase is worse evidence than one whose times are a fraction late.
             t = self._now_ms()
             if red is None:
                 # The redactor drops a frame; the tombstone that keeps its place in the
                 # order, and the suppression of the answer that would quote it back, are
                 # the caller's job.
                 rid = frame.get("request_id")
-                self._dropped_ids.add(rid)
+                if rid is not None:
+                    # Never register `None`: a future rule that drops a frame carrying no
+                    # request id would otherwise suppress every response that lacks one.
+                    self._dropped_ids.add(rid)
                 rec = {"t": t, "dir": direction, "dropped": (frame.get("request") or {}).get("subtype"), "request_id": rid}
             elif frame.get("type") == "control_response" and (frame.get("response") or {}).get("request_id") in self._dropped_ids:
                 return None
@@ -251,8 +265,7 @@ class Session:
 
     def _spill_locked(self):
         if self._spool is None:
-            d = tempfile.mkdtemp(prefix="afleet-spool-")
-            os.chmod(d, 0o700)
+            d = tempfile.mkdtemp(prefix="afleet-spool-")   # already 0700
             path = os.path.join(d, "capture.ndjson")
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             self._spool = (d, path, os.fdopen(fd, "w"))
@@ -302,20 +315,42 @@ class Session:
         rid = "init-1"
         self._send({"type": "control_request", "request_id": rid, "request": self.initialize}, subtype="initialize", rid=rid)
         resp = self._wait_response(rid, timeout)
+        # A child that outlives a failed handshake still holds the --session-id it was
+        # given and keeps writing into the scratch config home, so the *next* run of the
+        # same scenario collides on the id or records against a dirtied home. Popen does
+        # not kill on garbage collection, so the failure path has to do it.
         if resp is None:
-            raise RuntimeError("initialize timed out; stderr: %s" % "".join(self._stderr)[-2000:])
+            self.close(end_session=False)
+            raise RuntimeError("initialize timed out; stderr: %s" % self.stderr_tail())
         if resp.get("subtype") != "success":
+            self.close(end_session=False)
             raise RuntimeError("initialize failed: %s" % resp.get("error"))
         return resp.get("response") or {}
 
     def _send(self, frame, subtype=None, rid=None):
-        if rid and subtype:
-            self._pending[rid] = subtype
-        self._record("in", frame)
-        line = json.dumps(frame) + "\n"
         with self._write_lock:
-            self.proc.stdin.write(line)
-            self.proc.stdin.flush()
+            self._send_locked(frame, subtype, rid)
+
+    def _send_locked(self, frame, subtype=None, rid=None):
+        """Record and write as one step; the caller holds `_write_lock`.
+
+        Recording outside the lock and writing inside it would let two sending threads --
+        a dispatch thread answering one request while the scenario sends the next, or two
+        dispatch threads answering two parallel `can_use_tool` asks -- record in one order
+        and write in the other. The fixture would then say the host answered B before A
+        when it answered A first, and nothing downstream could tell: replay follows the
+        recorded order. So the whole step is serialised.
+
+        The lock order is `_write_lock` then `_lock`, and no path takes them the other way
+        round. The stdout reader's own `_record` never touches `_write_lock`, so a stalled
+        stdin write still cannot stop the harness draining stdout.
+        """
+        if rid and subtype:
+            with self._lock:
+                self._pending[rid] = subtype
+        self._record("in", frame)
+        self.proc.stdin.write(json.dumps(frame) + "\n")
+        self.proc.stdin.flush()
 
     def _stderr_reader(self):
         for line in self.proc.stderr:
@@ -329,9 +364,13 @@ class Session:
             try:
                 frame = json.loads(line)
             except ValueError:
+                # This synthetic type is captured and reaches the census on purpose. A line
+                # the CLI emitted that will not parse is real drift and the census should
+                # shout about it, unlike a frame that merely carries nothing.
                 frame = {"type": "__unparseable__", "raw": line}
             if frame.get("type") == "control_request":
-                self._inbound_subtypes[frame.get("request_id")] = (frame.get("request") or {}).get("subtype")
+                with self._lock:
+                    self._inbound_subtypes[frame.get("request_id")] = (frame.get("request") or {}).get("subtype")
             red = self._record("out", frame)
             if red is not None:
                 with self._lock:
@@ -357,9 +396,9 @@ class Session:
         rid = frame.get("request_id")
         policy = self.policies.get(sub)
         try:
-            if sub == "mcp_message":
-                self.answer(rid, {"mcp_response": self.mcp.handle(req.get("message") or {})}); return
             if policy is None:
+                if sub == "mcp_message":
+                    self.answer(rid, {"mcp_response": self.mcp.handle(req.get("message") or {})}); return
                 # Parent §6.3: no code path may hold an inbound request without a response
                 # or a cancellation. A dialog kind we did not declare is the single
                 # deliberate exception -- the schema forbids answering one, an off-subtype
@@ -379,10 +418,11 @@ class Session:
                     # §6.4's settlements are accept, decline and cancel; the host answers
                     # `{action, content?}`. `cancel` rather than `decline` because that is
                     # what the CLI itself answers when an elicitation cannot be completed
-                    # (parity 31-27 line 228), and because declining is a decision the
-                    # scenario did not make. Settling matters more here than elsewhere: the
-                    # idle watchdog is paused while an elicitation is open, so a host that
-                    # never answers hangs the tool call until the tool timeout.
+                    # (parity 31-27, the "Any error during elicitation" row, 31 §15.2), and
+                    # because declining is a decision the scenario did not make. Settling
+                    # matters more here than elsewhere: the same row records that the idle
+                    # watchdog is paused while an elicitation is open, so a host that never
+                    # answers hangs the tool call until the tool timeout.
                     self.answer(rid, {"action": "cancel"}); return
                 if sub != "can_use_tool":
                     self.answer(rid, error="subtype %s not supported by afleet %s" % (sub, VERSION)); return   # the parent §6.3 string, verbatim
@@ -469,16 +509,27 @@ class Session:
     def close(self, end_session=True):
         if self.proc is None:
             return None
-        if self.proc.poll() is None and end_session:
-            try:
-                self._send({"type": "control_request", "request_id": "end-1", "request": {"subtype": "end_session"}}, "end_session", "end-1")
-            except (BrokenPipeError, OSError):
-                pass
+        # §6.7 bounds the graceful phase at 5 s. Both steps below need `_write_lock`, and a
+        # dispatch thread wedged writing into a child that stopped reading holds it, so the
+        # acquisition is bounded too: without that, SIGTERM would wait on the very writer
+        # that only SIGTERM can unblock. Not taking the lock is not a failure -- the signal
+        # escalation below settles the child either way.
+        took_write_lock = self._write_lock.acquire(timeout=5)
         try:
-            with self._write_lock:
-                self.proc.stdin.close()
-        except OSError:
-            pass
+            if took_write_lock:
+                if self.proc.poll() is None and end_session:
+                    try:
+                        self._send_locked({"type": "control_request", "request_id": "end-1",
+                                           "request": {"subtype": "end_session"}}, "end_session", "end-1")
+                    except (BrokenPipeError, OSError, ValueError):
+                        pass
+                try:
+                    self.proc.stdin.close()
+                except OSError:
+                    pass
+        finally:
+            if took_write_lock:
+                self._write_lock.release()
         for sig in (None, signal.SIGTERM, signal.SIGKILL):
             if sig is not None and self.proc.poll() is None:
                 self.proc.send_signal(sig)
@@ -508,4 +559,9 @@ class Session:
         self._discard_spool()
 
     def stderr_tail(self, n=2000):
-        return "".join(self._stderr)[-n:]
+        """Redacted like every other byte that leaves this module. A consumer is expected to
+        paste this into a failure report or a fixture README, and CLI stderr routinely
+        carries absolute home paths and host names; redacting here rather than at each
+        consumer is the same rule the frame capture follows. `record=False` keeps the
+        redaction manifest a count of frames, not of diagnostics."""
+        return self.redactor.redact_text("".join(self._stderr), record=False)[-n:]
