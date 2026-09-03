@@ -1,4 +1,5 @@
 import copy
+import socket
 import unittest
 import _paths  # noqa: F401
 import redact
@@ -191,6 +192,17 @@ class SecretKeyPredicateTests(unittest.TestCase):
                                "organizationId": "<organizationId>"})
         self.assertEqual(len(redact.scan({"subscriptionType": "max"}, home="/Users/probe")), 1)
 
+    def test_name_shaped_identity_keys_are_exact_never_substring(self):
+        out = self.r.redact_json({"organizationName": "Acme", "userName": "pp", "accountName": "a",
+                                  "fullName": "Probe Person", "toolName": "Bash", "serverName": "afleet",
+                                  "modelName": "opus", "displayName": "Claude Opus 5 (1M context)"})
+        self.assertEqual(out, {"organizationName": "<organizationName>", "userName": "<userName>",
+                               "accountName": "<accountName>", "fullName": "<fullName>",
+                               # displayName is a list_models / plugin / slash-command row field,
+                               # not identity; redacting it would empty the model picker.
+                               "toolName": "Bash", "serverName": "afleet", "modelName": "opus",
+                               "displayName": "Claude Opus 5 (1M context)"})
+
     def test_hook_event_keys_are_structural_and_survive(self):
         hooks = {"hooks": {"UserPromptSubmit": [{"matcher": "*"}], "PreToolUse": []}}
         self.assertEqual(self.r.redact_json(hooks), hooks)
@@ -216,6 +228,13 @@ class FrameFailClosedTests(unittest.TestCase):
                 "response": {"docsUrl": "https://docs.test/page?section=intro"}}}
         body = self.r.redact_frame(resp, "in", {"r7": "get_settings"})["response"]["response"]
         self.assertEqual(body["docsUrl"], "https://docs.test/page?section=intro")
+
+    def test_correlated_non_settings_body_keeps_an_effective_key(self):
+        body = {"effective": {"model": "opus"}, "sources": ["a"]}
+        resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r8",
+                "response": body}}
+        out = self.r.redact_frame(resp, "in", {"r8": "list_models"})["response"]["response"]
+        self.assertEqual(out, {"effective": {"model": "opus"}, "sources": ["a"]})
 
     def test_non_dict_effective_is_still_dropped(self):
         resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r2",
@@ -258,10 +277,22 @@ class ManifestAndScanContractTests(unittest.TestCase):
         out = self.r.redact_json(payload)
         self.assertEqual(redact.scan(out, home="/Users/probe", hostname="probe-mac"), [])
 
-    def test_scan_flags_the_recording_hostname_only_when_given_one(self):
-        self.assertEqual(redact.scan({"a": "built on probe-mac"}, home="/Users/probe"), [])
+    def test_scan_defaults_to_the_local_hostname_and_takes_an_override(self):
         self.assertEqual(redact.scan({"a": "built on probe-mac"}, home="/Users/probe", hostname="probe-mac"),
                          ["a: hostname"])
+        self.assertEqual(redact.scan({"a": "built on " + socket.gethostname()}, home="/Users/probe"),
+                         ["a: hostname"])
+        # An explicit hostname replaces the default rather than adding to it.
+        self.assertEqual(redact.scan({"a": "built on probe-mac"}, home="/Users/probe", hostname="other-mac"), [])
+
+    def test_scan_catches_the_defaulted_hostname_in_key_position(self):
+        # Key position is the path that composes finding text, so a hostname the scanner was
+        # never given would ride into a finding that is safe to persist by assumption only.
+        host = socket.gethostname()
+        hits = redact.scan({host: {"accessToken": "x"}}, home="/Users/probe")
+        self.assertIn("<host>: hostname in key", hits)
+        self.assertIn("<host>.accessToken: secret-named field not redacted", hits)
+        self.assertNotIn(host, " | ".join(hits))
 
     def test_scan_flags_an_unredacted_api_key_source(self):
         self.assertEqual(redact.scan({"apiKeySource": "user"}, home="/Users/probe"),

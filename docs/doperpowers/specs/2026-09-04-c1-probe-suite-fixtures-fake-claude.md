@@ -680,4 +680,9 @@ Pending — written at finish.
   which is sound because it only ever reports what those rules would change; the two
   report-only checks of §4.5 name the rule and the position instead of echoing the author's
   name or a foreign home path, which redaction by definition leaves alone. No consumer of
-  `verify` therefore carries a rule about where findings may be written.
+  `verify` therefore carries a rule about where findings may be written. The guarantee
+  extends only to the patterns the scanner was given — a pattern it does not hold cannot be
+  scrubbed back out of a finding — so `scan` defaults the hostname to the local one. Rule 3's
+  hostname half is accordingly enforced at record time, and at verify time holds on the
+  recording machine and only opportunistically elsewhere, where a cross-machine review has to
+  pass the recording hostname explicitly.

@@ -44,10 +44,16 @@ PLACEHOLDER_KEY_RE = re.compile(r"^<[^<>]*>(#\d+)?$")
 # as a substring would swallow the `UserPromptSubmit` hook-event name, which appears as a
 # dictionary key in the `hooks` object of the §6.2 initialize payload. `email` is the one
 # substring match, because no structural protocol key contains it innocuously.
-IDENTITY_KEYS = frozenset(("account", "accountuuid", "accountid",
-                           "organization", "organizationuuid", "organizationid",
-                           "user", "userid", "useruuid",
-                           "subscription", "subscriptiontype"))
+# `name`-suffixed entries are listed one by one for the same reason: `displayName` is
+# structural in this protocol -- it is a `list_models` / `initialize.models` row field
+# (parity 06-08-02 lines 21 and 26, evidence 2026-09-03-control-request-shapes line 15), a
+# plugin catalogue field (30-29-32 line 170) and a slash-command field the menu widths and
+# the Fuse.js ranking read (28-slash-commands lines 500 and 503) -- so redacting it would
+# empty the model picker out of every fixture that records one.
+IDENTITY_KEYS = frozenset(("account", "accountuuid", "accountid", "accountname",
+                           "organization", "organizationuuid", "organizationid", "organizationname",
+                           "user", "userid", "useruuid", "username",
+                           "subscription", "subscriptiontype", "fullname"))
 SECRET_WORDS = ("token", "oauth", "key", "secret", "credential", "authorization", "cookie",
                 "password", "bearer")
 USAGE_COUNTERS = {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
@@ -239,20 +245,22 @@ class Redactor:
                 # The subtype is a hint, not a gate. Correlation is lost for a late response
                 # (§4.4's `late_responses`), and a rule that only fires on a known subtype
                 # fails open exactly when the frame is least understood. Rules 4 and 5 key off
-                # the body's own shape; rule 6 fires on an OAuth subtype or an unknown one, so
-                # a correlated non-OAuth response keeps its URLs and an uncorrelated one is
-                # treated as possibly-OAuth.
+                # the body's own shape only where that shape is distinctive; rules 5 and 6 fire
+                # on their own subtype or on an unknown one, so a correlated response to some
+                # other subtype keeps a body that merely happens to carry `effective`,
+                # `sources` or a URL, while an uncorrelated one is treated as possibly-either.
                 if "mcp_response" in body:
                     body["mcp_response"] = self._truncate_mcp(body["mcp_response"], "response.mcp_response")
-                if "effective" in body:
-                    eff = body.pop("effective")
-                    body["effective_keys"] = sorted(eff.keys()) if isinstance(eff, dict) else []
-                    self._hit("settings_bodies", "response.effective")
-                if "sources" in body:
-                    srcs = body.pop("sources")
-                    body["sources_keys"] = [{"source": s.get("source"), "keys": sorted((s.get("settings") or {}).keys())}
-                                            for s in srcs if isinstance(s, dict)] if isinstance(srcs, list) else []
-                    self._hit("settings_bodies", "response.sources")
+                if sub in (None, "get_settings"):
+                    if "effective" in body:
+                        eff = body.pop("effective")
+                        body["effective_keys"] = sorted(eff.keys()) if isinstance(eff, dict) else []
+                        self._hit("settings_bodies", "response.effective")
+                    if "sources" in body:
+                        srcs = body.pop("sources")
+                        body["sources_keys"] = [{"source": s.get("source"), "keys": sorted((s.get("settings") or {}).keys())}
+                                                for s in srcs if isinstance(s, dict)] if isinstance(srcs, list) else []
+                        self._hit("settings_bodies", "response.sources")
                 if sub is None or sub in OAUTH_SUBTYPES:
                     self._redact_urls(body, "response")
             return self.redact_json(f)
@@ -278,13 +286,17 @@ def _string_hits(s, path, probe, where=""):
 def scan(obj_or_text, home, *, hostname=None):
     """Hard failures: anything a redaction rule would still change.
 
-    `hostname` is optional because the default cannot be inferred: `Redactor` falls back to
-    the local hostname, which on a reviewing machine is the wrong one. Without it the
-    hostname half of rule 3 is not checked, so a cross-machine review must pass the
-    recording hostname explicitly. The sentinel default cannot occur in real data.
+    `hostname` defaults to the local one, like `Redactor` itself, and an explicit value
+    overrides it for a review run on some other machine. It cannot be left unset: findings
+    are made safe by running the redactor's rules over them, so a pattern the scanner was
+    never given cannot be scrubbed back out of a finding -- an unredacted hostname in key
+    position would compose a finding that is safe to persist by assumption and not in fact.
+    Defaulting makes the guarantee true on the recording machine, which is where recording
+    and verification happen; elsewhere rule 3's hostname half holds only if the caller
+    passes the recording hostname.
     """
     hits = []
-    probe = Redactor(home=home, hostname=hostname or "\x00nohost\x00")
+    probe = Redactor(home=home, hostname=hostname)
 
     def walk(o, path):
         if isinstance(o, dict):
