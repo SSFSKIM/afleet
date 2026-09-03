@@ -242,14 +242,14 @@ class Redactor:
             f = json.loads(json.dumps(frame))
             body = (f.get("response") or {}).get("response")
             if isinstance(body, dict):
-                # The subtype is a hint, not a gate. Correlation is lost for a late response
-                # (§4.4's `late_responses`), and a rule that only fires on a known subtype
-                # fails open exactly when the frame is least understood. Rules 4 and 5 key off
-                # the body's own shape only where that shape is distinctive; rules 5 and 6 fire
-                # on their own subtype or on an unknown one, so a correlated response to some
-                # other subtype keeps a body that merely happens to carry `effective`,
-                # `sources` or a URL, while an uncorrelated one is treated as possibly-either.
-                if "mcp_response" in body:
+                # The subtype is a hint, not a gate, but it is still a hint. Correlation is
+                # lost for a late response (§4.4's `late_responses`), and a rule that fires
+                # only on a known subtype fails open exactly when the frame is least
+                # understood -- so each of rules 4, 5 and 6 fires on its own subtype or on an
+                # unknown one. A correlated response to some other subtype therefore keeps a
+                # body that merely happens to carry `mcp_response`, `effective`, `sources` or
+                # a URL, and an uncorrelated one is treated as possibly any of them.
+                if sub in (None, "mcp_message") and "mcp_response" in body:
                     body["mcp_response"] = self._truncate_mcp(body["mcp_response"], "response.mcp_response")
                 if sub in (None, "get_settings"):
                     if "effective" in body:

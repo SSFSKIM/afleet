@@ -229,6 +229,16 @@ class FrameFailClosedTests(unittest.TestCase):
         body = self.r.redact_frame(resp, "in", {"r7": "get_settings"})["response"]["response"]
         self.assertEqual(body["docsUrl"], "https://docs.test/page?section=intro")
 
+    def test_correlated_non_mcp_body_keeps_an_oversized_mcp_response_key(self):
+        big = {"jsonrpc": "2.0", "id": 1, "method": "m", "params": {"blob": "x" * 5000}}
+        resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r9",
+                "response": {"mcp_response": big}}}
+        out = self.r.redact_frame(resp, "in", {"r9": "list_models"})["response"]["response"]
+        self.assertEqual(out["mcp_response"], big)
+        # Uncorrelated stays fail-closed: no subtype means it could be an MCP body.
+        out2 = self.r.redact_frame(resp, "in", {})["response"]["response"]
+        self.assertIn("truncated", out2["mcp_response"])
+
     def test_correlated_non_settings_body_keeps_an_effective_key(self):
         body = {"effective": {"model": "opus"}, "sources": ["a"]}
         resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r8",
