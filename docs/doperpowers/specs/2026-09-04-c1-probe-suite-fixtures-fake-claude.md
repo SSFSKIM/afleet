@@ -706,3 +706,25 @@ Pending — written at finish.
   a key that goes from always present to sometimes present leaves the union untouched.
   Nothing needs migrating: no `census.json` recorded before this change exists, `Fixtures/`
   holds only its placeholder, and no later run should accumulate onto a stale file.
+- 2026-09-04: §4.8's environment table is missing a row. `FAKE_CLAUDE_CWD` names the cwd a
+  replay presents as its own and defaults to the process's working directory. A replay runs in
+  a scratch directory while the transcript it materialises belongs to the recorded scenario's
+  cwd, so the slug the mirror paths carry cannot be derived from where the process happens to
+  run; without the variable a materialised home and a replaying process disagree about which
+  project directory they are talking about.
+- 2026-09-04: The mirror rewrite of §4.8 is a rule about the root standing in front of
+  `/projects/<slug>/`, not about `~/.claude`, which is one instance of it. Every scenario
+  records under the scratch `CLAUDE_CONFIG_DIR` of §4.6, and §4.5's rule 3 substitutes only the
+  recording user's home for `~`, deliberately leaving a synthetic `/tmp` path alone — so a
+  recorded `transcript_mirror.filePath` is rooted at that scratch home, and a replayer
+  recognising only `~/.claude/projects/` resolves the path outside the fake home and refuses its
+  own first mirror frame, taking C3.G3, C3.G4 and item 56 down with it. Whatever root precedes
+  the recorded slug becomes the fake home's. The same clause's "starting at the offsets in
+  `streams.json`" holds logically but not literally: materialisation rewrites the slug and the
+  recorded cwd inside the records it lays down, so the bytes on disk are not the recorded bytes
+  and the recorded offset no longer marks the end of the initial state. Appends begin after the
+  bytes materialisation actually wrote for that stream, with the `streams.json` offset standing
+  in for a stream `initial/` does not hold — which by §4.4 is a stream that did not exist at
+  spawn, whose offset is zero. A computed start beyond the end of the file is refused by name
+  rather than padded, because that combination means the fixture was never materialised into
+  that home and no replay from it could reproduce the final state.

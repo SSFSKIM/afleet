@@ -129,6 +129,19 @@ def _rewrite_text(text, meta, cwd, real_home):
     return text.replace(ARTIFACT_TOKEN, os.path.join(real_home, "tasks"))
 
 
+def rewrite_paths(text, meta, cwd, home):
+    """Rewrite recorded text for a replay: the `_slug_` token, the recorded cwd, the `<artifacts>`
+    token, and the root standing in front of `/projects/<recorded slug>/`, which becomes the fake
+    home's. That root is whatever config home the recording ran under — `~/.claude` is one such
+    root, not the only one, since recordings are made under a scratch `CLAUDE_CONFIG_DIR` (§4.6)
+    and redaction leaves a synthetic scratch path alone (§4.5 rule 3)."""
+    text = _rewrite_text(text, meta, cwd, home)
+    if meta.get("cwd"):
+        root = os.path.join(home, "projects", slug_of(cwd)) + "/"
+        text = re.sub(r'[^"\s\\]*/projects/%s/' % re.escape(slug_of(meta["cwd"])), lambda m: root, text)
+    return text
+
+
 def initial_bytes(fixture_dir, stream, meta, cwd, real_home):
     """The bytes materialize lays down for one `initial/` stream, or None when it has none."""
     src = os.path.join(fixture_dir, "initial", stream)
@@ -181,7 +194,7 @@ def compare_final_state(fixture_dir, config_home, cwd):
     pdir, kdir = os.path.join(real, "projects"), os.path.join(real, "tasks")
     for rel in sorted(rel_files(tdir)):
         with open(os.path.join(tdir, rel)) as fh:
-            want = [json.loads(_rewrite_text(l, meta, cwd, real)) for l in fh if l.strip()]
+            want = [json.loads(rewrite_paths(l, meta, cwd, real)) for l in fh if l.strip()]
         dst = os.path.join(pdir, rel.replace(SLUG_TOKEN, slug_of(cwd)))
         got = None
         if os.path.isfile(dst):
@@ -198,10 +211,11 @@ def compare_final_state(fixture_dir, config_home, cwd):
                 got_bytes = fh.read()
         if got_bytes != want_bytes:
             ok = False; report.append("artifact %s differs" % rel)
-    expected = set(r.replace(SLUG_TOKEN, slug_of(cwd)) for r in rel_files(tdir))
-    for name, base, want_rels in (("projects", pdir, expected), ("tasks", kdir, rel_files(adir))):
-        for rel in sorted(rel_files(base) - want_rels):
-            ok = False; report.append("%s/%s is under the fake home but not in the fixture" % (name, rel))
+    expected = set(os.path.join("projects", r.replace(SLUG_TOKEN, slug_of(cwd))) for r in rel_files(tdir))
+    expected |= set(os.path.join("tasks", r) for r in rel_files(adir))
+    expected.add(MARKER)
+    for rel in sorted(rel_files(real) - expected):
+        ok = False; report.append("%s is under the fake home but not in the fixture" % rel)
     return ok, "\n".join(report)
 
 
@@ -230,6 +244,7 @@ class Replayer:
         self.cwd = env.get("FAKE_CLAUDE_CWD") or os.getcwd()
         self.inbox, self.cond, self.eof = [], threading.Condition(), False
         self.last_request_id = None
+        self.init_request_id = None      # the recording's own id for its initialize request
         self.out_index = 0
         self.started = set()   # real stream paths already positioned at their append start
 
@@ -283,12 +298,7 @@ class Replayer:
 
     # ---- filesystem
     def _rewrite_frame(self, frame):
-        text = _rewrite_text(dumps(frame), self.meta, self.cwd, self.home)
-        text = text.replace("~/.claude/projects/", os.path.join(self.home, "projects") + "/")
-        rec_slug = slug_of(self.meta.get("cwd", "")) if self.meta.get("cwd") else None
-        if rec_slug:
-            text = text.replace("/projects/%s/" % rec_slug, "/projects/%s/" % slug_of(self.cwd))
-        frame = json.loads(text)
+        frame = json.loads(rewrite_paths(dumps(frame), self.meta, self.cwd, self.home))
         for s in self._artifact_paths(frame):
             self._write_artifact(s)
         return frame
@@ -336,8 +346,12 @@ class Replayer:
             if not os.path.exists(path):
                 with _open_new(path, "ab"):
                     pass
+            start = self._stream_start(stream)
+            if start > os.path.getsize(path):
+                raise RuntimeError("stream %s holds %d bytes but its appends start at %d: materialize this fixture into the fake home first"
+                                   % (stream, os.path.getsize(path), start))
             with open(path, "r+b") as fh:
-                fh.truncate(self._stream_start(stream))
+                fh.truncate(start)
         with _open_new(path, "ab") as fh:
             for entry in frame.get("entries", []):
                 fh.write((dumps(entry) + "\n").encode("utf-8"))
@@ -394,7 +408,7 @@ class Replayer:
             pred = lambda f: f.get("type") == "user"
         elif t == "control_request":
             sub = want["request"]["subtype"]
-            pred = lambda f: f.get("type") == "control_request" and (f.get("request") or {}).get("subtype") == sub
+            pred = lambda f: f.get("type") == "control_request" and f.get("request_id") and (f.get("request") or {}).get("subtype") == sub
         else:
             pred = lambda f: f.get("type") == t
         while True:
@@ -402,10 +416,21 @@ class Replayer:
             if got is None:
                 return None, None
             if pred(got):
+                if t == "user":
+                    self._note_user_text(want, got)
                 return got, want
             code = self._handle_unexpected(got)
             if code is not None:
                 return code, None
+
+    def _note_user_text(self, want, got):
+        """A user frame matches on type alone, so a host driving a different prompt than the
+        recording still replays; §4.8 asks for the difference on stderr so a caller can see it."""
+        recorded, sent = _get(want, "message.content"), _get(got, "message.content")
+        if recorded != sent:
+            self.stderr.write("fake-claude: user text differs from the recording: sent %s, recorded %s\n"
+                              % (dumps(sent)[:200], dumps(recorded)[:200]))
+            self.stderr.flush()
 
     def _handle_unexpected(self, frame):
         sub = (frame.get("request") or {}).get("subtype")
@@ -426,7 +451,7 @@ class Replayer:
             if "dropped" in rec:
                 i += 1; continue
             code = self._run_script(rec["t"])                        # script steps run around every line, in or out
-            if code:
+            if code is not None:
                 return code
             if rec["dir"] == "in":
                 got, want = self._wait_recorded_input(rec)
@@ -436,6 +461,8 @@ class Replayer:
                     return 0                                             # stdin closed mid-replay: exit like the CLI
                 if want.get("type") == "control_request":                 # host request: remember its real id
                     pending_id_map[want["request_id"]] = got["request_id"]
+                    if want["request"]["subtype"] == "initialize":
+                        self.init_request_id = want["request_id"]
                 prev_t = rec["t"]; i += 1; continue
             delay = (rec["t"] - prev_t) / 1000.0
             if self.speed > 0 and delay > 0:
@@ -449,12 +476,12 @@ class Replayer:
                 rid = frame["response"].get("request_id")
                 if rid in pending_id_map:
                     frame["response"]["request_id"] = pending_id_map[rid]
-                if self.init_override and rid == "init-1":
+                if self.init_override and rid is not None and rid == self.init_request_id:
                     frame["response"]["response"] = self.init_override
             self.emit(frame)
             prev_t = rec["t"]; i += 1
         code = self._run_script(None)
-        if code:
+        if code is not None:
             return code
         while True:                                                       # after the last line: wait for close or end_session
             got = self.take(lambda f: True, None)

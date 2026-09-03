@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -19,18 +20,22 @@ def write(path, text):
         fh.write(text)
 
 
-def tiny_fixture(root):
-    """Two turns: initialize, user -> system/init + assistant + mirror + result; host get_usage; user -> result; end_session."""
-    d = os.path.join(root, "tiny")
+def tiny_fixture(root, name="tiny", mirror_root="~/.claude", init_id="init-1"):
+    """Two turns: initialize, user -> system/init + assistant + mirror + result; host get_usage; user -> result; end_session.
+    `mirror_root` is the config home the recording ran under and `init_id` the id it gave its
+    initialize request; neither is a constant of the format, so both are variable here."""
+    d = os.path.join(root, name)
     rec_slug = fake_claude.slug_of(REC_CWD)
-    fp = "~/.claude/projects/%s/%s.jsonl" % (rec_slug, SID)
+    fp = "%s/projects/%s/%s.jsonl" % (mirror_root, rec_slug, SID)
+    # `parentPath` below stands in for any record field naming a path inside the recorded config
+    # home: emission and the final-state comparison have to rewrite it the same way or never agree.
     frames = [
-        {"t": 0, "dir": "in", "frame": {"type": "control_request", "request_id": "init-1", "request": {"subtype": "initialize"}}},
-        {"t": 2, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "init-1", "response": {"commands": [], "current_model": "haiku"}}}},
+        {"t": 0, "dir": "in", "frame": {"type": "control_request", "request_id": init_id, "request": {"subtype": "initialize"}}},
+        {"t": 2, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": init_id, "response": {"commands": [], "current_model": "haiku"}}}},
         {"t": 10, "dir": "in", "frame": {"type": "user", "uuid": "u1", "message": {"role": "user", "content": "one"}}},
         {"t": 20, "dir": "out", "frame": {"type": "system", "subtype": "init", "session_id": SID, "capabilities": [], "cwd": REC_CWD}},
         {"t": 30, "dir": "out", "frame": {"type": "assistant", "uuid": "a1", "message": {"role": "assistant", "content": [{"type": "text", "text": "one"}]}}},
-        {"t": 35, "dir": "out", "frame": {"type": "transcript_mirror", "filePath": fp, "entries": [{"type": "user", "uuid": "u1", "cwd": REC_CWD}, {"type": "assistant", "uuid": "a1"}]}},
+        {"t": 35, "dir": "out", "frame": {"type": "transcript_mirror", "filePath": fp, "entries": [{"type": "user", "uuid": "u1", "cwd": REC_CWD, "parentPath": fp}, {"type": "assistant", "uuid": "a1"}]}},
         {"t": 40, "dir": "out", "frame": {"type": "control_request", "request_id": "c1", "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": {}}}},
         {"t": 50, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}}},
         {"t": 55, "dir": "out", "frame": {"type": "system", "subtype": "task_notification", "output_file": "<artifacts>/%s/%s/tasks/t1.output" % (rec_slug, SID)}},
@@ -56,10 +61,32 @@ def tiny_fixture(root):
     init_size = os.path.getsize(os.path.join(d, "initial", "_slug_", SID + ".jsonl"))
     write(os.path.join(d, "streams.json"), json.dumps({"_slug_/%s.jsonl" % SID: init_size}))
     write(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"),
-          json.dumps({"type": "summary", "cwd": REC_CWD}) + "\n" + json.dumps({"type": "user", "uuid": "u1", "cwd": REC_CWD}) + "\n" +
+          json.dumps({"type": "summary", "cwd": REC_CWD}) + "\n" + json.dumps({"type": "user", "uuid": "u1", "cwd": REC_CWD, "parentPath": fp}) + "\n" +
           json.dumps({"type": "assistant", "uuid": "a1"}) + "\n" + json.dumps({"type": "user", "uuid": "u2"}) + "\n")
     write(os.path.join(d, "artifacts", rec_slug, SID, "tasks", "t1.output"), "bg-done\n")   # artifacts keep the recorded slug, as collect_artifacts stores them
     return d
+
+
+def scratch_home_fixture(root):
+    """The same recording with none of the hand-written conveniences: the mirror path is rooted at
+    the scratch CLAUDE_CONFIG_DIR every scenario records under, and the initialize request carries
+    the id the recording gave it rather than the literal the brief's fixture used."""
+    return tiny_fixture(root, name="scratch", mirror_root="/private/tmp/afleet-fixtures/config-home", init_id="req_7f3a")
+
+
+def drive_two_turns(h):
+    """Answer a tiny-fixture replay exactly as the recording expects, and return its mirror and
+    task-notification frames."""
+    h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
+    h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
+    mirror = h.wait(lambda f: f.get("type") == "transcript_mirror")
+    h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
+    notif = h.wait(lambda f: f.get("subtype") == "task_notification")   # recorded after the c1 answer, so replay cannot reach it before it
+    h.wait(lambda f: f.get("type") == "result")
+    h.send({"type": "control_request", "request_id": "zz", "request": {"subtype": "get_usage"}}); h.wait(lambda f: f.get("type") == "control_response" and f["response"]["request_id"] == "zz")
+    h.send({"type": "user", "uuid": "y", "message": {"role": "user", "content": "two"}}); h.wait(lambda f: f.get("result") == "two")
+    h.finish()
+    return mirror, notif
 
 
 class Host:
@@ -123,9 +150,20 @@ class Host:
             self.p.kill(); return None
 
 
-class VersionHelpTests(unittest.TestCase):
+class ToolTest(unittest.TestCase):
+    """Reaps every host a test started, then removes every temp directory it made."""
+    def tmp(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def tearDown(self):
+        Host.close_all()
+
+
+class VersionHelpTests(ToolTest):
     def setUp(self):
-        self.root = tempfile.mkdtemp(); self.fx = tiny_fixture(self.root)
+        self.root = self.tmp(); self.fx = tiny_fixture(self.root)
 
     def test_version_and_help_come_from_the_fixture(self):
         env = dict(os.environ, FAKE_CLAUDE_FIXTURE=self.fx)
@@ -136,10 +174,9 @@ class VersionHelpTests(unittest.TestCase):
         self.assertIn("--session-mirror", out); self.assertIn("--print", out)
 
 
-class ReplayTests(unittest.TestCase):
+class ReplayTests(ToolTest):
     def setUp(self):
-        self.root = tempfile.mkdtemp(); self.fx = tiny_fixture(self.root); self.cwd = tempfile.mkdtemp()
-        self.addCleanup(Host.close_all)
+        self.root = self.tmp(); self.fx = tiny_fixture(self.root); self.cwd = self.tmp()
 
     def test_reactive_order_blocking_and_request_id_substitution(self):
         h = Host(self.fx, self.cwd)
@@ -193,6 +230,36 @@ class ReplayTests(unittest.TestCase):
         r = h.wait(lambda f: f.get("type") == "control_response" and f["response"]["request_id"] == "surprise")
         self.assertEqual(r["response"]["subtype"], "success"); h.finish()
 
+    def test_init_override_replaces_only_the_recorded_initialize_response(self):
+        fx = scratch_home_fixture(self.root)              # its recorded initialize id is not the brief's "init-1"
+        override = os.path.join(self.root, "init.json"); write(override, json.dumps({"commands": [{"name": "afleet"}], "current_model": "opus"}))
+        h = Host(fx, self.cwd, env={"FAKE_CLAUDE_INIT": override})
+        h.send({"type": "control_request", "request_id": "my-init", "request": {"subtype": "initialize"}})
+        r = h.wait(lambda f: f.get("type") == "control_response")
+        self.assertEqual(r["response"]["request_id"], "my-init")
+        self.assertEqual(r["response"]["response"], {"commands": [{"name": "afleet"}], "current_model": "opus"})
+        h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
+        h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
+        h.send({"type": "control_request", "request_id": "zz", "request": {"subtype": "get_usage"}})
+        r2 = h.wait(lambda f: f.get("type") == "control_response" and f["response"]["request_id"] == "zz")
+        self.assertEqual(r2["response"]["response"], {"session": {"total_cost_usd": 0}})   # every other response is left alone
+        h.finish()
+
+    def test_a_user_frame_whose_text_differs_from_the_recording_is_logged_and_replay_continues(self):
+        h = Host(self.fx, self.cwd)
+        h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
+        h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "a prompt the recording never saw"}})
+        self.assertIsNotNone(h.wait(lambda f: f.get("type") == "assistant"))
+        h.finish()
+        err = h.p.stderr.read()
+        self.assertIn("user text differs from the recording", err); self.assertIn("a prompt the recording never saw", err)
+
+    def test_a_control_request_without_a_request_id_is_unexpected_traffic(self):
+        h = Host(self.fx, self.cwd)
+        h.send({"type": "control_request", "request": {"subtype": "initialize"}})
+        self.assertEqual(h.finish(), 3)
+        self.assertIn("unexpected", h.p.stderr.read())
+
     def test_script_emit_expect_answer(self):
         script = os.path.join(self.root, "s.json")
         write(script, json.dumps([
@@ -218,15 +285,14 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(h2.finish(timeout=6), 3)                                   # expect timed out, host never answered
 
 
-class MaterializeTests(unittest.TestCase):
+class MaterializeTests(ToolTest):
     def setUp(self):
-        self.root = tempfile.mkdtemp(); self.fx = tiny_fixture(self.root)
+        self.root = self.tmp(); self.fx = tiny_fixture(self.root)
         self.fake_real_home = os.path.join(self.root, "real-claude"); os.makedirs(self.fake_real_home)
         self.env = dict(os.environ, CLAUDE_CONFIG_DIR=self.fake_real_home)
-        self.addCleanup(Host.close_all)
 
-    def run_materialize(self, dest, cwd="/private/tmp/afleet-fixtures/tiny"):
-        return subprocess.run([EXE, "materialize", self.fx, dest, "--cwd", cwd], capture_output=True, text=True, env=self.env)
+    def run_materialize(self, dest, cwd="/private/tmp/afleet-fixtures/tiny", fixture=None):
+        return subprocess.run([EXE, "materialize", fixture or self.fx, dest, "--cwd", cwd], capture_output=True, text=True, env=self.env)
 
     def test_refuses_the_real_home_a_symlink_into_it_and_unmarked_directories(self):
         self.assertEqual(self.run_materialize(self.fake_real_home).returncode, 2)
@@ -258,7 +324,7 @@ class MaterializeTests(unittest.TestCase):
         self.assertEqual(self.run_materialize(dest).returncode, 2); self.assertEqual(os.listdir(elsewhere), [])
         os.unlink(os.path.join(dest, "projects")); r = self.run_materialize(dest, cwd="/private/tmp/afleet-fixtures/other-cwd"); self.assertEqual(r.returncode, 0)
         os.symlink(elsewhere, os.path.join(dest, "tasks"))                       # replay must refuse the artifact write
-        h = Host(self.fx, tempfile.mkdtemp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": "/private/tmp/afleet-fixtures/other-cwd"})
+        h = Host(self.fx, self.tmp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": "/private/tmp/afleet-fixtures/other-cwd"})
         h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
         h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
         h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
@@ -267,7 +333,7 @@ class MaterializeTests(unittest.TestCase):
     def test_replay_refuses_a_marked_home_planted_inside_the_real_config_home(self):
         planted = os.path.join(self.fake_real_home, "planted"); os.makedirs(planted)
         write(os.path.join(planted, fake_claude.MARKER), "")
-        h = Host(self.fx, tempfile.mkdtemp(), env={"FAKE_CLAUDE_CONFIG_HOME": planted, "CLAUDE_CONFIG_DIR": self.fake_real_home,
+        h = Host(self.fx, self.tmp(), env={"FAKE_CLAUDE_CONFIG_HOME": planted, "CLAUDE_CONFIG_DIR": self.fake_real_home,
                                                    "FAKE_CLAUDE_CWD": REC_CWD})
         self.assertEqual(h.finish(timeout=5), 2)
         self.assertEqual(os.listdir(planted), [fake_claude.MARKER])
@@ -275,22 +341,41 @@ class MaterializeTests(unittest.TestCase):
     def test_replay_with_config_home_reproduces_the_final_filesystem(self):
         dest = os.path.realpath(os.path.join(self.root, "fake-home")); cwd = "/private/tmp/afleet-fixtures/other-cwd"
         self.assertEqual(self.run_materialize(dest, cwd=cwd).returncode, 0)
-        h = Host(self.fx, tempfile.mkdtemp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": cwd})
-        h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
-        h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
-        mirror = h.wait(lambda f: f.get("type") == "transcript_mirror")
+        mirror, notif = drive_two_turns(Host(self.fx, self.tmp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": cwd}))
         slug = fake_claude.slug_of(cwd)
         self.assertEqual(mirror["filePath"], os.path.join(dest, "projects", slug, SID + ".jsonl"))
-        h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
-        notif = h.wait(lambda f: f.get("subtype") == "task_notification")   # recorded after the c1 answer, so replay cannot reach it before it
         self.assertTrue(notif["output_file"].startswith(os.path.join(dest, "tasks")))
         self.assertTrue(os.path.isfile(notif["output_file"]))
-        h.wait(lambda f: f.get("type") == "result")
-        h.send({"type": "control_request", "request_id": "zz", "request": {"subtype": "get_usage"}}); h.wait(lambda f: f.get("type") == "control_response" and f["response"]["request_id"] == "zz")
-        h.send({"type": "user", "uuid": "y", "message": {"role": "user", "content": "two"}}); h.wait(lambda f: f.get("result") == "two")
-        h.finish()
         ok, report = fake_claude.compare_final_state(self.fx, dest, cwd)
         self.assertTrue(ok, report)
+
+    def test_a_mirror_path_rooted_at_a_scratch_config_home_replays_into_the_fake_home(self):
+        fx = scratch_home_fixture(self.root)              # filePath rooted at /private/tmp/afleet-fixtures/config-home, not at ~
+        dest = os.path.realpath(os.path.join(self.root, "scratch-fake-home")); cwd = "/private/tmp/afleet-fixtures/other-cwd"
+        self.assertEqual(self.run_materialize(dest, cwd=cwd, fixture=fx).returncode, 0)
+        mirror, notif = drive_two_turns(Host(fx, self.tmp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": cwd}))
+        self.assertEqual(mirror["filePath"], os.path.join(dest, "projects", fake_claude.slug_of(cwd), SID + ".jsonl"))
+        self.assertTrue(os.path.isfile(notif["output_file"]))
+        ok, report = fake_claude.compare_final_state(fx, dest, cwd)
+        self.assertTrue(ok, report)
+
+    def test_a_file_the_fixture_does_not_hold_fails_the_final_state_comparison(self):
+        dest = os.path.realpath(os.path.join(self.root, "fake-home")); cwd = "/private/tmp/afleet-fixtures/other-cwd"
+        self.assertEqual(self.run_materialize(dest, cwd=cwd).returncode, 0)
+        drive_two_turns(Host(self.fx, self.tmp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": cwd}))
+        self.assertTrue(fake_claude.compare_final_state(self.fx, dest, cwd)[0])
+        write(os.path.join(dest, "shell-snapshots", "snap.sh"), "echo\n")       # neither a transcript nor an artifact
+        ok, report = fake_claude.compare_final_state(self.fx, dest, cwd)
+        self.assertFalse(ok); self.assertIn("shell-snapshots/snap.sh", report)
+
+    def test_replay_refuses_a_home_whose_initial_state_was_never_materialized(self):
+        dest = os.path.realpath(os.path.join(self.root, "bare-home")); os.makedirs(dest)
+        write(os.path.join(dest, fake_claude.MARKER), "")
+        h = Host(self.fx, self.tmp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": REC_CWD})
+        h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
+        h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
+        self.assertEqual(h.finish(timeout=10), 2)
+        self.assertIn("materialize this fixture", h.p.stderr.read())
 
 
 if __name__ == "__main__":
