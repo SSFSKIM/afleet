@@ -134,28 +134,53 @@ def scenario_for_fixture(fixture_path, scenario_dir=None):
 
 
 def config_home_paths(extra=None):
-    """Every directory nothing here may delete (contract X9, global constraint 3)."""
+    """Every directory nothing here may write into or delete (contract X9, global constraint 3)."""
     homes = [harness.SCRATCH_CONFIG_HOME, os.path.expanduser("~/.claude"),
              os.environ.get("CLAUDE_CONFIG_DIR"), extra]
     return sorted({os.path.realpath(h) for h in homes if h})
 
 
+def _within(child, parent):
+    """`child` is `parent` or sits under it, after symlink resolution.
+
+    The predicate `fake-claude`'s `materialize` already uses to refuse its own destination
+    (`Tools/fake-claude/fake_claude.py`, `_within`). Same problem, so the same shape rather
+    than a second one that would have to be audited separately.
+    """
+    child, parent = os.path.realpath(child), os.path.realpath(parent)
+    return child == parent or child.startswith(parent.rstrip("/") + os.sep)
+
+
+def forbidden_config_home(path, extra=None):
+    """The config home `path` is, sits inside, or contains -- or None when it touches none.
+
+    Both directions are refused, for different reasons. A path resolving *into* a config home
+    is the one X9 names outright: writing or deleting there reaches inside a logged-in Claude
+    configuration from within `Tools/`. A path that *contains* one takes the whole home with
+    it when it goes. Resolution comes before the comparison because a symlink is exactly how
+    a path that does not look like a config home turns out to be one.
+    """
+    for home in config_home_paths(extra):
+        if _within(path, home) or _within(home, path):
+            return home
+    return None
+
+
 def fresh_scratch(name, scratch_root=SCRATCH_ROOT, config_home=None):
-    """An empty scratch cwd for one scenario, refusing any name that resolves to a config home.
+    """An empty scratch cwd for one scenario, refusing any name that lands on a config home.
 
     §4.6 puts the scratch config home at `/tmp/afleet-fixtures/config-home` and every
     scenario's scratch cwd at `/tmp/afleet-fixtures/<name>`: siblings under one root. A
-    scenario named `config-home` -- or one whose name resolves to the root itself -- would
-    make the `rmtree` below delete a logged-in Claude configuration from inside `Tools/`,
-    which is the one thing X9 forbids outright. The test is on the resolved path and catches
-    a directory that merely *contains* a config home as well as one that is one.
+    scenario named `config-home`, one whose name resolves to the root itself, and one whose
+    scratch root resolves *inside* a config home all end in the same place -- the `rmtree`
+    below running within a logged-in Claude configuration, from inside `Tools/`, with no
+    warning. Containment is the dangerous relation, and it is dangerous both ways round.
     """
     d = os.path.join(scratch_root, name)
-    real = os.path.realpath(d)
-    for home in config_home_paths(config_home):
-        if real == home or home.startswith(real + os.sep):
-            raise ValueError("scratch cwd %s for scenario %r would delete the config home %s; rename the scenario"
-                             % (d, name, home))
+    home = forbidden_config_home(d, config_home)
+    if home:
+        raise ValueError("scratch cwd %s for scenario %r resolves onto the config home %s; rename the scenario"
+                         % (d, name, home))
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
     return d

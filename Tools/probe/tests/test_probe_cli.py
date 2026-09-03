@@ -47,6 +47,7 @@ TRANSCRIPT_SCENARIO_SRC = '''
 import json
 import os
 import fixture
+import probe
 
 META = {"name": "cli-transcript", "purpose": "cli test: a transcript for snapshot to copy",
         "serves": ["test"], "census": True, "deterministic": True, "isolation": "config-home",
@@ -54,6 +55,13 @@ META = {"name": "cli-transcript", "purpose": "cli test: a transcript for snapsho
         "prompts": ["hello"], "resume_of": None, "setup": None, "spikes": []}
 
 def run(session, ctx):
+    # This scenario writes a transcript, which is the one thing X9 forbids inside a real or
+    # scratch config home. The guard lives here, with the capability, rather than resting on
+    # every future caller handing it a throwaway directory -- and it runs before anything
+    # else, so being wrong costs nothing.
+    home = probe.forbidden_config_home(ctx["config_home"])
+    if home is not None:
+        raise RuntimeError("cli_transcript writes a transcript and must not be aimed at the config home " + home)
     session.send_user("hello")
     session.wait_result(20)
     sid = session.system_init["session_id"]
@@ -431,6 +439,35 @@ class RecordAndDiffTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             probe.fresh_scratch("config-home", probe.SCRATCH_ROOT)   # §4.6's, without being told
         self.assertTrue(os.path.isdir(self.config_home))
+
+    def test_fresh_scratch_refuses_a_scratch_root_that_resolves_inside_a_config_home(self):
+        # Containment is the dangerous relation and it runs both ways. An `rmtree` on a path
+        # *inside* a logged-in config home is the failure X9 exists to prevent, and refusing
+        # only the equal and the containing cases leaves it wide open.
+        inside = os.path.join(self.config_home, "projects")
+        os.makedirs(inside)
+        with self.assertRaises(ValueError):
+            probe.fresh_scratch("scratch", inside, self.config_home)
+        self.assertTrue(os.path.isdir(inside))
+        # And through a symlink, which is how a path that does not look like a config home
+        # turns out to be one -- so the comparison resolves first.
+        link = os.path.join(self.tmp, "link-to-home")
+        os.symlink(self.config_home, link)
+        with self.assertRaises(ValueError):
+            probe.fresh_scratch("scratch", link, self.config_home)
+        self.assertTrue(os.path.isdir(self.config_home))
+
+    def test_the_transcript_scenario_refuses_to_write_into_a_real_config_home(self):
+        # It writes a transcript, so the guard belongs with the capability rather than with
+        # every future caller. The next person to reach for it will be recording, not testing.
+        with open(os.path.join(self.scenarios, "cli_transcript.py"), "w") as fh:
+            fh.write(TRANSCRIPT_SCENARIO_SRC % {"stand_in": STAND_IN})
+        mod = probe.load_scenario("cli_transcript", self.scenarios)
+        # `session=None`: the refusal has to land before anything touches the session at all.
+        with self.assertRaises(RuntimeError) as caught:
+            mod.run(None, {"config_home": probe.harness.SCRATCH_CONFIG_HOME, "cwd": self.tmp})
+        self.assertIn(os.path.realpath(probe.harness.SCRATCH_CONFIG_HOME), str(caught.exception))
+        self.assertIsNone(probe.forbidden_config_home(self.config_home))   # the test's own is fine
 
     def test_main_usage_and_exit_codes(self):
         out = subprocess.run([sys.executable, os.path.join(probe.HERE, "probe.py")], capture_output=True, text=True)
