@@ -909,3 +909,36 @@ Pending — written at finish.
   model ever demands it — a visible replacement rather than a zero-width one, a non-reversible
   escape, and neutralising the notice form — and none is closed today. Found by review of the
   C2 implementation; the parent's §6.6 wording should not claim more than this.
+- 2026-09-04: Two `WireMCP` decisions revisited against the engine binary during execution, one
+  amended and one left pinned with its rationale corrected. First, `send_user_file` now coerces a
+  bare-string `files` into a one-element array, matching the built-in tool
+  (`~/claude-code-bundle/2.1.258/cli.pretty.js:485919`, where `files` is
+  `preprocess(e => typeof e === "string" ? [e] : e, array(string()).min(1))`). The design's
+  rationale for mirroring the built-in is that the model's prompt-trained behaviour transfers, and
+  that rationale reaches further than the schema: the model learned against a runtime that accepts
+  the bare string, so its output distribution includes that deviation precisely because the
+  deviation was never punished. The advertised JSON Schema says `array` in both implementations —
+  the converter selects the output direction, so the preprocess is invisible to the model — which
+  means mirroring the schema but not the tolerance reproduces only the half that does not matter.
+  A bare `"a.txt"` means exactly `["a.txt"]`, so rejecting it buys no disambiguation and converts
+  an unambiguous request into a failed tool call that costs a model turn in the G3 path. This
+  amends the plan's mandated assertion; `-32602` still answers `files: []`, `files: 5`,
+  `files: [1, 2]`, a bad `status`, a bad `display`, and an unknown tool name. Second, the
+  cancellation reply keeps JSON-RPC code `-32800`, but the spec should not claim it is MCP's: the
+  engine's MCP error enum (`cli.pretty.js:143539`) is `ConnectionClosed -32000`,
+  `RequestTimeout -32001` and the standard sets, and `-32800` appears nowhere in the binary — it is
+  LSP's code. It is inert rather than correct: the engine deletes its response handler before
+  sending `notifications/cancelled` (`474443`), so the reply reaches `_onresponse` (`474336`),
+  falls through to `474347`, and is raised on the client's error channel as an unknown-message-ID
+  string without ever being parsed for its code. Any value would behave identically today. Left
+  pinned so the wire bytes stay predictable, recorded here so a later reader does not mistake it
+  for a protocol citation.
+- 2026-09-04: The in-process MCP server no longer echoes the client's `protocolVersion` back
+  unchanged. The engine sends the newest entry of its own supported list
+  (`cli.pretty.js:679251`) and validates the answer with `if (!r.includes(a.protocolVersion))
+  throw` (`679254`), so echoing could never fail that check — but it meant afleet asserted it
+  spoke whatever version the engine named, and that list now leads with `2025-11-25` (`143537`),
+  a revision newer than the surface afleet implements. A future revision making a new behaviour
+  mandatory would have been silently agreed to. The server now declares its own supported set and
+  answers with the client's version only when it is in that set, falling back to `2025-06-18`
+  otherwise. This is the same class of drift the version gate covers for the CLI itself.
