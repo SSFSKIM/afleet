@@ -492,11 +492,16 @@ exactly that way (`sdk.mjs` 0.3.259, the `mcp_message` branch) and the CLI's own
 describes the field as "for a JSON-RPC notification, a response with an empty result".
 An unknown method answers JSON-RPC error `-32601`; `notifications/cancelled` is
 acknowledged and cancels the named in-flight tool call's task. Server info is `afleet`
-with the app's version; capabilities declare tools only. `SendUserFileTool` has input schema
-`{files: [string], caption?: string}`; it resolves each path against the channel's cwd,
-requires that the file exists and is readable, returns a text result naming the files
-sent, and reports a `HostToolInvocation.sentFile(paths:, caption:)` that FleetKit turns
-into the sent-file item. Later tools register the same way. No MCP SDK dependency: the
+with the app's version; capabilities declare tools only. `SendUserFileTool` has the parent's §6.8 schema,
+`{files: [string], caption?: string, status: "normal" | "proactive", display?: "render" |
+"attach"}` with `files` and `status` required, mirroring the built-in tool so the model's
+prompt-trained behaviour transfers; it resolves each path against the channel's cwd
+(absolute paths are taken as given, anywhere the file is readable, which is the built-in
+tool's domain and the model's own Read reach), requires that the file exists and is
+readable, returns a text result naming the files sent, and reports a
+`HostToolInvocation.sentFile(paths:, caption:, status:, display:)` that FleetKit turns
+into the sent-file item. A tool call whose arguments fail the schema is a JSON-RPC
+`-32602`; a runtime failure such as an unreadable file is an `isError` result. Later tools register the same way. No MCP SDK dependency: the
 five methods are a few hundred lines, and the control-frame carriage does not fit any
 SDK's transport abstraction.
 
@@ -847,3 +852,11 @@ Pending — written at finish.
   `configHomeOverride` for tests and recordings only. X3's consumers iterate `events` with
   `for await` exactly as before. Plan:
   `docs/doperpowers/plans/2026-09-04-c2-afleetcore-claudewire.md`.
+- 2026-09-04: v3, after the plan's Codex review. `send_user_file` restated with the parent's
+  full schema (`status`, `display?`) and the built-in tool's path domain; every settlement
+  in the transport (outbound correlation, handshake, exit waits) goes through a
+  single-resume `Waiter` registered before the write, never a continuation raced in a task
+  group; `tools/call` runs off the reader so cancellation can reach it; `Lossless` also
+  preserves declared keys that were explicit nulls; `mcp_reconnect`, `mcp_toggle`,
+  `update_settings` and `mcp_call` payloads corrected to the typings' keys; the
+  `ClaudeWire` umbrella re-exports `AfleetCore` so a consumer imports one module.

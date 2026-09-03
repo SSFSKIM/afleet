@@ -13,8 +13,8 @@
 ## Global Constraints
 
 - Two packages at the repository root: `AfleetCore/` and `ClaudeWire/`. `ClaudeWire` depends on `AfleetCore` only (parent X1). No module imports anything outside `AfleetCore` and Foundation.
-- Every manifest: `// swift-tools-version: 6.2`, `platforms: [.macOS(.v26)]`, every target `swiftSettings: [.swiftLanguageMode(.v6)]`. Strict concurrency is on from the first commit; no `@preconcurrency` imports, no `@unchecked Sendable` except the one documented wrapper around `Foundation.Process` inside the transport actor.
-- Every public type is `Sendable`. Actors: `ClaudeProcess`, `AfleetMCPServer`, `StdinWriter`, `BoundedChannel`. Nothing is `@MainActor`.
+- Every manifest: `// swift-tools-version: 6.2`, `platforms: [.macOS(.v26)]`, every target `swiftSettings: [.swiftLanguageMode(.v6)]`. Strict concurrency is on from the first commit; no `@preconcurrency` imports.
+- Every public type is `Sendable`. Actors: `ClaudeProcess`, `AfleetMCPServer`, `StdinWriter`, `BoundedChannel`. Nothing is `@MainActor`. `@unchecked Sendable` is permitted only on the private single-owner boxes around `Foundation.Process` (`ProcessJob` in WireEnvironment, `ProcessBox` in WireTransport), on `FileDiagnostics` (serial queue) and on the small `Waiter` settlement box.
 - Public initialisers on every value a downstream package constructs (Swift's synthesized memberwise initialisers are internal).
 - `swift test --package-path AfleetCore` and `swift test --package-path ClaudeWire` must pass after every task.
 - The typings are never committed: `.typings/` is gitignored (already on `main`), `git ls-files` must show nothing under `.typings/`, `node_modules/`, or any `*.d.ts`.
@@ -483,6 +483,17 @@ final class LosslessTests: XCTestCase {
         XCTAssertEqual(PointFields.declaredKeys, ["x", "display_label"])
     }
 
+    func testExplicitNullOnADeclaredOptionalSurvivesReEncoding() throws {
+        let raw = Data(#"{"x":1,"display_label":null,"nested":{"k":null}}"#.utf8)
+        let p = try JSONDecoder().decode(Point.self, from: raw)
+        XCTAssertNil(p.label); XCTAssertEqual(p.explicitNulls, ["display_label"])
+        let back = try JSONDecoder().decode(JSONValue.self, from: try JSONEncoder().encode(p))
+        XCTAssertEqual(back, try JSONDecoder().decode(JSONValue.self, from: raw))
+        var mutated = p; mutated.label = "now set"
+        let back2 = try JSONDecoder().decode(JSONValue.self, from: try JSONEncoder().encode(mutated))
+        XCTAssertEqual(back2["display_label"], .string("now set"))
+    }
+
     func testMissingRequiredFieldNamesTheField() {
         XCTAssertThrowsError(try JSONDecoder().decode(Point.self, from: Data(#"{"display_label":"p"}"#.utf8))) { error in
             XCTAssertEqual(DecodeFailure(error).field, "x")
@@ -700,14 +711,16 @@ public extension DeclaredKeys {
     static var declaredKeys: [String] { CodingKeys.allCases.map(\.stringValue) }
 }
 
-/// Wraps a typed Fields struct and keeps every undeclared key, so re-encoding is lossless.
+/// Wraps a typed Fields struct and keeps every undeclared key AND every declared key that was an explicit null,
+/// so re-encoding reproduces the original object key for key (an optional field decoded from `null` would otherwise vanish).
 @dynamicMemberLookup
 public struct Lossless<Fields: Codable & Sendable & DeclaredKeys>: Codable, Sendable {
     public var fields: Fields
     public var additional: [String: JSONValue]
+    public var explicitNulls: Set<String>
 
-    public init(fields: Fields, additional: [String: JSONValue] = [:]) {
-        self.fields = fields; self.additional = additional
+    public init(fields: Fields, additional: [String: JSONValue] = [:], explicitNulls: Set<String> = []) {
+        self.fields = fields; self.additional = additional; self.explicitNulls = explicitNulls
     }
     public subscript<T>(dynamicMember keyPath: KeyPath<Fields, T>) -> T { fields[keyPath: keyPath] }
     public subscript<T>(dynamicMember keyPath: WritableKeyPath<Fields, T>) -> T {
@@ -720,19 +733,27 @@ public struct Lossless<Fields: Codable & Sendable & DeclaredKeys>: Codable, Send
         let declared = Set(Fields.declaredKeys)
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         var extras: [String: JSONValue] = [:]
-        for key in c.allKeys where !declared.contains(key.stringValue) {
-            extras[key.stringValue] = try c.decode(JSONValue.self, forKey: key)
+        var nulls: Set<String> = []
+        for key in c.allKeys {
+            if declared.contains(key.stringValue) {
+                if try c.decodeNil(forKey: key) { nulls.insert(key.stringValue) }
+            } else {
+                extras[key.stringValue] = try c.decode(JSONValue.self, forKey: key)
+            }
         }
-        additional = extras
+        additional = extras; explicitNulls = nulls
     }
     public func encode(to encoder: any Encoder) throws {
-        try fields.encode(to: encoder)
+        // Nulls first, then the typed fields (a field mutated to a value overrides its recorded null), then extras.
         var c = encoder.container(keyedBy: AnyCodingKey.self)
+        for k in explicitNulls { try c.encodeNil(forKey: AnyCodingKey(stringValue: k)) }
+        try fields.encode(to: encoder)
         for (k, v) in additional { try c.encode(v, forKey: AnyCodingKey(stringValue: k)) }
     }
 }
 extension Lossless: Equatable where Fields: Equatable {}
 extension Lossless: Hashable where Fields: Hashable {}
+```
 ```
 
 `ClaudeWire/Sources/WireFrames/Identifiers.swift`:
@@ -831,7 +852,7 @@ public enum JSONRPCMessage: Hashable, Sendable, Codable {
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `swift test --package-path ClaudeWire 2>&1 | grep -E "Executed|error:"`
-Expected: `Executed 11 tests, with 0 failures` (the six smoke classes contribute zero tests).
+Expected: `Executed 13 tests, with 0 failures` (the six smoke classes contribute zero tests). Every later count in this plan is the whole `ClaudeWire` package unless a `--filter` is given; if a count differs by one or two after a legitimate extra test, verify by test names, never by trimming tests.
 
 - [ ] **Step 8: Commit**
 
@@ -853,7 +874,7 @@ git commit -m "ClaudeWire: package skeleton, JSONValue, Lossless models, epochs,
 
 **Interfaces:**
 - Consumes: from Task 2: `JSONValue`, `Lossless`, `DeclaredKeys`, `DecodeFailure`, `TestPaths`.
-- Produces: `Frame` (all cases), `OpaqueFrame`, `OpaqueReason`, `FrameDecoder.decode(line:) -> Frame`, `FrameDecoder.encode(_:) -> Data`; `AssistantFrame`, `UserFrame`, `StreamEventFrame`, `ResultFrame`, `Message`, `ContentBlock`, `ToolInput`; `ControlRequestFrame`, `ControlResponseFrame`, `ControlCancelFrame`, `ControlResponseBody`. Task 4 adds the `SystemFrame` and remaining cases; until then `FrameDecoder` routes `system` and the other one-way types to `.opaque(reason: .unknownType)` is **not** acceptable: Task 3 declares every `Frame` case now with its payload type, and Task 4 fills in the models, so the enum shape is fixed once.
+- Produces: `Frame` (all cases), `OpaqueFrame`, `OpaqueReason`, `FrameDecoder.decode(line:) -> Frame` (non-throwing), `FrameDecoder.encode(_:) throws -> Data`; `AssistantFrame`, `UserFrame`, `StreamEventFrame`, `ResultFrame`, `Message`, `ContentBlock`, `ToolInput`; `ControlRequestFrame`, `ControlResponseFrame`, `ControlCancelFrame`, `ControlResponseBody`. Task 4 adds the `SystemFrame` and remaining cases; until then `FrameDecoder` routes `system` and the other one-way types to `.opaque(reason: .unknownType)` is **not** acceptable: Task 3 declares every `Frame` case now with its payload type, and Task 4 fills in the models, so the enum shape is fixed once.
 
 - [ ] **Step 1: Write the sample files**
 
@@ -914,7 +935,7 @@ import WireFrames
 import WireTestSupport
 
 final class FrameDecoderTests: XCTestCase {
-    private func decode(_ name: String) throws -> Frame { try FrameDecoder.decode(line: try TestPaths.sample(name)) }
+    private func decode(_ name: String) throws -> Frame { FrameDecoder.decode(line: try TestPaths.sample(name)) }
 
     func testAssistantDecodesTypedWithBlocks() throws {
         guard case .assistant(let f) = try decode("assistant") else { return XCTFail("not assistant") }
@@ -978,13 +999,13 @@ final class FrameDecoderTests: XCTestCase {
 
     func testDecodeFailureOnKnownTypeIsOpaqueWithField() throws {
         let broken = Data(#"{"type":"assistant","message":"not-an-object","uuid":"u","session_id":"s","parent_tool_use_id":null}"#.utf8)
-        guard case .opaque(let o) = try FrameDecoder.decode(line: broken) else { return XCTFail() }
+        guard case .opaque(let o) = FrameDecoder.decode(line: broken) else { return XCTFail() }
         guard case .decodeFailure(let field, _) = o.reason else { return XCTFail("\(o.reason)") }
         XCTAssertEqual(field, "message")
     }
 
     func testNonJSONLineIsOpaqueWithInvalidJSONReason() throws {
-        guard case .opaque(let o) = try FrameDecoder.decode(line: Data("not json at all".utf8)) else { return XCTFail() }
+        guard case .opaque(let o) = FrameDecoder.decode(line: Data("not json at all".utf8)) else { return XCTFail() }
         XCTAssertEqual(o.reason, .invalidJSON)
     }
 
@@ -992,7 +1013,7 @@ final class FrameDecoderTests: XCTestCase {
         for name in ["assistant", "user", "user_replay", "stream_event", "result", "control_request_can_use_tool",
                      "control_response_success", "control_response_error", "control_cancel_request", "keep_alive"] {
             let raw = try TestPaths.sample(name)
-            let frame = try FrameDecoder.decode(line: raw)
+            let frame = FrameDecoder.decode(line: raw)
             if case .opaque = frame { XCTFail("\(name) decoded opaque"); continue }
             let again = try JSONDecoder().decode(JSONValue.self, from: try FrameDecoder.encode(frame))
             let original = try JSONDecoder().decode(JSONValue.self, from: raw)
@@ -1066,9 +1087,8 @@ public enum Frame: Sendable {
 
 public enum FrameDecoder {
     /// Stage one parses the line into a JSONValue; stage two decodes the typed model from the same bytes.
-    /// A failure at any stage yields .opaque; this function never throws for malformed input, only for
-    /// the impossible case that JSONEncoder itself fails.
-    public static func decode(line: Data) throws -> Frame {
+    /// A failure at any stage yields .opaque; this function never throws.
+    public static func decode(line: Data) -> Frame {
         let value: JSONValue
         do { value = try JSONDecoder().decode(JSONValue.self, from: line) }
         catch { return .opaque(.init(raw: line, value: .null, type: nil, subtype: nil, reason: .invalidJSON)) }
@@ -1456,62 +1476,61 @@ git commit -m "WireFrames: Frame, two-stage decoder, message frames, control env
 
 **Files:**
 - Create (replacing Task 3's temporary declarations): `ClaudeWire/Sources/WireFrames/SystemFrames.swift`, `ClaudeWire/Sources/WireFrames/OtherFrames.swift`
-- Create samples: `Tests/Support/Samples/system_init.json`, `system_session_state_changed.json`, `system_permission_denied.json`, `system_task_started.json`, `system_task_updated.json`, `system_task_progress.json`, `system_task_notification.json`, `system_background_tasks_changed.json`, `system_hook_started.json`, `system_hook_progress.json`, `system_hook_response.json`, `system_compact_boundary.json`, `system_status.json`, `system_api_retry.json`, `system_control_request_progress.json`, `system_model_refusal_fallback.json`, `system_model_refusal_no_fallback.json`, `system_model_consent_fallback.json`, `system_local_command_output.json`, `system_plugin_install.json`, `system_thinking_tokens.json`, `system_worker_shutting_down.json`, `system_commands_changed.json`, `system_notification.json`, `system_files_persisted.json`, `system_memory_recall.json`, `system_elicitation_complete.json`, `system_mirror_error.json`, `system_informational.json`, `system_error.json`, `system_error_during_execution.json`, `system_seed_read_state.json`, `system_unknown_subtype.json`, `tool_progress.json`, `tool_use_summary.json`, `rate_limit_event.json`, `auth_status.json`, `prompt_suggestion.json`, `conversation_reset.json`, `transcript_mirror.json`, `command_lifecycle.json`
+- Create samples: `Tests/Support/Samples/system_init.json`, `system_session_state_changed.json`, `system_permission_denied.json`, `system_task_started.json`, `system_task_updated.json`, `system_task_progress.json`, `system_task_notification.json`, `system_background_tasks_changed.json`, `system_hook_started.json`, `system_hook_progress.json`, `system_hook_response.json`, `system_compact_boundary.json`, `system_status.json`, `system_api_retry.json`, `system_control_request_progress.json`, `system_model_refusal_fallback.json`, `system_model_refusal_no_fallback.json`, `system_model_consent_fallback.json`, `system_local_command_output.json`, `system_plugin_install.json`, `system_thinking_tokens.json`, `system_worker_shutting_down.json`, `system_commands_changed.json`, `system_notification.json`, `system_files_persisted.json`, `system_memory_recall.json`, `system_elicitation_complete.json`, `system_mirror_error.json`, `system_informational.json`, `system_unknown_subtype.json`, `tool_progress.json`, `tool_use_summary.json`, `rate_limit_event.json`, `auth_status.json`, `prompt_suggestion.json`, `conversation_reset.json`, `transcript_mirror.json`, `command_lifecycle.json`
 - Test: `ClaudeWire/Tests/WireFramesTests/SystemFrameTests.swift`, `ClaudeWire/Tests/WireFramesTests/SampleCorpusTests.swift`
 
 **Interfaces:**
 - Consumes: from Tasks 2–3: `Lossless`, `JSONValue`, `Frame`, `FrameDecoder`, `OpaqueFrame`, `TestPaths.sampleNames()`.
-- Produces: `SystemFrame` with one case per subtype below plus `.opaque(subtype:JSONValue)`; `SystemFrame.decode(line:value:subtype:)`, `SystemFrame.encode()`, `SystemFrame.subtype`; `SystemInit` and every system payload type; `ToolProgressFrame`, `ToolUseSummaryFrame`, `RateLimitEventFrame`, `AuthStatusFrame`, `PromptSuggestionFrame`, `ConversationResetFrame`, `TranscriptMirrorFrame`, `CommandLifecycleFrame`. Task 9 reads `SystemInit`; Task 10 reads `TranscriptMirrorFrame` only as a pass-through.
+- Produces: `SystemFrame` with one case per subtype below plus `.opaque(subtype:JSONValue)`; `SystemFrame.decode(line:value:subtype:)`, `SystemFrame.encode()`, `SystemFrame.subtype`, `SystemFrame.knownSubtypes`, `SystemFrame.declaredKeys`; `SystemInit` and every system payload type; `ToolProgressFrame`, `ToolUseSummaryFrame`, `RateLimitEventFrame`, `AuthStatusFrame`, `PromptSuggestionFrame`, `ConversationResetFrame`, `TranscriptMirrorFrame`, `CommandLifecycleFrame`. Task 9 reads `SystemInit`; Task 10 reads `TranscriptMirrorFrame` only as a pass-through.
 
-Every payload is `Lossless<XFields>`; the field lists below are the declared set, and anything the CLI adds lands in `additional`. Field names are the wire names from the typings (`sdk.d.ts` 0.3.259); Swift properties are camelCase with explicit `CodingKeys`. `uuid` and `session_id` are declared on every system payload as `uuid: String`, `sessionID: String` (some CLIs omit them on `init`: declare them optional there).
+Every payload is `Lossless<XFields>`; the field lists below are the declared set, and anything the CLI adds lands in `additional`. Field names are the wire names from the typings (`sdk.d.ts` 0.3.259); Swift properties are camelCase with explicit `CodingKeys`. `uuid` and `session_id` are declared on every system payload as `uuid: String`, `sessionID: String`.
 
 | Subtype | Fields type | Declared fields (wire names) |
 |---|---|---|
-| `init` | `SystemInitFields` | type, subtype, cwd, session_id?, tools [String], mcp_servers [MCPServerStatus{name,status}], model, permissionMode, slash_commands [String], terminal_slash_commands [String]?, apiKeySource, claude_code_version, output_style, agents [String]?, skills [String], plugins [JSONValue], capabilities [String]?, fast_mode_state?, fast_mode_disabled_reason?, effort?, betas [String]?, messaging_socket_path?, uuid? |
-| `session_state_changed` | `SessionStateChangedFields` | type, subtype, session_state JSONValue, uuid, session_id |
-| `permission_denied` | `PermissionDeniedFields` | type, subtype, tool_name, tool_use_id, tool_input JSONValue, decision_reason?, uuid, session_id |
+| `init` | `SystemInitFields` | type, subtype, cwd, session_id, tools [String], mcp_servers [MCPServerStatus{name,status}], model, permissionMode, slash_commands [String], terminal_slash_commands [String]?, apiKeySource, claude_code_version, output_style, agents [String]?, skills [String], plugins [JSONValue], capabilities [String]?, fast_mode_state?, fast_mode_disabled_reason?, effort?, betas [String]?, messaging_socket_path?, uuid |
+| `session_state_changed` | `SessionStateChangedFields` | type, subtype, state JSONValue, uuid, session_id |
+| `permission_denied` | `PermissionDeniedFields` | type, subtype, tool_name, tool_use_id, message, agent_id?, decision_reason_type?, decision_reason?, uuid, session_id |
 | `task_started` | `TaskStartedFields` | type, subtype, task_id, tool_use_id?, description, subagent_type?, is_backgrounded?, spawn_depth?, task_type?, workflow_name?, prompt?, skip_transcript?, ambient?, uuid, session_id |
-| `task_updated` | `TaskUpdatedFields` | type, subtype, task_id, tool_use_id?, status?, description?, uuid, session_id |
-| `task_progress` | `TaskProgressFields` | type, subtype, task_id, tool_use_id?, description, last_tool_name?, usage JSONValue?, summary?, uuid, session_id |
+| `task_updated` | `TaskUpdatedFields` | type, subtype, task_id, patch JSONValue, uuid, session_id |
+| `task_progress` | `TaskProgressFields` | type, subtype, task_id, tool_use_id?, description, subagent_type?, usage JSONValue, last_tool_name?, summary?, uuid, session_id |
 | `task_notification` | `TaskNotificationFields` | type, subtype, task_id, tool_use_id?, status, output_file, summary, usage JSONValue?, resource_links JSONValue?, skip_transcript?, ambient?, uuid, session_id |
 | `background_tasks_changed` | `BackgroundTasksChangedFields` | type, subtype, tasks JSONValue, uuid, session_id |
 | `hook_started` | `HookStartedFields` | type, subtype, hook_id, hook_name, hook_event, uuid, session_id |
-| `hook_progress` | `HookProgressFields` | type, subtype, hook_id, hook_name, hook_event, stdout?, stderr?, output?, uuid, session_id |
-| `hook_response` | `HookResponseFields` | type, subtype, hook_id, hook_name, hook_event, output?, stdout?, stderr?, exit_code?, outcome?, uuid, session_id |
+| `hook_progress` | `HookProgressFields` | type, subtype, hook_id, hook_name, hook_event, stdout, stderr, output, uuid, session_id |
+| `hook_response` | `HookResponseFields` | type, subtype, hook_id, hook_name, hook_event, output, stdout, stderr, exit_code Int?, outcome, uuid, session_id |
 | `compact_boundary` | `CompactBoundaryFields` | type, subtype, compact_metadata JSONValue, uuid, session_id |
-| `status` | `StatusFields` | type, subtype, status String?, permissionMode?, compact_result?, compact_error?, uuid, session_id |
-| `api_retry` | `APIRetryFields` | type, subtype, attempt Int, max_retries Int, retry_delay_ms Int, error String, error_status Int?, uuid, session_id |
-| `control_request_progress` | `ControlRequestProgressFields` | type, subtype, request_id, progress JSONValue?, uuid, session_id |
-| `model_refusal_fallback` | `ModelRefusalFallbackFields` | type, subtype, original_model, fallback_model, retracted_message_uuids [String]?, content?, uuid, session_id |
-| `model_refusal_no_fallback` | `ModelRefusalNoFallbackFields` | type, subtype, model, content?, uuid, session_id |
-| `model_consent_fallback` | `ModelConsentFallbackFields` | type, subtype, choice, original_model, original_model_name?, fallback_model, persisted_as_default Bool, content, uuid, session_id |
+| `status` | `StatusFields` | type, subtype, status JSONValue (a string or null on the wire), permissionMode?, compact_result?, compact_error?, uuid, session_id |
+| `api_retry` | `APIRetryFields` | type, subtype, attempt Int, max_retries Int, retry_delay_ms Int, error_status JSONValue (number or null), error, uuid, session_id |
+| `control_request_progress` | `ControlRequestProgressFields` | type, subtype, request_id, status, attempt Int?, max_retries Int?, retry_delay_ms Int?, error_status JSONValue?, uuid, session_id |
+| `model_refusal_fallback` | `ModelRefusalFallbackFields` | type, subtype, trigger, direction, scope?, original_model, fallback_model, request_id, api_refusal_category?, api_refusal_explanation?, retracted_message_uuids [String]?, refused_user_message_uuid?, content, uuid, session_id |
+| `model_refusal_no_fallback` | `ModelRefusalNoFallbackFields` | type, subtype, original_model, request_id, api_refusal_category?, api_refusal_explanation?, refused_user_message_uuid?, content, uuid, session_id |
+| `model_consent_fallback` | `ModelConsentFallbackFields` | type, subtype, choice, original_model, original_model_name?, fallback_model, persisted_as_default Bool, content, uuid, session_id (not in the public union; modelled from the bundle schema) |
 | `local_command_output` | `LocalCommandOutputFields` | type, subtype, content, uuid, session_id |
-| `plugin_install` | `PluginInstallFields` | type, subtype, plugin, status, message?, uuid, session_id |
-| `thinking_tokens` | `ThinkingTokensFields` | type, subtype, max_thinking_tokens Int?, uuid, session_id |
+| `plugin_install` | `PluginInstallFields` | type, subtype, status, name?, error?, uuid, session_id |
+| `thinking_tokens` | `ThinkingTokensFields` | type, subtype, estimated_tokens Int, estimated_tokens_delta Int, uuid, session_id |
 | `worker_shutting_down` | `WorkerShuttingDownFields` | type, subtype, reason, uuid, session_id |
 | `commands_changed` | `CommandsChangedFields` | type, subtype, commands JSONValue, uuid, session_id |
-| `notification` | `NotificationFields` | type, subtype, message, title?, notification_type?, uuid, session_id |
-| `files_persisted` | `FilesPersistedFields` | type, subtype, files JSONValue, uuid, session_id |
-| `memory_recall` | `MemoryRecallFields` | type, subtype, content?, files JSONValue?, uuid, session_id |
-| `elicitation_complete` | `ElicitationCompleteFields` | type, subtype, elicitation_id?, mcp_server_name?, uuid, session_id |
-| `mirror_error` | `MirrorErrorFields` | type, subtype, error, path?, uuid, session_id |
-| `informational` | `InformationalFields` | type, subtype, content, level?, uuid, session_id |
-| `error` | `ErrorFrameFields` | type, subtype, error, uuid, session_id |
-| `error_during_execution` | `ErrorDuringExecutionFields` | type, subtype, error, uuid, session_id |
-| `seed_read_state` | `SeedReadStateFields` | type, subtype, state JSONValue, uuid, session_id |
+| `notification` | `NotificationFields` | type, subtype, key, text, priority, color?, timeout_ms Int?, uuid, session_id |
+| `files_persisted` | `FilesPersistedFields` | type, subtype, files JSONValue, failed JSONValue, processed_at, uuid, session_id |
+| `memory_recall` | `MemoryRecallFields` | type, subtype, mode, memories JSONValue, uuid, session_id |
+| `elicitation_complete` | `ElicitationCompleteFields` | type, subtype, mcp_server_name, elicitation_id, uuid, session_id |
+| `mirror_error` | `MirrorErrorFields` | type, subtype, error, key, uuid, session_id |
+| `informational` | `InformationalFields` | type, subtype, content, level, tool_use_id?, prevent_continuation Bool?, uuid, session_id |
 
 Other one-way frames:
 
 | Type | Fields type | Declared fields |
 |---|---|---|
-| `tool_progress` | `ToolProgressFields` | type, tool_use_id, tool_name, parent_tool_use_id?, elapsed_time_seconds Double?, task_id?, uuid, session_id |
+| `tool_progress` | `ToolProgressFields` | type, tool_use_id, tool_name, parent_tool_use_id (nullable String; decode as `String?` and it stays in `explicitNulls` when null), elapsed_time_seconds Double, task_id?, heartbeat Bool?, subagent_type?, subagent_retry JSONValue?, uuid, session_id |
 | `tool_use_summary` | `ToolUseSummaryFields` | type, summary, preceding_tool_use_ids [String], uuid, session_id |
 | `rate_limit_event` | `RateLimitEventFields` | type, rate_limit_info JSONValue, uuid, session_id |
-| `auth_status` | `AuthStatusFields` | type, isAuthenticating Bool, output [String]?, error?, uuid, session_id |
+| `auth_status` | `AuthStatusFields` | type, isAuthenticating Bool, output [String], error?, uuid, session_id |
 | `prompt_suggestion` | `PromptSuggestionFields` | type, suggestion, uuid, session_id |
-| `conversation_reset` | `ConversationResetFields` | type, uuid, session_id |
-| `transcript_mirror` | `TranscriptMirrorFields` | type, filePath, entries [JSONValue], uuid?, session_id? |
-| `command_lifecycle` | `CommandLifecycleFields` | type, event, command_uuid?, uuid?, session_id? |
+| `conversation_reset` | `ConversationResetFields` | type, new_conversation_id, uuid, session_id |
+| `transcript_mirror` | `TranscriptMirrorFields` | type, filePath, entries [JSONValue], uuid?, session_id? (not in the public union; from the bundle) |
+| `command_lifecycle` | `CommandLifecycleFields` | type, event, command_uuid?, uuid?, session_id? (not in the public union; from the bundle) |
+
+These rows were regenerated from `sdk.d.ts` 0.3.259 on 2026-09-04 (required fields carry no `?`); the three bundle-only frames keep their observed shapes. There is no `error`, `error_during_execution` or `seed_read_state` system frame in the typings (`seed_read_state` is an outbound control request), so they are not routed; an unknown subtype becomes `.system(.opaque)` and is counted for drift.
 
 - [ ] **Step 1: Write one sample per subtype**
 
@@ -1545,7 +1564,7 @@ import WireTestSupport
 
 final class SystemFrameTests: XCTestCase {
     private func system(_ name: String) throws -> SystemFrame {
-        guard case .system(let s) = try FrameDecoder.decode(line: try TestPaths.sample(name)) else { XCTFail("\(name) not system"); throw XCTSkip() }
+        guard case .system(let s) = FrameDecoder.decode(line: try TestPaths.sample(name)) else { XCTFail("\(name) not system"); throw XCTSkip() }
         return s
     }
     func testInitCarriesToolsCapabilitiesAndVersion() throws {
@@ -1564,7 +1583,7 @@ final class SystemFrameTests: XCTestCase {
     }
     func testUnknownSubtypeIsSystemOpaqueAndReEncodes() throws {
         let raw = try TestPaths.sample("system_unknown_subtype")
-        guard case .system(.opaque(let subtype, let value)) = try FrameDecoder.decode(line: raw) else { return XCTFail() }
+        guard case .system(.opaque(let subtype, let value)) = FrameDecoder.decode(line: raw) else { return XCTFail() }
         XCTAssertEqual(subtype, "afleet_future_subtype"); XCTAssertEqual(value["payload"]?["x"], .integer(1))
         let again = try JSONDecoder().decode(JSONValue.self, from: try FrameDecoder.encode(.system(.opaque(subtype: subtype, value))))
         XCTAssertEqual(again, try JSONDecoder().decode(JSONValue.self, from: raw))
@@ -1575,11 +1594,11 @@ final class SystemFrameTests: XCTestCase {
         XCTAssertEqual(try system("system_unknown_subtype").subtype, "afleet_future_subtype")
     }
     func testOtherOneWayFrames() throws {
-        guard case .transcriptMirror(let m) = try FrameDecoder.decode(line: try TestPaths.sample("transcript_mirror")) else { return XCTFail() }
+        guard case .transcriptMirror(let m) = FrameDecoder.decode(line: try TestPaths.sample("transcript_mirror")) else { return XCTFail() }
         XCTAssertTrue(m.filePath.hasSuffix(".jsonl")); XCTAssertEqual(m.entries.count, 1)
-        guard case .toolUseSummary(let s) = try FrameDecoder.decode(line: try TestPaths.sample("tool_use_summary")) else { return XCTFail() }
+        guard case .toolUseSummary(let s) = FrameDecoder.decode(line: try TestPaths.sample("tool_use_summary")) else { return XCTFail() }
         XCTAssertEqual(s.precedingToolUseIDs, ["toolu_01"])
-        guard case .authStatus(let a) = try FrameDecoder.decode(line: try TestPaths.sample("auth_status")) else { return XCTFail() }
+        guard case .authStatus(let a) = FrameDecoder.decode(line: try TestPaths.sample("auth_status")) else { return XCTFail() }
         XCTAssertEqual(a.isAuthenticating, false)
     }
 }
@@ -1599,7 +1618,7 @@ final class SampleCorpusTests: XCTestCase {
         var typed = 0
         for name in try TestPaths.sampleNames() {
             let raw = try TestPaths.sample(name)
-            let frame = try FrameDecoder.decode(line: raw)
+            let frame = FrameDecoder.decode(line: raw)
             switch frame {
             case .opaque(let o): XCTAssertTrue(unknown.contains(name), "\(name) unexpectedly opaque: \(o.reason)")
             case .system(.opaque): XCTAssertTrue(unknown.contains(name), "\(name) unexpectedly opaque system")
@@ -1608,7 +1627,7 @@ final class SampleCorpusTests: XCTestCase {
             let again = try JSONDecoder().decode(JSONValue.self, from: try FrameDecoder.encode(frame))
             XCTAssertTrue(again.numericallyEqual(try JSONDecoder().decode(JSONValue.self, from: raw)), "\(name) not lossless")
         }
-        XCTAssertGreaterThanOrEqual(typed, 50)
+        XCTAssertGreaterThanOrEqual(typed, 45)
     }
 }
 ```
@@ -1620,7 +1639,7 @@ Expected: compile errors for the missing cases (`.initialize`, `.taskStarted`, �
 
 - [ ] **Step 4: Implement `SystemFrames.swift`**
 
-Write one `XFields` struct per row of the table above following this exact pattern (shown for three; repeat for all thirty-two):
+Write one `XFields` struct per row of the table above following this exact pattern (shown for three; repeat for all twenty-nine). A field whose wire type is nullable but required (`parent_tool_use_id`, `error_status`, `status` on `status` frames) is declared `JSONValue` or `String?` as the table says; `Lossless.explicitNulls` re-emits the null.
 
 ```swift
 import Foundation
@@ -1629,12 +1648,12 @@ public struct MCPServerStatus: Codable, Hashable, Sendable { public var name: St
     public init(name: String, status: String) { self.name = name; self.status = status } }
 
 public struct SystemInitFields: Codable, Hashable, Sendable, DeclaredKeys {
-    public var type: String; public var subtype: String; public var cwd: String; public var sessionID: String?
+    public var type: String; public var subtype: String; public var cwd: String; public var sessionID: String
     public var tools: [String]; public var mcpServers: [MCPServerStatus]; public var model: String; public var permissionMode: String
     public var slashCommands: [String]; public var terminalSlashCommands: [String]?; public var apiKeySource: String; public var claudeCodeVersion: String
     public var outputStyle: String; public var agents: [String]?; public var skills: [String]; public var plugins: [JSONValue]; public var capabilities: [String]?
     public var fastModeState: String?; public var fastModeDisabledReason: String?; public var effort: String?; public var betas: [String]?
-    public var messagingSocketPath: String?; public var uuid: String?
+    public var messagingSocketPath: String?; public var uuid: String
     enum CodingKeys: String, CodingKey, CaseIterable {
         case type, subtype, cwd, sessionID = "session_id", tools, mcpServers = "mcp_servers", model, permissionMode, slashCommands = "slash_commands",
              terminalSlashCommands = "terminal_slash_commands", apiKeySource, claudeCodeVersion = "claude_code_version", outputStyle = "output_style",
@@ -1678,9 +1697,26 @@ public enum SystemFrame: Sendable {
     case modelRefusalFallback(ModelRefusalFallback), modelRefusalNoFallback(ModelRefusalNoFallback), modelConsentFallback(ModelConsentFallback)
     case localCommandOutput(LocalCommandOutput), pluginInstall(PluginInstall), thinkingTokens(ThinkingTokens), workerShuttingDown(WorkerShuttingDown)
     case commandsChanged(CommandsChanged), notification(NotificationFrame), filesPersisted(FilesPersisted), memoryRecall(MemoryRecall)
-    case elicitationComplete(ElicitationComplete), mirrorError(MirrorError), informational(Informational), error(ErrorFrame)
-    case errorDuringExecution(ErrorDuringExecution), seedReadState(SeedReadState)
+    case elicitationComplete(ElicitationComplete), mirrorError(MirrorError), informational(Informational)
     case opaque(subtype: String, JSONValue)
+
+    /// Declared keys per subtype, for the typings drift test (Task 11): subtype → Fields.declaredKeys.
+    public static let declaredKeys: [String: [String]] = [
+        "init": SystemInitFields.declaredKeys, "session_state_changed": SessionStateChangedFields.declaredKeys,
+        "permission_denied": PermissionDeniedFields.declaredKeys, "task_started": TaskStartedFields.declaredKeys,
+        "task_updated": TaskUpdatedFields.declaredKeys, "task_progress": TaskProgressFields.declaredKeys,
+        "task_notification": TaskNotificationFields.declaredKeys, "background_tasks_changed": BackgroundTasksChangedFields.declaredKeys,
+        "hook_started": HookStartedFields.declaredKeys, "hook_progress": HookProgressFields.declaredKeys, "hook_response": HookResponseFields.declaredKeys,
+        "compact_boundary": CompactBoundaryFields.declaredKeys, "status": StatusFields.declaredKeys, "api_retry": APIRetryFields.declaredKeys,
+        "control_request_progress": ControlRequestProgressFields.declaredKeys, "model_refusal_fallback": ModelRefusalFallbackFields.declaredKeys,
+        "model_refusal_no_fallback": ModelRefusalNoFallbackFields.declaredKeys, "model_consent_fallback": ModelConsentFallbackFields.declaredKeys,
+        "local_command_output": LocalCommandOutputFields.declaredKeys, "plugin_install": PluginInstallFields.declaredKeys,
+        "thinking_tokens": ThinkingTokensFields.declaredKeys, "worker_shutting_down": WorkerShuttingDownFields.declaredKeys,
+        "commands_changed": CommandsChangedFields.declaredKeys, "notification": NotificationFields.declaredKeys,
+        "files_persisted": FilesPersistedFields.declaredKeys, "memory_recall": MemoryRecallFields.declaredKeys,
+        "elicitation_complete": ElicitationCompleteFields.declaredKeys, "mirror_error": MirrorErrorFields.declaredKeys,
+        "informational": InformationalFields.declaredKeys,
+    ]
 
     /// The routing table: wire subtype → decoder. One entry per case above.
     static let routes: [String: @Sendable (Data) throws -> SystemFrame] = [
@@ -1713,9 +1749,6 @@ public enum SystemFrame: Sendable {
         "elicitation_complete": { .elicitationComplete(try JSONDecoder().decode(ElicitationComplete.self, from: $0)) },
         "mirror_error": { .mirrorError(try JSONDecoder().decode(MirrorError.self, from: $0)) },
         "informational": { .informational(try JSONDecoder().decode(Informational.self, from: $0)) },
-        "error": { .error(try JSONDecoder().decode(ErrorFrame.self, from: $0)) },
-        "error_during_execution": { .errorDuringExecution(try JSONDecoder().decode(ErrorDuringExecution.self, from: $0)) },
-        "seed_read_state": { .seedReadState(try JSONDecoder().decode(SeedReadState.self, from: $0)) },
     ]
     public static var knownSubtypes: Set<String> { Set(routes.keys) }
 
@@ -1739,8 +1772,8 @@ public enum SystemFrame: Sendable {
         case .modelRefusalFallback: "model_refusal_fallback"; case .modelRefusalNoFallback: "model_refusal_no_fallback"; case .modelConsentFallback: "model_consent_fallback"
         case .localCommandOutput: "local_command_output"; case .pluginInstall: "plugin_install"; case .thinkingTokens: "thinking_tokens"; case .workerShuttingDown: "worker_shutting_down"
         case .commandsChanged: "commands_changed"; case .notification: "notification"; case .filesPersisted: "files_persisted"; case .memoryRecall: "memory_recall"
-        case .elicitationComplete: "elicitation_complete"; case .mirrorError: "mirror_error"; case .informational: "informational"; case .error: "error"
-        case .errorDuringExecution: "error_during_execution"; case .seedReadState: "seed_read_state"; case .opaque(let s, _): s
+        case .elicitationComplete: "elicitation_complete"; case .mirrorError: "mirror_error"; case .informational: "informational"
+        case .opaque(let s, _): s
         }
     }
 
@@ -1750,7 +1783,7 @@ public enum SystemFrame: Sendable {
         case .initialize(let v): return try e.encode(v)
         case .sessionStateChanged(let v): return try e.encode(v)
         // … one line per case, in the same order as the enum …
-        case .seedReadState(let v): return try e.encode(v)
+        case .informational(let v): return try e.encode(v)
         case .opaque(_, let value): return try e.encode(value)
         }
     }
@@ -1776,7 +1809,7 @@ Delete the temporary declarations from Task 3.
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `swift test --package-path ClaudeWire 2>&1 | grep -E "Executed|error:|failed"`
-Expected: `Executed 25 tests, with 0 failures` (sample count in `SampleCorpusTests` ≥ 50 typed).
+Expected: `Executed 27 tests, with 0 failures` (sample count in `SampleCorpusTests` ≥ 45 typed).
 
 - [ ] **Step 7: Commit**
 
@@ -1843,7 +1876,7 @@ import WireTestSupport
 
 final class InboundRequestTests: XCTestCase {
     private func parse(_ name: String) throws -> InboundRequest {
-        guard case .controlRequest(let f) = try FrameDecoder.decode(line: try TestPaths.sample(name)) else { XCTFail(); throw XCTSkip() }
+        guard case .controlRequest(let f) = FrameDecoder.decode(line: try TestPaths.sample(name)) else { XCTFail(); throw XCTSkip() }
         return InboundRequest.parse(frame: f, epoch: .first, receivedAt: .now)
     }
     func testCanUseTool() throws {
@@ -1954,6 +1987,26 @@ final class OutboundRequestTests: XCTestCase {
     }
     func testAbortableSubtypes() {
         XCTAssertEqual(OutboundEnvelope.abortableSubtypes, ["side_question", "mcp_call"])
+    }
+    /// Byte-level payloads for the requests whose keys the typings pin (a wrong key is a silently ignored request).
+    func testPayloadsMatchTheTypings() throws {
+        func request<R: ControlRequestSpec>(_ spec: R) throws -> JSONValue {
+            try JSONDecoder().decode(JSONValue.self, from: try OutboundEnvelope.encode(spec: spec, requestID: .init(rawValue: "r")))["request"]!
+        }
+        XCTAssertEqual(try request(MCPToggle(serverName: "github", enabled: false)), .object(["subtype": .string("mcp_toggle"), "serverName": .string("github"), "enabled": .bool(false)]))
+        XCTAssertEqual(try request(MCPReconnect(serverName: "github")), .object(["subtype": .string("mcp_reconnect"), "serverName": .string("github")]))
+        XCTAssertEqual(try request(UpdateSettings(settings: .object(["outputStyle": .string("x")]))), .object(["subtype": .string("update_settings"), "source": .string("localSettings"), "settings": .object(["outputStyle": .string("x")])]))
+        XCTAssertEqual(try request(MCPCall(tool: "mcp__github__list_prs", arguments: .object(["repo": .string("a")]), timeoutMs: 5000)),
+                       .object(["subtype": .string("mcp_call"), "tool": .string("mcp__github__list_prs"), "arguments": .object(["repo": .string("a")]), "timeout_ms": .integer(5000)]))
+        XCTAssertEqual(try request(StopTask(taskID: "t1")), .object(["subtype": .string("stop_task"), "task_id": .string("t1")]))
+        XCTAssertEqual(try request(BackgroundTasks()), .object(["subtype": .string("background_tasks")]))
+        XCTAssertEqual(try request(RewindFiles(userMessageID: "u", dryRun: true)), .object(["subtype": .string("rewind_files"), "user_message_id": .string("u"), "dry_run": .bool(true)]))
+        XCTAssertEqual(try request(SetMaxThinkingTokens(maxThinkingTokens: nil)), .object(["subtype": .string("set_max_thinking_tokens"), "max_thinking_tokens": .null]))
+        XCTAssertEqual(try request(SetModel(model: "opus")), .object(["subtype": .string("set_model"), "model": .string("opus")]))
+        XCTAssertEqual(try request(RenameSession(title: "t")), .object(["subtype": .string("rename_session"), "title": .string("t")]))
+        XCTAssertEqual(try request(FileSuggestions(query: "src")), .object(["subtype": .string("file_suggestions"), "query": .string("src")]))
+        XCTAssertEqual(try request(Interrupt(cancelQueued: true)), .object(["subtype": .string("interrupt"), "cancel_queued": .bool(true)]))
+        XCTAssertEqual(try request(GetContextUsage(detail: "full")), .object(["subtype": .string("get_context_usage"), "detail": .string("full")]))
     }
 }
 ```
@@ -2287,6 +2340,8 @@ public struct ClaudeAuthenticate: ControlRequestSpec { public typealias Response
 public struct ClaudeOAuthCallback: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "claude_oauth_callback"
     public var code: String; public init(code: String) { self.code = code }; public var payload: JSONValue { .object(["code": .string(code)]) } }
 public struct ClaudeOAuthWaitForCompletion: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "claude_oauth_wait_for_completion"; public init() {}; public var payload: JSONValue { .object([:]) } }
+// The three MCP OAuth requests below and the claude_* auth requests have no published typings (parent §6.3); their key names are
+// modelled from the bundle handler source and pinned by C1's S8 fixtures. Until those land, treat the payload keys as provisional.
 public struct MCPAuthenticate: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_authenticate"
     public var serverName: String; public init(serverName: String) { self.serverName = serverName }; public var payload: JSONValue { .object(["server_name": .string(serverName)]) } }
 public struct MCPOAuthCallbackURL: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_oauth_callback_url"
@@ -2301,7 +2356,9 @@ public struct RewindFiles: ControlRequestSpec { public typealias Response = JSON
     public var userMessageID: String; public var dryRun: Bool
     public init(userMessageID: String, dryRun: Bool) { self.userMessageID = userMessageID; self.dryRun = dryRun }
     public var payload: JSONValue { .object(["user_message_id": .string(userMessageID), "dry_run": .bool(dryRun)]) } }
-public struct GetContextUsage: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "get_context_usage"; public init() {}; public var payload: JSONValue { .object([:]) } }
+public struct GetContextUsage: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "get_context_usage"
+    public var detail: String?; public init(detail: String? = nil) { self.detail = detail }
+    public var payload: JSONValue { detail.map { .object(["detail": .string($0)]) } ?? .object([:]) } }
 public struct GetSessionCost: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "get_session_cost"; public init() {}; public var payload: JSONValue { .object([:]) } }
 public struct GetUsage: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "get_usage"; public init() {}; public var payload: JSONValue { .object([:]) } }
 public struct GetBinaryVersion: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "get_binary_version"; public init() {}; public var payload: JSONValue { .object([:]) } }
@@ -2319,12 +2376,12 @@ public struct FileSuggestions: ControlRequestSpec { public typealias Response = 
 public struct MCPStatus: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_status"; public init() {}; public var payload: JSONValue { .object([:]) } }
 public struct MCPSetServers: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_set_servers"
     public var servers: JSONValue; public init(servers: JSONValue) { self.servers = servers }; public var payload: JSONValue { .object(["servers": servers]) } }
-public struct MCPReconnect: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_reconnect"
-    public var serverName: String; public init(serverName: String) { self.serverName = serverName }; public var payload: JSONValue { .object(["server_name": .string(serverName)]) } }
-public struct MCPToggle: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_toggle"
+public struct MCPReconnect: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_reconnect"   // typings: serverName (camelCase)
+    public var serverName: String; public init(serverName: String) { self.serverName = serverName }; public var payload: JSONValue { .object(["serverName": .string(serverName)]) } }
+public struct MCPToggle: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_toggle"         // typings: serverName, enabled
     public var serverName: String; public var enabled: Bool
     public init(serverName: String, enabled: Bool) { self.serverName = serverName; self.enabled = enabled }
-    public var payload: JSONValue { .object(["server_name": .string(serverName), "enabled": .bool(enabled)]) } }
+    public var payload: JSONValue { .object(["serverName": .string(serverName), "enabled": .bool(enabled)]) } }
 public struct ReloadSkills: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "reload_skills"; public init() {}; public var payload: JSONValue { .object([:]) } }
 public struct ReloadPlugins: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "reload_plugins"; public init() {}; public var payload: JSONValue { .object([:]) } }
 public struct EndSession: ControlRequestSpec { public typealias Response = EmptyResponse; public static let subtype = "end_session"; public init() {}; public var payload: JSONValue { .object([:]) } }
@@ -2332,12 +2389,13 @@ public struct GenerateSessionTitle: ControlRequestSpec { public typealias Respon
     public var description: String?; public var persist: Bool
     public init(description: String? = nil, persist: Bool = true) { self.description = description; self.persist = persist }
     public var payload: JSONValue { var o: [String: JSONValue] = ["persist": .bool(persist)]; if let d = description { o["description"] = .string(d) }; return .object(o) } }
-public struct UpdateSettings: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "update_settings"
-    public var settings: JSONValue; public init(settings: JSONValue) { self.settings = settings }; public var payload: JSONValue { .object(["settings": settings]) } }
-public struct MCPCall: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_call"
-    public var serverName: String; public var message: JSONRPCMessage
-    public init(serverName: String, message: JSONRPCMessage) { self.serverName = serverName; self.message = message }
-    public var payload: JSONValue { .object(["server_name": .string(serverName), "message": message.jsonValue]) } }
+public struct UpdateSettings: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "update_settings"   // typings: source is required and only 'localSettings'
+    public var settings: JSONValue; public init(settings: JSONValue) { self.settings = settings }
+    public var payload: JSONValue { .object(["source": .string("localSettings"), "settings": settings]) } }
+public struct MCPCall: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_call"   // typings: tool (mcp__server__tool name), arguments?, timeout_ms?
+    public var tool: String; public var arguments: JSONValue?; public var timeoutMs: Int?
+    public init(tool: String, arguments: JSONValue? = nil, timeoutMs: Int? = nil) { self.tool = tool; self.arguments = arguments; self.timeoutMs = timeoutMs }
+    public var payload: JSONValue { var o: [String: JSONValue] = ["tool": .string(tool)]; if let arguments { o["arguments"] = arguments }; if let timeoutMs { o["timeout_ms"] = .integer(Int64(timeoutMs)) }; return .object(o) } }
 
 /// Escape hatch: any subtype, any payload, JSONValue response. `Self.subtype` is the constant "raw"; the wire subtype is per instance.
 public struct RawControlRequest: ControlRequestSpec {
@@ -2434,7 +2492,7 @@ public enum ShellEnvelope {
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `swift test --package-path ClaudeWire 2>&1 | grep -E "Executed|error:|failed"`
-Expected: `Executed 37 tests, with 0 failures`.
+Expected: `Executed 42 tests, with 0 failures`.
 
 - [ ] **Step 7: Commit**
 
@@ -2516,11 +2574,30 @@ final class AfleetMCPServerTests: XCTestCase {
         guard case .response(.error(let e3)) = r3 else { return XCTFail() }
         XCTAssertEqual(e3.error.code, -32602)
     }
-    func testPathsOutsideCwdAreRefused() async throws {
+    func testAbsolutePathsAnywhereReadableAreAllowed() async throws {
+        // The built-in SendUserFile accepts any file the model can read; afleet mirrors that domain (child spec, WireMCP).
         let s = server()
-        let (r, inv) = await s.handle(req(9, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("../../etc/hosts")]), "status": .string("proactive")])])))
+        let (r, inv) = await s.handle(req(9, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("/etc/hosts")]), "status": .string("proactive")])])))
         guard case .response(.response(let resp)) = r else { return XCTFail() }
-        XCTAssertEqual(resp.result["isError"], .bool(true)); XCTAssertNil(inv)
+        XCTAssertEqual(resp.result["isError"], .bool(false))
+        guard case .sentFile(let paths, _, let status, _) = inv else { return XCTFail() }
+        XCTAssertEqual(paths.first?.path, "/etc/hosts"); XCTAssertEqual(status, "proactive")
+    }
+    func testCancelledNotificationCancelsAnInFlightCall() async throws {
+        struct SleepingTool: MCPTool {
+            var name: String { "sleep" }; var description: String { "sleeps until cancelled" }
+            var inputSchema: JSONValue { .object(["type": .string("object")]) }
+            func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
+                try await Task.sleep(for: .seconds(30)); return .text("woke")
+            }
+        }
+        let s = AfleetMCPServer(serverVersion: "0.1.0", cwd: tmp, tools: [SleepingTool()])
+        let call = Task { await s.handle(req(10, "tools/call", .object(["name": .string("sleep"), "arguments": .object([:])]))) }
+        try await Task.sleep(for: .milliseconds(100))
+        _ = await s.handle(.notification(.init(method: "notifications/cancelled", params: .object(["requestId": .integer(10)]))))
+        let (r, _) = await call.value
+        guard case .response(.error(let e)) = r else { return XCTFail("\(r)") }
+        XCTAssertEqual(e.error.code, -32800)
     }
 }
 ```
@@ -2598,6 +2675,8 @@ public actor AfleetMCPServer {
                 }
                 return (.response(.response(.init(id: r.id, result: .object(["tools": .array(list)])))), nil)
             case "tools/call":
+                // Runs inline on the actor; the transport (Task 10) calls handle() from a detached task per request so a long tool
+                // never blocks the stdout reader, and notifications/cancelled reaches inFlight while the call is still running.
                 guard let name = r.params?["name"]?.stringValue, let tool = tools[name] else {
                     return (.response(.error(.init(id: r.id, error: .init(code: -32602, message: "Unknown tool: \(r.params?["name"]?.stringValue ?? "?")")))), nil)
                 }
@@ -2606,7 +2685,7 @@ public actor AfleetMCPServer {
                 inFlight[r.id] = task
                 defer { inFlight[r.id] = nil }
                 do {
-                    let result = try await task.value
+                    let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
                     return (.response(.response(.init(id: r.id, result: .object(["content": .array(result.content), "isError": .bool(result.isError)])))), result.hostInvocation)
                 } catch let e as MCPArgumentError {
                     return (.response(.error(.init(id: r.id, error: .init(code: -32602, message: e.message)))), nil)
@@ -2649,11 +2728,10 @@ public struct SendUserFileTool: MCPTool {
         guard let status = arguments["status"]?.stringValue, ["normal", "proactive"].contains(status) else { throw MCPArgumentError("status must be 'normal' or 'proactive'") }
         let display = arguments["display"]?.stringValue
         if let display, !["render", "attach"].contains(display) { throw MCPArgumentError("display must be 'render' or 'attach'") }
-        let root = context.cwd.standardizedFileURL.resolvingSymlinksInPath()
+        let root = context.cwd.standardizedFileURL
         var resolved: [URL] = []
         for f in files.compactMap(\.stringValue) {
-            let url = (f.hasPrefix("/") ? URL(fileURLWithPath: f) : root.appendingPathComponent(f)).standardizedFileURL.resolvingSymlinksInPath()
-            guard url.path.hasPrefix(root.path + "/") || url.path == root.path else { return .text("Refused: \(f) is outside the working directory", isError: true) }
+            let url = (f.hasPrefix("/") ? URL(fileURLWithPath: f) : root.appendingPathComponent(f)).standardizedFileURL
             guard FileManager.default.isReadableFile(atPath: url.path) else { return .text("Cannot read \(f): no such file or not readable", isError: true) }
             resolved.append(url)
         }
@@ -2669,7 +2747,7 @@ Delete `Sources/WireMCP/Placeholder.swift`.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `swift test --package-path ClaudeWire --filter AfleetMCPServerTests 2>&1 | grep -E "Executed|error:|failed"`
-Expected: `Executed 4 tests, with 0 failures`.
+Expected: `Executed 5 tests, with 0 failures`.
 
 - [ ] **Step 5: Commit**
 
@@ -2875,27 +2953,46 @@ public protocol ProcessRunner: Sendable {
     func run(_ executable: URL, arguments: [String], environment: [String: String], timeout: Duration) async throws -> ProcessOutput
 }
 
-/// Runs a short-lived process to completion, collecting both pipes, killing it at the timeout.
+/// Runs a short-lived process to completion, draining both pipes concurrently, killing it at the timeout.
+/// `Process` is not Sendable: one serial queue owns it; the drains run on their own threads and only hand Data back.
 public struct FoundationProcessRunner: ProcessRunner {
     public init() {}
     public func run(_ executable: URL, arguments: [String], environment: [String: String], timeout: Duration) async throws -> ProcessOutput {
-        try await withCheckedThrowingContinuation { cont in
-            let p = Process(); p.executableURL = executable; p.arguments = arguments; p.environment = environment
-            p.standardInput = FileHandle.nullDevice
-            let out = Pipe(), err = Pipe(); p.standardOutput = out; p.standardError = err
-            let done = TimedOutFlag()
-            do { try p.run() } catch { cont.resume(throwing: error); return }
-            let timer = DispatchWorkItem { if p.isRunning { done.set(); p.terminate(); DispatchQueue.global().asyncAfter(deadline: .now() + 1) { if p.isRunning { kill(p.processIdentifier, SIGKILL) } } } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(timeout.components.seconds * 1_000_000_000 + timeout.components.attoseconds / 1_000_000_000)), execute: timer)
-            DispatchQueue.global().async {
-                let o = out.fileHandleForReading.readDataToEndOfFile(); let e = err.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit(); timer.cancel()
-                cont.resume(returning: ProcessOutput(stdout: o, stderr: e, exitCode: p.terminationStatus, timedOut: done.value))
-            }
+        let job = ProcessJob(executable: executable, arguments: arguments, environment: environment)
+        try job.start()
+        return await withCheckedContinuation { cont in job.finish(timeout: timeout) { cont.resume(returning: $0) } }
+    }
+}
+
+/// Single owner of a Process and its pipes. Every access to the Process happens on `queue`.
+private final class ProcessJob: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "afleet.process-runner")
+    private let process = Process()
+    private let out = Pipe(), err = Pipe()
+    private var timedOut = false
+    init(executable: URL, arguments: [String], environment: [String: String]) {
+        process.executableURL = executable; process.arguments = arguments; process.environment = environment
+        process.standardInput = FileHandle.nullDevice; process.standardOutput = out; process.standardError = err
+    }
+    func start() throws { try queue.sync { try process.run() } }
+    func finish(timeout: Duration, completion: @escaping @Sendable (ProcessOutput) -> Void) {
+        let group = DispatchGroup()
+        let stdoutBox = DataBox(), stderrBox = DataBox()
+        group.enter(); DispatchQueue.global().async { stdoutBox.data = self.out.fileHandleForReading.readDataToEndOfFile(); group.leave() }
+        group.enter(); DispatchQueue.global().async { stderrBox.data = self.err.fileHandleForReading.readDataToEndOfFile(); group.leave() }
+        group.enter(); DispatchQueue.global().async { self.process.waitUntilExit(); group.leave() }
+        let nanos = Int(timeout.components.seconds) * 1_000_000_000 + Int(timeout.components.attoseconds / 1_000_000_000)
+        let timer = DispatchWorkItem { [self] in
+            queue.sync { if process.isRunning { timedOut = true; process.terminate() } }
+            queue.asyncAfter(deadline: .now() + 1) { [self] in if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+        }
+        queue.asyncAfter(deadline: .now() + .nanoseconds(nanos), execute: timer)
+        group.notify(queue: queue) { [self] in
+            timer.cancel()
+            completion(ProcessOutput(stdout: stdoutBox.data, stderr: stderrBox.data, exitCode: process.terminationStatus, timedOut: timedOut))
         }
     }
-    private final class TimedOutFlag: @unchecked Sendable { private let lock = NSLock(); private var v = false
-        func set() { lock.lock(); v = true; lock.unlock() }; var value: Bool { lock.lock(); defer { lock.unlock() }; return v } }
+    private final class DataBox: @unchecked Sendable { var data = Data() }
 }
 ```
 
@@ -3086,9 +3183,9 @@ final class RedactorTests: XCTestCase {
     func testTypedFramesStayTypedAfterRedaction() throws {
         for name in try TestPaths.sampleNames() {
             let raw = try TestPaths.sample(name)
-            let before = try FrameDecoder.decode(line: raw)
+            let before = FrameDecoder.decode(line: raw)
             guard let after = Redactor.redact(line: raw) else { XCTFail("\(name) dropped"); continue }
-            let afterFrame = try FrameDecoder.decode(line: after)
+            let afterFrame = FrameDecoder.decode(line: after)
             XCTAssertEqual(before.typeName, afterFrame.typeName, name)
             if case .opaque = before { continue }
             if case .opaque(let o) = afterFrame { XCTFail("\(name) became opaque after redaction: \(o.reason)") }
@@ -3385,12 +3482,12 @@ git commit -m "WireDiagnostics: metadata log, structural redactor with counter e
 ### Task 9: `WireTransport` values: launch configuration, initialize payload, policy, events, bounded channel, stdin writer
 
 **Files:**
-- Create (replacing the placeholder): `ClaudeWire/Sources/WireTransport/LaunchConfiguration.swift`, `InitializeConfiguration.swift`, `InboundPolicy.swift`, `WireEvent.swift`, `BoundedChannel.swift`, `StdinWriter.swift`
+- Create (replacing the placeholder): `ClaudeWire/Sources/WireTransport/LaunchConfiguration.swift`, `InitializeConfiguration.swift`, `InboundPolicy.swift`, `WireEvent.swift`, `BoundedChannel.swift`, `StdinWriter.swift`, `Waiter.swift`
 - Test: `ClaudeWire/Tests/WireTransportTests/LaunchConfigurationTests.swift`, `InitializeConfigurationTests.swift`, `InboundPolicyTests.swift`, `BoundedChannelTests.swift`
 
 **Interfaces:**
 - Consumes: Tasks 1–8 types.
-- Produces: `SessionStart`, `Worktree`, `SettingSource`, `ChildEnvironmentOptions`, `LaunchConfiguration` (`arguments()`, `childEnvironment(over:)`), `HookEvent`, `HookCallbackMatcher`, `InitializeConfiguration` (`payload()`, `.afleetDefaults`), `InboundPolicy` (`.default`, `decide(_:) -> PolicyDecision`), `PolicyDecision`, `WireEvent`, `Handshake`, `InitializeResponse`, `ExitStatus`, `ProcessStatus`, `WireError`, `WireEventStream`, `actor BoundedChannel<Element>`, `actor StdinWriter`. Task 10 assembles these into `ClaudeProcess`.
+- Produces: `SessionStart`, `Worktree`, `SettingSource`, `ChildEnvironmentOptions`, `LaunchConfiguration` (`arguments()`, `childEnvironment(over:)`), `HookEvent`, `HookCallbackMatcher`, `InitializeConfiguration` (`payload()`, `.afleetDefaults`), `InboundPolicy` (`.default`, `decide(_:) -> PolicyDecision`), `PolicyDecision`, `WireEvent`, `Handshake`, `InitializeResponse`, `ExitStatus`, `ProcessStatus`, `WireError`, `WireEventStream` (read-only; its channel is module-internal), `actor BoundedChannel<Element>` (cancellation-aware waiters), `actor StdinWriter` (dedicated write thread), `Waiter<Value>` (single-resume, cancellation-aware settlement box used for correlation, handshake and exit waits). Task 10 assembles these into `ClaudeProcess`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3510,7 +3607,7 @@ final class InboundPolicyTests: XCTestCase {
 
 ```swift
 import XCTest
-import WireTransport
+@testable import WireTransport
 
 final class BoundedChannelTests: XCTestCase {
     func testPushSuspendsWhenFullAndResumesOnPop() async throws {
@@ -3518,10 +3615,14 @@ final class BoundedChannelTests: XCTestCase {
         await ch.push(1); await ch.push(2)
         let pushed = Task { await ch.push(3); return true }
         try await Task.sleep(for: .milliseconds(50))
-        XCTAssertEqual(await ch.count, 2)                       // third push is still suspended
-        XCTAssertEqual(await ch.pop(), 1)
-        XCTAssertTrue(await pushed.value)
-        XCTAssertEqual(await ch.pop(), 2); XCTAssertEqual(await ch.pop(), 3)
+        let countWhileBlocked = await ch.count
+        XCTAssertEqual(countWhileBlocked, 2)                    // third push is still suspended
+        let first = await ch.pop()
+        XCTAssertEqual(first, 1)
+        let didPush = await pushed.value
+        XCTAssertTrue(didPush)
+        let second = await ch.pop(), third = await ch.pop()
+        XCTAssertEqual(second, 2); XCTAssertEqual(third, 3)
     }
     func testFinishEndsIterationAfterDraining() async {
         let ch = BoundedChannel<Int>(capacity: 8)
@@ -3530,16 +3631,48 @@ final class BoundedChannelTests: XCTestCase {
         for await x in WireEventStream(channel: ch) { got.append(x) }
         XCTAssertEqual(got, [7])
         await ch.push(9)                                        // after finish: dropped, never blocks
-        XCTAssertNil(await ch.pop())
+        let afterFinish = await ch.pop()
+        XCTAssertNil(afterFinish)
     }
     func testPopSuspendsUntilPush() async throws {
         let ch = BoundedChannel<String>(capacity: 1)
         let popped = Task { await ch.pop() }
         try await Task.sleep(for: .milliseconds(30))
         await ch.push("late")
-        XCTAssertEqual(await popped.value, "late")
+        let value = await popped.value
+        XCTAssertEqual(value, "late")
+    }
+    func testCancelledPopDoesNotStealALaterElementAndCancelledPushDoesNotAppend() async throws {
+        let ch = BoundedChannel<Int>(capacity: 1)
+        let cancelledPop = Task { await ch.pop() }
+        try await Task.sleep(for: .milliseconds(30)); cancelledPop.cancel()
+        let popResult = await cancelledPop.value
+        XCTAssertNil(popResult)
+        await ch.push(1)
+        let live = await ch.pop()
+        XCTAssertEqual(live, 1, "the element must reach a live consumer, not the cancelled waiter")
+        await ch.push(2)                                        // full
+        let cancelledPush = Task { await ch.push(3) }
+        try await Task.sleep(for: .milliseconds(30)); cancelledPush.cancel(); await cancelledPush.value
+        let a = await ch.pop(), afterCancelled = await ch.count
+        XCTAssertEqual(a, 2); XCTAssertEqual(afterCancelled, 0, "a cancelled push must not append later")
+    }
+    func testWaiterSettlesOnceAndTimesOutWithoutDeadlock() async throws {
+        let w = Waiter<Int>()
+        XCTAssertTrue(w.settle(.success(1))); XCTAssertFalse(w.settle(.success(2)))
+        let v = try await w.value(); XCTAssertEqual(v, 1)
+        struct Late: Error {}
+        let slow = Waiter<Int>()
+        let timer = slow.timeout(after: .milliseconds(50)) { Late() }
+        do { _ = try await slow.value(); XCTFail("should time out") } catch { XCTAssertTrue(error is Late) }
+        timer.cancel()
+        let cancelled = Waiter<Int>()
+        let t = Task { try await cancelled.value() }
+        try await Task.sleep(for: .milliseconds(20)); t.cancel()
+        do { _ = try await t.value; XCTFail() } catch { XCTAssertTrue(error is CancellationError) }
     }
 }
+```
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -3804,46 +3937,68 @@ public enum WireEvent: Sendable {
 ```swift
 import Foundation
 
-/// A lossless bounded FIFO: push suspends when full, pop suspends when empty. finish() lets consumers drain then end.
+/// A lossless bounded FIFO: push suspends when full, pop suspends when empty, both cancellation-aware.
+/// finish() lets consumers drain what is buffered, then ends iteration; pushes after finish are dropped.
 public actor BoundedChannel<Element: Sendable> {
     public let capacity: Int
     private var buffer: [Element] = []
     private var head = 0
-    private var waitingPush: [CheckedContinuation<Void, Never>] = []
-    private var waitingPop: [CheckedContinuation<Element?, Never>] = []
+    private var nextWaiterID: UInt64 = 0
+    private var pushWaiters: [(id: UInt64, c: CheckedContinuation<Void, Never>)] = []
+    private var popWaiters: [(id: UInt64, c: CheckedContinuation<Element?, Never>)] = []
     private var finished = false
 
     public init(capacity: Int) { self.capacity = max(1, capacity) }
     public var count: Int { buffer.count - head }
+    public var isFinished: Bool { finished }
 
     public func push(_ element: Element) async {
+        while !finished && count >= capacity && popWaiters.isEmpty {
+            let id = nextWaiterID; nextWaiterID += 1
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { c in pushWaiters.append((id, c)) }
+            } onCancel: {
+                Task { await self.cancelPushWaiter(id) }
+            }
+            if Task.isCancelled { return }                    // a cancelled push never appends
+        }
         if finished { return }
-        if let waiter = waitingPop.first { waitingPop.removeFirst(); waiter.resume(returning: element); return }
-        while count >= capacity && !finished { await withCheckedContinuation { waitingPush.append($0) } }
-        if finished { return }
+        if let w = popWaiters.first { popWaiters.removeFirst(); w.c.resume(returning: element); return }
         buffer.append(element)
     }
     public func pop() async -> Element? {
         if count > 0 {
             let e = buffer[head]; head += 1
             if head > 1024 { buffer.removeFirst(head); head = 0 }
-            if let w = waitingPush.first { waitingPush.removeFirst(); w.resume() }
+            if let w = pushWaiters.first { pushWaiters.removeFirst(); w.c.resume() }
             return e
         }
         if finished { return nil }
-        return await withCheckedContinuation { waitingPop.append($0) }
+        let id = nextWaiterID; nextWaiterID += 1
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { c in popWaiters.append((id, c)) }
+        } onCancel: {
+            Task { await self.cancelPopWaiter(id) }
+        }
     }
     public func finish() {
         finished = true
-        for w in waitingPush { w.resume() }; waitingPush.removeAll()
-        for w in waitingPop { w.resume(returning: nil) }; waitingPop.removeAll()
+        for w in pushWaiters { w.c.resume() }; pushWaiters.removeAll()
+        for w in popWaiters { w.c.resume(returning: nil) }; popWaiters.removeAll()
+    }
+    private func cancelPushWaiter(_ id: UInt64) {
+        if let i = pushWaiters.firstIndex(where: { $0.id == id }) { let w = pushWaiters.remove(at: i); w.c.resume() }
+    }
+    private func cancelPopWaiter(_ id: UInt64) {
+        if let i = popWaiters.firstIndex(where: { $0.id == id }) { let w = popWaiters.remove(at: i); w.c.resume(returning: nil) }
     }
 }
 
-/// AsyncSequence view over a BoundedChannel; the transport's `events` is one of these (spec X3, revised 2026-09-04).
+/// Read-only AsyncSequence view over a BoundedChannel; the channel itself is not reachable from outside the module,
+/// so a consumer can neither inject events nor finish the stream. The transport's `events` is one of these (spec X3, v3).
 public struct WireEventStream<Element: Sendable>: AsyncSequence, Sendable {
-    public let channel: BoundedChannel<Element>
-    public init(channel: BoundedChannel<Element>) { self.channel = channel }
+    let channel: BoundedChannel<Element>
+    init(channel: BoundedChannel<Element>) { self.channel = channel }
     public struct Iterator: AsyncIteratorProtocol {
         let channel: BoundedChannel<Element>
         public mutating func next() async -> Element? { await channel.pop() }
@@ -3851,39 +4006,88 @@ public struct WireEventStream<Element: Sendable>: AsyncSequence, Sendable {
     public func makeAsyncIterator() -> Iterator { Iterator(channel: channel) }
 }
 ```
+```
 
 `ClaudeWire/Sources/WireTransport/StdinWriter.swift`:
 
 ```swift
 import Foundation
 
-/// Serialises writes to the child's stdin; each write suspends until the bytes are in the pipe. EPIPE surfaces as an error.
+/// Serialises writes to the child's stdin on a dedicated thread (a full pipe blocks that thread, never a cooperative one);
+/// each caller suspends until its bytes are in the pipe, which is the bounded back-pressure the spec asks for. EPIPE surfaces as an error.
 public actor StdinWriter {
     private let handle: FileHandle
+    private let queue = DispatchQueue(label: "afleet.stdin-writer")
     private var closed = false
     public init(handle: FileHandle) { self.handle = handle }
-    public func write(_ data: Data) throws {
+    public func write(_ data: Data) async throws {
         guard !closed else { throw StdinClosed() }
         var line = data; if line.last != 0x0A { line.append(0x0A) }
-        try handle.write(contentsOf: line)           // throws on EPIPE once SIGPIPE is ignored (ClaudeProcess sets SIG_IGN)
+        let handle = self.handle
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, any Error>) in
+            queue.async {
+                do { try handle.write(contentsOf: line); c.resume() } catch { c.resume(throwing: error) }
+            }
+        }
     }
-    public func close() { guard !closed else { return }; closed = true; try? handle.close() }
+    public func close() {
+        guard !closed else { return }; closed = true
+        let handle = self.handle
+        queue.async { try? handle.close() }
+    }
     public struct StdinClosed: Error {}
 }
 ```
+```
 
-Delete `Sources/WireTransport/Placeholder.swift` only after Task 10 adds `ClaudeProcess.swift` if the module would otherwise be empty of `import` lines; it is not empty now, so delete it here.
+`ClaudeWire/Sources/WireTransport/Waiter.swift` — the one settlement primitive every timeout in the transport uses. A task group that races a continuation child against a timer child deadlocks on teardown (a checked continuation never observes cancellation); this box does not.
+
+```swift
+import Foundation
+
+/// Single-resume settlement: the first settle() wins; value() suspends until settled and settles itself with
+/// CancellationError if its task is cancelled. Timeouts are separate tasks that call settle(); nothing is raced in a task group.
+public final class Waiter<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Value, any Error>?
+    private var continuation: CheckedContinuation<Value, any Error>?
+    public init() {}
+    @discardableResult
+    public func settle(_ r: Result<Value, any Error>) -> Bool {
+        lock.lock()
+        guard result == nil else { lock.unlock(); return false }
+        result = r; let c = continuation; continuation = nil
+        lock.unlock()
+        c?.resume(with: r); return true
+    }
+    public var isSettled: Bool { lock.lock(); defer { lock.unlock() }; return result != nil }
+    public func value() async throws -> Value {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Value, any Error>) in
+                lock.lock()
+                if let r = result { lock.unlock(); c.resume(with: r) } else { continuation = c; lock.unlock() }
+            }
+        } onCancel: { settle(.failure(CancellationError())) }
+    }
+    /// Convenience: settle with `failure` after `timeout` unless settled first. Returns the timer task so the caller can cancel it.
+    public func timeout(after timeout: Duration, failure: @escaping @Sendable () -> any Error) -> Task<Void, Never> {
+        Task { try? await Task.sleep(for: timeout); settle(.failure(failure())) }
+    }
+}
+```
+
+Add to `BoundedChannelTests` (still Task 9) and to the manifest nothing new; `Waiter` is in `WireTransport`. Delete `Sources/WireTransport/Placeholder.swift` here.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `swift test --package-path ClaudeWire --filter 'LaunchConfigurationTests|InitializeConfigurationTests|InboundPolicyTests|BoundedChannelTests' 2>&1 | grep -E "Executed|error:|failed"`
-Expected: `Executed 10 tests, with 0 failures`.
+Expected: `Executed 12 tests, with 0 failures`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add ClaudeWire
-git commit -m "WireTransport: launch and initialize configuration, inbound policy, events, bounded channel, stdin writer"
+git commit -m "WireTransport: launch and initialize configuration, inbound policy, events, bounded channel, stdin writer, waiter"
 ```
 
 ---
@@ -4108,7 +4312,8 @@ final class ClaudeProcessTests: XCTestCase {
         let h = try Harness(); let p = h.make(scenario: "")
         let hs = try await p.spawn()
         XCTAssertEqual(hs.initialize.pid != nil, true); XCTAssertEqual(hs.systemInit.claudeCodeVersion, "2.1.259")
-        XCTAssertTrue(hs.systemInit.tools.contains("mcp__afleet__send_user_file")); XCTAssertEqual(await p.status, .running)
+        XCTAssertTrue(hs.systemInit.tools.contains("mcp__afleet__send_user_file"))
+        let running = await p.status; XCTAssertEqual(running, .running)
         _ = await h.expect({ if case .handshakeCompleted(_, let e) = $0 { return e == .first }; return false }, "handshakeCompleted with epoch")
         let uuid = try await p.send(UserInput(text: "ping"))
         let reply = await h.expect({ if case .frame(.assistant(let a), _) = $0 { return a.userMessageUUID == uuid.uuidString.lowercased() }; return false }, "assistant echo bound by user_message_uuid")
@@ -4117,14 +4322,14 @@ final class ClaudeProcessTests: XCTestCase {
         await p.terminate()
         guard case .exited(let status, .first)? = await h.expect({ if case .exited = $0 { return true }; return false }, "exited") else { return }
         XCTAssertTrue(status.isClean)
-        XCTAssertEqual(await p.status, .exited(status))
+        let final = await p.status; XCTAssertEqual(final, .exited(status))
     }
     func testRequestResponseCorrelationAndControlError() async throws {
         let h = try Harness(); let p = h.make(scenario: "")
         _ = try await p.spawn()
         let r: JSONValue = try await p.request(GetSettings())
         XCTAssertEqual(r, .object([:]))
-        XCTAssertEqual(await h.stderrLines().contains("HOST get_settings"), true)
+        let lines = await h.stderrLines(); XCTAssertTrue(lines.contains("HOST get_settings"))
         let raw = try await p.requestRaw(subtype: "future_thing", payload: .object(["k": .integer(1)]))
         XCTAssertEqual(raw, .object([:]))
         await p.terminate()
@@ -4137,7 +4342,8 @@ final class ClaudeProcessTests: XCTestCase {
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(1))
         XCTAssertEqual(req.subtype, "afleet_never_heard"); XCTAssertEqual(error, "subtype afleet_never_heard not supported by afleet 0.1.0")
         _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("ANSWER u1 ") && s.contains("\"subtype\":\"error\"") && s.contains("not supported by afleet") }; return false }, "stand-in saw the error response")
-        XCTAssertFalse(await h.log.events.contains { if case .request(let r) = $0 { return r.subtype == "afleet_never_heard" }; return false })
+        let surfacedUnknown = await h.log.events.contains { if case .request(let r) = $0 { return r.subtype == "afleet_never_heard" }; return false }
+        XCTAssertFalse(surfacedUnknown)
         await p.terminate()
     }
     func testMalformedKnownRequestNamesTheField() async throws {
@@ -4156,7 +4362,8 @@ final class ClaudeProcessTests: XCTestCase {
         _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("ANSWER d1 ") && s.contains("retry_fallback") }; return false }, "dialog answer delivered")
         _ = await h.expect({ if case .unansweredDialog(let r) = $0 { return r.id.rawValue == "d2" }; return false }, "undeclared dialog event")
         _ = await h.expect({ if case .requestCancelled(let id, _) = $0 { return id.rawValue == "d2" }; return false }, "CLI cancelled d2 after its deadline")
-        XCTAssertFalse(await h.stderrLines().contains { $0.hasPrefix("ANSWER d2") })
+        let d2Answered = await h.stderrLines().contains { $0.hasPrefix("ANSWER d2") }
+        XCTAssertFalse(d2Answered)
         await p.terminate()
     }
     func testCancelRemovesPendingAndLateAnswerThrows() async throws {
@@ -4187,7 +4394,8 @@ final class ClaudeProcessTests: XCTestCase {
         XCTAssertEqual(paths.map(\.lastPathComponent), ["hello.txt"]); XCTAssertEqual(status, "normal")
         _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("MCP m5 ") && s.contains("-32601") }; return false }, "unknown method error")
         _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("MCP m6 ") }; return false }, "cancelled notification acked")
-        XCTAssertFalse(await h.log.events.contains { if case .request(let r) = $0 { return r.subtype == "mcp_message" }; return false }, "mcp_message must never surface")
+        let mcpSurfaced = await h.log.events.contains { if case .request(let r) = $0 { return r.subtype == "mcp_message" }; return false }
+        XCTAssertFalse(mcpSurfaced, "mcp_message must never surface")
         await p.terminate()
     }
     func testPendingRequestsReArmedOnceAndDeduplicated() async throws {
@@ -4212,7 +4420,7 @@ final class ClaudeProcessTests: XCTestCase {
         let h = try Harness(); let p = h.make(scenario: "no_init,stderr:warming")
         do { _ = try await p.spawn(handshakeTimeout: .seconds(1)); XCTFail("spawn should time out") }
         catch let e as WireError { if case .handshakeTimeout(let tail) = e { XCTAssertTrue(tail.contains("warming")) } else { XCTFail("\(e)") } }
-        XCTAssertNotEqual(await p.status, .running)
+        let after = await p.status; XCTAssertNotEqual(after, .running)
     }
     func testLaunchFailure() async throws {
         let h = try Harness()
@@ -4258,7 +4466,7 @@ final class ClaudeProcessTerminationTests: XCTestCase {
         let t0 = ContinuousClock.now
         await p.terminate()
         XCTAssertLessThan(ContinuousClock.now - t0, .seconds(2))
-        XCTAssertTrue(await h.stderrLines().contains("HOST end_session"))
+        let lines = await h.stderrLines(); XCTAssertTrue(lines.contains("HOST end_session"))
         guard case .exited(let s, _)? = await h.expect({ if case .exited = $0 { return true }; return false }, "exited") else { return }
         XCTAssertTrue(s.isClean)
     }
@@ -4297,9 +4505,8 @@ final class ClaudeProcessTerminationTests: XCTestCase {
         let h = try Harness(); let p = h.make(scenario: "")
         _ = try await p.spawn()
         await p.terminate(); await p.terminate()
-        var ended = false
-        let drain = Task { for await _ in p.events {}; ended = true }
-        _ = await drain.value
+        let drain = Task { () -> Bool in for await _ in p.events {}; return true }
+        let ended = await drain.value
         XCTAssertTrue(ended)
     }
 }
@@ -4324,8 +4531,8 @@ final class ClaudeProcessFloodTests: XCTestCase {
                               mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: h.cwd, tools: []), diagnostics: NullDiagnostics(), capture: nil, eventBufferCapacity: capacity)
         _ = try await p.spawn()
         try await Task.sleep(for: .seconds(2))                       // consumer suspended: nobody reads p.events
-        XCTAssertLessThanOrEqual(await p.bufferedEventCount, capacity)
-        XCTAssertEqual(await p.status, .running, "the child must still be alive, blocked on its pipe")
+        let buffered = await p.bufferedEventCount; XCTAssertLessThanOrEqual(buffered, capacity)
+        let status = await p.status; XCTAssertEqual(status, .running, "the child must still be alive, blocked on its pipe")
         var assistants = 0, sawResult = false
         for await ev in p.events {
             if case .frame(.assistant, _) = ev { assistants += 1 }
@@ -4370,20 +4577,24 @@ public actor ClaudeProcess {
     public nonisolated let events: WireEventStream<WireEvent>
     private let channel: BoundedChannel<WireEvent>
 
+    /// Foundation.Process is not Sendable; this box is the one place it lives and only the actor (and its termination
+    /// handler, which hops back onto the actor) touches it.
     private final class ProcessBox: @unchecked Sendable { let process = Process(); let stdin = Pipe(); let stdout = Pipe(); let stderr = Pipe() }
     private let box = ProcessBox()
     private var writer: StdinWriter?
     private var readers: [Task<Void, Never>] = []
+    private var mcpTasks: [RequestID: Task<Void, Never>] = [:]
     private var stderrRing: [String] = []
-    private var pendingOutbound: [RequestID: CheckedContinuation<ControlResponseBody, any Error>] = [:]
+    private var pendingOutbound: [RequestID: Waiter<ControlResponseBody>] = [:]
     private var pendingInbound: [RequestID: InboundRequest] = [:]
     private var seenInboundIDs: Set<RequestID> = []
-    private var exitContinuations: [CheckedContinuation<ExitStatus, Never>] = []
-    private var handshakeContinuation: CheckedContinuation<(ControlSuccess, SystemInit), any Error>?
+    private var exitWaiters: [Waiter<ExitStatus>] = []
+    private let handshakeWaiter = Waiter<HandshakePair>()
     private var handshakeInit: ControlSuccess?
     private var handshakeSystemInit: SystemInit?
     private var terminating = false
     public private(set) var status: ProcessStatus = .launching
+    private struct HandshakePair: Sendable { let initialize: ControlSuccess; let systemInit: SystemInit }
 
     public init(epoch: ProcessEpoch, launch: LaunchConfiguration, environment: ResolvedEnvironment, configHome: ConfigHome,
                 initialize: InitializeConfiguration = .init(), policy: InboundPolicy? = nil, mcpServer: AfleetMCPServer,
@@ -4398,8 +4609,9 @@ public actor ClaudeProcess {
     }
 
     public var bufferedEventCount: Int { get async { await channel.count } }
+    private var isExited: Bool { if case .exited = status { return true }; return false }
 
-    // MARK: spawn
+    // MARK: spawn and handshake
 
     public func spawn(handshakeTimeout: Duration = .seconds(30)) async throws -> Handshake {
         guard status == .launching else { throw WireError.notInRunningState(status) }
@@ -4408,43 +4620,42 @@ public actor ClaudeProcess {
         p.environment = launch.childEnvironment(over: environment)
         p.standardInput = box.stdin; p.standardOutput = box.stdout; p.standardError = box.stderr
         p.terminationHandler = { [weak self] proc in
-            let status: ExitStatus = proc.terminationReason == .uncaughtSignal ? .signal(proc.terminationStatus, stderrTail: "") : .code(proc.terminationStatus, stderrTail: "")
-            Task { await self?.processDidExit(status) }
+            let raw: ExitStatus = proc.terminationReason == .uncaughtSignal ? .signal(proc.terminationStatus, stderrTail: "") : .code(proc.terminationStatus, stderrTail: "")
+            Task { await self?.processDidExit(raw) }
         }
-        do { try p.run() } catch { status = .exited(.code(-1, stderrTail: String(describing: error))); await channel.finish(); throw WireError.launchFailed(String(describing: error)) }
+        do { try p.run() } catch {
+            status = .exited(.code(-1, stderrTail: String(describing: error))); await channel.finish()
+            throw WireError.launchFailed(String(describing: error))
+        }
         status = .handshaking
         diagnostics.record(.lifecycle("spawned pid \(p.processIdentifier)", epoch: epoch))
         writer = StdinWriter(handle: box.stdin.fileHandleForWriting)
         startReaders()
         let started = ContinuousClock.now
-        let line = try initialize.requestLine(requestID: RequestID(rawValue: "init-1"))
-        try await writeLine(line, type: "control_request", subtype: "initialize", requestID: RequestID(rawValue: "init-1"))
-        let (initResp, sysInit): (ControlSuccess, SystemInit)
+        let timer = handshakeWaiter.timeout(after: handshakeTimeout) { WireError.handshakeTimeout(stderrTail: "") }
+        defer { timer.cancel() }
+        let pair: HandshakePair
         do {
-            (initResp, sysInit) = try await withThrowingTaskGroup(of: (ControlSuccess, SystemInit).self) { group in
-                group.addTask { try await withCheckedThrowingContinuation { c in Task { await self.armHandshake(c) } } }
-                group.addTask { try await Task.sleep(for: handshakeTimeout); throw WireError.handshakeTimeout(stderrTail: await self.stderrTail()) }
-                let first = try await group.next()!; group.cancelAll(); return first
-            }
+            let line = try initialize.requestLine(requestID: RequestID(rawValue: "init-1"))
+            try await writeLine(line, type: "control_request", subtype: "initialize", requestID: RequestID(rawValue: "init-1"))
+            pair = try await handshakeWaiter.value()
         } catch {
-            handshakeContinuation = nil
+            let tail = stderrTail()
             await terminate()
+            if case WireError.handshakeTimeout = error { throw WireError.handshakeTimeout(stderrTail: tail) }
             throw error
         }
         status = .running
         diagnostics.record(.handshake(durationMs: Int((ContinuousClock.now - started) / .milliseconds(1)), epoch: epoch))
-        let pending = (initResp.pendingPermissionRequests + initResp.pendingUserDialogRequests).map { InboundRequest.parse(frame: $0, epoch: epoch, receivedAt: .now) }
+        let pending = (pair.initialize.pendingPermissionRequests + pair.initialize.pendingUserDialogRequests).map { InboundRequest.parse(frame: $0, epoch: epoch, receivedAt: .now) }
         for r in pending { pendingInbound[r.id] = r; seenInboundIDs.insert(r.id) }
-        let handshake = Handshake(initialize: InitializeResponse(raw: initResp.response ?? .object([:])), systemInit: sysInit, pending: pending)
+        let handshake = Handshake(initialize: InitializeResponse(raw: pair.initialize.response ?? .object([:])), systemInit: pair.systemInit, pending: pending)
         await channel.push(.handshakeCompleted(handshake, epoch))
         for r in pending { await channel.push(.request(r)) }
         return handshake
     }
-    private func armHandshake(_ c: CheckedContinuation<(ControlSuccess, SystemInit), any Error>) {
-        if let i = handshakeInit, let s = handshakeSystemInit { c.resume(returning: (i, s)) } else { handshakeContinuation = c }
-    }
     private func handshakeProgress() {
-        if let i = handshakeInit, let s = handshakeSystemInit, let c = handshakeContinuation { handshakeContinuation = nil; c.resume(returning: (i, s)) }
+        if let i = handshakeInit, let s = handshakeSystemInit { handshakeWaiter.settle(.success(HandshakePair(initialize: i, systemInit: s))) }
     }
 
     // MARK: readers
@@ -4454,7 +4665,6 @@ public actor ClaudeProcess {
         readers.append(Task { [weak self] in
             do { for try await line in stdoutHandle.bytes.lines { guard let self else { return }; await self.receive(line: Data(line.utf8)) } }
             catch { await self?.record(.lifecycle("stdout reader error \(error)", epoch: self?.epoch ?? .first)) }
-            await self?.stdoutClosed()
         })
         readers.append(Task { [weak self] in
             do { for try await line in stderrHandle.bytes.lines { await self?.receiveStderr(line) } } catch {}
@@ -4473,9 +4683,14 @@ public actor ClaudeProcess {
         await capture?.write(line: line, session: sessionID)
         switch frame {
         case .controlResponse(let resp):
-            if resp.requestID.rawValue == "init-1", case .success(let s) = resp.body { handshakeInit = s; handshakeProgress(); return }
-            if resp.requestID.rawValue == "init-1", case .error(let e) = resp.body { handshakeContinuation?.resume(throwing: WireError.handshakeRejected(e.error)); handshakeContinuation = nil; return }
-            if let c = pendingOutbound.removeValue(forKey: resp.requestID) { c.resume(returning: resp.body) }
+            if resp.requestID.rawValue == "init-1" {
+                switch resp.body {
+                case .success(let s): handshakeInit = s; handshakeProgress()
+                case .error(let e): handshakeWaiter.settle(.failure(WireError.handshakeRejected(e.error)))
+                }
+                return
+            }
+            if let w = pendingOutbound.removeValue(forKey: resp.requestID) { w.settle(.success(resp.body)) }
             await channel.push(.frame(frame, epoch))
         case .controlRequest(let req):
             await handleInbound(req)
@@ -4506,11 +4721,25 @@ public actor ClaudeProcess {
             await channel.push(.unansweredDialog(request))
         case .routeToMCP:
             guard case .mcpMessage(let m) = request.payload else { return }
-            let (reply, invocation) = await mcpServer.handle(m.message)
-            let rpc: JSONRPCMessage = { if case .response(let r) = reply { return r }; return .response(.init(id: .number(0), result: .object([:]))) }()
-            try? await writeAnswer(request.id, .mcpResponse(rpc), subtype: "mcp_message")
-            if let invocation { await channel.push(.hostToolInvoked(invocation, epoch)) }
+            switch m.message {
+            case .request:
+                // Off the reader: a long tools/call must not stall stdout, and notifications/cancelled must reach the server while it runs.
+                let id = request.id
+                mcpTasks[id] = Task { [mcpServer] in
+                    let (reply, invocation) = await mcpServer.handle(m.message)
+                    await self.deliverMCP(id, reply: reply, invocation: invocation)
+                }
+            default:
+                let (reply, invocation) = await mcpServer.handle(m.message)
+                await deliverMCP(request.id, reply: reply, invocation: invocation)
+            }
         }
+    }
+    private func deliverMCP(_ id: RequestID, reply: MCPReply, invocation: HostToolInvocation?) async {
+        mcpTasks[id] = nil
+        let rpc: JSONRPCMessage = { if case .response(let r) = reply { return r }; return .response(.init(id: .number(0), result: .object([:]))) }()
+        try? await writeAnswer(id, .mcpResponse(rpc), subtype: "mcp_message")
+        if let invocation { await channel.push(.hostToolInvoked(invocation, epoch)) }
     }
     private func subtype(of frame: Frame) -> String? {
         switch frame { case .system(let s): s.subtype; case .controlRequest(let r): r.subtype; case .result(let r): r.subtype; case .opaque(let o): o.subtype; default: nil }
@@ -4522,12 +4751,11 @@ public actor ClaudeProcess {
     // MARK: writes
 
     private func writeLine(_ data: Data, type: String, subtype: String?, requestID: RequestID?) async throws {
-        guard let writer, status != .terminating, !isExited else { throw WireError.processExited }
+        guard let writer, !terminating, !isExited else { throw WireError.processExited }
         diagnostics.record(.frame(direction: .outbound, type: type, subtype: subtype, bytes: data.count, epoch: epoch, requestID: requestID))
         await capture?.write(line: data, session: sessionID)
         do { try await writer.write(data) } catch { throw WireError.processExited }
     }
-    private var isExited: Bool { if case .exited = status { return true }; return false }
     private func writeAnswer(_ id: RequestID, _ answer: InboundAnswer, subtype: String) async throws {
         let frame = answer.controlResponse(for: id)
         let behavior: String = { if case .error = answer { return "error" }; return "success" }()
@@ -4557,31 +4785,29 @@ public actor ClaudeProcess {
     public func requestRaw(subtype: String, payload: JSONValue, timeout: Duration? = nil) async throws -> JSONValue {
         try await request(RawControlRequest(subtype: subtype, payload: payload), timeout: timeout)
     }
+    /// The waiter is registered BEFORE the request is written, so a response that arrives during the write's suspension
+    /// always finds it; every settlement path (response, exit, timeout, cancellation) removes the entry.
     private func performRequest<R: ControlRequestSpec>(_ spec: R, timeout: Duration?) async throws -> ControlResponseBody {
         guard status == .running else { throw isExited ? WireError.processExited : WireError.notInRunningState(status) }
         let id = RequestID(rawValue: UUID().uuidString.lowercased())
         let wireSubtype = (spec as? RawControlRequest)?.wireSubtype ?? R.subtype
-        let line = try OutboundEnvelope.encode(spec: spec, requestID: id)
-        try await writeLine(line, type: "control_request", subtype: wireSubtype, requestID: id)
-        return try await withTaskCancellationHandler {
-            try await withThrowingTaskGroup(of: ControlResponseBody.self) { group in
-                group.addTask { try await withCheckedThrowingContinuation { c in Task { await self.registerOutbound(id, c) } } }
-                if let timeout { group.addTask { try await Task.sleep(for: timeout); throw WireError.controlError("timeout after \(timeout) waiting for \(wireSubtype)") } }
-                let first = try await group.next()!; group.cancelAll(); return first
-            }
-        } onCancel: {
-            Task { await self.cancelOutbound(id, subtype: wireSubtype) }
+        let waiter = Waiter<ControlResponseBody>()
+        pendingOutbound[id] = waiter
+        defer { pendingOutbound[id] = nil }
+        do { try await writeLine(try OutboundEnvelope.encode(spec: spec, requestID: id), type: "control_request", subtype: wireSubtype, requestID: id) }
+        catch { waiter.settle(.failure(error)); throw error }
+        let timer = timeout.map { t in waiter.timeout(after: t) { WireError.controlError("timeout after \(t) waiting for \(wireSubtype)") } }
+        defer { timer?.cancel() }
+        do { return try await waiter.value() }
+        catch is CancellationError {
+            if OutboundEnvelope.abortableSubtypes.contains(wireSubtype) { await cancel(id) }
+            throw CancellationError()
         }
     }
-    private func registerOutbound(_ id: RequestID, _ c: CheckedContinuation<ControlResponseBody, any Error>) { pendingOutbound[id] = c }
-    private func cancelOutbound(_ id: RequestID, subtype: String) async {
-        guard let c = pendingOutbound.removeValue(forKey: id) else { return }
-        c.resume(throwing: CancellationError())
-        if OutboundEnvelope.abortableSubtypes.contains(subtype) { await cancel(id) }
-    }
     public func cancel(_ id: RequestID) async {
-        let line = try? ControlCancelFrame(requestID: id).jsonValueData()
-        if let line { try? await writeLine(line, type: "control_cancel_request", subtype: nil, requestID: id) }
+        if let line = try? ControlCancelFrame(requestID: id).jsonValueData() {
+            try? await writeLine(line, type: "control_cancel_request", subtype: nil, requestID: id)
+        }
     }
     public func answer(_ id: RequestID, _ answer: InboundAnswer) async throws {
         guard let request = pendingInbound.removeValue(forKey: id) else { throw WireError.unknownRequest(id) }
@@ -4590,39 +4816,38 @@ public actor ClaudeProcess {
 
     // MARK: exit and terminate
 
-    private func stdoutClosed() async { /* the termination handler owns the exit event; nothing to do */ }
     private func processDidExit(_ raw: ExitStatus) async {
-        let tail = stderrTail()
-        let status: ExitStatus = { switch raw { case .code(let c, _): .code(c, stderrTail: tail); case .signal(let s, _): .signal(s, stderrTail: tail) } }()
         try? await Task.sleep(for: .milliseconds(50))      // let the stderr reader drain the last lines
+        let tail = stderrTail()
+        let status: ExitStatus = { switch raw { case .code(let c, _): .code(c, stderrTail: tail); case .signal(let sig, _): .signal(sig, stderrTail: tail) } }()
         self.status = .exited(status)
-        for (_, c) in pendingOutbound { c.resume(throwing: WireError.processExited) }; pendingOutbound.removeAll()
+        for (_, w) in pendingOutbound { w.settle(.failure(WireError.processExited)) }; pendingOutbound.removeAll()
         pendingInbound.removeAll()
+        for (_, t) in mcpTasks { t.cancel() }; mcpTasks.removeAll()
+        handshakeWaiter.settle(.failure(WireError.processExited))
         diagnostics.record(.lifecycle("exited \(status)", epoch: epoch))
         await channel.push(.exited(status, epoch))
         await channel.finish()
-        for c in exitContinuations { c.resume(returning: status) }; exitContinuations.removeAll()
+        for w in exitWaiters { w.settle(.success(status)) }; exitWaiters.removeAll()
         await writer?.close()
     }
+    /// nil on timeout; the caller escalates. Never deadlocks: the timeout settles the waiter itself.
     private func waitForExit(upTo timeout: Duration) async -> ExitStatus? {
         if case .exited(let s) = status { return s }
-        return await withTaskGroup(of: ExitStatus?.self) { group in
-            group.addTask { await withCheckedContinuation { c in Task { await self.addExitContinuation(c) } } }
-            group.addTask { try? await Task.sleep(for: timeout); return nil }
-            let first = await group.next()!; group.cancelAll(); return first
-        }
-    }
-    private func addExitContinuation(_ c: CheckedContinuation<ExitStatus, Never>) {
-        if case .exited(let s) = status { c.resume(returning: s) } else { exitContinuations.append(c) }
+        let w = Waiter<ExitStatus>(); exitWaiters.append(w)
+        struct ExitTimeout: Error {}
+        let timer = w.timeout(after: timeout) { ExitTimeout() }
+        defer { timer.cancel() }
+        return try? await w.value()
     }
     /// §6.7 as amended: end_session, close stdin, wait 5 s, SIGTERM, wait 5 s, SIGKILL; returns only after the exit is observed.
     public func terminate() async {
         if isExited { return }
         if terminating { _ = await waitForExit(upTo: .seconds(60)); return }
         terminating = true
-        let wasHandshaking = status == .handshaking || status == .launching
+        let wasRunning = status == .running
         status = .terminating
-        if !wasHandshaking, let writer, let line = try? OutboundEnvelope.encode(spec: EndSession(), requestID: RequestID(rawValue: "end-\(UUID().uuidString.lowercased())")) {
+        if wasRunning, let writer, let line = try? OutboundEnvelope.encode(spec: EndSession(), requestID: RequestID(rawValue: "end-\(UUID().uuidString.lowercased())")) {
             try? await writer.write(line)
             diagnostics.record(.terminateEscalated(step: "end_session", epoch: epoch))
         }
@@ -4642,8 +4867,9 @@ private extension ControlCancelFrame {
     func jsonValueData() throws -> Data { try JSONValue.object(["type": .string("control_cancel_request"), "request_id": .string(requestID.rawValue)]).canonicalData() }
 }
 ```
+```
 
-Notes for the executor: `Process` is not `Sendable`, so it lives in the private `ProcessBox` (`@unchecked Sendable`, the one permitted use) and is touched only from inside the actor except `terminationHandler`, which hops back through `Task { await self?.processDidExit }`. `status == .running` comparisons need `ProcessStatus: Equatable`; it is declared `Hashable` in Task 9. The `EmptyResponse` special case avoids decoding `{}` into a type with no fields when the CLI answers with no `response`.
+Notes for the executor: `Process` is not `Sendable`, so it lives in the private `ProcessBox` and is touched only from inside the actor except `terminationHandler`, which hops back through `Task { await self?.processDidExit }`. `writeLine` suspends on the writer, which is an actor re-entrancy point: that is exactly why every waiter is registered before the write. `status == .running` comparisons need `ProcessStatus: Equatable`; it is declared `Hashable` in Task 9. The `EmptyResponse` special case avoids decoding `{}` into a type with no fields when the CLI answers with no `response`. The `writeLine` guard uses `terminating` (not `status`) so `terminate()` itself can still write `end_session` through the writer directly.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -4662,7 +4888,7 @@ git commit -m "WireTransport: ClaudeProcess actor with escalating terminate, pol
 ### Task 11: Umbrella product, `ConsumerSmoke`, import-graph test, `fetch-typings.sh`, typings drift test
 
 **Files:**
-- Modify: `ClaudeWire/Sources/ClaudeWire/ClaudeWire.swift` (already the five `@_exported import` lines; add the doc comment below)
+- Modify: `ClaudeWire/Sources/ClaudeWire/ClaudeWire.swift`: add `@_exported import AfleetCore` above the five module exports, so a downstream package imports `ClaudeWire` alone and sees the Core value types (X2) too
 - Create: `ClaudeWire/Tests/ConsumerSmoke/Package.swift`, `ClaudeWire/Tests/ConsumerSmoke/Sources/ConsumerSmoke/main.swift`
 - Create: `Tools/fetch-typings.sh` (mode 0755)
 - Test: `ClaudeWire/Tests/ClaudeWireTests/ImportGraphTests.swift`, `ClaudeWire/Tests/ClaudeWireTests/ConsumerSmokeTests.swift`, `ClaudeWire/Tests/ClaudeWireTests/TypingsDriftTests.swift`
@@ -4683,20 +4909,20 @@ import PackageDescription
 let package = Package(
     name: "ConsumerSmoke",
     platforms: [.macOS(.v26)],
-    dependencies: [.package(path: "../../"), .package(path: "../../../AfleetCore")],
+    dependencies: [.package(path: "../../")],
     targets: [
         .executableTarget(name: "ConsumerSmoke",
-                          dependencies: [.product(name: "ClaudeWire", package: "ClaudeWire"), .product(name: "AfleetCore", package: "AfleetCore")],
+                          dependencies: [.product(name: "ClaudeWire", package: "ClaudeWire")],
                           swiftSettings: [.swiftLanguageMode(.v6)]),
     ]
 )
 ```
+```
 
-`ClaudeWire/Tests/ConsumerSmoke/Sources/ConsumerSmoke/main.swift` — constructs every X2 and X3 value through public initialisers; it must compile, and running it prints one line:
+`ClaudeWire/Tests/ConsumerSmoke/Sources/ConsumerSmoke/main.swift` — imports only `ClaudeWire` and constructs every downstream-constructible X2 and X3 value through public initialisers; it must compile, and running it prints one line:
 
 ```swift
 import Foundation
-import AfleetCore
 import ClaudeWire
 
 let session = SessionID()
@@ -4719,7 +4945,12 @@ let spec = Interrupt(cancelQueued: true)
 let input = UserInput(text: "hello", images: [])
 let envelope = ShellEnvelope.wrap(command: "ls", stdout: Data(), stderr: Data())
 let frame = FrameDecoder.decode(line: Data(#"{"type":"keep_alive"}"#.utf8))
-_ = (link, origin, launch.arguments(), initCfg.payload(), answer, type(of: spec).subtype, input.frame(uuid: UUID()), envelope, frame, process.events)
+let inbound = InboundRequest(id: RequestID(rawValue: "r"), epoch: epoch, receivedAt: .now, payload: .unknown(subtype: "x", .null), raw: .object([:]))
+let sysInitData = Data(#"{"type":"system","subtype":"init","cwd":"/tmp","session_id":"s","tools":[],"mcp_servers":[],"model":"m","permissionMode":"default","slash_commands":[],"apiKeySource":"none","claude_code_version":"2.1.259","output_style":"default","skills":[],"plugins":[],"uuid":"u"}"#.utf8)
+let handshake = Handshake(initialize: InitializeResponse(raw: .object([:])), systemInit: try JSONDecoder().decode(SystemInit.self, from: sysInitData), pending: [inbound])
+let event: WireEvent = .request(inbound)
+let exit: ExitStatus = .code(0, stderrTail: "")
+_ = (link, origin, launch.arguments(), initCfg.payload(), answer, type(of: spec).subtype, input.frame(uuid: UUID()), envelope, frame, process.events, handshake, event, exit, ProcessStatus.launching)
 print("ConsumerSmoke: constructed every X2 and X3 value")
 ```
 
@@ -4740,7 +4971,7 @@ final class ImportGraphTests: XCTestCase {
         "WireEnvironment": ["Foundation", "AfleetCore", "WireFrames"],
         "WireDiagnostics": ["Foundation", "CryptoKit", "AfleetCore", "WireFrames"],
         "WireTransport": ["Foundation", "AfleetCore", "WireFrames", "WireMCP", "WireEnvironment", "WireDiagnostics"],
-        "ClaudeWire": ["WireFrames", "WireMCP", "WireEnvironment", "WireDiagnostics", "WireTransport"],
+        "ClaudeWire": ["AfleetCore", "WireFrames", "WireMCP", "WireEnvironment", "WireDiagnostics", "WireTransport"],
         "WireTestSupport": ["Foundation", "WireFrames"],
     ]
     func testNoUpwardOrForeignImports() throws {
@@ -4788,34 +5019,77 @@ import XCTest
 import WireFrames
 import WireTestSupport
 
-/// Optional: compares the typings' message discriminants with the Swift routing tables. Skipped when .typings/ is absent.
+/// Optional: compares the pinned typings' SDKMessage union with the Swift routing tables and declared keys. Skipped when .typings/ is absent.
 final class TypingsDriftTests: XCTestCase {
     private var typings: URL { TestPaths.support.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(".typings/package/sdk.d.ts") }
-    func testSystemSubtypesInTypingsAreAllRouted() throws {
-        guard FileManager.default.fileExists(atPath: typings.path) else { throw XCTSkip("run Tools/fetch-typings.sh to enable the drift test") }
+
+    /// (type, subtype?) → property names (required and optional) for every member of `SDKMessage`.
+    private func unionMembers() throws -> [(type: String, subtype: String?, required: Set<String>, all: Set<String>)] {
         let text = try String(contentsOf: typings, encoding: .utf8)
-        // subtype literals that appear inside a `type: 'system'` declaration block
-        let blocks = text.components(separatedBy: "export declare type ").filter { $0.contains("type: 'system';") }
-        var subtypes = Set<String>()
-        let re = try NSRegularExpression(pattern: #"subtype: '([a-z_]+)'"#)
-        for b in blocks { for m in re.matches(in: b, range: NSRange(b.startIndex..., in: b)) { subtypes.insert(String(b[Range(m.range(at: 1), in: b)!])) } }
-        let unrouted = subtypes.subtracting(SystemFrame.knownSubtypes)
-        XCTAssertTrue(unrouted.isEmpty, "system subtypes in the typings without a Swift route: \(unrouted.sorted())")
+        guard let union = text.range(of: #"export declare type SDKMessage = "#) else { throw XCTSkip("SDKMessage union not found") }
+        let tail = text[union.upperBound...]
+        let names = tail[..<tail.firstIndex(of: ";")!].split(separator: "|").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var out: [(String, String?, Set<String>, Set<String>)] = []
+        for name in names {
+            guard let start = text.range(of: "export declare type \(name) = {") else { continue }
+            var depth = 0, body: [String] = []
+            for line in text[start.upperBound...].split(separator: "\n", omittingEmptySubsequences: false) {
+                let s = String(line)
+                if depth == 0 && s.hasPrefix("};") { break }
+                if depth == 0, let m = s.range(of: #"^\s+([A-Za-z_][A-Za-z0-9_]*)(\?)?:"#, options: .regularExpression) { body.append(String(s[m]).trimmingCharacters(in: .whitespaces)) }
+                depth += s.filter { $0 == "{" }.count - s.filter { $0 == "}" }.count
+            }
+            var required = Set<String>(), all = Set<String>(), type: String?, subtype: String?
+            for prop in body {
+                let n = prop.trimmingCharacters(in: CharacterSet(charactersIn: "?:"))
+                let optional = prop.hasSuffix("?:")
+                all.insert(n); if !optional { required.insert(n) }
+            }
+            if let m = text[start.upperBound...].range(of: #"type: '([a-z_]+)'"#, options: .regularExpression) { type = String(text[m]).components(separatedBy: "'")[1] }
+            if let m = text[start.upperBound...].range(of: #"subtype: '([a-z_]+)'"#, options: .regularExpression), type == "system" { subtype = String(text[m]).components(separatedBy: "'")[1] }
+            if let type { out.append((type, subtype, required, all)) }
+        }
+        return out
     }
-    func testTopLevelMessageTypesAreAllRouted() throws {
+
+    /// Swift declared keys per (type, subtype?), from the Fields types. `type`/`subtype` themselves are declared everywhere.
+    private static let swiftDeclared: [String: [String]] = [
+        "assistant": AssistantFields.declaredKeys, "user": UserFields.declaredKeys, "stream_event": StreamEventFields.declaredKeys,
+        "result": ResultFields.declaredKeys, "tool_progress": ToolProgressFields.declaredKeys, "tool_use_summary": ToolUseSummaryFields.declaredKeys,
+        "rate_limit_event": RateLimitEventFields.declaredKeys, "auth_status": AuthStatusFields.declaredKeys, "prompt_suggestion": PromptSuggestionFields.declaredKeys,
+        "conversation_reset": ConversationResetFields.declaredKeys,
+    ]
+
+    func testEveryUnionMemberIsRouted() throws {
         guard FileManager.default.fileExists(atPath: typings.path) else { throw XCTSkip("run Tools/fetch-typings.sh to enable the drift test") }
-        let text = try String(contentsOf: typings, encoding: .utf8)
-        let re = try NSRegularExpression(pattern: #"^\s+type: '([a-z_]+)';"#, options: [.anchorsMatchLines])
-        var types = Set<String>()
-        for m in re.matches(in: text, range: NSRange(text.startIndex..., in: text)) { types.insert(String(text[Range(m.range(at: 1), in: text)!])) }
-        let routed: Set<String> = ["assistant", "user", "stream_event", "result", "system", "tool_progress", "tool_use_summary", "rate_limit_event", "auth_status",
-                                   "prompt_suggestion", "conversation_reset", "transcript_mirror", "command_lifecycle", "keep_alive", "control_request", "control_response", "control_cancel_request"]
-        // types the typings declare for other transports or the SDK's own use are listed here explicitly so a new one is noticed
-        let knownUnrouted: Set<String> = ["active_goal", "autocompact_state", "tombstone", "query_model_change", "bash_command", "queued_notification"]
-        let surprise = types.subtracting(routed).subtracting(knownUnrouted)
-        XCTAssertTrue(surprise.isEmpty, "top-level message types not routed and not listed as known: \(surprise.sorted())")
+        var unrouted: [String] = []
+        for m in try unionMembers() {
+            if m.type == "system" { if let st = m.subtype, !SystemFrame.knownSubtypes.contains(st) { unrouted.append("system/\(st)") } }
+            else if Self.swiftDeclared[m.type] == nil { unrouted.append(m.type) }
+        }
+        XCTAssertTrue(unrouted.isEmpty, "SDKMessage members without a Swift route: \(unrouted.sorted())")
+    }
+
+    func testDeclaredKeysExistInTypingsAndRequiredKeysAreDeclared() throws {
+        guard FileManager.default.fileExists(atPath: typings.path) else { throw XCTSkip("run Tools/fetch-typings.sh to enable the drift test") }
+        var stale: [String] = [], missing: [String] = []
+        var byKey: [String: (required: Set<String>, all: Set<String>)] = [:]
+        for m in try unionMembers() {                         // two `user` members merge
+            let key = m.subtype.map { "system/\($0)" } ?? m.type
+            let prev = byKey[key] ?? ([], [])
+            byKey[key] = (prev.required.intersection(m.required).isEmpty && prev.all.isEmpty ? m.required : prev.required.intersection(m.required), prev.all.union(m.all))
+        }
+        for (key, typ) in byKey {
+            let declared: [String]? = key.hasPrefix("system/") ? SystemFrame.declaredKeys[String(key.dropFirst(7))] : Self.swiftDeclared[key]
+            guard let declared else { continue }
+            for d in declared where d != "type" && d != "subtype" && !typ.all.contains(d) { stale.append("\(key).\(d)") }
+            for r in typ.required where !declared.contains(r) { missing.append("\(key).\(r)") }
+        }
+        XCTAssertTrue(stale.isEmpty, "Swift declares keys the typings do not have (renamed or removed): \(stale.sorted())")
+        XCTAssertTrue(missing.isEmpty, "typings require keys Swift does not declare: \(missing.sorted())")
     }
 }
+```
 ```
 
 - [ ] **Step 3: Write the fetch script**
@@ -4843,7 +5117,7 @@ Run: `swift test --package-path ClaudeWire 2>&1 | grep -E "Executed|error:|faile
 Expected: all tests pass; `TypingsDriftTests` reports 2 skipped until the script runs. Then:
 
 Run: `Tools/fetch-typings.sh && swift test --package-path ClaudeWire --filter TypingsDriftTests 2>&1 | grep -E "Executed|failed"`
-Expected: `Executed 2 tests, with 0 failures`. If a subtype or type is reported, add its route (Task 4 pattern) or, for a type that cannot reach a stdio host, its name to `knownUnrouted` with a comment saying why.
+Expected: `Executed 2 tests, with 0 failures`. If a member is reported unrouted, add its route (Task 4 pattern); if a key is reported stale or missing, fix the Fields struct and its sample. The bundle-only frames (`transcript_mirror`, `command_lifecycle`, `model_consent_fallback`) are not in the union and are not checked here.
 
 Run: `git status --short .typings node_modules; git ls-files | grep -E '\.d\.ts$|^\.typings/|node_modules/' | wc -l`
 Expected: no tracked files; `0`.
@@ -4894,7 +5168,7 @@ final class FixtureCorpusTests: XCTestCase {
             var typed = 0
             for line in lines {
                 let entry = try JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
-                guard entry["dir"]?.stringValue == "out", let frameValue = entry["frame"] else { continue }
+                guard let frameValue = entry["frame"] else { XCTFail("\(name): line without a frame"); continue }   // both directions decode
                 let raw = try frameValue.canonicalData()
                 let frame = FrameDecoder.decode(line: raw)
                 switch frame {
@@ -4911,13 +5185,15 @@ final class FixtureCorpusTests: XCTestCase {
                 }
             }
             XCTAssertGreaterThan(typed, 0, "\(name) has no typed frames")
-            // census cross-check: pairs the census marks as unmodelled must equal what we saw as opaque
+            // census cross-check: for every pair the census marks as unmodelled, the opaque COUNT must match the census count
+            // (X8: census.json `pairs` maps "type/subtype" to {"count": n, "keys": [...]}); pair names alone would hide a miscount
             let censusURL = dir.appendingPathComponent("census.json")
             if FileManager.default.fileExists(atPath: censusURL.path) {
                 let census = try JSONDecoder().decode(JSONValue.self, from: try Data(contentsOf: censusURL))
                 let pairs = census["pairs"]?.objectValue ?? [:]
-                let unmodelled = Set(pairs.keys.filter { !Self.isModelled(pair: $0) })
-                XCTAssertEqual(unmodelled, Set(opaqueByPair.keys), "\(name): census unmodelled pairs \(unmodelled.sorted()) vs opaque pairs \(opaqueByPair.keys.sorted())")
+                var expected: [String: Int] = [:]
+                for (pair, entry) in pairs where !Self.isModelled(pair: pair) { expected[pair] = Int(entry["count"]?.intValue ?? 0) }
+                XCTAssertEqual(expected, opaqueByPair, "\(name): census unmodelled counts \(expected) vs opaque counts \(opaqueByPair)")
             }
         }
     }
@@ -4942,10 +5218,11 @@ Expected today: `1 test, with 0 failures (0 unexpected)` and the skip message. T
 ```bash
 mkdir -p Fixtures/_rehearsal && : > Fixtures/_rehearsal/frames.ndjson
 for f in ClaudeWire/Tests/Support/Samples/*.json; do printf '{"t":0,"dir":"out","frame":%s}\n' "$(cat "$f")" >> Fixtures/_rehearsal/frames.ndjson; done
+printf '{"t":1,"dir":"in","frame":{"type":"control_response","response":{"subtype":"success","request_id":"req-001","response":{"behavior":"allow"}}}}\n' >> Fixtures/_rehearsal/frames.ndjson
 swift test --package-path ClaudeWire --filter FixtureCorpusTests 2>&1 | grep -E "Executed|failed"
 rm -rf Fixtures/_rehearsal
 ```
-Expected: `Executed 1 test, with 0 failures`. Do not commit `Fixtures/_rehearsal`.
+Expected: `Executed 1 test, with 0 failures` (the two deliberately unknown samples count as opaque; with no `census.json` the count check is skipped). Do not commit `Fixtures/_rehearsal`.
 
 - [ ] **Step 3: Commit**
 
@@ -5152,10 +5429,11 @@ git commit -m "C2: record acceptance results"
 
 ## Questions left for the human
 
-Each was answered with the recommendation below and the plan proceeds on it; overrule before execution if you disagree.
+Each was answered with the recommendation below and the plan proceeds on it; overrule before execution if you disagree. One Codex adversarial review of this plan ran on 2026-09-04; its fourteen findings were verified against the pinned typings and applied (settlement via `Waiter`, explicit-null preservation, corrected frame and payload shapes, key-level drift test, both-direction corpus check, threaded stdin writer, cancellation-aware channel, off-reader MCP calls, consumer package importing only `ClaudeWire`, test-count corrections). No second review is planned.
 
 1. **`events` type.** The spec's X3 declared `AsyncStream<WireEvent>`, but `AsyncStream` cannot suspend its producer, so it cannot give the bounded, lossless, pipe-backpressured buffer the same spec requires. The plan uses `WireEventStream<WireEvent>`, a small `AsyncSequence` over `BoundedChannel`; downstream code iterates it with `for await` exactly as before. The spec is amended with this plan (Revision Notes v3).
 2. **Two decoding passes instead of one.** The typed model is decoded by `JSONDecoder` from the same bytes rather than from the already-parsed `JSONValue`, because a `JSONValue`-backed `Decoder` is a few hundred lines that buy nothing observable. Same behaviour, simpler code; noted in the spec's Revision Notes.
 3. **`configHomeOverride` on `LaunchConfiguration`.** Added so tests and C1's recordings can point the child at the scratch config home without touching the resolver; FleetKit never sets it (one ConfigHome per launch, parent §6.9). It is not part of X3's contract text and is documented as test-and-recording only.
-4. **Redaction keys for `.claude.json`-style paths.** The redactor treats `account`, `oauthAccount`, `organization`, `user`, `email`, `emailAddress` objects as account data; if the census later shows another identity-bearing key, add it to `Redactor.accountKeys` and re-run `RedactorTests`.
-5. **Escalation timing in tests.** The two `terminate()` escalation tests take about five and ten seconds by design (they prove the waits). Keep them in the default suite rather than behind a flag; the whole `ClaudeWire` suite should still finish in under ninety seconds.
+4. **`send_user_file` path domain.** The tool accepts any readable file, absolute or relative to the cwd, matching the built-in tool the model was trained on; the earlier "inside cwd only" restriction was dropped because the model can already Read any file with the user's privileges, so the fence bought nothing.
+5. **Redaction keys for `.claude.json`-style paths.** The redactor treats `account`, `oauthAccount`, `organization`, `user`, `email`, `emailAddress` objects as account data; if the census later shows another identity-bearing key, add it to `Redactor.accountKeys` and re-run `RedactorTests`.
+6. **Escalation timing in tests.** The two `terminate()` escalation tests take about five and ten seconds by design (they prove the waits). Keep them in the default suite rather than behind a flag; the whole `ClaudeWire` suite should still finish in under ninety seconds.
