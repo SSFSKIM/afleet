@@ -1024,7 +1024,7 @@ class SessionTests(unittest.TestCase):
         s = self.run_session(["unknown", "dialog"])
         s.send_user("go"); s.wait_result(10); s.close()
         saw = {c["frame"]["what"]: c["frame"] for c in s.frames() if c.get("frame", {}).get("subtype") == "stand_in_saw"}
-        self.assertEqual(saw["unknown"]["error"], "subtype bogus_probe_request not supported by afleet-probe %s" % harness.VERSION)
+        self.assertEqual(saw["unknown"]["error"], "subtype bogus_probe_request not supported by afleet %s" % harness.VERSION)
         self.assertFalse(saw["dialog"]["answered"])
         cancels = [c for c in s.frames() if c.get("frame", {}).get("type") == "control_cancel_request"]
         self.assertEqual(len(cancels), 1)
@@ -1377,7 +1377,7 @@ class Session:
             if sub == "hook_callback" and policy is None:
                 self.answer(rid, {"continue": True}); return
             if policy is None and sub not in ("can_use_tool", "elicitation", "request_user_dialog", "hook_callback"):
-                self.answer(rid, error="subtype %s not supported by afleet-probe %s" % (sub, VERSION)); return
+                self.answer(rid, error="subtype %s not supported by afleet %s" % (sub, VERSION)); return   # the parent §6.3 string, verbatim
             if policy == "leave":
                 return
             if policy == "allow" or (policy is None and sub == "can_use_tool"):
@@ -1389,7 +1389,7 @@ class Session:
                 if resp is not None:
                     self.answer(rid, resp)
                 return
-            self.answer(rid, error="subtype %s not supported by afleet-probe %s" % (sub, VERSION))
+            self.answer(rid, error="subtype %s not supported by afleet %s" % (sub, VERSION))
         except Exception as e:  # never leave a request unanswered because the policy crashed
             self.answer(rid, error="probe policy failed: %s" % e)
 
@@ -1405,11 +1405,22 @@ class Session:
                     "message": {"role": "user", "content": text}})
         return u
 
-    def request(self, subtype, timeout=30, **payload):
+    def request_async(self, subtype, **payload):
         rid = str(uuid.uuid4())
         req = {"subtype": subtype}
         req.update(payload)
         self._send({"type": "control_request", "request_id": rid, "request": req}, subtype=subtype, rid=rid)
+        return rid
+
+    def wait_response(self, rid, timeout=30):
+        return self._wait_response(rid, timeout)
+
+    def cancel(self, rid):
+        """Cancel one of our own outbound requests (recorded as an `in` control_cancel_request)."""
+        self._send({"type": "control_cancel_request", "request_id": rid})
+
+    def request(self, subtype, timeout=30, **payload):
+        rid = self.request_async(subtype, **payload)
         resp = self._wait_response(rid, timeout)
         if resp is None:
             raise TimeoutError("no response to %s within %ss" % (subtype, timeout))
@@ -1590,10 +1601,15 @@ class SlugAndSnapshotTests(unittest.TestCase):
         art_src = tempfile.mkdtemp(); dest = tempfile.mkdtemp()
         out = os.path.join(art_src, "claude-501", "-slug", SID, "tasks", "t9.output")
         write(out, "hello\n")
-        frames = [{"type": "system", "subtype": "task_notification", "output_file": out}]
-        mapping = fixture.collect_artifacts(frames, [], dest, task_root=os.path.join(art_src, "claude-501"))
+        binary = os.path.join(art_src, "claude-501", "-slug", SID, "tasks", "t10.output")
+        os.makedirs(os.path.dirname(binary), exist_ok=True); open(binary, "wb").write(b"\xff\xfe\x00 not utf-8")
+        write(out, "hello leak@example.com\n")
+        frames = [{"type": "system", "subtype": "task_notification", "output_file": out}, {"type": "system", "subtype": "task_notification", "output_file": binary}]
+        r = redact.Redactor(home="/Users/probe", hostname="probe-mac")
+        mapping = fixture.collect_artifacts(frames, [], dest, r, task_root=os.path.join(art_src, "claude-501"))
         self.assertEqual(mapping[out], "<artifacts>/-slug/%s/tasks/t9.output" % SID)
-        self.assertTrue(os.path.isfile(os.path.join(dest, "-slug", SID, "tasks", "t9.output")))
+        self.assertEqual(open(os.path.join(dest, "-slug", SID, "tasks", "t9.output")).read(), "hello <email>\n")
+        self.assertEqual(json.load(open(os.path.join(dest, "-slug", SID, "tasks", "t10.output")))["omitted"], "binary artifact")
         self.assertEqual(fixture.tokenise(frames, mapping)[0]["output_file"], "<artifacts>/-slug/%s/tasks/t9.output" % SID)
 
 
@@ -1675,6 +1691,12 @@ class VerifyTests(unittest.TestCase):
         self.assertTrue(any("hypothesis" in e for e in self.errors(d)))
         d2 = build_fixture(self.root, name="demo2", hypothesis=True, synthetic=True, census=False)
         self.assertEqual(self.errors(d2), [])
+
+    def test_mirror_entries_must_reproduce_the_transcript(self):
+        d = build_fixture(self.root)
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "uuid": "not-mirrored"}) + "\n")
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
 
     def test_report_only_warning_for_author_name(self):
         d = build_fixture(self.root)
@@ -1801,8 +1823,10 @@ def default_task_root():
     return "/private/tmp/claude-%d" % os.getuid()
 
 
-def collect_artifacts(frames, record_dirs, dest_dir, task_root=None):
-    """Copy files under the CLI's task root that frames or records name; return abs -> token path."""
+def collect_artifacts(frames, record_dirs, dest_dir, redactor, task_root=None):
+    """Copy files under the CLI's task root that frames or records name, redacted in memory before the
+    first write; a file that is not UTF-8 is replaced by a JSON stub naming its size (no binary bytes are
+    stored). Returns abs -> token path."""
     task_root = task_root or default_task_root()
     candidates = set()
     for f in frames:
@@ -1824,7 +1848,14 @@ def collect_artifacts(frames, record_dirs, dest_dir, task_root=None):
         rel = os.path.relpath(real, task_root)
         dest = os.path.join(dest_dir, rel)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.copyfile(real, dest)
+        with open(real, "rb") as fh:
+            raw = fh.read()
+        try:
+            text = redactor.redact_text(raw.decode("utf-8"), path="artifacts/" + rel)
+        except UnicodeDecodeError:
+            text = json.dumps({"omitted": "binary artifact", "bytes": len(raw)})
+        with open(dest, "w") as out:
+            out.write(text)
         mapping[path] = ARTIFACT_TOKEN + "/" + rel
     return mapping
 
@@ -2013,6 +2044,27 @@ def verify_fixture(path, home=None, author=None):
     for rel in sorted(needed):
         if not os.path.isfile(os.path.join(art_dir, rel)):
             errors.append("artifacts/%s named by a frame or record is missing" % rel)
+    # mirror fidelity: initial records + mirrored entries per stream == transcript records (recorded fixtures)
+    if not meta.get("synthetic"):
+        rec_slug = fixture.slug_of(meta["cwd"]) if meta.get("cwd") else None
+        mirrored = {}
+        for rec in frames:
+            f = rec.get("frame") or {}
+            if f.get("type") == "transcript_mirror" and "/projects/" in f.get("filePath", ""):
+                stream = f["filePath"].split("/projects/", 1)[1]
+                if rec_slug:
+                    stream = stream.replace(rec_slug, fixture.SLUG_TOKEN, 1)
+                mirrored.setdefault(stream, []).extend(f.get("entries", []))
+        for stream, entries in mirrored.items():
+            init_path = os.path.join(path, "initial", stream)
+            final_path = os.path.join(path, "transcript", stream)
+            if not os.path.isfile(final_path):
+                errors.append("mirror names stream %s but transcript/%s is missing" % (stream, stream)); continue
+            head = [json.loads(l) for l in open(init_path) if l.strip()] if os.path.isfile(init_path) else []
+            want = head + entries
+            got = [json.loads(l) for l in open(final_path) if l.strip()]
+            if got != want:
+                errors.append("mirror entries for %s do not reproduce transcript/%s (%d mirrored + %d initial vs %d records)" % (stream, stream, len(entries), len(head), len(got)))
     # streams offsets
     initial_sizes = fixture.stream_sizes(os.path.join(path, "initial"))
     for stream, off in fx["streams"].items():
@@ -2135,7 +2187,7 @@ class RecordAndDiffTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_record_writes_only_redacted_bytes_and_leaves_review_unsigned(self):
+    def test_record_no_unredacted_byte_reaches_disk_and_review_is_unsigned(self):
         path, errors = probe.record("cli_demo", claude=sys.executable, scenario_dir=self.scenarios,
                                     fixtures_root=self.fixtures, config_home=self.config_home, scratch_root=self.tmp)
         self.assertEqual(path, os.path.join(self.fixtures, "cli-demo"))
@@ -2171,6 +2223,14 @@ class RecordAndDiffTests(unittest.TestCase):
     def test_main_usage_and_exit_codes(self):
         out = subprocess.run([sys.executable, os.path.join(probe.HERE, "probe.py")], capture_output=True, text=True)
         self.assertEqual(out.returncode, 2)
+
+
+class ResumeResolutionTests(unittest.TestCase):
+    def test_resolve_resume_reads_the_prior_fixture_for_record_diff_and_spike(self):
+        root = tempfile.mkdtemp(); os.makedirs(os.path.join(root, "prior"))
+        json.dump({"session_id": "prior-sid"}, open(os.path.join(root, "prior", "fixture.json"), "w"))
+        self.assertEqual(probe.resolve_resume({"resume_of": "prior"}, root), "prior-sid")
+        self.assertIsNone(probe.resolve_resume({"resume_of": None}, root))
 
 
 class ZeroCostScenarioTests(unittest.TestCase):
@@ -2318,6 +2378,14 @@ def run_scenario(mod, claude, config_home, scratch_root, redactor, resume=None, 
     return session, ctx
 
 
+def resolve_resume(meta, fixtures_root):
+    """The session id a scenario resumes, from the fixture named by META['resume_of'] (None when it resumes nothing)."""
+    if not meta.get("resume_of"):
+        return None
+    prior = json.load(open(os.path.join(fixtures_root or FIXTURES_ROOT, meta["resume_of"], "fixture.json")))
+    return prior["session_id"]
+
+
 def session_id_of(session, launch):
     if session.system_init and session.system_init.get("session_id"):
         return session.system_init["session_id"]
@@ -2336,11 +2404,9 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
     initial_dir, transcript_dir, artifacts_dir = (os.path.join(work, d) for d in ("initial", "transcript", "artifacts"))
     for d in (initial_dir, transcript_dir, artifacts_dir):
         os.makedirs(d)
-    resume = None
     ch = resolve_config_home(meta, config_home)
-    if meta.get("resume_of"):
-        prior = json.load(open(os.path.join(fixtures_root, meta["resume_of"], "fixture.json")))
-        resume = prior["session_id"]
+    resume = resolve_resume(meta, fixtures_root)
+    if resume:
         fixture.snapshot(ch or os.path.expanduser("~/.claude"), resume, initial_dir, redactor)
     session, ctx = run_scenario(mod, claude, config_home, scratch_root, redactor, resume=resume)
     sid = session_id_of(session, ctx["launch"])
@@ -2349,7 +2415,7 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
         fixture.snapshot(ctx["config_home"] or os.path.expanduser("~/.claude"), sid, transcript_dir, redactor)
     except FileNotFoundError as e:       # a stand-in writes no transcript; the real CLI always does
         ctx["notes"].append("no transcript to snapshot: %s" % e)
-    mapping = fixture.collect_artifacts([r.get("frame") for r in frames if "frame" in r], [transcript_dir], artifacts_dir)
+    mapping = fixture.collect_artifacts([r.get("frame") for r in frames if "frame" in r], [transcript_dir], artifacts_dir, redactor)
     if mapping:
         frames = fixture.tokenise(frames, mapping)
         for root, _, files in os.walk(transcript_dir):
@@ -2420,7 +2486,7 @@ def diff(claude, scenario_dir=None, fixtures_root=None, config_home=None, scratc
         try:
             argv = tool_argv(claude, mod.META)
             version, help_text = claude_version(argv), claude_help(argv)     # inside the env block so fake-claude answers from this fixture
-            session, ctx = run_scenario(mod, claude, config_home, scratch_root, redact.Redactor())
+            session, ctx = run_scenario(mod, claude, config_home, scratch_root, redact.Redactor(), resume=resolve_resume(meta, fixtures_root))
         finally:
             os.environ.clear(); os.environ.update(env_backup)
         observed = census.census([r["frame"] for r in session.frames() if "frame" in r], help_text=help_text, version=version)
@@ -2460,7 +2526,7 @@ def main(argv=None):
             mod = load_scenario(name)
             argv_b = tool_argv(args.claude, mod.META)
             version, help_text = claude_version(argv_b), claude_help(argv_b)
-            session, ctx = run_scenario(mod, args.claude, args.config_home, SCRATCH_ROOT, redact.Redactor())
+            session, ctx = run_scenario(mod, args.claude, args.config_home, SCRATCH_ROOT, redact.Redactor(), resume=resolve_resume(mod.META, FIXTURES_ROOT))
             out[mod.META["name"]] = census.census([r["frame"] for r in session.frames() if "frame" in r], help_text=help_text, version=version)
         print(json.dumps(out, indent=1, sort_keys=True)); return 0
     if args.cmd == "diff":
@@ -2693,6 +2759,20 @@ class ReplayTests(unittest.TestCase):
         self.assertIsNotNone(h.wait(lambda f: f.get("type") == "control_response" and f["response"]["request_id"] == "e"))
         self.assertEqual(h.finish(), 0)
 
+    def test_leading_and_trailing_expects_fail_when_the_host_stays_silent(self):
+        lead = os.path.join(self.root, "lead.json"); write(lead, json.dumps([{"expect": {"type": "control_request", "request.subtype": "get_usage"}, "timeout_ms": 500}]))
+        h = Host(self.fx, self.cwd, env={"FAKE_CLAUDE_SCRIPT": lead})
+        self.assertEqual(h.finish(timeout=5), 3)                                    # nothing sent: leading expect times out
+        trail = os.path.join(self.root, "trail.json"); write(trail, json.dumps([{"after": 999, "emit": {"type": "system", "subtype": "late"}}, {"expect": {"type": "user"}, "timeout_ms": 500}]))
+        h = Host(self.fx, self.cwd, env={"FAKE_CLAUDE_SCRIPT": trail})
+        h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
+        h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
+        h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
+        h.send({"type": "control_request", "request_id": "zz", "request": {"subtype": "get_usage"}}); h.wait(lambda f: f.get("type") == "control_response" and f["response"]["request_id"] == "zz")
+        h.send({"type": "user", "uuid": "y", "message": {"role": "user", "content": "two"}}); h.wait(lambda f: f.get("result") == "two")
+        h.send({"type": "control_request", "request_id": "e", "request": {"subtype": "end_session"}})
+        self.assertEqual(h.finish(timeout=5), 3)                                    # trailing emit fires at the end, then the expect times out
+
     def test_patch_step_removes_keys_from_matching_out_frames(self):
         script = os.path.join(self.root, "patch.json"); write(script, json.dumps([{"patch": {"type": "system", "subtype": "init"}, "remove": ["capabilities"]}]))
         h = Host(self.fx, self.cwd, env={"FAKE_CLAUDE_SCRIPT": script})
@@ -2763,6 +2843,19 @@ class MaterializeTests(unittest.TestCase):
         t = os.path.join(dest, "projects", slug, SID + ".jsonl")
         self.assertEqual(open(t).read().count("\n"), 1)
         self.assertEqual(self.run_materialize(dest).returncode, 2)               # transcript already there
+
+    def test_nested_symlink_under_a_marked_home_is_refused_by_materialize_and_replay(self):
+        dest = os.path.realpath(os.path.join(self.root, "fake-home")); elsewhere = os.path.join(self.root, "elsewhere"); os.makedirs(elsewhere)
+        os.makedirs(dest); open(os.path.join(dest, fake_claude.MARKER), "w").close()
+        os.symlink(elsewhere, os.path.join(dest, "projects"))
+        self.assertEqual(self.run_materialize(dest).returncode, 2); self.assertEqual(os.listdir(elsewhere), [])
+        os.unlink(os.path.join(dest, "projects")); r = self.run_materialize(dest, cwd="/private/tmp/afleet-fixtures/other-cwd"); self.assertEqual(r.returncode, 0)
+        os.symlink(elsewhere, os.path.join(dest, "tasks"))                       # replay must refuse the artifact write
+        h = Host(self.fx, tempfile.mkdtemp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": "/private/tmp/afleet-fixtures/other-cwd"})
+        h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
+        h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
+        h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
+        self.assertEqual(h.finish(timeout=10), 2); self.assertEqual(os.listdir(elsewhere), [])
 
     def test_replay_with_config_home_reproduces_the_final_filesystem(self):
         dest = os.path.realpath(os.path.join(self.root, "fake-home")); cwd = "/private/tmp/afleet-fixtures/other-cwd"
@@ -2859,6 +2952,32 @@ def refusal_reason(dest, session_id, env=None):
     return None
 
 
+def safe_path(root, rel):
+    """A destination under root whose every component below root is a real directory, never a symlink;
+    refused (returns None) when a component is a symlink or the resolved path leaves root."""
+    root = _real(root)
+    cur = root
+    parts = [p for p in rel.split(os.sep) if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        return None
+    for part in parts[:-1]:
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            return None
+        if os.path.exists(cur) and not os.path.isdir(cur):
+            return None
+    final = os.path.join(cur, parts[-1]) if parts else cur
+    if os.path.islink(final) or not _within(final, root):
+        return None
+    return final
+
+
+def _open_new(path, mode):
+    """open() that never follows a symlink at the leaf."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if "a" in mode else 0) | (os.O_TRUNC if "w" in mode else 0)
+    return os.fdopen(os.open(path, flags, 0o600), mode)
+
+
 def _rewrite_text(text, meta, cwd, real_home):
     slug = slug_of(cwd)
     text = text.replace(SLUG_TOKEN, slug)
@@ -2881,7 +3000,10 @@ def materialize(fixture_dir, config_home, cwd, env=None, stderr=sys.stderr):
         for f in files:
             src = os.path.join(root, f)
             rel = os.path.relpath(src, initial).replace(SLUG_TOKEN, slug_of(cwd))
-            dst = os.path.join(real, "projects", rel)
+            dst = safe_path(real, os.path.join("projects", rel))
+            if dst is None:
+                stderr.write("fake-claude: refusing to write through a symlink or outside the fake home: projects/%s\n" % rel)
+                return EXIT_REFUSED
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             with open(src, "rb") as a:
                 data = a.read()
@@ -2889,7 +3011,7 @@ def materialize(fixture_dir, config_home, cwd, env=None, stderr=sys.stderr):
                 data = _rewrite_text(data.decode("utf-8"), meta, cwd, real).encode("utf-8")
             except UnicodeDecodeError:
                 pass
-            with open(dst, "wb") as b:
+            with _open_new(dst, "wb") as b:
                 b.write(data)
     return 0
 
@@ -2948,13 +3070,17 @@ class Replayer:
 
     # ---- io
     def emit(self, frame):
-        if self.home:
-            frame = self._rewrite_frame(frame)
+        try:
+            if self.home:
+                frame = self._rewrite_frame(frame)
+            if self.home and frame.get("type") == "transcript_mirror":
+                self._append_mirror(frame)
+        except RuntimeError as e:                       # a symlink appeared under the fake home: stop before writing
+            self.stderr.write("fake-claude: %s\n" % e); self.stderr.flush()
+            raise SystemExit(EXIT_REFUSED)
         self.stdout.write(dumps(frame) + "\n"); self.stdout.flush()
         if frame.get("type") == "control_request":
             self.last_request_id = frame.get("request_id")
-        if self.home and frame.get("type") == "transcript_mirror":
-            self._append_mirror(frame)
         self.out_index += 1
 
     def _reader(self):
@@ -3018,22 +3144,28 @@ class Replayer:
     def _write_artifact(self, path):
         rel = os.path.relpath(path, os.path.join(self.home, "tasks"))
         src = os.path.join(self.fixture_dir, "artifacts", rel)     # artifacts/ keeps the recorded task-root layout
-        if os.path.isfile(src) and not os.path.exists(path):
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(src, "rb") as a, open(path, "wb") as b:
+        dst = safe_path(self.home, os.path.join("tasks", rel))
+        if dst is None:
+            raise RuntimeError("refusing to write artifact through a symlink: tasks/%s" % rel)
+        if os.path.isfile(src) and not os.path.exists(dst):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(src, "rb") as a, _open_new(dst, "wb") as b:
                 b.write(a.read())
 
     def _append_mirror(self, frame):
-        path = frame["filePath"]
-        rel = os.path.relpath(path, os.path.join(self.home, "projects")).replace(slug_of(self.cwd), SLUG_TOKEN, 1)
+        rel = os.path.relpath(frame["filePath"], os.path.join(self.home, "projects"))
+        path = safe_path(self.home, os.path.join("projects", rel))
+        if path is None:
+            raise RuntimeError("refusing to append through a symlink: projects/%s" % rel)
+        stream = rel.replace(slug_of(self.cwd), SLUG_TOKEN, 1)
         if path not in self.offsets:
-            self.offsets[path] = self.streams.get(rel, 0)
+            self.offsets[path] = self.streams.get(stream, 0)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             if not os.path.exists(path):
-                open(path, "a").close()
+                _open_new(path, "ab").close()
             with open(path, "r+b") as fh:
                 fh.truncate(self.offsets[path])
-        with open(path, "ab") as fh:
+        with _open_new(path, "ab") as fh:
             for entry in frame.get("entries", []):
                 fh.write((dumps(entry) + "\n").encode("utf-8"))
             self.offsets[path] = fh.tell()
@@ -3047,22 +3179,25 @@ class Replayer:
         return True
 
     def _run_script(self, next_t):
-        """Fire emit steps that are due, then the expect/answer steps attached to them."""
-        while self.steps and "emit" in self.steps[0] and self._due(self.steps[0], next_t):
-            step = self.steps.pop(0)
-            self.emit(step["emit"])
-            while self.steps and "emit" not in self.steps[0]:
-                s = self.steps.pop(0)
-                if "expect" in s:
-                    got = self.take(lambda f: self._matches(f, s["expect"]), (s.get("timeout_ms", 5000)) / 1000.0)
-                    if got is None:
-                        return self.fail("expect timed out: %s" % dumps(s["expect"]))
-                    self._last_matched = got
-                elif "answer" in s:
-                    ans = json.loads(dumps(s["answer"]))
-                    if ans.get("type") == "control_response" and getattr(self, "_last_matched", {}).get("type") == "control_request":
-                        ans.setdefault("response", {})["request_id"] = self._last_matched["request_id"]
-                    self.emit(ans)
+        """Run the script as a sequential state machine: an emit step waits for its position (time or
+        index); expect and answer steps run as soon as they are reached, wherever they sit."""
+        while self.steps:
+            s = self.steps[0]
+            if "emit" in s:
+                if not self._due(s, next_t):
+                    return None
+                self.steps.pop(0); self.emit(s["emit"]); continue
+            self.steps.pop(0)
+            if "expect" in s:
+                got = self.take(lambda f: self._matches(f, s["expect"]), (s.get("timeout_ms", 5000)) / 1000.0)
+                if got is None:
+                    return self.fail("expect timed out: %s" % dumps(s["expect"]))
+                self._last_matched = got
+            elif "answer" in s:
+                ans = json.loads(dumps(s["answer"]))
+                if ans.get("type") == "control_response" and getattr(self, "_last_matched", {}).get("type") == "control_request":
+                    ans.setdefault("response", {})["request_id"] = self._last_matched["request_id"]
+                self.emit(ans)
         return None
 
     def _matches(self, frame, matcher):
@@ -3815,6 +3950,14 @@ def run(session, ctx):
     note("set_cwd back", session.request("set_cwd", path=ctx["cwd"]))
     note("rewind_conversation", session.request("rewind_conversation", target_message_uuid=first_uuid))
     note("claude_authenticate", session.request("claude_authenticate"))
+    note("claude_oauth_callback (invalid code)", session.request("claude_oauth_callback", code="probe-invalid-code"))
+    rid = session.request_async("claude_oauth_wait_for_completion")          # no login completes; capture the shape or the silence
+    resp = session.wait_response(rid, timeout=10)
+    if resp is None:
+        session.cancel(rid)
+        ctx["notes"].append("claude_oauth_wait_for_completion -> no response in 10 s; cancelled by the host (control_cancel_request recorded)")
+    else:
+        note("claude_oauth_wait_for_completion", resp)
     note("generate_session_title", session.request("generate_session_title", description="control shapes probe", persist=False))
 ```
 
@@ -3917,8 +4060,9 @@ Append to the parent's Revision Notes (fill from the notes; keep each note to th
   carries the readback; `rewind_conversation {target_message_uuid}` answers
   `{rewound, targetMessageUuid, prefillText, precedingAssistantUuid}`; `set_cwd` answers
   `{status, cwd, changed, transcript_relocated}` <and needs_trust as observed>;
-  `claude_authenticate` answers `{manualUrl, automaticUrl, …}`. Settles §6.4's unpublished
-  shapes for C2's models.
+  `claude_authenticate` answers `{manualUrl, automaticUrl, …}`; `claude_oauth_callback` with an
+  invalid code answers <the error text>; `claude_oauth_wait_for_completion` <answered … | stayed
+  silent and was cancelled>. Settles §6.4's unpublished shapes for C2's models.
 - 2026-09-04 C1/S13: Under the scratch config home `set_cwd` to an untrusted sibling
   <returned needs_trust and `trust_accepted: true` completed it | completed without a
   trust step>; the scratch `.claude.json` <did | did not> record `hasTrustDialogAccepted`
@@ -3932,6 +4076,7 @@ Append to the parent's Revision Notes (fill from the notes; keep each note to th
   `<value>` the `AskUserQuestion` input carries `options[].preview` (fixture
   `ask-user-question`). §6.1's table takes `<value>`.
 ```
+Then make the value reproducible: add `"CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "<value>"` to `harness.DEFAULT_ENV_TABLE`, delete the `env_table` override and the `AFLEET_QUESTION_PREVIEW_FORMAT` indirection from `ask_user_question.py`, re-record `ask-user-question` once so its `fixture.json` `launch.env` carries the variable, and confirm in a fresh shell (`env -i PATH="$PATH" HOME="$HOME" make probe FIXTURE=ask-user-question`) that no export is needed.
 Append to the child spec's Revision Notes:
 ```
 - 2026-09-04: The catalogue's `session-mirror-relocation` row is recorded as two fixtures,
@@ -3959,11 +4104,39 @@ git commit -m "feat(probe): wave B scenarios; S8, S13, S14 and S15 findings on t
 
 - [ ] **Step 1: Write the four scenarios**
 
+`Tools/probe/scenarios/_tasks.py` (shared by the agent and background scenarios; `CLAUDE_CODE_FORK_SUBAGENT=1` backgrounds every subagent, so the initiating turn's `result` can arrive while agents still run):
+
+```python
+"""Wait until every task the CLI started has ended, so end_session never kills a live agent."""
+import time
+
+
+def started_ids(session):
+    return [f["frame"].get("task_id") for f in session.frames() if f.get("frame", {}).get("subtype") == "task_started"]
+
+
+def ended_ids(session):
+    return [f["frame"].get("task_id") for f in session.frames() if f.get("frame", {}).get("subtype") == "task_notification"]
+
+
+def wait_for_tasks(session, timeout=300):
+    """True when every task_started has a task_notification; also drains the auto-turns that follow."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pending = set(started_ids(session)) - set(ended_ids(session))
+        if not pending:
+            time.sleep(3)                      # let a trailing auto-turn's result arrive
+            return True
+        time.sleep(1)
+    return False
+```
+
 `Tools/probe/scenarios/explore_depth_1.py`:
 
 ```python
 """One Explore agent (items 9, 38, 49; C3.G3)."""
 import os
+from _tasks import wait_for_tasks
 
 META = {"name": "explore-depth-1", "purpose": "one Explore subagent searching synthetic files", "serves": ["item 9", "item 38", "item 49", "C3.G3"],
         "spikes": [], "census": True, "deterministic": False, "isolation": "config-home", "launch": {"max_turns": 4},
@@ -3980,8 +4153,9 @@ META["setup"] = setup
 def run(session, ctx):
     session.send_user(META["prompts"][0])
     res = session.wait_result(timeout=300)
+    settled = wait_for_tasks(session, timeout=300)
     started = [f["frame"] for f in session.frames() if f.get("frame", {}).get("subtype") == "task_started"]
-    ctx["notes"].append("task_started: %d, depths: %s, result: %s" % (len(started), [t.get("spawn_depth") for t in started], (res or {}).get("subtype")))
+    ctx["notes"].append("task_started: %d, depths: %s, all settled: %s, result: %s" % (len(started), [t.get("spawn_depth") for t in started], settled, (res or {}).get("subtype")))
     ctx["notes"].append("frames with parent_tool_use_id: %d" % sum(1 for f in session.frames() if f.get("frame", {}).get("parent_tool_use_id")))
 ```
 
@@ -3990,6 +4164,7 @@ def run(session, ctx):
 ```python
 """S16: a general-purpose agent that itself spawns Explore (items 49, 52)."""
 import os
+from _tasks import wait_for_tasks
 
 META = {"name": "nested-depth-2", "purpose": "a depth-2 run: general-purpose spawns Explore", "serves": ["item 49", "item 52"],
         "spikes": ["S16"], "census": True, "deterministic": False, "isolation": "config-home", "launch": {"max_turns": 6},
@@ -4006,8 +4181,9 @@ META["setup"] = setup
 def run(session, ctx):
     session.send_user(META["prompts"][0])
     res = session.wait_result(timeout=480)
+    settled = wait_for_tasks(session, timeout=480)
     started = [f["frame"] for f in session.frames() if f.get("frame", {}).get("subtype") == "task_started"]
-    ctx["notes"].append("task_started: %d, depths: %s, result: %s" % (len(started), sorted(t.get("spawn_depth") for t in started), (res or {}).get("subtype")))
+    ctx["notes"].append("task_started: %d, depths: %s, all settled: %s, result: %s" % (len(started), sorted(t.get("spawn_depth") for t in started), settled, (res or {}).get("subtype")))
     ctx["notes"].append("depth-2 text or thinking forwarded: %s" % any(
         f.get("frame", {}).get("type") == "assistant" and f["frame"].get("parent_tool_use_id") and
         any(b.get("type") in ("text", "thinking") for b in f["frame"]["message"].get("content", [])) for f in session.frames()))
@@ -4068,7 +4244,7 @@ def run(session, ctx):
 
 - [ ] **Step 2: Record the four fixtures, one at a time**
 
-Same loop as Task 9 Step 4 for `explore_depth_1`, `nested_depth_2`, `background_shell`, `notification_hook`. Expected: `explore-depth-1` notes one `task_started` at depth 1 and `transcript/_slug_/<sid>/subagents/agent-<id>.jsonl` plus its `.meta.json` are present; `nested-depth-2` notes depths `[1, 2]` and two subagent files with their `.meta.json`; `background-shell` notes `task_notification: True` with an `output_file` whose recorded value in `frames.ndjson` reads `<artifacts>/…/tasks/<id>.output` and `artifacts/` holds it (`verify` checks this); `notification-hook` notes whether the hook fired inside 75 s and the input keys when it did. If `nested-depth-2` produces only depth 1, add to the prompt "You must delegate the search to an Explore subagent rather than searching yourself" and re-record once; note the outcome either way.
+Same loop as Task 9 Step 4 for `explore_depth_1`, `nested_depth_2`, `background_shell`, `notification_hook`. A scenario whose notes say `all settled: False` is re-recorded with a larger timeout rather than accepted, because `end_session` after an unsettled agent produces a truncated sidecar. Expected: `explore-depth-1` notes one `task_started` at depth 1 and `transcript/_slug_/<sid>/subagents/agent-<id>.jsonl` plus its `.meta.json` are present; `nested-depth-2` notes depths `[1, 2]` and two subagent files with their `.meta.json`; `background-shell` notes `task_notification: True` with an `output_file` whose recorded value in `frames.ndjson` reads `<artifacts>/…/tasks/<id>.output` and `artifacts/` holds it (`verify` checks this); `notification-hook` notes whether the hook fired inside 75 s and the input keys when it did. If `nested-depth-2` produces only depth 1, add to the prompt "You must delegate the search to an Explore subagent rather than searching yourself" and re-record once; note the outcome either way.
 
 - [ ] **Step 3: Drift check and findings**
 
@@ -4113,7 +4289,7 @@ In `probe.py` `main()`: add `"spike"` to the sub-parser tuple with `sp.add_argum
 ```python
     if args.cmd == "spike":
         mod = load_scenario(args.scenario)
-        session, ctx = run_scenario(mod, args.claude, args.config_home, SCRATCH_ROOT, redact.Redactor())
+        session, ctx = run_scenario(mod, args.claude, args.config_home, SCRATCH_ROOT, redact.Redactor(), resume=resolve_resume(mod.META, FIXTURES_ROOT))
         for n in ctx["notes"]:
             print(n)
         print("exit code %s" % ctx["exit_code"])
@@ -4147,10 +4323,16 @@ NEEDLES = {
 
 
 def scan(path):
+    """For each kind, find the dialog's own definition (`kind:"<kind>"`) and require every needle to sit
+    inside the 800 bytes that follow it, so the enum and fields are structurally tied to that handler."""
     data = open(path, "rb").read()
     out = {}
     for kind, needles in NEEDLES.items():
-        out[kind] = {n.decode(): data.count(n) for n in needles}
+        anchor = needles[0]
+        windows = [data[i:i + 800] for i in [m.start() for m in re.finditer(re.escape(anchor), data)]]
+        out[kind] = {"definitions": len(windows),
+                     "needles_in_definition_window": {n.decode(): any(n in w for w in windows) for n in needles[1:]},
+                     "context": windows[0][:800].decode("utf-8", "replace") if windows else ""}
     return out
 
 
@@ -4164,11 +4346,14 @@ def main():
     if hits is None:
         print("no binary found under", VERSIONS); return 2
     ok = True
-    for kind, counts in hits.items():
-        for needle, n in counts.items():
-            print("%-30s %-48s %d" % (kind, needle, n))
-            ok = ok and n > 0
-    print("ALL STRINGS PRESENT" if ok else "SOME STRINGS MISSING (binary may be compressed; extract with ~/claude-code-bundle tools and rerun on modules/)")
+    for kind, info in hits.items():
+        print("%s: %d definition(s)" % (kind, info["definitions"]))
+        for needle, present in info["needles_in_definition_window"].items():
+            print("   %-48s %s" % (needle, "in window" if present else "NOT in window"))
+            ok = ok and present
+        ok = ok and info["definitions"] > 0
+        print("   context: %s" % info["context"][:800])
+    print("ALL SHAPES STRUCTURALLY CONFIRMED" if ok else "NOT CONFIRMED (missing definition or a needle outside its window; if the binary is compressed, extract with the ~/claude-code-bundle tools and rerun on the largest module)")
     return 0 if ok else 1
 
 
@@ -4177,8 +4362,8 @@ if __name__ == "__main__":
 ```
 
 Run: `/usr/bin/python3 Tools/probe/spikes/extract_dialog_enums.py 2.1.259`
-Expected: every needle count > 0 and `ALL STRINGS PRESENT`. If it prints `SOME STRINGS MISSING`, the binary embeds compressed JS: run the extraction the author used for 2.1.257 (`~/claude-code-bundle/2.1.257/tools/`, or the `update-bundle` skill) into `~/claude-code-bundle/2.1.259/` and rerun the scan against `~/claude-code-bundle/2.1.259/modules/*.js` by passing that directory's largest chunk path as the version argument. Either way, paste the counts into the finding.
-When every string is present on 2.1.259: set `"hypothesis": false` in both dialog fixtures' `fixture.json`, keep `synthetic: true`, re-sign both (`make sign …`), `make verify-fixtures`, and commit `fixtures: S6 confirmed on 2.1.259, dialog fixtures leave hypothesis`. If not, leave them as they are.
+Expected: one or more definitions per kind, every needle `in window`, and `ALL SHAPES STRUCTURALLY CONFIRMED`; paste the two printed contexts into the finding. If it prints `NOT CONFIRMED`, the binary embeds compressed JS: run the extraction the author used for 2.1.257 (`~/claude-code-bundle/2.1.257/tools/`, or the `update-bundle` skill) into `~/claude-code-bundle/2.1.259/` and rerun the scan against `~/claude-code-bundle/2.1.259/modules/*.js` by passing that directory's largest chunk path as the version argument. Either way, paste the counts into the finding.
+Only when both kinds are structurally confirmed on 2.1.259: set `"hypothesis": false` in both dialog fixtures' `fixture.json`, keep `synthetic: true`, re-sign both (`make sign …`), `make verify-fixtures`, and commit `fixtures: S6 confirmed on 2.1.259, dialog fixtures leave hypothesis`. If not, leave them as they are.
 
 - [ ] **Step 3: Write the four spike scenarios**
 
@@ -4426,10 +4611,14 @@ Expected: one dated note for each of S2, S5, S6, S8, S10, S11, S12, S13, S14, S1
 Run:
 ```bash
 test ! -d Fixtures/*/raw && echo "no raw dirs"
-/usr/bin/python3 -m unittest discover -s Tools/probe/tests -t Tools/probe/tests -p 'test_probe_cli.py' -k no_unredacted -v
-/usr/bin/python3 -m unittest discover -s Tools/probe/tests -t Tools/probe/tests -p 'test_fixture_verify.py' -k unsigned -k planted -k orphaned -v
+cd Tools/probe/tests && /usr/bin/python3 -m unittest -v \
+  test_probe_cli.RecordAndDiffTests.test_record_no_unredacted_byte_reaches_disk_and_review_is_unsigned \
+  test_fixture_verify.VerifyTests.test_unsigned_review_fails \
+  test_fixture_verify.VerifyTests.test_planted_email_fails_in_any_file \
+  test_fixture_verify.VerifyTests.test_orphaned_request_fails \
+  test_fixture_verify.SlugAndSnapshotTests.test_collect_artifacts_and_tokenise; cd ../../..
 ```
-Expected: `no raw dirs`; the three named tests pass (unsigned review, planted email, unresolved lifecycle fail `verify`; the record test proves no unredacted byte).
+Expected: `Ran 5 tests` and `OK` (fully qualified names, so an empty selection cannot pass silently): unsigned review, planted email and unresolved lifecycle fail `verify`; the record test and the artifact test prove no unredacted byte reaches disk.
 
 - [ ] **Step 6: Write the child's Outcomes and hand back to the parent**
 
