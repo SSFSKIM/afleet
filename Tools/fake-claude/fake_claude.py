@@ -246,7 +246,8 @@ class Replayer:
         self.last_request_id = None
         self.init_request_id = None      # the recording's own id for its initialize request
         self.out_index = 0
-        self.started = set()   # real stream paths already positioned at their append start
+        self.started = set()            # real stream paths already positioned at their append start
+        self.missing_artifacts = set()  # artifact paths already reported absent, so each is said once
 
     # ---- io
     def emit(self, frame):
@@ -322,7 +323,12 @@ class Replayer:
         dst = safe_path(self.home, os.path.join("tasks", rel))
         if dst is None:
             raise RuntimeError("refusing to write artifact through a symlink: tasks/%s" % rel)
-        if os.path.isfile(src) and not os.path.exists(dst):
+        if not os.path.isfile(src):
+            if rel not in self.missing_artifacts:
+                self.missing_artifacts.add(rel)
+                self.stderr.write("fake-claude: frame names an artifact the fixture does not hold: artifacts/%s\n" % rel)
+                self.stderr.flush()
+        elif not os.path.exists(dst):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             with open(src, "rb") as a, _open_new(dst, "wb") as b:
                 b.write(a.read())
@@ -494,7 +500,7 @@ class Replayer:
 
 def print_help(cen, out):
     out.write("Usage: claude [options] [command] [prompt]\n\nOptions:\n")
-    for flag in cen.get("flags", []):
+    for flag in cen.get("flags") or []:      # census.py writes null, not [], when `claude --help` was never captured
         out.write("  %s\n" % flag)
 
 

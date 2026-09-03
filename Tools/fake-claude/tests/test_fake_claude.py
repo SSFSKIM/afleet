@@ -173,6 +173,16 @@ class VersionHelpTests(ToolTest):
         out = subprocess.run([EXE, "--help"], capture_output=True, text=True, env=env).stdout
         self.assertIn("--session-mirror", out); self.assertIn("--print", out)
 
+    def test_help_survives_a_census_that_never_captured_the_flag_list(self):
+        cen = os.path.join(self.fx, "census.json")
+        with open(cen) as fh:
+            recorded = json.load(fh)
+        recorded["flags"] = None                 # census.py writes null for a run whose `claude --help` was never captured
+        write(cen, json.dumps(recorded))
+        r = subprocess.run([EXE, "--help"], capture_output=True, text=True, env=dict(os.environ, FAKE_CLAUDE_FIXTURE=self.fx))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Usage:", r.stdout)
+
 
 class ReplayTests(ToolTest):
     def setUp(self):
@@ -367,6 +377,15 @@ class MaterializeTests(ToolTest):
         write(os.path.join(dest, "shell-snapshots", "snap.sh"), "echo\n")       # neither a transcript nor an artifact
         ok, report = fake_claude.compare_final_state(self.fx, dest, cwd)
         self.assertFalse(ok); self.assertIn("shell-snapshots/snap.sh", report)
+
+    def test_a_frame_naming_an_artifact_the_fixture_does_not_hold_is_reported(self):
+        dest = os.path.realpath(os.path.join(self.root, "fake-home")); cwd = "/private/tmp/afleet-fixtures/other-cwd"
+        self.assertEqual(self.run_materialize(dest, cwd=cwd).returncode, 0)
+        os.remove(os.path.join(self.fx, "artifacts", fake_claude.slug_of(REC_CWD), SID, "tasks", "t1.output"))
+        h = Host(self.fx, self.tmp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": cwd})
+        _, notif = drive_two_turns(h)
+        self.assertFalse(os.path.exists(notif["output_file"]))    # the frame still names it, so the gap has to be said out loud
+        self.assertIn("artifact the fixture does not hold", h.p.stderr.read())
 
     def test_replay_refuses_a_home_whose_initial_state_was_never_materialized(self):
         dest = os.path.realpath(os.path.join(self.root, "bare-home")); os.makedirs(dest)
