@@ -4,3 +4,5 @@ DerivedData/
 *.app
 .DS_Store
 /Fixtures/**/*.secret*
+
+.doperpowers/
