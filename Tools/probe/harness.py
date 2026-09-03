@@ -153,6 +153,16 @@ class Launch:
         return env
 
 
+class RetryWithFallback(Exception):
+    """A scenario asks to be re-run with META['fallback_launch'] applied; the message is the reason.
+
+    Raised out of `run()`, so the session it was raised in is closed the ordinary way and its
+    capture is discarded: the recorder opens a second session under the fallback launch line and
+    keeps only that one. A scenario raises it only once it has observed that the launch line it
+    was given cannot produce the evidence the recording exists for.
+    """
+
+
 class MCPServer:
     """Minimal JSON-RPC 2.0 server for the in-process `afleet` MCP server."""
     def __init__(self, cwd, tools=None):

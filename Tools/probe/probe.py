@@ -33,6 +33,13 @@ A scenario is a module under `scenarios/` exposing `META` (a dict) and `run(sess
                      reused, because the transcript slug is derived from the cwd.
 - `setup`            optional `callable(scratch_cwd)` creating the synthetic content §4.5
                      requires the model to read.
+- `fallback_launch`  `launch` overrides applied to a second recording when `run()` raises
+                     `harness.RetryWithFallback`. The first session's capture is discarded
+                     whole and only the second reaches the fixture; `fallback_reason` is the
+                     one line the note in `fixture.json` gives for why. This exists for the
+                     scenario that cannot know its launch line is wrong until it has opened
+                     the session -- S5 learns from `system/init.tools` whether the SDK MCP
+                     server registered under `--strict-mcp-config`.
 - `keep_open`        True suppresses the `end_session` at close. The global constraint
                      forbids ending a session while a background task is still running, and
                      this is how a scenario says so -- `background-shell` sets it.
@@ -129,9 +136,29 @@ def load_scenario(name, scenario_dir=None):
     return mod
 
 
-def scenario_for_fixture(fixture_path, scenario_dir=None):
+def fixture_meta(fixture_path):
     with open(os.path.join(fixture_path, "fixture.json"), encoding="utf-8") as fh:
-        meta = json.load(fh)
+        return json.load(fh)
+
+
+def takes_part_in_the_census(meta):
+    """Whether `diff` re-runs this fixture against a binary, and why not when it does not.
+
+    Returns the reason it is skipped, or None to run it. Asked *before* the fixture's
+    scenario is loaded: a synthetic fixture is written from schemas and has no scenario
+    module at all, so loading first raised `FileNotFoundError` for the very fixtures this
+    test exists to pass over, and the drift ritual reported the two hand-written dialog
+    fixtures as failures on a tree where nothing was wrong.
+    """
+    if meta.get("synthetic"):
+        return "synthetic"
+    if not meta.get("census"):
+        return "census: false"
+    return None
+
+
+def scenario_for_fixture(fixture_path, scenario_dir=None):
+    meta = fixture_meta(fixture_path)
     return load_scenario(meta.get("scenario") or meta["name"], scenario_dir), meta
 
 
@@ -240,6 +267,12 @@ def run_scenario(mod, claude, config_home, scratch_root, redactor, resume=None):
     session.start(timeout=60)
     try:
         mod.run(session, ctx)
+    except harness.RetryWithFallback as why:
+        # Not an error: the scenario observed that this launch line cannot produce its
+        # evidence and asks for the fallback. The session is still closed below, and
+        # `record` reads `ctx["retry"]` to decide whether to re-run.
+        ctx["notes"].append("retry with fallback launch: %s" % why)
+        ctx["retry"] = str(why)
     finally:
         code = session.close(end_session=not meta.get("keep_open"))
     ctx["exit_code"] = code
@@ -297,6 +330,16 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
         if resume:
             fixture.snapshot(ch or os.path.expanduser("~/.claude"), resume, initial_dir, redactor)
         session, ctx = run_scenario(mod, claude, config_home, scratch_root, redactor, resume=resume)
+        if ctx.get("retry") and meta.get("fallback_launch"):
+            # The first session's capture is dropped whole and the fixture keeps only the
+            # second. `mod.META` is rebound because `run_scenario` reads the module's META,
+            # and the scenario's own `run()` reads it too; the module was loaded for this
+            # call alone, so the rebinding outlives nothing.
+            meta = dict(meta)
+            meta["launch"] = dict(meta.get("launch") or {}, **meta["fallback_launch"])
+            mod.META = meta
+            session, ctx = run_scenario(mod, claude, config_home, scratch_root, redactor, resume=resume)
+            ctx["notes"].insert(0, "recorded with fallback launch after: %s" % meta.get("fallback_reason", "retry requested"))
         if ctx["exit_code"]:
             # At the terminal, not only in the fixture: twenty live recordings cost real
             # tokens, and an operator who sees the exit as it happens can stop the run.
@@ -451,13 +494,15 @@ def diff(claude, scenario_dir=None, fixtures_root=None, config_home=None, scratc
         # leak a `FAKE_CLAUDE_*` variable into the next fixture's run.
         env_backup = dict(os.environ)
         try:
-            mod, meta = scenario_for_fixture(fpath, scenario_dir)
-            if not meta.get("census") or meta.get("synthetic"):
+            meta = fixture_meta(fpath)
+            why = takes_part_in_the_census(meta)
+            if why:
                 # Named, not passed over in silence: an omitted directory reads exactly like a
                 # fixture that passed, and this report is what says which is which.
-                report.append("%s: skipped (%s)" % (n, "synthetic" if meta.get("synthetic") else "census: false"))
+                report.append("%s: skipped (%s)" % (n, why))
                 skipped += 1
                 continue
+            mod = load_scenario(meta.get("scenario") or meta["name"], scenario_dir)
             os.environ["FAKE_CLAUDE_FIXTURE"] = fpath
             if script:
                 os.environ["FAKE_CLAUDE_SCRIPT"] = script

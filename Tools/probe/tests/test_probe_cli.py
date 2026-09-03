@@ -413,6 +413,21 @@ class RecordAndDiffTests(unittest.TestCase):
         self.assertIn("cli-demo: skipped (census: false)", report)
         self.assertIn("proves nothing", report)
 
+    def test_a_synthetic_fixture_with_no_scenario_module_is_skipped_rather_than_failed(self):
+        """A synthetic fixture is written from schemas and has no scenario to re-run, so the
+        skip has to be decided from `fixture.json` alone. Deciding it after loading the
+        scenario made the two hand-written dialog fixtures report `FAILED to run` on a tree
+        where nothing was wrong -- and a failure the ritual invents is worse than one it
+        misses, because the next reader stops trusting the report."""
+        self.record("cli_demo")
+        d = os.path.join(self.fixtures, "dialog-demo"); os.makedirs(d)
+        write_json(os.path.join(d, "fixture.json"),
+                   {"name": "dialog-demo", "scenario": None, "census": False, "synthetic": True, "deterministic": True})
+        code, report = self.run_diff()
+        self.assertEqual(code, 0, report)
+        self.assertIn("dialog-demo: skipped (synthetic)", report)
+        self.assertIn("cli-demo: ok", report)
+
     def test_diff_over_an_empty_fixtures_root_is_a_failure(self):
         os.makedirs(self.fixtures)
         code, report = self.run_diff()
