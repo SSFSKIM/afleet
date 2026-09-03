@@ -1,6 +1,6 @@
 import Foundation
 
-public enum TestPaths {
+public enum TestPaths: Sendable {
     /// ClaudeWire/Tests/Support, derived from this source file's location.
     public static var support: URL {
         URL(fileURLWithPath: #filePath)                       // .../ClaudeWire/Sources/WireTestSupport/TestPaths.swift

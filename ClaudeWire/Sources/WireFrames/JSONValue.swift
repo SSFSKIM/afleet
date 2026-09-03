@@ -1,5 +1,11 @@
 import Foundation
 
+/// A decoded JSON value.
+///
+/// The `.integer` / `.number` split is integral versus fractional, not "as written on the wire":
+/// `1.0` on the wire decodes to `.integer(1)`, because `JSONDecoder` accepts an integral double
+/// as an `Int64` and the decoder tries `Int64` first. Use `numericallyEqual(_:)` when the
+/// distinction should not matter.
 public enum JSONValue: Hashable, Sendable {
     case null
     case bool(Bool)
@@ -36,6 +42,12 @@ public enum JSONValue: Hashable, Sendable {
     }
 
     /// Deterministic encoding: keys sorted recursively, no whitespace, no escaped slashes.
+    ///
+    /// Numbers are normalised as well as ordered: an integral `.number` loses its fractional part
+    /// (`.number(1.0)` writes `1`, `.number(-0.0)` writes `0`). Canonical output therefore decodes
+    /// to a numerically equal `JSONValue`, not necessarily an identical one. Use this for byte
+    /// comparison and hashing, not as a re-encoder — `Codable` is the re-encoder.
+    /// Throws for a non-finite double, which JSON cannot represent.
     public func canonicalData() throws -> Data {
         var out = ""
         try Self.write(self, into: &out)
@@ -48,7 +60,10 @@ public enum JSONValue: Hashable, Sendable {
         case .integer(let i): out += String(i)
         case .number(let d):
             guard d.isFinite else { throw EncodingError.invalidValue(d, .init(codingPath: [], debugDescription: "non-finite")) }
-            out += d == d.rounded() && abs(d) < 1e15 ? String(Int64(d)) : String(d)
+            // 9.2e18 stays inside Int64.max (~9.223e18). A narrower bound would canonicalise, say,
+            // 1e16 as "1e+16", which decodes back to .integer and then canonicalises differently —
+            // canonical bytes must not depend on whether a value arrived as .integer or .number.
+            out += d == d.rounded() && abs(d) < 9.2e18 ? String(Int64(d)) : String(d)
         case .string(let s): out += Self.quote(s)
         case .array(let a):
             out += "["; for (i, e) in a.enumerated() { if i > 0 { out += "," }; try write(e, into: &out) }; out += "]"

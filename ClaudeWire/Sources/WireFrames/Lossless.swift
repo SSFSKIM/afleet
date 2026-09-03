@@ -43,6 +43,9 @@ public struct Lossless<Fields: Codable & Sendable & DeclaredKeys>: Codable, Send
     }
     public func encode(to encoder: any Encoder) throws {
         // Nulls first, then the typed fields (a field mutated to a value overrides its recorded null), then extras.
+        // Because `additional` is written last, a key present in both `fields` and `additional` is won by
+        // `additional`. Decoding cannot produce that overlap — declared and undeclared keys are disjoint there —
+        // but the public memberwise initialiser can, so callers must keep the two sets disjoint themselves.
         var c = encoder.container(keyedBy: AnyCodingKey.self)
         for k in explicitNulls { try c.encodeNil(forKey: AnyCodingKey(stringValue: k)) }
         try fields.encode(to: encoder)

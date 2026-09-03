@@ -35,8 +35,22 @@ public enum JSONRPCMessage: Hashable, Sendable, Codable {
     public init(from decoder: any Decoder) throws {
         let v = try JSONValue(from: decoder)
         guard let o = v.objectValue else { throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "JSON-RPC message must be an object")) }
-        let id: JSONRPCID? = o["id"].flatMap { idv in
-            switch idv { case .integer(let i): return .number(i); case .string(let s): return .string(s); case .null: return JSONRPCID.null; default: return nil }
+        // A missing "id" key means notification; an "id" key that is present but not an integer,
+        // a string or null is malformed and must throw rather than silently become a notification —
+        // a notification owes no response, so misreading one leaves the peer waiting forever.
+        let id: JSONRPCID?
+        if let idv = o["id"] {
+            switch idv {
+            case .integer(let i): id = .number(i)
+            case .string(let s): id = .string(s)
+            case .null: id = .null
+            default:
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: decoder.codingPath + [AnyCodingKey(stringValue: "id")],
+                    debugDescription: "JSON-RPC id must be an integer, a string or null"))
+            }
+        } else {
+            id = nil
         }
         if let method = o["method"]?.stringValue {
             if let id { self = .request(.init(id: id, method: method, params: o["params"])) }

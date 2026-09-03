@@ -39,4 +39,53 @@ final class JSONValueTests: XCTestCase {
         let v = try JSONDecoder().decode(JSONValue.self, from: Data("9007199254740993".utf8))
         XCTAssertEqual(v, .integer(9_007_199_254_740_993))
     }
+
+    func testCanonicalDataEscapesEveryControlCharacterInStringsAndInKeys() throws {
+        let v: JSONValue = .object([
+            "plain": .string("q\"b \\ s\nn\tt\rr\u{07}bell"),
+            "k\u{01}": .string("control in the key"),
+        ])
+        let canonical = try v.canonicalData()
+        let text = String(decoding: canonical, as: UTF8.self)
+        XCTAssertTrue(text.contains(#"\u0007"#), text)
+        XCTAssertTrue(text.contains(#"\u0001"#), text)
+        XCTAssertTrue(text.contains(#"\n"#) && text.contains(#"\t"#) && text.contains(#"\r"#), text)
+        // The escape table is only correct if the result parses back to the same value.
+        XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: canonical), v)
+    }
+
+    func testCanonicalDataThrowsForNonFiniteDoubles() {
+        XCTAssertThrowsError(try JSONValue.number(.infinity).canonicalData())
+        XCTAssertThrowsError(try JSONValue.number(-.infinity).canonicalData())
+        XCTAssertThrowsError(try JSONValue.object(["k": .array([.number(.nan)])]).canonicalData())
+    }
+
+    func testCanonicalDataIsIdempotentAcrossADecodeForLargeIntegralDoubles() throws {
+        // .number(1e16) and .integer(10000000000000000) are the same value reached two ways;
+        // canonical bytes must not depend on which one the wire happened to produce.
+        let once = try JSONValue.number(1e16).canonicalData()
+        XCTAssertEqual(String(decoding: once, as: UTF8.self), "10000000000000000")
+        XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: once).canonicalData(), once)
+        XCTAssertEqual(try JSONValue.integer(10_000_000_000_000_000).canonicalData(), once)
+        // Fractional and out-of-Int64-range values keep the Double spelling.
+        XCTAssertEqual(String(decoding: try JSONValue.number(1.5).canonicalData(), as: UTF8.self), "1.5")
+        XCTAssertEqual(String(decoding: try JSONValue.number(-0.0).canonicalData(), as: UTF8.self), "0")
+        XCTAssertNoThrow(try JSONValue.number(1e30).canonicalData())
+    }
+
+    func testNumericEqualityComparesObjectKeysNotInsertionOrder() {
+        var a: [String: JSONValue] = [:]
+        for k in ["one", "two", "three"] { a[k] = .integer(2) }
+        var b: [String: JSONValue] = [:]
+        for k in ["three", "two", "one"] { b[k] = .number(2) }
+        XCTAssertTrue(JSONValue.object(a).numericallyEqual(.object(b)))
+        // Same count, one key renamed: the key comparison, not the count, has to catch this.
+        var renamed = b
+        renamed["four"] = renamed.removeValue(forKey: "one")
+        XCTAssertEqual(renamed.count, b.count)
+        XCTAssertFalse(JSONValue.object(a).numericallyEqual(.object(renamed)))
+        XCTAssertFalse(JSONValue.object(a).numericallyEqual(.object(["one": .integer(2), "two": .integer(2)])))
+        XCTAssertTrue(JSONValue.array([.integer(1), .number(2.0)]).numericallyEqual(.array([.number(1.0), .integer(2)])))
+        XCTAssertFalse(JSONValue.array([.integer(1)]).numericallyEqual(.array([.integer(1), .integer(1)])))
+    }
 }

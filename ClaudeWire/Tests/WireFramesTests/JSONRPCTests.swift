@@ -24,4 +24,22 @@ final class JSONRPCTests: XCTestCase {
         XCTAssertEqual(ev["error"]?["code"], .integer(-32601))
         XCTAssertNil(ev["error"]?["data"])
     }
+
+    func testPresentButUnmappableIDThrowsInsteadOfSilentlyBecomingANotification() throws {
+        // A notification owes no response, so misclassifying a request as one would hang the peer.
+        for raw in [#"{"jsonrpc":"2.0","id":1.5,"method":"ping"}"#,
+                    #"{"jsonrpc":"2.0","id":{"a":1},"method":"ping"}"#,
+                    #"{"jsonrpc":"2.0","id":[1],"method":"ping"}"#,
+                    #"{"jsonrpc":"2.0","id":true,"method":"ping"}"#] {
+            XCTAssertThrowsError(try decode(raw), raw) { error in
+                XCTAssertEqual(DecodeFailure(error).field, "id", raw)
+            }
+        }
+    }
+
+    func testAbsentIDIsStillANotification() throws {
+        guard case .notification(let n) = try decode(#"{"jsonrpc":"2.0","method":"ping","params":{"a":1}}"#) else { return XCTFail() }
+        XCTAssertEqual(n.method, "ping")
+        XCTAssertEqual(n.params?["a"], .integer(1))
+    }
 }
