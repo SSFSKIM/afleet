@@ -7,6 +7,10 @@ import re
 DECLARATION_RE = re.compile(r"^ {2}(-{1,2}[A-Za-z][A-Za-z0-9-]*(?:,\s*-{1,2}[A-Za-z][A-Za-z0-9-]*)*)")
 LONG_FLAG_RE = re.compile(r"--[A-Za-z][A-Za-z0-9-]*")
 
+# The pair `harness` mints for a stdout line that would not decode. It is an ordinary member
+# of a census; `diff` is the one place it is not compared like one.
+UNPARSEABLE_PAIR = "__unparseable__"
+
 
 def flags_from_help(text):
     """Sorted, de-duplicated long flags *declared* in `claude --help` (spec §4.4).
@@ -218,6 +222,15 @@ def diff(recorded, observed, mode):
     for pair in sorted(set(op) - set(rp)):
         lines.append("added pair %s" % pair)
     for pair in sorted(set(rp) - set(op)):
+        if pair == UNPARSEABLE_PAIR:
+            # Alarm on appearance, never on absence, in both modes. The pair belongs in a
+            # census -- a binary that starts emitting malformed lines is real drift and the
+            # added-pair line above is how the gate shouts about it -- but it must never
+            # become something a baseline *requires*. A baseline recorded on a run that
+            # happened to hit one truncated line would otherwise carry the pair for good, so
+            # the next healthy re-record would alarm on a removed pair and the operator would
+            # learn to wave the gate through. A gate nobody reads catches nothing.
+            continue
         lines.append("removed pair %s" % pair)
     for pair in sorted(set(rp) & set(op)):
         r, o = rp[pair], op[pair]
