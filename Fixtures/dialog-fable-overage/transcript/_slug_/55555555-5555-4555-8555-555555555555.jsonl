@@ -1,0 +1,10 @@
+{"type": "user", "uuid": "u0", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "user", "content": "prompt 0"}}
+{"type": "assistant", "uuid": "a-0", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "assistant", "content": [{"type": "text", "text": "answer"}]}}
+{"type": "user", "uuid": "u1", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "user", "content": "prompt 1"}}
+{"type": "assistant", "uuid": "a-1", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "assistant", "content": [{"type": "text", "text": "answer"}]}}
+{"type": "user", "uuid": "u2", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "user", "content": "prompt 2"}}
+{"type": "assistant", "uuid": "a-2", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "assistant", "content": [{"type": "text", "text": "answer"}]}}
+{"type": "user", "uuid": "u3", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "user", "content": "prompt 3"}}
+{"type": "assistant", "uuid": "a-3", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "assistant", "content": [{"type": "text", "text": "answer"}]}}
+{"type": "user", "uuid": "u4", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "user", "content": "prompt 4"}}
+{"type": "assistant", "uuid": "a-4", "cwd": "/private/tmp/afleet-fixtures/synthetic", "message": {"role": "assistant", "content": [{"type": "text", "text": "answer"}]}}

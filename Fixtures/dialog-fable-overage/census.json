@@ -1,0 +1,208 @@
+{
+ "capabilities": null,
+ "flags": null,
+ "pairs": {
+  "assistant": {
+   "block_types": [
+    "text"
+   ],
+   "count": 5,
+   "keys": [
+    "message",
+    "parent_tool_use_id",
+    "session_id",
+    "type",
+    "uuid"
+   ],
+   "payload_keys": [
+    "content",
+    "role"
+   ],
+   "required_keys": [
+    "message",
+    "parent_tool_use_id",
+    "session_id",
+    "type",
+    "uuid"
+   ],
+   "required_payload_keys": [
+    "content",
+    "role"
+   ]
+  },
+  "control_request/initialize": {
+   "count": 1,
+   "keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "payload_keys": [
+    "subtype",
+    "supportedDialogKinds"
+   ],
+   "required_keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "required_payload_keys": [
+    "subtype",
+    "supportedDialogKinds"
+   ]
+  },
+  "control_request/request_user_dialog": {
+   "count": 5,
+   "keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "payload_keys": [
+    "dialog_kind",
+    "payload",
+    "subtype"
+   ],
+   "required_keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "required_payload_keys": [
+    "dialog_kind",
+    "payload",
+    "subtype"
+   ]
+  },
+  "control_response/initialize": {
+   "body_keys": [
+    "commands",
+    "current_model",
+    "current_permission_mode",
+    "models"
+   ],
+   "count": 1,
+   "keys": [
+    "response",
+    "type"
+   ],
+   "payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ],
+   "required_body_keys": [
+    "commands",
+    "current_model",
+    "current_permission_mode",
+    "models"
+   ],
+   "required_keys": [
+    "response",
+    "type"
+   ],
+   "required_payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ]
+  },
+  "control_response/request_user_dialog": {
+   "body_keys": [
+    "behavior",
+    "result"
+   ],
+   "count": 5,
+   "keys": [
+    "response",
+    "type"
+   ],
+   "payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ],
+   "required_body_keys": [
+    "behavior"
+   ],
+   "required_keys": [
+    "response",
+    "type"
+   ],
+   "required_payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ]
+  },
+  "result/success": {
+   "count": 5,
+   "keys": [
+    "num_turns",
+    "result",
+    "subtype",
+    "type"
+   ],
+   "required_keys": [
+    "num_turns",
+    "result",
+    "subtype",
+    "type"
+   ]
+  },
+  "system/model_consent_fallback": {
+   "count": 4,
+   "keys": [
+    "choice",
+    "content",
+    "fallback_model",
+    "original_model",
+    "original_model_name",
+    "persisted_as_default",
+    "session_id",
+    "subtype",
+    "type",
+    "uuid"
+   ],
+   "required_keys": [
+    "choice",
+    "content",
+    "fallback_model",
+    "original_model",
+    "original_model_name",
+    "persisted_as_default",
+    "session_id",
+    "subtype",
+    "type",
+    "uuid"
+   ]
+  },
+  "user": {
+   "block_types": [],
+   "count": 5,
+   "keys": [
+    "message",
+    "origin",
+    "parent_tool_use_id",
+    "type",
+    "uuid"
+   ],
+   "payload_keys": [
+    "content",
+    "role"
+   ],
+   "required_keys": [
+    "message",
+    "origin",
+    "parent_tool_use_id",
+    "type",
+    "uuid"
+   ],
+   "required_payload_keys": [
+    "content",
+    "role"
+   ]
+  }
+ },
+ "version": "2.1.257-bundle"
+}
