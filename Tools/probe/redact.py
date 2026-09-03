@@ -42,7 +42,13 @@ SECRET_WORDS = ("token", "oauth", "key", "secret", "credential", "authorization"
                 "password", "bearer")
 USAGE_COUNTERS = {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
                   "thinking_tokens", "max_tokens", "tokens", "total_tokens", "maxtokens", "rawmaxtokens"}
-SECRET_EXEMPT = frozenset(("apikeysource", "hookcallbackids", "projectkey", "sessionkey"))
+# Keys that contain a SECRET_WORDS substring but are structural. `projectKey` names the
+# directory a GUI must read to replay history -- `~/.claude/projects/<projectKey>/
+# <sessionId>.jsonl`, parity 03-49-35 line 186 -- so its value is load-bearing. Nothing
+# earns a place here without that kind of citation: `sessionKey` was exempt until a
+# search of docs/tui-parity and probes turned up no record of it, against bundle
+# occurrences in credential-shaped positions, so it is redacted like any other key.
+SECRET_EXEMPT = frozenset(("apikeysource", "hookcallbackids", "projectkey"))
 OAUTH_SUBTYPES = ("claude_authenticate", "claude_oauth_callback", "claude_oauth_wait_for_completion",
                   "mcp_authenticate", "mcp_oauth_callback_url")
 MCP_LIMIT = 4096

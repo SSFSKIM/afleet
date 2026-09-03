@@ -173,6 +173,16 @@ class SecretKeyPredicateTests(unittest.TestCase):
         self.assertEqual(self.r.redact_json({"password": "p", "bearerToken": "b", "PASSWORD": "q"}),
                          {"password": "<redacted>", "bearerToken": "<redacted>", "PASSWORD": "<redacted>"})
 
+    def test_session_key_is_secret_but_project_key_is_structural(self):
+        # projectKey names a directory the GUI must read (parity 03-49-35 line 186), so it
+        # keeps its exemption. sessionKey has no such record and occurs credential-shaped,
+        # so it is redacted like any other key-named field.
+        out = self.r.redact_json({"sessionKey": "s3cret", "session_key": "s3cret", "projectKey": "p"})
+        self.assertEqual(out, {"sessionKey": "<redacted>", "session_key": "<redacted>", "projectKey": "p"})
+        self.assertEqual(redact.scan({"sessionKey": "s3cret"}, home="/Users/probe"),
+                         ["sessionKey: secret-named field not redacted"])
+        self.assertEqual(redact.scan({"projectKey": "p"}, home="/Users/probe"), [])
+
     def test_camelcase_and_cased_identity_keys(self):
         out = self.r.redact_json({"subscriptionType": "max", "accountUuid": "u", "Account": {"x": 1},
                                   "user_id": 7, "emailAddress": "opaque-id-12345", "organizationId": 3})
