@@ -1,0 +1,1 @@
+{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"commands":[],"agents":[],"models":[],"output_style":"default","available_output_styles":["default"],"current_model":"claude-opus-5","current_permission_mode":"default","session_state":{},"pid":4242,"fast_mode_state":"off"}}}
