@@ -4,7 +4,9 @@
 > **Parent-pin:** that path at commit `9fd067c` ("Spec: §6.10 counts the fourteen probe
 > scripts"). **Level name:** child, wave 1 of the v1 roadmap. **Track:** controlled.
 > **Branch:** `child/c2-core-wire`, worktree `../afleet-c2`; merges to `main` when G1, G3
-> and G4 pass and G2 passes against C1's first fixtures. This document treats the parent's
+> and G4 pass. G2 is blocked by C1.G1: it becomes evaluable when that gate lands, the child
+> may merge with it pending, marked in the parent's tracking map (parent §17.6), and a later
+> failure is a corrective task on C2 flagged to C3 and C4. This document treats the parent's
 > §17 C2 section and its binding inheritance (§5, §6.1 through §6.9) as landed; it
 > records only the residue those sections leave to this child.
 
@@ -43,18 +45,38 @@ that proves it.
   answered with an error naming the failing field and surfaced as a malformed request;
   every frame, request, stderr line and exit event carries the epoch the process was
   created with; `terminate()` sends `end_session`, closes stdin, waits up to five
-  seconds for exit, then sends SIGTERM, in that order, observed against a scripted
-  stand-in that ignores `end_session` (§6.7).
+  seconds for exit, sends SIGTERM, waits up to five seconds more, sends SIGKILL, and
+  emits `.exited` only once the process exit is observed, in that order, observed
+  against one scripted stand-in that ignores `end_session` and another that ignores
+  both `end_session` and SIGTERM (§6.7 as amended on `main`); the in-process MCP server
+  answers the full sequence `initialize`, `notifications/initialized` (acknowledged as
+  `mcp_response {jsonrpc: "2.0", result: {}, id: 0}`), `ping`, `tools/list`,
+  `tools/call`, an unknown method (JSON-RPC error `-32601`) and a cancelled call; with
+  the event consumer suspended and a stand-in emitting frames faster than they are
+  drained, no frame is lost, the stand-in blocks on its pipe and resident memory stays
+  under the buffer bound; every frame that decoded as a typed frame before redaction
+  decodes to the same typed case after it; and `Tests/ConsumerSmoke`, a separate package
+  that imports only `ClaudeWire`, builds and constructs every X3 value through public
+  initialisers.
 - **G2 (required, blocked-by C1.G1) — nothing known is lost, nothing unknown is
   dropped.** For every fixture in `Fixtures/`, every NDJSON line decodes to a `Frame`;
   re-encoding a decoded known frame reproduces every key the fixture line had, with
   equal values; lines whose `type` or `subtype` is not modelled decode to
   `Frame.opaque` carrying the raw line and a parsed `JSONValue`; the count of opaque
   frames per fixture equals the census's count of unmodelled types. This is the
-  ClaudeWire half of the parent's acceptance item 36.
+  ClaudeWire half of the parent's acceptance item 36. The gate is evaluable when C1.G1
+  lands with its complete catalogue; until then the hand-written samples and the stand-in
+  are development aids, not evidence, and the child may merge with G2 pending, marked in
+  the parent's tracking map; a later failure is a corrective task on C2 flagged to C3
+  and C4 (parent §17.6).
 - **G3 (required) — it works against the installed CLI.** With `AFLEET_LIVE_CLI=1`, a
-  test spawns `claude` 2.1.259 in a temporary directory under the user's real ConfigHome
-  with `--setting-sources ""`, completes the handshake, sees `mcp__afleet__send_user_file`
+  test spawns `claude` 2.1.259 with `CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home`,
+  the scratch config home the user logged into once by hand (gate decision 2026-09-04),
+  in a working directory created under the system temporary directory, with
+  `--setting-sources ""`; it diffs the scratch config home before and after and asserts
+  that the only changes are files the spawned `claude` wrote (its transcript, registry
+  record and `.claude.json`), nothing created by the test; it completes the handshake,
+  sees `mcp__afleet__send_user_file`
   in `system/init.tools`, asks the model to send a file and receives the
   `hostToolInvoked` event naming that file with the model's turn completing normally
   (S5's mechanism; the wire half of item 29); `VersionGate` refuses a fabricated
@@ -100,23 +122,31 @@ AfleetCore/
   Tests/AfleetCoreTests/
 ClaudeWire/
   Package.swift            products: ClaudeWire (umbrella); depends on AfleetCore only
-  Sources/WireFrames/      JSONValue, Frame and every typed frame, inbound request and
-                           answer shapes, outbound request specs, ShellEnvelope
+  Sources/WireFrames/      JSONValue, JSONRPCMessage, ProcessEpoch, RequestID, Frame and
+                           every typed frame, inbound request and answer shapes, outbound
+                           request specs, ShellEnvelope
   Sources/WireTransport/   ClaudeProcess, LaunchConfiguration, InitializeConfiguration,
-                           correlation, InboundPolicy, epochs, exit observation
-  Sources/WireMCP/         JSON-RPC 2.0 codec, AfleetMCPServer, MCPTool, SendUserFileTool
+                           correlation, InboundPolicy, exit observation
+  Sources/WireMCP/         AfleetMCPServer, MCPTool, SendUserFileTool (the JSON-RPC value
+                           type lives in WireFrames)
   Sources/WireEnvironment/ EnvironmentResolver, ConfigHome derivation, BinaryLocator,
                            VersionGate, ProtocolBaseline
   Sources/WireDiagnostics/ DiagnosticsSink, FileDiagnostics, RawCapture, Redactor
   Sources/ClaudeWire/      @_exported imports of the five modules
   Tests/<Module>Tests/     one test target per module
   Tests/Support/           scripted-claude.py and hand-written frame samples
+  Tests/ConsumerSmoke/     a separate SwiftPM package that imports only ClaudeWire and
+                           constructs every X3 value (G1)
 Tools/fetch-typings.sh
 ```
 
-Module dependency order inside ClaudeWire: `WireFrames` ← `WireMCP` ← `WireTransport`;
-`WireEnvironment` and `WireDiagnostics` depend on `WireFrames` only; `WireTransport`
-depends on all four. No module imports anything outside `AfleetCore` and Foundation.
+Module dependency order inside ClaudeWire: `WireFrames` depends on `AfleetCore` alone;
+`WireMCP`, `WireEnvironment` and `WireDiagnostics` depend on `WireFrames` only;
+`WireTransport` depends on all four. `InboundRequest` and `InboundAnswer` are
+`WireFrames` types and reference only `WireFrames` types, which is why `ProcessEpoch`,
+`RequestID` and `JSONRPCMessage` live there rather than in the transport or MCP modules:
+nothing imports upward, and G1 proves it by building the manifests together with
+`Tests/ConsumerSmoke`. No module imports anything outside `AfleetCore` and Foundation.
 Every public type is `Sendable`; processes and the MCP server are actors; nothing in
 these packages is `@MainActor`. This is the concurrency convention the parent's §17.7
 asks C2 to set: actors own I/O, values cross actor boundaries, upper layers add
@@ -169,10 +199,13 @@ public enum ChannelOrigin: Hashable, Sendable {
 }
 ```
 
-`OwnedState` and `ForeignHost` enumerate the states named in the parent's §7.4 table.
-`DiffRef` is an addition X2 permits with a Revision Note on the parent; it is filed at
-merge (see Parent revisions below). `AfleetCore` has no I/O, no dependencies and no
-functions beyond initialisers and string conversion.
+`OwnedState` and `ForeignHost` enumerate the states named in the parent's §7.4 table;
+`contended` is modelled as an owned sub-state rather than a fifth origin (gate decision
+2026-09-04), which C4 may overturn with a Revision Note if its lifecycle code reads
+better otherwise. `DiffRef` is adopted (gate decision 2026-09-04) as the X2 addition the
+parent's §9.6 names without defining; it is filed on the parent at merge (see Parent
+revisions below). Every type here has a public memberwise initialiser. `AfleetCore` has
+no I/O, no dependencies and no functions beyond initialisers and string conversion.
 
 ### `WireFrames`: frame models
 
@@ -237,7 +270,8 @@ public enum SystemFrame: Sendable {   // one case per modelled system subtype �
 **Inbound requests and answers.**
 
 ```swift
-public struct RequestID: Hashable, Sendable { public let rawValue: String }
+// All of these are WireFrames types; ProcessEpoch and JSONRPCMessage are defined there too.
+public struct RequestID: Hashable, Sendable { public let rawValue: String; public init(rawValue: String) }
 public struct InboundRequest: Sendable, Identifiable {
   public let id: RequestID; public let epoch: ProcessEpoch
   public let receivedAt: ContinuousClock.Instant
@@ -295,9 +329,26 @@ restart create a new instance with a higher epoch, so "discard events from a sup
 process" is a comparison on `ProcessEpoch`, never a flag.
 
 ```swift
-public struct ProcessEpoch: Hashable, Comparable, Codable, Sendable { public let rawValue: UInt64 }
+public struct ProcessEpoch: Hashable, Comparable, Codable, Sendable {   // defined in WireFrames
+  public let rawValue: UInt64
+  public init(rawValue: UInt64)
+  public static let first: ProcessEpoch                // rawValue 1
+  public func next() -> ProcessEpoch                   // rawValue + 1; FleetKit owns the progression
+}
+
+public enum SessionStart: Hashable, Sendable { case new(SessionID), resume(SessionID, fork: Bool) }
+public struct ChildEnvironmentOptions: Hashable, Sendable {
+  public var forkSubagents: Bool, automodeDecisionLog: Bool, questionPreviewFormat: String?
+  public init(forkSubagents: Bool = true, automodeDecisionLog: Bool = false, questionPreviewFormat: String? = nil)
+}
 
 public struct LaunchConfiguration: Hashable, Sendable {
+  public init(binary: URL, cwd: URL, session: SessionStart, model: String? = nil,
+              permissionMode: PermissionMode? = nil, agent: String? = nil, effort: String? = nil,
+              name: String? = nil, addDirectories: [URL] = [], worktree: Worktree? = nil,
+              allowBypass: Bool = false, promptSuggestions: Bool = false,
+              settingSources: [SettingSource]? = nil, strictMCPConfig: Bool = false,
+              environment: ChildEnvironmentOptions = .init())
   public var binary: URL
   public var cwd: URL
   public var session: SessionStart                 // .new(SessionID) | .resume(SessionID, fork: Bool)
@@ -318,6 +369,10 @@ public struct LaunchConfiguration: Hashable, Sendable {
 }
 
 public struct InitializeConfiguration: Hashable, Sendable {  // §6.2, defaults are the parent's payload
+  public init(supportedDialogKinds: [String] = ["refusal_fallback_prompt", "fable_overage_consent_prompt"],
+              perTaskStopAffordance: Bool = true, agentProgressSummaries: Bool = true,
+              sdkMcpServers: [String] = ["afleet"],
+              hooks: [HookEvent: [HookCallbackMatcher]] = .afleetDefaults)  // Notification + ConfigChange
   public var supportedDialogKinds: [String]
   public var perTaskStopAffordance: Bool
   public var agentProgressSummaries: Bool
@@ -357,10 +412,13 @@ public actor ClaudeProcess {
   public func requestRaw(subtype: String, payload: JSONValue, timeout: Duration? = nil) async throws -> JSONValue
   public func cancel(_ id: RequestID) async         // sends control_cancel_request for an outbound request
   public func answer(_ id: RequestID, _ answer: InboundAnswer) async throws
-  public func terminate() async                    // §6.7 sequence
+  public func terminate() async                    // §6.7 sequence; returns only after the exit is observed
   public var status: ProcessStatus { get }         // launching, handshaking, running, terminating, exited(ExitStatus)
 }
 ```
+
+Every value a downstream package constructs has a public initialiser above; Swift's
+synthesised memberwise initialisers are internal, so none of X3 relies on them.
 
 **Correlation.** Outbound `request_id`s are UUID strings; a pending map resolves the
 matching `control_response` into the spec's `Response` or throws
@@ -380,22 +438,38 @@ callback id the host did not register is answered with an empty continue and log
 per the parent's §6.4 row; registered ids are surfaced as `.request` for FleetKit to
 act on and then answer. `mcp_message` never reaches FleetKit: the transport routes it to
 the `AfleetMCPServer` actor and answers with `mcp_response` itself, emitting
-`.hostToolInvoked` when a tool call had a host-side effect.
+`.hostToolInvoked` when a tool call had a host-side effect. `oauth_token_refresh` and
+`host_auth_token_refresh` are deliberately not modelled: the CLI installs those two
+inbound requests only when `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` is set and
+`CLAUDE_CODE_ENTRYPOINT` is `claude-desktop`, `local-agent` or `claude-vscode`
+(`docs/tui-parity/areas/06-08-02-models-auth-bootstrap.md`, the SDK-driven token refresh
+row), and afleet sets neither. Should one ever arrive, the unknown-subtype error is the
+correct decline: the CLI refreshes its own stored login, and a host that cannot own the
+credential must not pretend to.
 
-**Transport mechanics.** `Process` with three pipes; a stdin writer task fed by an
-`AsyncStream<Data>` that serialises writes and surfaces `EPIPE` as the crash path; a
-stdout reader that splits on `\n`, tolerates a final unterminated line at exit, and
-hands each line to the decoder and the raw tap; a stderr reader into a 64 KiB ring
-whose tail rides `.exited`; `keep_alive` frames reset an inactivity timer used only for
-diagnostics. `events` buffers without dropping (frames are never dropped), which is
-safe because the consumer is FleetKit's reducer, not a UI. `spawn()` fails with
-`WireError.handshakeTimeout(stderrTail:)` after 30 s, or `WireError.launchFailed` when
-the binary cannot be executed.
+**Transport mechanics.** `Process` with three pipes. The stdin side is a bounded queue:
+`send` and `request` suspend until their bytes have been written to the pipe, so a
+caller cannot outrun the child and `EPIPE` surfaces as the crash path on the call that
+hit it. The stdout reader splits on `\n`, tolerates a final unterminated line at exit,
+and hands each line to the decoder and the raw tap; `events` is backed by a bounded
+buffer (4,096 frames by default, configurable at init) and when it is full the reader
+stops reading, so the CLI blocks on its own pipe write. Nothing is ever dropped and
+memory is bounded; the cost is that a stalled consumer pauses the engine, which is the
+right failure for a reducer that drains a frame in microseconds and is the failure the
+stress test in G1 provokes on purpose. There is no disk spool. A stderr reader fills a
+64 KiB ring whose tail rides `.exited`; `keep_alive` frames reset an inactivity timer
+used only for diagnostics. `spawn()` fails with `WireError.handshakeTimeout(stderrTail:)`
+after 30 s, or `WireError.launchFailed` when the binary cannot be executed.
 
 **`terminate()`**: write `end_session` as a control request without awaiting its
-response beyond the wait window, close stdin, wait up to five seconds for exit, then
-SIGTERM; the instance is then `exited`. The parent's sequence stops at SIGTERM; a
-SIGKILL five seconds later is proposed below, not assumed.
+response beyond the wait window, close stdin, wait up to five seconds for the process
+to exit, send SIGTERM, wait up to five seconds more, send SIGKILL. `status` stays
+`.terminating` until `Process` reports termination, and `.exited` is emitted only on
+that observation, never on a timer, so FleetKit's handoff, ownership release and
+respawn always wait on a real exit and two holders can never coexist because a child
+ignored a signal. Each escalation step is a diagnostic event (`terminateEscalated`
+with the step reached); a SIGKILLed child reports signal 9. This is the parent's §6.7
+sequence as amended on `main` on 2026-09-04 (gate decision: SIGKILL accepted).
 
 ### `WireMCP`: the in-process server
 
@@ -403,9 +477,16 @@ A minimal JSON-RPC 2.0 codec (`JSONRPCMessage` = request, notification, response
 error) and an `AfleetMCPServer` actor that implements `initialize`,
 `notifications/initialized`, `ping`, `tools/list` and `tools/call` for a registry of
 `MCPTool`s. It is transport-agnostic: `handle(_ message: JSONRPCMessage) async ->
-JSONRPCMessage?` returns the reply (or nil for notifications), and `ClaudeProcess`
-carries replies back under `response.mcp_response`. Server info is `afleet` with the
-app's version; capabilities declare tools only. `SendUserFileTool` has input schema
+MCPReply`, where `MCPReply` is `.response(JSONRPCMessage)` for a request and
+`.notificationAck` for a notification. `ClaudeProcess` carries a response back under
+`response.mcp_response` and encodes a notification acknowledgement as `mcp_response:
+{"jsonrpc": "2.0", "result": {}, "id": 0}`, because every `mcp_message` arrives inside a
+`control_request` that must be answered: the pinned SDK answers non-request messages
+exactly that way (`sdk.mjs` 0.3.259, the `mcp_message` branch) and the CLI's own schema
+describes the field as "for a JSON-RPC notification, a response with an empty result".
+An unknown method answers JSON-RPC error `-32601`; `notifications/cancelled` is
+acknowledged and cancels the named in-flight tool call's task. Server info is `afleet`
+with the app's version; capabilities declare tools only. `SendUserFileTool` has input schema
 `{files: [string], caption?: string}`; it resolves each path against the channel's cwd,
 requires that the file exists and is readable, returns a text result naming the files
 sent, and reports a `HostToolInvocation.sentFile(paths:, caption:)` that FleetKit turns
@@ -415,14 +496,18 @@ SDK's transport abstraction.
 
 ### `WireEnvironment`: environment, ConfigHome, binary, version
 
-`EnvironmentResolver.resolve(shell:timeout:)` runs `$SHELL -l -i -c 'env -0'` with stdin
-from `/dev/null`, a pseudo-`TERM` of `dumb`, and a five-second timeout; on timeout or a
-non-zero exit it retries with `-l -c`; if that fails too it returns the app's own
-environment tagged `.processFallback` so the app can warn rather than refuse to start.
-Parsing takes only NUL-separated tokens matching `^[A-Za-z_][A-Za-z0-9_]*=`, which
-skips banners an interactive rc file may print, and records `capturedAt`, the shell and
-the mode. The resolver is a `Sendable` value with an injectable process runner so the
-banner, timeout and fallback paths are unit-tested with scripted shells.
+`EnvironmentResolver.resolve(shell:timeout:)` runs `$SHELL -l -i -c 'printf
+"__AFLEET_ENV__\0"; env -0'` with stdin from `/dev/null`, a pseudo-`TERM` of `dumb`, and
+a five-second timeout; on timeout or a non-zero exit it retries with `-l -c`; if that
+fails too it returns the app's own environment tagged `.processFallback` so the app can
+warn rather than refuse to start. Parsing discards every byte up to and including the
+first `__AFLEET_ENV__` NUL-terminated sentinel, so a banner an interactive rc file
+prints cannot fuse with the first variable, then splits the remainder on NUL and keeps
+tokens matching `^[A-Za-z_][A-Za-z0-9_]*=`; a missing sentinel counts as a failed
+capture and falls through the ladder. It records `capturedAt`, the shell and the mode.
+The resolver is a `Sendable` value with an injectable process runner; the unit tests
+cover a banner with `PATH` as the first variable, a banner with `CLAUDE_CONFIG_DIR`
+first, a banner without a trailing newline, the timeout and the fallback paths.
 
 `ConfigHome.derive(from:)` implements §6.9: `CLAUDE_CONFIG_DIR` from the captured
 variables when set (tilde-expanded, standardised, source `.environment`), else
@@ -450,11 +535,20 @@ characters of SHA-256 over the ConfigHome path) under a 0700 directory as 0600 f
 enforces the 200 MB budget oldest-first, and exposes `prune(keeping: Set<SessionID>)`
 for FleetKit to call when a transcript disappears. `Redactor` is structural: it parses
 the line, removes account fields and whole `update_environment_variables` frames,
-replaces the value of any key whose name contains `token`, `oauth`, `key` or `secret`
-(case-insensitive) with `"<redacted>"`, truncates MCP JSON-RPC bodies to 4 KB, and
+replaces the value of any **string-valued** field whose name contains `token`, `oauth`,
+`key` or `secret` (case-insensitive) with `"<redacted>"`, leaving numbers, booleans,
+arrays and objects untouched and exempting the usage counters by exact name
+(`input_tokens`, `output_tokens`, `cache_read_input_tokens`,
+`cache_creation_input_tokens`, `thinking_tokens`, `max_tokens`, `tokens`); credential
+paths that are known are matched by path as well (`account.*`, any `access_token`,
+`refresh_token`, `authorization`, `oauth*`). It truncates MCP JSON-RPC bodies to 4 KB and
 re-serialises; a line that does not parse is not captured and is counted in
 diagnostics. Redaction happens before any write, so the on-disk file never holds an
-unredacted byte (§11, X9).
+unredacted byte (§11, X9). The substring rule as the parent first wrote it would have
+turned `usage.input_tokens` and its siblings, present in every assistant frame, into
+strings and made every redacted assistant frame undecodable; the parent's §11 is
+amended on `main` to the string-valued rule, and a test asserts that every frame typed
+before redaction decodes to the same typed case after it.
 
 ### Tests before C1's fixtures exist
 
@@ -462,14 +556,23 @@ unredacted byte (§11, X9).
 not a fixture player: it answers `initialize`, echoes user frames as `assistant` frames,
 and takes scenario flags to emit an unknown control subtype, a malformed `can_use_tool`,
 a declared and an undeclared `request_user_dialog`, a `control_cancel_request`, to ignore
-`end_session`, to exit with a chosen code, and to print stderr. G1 runs against it.
+`end_session`, to ignore both `end_session` and SIGTERM (it traps the signal and keeps
+running until SIGKILL), to flood stdout with frames faster than a suspended consumer
+drains them, to exit with a chosen code, and to print stderr. G1 runs against it, and
+against `Tests/ConsumerSmoke`, the external package that proves the public API is
+constructible from outside.
 Frame-model tests use hand-written samples for every modelled type, drawn from the
 parity evidence's captured frames and the bundle spec. When C1's `fake-claude` and
 `Fixtures/` land, G2 replaces the samples with the corpus and the stand-in stays for the
 scenarios a recording cannot produce. Live tests (G3) are one XCTest class tagged by the
-`AFLEET_LIVE_CLI` environment variable, spawn in a fresh temporary directory so the
-CLI's own transcript lands under a disposable project slug, pass `--setting-sources ""`
-so the user's hooks and MCP servers stay out, and cost one short model turn per run.
+`AFLEET_LIVE_CLI` environment variable; they set `CLAUDE_CONFIG_DIR` to the scratch
+config home at `/tmp/afleet-fixtures/config-home`, which the user logs into once by hand
+and which C1's recordings share, spawn in a fresh directory under the system temporary
+directory so the CLI's own transcript lands under a disposable project slug inside the
+scratch home, pass `--setting-sources ""` so no hook or MCP server joins, diff the
+scratch home before and after to prove the test itself created nothing there, and cost
+one short model turn per run. The test is skipped with a message naming the login step
+when the scratch home has no credentials.
 
 ### `Tools/fetch-typings.sh`
 
@@ -485,7 +588,9 @@ nothing derived from the typings is ever committed.
 
 **Owned by C2.** X2 `AfleetCore` value types, exactly the shapes above. X3 Wire API,
 exactly `ClaudeProcess`, `LaunchConfiguration`, `InitializeConfiguration`, `WireEvent`,
-`InboundRequest`, `InboundAnswer`, `ControlRequestSpec` and `Frame` as written here.
+`InboundRequest`, `InboundAnswer`, `ControlRequestSpec`, `ProcessEpoch` and `Frame` as
+written here, with the public initialisers shown; `Tests/ConsumerSmoke` is the
+executable statement of what C3 and C4 may construct.
 X11 Environment injection: `ResolvedEnvironment` is captured once per app launch by
 `EnvironmentResolver`, and `LaunchConfiguration.childEnvironment(over:)` is the only
 place the child environment is composed; Workbench and the app receive the same value
@@ -509,33 +614,16 @@ C2's own: whether `-l -i -c` under the user's zsh configuration completes inside
 seconds on a cold start; the resolver's fallback ladder makes either outcome
 non-fatal, and the measured time is logged in diagnostics.
 
-## Parent revisions to file at merge
+## Parent revisions
 
-Revision Notes on the parent, per its X2 rule for additions and the child's duty to
-report overturned advisory content: `DiffRef` defined as above; `ChannelOrigin`'s
-sub-states enumerated as above; `.typings/` added to `.gitignore`; and, if approved
-below, SIGKILL appended to §6.7's sequence.
-
-## Questions for the human gate
-
-1. **SIGKILL after SIGTERM.** §6.7's binding sequence ends at SIGTERM. A binary that
-   ignores SIGTERM would leave a zombie that FleetKit's respawn cannot replace.
-   Recommendation: SIGKILL five seconds after SIGTERM, filed as a `[parent-impact]`
-   note because it extends binding content.
-2. **`DiffRef` shape.** The parent names it and leaves it undefined; the shape above
-   serves the Source Control panel's three diff kinds. Recommendation: adopt it; C7 may
-   extend it with a Revision Note.
-3. **Live-CLI tests use the real ConfigHome.** A temporary ConfigHome would need its
-   own login. G3 therefore spawns under the user's ConfigHome with `--setting-sources
-   ""` in a disposable directory; the CLI writes one transcript there per run.
-   Recommendation: accept; it is what the fourteen probes already do.
-4. **Packages at the repository root.** `AfleetCore/` and `ClaudeWire/` at the root
-   match the parent's `swift test --package-path ClaudeWire`; a `Packages/` folder would
-   be tidier but needs the gate reworded. Recommendation: root.
-5. **`contended` as an owned sub-state.** X2 lists four origins; the parent's §7.4 has a
-   Contended state. Modelling it under `.owned` keeps X2's four cases; C4 may prefer a
-   fifth top-level case. Recommendation: sub-state, C4 overturns with a Revision Note
-   if the lifecycle code reads better otherwise.
+Filed on the parent by its tending session on 2026-09-04, listed here for the lineage
+check at recomposition: §6.7's `terminate()` sequence gains SIGTERM, a five-second
+wait and SIGKILL, with exit reported only when observed; §11's capture redaction rule
+reads "string-valued fields named like token, oauth, key or secret, usage counters
+exempt"; §17.6 states that a gate blocked by another child's gate is evaluable when that
+gate lands and a child may merge with it pending, marked in the tracking map. To file
+at merge, under X2's additions rule: `DiffRef` as defined above; `ChannelOrigin`'s
+sub-states as enumerated above; `.typings/` in `.gitignore`.
 
 ## Decision Log
 
@@ -574,10 +662,13 @@ below, SIGKILL appended to §6.7's sequence.
   away from FleetKit. Rejected: `modelcontextprotocol/swift-sdk`; surfacing raw
   JSON-RPC to FleetKit.
   Date/Author: 2026-09-04 / Claude for kimmi
-- Decision: Environment capture is interactive-login first with a token filter, then
-  login-only, then the process environment, each tagged in `CaptureMode`.
-  Rationale: §6.9 wants `.zshrc` to apply, interactive rc files can print, and a failed
-  capture must not stop the app from opening history. Rejected: login-only capture;
+- Decision: Environment capture is interactive-login first, behind a NUL-terminated
+  sentinel that discards banner output, then login-only, then the process environment,
+  each tagged in `CaptureMode`.
+  Rationale: §6.9 wants `.zshrc` to apply, interactive rc files can print, a banner
+  without a trailing newline would otherwise fuse with the first variable and silently
+  drop `PATH` or `CLAUDE_CONFIG_DIR`, and a failed capture must not stop the app from
+  opening history. Rejected: login-only capture; filtering tokens by shape alone;
   failing hard when the shell hangs.
   Date/Author: 2026-09-04 / Claude for kimmi
 - Decision: Binary lookup order is settings override, PATH from the captured
@@ -585,17 +676,27 @@ below, SIGKILL appended to §6.7's sequence.
   Rationale: PATH is what the terminal runs; the parent names `~/.local/bin/claude`
   as the known install location, kept as the fallback. Rejected: the fixed path first.
   Date/Author: 2026-09-04 / Claude for kimmi
-- Decision: Redaction is structural and precedes every write; unparseable lines are not
-  captured.
+- Decision: Redaction is structural, applies the name rule to string values only with
+  the usage counters exempt and credential paths matched explicitly, precedes every
+  write, and is checked by a typed-before-typed-after assertion; unparseable lines are
+  not captured.
   Rationale: Regex redaction over raw text misses nested fields and can corrupt JSON;
-  the capture exists to make fixtures, which must parse anyway. Rejected: text-level
-  redaction; capture-then-redact.
+  the bare substring rule would have rewritten `input_tokens` and its siblings into
+  strings and broken every assistant frame's decoding; the capture exists to make
+  fixtures, which must both parse and stay typed. Rejected: text-level redaction;
+  capture-then-redact; the substring rule as first written (a `[parent-impact]`, now
+  amended on `main`).
   Date/Author: 2026-09-04 / Claude for kimmi
 - Decision: A scripted Python stand-in for transport tests until C1's `fake-claude`
-  lands; live tests behind `AFLEET_LIVE_CLI=1`.
+  lands, with scenarios for ignoring `end_session`, ignoring SIGTERM too, and flooding a
+  suspended consumer; live tests behind `AFLEET_LIVE_CLI=1` under the scratch config
+  home.
   Rationale: G1 must be provable in wave 1 without fixtures, and scenarios such as
-  ignoring `end_session` cannot be recorded. Rejected: waiting for C1; mocking `Process`
-  entirely.
+  ignoring signals or out-running the reducer cannot be recorded; the scratch home, which
+  the user logs into once, keeps test writes out of the real config home and lets the
+  test prove by diff that it created nothing there. Rejected: waiting for C1; mocking
+  `Process` entirely; spawning under the real config home with isolated settings
+  (rejected at the gate, 2026-09-04).
   Date/Author: 2026-09-04 / Claude for kimmi
 - Decision: ClaudeWire is five single-purpose modules under one umbrella product;
   AfleetCore is one module.
@@ -605,6 +706,73 @@ below, SIGKILL appended to §6.7's sequence.
 - Decision: `ShellEnvelope` lives in `WireFrames`.
   Rationale: The neutraliser is protocol text that two upper children would otherwise
   each implement. Rejected: FleetKit's router owning it; duplicating it in the composer.
+  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: `ProcessEpoch`, `RequestID` and `JSONRPCMessage` are `WireFrames` types, and
+  G1 builds an external consumer package that imports only `ClaudeWire`.
+  Rationale: `InboundRequest` carries the epoch and `InboundAnswer` carries a JSON-RPC
+  reply; placing those types above `WireFrames` would make the frame module import the
+  transport and MCP modules that depend on it, and the package would not build. The
+  consumer package is the only proof that the public surface is constructible from
+  outside the module. Rejected: moving `InboundRequest` and `InboundAnswer` into
+  `WireTransport` (C3 and C4 would then import transport types to read a request);
+  trusting synthesised memberwise initialisers, which are internal.
+  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: `terminate()` escalates `end_session`, stdin close, SIGTERM, SIGKILL with
+  five-second waits, keeps `.terminating` until the exit is observed, and emits `.exited`
+  only then.
+  Rationale: A child that ignores SIGTERM would otherwise be reported dead while alive,
+  and FleetKit's ownership release or respawn would create two holders of one session
+  with concurrent transcript writes. Accepted at the gate as an amendment to the parent's
+  §6.7 (2026-09-04). Rejected: reporting `.exited` on the SIGTERM timer; stopping at
+  SIGTERM and leaving the zombie to the lifecycle layer.
+  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: JSON-RPC notifications are acknowledged with an outer `mcp_response` of
+  `{jsonrpc: "2.0", result: {}, id: 0}`; `handle` returns `MCPReply.notificationAck`.
+  Rationale: Every `mcp_message` is a control request that needs a control response; a
+  nil reply would leave `notifications/initialized` unanswered and stall the server's
+  initialisation. The shape is the pinned SDK's own (`sdk.mjs` 0.3.259) and matches the
+  CLI schema's description. Rejected: answering with a success that lacks
+  `mcp_response`; not answering.
+  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: Both transport directions are bounded in memory; a full event buffer stops
+  the stdout reader so the CLI blocks on its pipe; stdin sends suspend until written.
+  Rationale: Frames must never be dropped and memory must never grow without bound; the
+  pipe's own backpressure gives both at once, and a paused engine is the right failure
+  when the reducer, which drains in microseconds, has stalled. Rejected: an unbounded
+  buffer; dropping oldest frames; an ordered disk spool (complexity for a consumer that
+  never falls behind in practice).
+  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: `oauth_token_refresh` and `host_auth_token_refresh` are not modelled.
+  Rationale: The CLI installs them only with `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` and a
+  first-party entrypoint, neither of which afleet sets, and the CLI refreshes its own
+  login; if one ever arrived, the unknown-subtype error is the correct decline.
+  Rejected: typed shapes and host callbacks for a credential the host must not own.
+  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: G2 is evaluable when C1.G1 lands and the child may merge with it pending,
+  marked in the parent's tracking map.
+  Rationale: Decided at the parent (§17.6): C1's catalogue needs the user's manual login
+  and real recording time, and holding all of wave 2 for it costs more than a later
+  corrective task on C2, which C3 and C4 are flagged for. Rejected: merging on partial
+  fixtures as if G2 had passed; blocking the merge on the complete catalogue.
+  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: Live tests use the scratch config home `/tmp/afleet-fixtures/config-home`,
+  logged into once by the user, with the working directory under the system temporary
+  directory.
+  Rationale: Gate decision 2026-09-04, shared with C1's recordings: nothing test-owned
+  is created under any config home, the real history stays clean, and the before-and-
+  after diff makes the never-write rule a checked property. Rejected: the real config
+  home with isolated settings.
+  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: `AfleetCore/` and `ClaudeWire/` live at the repository root.
+  Rationale: Gate decision 2026-09-04; the parent's `swift test --package-path
+  ClaudeWire` then reads literally. Rejected: a `Packages/` folder with the gate
+  reworded.
+  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: `DiffRef` is adopted as defined above; `contended` is an owned sub-state.
+  Rationale: Gate decision 2026-09-04. `DiffRef` gives the Source Control panel its three
+  diff kinds under X2's additions rule; the sub-state keeps X2's four origins and leaves
+  C4 free to overturn it with a Revision Note. Rejected: leaving `DiffRef` undefined for
+  C7; a fifth top-level origin.
   Date/Author: 2026-09-04 / Claude for kimmi
 
 ## Surprises & Discoveries
@@ -621,6 +789,28 @@ below, SIGKILL appended to §6.7's sequence.
   Evidence: the `interrupt()` doc comment and `SDKControlInterruptRequest` in the
   typings. Impact: `Interrupt.Response` fields are optional and FleetKit's `still_queued`
   handling gates on the capability token.
+- Observation: The pinned SDK answers a JSON-RPC notification delivered by `mcp_message`
+  with a dummy response, `{jsonrpc: "2.0", result: {}, id: 0}`, rather than with nothing.
+  Evidence: the `mcp_message` branch of `sdk.mjs` 0.3.259 (`if (r.onmessage)
+  r.onmessage(n.message); return {mcp_response: {jsonrpc: "2.0", result: {}, id: 0}}`) and
+  the CLI schema text "for a JSON-RPC notification, a response with an empty result".
+  Impact: `MCPReply.notificationAck` and its fixed outer encoding.
+- Observation: A name-substring redaction rule on `token` hits `usage.input_tokens`,
+  `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` and
+  `thinking_tokens`, which every assistant and result frame carries as numbers.
+  Evidence: the `usage` object in the parity evidence's captured frames and the typings'
+  `NonNullableUsage`. Impact: the rule applies to string values only with the counters
+  exempt; the parent's §11 wording is amended on `main`.
+- Observation: The two token-refresh inbound requests are entrypoint-gated.
+  Evidence: `docs/tui-parity/areas/06-08-02-models-auth-bootstrap.md`, "installed only
+  when `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` is set and `CLAUDE_CODE_ENTRYPOINT` ∈
+  {claude-desktop, local-agent, claude-vscode}". Impact: not modelled; the unknown-subtype
+  error is the decline if one ever arrives.
+- Observation: The extracted bundle's SPEC chapter files under
+  `~/claude-code-bundle/2.1.257/SPEC/` were no longer on disk on 2026-09-04; the bundle
+  source (`cli.pretty.js`, `modules/`), the fetched SDK package and `docs/tui-parity/`
+  remain. Impact: existing SPEC citations in this document are kept as written; new
+  citations point at sources that can be opened.
 
 ## Outcomes & Retrospective
 
@@ -629,3 +819,16 @@ Pending — written at finish.
 ## Revision Notes
 
 - 2026-09-04: v1, written at dispatch against parent commit `9fd067c`.
+- 2026-09-04: v2 after the parent's review, the human gate and a Codex adversarial review.
+  Gate decisions folded in: SIGKILL after SIGTERM with exit reported only when observed
+  (§6.7 amended on `main`), `DiffRef` adopted, `contended` as an owned sub-state,
+  packages at the repository root, live tests under the scratch config home. Review
+  findings: `ProcessEpoch`, `RequestID` and `JSONRPCMessage` moved to `WireFrames` and an
+  external consumer package added to G1; public initialisers for every downstream value;
+  notification acknowledgement as `mcp_response {result: {}, id: 0}` and the full MCP
+  sequence in G1; string-valued redaction with the usage counters exempt and a
+  typed-after-redaction assertion (§11 amended on `main`); bounded transport buffers with
+  pipe backpressure and a flood test; sentinel-delimited environment capture; G2 stated
+  as evaluable at C1.G1 with merge allowed pending (§17.6); the token-refresh requests
+  recorded as unreachable for afleet. The "Questions for the human gate" section is
+  removed.
