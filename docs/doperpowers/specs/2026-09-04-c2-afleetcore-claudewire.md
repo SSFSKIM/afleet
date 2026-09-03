@@ -860,3 +860,33 @@ Pending — written at finish.
   preserves declared keys that were explicit nulls; `mcp_reconnect`, `mcp_toggle`,
   `update_settings` and `mcp_call` payloads corrected to the typings' keys; the
   `ClaudeWire` umbrella re-exports `AfleetCore` so a consumer imports one module.
+- 2026-09-04: Outbound cancellation, two facts read from the engine binary during execution
+  (`~/claude-code-bundle/2.1.258/cli.pretty.js`; C1 confirms both against the 2.1.259
+  recording, after which this note cites the fixture instead). First, the abortable set above
+  is correct as written: the stdin loop's `control_cancel_request` handler aborts only
+  requests registered in its abort map, and the only host-reachable subtypes that register
+  are `mcp_call` and `side_question` (`remote_tools_announce` also registers but is
+  cloud-worker only). For every other subtype a host cancel is a no-op — the binary logs
+  `control_cancel_request for unknown request <id> — nothing pending, ignoring` — and the
+  request runs on to its normal answer. `ClaudeProcess.cancel(_:)` therefore documents that
+  the CLI ignores the frame for non-abortable subtypes, so no caller expects the request to
+  stop. Second, after honouring a cancel the CLI still emits an error `control_response`
+  (`mcp_call cancelled by client: <server>`, `Side question cancelled`). A response whose
+  `request_id` the pending map has already forgotten is therefore ordinary traffic, not
+  drift: the correlation path drops it with at most a diagnostic, never a `WireError` and
+  never an opaque-census entry. The CLI's own schema text states the rule symmetrically — a
+  requester ignores responses for request ids it is not waiting on.
+- 2026-09-04: Frame-model errata found during execution by reading the engine's zod schema
+  registry rather than the typings, each confirmed by an independent reviewer against the
+  same source. `command_lifecycle` carries `state` (one of queued, started, completed,
+  cancelled, discarded, refused), not `event`; there is no `event` key on that frame.
+  `mirror_error.key` is an object (`projectKey`, `sessionId`, optional `subpath`), not a
+  string. `tool_progress.elapsed_time_seconds` is an integer. `files_persisted` carries
+  `files` of `{filename, file_id}` and `failed` of `{filename, error}`.
+  `compact_boundary`'s `preserved_segment` and `preserved_messages` are objects. `request_id`
+  is nullable on both `model_refusal_fallback` and `model_refusal_no_fallback`, which makes
+  five nullable-but-required fields in total across the modelled frames rather than the three
+  the plan named. `conversation_reset` was checked and the plan was right: the wire key is
+  `new_conversation_id`, and the parity doc's `newConversationId` is a client-side internal.
+  Wire evidence is taken from the engine's own schemas; a hand-written sample that agrees
+  with a wrong model proves nothing, which is how two of these survived review of the tables.
