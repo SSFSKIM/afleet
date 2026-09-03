@@ -50,7 +50,7 @@ public enum Frame: Sendable {
     }
 }
 
-public enum FrameDecoder {
+public enum FrameDecoder: Sendable {
     /// Stage one parses the line into a JSONValue; stage two decodes the typed model from the same bytes.
     /// A failure at any stage yields .opaque; this function never throws.
     public static func decode(line: Data) -> Frame {

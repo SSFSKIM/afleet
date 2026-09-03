@@ -20,14 +20,52 @@ public struct ControlRequestFrame: Hashable, Sendable, Codable {
 }
 
 public struct ControlSuccess: Hashable, Sendable {
-    public var requestID: RequestID; public var response: JSONValue?; public var pendingPermissionRequests: [ControlRequestFrame]; public var pendingUserDialogRequests: [ControlRequestFrame]
+    public var requestID: RequestID
+    public var response: JSONValue?
+    /// The two `pending_*` arrays exactly as they arrived, kept raw rather than rebuilt from the
+    /// typed views. Re-encoding therefore reproduces them key for key: an absent key stays absent,
+    /// a present empty array stays a present empty array, and an element's keys beyond
+    /// type/request_id/request survive. `nil` means the key was not on the wire.
+    public var rawPendingPermissionRequests: JSONValue?
+    public var rawPendingUserDialogRequests: JSONValue?
+
+    /// Typed views over the raw arrays. An element that does not decode as a control request is
+    /// skipped here; it is still re-encoded verbatim, because the raw value is what gets written.
+    public var pendingPermissionRequests: [ControlRequestFrame] { Self.requestFrames(rawPendingPermissionRequests) }
+    public var pendingUserDialogRequests: [ControlRequestFrame] { Self.requestFrames(rawPendingUserDialogRequests) }
+
+    /// Builds a response afleet is about to send. An empty array omits the key, which is what this
+    /// type did before the arrays became raw.
     public init(requestID: RequestID, response: JSONValue?, pendingPermissionRequests: [ControlRequestFrame] = [], pendingUserDialogRequests: [ControlRequestFrame] = []) {
-        self.requestID = requestID; self.response = response; self.pendingPermissionRequests = pendingPermissionRequests; self.pendingUserDialogRequests = pendingUserDialogRequests
+        self.requestID = requestID
+        self.response = response
+        self.rawPendingPermissionRequests = pendingPermissionRequests.isEmpty ? nil : .array(pendingPermissionRequests.map(\.jsonValue))
+        self.rawPendingUserDialogRequests = pendingUserDialogRequests.isEmpty ? nil : .array(pendingUserDialogRequests.map(\.jsonValue))
+    }
+    /// Preserves what arrived on the wire; used by `ControlResponseFrame.init(from:)`.
+    public init(requestID: RequestID, response: JSONValue?, rawPendingPermissionRequests: JSONValue?, rawPendingUserDialogRequests: JSONValue?) {
+        self.requestID = requestID
+        self.response = response
+        self.rawPendingPermissionRequests = rawPendingPermissionRequests
+        self.rawPendingUserDialogRequests = rawPendingUserDialogRequests
+    }
+    private static func requestFrames(_ value: JSONValue?) -> [ControlRequestFrame] {
+        guard let elements = value?.arrayValue else { return [] }
+        return elements.compactMap { element in
+            guard let data = try? element.canonicalData() else { return nil }
+            return try? JSONDecoder().decode(ControlRequestFrame.self, from: data)
+        }
     }
 }
 public struct ControlFailure: Hashable, Sendable {
-    public var requestID: RequestID; public var error: String
-    public init(requestID: RequestID, error: String) { self.requestID = requestID; self.error = error }
+    public var requestID: RequestID
+    /// The `error` value exactly as it arrived. `nil` means the frame carried no `error` key, and
+    /// re-encoding must not invent one.
+    public var rawError: JSONValue?
+    /// The error text; empty when the frame carried no `error` key or carried a non-string one.
+    public var error: String { rawError?.stringValue ?? "" }
+    public init(requestID: RequestID, error: String) { self.requestID = requestID; self.rawError = .string(error) }
+    public init(requestID: RequestID, rawError: JSONValue?) { self.requestID = requestID; self.rawError = rawError }
 }
 public enum ControlResponseBody: Hashable, Sendable { case success(ControlSuccess), error(ControlFailure) }
 
@@ -42,15 +80,15 @@ public struct ControlResponseFrame: Hashable, Sendable, Codable {
         guard let r = v["response"]?.objectValue, let id = r["request_id"]?.stringValue, let sub = r["subtype"]?.stringValue else {
             throw DecodingError.keyNotFound(AnyCodingKey(stringValue: "response.request_id"), .init(codingPath: decoder.codingPath, debugDescription: "control_response without response.request_id/subtype"))
         }
+        // Every key here is either modelled by the body or carried in `additional`, and `jsonValue`
+        // writes each exactly once, so the "response" object round-trips key for key.
         let known: Set<String> = ["subtype", "request_id", "response", "error", "pending_permission_requests", "pending_user_dialog_requests"]
         additional = r.filter { !known.contains($0.key) }
-        func frames(_ key: String) throws -> [ControlRequestFrame] {
-            guard let arr = r[key]?.arrayValue else { return [] }
-            return try arr.map { try JSONDecoder().decode(ControlRequestFrame.self, from: try $0.canonicalData()) }
-        }
         switch sub {
-        case "success": body = .success(.init(requestID: .init(rawValue: id), response: r["response"], pendingPermissionRequests: try frames("pending_permission_requests"), pendingUserDialogRequests: try frames("pending_user_dialog_requests")))
-        case "error": body = .error(.init(requestID: .init(rawValue: id), error: r["error"]?.stringValue ?? ""))
+        case "success": body = .success(.init(requestID: .init(rawValue: id), response: r["response"],
+                                              rawPendingPermissionRequests: r["pending_permission_requests"],
+                                              rawPendingUserDialogRequests: r["pending_user_dialog_requests"]))
+        case "error": body = .error(.init(requestID: .init(rawValue: id), rawError: r["error"]))
         default: throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath + [AnyCodingKey(stringValue: "response.subtype")], debugDescription: "unknown control_response subtype \(sub)"))
         }
     }
@@ -60,10 +98,11 @@ public struct ControlResponseFrame: Hashable, Sendable, Codable {
         case .success(let s):
             r["subtype"] = .string("success"); r["request_id"] = .string(s.requestID.rawValue)
             if let resp = s.response { r["response"] = resp }
-            if !s.pendingPermissionRequests.isEmpty { r["pending_permission_requests"] = .array(s.pendingPermissionRequests.map(\.jsonValue)) }
-            if !s.pendingUserDialogRequests.isEmpty { r["pending_user_dialog_requests"] = .array(s.pendingUserDialogRequests.map(\.jsonValue)) }
+            if let pending = s.rawPendingPermissionRequests { r["pending_permission_requests"] = pending }
+            if let pending = s.rawPendingUserDialogRequests { r["pending_user_dialog_requests"] = pending }
         case .error(let e):
-            r["subtype"] = .string("error"); r["request_id"] = .string(e.requestID.rawValue); r["error"] = .string(e.error)
+            r["subtype"] = .string("error"); r["request_id"] = .string(e.requestID.rawValue)
+            if let error = e.rawError { r["error"] = error }
         }
         return .object(["type": .string("control_response"), "response": .object(r)])
     }
