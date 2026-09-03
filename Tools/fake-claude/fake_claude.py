@@ -414,25 +414,43 @@ class Replayer:
         return True
 
     # ---- recorded host inputs
-    def _wait_recorded_input(self, rec):
-        want = rec["frame"]
+    def _input_pred(self, want):
+        """What a host frame has to look like to be the one this recorded `in` line stands for."""
         t = want.get("type")
         if t == "control_response":
             rid = want["response"]["request_id"]
-            pred = lambda f: f.get("type") == "control_response" and (f.get("response") or {}).get("request_id") == rid
-        elif t == "user":
-            pred = lambda f: f.get("type") == "user"
-        elif t == "control_request":
+            return lambda f: f.get("type") == "control_response" and (f.get("response") or {}).get("request_id") == rid
+        if t == "user":
+            return lambda f: f.get("type") == "user"
+        if t == "control_request":
             sub = want["request"]["subtype"]
-            pred = lambda f: f.get("type") == "control_request" and f.get("request_id") and (f.get("request") or {}).get("subtype") == sub
-        else:
-            pred = lambda f: f.get("type") == t
+            return lambda f: f.get("type") == "control_request" and f.get("request_id") and (f.get("request") or {}).get("subtype") == sub
+        return lambda f: f.get("type") == t
+
+    @staticmethod
+    def _is_end_session(frame):
+        return frame.get("type") == "control_request" and (frame.get("request") or {}).get("subtype") == "end_session"
+
+    def _wait_recorded_input(self, rec, later):
+        """Wait for the host frame this recorded `in` line stands for.
+
+        The recording's order *among host frames* is not an order the host has to reproduce.
+        A reply the host owes one of our out frames and a request the host's own caller makes
+        come from two different threads, so either can reach us first however the recording
+        happened to interleave them. A frame that some later recorded `in` line is still
+        waiting for is therefore left in the inbox for that line to claim, rather than judged
+        unexpected here; only a frame no remaining line accounts for is unexpected. An
+        `end_session` is the exception: the host asking to stop is answered whenever it comes.
+        """
+        want = rec["frame"]
+        pred = self._input_pred(want)
+        deferred = [self._input_pred(r["frame"]) for r in later]
         while True:
-            got = self.take(lambda f: True, None)
+            got = self.take(lambda f: pred(f) or self._is_end_session(f) or not any(p(f) for p in deferred), None)
             if got is None:
                 return None, None
             if pred(got):
-                if t == "user":
+                if want.get("type") == "user":
                     self._note_user_text(want, got)
                 return got, want
             code = self._handle_unexpected(got)
@@ -470,7 +488,8 @@ class Replayer:
             if code is not None:
                 return code
             if rec["dir"] == "in":
-                got, want = self._wait_recorded_input(rec)
+                later = [r for r in self.frames[i + 1:] if r.get("dir") == "in" and "dropped" not in r]
+                got, want = self._wait_recorded_input(rec, later)
                 if isinstance(got, int):
                     return got
                 if got is None:

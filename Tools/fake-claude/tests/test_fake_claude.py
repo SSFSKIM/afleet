@@ -227,6 +227,46 @@ class ReplayTests(ToolTest):
         h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
         init = h.wait(lambda f: f.get("subtype") == "init"); self.assertNotIn("capabilities", init); h.finish()
 
+    def test_a_patch_that_matches_no_frame_replays_exactly_like_no_script(self):
+        script = os.path.join(self.root, "nomatch.json")
+        write(script, json.dumps([{"patch": {"type": "afleet_never_recorded"}, "remove": ["capabilities"]}]))
+        runs = []
+        for env in ({}, {"FAKE_CLAUDE_SCRIPT": script}):
+            h = Host(self.fx, self.cwd, env=env)
+            drive_two_turns(h)
+            runs.append(h.frames)
+        self.assertEqual(runs[0], runs[1])
+        self.assertIn("capabilities", next(f for f in runs[1] if f.get("subtype") == "init"))
+
+    def test_host_frames_that_arrive_in_a_different_order_than_the_recording_still_replay(self):
+        """The recorded c1 answer and the host's own get_usage come from two host threads, so the
+        recording's order between them is not one the host has to reproduce."""
+        h = Host(self.fx, self.cwd)
+        h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
+        h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
+        self.assertIsNotNone(h.wait(lambda f: f.get("type") == "control_request" and f["request_id"] == "c1"))
+        h.send({"type": "control_request", "request_id": "zz", "request": {"subtype": "get_usage"}})      # recorded after the c1 answer
+        h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
+        self.assertIsNotNone(h.wait(lambda f: f.get("type") == "result"))
+        r = h.wait(lambda f: f.get("type") == "control_response" and f["response"]["request_id"] == "zz")
+        self.assertEqual(r["response"]["response"]["session"]["total_cost_usd"], 0)
+        h.send({"type": "user", "uuid": "y", "message": {"role": "user", "content": "two"}})
+        self.assertIsNotNone(h.wait(lambda f: f.get("result") == "two"))
+        h.send({"type": "control_request", "request_id": "e", "request": {"subtype": "end_session"}})
+        self.assertEqual(h.finish(), 0)
+
+    def test_a_rule_does_not_swallow_a_host_frame_a_later_recorded_line_is_waiting_for(self):
+        script = os.path.join(self.root, "greedy.json"); write(script, json.dumps([{"rule": "generic-success", "subtypes": ["get_usage"]}]))
+        h = Host(self.fx, self.cwd, env={"FAKE_CLAUDE_SCRIPT": script})
+        h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
+        h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
+        h.wait(lambda f: f.get("type") == "control_request" and f["request_id"] == "c1")
+        h.send({"type": "control_request", "request_id": "zz", "request": {"subtype": "get_usage"}})
+        h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
+        r = h.wait(lambda f: f.get("type") == "control_response" and f["response"]["request_id"] == "zz")
+        self.assertEqual(r["response"]["response"], {"session": {"total_cost_usd": 0}})   # the recorded answer, not the rule's empty one
+        h.finish()
+
     def test_unexpected_host_traffic_fails_with_exit_3_unless_a_rule_allows_it(self):
         h = Host(self.fx, self.cwd)
         h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
