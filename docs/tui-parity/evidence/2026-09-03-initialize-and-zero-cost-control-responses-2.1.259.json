@@ -1,0 +1,1657 @@
+{
+ "initialize": null,
+ "get_context_usage": {
+  "categories": [
+   {
+    "name": "System prompt",
+    "tokens": 3614,
+    "color": "promptBorder"
+   },
+   {
+    "name": "System tools",
+    "tokens": 4978,
+    "color": "inactive"
+   },
+   {
+    "name": "MCP tools (deferred)",
+    "tokens": 288,
+    "color": "inactive",
+    "isDeferred": true
+   },
+   {
+    "name": "System tools (deferred)",
+    "tokens": 15894,
+    "color": "inactive",
+    "isDeferred": true
+   },
+   {
+    "name": "Custom agents",
+    "tokens": 1585,
+    "color": "permission"
+   },
+   {
+    "name": "Memory files",
+    "tokens": 5914,
+    "color": "claude"
+   },
+   {
+    "name": "Skills",
+    "tokens": 6074,
+    "color": "warning"
+   },
+   {
+    "name": "Messages",
+    "tokens": 316,
+    "color": "purple_FOR_SUBAGENTS_ONLY"
+   },
+   {
+    "name": "Autocompact buffer",
+    "tokens": 33000,
+    "color": "inactive"
+   },
+   {
+    "name": "Free space",
+    "tokens": 744519,
+    "color": "promptBorder"
+   }
+  ],
+  "totalTokens": 22481,
+  "maxTokens": 800000,
+  "rawMaxTokens": 800000,
+  "autocompactSource": "settings",
+  "percentage": 3,
+  "gridRows": [
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "System prompt",
+     "tokens": 3614,
+     "percentage": 0,
+     "squareFullness": 0.45175
+    },
+    {
+     "color": "inactive",
+     "isFilled": true,
+     "categoryName": "System tools",
+     "tokens": 4978,
+     "percentage": 1,
+     "squareFullness": 0.62225
+    },
+    {
+     "color": "permission",
+     "isFilled": true,
+     "categoryName": "Custom agents",
+     "tokens": 1585,
+     "percentage": 0,
+     "squareFullness": 0.198125
+    },
+    {
+     "color": "claude",
+     "isFilled": true,
+     "categoryName": "Memory files",
+     "tokens": 5914,
+     "percentage": 1,
+     "squareFullness": 0.73925
+    },
+    {
+     "color": "warning",
+     "isFilled": true,
+     "categoryName": "Skills",
+     "tokens": 6074,
+     "percentage": 1,
+     "squareFullness": 0.75925
+    },
+    {
+     "color": "purple_FOR_SUBAGENTS_ONLY",
+     "isFilled": true,
+     "categoryName": "Messages",
+     "tokens": 316,
+     "percentage": 0,
+     "squareFullness": 0.0395
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    }
+   ],
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    }
+   ],
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    }
+   ],
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    }
+   ],
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    }
+   ],
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    }
+   ],
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    }
+   ],
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    }
+   ],
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    }
+   ],
+   [
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "promptBorder",
+     "isFilled": true,
+     "categoryName": "Free space",
+     "tokens": 744519,
+     "percentage": 93,
+     "squareFullness": 1
+    },
+    {
+     "color": "inactive",
+     "isFilled": true,
+     "categoryName": "Autocompact buffer",
+     "tokens": 33000,
+     "percentage": 4,
+     "squareFullness": 1
+    },
+    {
+     "color": "inactive",
+     "isFilled": true,
+     "categoryName": "Autocompact buffer",
+     "tokens": 33000,
+     "percentage": 4,
+     "squareFullness": 1
+    },
+    {
+     "color": "inactive",
+     "isFilled": true,
+     "categoryName": "Autocompact buffer",
+     "tokens": 33000,
+     "percentage": 4,
+     "squareFullness": 1
+    },
+    {
+     "color": "inactive",
+     "isFilled": true,
+     "categoryName": "Autocompact buffer",
+     "tokens": 33000,
+     "percentage": 4,
+     "squareFullness": 1
+    }
+   ]
+  ],
+  "model": "claude-fable-5-1",
+  "memoryFiles": [
+   {
+    "path": "/Users/new/.claude/CLAUDE.md",
+    "type": "User",
+    "tokens": 5914
+   }
+  ],
+  "mcpTools": [
+   {
+    "name": "mcp__plugin_chatgpt-advisor_advisor__advisor_ask",
+    "serverName": "plugin_chatgpt-advisor_advisor",
+    "tokens": 137,
+    "isLoaded": false
+   },
+   {
+    "name": "mcp__plugin_chatgpt-advisor_advisor__advisor_poll",
+    "serverName": "plugin_chatgpt-advisor_advisor",
+    "tokens": 95,
+    "isLoaded": false
+   },
+   {
+    "name": "mcp__plugin_chatgpt-advisor_advisor__advisor_status",
+    "serverName": "plugin_chatgpt-advisor_advisor",
+    "tokens": 56,
+    "isLoaded": false
+   }
+  ],
+  "agents": [
+   {
+    "agentType": "code-simplifier:code-simplifier",
+    "source": "plugin",
+    "tokens": 73
+   },
+   {
+    "agentType": "doperpowers:critique",
+    "source": "plugin",
+    "tokens": 142
+   },
+   {
+    "agentType": "plugin-dev:agent-creator",
+    "source": "plugin",
+    "tokens": 408
+   },
+   {
+    "agentType": "plugin-dev:plugin-validator",
+    "source": "plugin",
+    "tokens": 431
+   },
+   {
+    "agentType": "plugin-dev:skill-reviewer",
+    "source": "plugin",
+    "tokens": 410
+   },
+   {
+    "agentType": "researcher",
+    "source": "userSettings",
+    "tokens": 121
+   }
+  ],
+  "slashCommands": {
+   "totalCommands": 55,
+   "includedCommands": 55,
+   "tokens": 919
+  },
+  "skills": {
+   "totalSkills": 55,
+   "includedSkills": 55,
+   "tokens": 6074,
+   "skillFrontmatter": [
+    {
+     "name": "claude-md-setup",
+     "source": "userSettings",
+     "tokens": 168
+    },
+    {
+     "name": "grilling",
+     "source": "userSettings",
+     "tokens": 56
+    },
+    {
+     "name": "playwright-cli",
+     "source": "userSettings",
+     "tokens": 92
+    },
+    {
+     "name": "worktree",
+     "source": "userSettings",
+     "tokens": 57
+    },
+    {
+     "name": "code-review:code-review",
+     "source": "plugin",
+     "pluginName": "code-review",
+     "tokens": 18
+    },
+    {
+     "name": "claude-md-management:revise-claude-md",
+     "source": "plugin",
+     "pluginName": "claude-md-management",
+     "tokens": 30
+    },
+    {
+     "name": "plugin-dev:create-plugin",
+     "source": "plugin",
+     "pluginName": "plugin-dev",
+     "tokens": 41
+    },
+    {
+     "name": "claude-md-management:claude-md-improver",
+     "source": "plugin",
+     "pluginName": "claude-md-management",
+     "tokens": 127
+    },
+    {
+     "name": "skill-creator:skill-creator",
+     "source": "plugin",
+     "pluginName": "skill-creator",
+     "tokens": 117
+    },
+    {
+     "name": "plugin-dev:agent-development",
+     "source": "plugin",
+     "pluginName": "plugin-dev",
+     "tokens": 130
+    },
+    {
+     "name": "plugin-dev:command-development",
+     "source": "plugin",
+     "pluginName": "plugin-dev",
+     "tokens": 174
+    },
+    {
+     "name": "plugin-dev:hook-development",
+     "source": "plugin",
+     "pluginName": "plugin-dev",
+     "tokens": 185
+    },
+    {
+     "name": "plugin-dev:mcp-integration",
+     "source": "plugin",
+     "pluginName": "plugin-dev",
+     "tokens": 156
+    },
+    {
+     "name": "plugin-dev:plugin-settings",
+     "source": "plugin",
+     "pluginName": "plugin-dev",
+     "tokens": 146
+    },
+    {
+     "name": "plugin-dev:plugin-structure",
+     "source": "plugin",
+     "pluginName": "plugin-dev",
+     "tokens": 155
+    },
+    {
+     "name": "plugin-dev:skill-development",
+     "source": "plugin",
+     "pluginName": "plugin-dev",
+     "tokens": 107
+    },
+    {
+     "name": "doperpowers:agora",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 110
+    },
+    {
+     "name": "doperpowers:architecting",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 104
+    },
+    {
+     "name": "doperpowers:architecture-mapping",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 107
+    },
+    {
+     "name": "doperpowers:brainstorming",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 59
+    },
+    {
+     "name": "doperpowers:codex-companion",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 64
+    },
+    {
+     "name": "doperpowers:decomposing",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 104
+    },
+    {
+     "name": "doperpowers:domain-modeling",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 60
+    },
+    {
+     "name": "doperpowers:execplan",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 65
+    },
+    {
+     "name": "doperpowers:execspec",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 45
+    },
+    {
+     "name": "doperpowers:executing",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 101
+    },
+    {
+     "name": "doperpowers:finishing-a-development-branch",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 55
+    },
+    {
+     "name": "doperpowers:issue-tracker",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 77
+    },
+    {
+     "name": "doperpowers:qa-loops",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 52
+    },
+    {
+     "name": "doperpowers:subagent-driven-execution",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 40
+    },
+    {
+     "name": "doperpowers:systematic-debugging",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 42
+    },
+    {
+     "name": "doperpowers:test-driven-development",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 39
+    },
+    {
+     "name": "doperpowers:triaging-feedback",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 56
+    },
+    {
+     "name": "doperpowers:using-git-worktrees",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 48
+    },
+    {
+     "name": "doperpowers:verification-before-completion",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 56
+    },
+    {
+     "name": "doperpowers:writing-plans",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 38
+    },
+    {
+     "name": "doperpowers:writing-skills",
+     "source": "plugin",
+     "pluginName": "doperpowers",
+     "tokens": 42
+    },
+    {
+     "name": "supabase:supabase",
+     "source": "plugin",
+     "pluginName": "supabase",
+     "tokens": 270
+    },
+    {
+     "name": "supabase:supabase-postgres-best-practices",
+     "source": "plugin",
+     "pluginName": "supabase",
+     "tokens": 293
+    },
+    {
+     "name": "designer:designer",
+     "source": "plugin",
+     "pluginName": "designer",
+     "tokens": 178
+    },
+    {
+     "name": "eli5:eli5",
+     "source": "plugin",
+     "pluginName": "eli5",
+     "tokens": 52
+    },
+    {
+     "name": "chatgpt-advisor:gpt-research",
+     "source": "plugin",
+     "pluginName": "chatgpt-advisor",
+     "tokens": 99
+    },
+    {
+     "name": "dataviz",
+     "source": "built-in",
+     "tokens": 482
+    },
+    {
+     "name": "update-config",
+     "source": "built-in",
+     "tokens": 236
+    },
+    {
+     "name": "keybindings-help",
+     "source": "built-in",
+     "tokens": 83
+    },
+    {
+     "name": "code-review",
+     "source": "built-in",
+     "tokens": 269
+    },
+    {
+     "name": "simplify",
+     "source": "built-in",
+     "tokens": 63
+    },
+    {
+     "name": "fewer-permission-prompts",
+     "source": "built-in",
+     "tokens": 64
+    },
+    {
+     "name": "loop",
+     "source": "built-in",
+     "tokens": 115
+    },
+    {
+     "name": "schedule",
+     "source": "built-in",
+     "tokens": 127
+    },
+    {
+     "name": "claude-api",
+     "source": "built-in",
+     "tokens": 361
+    },
+    {
+     "name": "workflow-authoring",
+     "source": "built-in",
+     "tokens": 84
+    },
+    {
+     "name": "run",
+     "source": "built-in",
+     "tokens": 123
+    },
+    {
+     "name": "init",
+     "source": "built-in",
+     "tokens": 22
+    },
+    {
+     "name": "security-review",
+     "source": "built-in",
+     "tokens": 30
+    }
+   ]
+  },
+  "autoCompactThreshold": 767000,
+  "isAutoCompactEnabled": true,
+  "messageBreakdown": {
+   "toolCallTokens": 0,
+   "toolResultTokens": 0,
+   "attachmentTokens": 649,
+   "assistantMessageTokens": 0,
+   "userMessageTokens": 0,
+   "redirectedContextTokens": 0,
+   "unattributedTokens": 0,
+   "toolCallsByType": [],
+   "attachmentsByType": [
+    {
+     "name": "hook_success",
+     "tokens": 359
+    },
+    {
+     "name": "hook_additional_context",
+     "tokens": 290
+    }
+   ]
+  },
+  "apiUsage": null
+ },
+ "get_session_cost": {
+  "text": "Total cost:            $0.0000\nTotal duration (API):  0s\nTotal duration (wall): 2s\nTotal code changes:    0 lines added, 0 lines removed\nUsage:                 0 input, 0 output, 0 cache read, 0 cache write"
+ },
+ "get_binary_version": {
+  "version": "2.1.259",
+  "buildTime": "2026-09-02T18:43:49Z"
+ },
+ "mcp_status": {
+  "mcpServers": [
+   {
+    "name": "plugin:supabase:supabase",
+    "status": "needs-auth",
+    "config": {
+     "type": "http",
+     "url": "https://mcp.supabase.com/mcp",
+     "headers": {
+      "X-Source-Name": "claude-code-plugin",
+      "X-Source-Version": "0.1.15"
+     }
+    },
+    "scope": "dynamic"
+   },
+   {
+    "name": "plugin:chatgpt-advisor:advisor",
+    "status": "connected",
+    "serverInfo": {
+     "name": "chatgpt-advisor",
+     "version": "0.1.0"
+    },
+    "config": {
+     "type": "stdio",
+     "command": "node",
+     "args": [
+      "/Users/new/.claude/skills/chatgpt-advisor/server/mcp-server.mjs"
+     ]
+    },
+    "scope": "dynamic",
+    "tools": [
+     {
+      "name": "advisor_ask",
+      "annotations": {}
+     },
+     {
+      "name": "advisor_poll",
+      "annotations": {}
+     },
+     {
+      "name": "advisor_status",
+      "annotations": {}
+     }
+    ]
+   },
+   {
+    "name": "openaiDeveloperDocs",
+    "status": "connected",
+    "serverInfo": {
+     "name": "openai-docs-mcp",
+     "version": "1.0.0"
+    },
+    "config": {
+     "type": "http",
+     "url": "https://developers.openai.com/mcp"
+    },
+    "scope": "user",
+    "tools": [
+     {
+      "name": "search_openai_docs",
+      "annotations": {
+       "readOnly": true
+      }
+     },
+     {
+      "name": "list_openai_docs",
+      "annotations": {
+       "readOnly": true
+      }
+     },
+     {
+      "name": "fetch_openai_doc",
+      "annotations": {
+       "readOnly": true
+      }
+     },
+     {
+      "name": "list_api_endpoints",
+      "annotations": {
+       "readOnly": true
+      }
+     },
+     {
+      "name": "get_openapi_spec",
+      "annotations": {
+       "readOnly": true
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "background_tasks": null,
+ "get_settings": {
+  "_note": "body redacted (personal settings); keys only",
+  "effective_keys": [
+   "agentPushNotifEnabled",
+   "autoCompactWindow",
+   "autoMemoryEnabled",
+   "autoMode",
+   "autoScrollEnabled",
+   "autoUpdatesChannel",
+   "disableClaudeAiConnectors",
+   "editorMode",
+   "effortLevel",
+   "enableArtifact",
+   "enableWorkflows",
+   "enabledPlugins",
+   "env",
+   "extraKnownMarketplaces",
+   "feedbackDrafts",
+   "fileCheckpointingEnabled",
+   "hooks",
+   "inputNeededNotifEnabled",
+   "minimumVersion",
+   "model",
+   "modelSettings",
+   "permissions",
+   "pluginConfigs",
+   "preferredNotifChannel",
+   "remote",
+   "remoteControlAtStartup",
+   "showTurnDuration",
+   "skillListingBudgetFraction",
+   "skillOverrides",
+   "skipAutoPermissionPrompt",
+   "skipWorkflowUsageWarning",
+   "statusLine",
+   "switchModelsOnFlag",
+   "theme",
+   "tui",
+   "voice",
+   "voiceEnabled",
+   "worktree"
+  ],
+  "sources_keys": "list",
+  "applied": {
+   "model": "claude-fable-5-1",
+   "effort": "xhigh",
+   "advisor": null,
+   "ultracode": false
+  }
+ },
+ "get_usage": {
+  "session": {
+   "total_cost_usd": 0,
+   "total_api_duration_ms": 0,
+   "total_duration_ms": 3642,
+   "total_lines_added": 0,
+   "total_lines_removed": 0,
+   "model_usage": {}
+  },
+  "subscription_type": "max",
+  "rate_limits_available": true,
+  "rate_limits": {
+   "five_hour": {
+    "utilization": 55,
+    "resets_at": "2026-09-03T13:40:00.451647+00:00",
+    "limit_dollars": null,
+    "used_dollars": null,
+    "remaining_dollars": null,
+    "locked_reason": null
+   },
+   "seven_day": {
+    "utilization": 73,
+    "resets_at": "2026-09-06T15:00:00.451668+00:00",
+    "limit_dollars": null,
+    "used_dollars": null,
+    "remaining_dollars": null,
+    "locked_reason": null
+   },
+   "seven_day_oauth_apps": null,
+   "seven_day_opus": null,
+   "seven_day_sonnet": null,
+   "seven_day_cowork": null,
+   "seven_day_omelette": null,
+   "tangelo": null,
+   "iguana_necktie": null,
+   "omelette_promotional": null,
+   "nimbus_quill": {
+    "utilization": 0,
+    "resets_at": null,
+    "limit_dollars": null,
+    "used_dollars": null,
+    "remaining_dollars": null,
+    "locked_reason": null
+   },
+   "cinder_cove": null,
+   "amber_ladder": null,
+   "juniper_tide": null,
+   "extra_usage": {
+    "is_enabled": false,
+    "monthly_limit": null,
+    "used_credits": 3040,
+    "utilization": null,
+    "currency": "USD",
+    "decimal_places": 2,
+    "disabled_reason": "out_of_credits",
+    "user_disabled": false,
+    "spend_limit_reached": false,
+    "credits_ever_enabled": true,
+    "daily": null,
+    "weekly": null
+   },
+   "limits": [
+    {
+     "kind": "session",
+     "group": "session",
+     "percent": 55,
+     "severity": "normal",
+     "resets_at": "2026-09-03T13:40:00.451647+00:00",
+     "scope": null,
+     "is_active": false
+    },
+    {
+     "kind": "weekly_all",
+     "group": "weekly",
+     "percent": 73,
+     "severity": "normal",
+     "resets_at": "2026-09-06T15:00:00.451668+00:00",
+     "scope": null,
+     "is_active": true
+    },
+    {
+     "kind": "weekly_scoped",
+     "group": "weekly",
+     "percent": 34,
+     "severity": "normal",
+     "resets_at": "2026-09-06T15:00:00.451853+00:00",
+     "scope": {
+      "model": {
+       "id": null,
+       "display_name": "Fable"
+      },
+      "surface": null
+     },
+     "is_active": false
+    }
+   ],
+   "spend": {
+    "used": {
+     "amount_minor": 3040,
+     "currency": "USD",
+     "exponent": 2
+    },
+    "limit": null,
+    "percent": 0,
+    "severity": "normal",
+    "enabled": false,
+    "disabled_reason": "out_of_credits",
+    "cap": null,
+    "balance": null,
+    "auto_reload": null,
+    "disclaimer": "Usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)",
+    "can_purchase_credits": false,
+    "can_toggle": false
+   },
+   "member_dashboard_available": false,
+   "model_scoped": [
+    {
+     "display_name": "Fable",
+     "utilization": 34,
+     "resets_at": "2026-09-06T15:00:00.451853+00:00"
+    }
+   ]
+  },
+  "behaviors": {
+   "day": {
+    "request_count": 21037,
+    "session_count": 52,
+    "behaviors": [
+     {
+      "key": "subagent_heavy",
+      "pct": 97,
+      "count": 5
+     },
+     {
+      "key": "long_context",
+      "pct": 75,
+      "count": 11363
+     }
+    ],
+    "agents": [
+     {
+      "name": "general-purpose",
+      "pct": 89
+     }
+    ],
+    "skills": [
+     {
+      "name": "doperpowers:brainstorming",
+      "pct": 1
+     }
+    ],
+    "plugins": [
+     {
+      "name": "doperpowers",
+      "pct": 2
+     }
+    ],
+    "mcp_servers": []
+   },
+   "week": {
+    "request_count": 47133,
+    "session_count": 181,
+    "behaviors": [
+     {
+      "key": "subagent_heavy",
+      "pct": 96,
+      "count": 12
+     },
+     {
+      "key": "cron",
+      "pct": 92,
+      "count": 5
+     },
+     {
+      "key": "long_context",
+      "pct": 76,
+      "count": 26962
+     }
+    ],
+    "agents": [
+     {
+      "name": "general-purpose",
+      "pct": 77
+     },
+     {
+      "name": "claude",
+      "pct": 2
+     },
+     {
+      "name": "fork",
+      "pct": 1
+     },
+     {
+      "name": "doperpowers:execplan",
+      "pct": 1
+     }
+    ],
+    "skills": [
+     {
+      "name": "doperpowers:brainstorming",
+      "pct": 1
+     }
+    ],
+    "plugins": [
+     {
+      "name": "doperpowers",
+      "pct": 2
+     }
+    ],
+    "mcp_servers": []
+   }
+  }
+ }
+}
