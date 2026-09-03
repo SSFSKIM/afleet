@@ -9,6 +9,62 @@ def frame(t, **kw):
     return d
 
 
+class FlagsFromHelpTests(unittest.TestCase):
+    # `claude --help`'s real shape: declarations at exactly two spaces, wrapped
+    # description text at the description column. The lines below follow the 2.1.259
+    # output, including the camelCase alias pair and the description that names
+    # --permission-prompt-tool without declaring it.
+    HELP = (
+        "Usage: claude [options] [command] [prompt]\n"
+        "\n"
+        "Options:\n"
+        "  -p, --print                           Print response and exit\n"
+        "  --bg, --background                    Start the session in the background and\n"
+        "                                        detach from the terminal\n"
+        "  --allowedTools, --allowed-tools <tools...>\n"
+        "                                        Comma or space-separated list of tool\n"
+        "                                        names to allow\n"
+        "  --permission-prompts <mode>           Controls permission prompting under\n"
+        "                                        --print: \"host\" (the SDK host or\n"
+        "                                        --permission-prompt-tool) or \"none\"\n"
+        "  -h, --help                            Display help for command\n"
+    )
+
+    def test_the_declared_flag_list_is_sorted_and_deduplicated(self):
+        self.assertEqual(census.flags_from_help(self.HELP), [
+            "--allowed-tools", "--allowedTools", "--background", "--bg",
+            "--help", "--permission-prompts", "--print",
+        ])
+
+    def test_a_camelcase_alias_pair_yields_both_names_untruncated(self):
+        flags = census.flags_from_help(self.HELP)
+        self.assertIn("--allowedTools", flags)
+        self.assertIn("--allowed-tools", flags)
+        # --allowed is not a flag; it is the lowercase prefix of --allowedTools
+        self.assertNotIn("--allowed", flags)
+
+    def test_a_short_flag_declaration_yields_only_the_long_name(self):
+        flags = census.flags_from_help(self.HELP)
+        self.assertIn("--print", flags)
+        self.assertNotIn("-p", flags)
+
+    def test_two_long_aliases_on_one_line_yield_both(self):
+        flags = census.flags_from_help(self.HELP)
+        self.assertIn("--bg", flags)
+        self.assertIn("--background", flags)
+
+    def test_a_flag_only_named_in_a_description_is_not_declared(self):
+        self.assertIn("--permission-prompt-tool", self.HELP)
+        self.assertNotIn("--permission-prompt-tool", census.flags_from_help(self.HELP))
+
+    def test_value_placeholders_and_description_words_end_the_declaration(self):
+        self.assertEqual(census.flags_from_help("  --file <path>  Read --other from disk\n"), ["--file"])
+
+    def test_missing_or_empty_help_is_safe(self):
+        self.assertEqual(census.flags_from_help(None), [])
+        self.assertEqual(census.flags_from_help(""), [])
+
+
 class PairOfTests(unittest.TestCase):
     def test_system_frame_uses_subtype(self):
         self.assertEqual(census.pair_of(frame("system", subtype="init"), {}), "system/init")
@@ -59,6 +115,15 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(m["pairs"]["system/init"]["keys"], ["capabilities", "extra", "subtype", "tools", "type", "uuid"])
         self.assertEqual(m["pairs"]["system/init"]["required_keys"], ["capabilities", "subtype", "type"])
         self.assertIn("assistant", m["pairs"])  # pairs only in one side are kept as recorded
+
+    def test_merge_required_records_an_empty_flag_list_rather_than_inheriting_one(self):
+        # A run whose `claude --help` came back empty must not silently keep the previous
+        # flag list, or the drift check goes quiet exactly when the CLI stopped answering.
+        previous = census.census([frame("system", subtype="init")], help_text="  --foo  x\n")
+        current = census.census([frame("system", subtype="init")])
+        merged = census.merge_required(previous, current)
+        self.assertEqual(merged["flags"], [])
+        self.assertEqual(census.diff(merged, previous, "exact"), ["flags: added --foo"])
 
 
 class DiffTests(unittest.TestCase):

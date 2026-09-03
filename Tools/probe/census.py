@@ -1,12 +1,34 @@
 """Frame census: a set-based fingerprint of a stream-json session (spec §4.4)."""
 import re
 
-FLAG_RE = re.compile(r"(?m)^\s+(?:-[A-Za-z],\s+)?(--[a-z][a-z0-9-]*)")
+# A flag declaration is indented exactly two spaces and opens with the alias run: one or
+# more short or long flags separated by commas. Anything after the run -- a value
+# placeholder, the description -- is not part of it.
+DECLARATION_RE = re.compile(r"^ {2}(-{1,2}[A-Za-z][A-Za-z0-9-]*(?:,\s*-{1,2}[A-Za-z][A-Za-z0-9-]*)*)")
+LONG_FLAG_RE = re.compile(r"--[A-Za-z][A-Za-z0-9-]*")
 
 
 def flags_from_help(text):
-    """Sorted, de-duplicated long flags from `claude --help` output."""
-    return sorted(set(FLAG_RE.findall(text or "")))
+    """Sorted, de-duplicated long flags *declared* in `claude --help` (spec §4.4).
+
+    The two-space indentation anchor is load-bearing. Declarations sit at exactly two
+    spaces; wrapped description text sits at the description column (40 on 2.1.259), so
+    the anchor is the only thing keeping a flag merely *mentioned* in prose out of the
+    census. On 2.1.259 `--permission-prompt-tool` appears nowhere but inside the
+    description of `--permission-prompts` ("the SDK host or --permission-prompt-tool"),
+    and an unanchored parse would fingerprint it as a flag the CLI does not declare.
+
+    A declaration may list several comma-separated aliases and may lead with a short
+    flag: `-p, --print`, `--bg, --background`, `--allowedTools, --allowed-tools
+    <tools...>`. Every long alias in the run is recorded, camelCase included -- matching
+    only a lowercase prefix would invent `--allowed` out of `--allowedTools`.
+    """
+    flags = set()
+    for line in (text or "").splitlines():
+        declaration = DECLARATION_RE.match(line)
+        if declaration:
+            flags.update(LONG_FLAG_RE.findall(declaration.group(1)))
+    return sorted(flags)
 
 
 def request_subtypes(frames):
@@ -96,8 +118,10 @@ def merge_required(previous, current):
     """Accumulate across re-recordings: keys = union, required = intersection, counts summed."""
     if not previous:
         return current
+    # flags uses `is not None`, not `or`: a run whose `claude --help` came back empty must
+    # record the empty list so later diffs alarm, not silently inherit the previous list.
     out = {"version": current.get("version") or previous.get("version"),
-           "flags": current.get("flags") or previous.get("flags"),
+           "flags": current.get("flags") if current.get("flags") is not None else previous.get("flags"),
            "capabilities": current.get("capabilities") if current.get("capabilities") is not None else previous.get("capabilities"),
            "pairs": {}}
     names = set(previous["pairs"]) | set(current["pairs"])
