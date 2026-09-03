@@ -675,3 +675,9 @@ Pending — written at finish.
   binary; `probe.py` remains the only composition point. Discovery runs one
   `unittest discover` per tool because `Tools/fake-claude` is not an importable
   package name.
+- 2026-09-04: `verify`'s scanners return findings that are themselves safe to print and to
+  store. `scan` passes every finding through the same redaction rules before returning it,
+  which is sound because it only ever reports what those rules would change; the two
+  report-only checks of §4.5 name the rule and the position instead of echoing the author's
+  name or a foreign home path, which redaction by definition leaves alone. No consumer of
+  `verify` therefore carries a rule about where findings may be written.

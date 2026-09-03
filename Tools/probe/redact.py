@@ -9,6 +9,16 @@ writes a real secret to a committed file.
 *One predicate, two consumers.* `scan` reuses this module's own predicates, so wherever
 the redactor is blind `verify` is blind to the same thing and the leak is undetectable by
 the tooling. Widen a predicate and both halves widen together; never fork them.
+
+*Findings are safe to persist.* Every string `scan` and `scan_report_only` return names the
+rule that fired and the position it fired at, never the material that triggered it, so a
+caller may print findings and may equally write them to a log or a report. `scan` gets this
+by construction: it only reports what the redactor's own rules would change, so running
+those rules over the finding is guaranteed to neutralise it. `scan_report_only` cannot use
+that argument -- report-only findings are by definition material the redactor does not
+touch -- so it names its findings instead of echoing them. A later edit that quotes an input
+into a finding silently breaks this; the two `..._never_quote_what_they_found` tests guard
+it.
 """
 import collections
 import json
@@ -279,7 +289,10 @@ def scan(obj_or_text, home, *, hostname=None):
     def walk(o, path):
         if isinstance(o, dict):
             for k, v in o.items():
-                p = "%s.%s" % (path, k) if path else k
+                # Scrub each path segment rather than the finished path: the email pattern
+                # would otherwise swallow the parent segments along with the key and cost the
+                # reader the position. Detection still reads the raw key.
+                p = "%s.%s" % (path, probe.redact_text(k, record=False)) if path else probe.redact_text(k, record=False)
                 hits.extend(_string_hits(k, p, probe, " in key"))
                 nk = _norm_key(k)
                 if _is_identity_key(nk):
@@ -299,15 +312,40 @@ def scan(obj_or_text, home, *, hostname=None):
             hits.extend(_string_hits(o, path, probe))
 
     walk(obj_or_text, "")
-    return hits
+    # Segment scrubbing above already covers every finding this function builds. Scrubbing
+    # the finished list too costs one pass and makes the guarantee hold at the return
+    # statement for any finding a later edit adds, however it is composed.
+    return [probe.redact_text(h, record=False) for h in hits]
+
+
+def _line_of(text, index):
+    return text.count("\n", 0, index) + 1
 
 
 def scan_report_only(text, author, home):
-    """The two findings only a human can judge in context: reported, never failed."""
+    """The two findings only a human can judge in context: reported, never failed.
+
+    These name what matched and where, and never echo it. The material is exactly what the
+    redactor leaves alone -- that is why a human has to judge it -- so it cannot be made safe
+    by redacting the finding, and §4.5 sends the reviewer to the file anyway. One finding per
+    line keeps a name that recurs on every transcript line from burying the rest.
+    """
     hits = []
-    if author and author in text:
-        hits.append("author name appears: %s" % author)
+    if author:
+        seen = set()
+        start = text.find(author)
+        while start != -1:
+            line = _line_of(text, start)
+            if line not in seen:
+                seen.add(line)
+                hits.append("line %d: configured author name appears" % line)
+            start = text.find(author, start + 1)
+    seen = set()
     for m in re.finditer(r"/Users/[A-Za-z0-9._-]+", text):
-        if not (home and m.group(0).startswith(home)):
-            hits.append("path under /Users: %s" % m.group(0))
+        if home and m.group(0).startswith(home):
+            continue
+        line = _line_of(text, m.start())
+        if line not in seen:
+            seen.add(line)
+            hits.append("line %d: path under /Users: /Users/<user>" % line)
     return hits

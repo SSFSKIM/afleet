@@ -271,7 +271,31 @@ class ManifestAndScanContractTests(unittest.TestCase):
 
     def test_report_only_tolerates_a_missing_home(self):
         self.assertEqual(redact.scan_report_only("in /Users/someone/x", author=None, home=None),
-                         ["path under /Users: /Users/someone"])
+                         ["line 1: path under /Users: /Users/<user>"])
+
+    def test_scan_findings_never_quote_what_they_found(self):
+        # The invariant Tasks 4 and 5 rely on: a finding names the rule and the position and
+        # never the material, so it is safe to persist as well as to print.
+        planted = {"projects": {"/Users/probe/code/app": {"note": "a.b@example.com",
+                                                          "accessToken": "sk-ant-api03-SECRETVALUE"}},
+                   "host": "built on probe-mac"}
+        hits = redact.scan(planted, home="/Users/probe", hostname="probe-mac")
+        blob = " | ".join(hits)
+        for literal in ("/Users/probe", "a.b@example.com", "sk-ant-api03-SECRETVALUE", "probe-mac"):
+            self.assertNotIn(literal, blob)
+        self.assertIn("projects.~/code/app: home directory in key", hits)
+        self.assertIn("projects.~/code/app.note: email", hits)
+        self.assertIn("projects.~/code/app.accessToken: secret-named field not redacted", hits)
+        self.assertIn("host: hostname", hits)
+
+    def test_report_only_findings_never_quote_what_they_found(self):
+        text = "committed by Probe Person\nand touched /Users/someone/secret-dir\n"
+        hits = redact.scan_report_only(text, author="Probe Person", home="/Users/probe")
+        blob = " | ".join(hits)
+        self.assertNotIn("Probe Person", blob)
+        self.assertNotIn("someone", blob)
+        self.assertEqual(hits, ["line 1: configured author name appears",
+                                "line 2: path under /Users: /Users/<user>"])
 
 
 if __name__ == "__main__":
