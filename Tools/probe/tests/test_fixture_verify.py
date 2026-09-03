@@ -453,11 +453,26 @@ class VerifyTests(unittest.TestCase):
         append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
         self.assertTrue(any("unanswered request o1" in e for e in self.errors(d)))
 
-    def test_a_response_travelling_the_wrong_direction_fails(self):
+    def test_a_response_travelling_the_request_direction_is_the_replay_echo_and_answers_nothing(self):
+        """`--replay-user-messages` makes the CLI re-emit every host `control_response` on
+        stdout, so a CLI-originated request shows its own answer coming back the way the
+        request went. The echo settles nothing: with no answer travelling the other way the
+        request is still unanswered, which is what this asserts."""
         d = build_fixture(self.root)
         append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "c9", "request": {"subtype": "can_use_tool"}}})
         append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c9", "response": {}}}})
-        self.assertTrue(any("c9" in e and "wrong direction" in e for e in self.errors(d)))
+        self.assertTrue(any("unanswered request c9" in e for e in self.errors(d)))
+
+    def test_the_replay_echo_of_an_answered_request_is_not_a_duplicate(self):
+        """The shape every live recording carries: the host answers a CLI request and the CLI
+        echoes that answer back. Counted as a second answer it read as a duplicate, and the
+        first real recording of the zero-cost census failed the gate on three of them."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "c9", "request": {"subtype": "mcp_message"}}})
+        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c9", "response": {"mcp_response": {}}}}})
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c9", "response": {"mcp_response": {}}}}})
+        e = self.errors(d)
+        self.assertFalse(any("c9" in x for x in e), e)
 
     def test_a_duplicate_response_fails(self):
         d = build_fixture(self.root)

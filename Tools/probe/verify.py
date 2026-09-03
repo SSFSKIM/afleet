@@ -105,6 +105,22 @@ def _lifecycle(frames, late_ok, withdrawn_ok=()):
             origin, status = state.get(rid, (None, None))
             if origin is None:
                 errors.append("response to unknown request %s" % rid)
+            elif d == ("out" if origin == "cli" else "in"):
+                # The `--replay-user-messages` echo, not an answer. That flag makes the CLI
+                # re-emit every `control_response` the host sends straight back on stdout
+                # (2.1.258 `cli.pretty.js`: the stdin loop's `control_response` branch is
+                # `if (C.replayUserMessages) bt.enqueue(d)`), so a CLI-originated request
+                # shows the host's answer travelling in and the same body travelling back
+                # out milliseconds later. The parent's §6.1 launch line always carries the
+                # flag, so every recording made here contains these; read as answers they
+                # were counted a second time and reported as duplicates.
+                #
+                # A response travelling the same way as the request it names can only be an
+                # echo: the answer is by definition the other direction, which is the branch
+                # below. Skipping loses no strictness -- two genuine answers still collide on
+                # `closed`, in either direction -- and it is why the "wrong direction" error
+                # this replaces is gone rather than merely bypassed.
+                continue
             elif status == "dropped":
                 continue
             elif status == "cancelled":
@@ -121,9 +137,6 @@ def _lifecycle(frames, late_ok, withdrawn_ok=()):
                 # the CLI honours a host cancel for only three subtypes and answers anyway even
                 # for those, so a host request always ends in a response and the cancel merely
                 # says the host stopped waiting.
-                expected_dir = "in" if origin == "cli" else "out"
-                if d != expected_dir:
-                    errors.append("response to %s travels the wrong direction" % rid)
                 state[rid] = (origin, "closed")
         elif t == "control_cancel_request":
             rid = f.get("request_id")
