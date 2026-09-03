@@ -40,6 +40,13 @@ REQUIRED_META = ("name", "purpose", "recorded_at", "cli_version", "launch", "pro
                  "census", "deterministic", "synthetic", "hypothesis", "late_responses",
                  "withdrawn_requests", "review")
 
+# The four §4.4 fields whose *value* is a flag. Presence is the wrong instrument for these:
+# `"deterministic": null` is present, reads as false, and silently picks the permissive census
+# comparison over the strict one -- the same downgrade a missing field makes, one step further
+# along. `record` writes `bool(...)`, so only a hand-written fixture reaches here, which is the
+# population this check exists for.
+BOOLEAN_META = ("census", "deterministic", "synthetic", "hypothesis")
+
 # The two fixture files that carry protocol *names* in key position: `census.json` is keyed
 # by `(type, subtype)` pair names and `redaction.json` by the field paths a rule touched. The
 # scanner's structural predicates ask of a key "must this field's value be a placeholder?",
@@ -86,6 +93,11 @@ def _lifecycle(frames, late_ok, withdrawn_ok=()):
         t = f.get("type")
         if t == "control_request":
             rid = f.get("request_id"); origin = "cli" if d == "out" else "host"
+            if rid in state:
+                # The second request takes the id's state entry, so the first one's outcome
+                # stops being checked. That is the remaining way an unanswered request leaves
+                # the gate unremarked.
+                errors.append("request id %s is opened twice; the earlier lifecycle cannot be checked" % rid)
             state[rid] = (origin, "open"); subtype[rid] = (f.get("request") or {}).get("subtype")
             opened_at[rid] = i
         elif t == "control_response":
@@ -194,6 +206,8 @@ def _check_present(path):
 
 def _check_meta(path, meta):
     errors = ["fixture.json is missing %s (spec §4.4)" % k for k in REQUIRED_META if k not in meta]
+    errors += ["fixture.json %s must be true or false (spec §4.4)" % k
+               for k in BOOLEAN_META if k in meta and not isinstance(meta[k], bool)]
     if meta.get("name") != os.path.basename(os.path.normpath(path)):
         errors.append("fixture.json name %r does not match directory" % meta.get("name"))
     review = meta.get("review") or {}
@@ -230,6 +244,11 @@ def _check_census(fx):
     one that nothing else in the pipeline has ever read.
     """
     meta, recorded = fx["meta"], fx["census"]
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("pairs"), dict):
+        # The recount reads every fixture's census now, and a hand-written one is where a
+        # mis-shaped file actually turns up. Without this the comparison raises and the gate
+        # reports nothing at all, which is the one outcome worse than a finding.
+        return ["census.json is not a census object with a pairs map"]
     errors = []
     if recorded.get("version") != meta.get("cli_version"):
         errors.append("census.json version %r does not match fixture.json cli_version %r"
@@ -241,21 +260,37 @@ def _check_census(fx):
     # recount at all; it is checked against fixture.json above, which is the claim worth
     # making about it.
     recount["flags"] = recorded.get("flags")
-    drift = census.diff(recorded, recount, "exact" if meta.get("deterministic") else "required")
+    try:
+        drift = census.diff(recorded, recount, "exact" if meta.get("deterministic") else "required")
+    except (KeyError, TypeError, AttributeError):
+        # A pair record of the wrong shape, which the top-level guard above cannot see.
+        return errors + ["census.json has a pair record the comparison cannot read"]
     if drift:
         errors.append("census.json does not match a recount: %s" % "; ".join(drift))
     return errors
 
 
-def _artifact_tokens(text, into):
-    """Every `<artifacts>/…` path a frame string or a record line names.
+def _tokens_in_strings(obj, into):
+    """Every `<artifacts>/…` path the decoded strings of `obj` name.
 
-    A token ends where its JSON string ends, not at the first space. Every file in a fixture
-    that carries one is JSON, and truncating at a space turns an artifact path containing a
-    space into a missing-artifact failure the reviewer has to override -- which is how a gate
-    stops being read.
+    A decoded string names an artifact only when the whole string is the token, so the test is
+    `startswith` and the remainder is taken whole. Both halves earn their place against a false
+    missing-artifact failure, and a gate that cries wolf is a gate reviewers learn to override:
+    reading from the prefix inwards would swallow the rest of a sentence in a `result` frame
+    that merely mentions a path, and stopping at the first space would break a path containing
+    one.
     """
-    for part in text.split(fixture.ARTIFACT_TOKEN + "/")[1:]:
+    prefix = fixture.ARTIFACT_TOKEN + "/"
+    for s in fixture._strings(obj):
+        if s.startswith(prefix) and len(s) > len(prefix):
+            into.add(s[len(prefix):])
+
+
+def _tokens_in_raw_line(line, into):
+    """The fallback for a record that is not JSON, which has no string boundaries to read. A
+    token would have ended at its closing quote had the line parsed, so that is where it ends
+    here."""
+    for part in line.split(fixture.ARTIFACT_TOKEN + "/")[1:]:
         token = part.split('"')[0].split("'")[0].strip()
         if token:
             into.add(token)
@@ -264,17 +299,19 @@ def _artifact_tokens(text, into):
 def _check_artifacts(path, frames):
     needed = set()
     for rec in frames:
-        for s in fixture._strings(rec):
-            if fixture.ARTIFACT_TOKEN in s:
-                _artifact_tokens(s, needed)
+        _tokens_in_strings(rec, needed)
     # `initial/` as well as `transcript/`: a resume fixture's `initial/` holds a prior
     # session's records, and those name artifacts a replay has to resolve too.
     for sub in ("initial", "transcript"):
         for fpath in _walk_files(os.path.join(path, sub)):
             with open(fpath, encoding="utf-8", errors="replace") as fh:
                 for line in fh:
-                    if fixture.ARTIFACT_TOKEN in line:
-                        _artifact_tokens(line, needed)
+                    if fixture.ARTIFACT_TOKEN not in line:
+                        continue
+                    try:
+                        _tokens_in_strings(json.loads(line), needed)
+                    except ValueError:
+                        _tokens_in_raw_line(line, needed)
     art_dir = os.path.join(path, "artifacts")
     return ["artifacts/%s named by a frame or record is missing" % rel
             for rel in sorted(needed) if not os.path.isfile(os.path.join(art_dir, rel))]
@@ -284,12 +321,13 @@ def _check_mirror(path, fx):
     """Mirrored entries reproduce the transcript: `initial/` records plus every mirrored
     entry, in order, are the `transcript/` records.
 
-    Recorded fixtures only. A synthetic fixture is written from schemas rather than off a
-    filesystem, so it may legitimately declare no transcript at all; the census recount has no
-    such excuse, which is why that one runs unconditionally and this does not.
+    Gated on whether the fixture declares a transcript at all, which is what the check actually
+    needs, rather than on `synthetic`, which was only ever a proxy for it. A fixture written
+    from schemas may legitimately have nothing under `transcript/`; one that does populate it is
+    held to its mirror frames whether it was recorded or written by hand.
     """
     meta, frames = fx["meta"], fx["frames"]
-    if meta.get("synthetic"):
+    if not fixture.stream_sizes(os.path.join(path, "transcript")):
         return []
     errors = []
     rec_slug = fixture.slug_of(meta["cwd"]) if meta.get("cwd") else None

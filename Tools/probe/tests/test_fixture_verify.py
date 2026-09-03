@@ -247,15 +247,60 @@ class VerifyTests(unittest.TestCase):
         write(os.path.join(d, "fixture.json"), json.dumps(meta, indent=1))
         self.assertTrue(any("missing deterministic" in e for e in self.errors(d)))
 
+    def test_a_flag_field_present_but_not_a_boolean_fails(self):
+        """Presence is the wrong instrument for the field whose value picks the comparison.
+
+        `"deterministic": null` is present and reads as false, which is the same silent
+        downgrade of the strict gate to the permissive one that a missing field makes.
+        """
+        for field in ("census", "deterministic", "synthetic", "hypothesis"):
+            d = build_fixture(self.root, name=field, **{field: None})
+            self.assertTrue(any("%s must be true or false" % field in e for e in self.errors(d)), field)
+
     def test_census_version_must_match_the_declared_cli_version(self):
         d = build_fixture(self.root, cli_version="2.1.260")
         self.assertTrue(any("cli_version" in e for e in self.errors(d)))
+
+    def test_a_mis_shaped_census_is_reported_rather_than_crashing(self):
+        """The recount reads hand-written censuses now, which are the ones that are mis-shaped."""
+        d = build_fixture(self.root)
+        write(os.path.join(d, "census.json"), json.dumps({}))
+        self.assertTrue(any("pairs map" in e for e in self.errors(d)))
+        d2 = build_fixture(self.root, name="demo2")
+        c = read_json(os.path.join(d2, "census.json")); c["pairs"]["system/init"] = "not a record"
+        write(os.path.join(d2, "census.json"), json.dumps(c))
+        self.assertTrue(any("cannot read" in e for e in self.errors(d2)))
+
+    def test_a_reused_request_id_is_reported(self):
+        """The second request takes the id's state entry, so the first stops being checked."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "c1", "request": {"subtype": "can_use_tool"}}})
+        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}}})
+        self.assertTrue(any("c1" in e and "opened twice" in e for e in self.errors(d)))
 
     def test_mirror_entries_must_reproduce_the_transcript(self):
         d = build_fixture(self.root)
         with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
             fh.write(json.dumps({"type": "assistant", "uuid": "not-mirrored"}) + "\n")
         self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+
+    def test_a_synthetic_fixture_that_declares_a_transcript_is_still_mirror_checked(self):
+        """`synthetic` was only ever a proxy for "has no transcript"; the transcript is the fact."""
+        d = build_fixture(self.root, synthetic=True, hypothesis=True)
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "uuid": "not-mirrored"}) + "\n")
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+
+    def test_a_token_inside_prose_is_not_read_as_a_path(self):
+        """A false missing-artifact failure is how a gate stops being read."""
+        d = build_fixture(self.root)
+
+        def mention(f):
+            if f.get("type") == "result":
+                f["result"] = "wrote <artifacts>/_slug_/%s/tasks/t1.output for you" % SID
+
+        rewrite_frames(d, mention)
+        self.assertEqual(self.errors(d), [])
 
     def test_a_file_the_scanners_cannot_read_is_a_finding(self):
         """The gate's coverage has to be total: an unscannable file is reported, not skipped."""
