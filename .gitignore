@@ -4,3 +4,4 @@ DerivedData/
 *.app
 .DS_Store
 /Fixtures/**/*.secret*
+.typings/

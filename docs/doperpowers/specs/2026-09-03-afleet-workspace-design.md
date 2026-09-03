@@ -456,7 +456,9 @@ transcript.
 
 Owned by `ClaudeProcess`: stdin writer with backpressure, stdout line reader, stderr
 capture ring, keep-alive, exit observation with code and signal, and a `terminate()` that
-sends `end_session`, closes stdin, waits up to 5 s, then SIGTERM. Every spawn carries a
+sends `end_session`, closes stdin, waits up to 5 s for exit, sends SIGTERM, waits up to 5 s
+more, then SIGKILL; the process counts as exited only when its exit is observed, never when
+a signal is sent. Every spawn carries a
 monotonically increasing *process epoch*; every frame and exit event is tagged with it so
 FleetKit can discard events from a superseded process. Lifecycle policy (when to spawn,
 reap, respawn) lives in FleetKit (§7.4); ClaudeWire only executes it.
@@ -465,10 +467,13 @@ reap, respawn) lives in FleetKit (§7.4); ClaudeWire only executes it.
 
 `initialize.sdkMcpServers` and `sdkMcpServerConfigs` register a server named `afleet`,
 served in-process over `mcp_message` frames carrying JSON-RPC (*SPEC 45.21*): the binary
-forwards requests, the host answers in a control response. Tools appear to the model as
-`mcp__afleet__<tool>`. The first tool is `send_user_file(files: [path], caption?: string)`,
-because the built-in `SendUserFile` is enabled only on remote and desktop surfaces
-(*SPEC 23.4.2*) and is absent headless. Its effect is a *sent file* timeline item with a
+forwards requests, the host answers in a control response; a JSON-RPC notification carried
+in `mcp_message` is answered with `mcp_response {"jsonrpc": "2.0", "result": {}, "id": 0}`,
+as the SDK does. Tools appear to the model as `mcp__afleet__<tool>`. The first tool is
+`send_user_file(files: [path], caption?: string, status: "normal" | "proactive",
+display?: "render" | "attach")`, mirroring the built-in tool's shape so the model's
+prompt-trained behaviour transfers (*Parity* area 13), because the built-in `SendUserFile`
+is enabled only on remote and desktop surfaces (*SPEC 23.4.2*) and is absent headless. Its effect is a *sent file* timeline item with a
 preview and an *Open in Files* link. Later tools ride the same server with their own
 decision-log entries.
 
@@ -502,8 +507,13 @@ There is one ConfigHome per app launch. A project whose own environment (for exa
   commands, background turn boundary, resume and control shapes, checkpoints, fast mode,
   session mirror, `tool_progress` and the registry record, are its seed and move there): runs the installed
   CLI through a scripted session and a zero-cost `initialize`, records a *frame census*
-  (type and subtype counts, top-level key sets per type, `capabilities`, the flag list from
-  `claude --help`), and diffs it against the census of the fixtures. A CLI upgrade is
+  (type and subtype pairs; top-level key sets per pair and key sets one level down per
+  discriminated payload, `request` and `response` by subtype, `message` and its
+  content-block types; `capabilities`; the flag list from `claude --help`), and diffs it
+  against the census of the fixtures: deterministic scenarios such as the zero-cost
+  `initialize` compare exactly, model-driven scenarios compare required shapes only, and
+  counts are printed, never compared, because model output varies between runs. A CLI
+  upgrade is
   caught here before it breaks the app. New frame types found by the census are the queue
   for typing work.
 
@@ -1187,6 +1197,8 @@ spoken directly in v1. Dispatching new jobs is v1.1.
 
 ```swift
 enum WorkspaceLink { case file(URL, line: Int?), diff(DiffRef), url(URL), commit(String), pullRequest(Int), command(String) }
+struct DiffRef { var repository: URL; var path: String; var base: Base }   // repository: working-tree root; path: relative to it
+extension DiffRef { enum Base { case workingTreeAgainstHEAD, commit(String), commitAgainstParent(String) } }
 ```
 
 `WorkspaceLink` is a value type in `AfleetCore`, so FleetKit items can emit links without
@@ -1229,7 +1241,7 @@ output committed), the SDK typings fetched on demand.
 |---|---|---|
 | `~/Library/Application Support/afleet/state.json` | the namespaced store (§7.8) | atomic writes, schema version |
 | `~/Library/Logs/afleet/diagnostics.log` | metadata-only diagnostics: frame type, subtype, size, timing, request id, control answer behavior and classification without payload, lifecycle and ownership events | rotated, 50 MB budget |
-| `~/Library/Logs/afleet/capture/<configHomeHash>/<session-id>.ndjson` | raw frame capture, **only while the Developer setting is on** | redacted before disk: account fields, `update_environment_variables` frames, any field named like token, oauth, key or secret, MCP JSON-RPC bodies truncated to 4 KB; directory 0700, files 0600; 200 MB total budget, oldest deleted first; a session's capture is deleted when its transcript disappears from `<configHome>/projects`; *Delete diagnostics* in Settings removes everything |
+| `~/Library/Logs/afleet/capture/<configHomeHash>/<session-id>.ndjson` | raw frame capture, **only while the Developer setting is on** | redacted before disk: account fields, `update_environment_variables` frames, any string-valued field whose name contains token, oauth, key or secret, excluding the usage counters (`input_tokens`, `output_tokens`, `max_tokens`, `thinking_tokens` and their kin), with an assertion after redaction that every frame typed before it stays typed; MCP JSON-RPC bodies truncated to 4 KB; directory 0700, files 0600; 200 MB total budget, oldest deleted first; a session's capture is deleted when its transcript disappears from `<configHome>/projects`; *Delete diagnostics* in Settings removes everything |
 
 Nothing under `<configHome>` is written by afleet.
 
@@ -1683,7 +1695,11 @@ directories and 2,989 top-level session transcripts, counted as `*.jsonl` direct
 `projects/<slug>/`, 25 registry records (17 interactive, 8 background) and 8 roster
 workers. This is the data set the transcript index and fleet tracking are measured
 against; the earlier Surprises figure of 96 projects and 695 transcripts came from a
-narrower count, and S4's target applies to the full set.
+narrower count, and S4's target applies to the full set. On 2026-09-04 the extracted
+bundle's `SPEC/` chapter files were found missing from disk while the bundle source
+(`cli.pretty.js`, `modules/`), the parity inventory and the fetched SDK package remain;
+existing *SPEC* citations stand as recorded, and new protocol facts are cited to the
+bundle modules or the parity inventory until the chapters are restored.
 
 ### 17.3 Design authority
 
@@ -1760,7 +1776,9 @@ SwiftPM package or target that builds and tests without the children above it, p
   §6.3 diagnostics and §11 redaction rules (binding), §15's spike list (advisory in
   method, binding in what each must settle).
 - **Required:** required for parent acceptance.
-- **Status:** not-dispatched, dispatchable now.
+- **Status:** in-flight since 2026-09-04 (wave 1) on branch `child/c1-probes-fixtures`;
+  spec `docs/doperpowers/specs/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` on that
+  branch until merge.
 
 #### C2: `AfleetCore` and `ClaudeWire` — controlled
 
@@ -1789,7 +1807,9 @@ SwiftPM package or target that builds and tests without the children above it, p
 - **Design inheritance:** §5, §6.1 through §6.9 (binding); §6.10's fake-claude interface
   as consumer.
 - **Required:** required.
-- **Status:** not-dispatched, dispatchable now.
+- **Status:** in-flight since 2026-09-04 (wave 1) on branch `child/c2-core-wire`; spec
+  `docs/doperpowers/specs/2026-09-04-c2-afleetcore-claudewire.md` on that branch until
+  merge; G2 pending C1.G1 under §17.6's pending-gate rule.
 
 #### C3: `FleetKit` timeline: reducers, transcript index, agent tree, registry mirror — controlled
 
@@ -1984,9 +2004,11 @@ SwiftPM package or target that builds and tests without the children above it, p
   Workbench's manifest. Binds every child; a CI check in C5 rejects a violating import.
 - **X2 Core value types.** `WorkspaceLink` exactly as §9.6; `ResolvedEnvironment`
   (variables, PATH, shell, capture time); `ConfigHome` (root URL, source: env or
-  default); `SessionID` (UUID); `ChannelOrigin` (owned with its sub-state, foreignLive,
-  backgroundJob, archived). Owner: C2. Binds C3 through C7; additions need a Revision
-  Note, changes a `[parent-impact]`.
+  default); `SessionID` (UUID); `DiffRef` as §9.6; `ChannelOrigin` as
+  `owned(connecting | ready | dormant | contended)`, `foreignLive(usersTerminal |
+  ownTerminalTab)`, `backgroundJob`, `archived`, where C4 may move `contended` to a
+  top-level case with a Revision Note if the lifecycle code reads better that way. Owner:
+  C2. Binds C3 through C7; additions need a Revision Note, changes a `[parent-impact]`.
 - **X3 Wire API.** `ClaudeProcess` exposes spawn with the §6.1 flag builder and
   environment table, `send(frame)`, `request(subtype, payload) async -> response`, an
   inbound stream of epoch-tagged frames and requests, `terminate()`, and the answer
@@ -2058,6 +2080,18 @@ the commit it read. A composite child's decomposing run happens on `main`: it wr
 child's own composite spec in `docs/doperpowers/specs/`, citing `§17 C<n>`, and updates
 the tracking map here; its leaves cite that document and get their own worktrees.
 
+**Gates pending another child.** A gate blocked by another child's gate (C2.G2 on C1.G1)
+is evaluable only when that gate lands. A child may merge with such a gate pending,
+provided every other required gate passes; the tracking map marks the pending gate, and a
+later failure becomes a corrective task on that child, flagged to its dependants, rather
+than a block on the whole wave.
+
+**Wave-1 recording and live-test convention.** Live recordings and live tests run under a
+scratch config home, `CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home`, which the author
+logs into once by hand. Nothing under `Tools/` and nothing in a test writes there; only the
+spawned CLI does. Working directories are fresh directories under the system temporary
+directory, never under any config home.
+
 ### 17.7 Risks and mitigations
 
 - **CLI drift mid-build.** A CLI upgrade changes a frame the children depend on.
@@ -2102,8 +2136,8 @@ notarized distribution, and any write under `<configHome>` (X9).
 
 | Child | Spec | Status |
 |---|---|---|
-| C1 Probe suite, fixtures, fake-claude | — | not-dispatched, dispatchable now |
-| C2 AfleetCore and ClaudeWire | — | not-dispatched, dispatchable now |
+| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md` on `child/c1-probes-fixtures` | in-flight (wave 1) |
+| C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md` on `child/c2-core-wire` | in-flight (wave 1); G2 pending C1.G1 |
 | C3 FleetKit timeline | — | blocked-by C2 |
 | C4 FleetKit sessions and fleet | — | blocked-by C2 |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
@@ -2694,6 +2728,64 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   document.
   Date/Author: 2026-09-04 / kimmi with Claude
 
+- Decision: `terminate()` ends in SIGKILL five seconds after SIGTERM, and a process is
+  exited only when its exit is observed (§6.7).
+  Rationale: C2's `[parent-impact]`: a binary that ignores SIGTERM would otherwise leave a
+  live process that FleetKit's respawn and handoff treat as gone, giving one session two
+  holders. Rejected: stopping at SIGTERM; reporting exited on signal.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: `send_user_file` mirrors the built-in tool's schema, `files`, `caption?`,
+  `status`, `display?`, and a JSON-RPC notification inside `mcp_message` is answered with
+  the SDK's dummy `mcp_response` (§6.8).
+  Rationale: The model is prompt-trained on the built-in shape, and `status` and
+  `display` carry routing intent (*Parity* area 13); C1's harness had `{path}` and C2 had
+  `{files, caption}`, so the contract is fixed here. The SDK answers non-request messages
+  with `{jsonrpc: "2.0", result: {}, id: 0}` (sdk.mjs 0.3.259), and the CLI's schema says
+  a notification gets a response with an empty result. Rejected: a single-path schema; a
+  control response without `mcp_response`.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: The census records key sets one level down per discriminated payload,
+  compares deterministic scenarios exactly and model-driven ones on required shapes, and
+  never compares counts (§6.10).
+  Rationale: The fields the app decodes sit under `request`, `response` and `message`, so
+  a frame-level key set misses breaking drift; conditional frames and optional keys in
+  model-driven runs would otherwise register as drift. Rejected: frame-level key sets
+  only; count-exact censuses.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: `DiffRef` is defined in §9.6 and `ChannelOrigin`'s sub-states are enumerated
+  in X2, as additions under X2's Revision Note rule.
+  Rationale: C2 owns X2 and needed both to write `AfleetCore`; `contended` sits under
+  `owned` because §7.4's Contended state is entered from an owned channel's handoff and
+  resolves back to an origin, and C4 may move it with a Revision Note. Rejected: leaving
+  `DiffRef` undefined until C7; a fifth top-level origin now.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: Capture redaction targets string-valued fields whose names contain token,
+  oauth, key or secret, excludes the usage counters, and asserts that typed frames stay
+  typed (§11).
+  Rationale: The earlier wording matched `input_tokens` and its kin, whose replacement by
+  a string would make every known frame with usage fail to decode and defeat G2's
+  round-trip check. Rejected: name-only matching; redacting after the write.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: A gate blocked by another child's gate is evaluable when that gate lands, and
+  a child may merge with it pending, marked in the tracking map (§17.6).
+  Rationale: C2.G2 waits on C1's full recording catalogue, which needs a manual login and
+  real time; holding C3 and C4 for it costs more than a possible model correction, which
+  becomes a corrective task flagged to the dependants. Rejected: merge only when every
+  gate passes; treating hand-written samples as G2 evidence.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: Wave-1 recordings and live tests run under a scratch config home the author
+  logs into once by hand (§17.6).
+  Rationale: Keeps about twenty probe sessions out of the real history and the user's
+  plugins, skills and memory files out of the census, at the price of one manual login.
+  Rejected: the real config home with `--setting-sources ""`.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
 ## Surprises & Discoveries
 
 - Observation: Anthropic paused the June 15, 2026 Agent SDK credit split.
@@ -2983,6 +3075,31 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   figure of 96 projects and 695 transcripts came from a narrower count.
   Impact: §17.2 records the full-set numbers and C3's index gate targets them.
 
+- Observation: The SDK answers a JSON-RPC notification carried in `mcp_message` with a
+  dummy response rather than nothing.
+  Evidence: `sdk.mjs` in `@anthropic-ai/claude-agent-sdk@0.3.259`: for a non-request
+  message it calls `transport.onmessage` and returns
+  `{mcp_response: {jsonrpc: "2.0", result: {}, id: 0}}`; the CLI's schema description in
+  `modules/chunk-sct99ax9.js` says a notification gets "a response with an empty result".
+  Impact: §6.8 fixes the answer; a host that returned no `mcp_response` would stall MCP
+  initialisation at `notifications/initialized`.
+- Observation: The §11 redaction rule as first written would have corrupted every frame
+  carrying usage.
+  Evidence: Codex's review of the C2 spec: "any field named like token" matches
+  `input_tokens`, `output_tokens`, `max_tokens` and `thinking_tokens`; replacing numbers
+  with `"<redacted>"` makes the typed models fail to decode.
+  Impact: §11 now targets string-valued fields, excludes the counters and asserts typed
+  frames stay typed.
+- Observation: The extracted bundle's specification chapters disappeared from disk during
+  the day.
+  Evidence: On 2026-09-04 `ls ~/claude-code-bundle/2.1.257/SPEC` lists only `00-README.md`,
+  `CONVENTIONS.md`, `_briefs/`, `_inventory/` and `_notes/`; the chapter files this
+  document cites (`02`, `03`, `11`, `18`, `31`, `35`, `42`, `45` and the rest) were read
+  from that directory hours earlier in the same session. `cli.pretty.js` and `modules/`
+  are intact; the 2.1.258 directory never had chapters.
+  Impact: §17.2 records the loss; new protocol facts cite the bundle modules or the
+  parity inventory until the chapters are restored.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
@@ -3071,3 +3188,15 @@ Pending — written at finish.
   at §17. Six Decision Log entries and one Surprises entry added. The 2026-09-03 draft
   decomposition into eleven children was removed from `main` at the author's request
   and served here as critique input.
+- 2026-09-04: Wave-1 reconciliations from C2. §6.7 `terminate()` ends in SIGKILL and exit
+  is observed; §9.6 defines `DiffRef` and X2 enumerates `ChannelOrigin`'s sub-states; §11's
+  redaction rule targets string-valued fields, excludes usage counters and asserts typed
+  frames stay typed. Flags C2 (owner) and, for X2, C3 through C7 at their dispatch.
+- 2026-09-04: Wave-1 reconciliations from C1. §6.8 fixes `send_user_file`'s schema
+  (`files`, `caption?`, `status`, `display?`) and the notification answer; §6.10 extends
+  the census one level down with exact versus required-shape comparison. Flags C1 and C2.
+- 2026-09-04: Dispatch bookkeeping. §17.6 adds the pending-gate rule and the scratch
+  config home convention for wave 1; §17.4 and §17.9 mark C1 and C2 in-flight with their
+  spec paths and branches, C2.G2 pending C1.G1; §17.2 records the missing bundle spec
+  chapters; `.gitignore` gains `.typings/`. Seven Decision Log entries and three Surprises
+  entries added.
