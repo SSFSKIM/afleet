@@ -222,6 +222,17 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(recorded_order, ["A", "B"])
         self.assertEqual(wire_order, recorded_order)
 
+    def test_a_mis_shaped_string_policy_is_refused_when_it_is_set(self):
+        s = harness.Session(make_launch(self.tmp), self.redactor)      # no child needed
+        for subtype, policy in (("elicitation", "allow"), ("mcp_message", "deny"),
+                                ("request_user_dialog", "allow"), ("can_use_tool", "approve")):
+            with self.assertRaises(ValueError, msg="%s/%s" % (subtype, policy)):
+                s.on(subtype, policy)
+        s.on("can_use_tool", "deny")              # the shape it was written for
+        s.on("elicitation", "leave")              # shape-free, fits any subtype
+        s.on("mcp_message", lambda f: None)       # a callable always fits
+        self.assertEqual(s.policies["can_use_tool"], "deny")
+
     def test_stderr_tail_is_redacted_at_the_source(self):
         s = self.run_session([])
         s._stderr.append("failed at /Users/probe/x on probe-mac\n")
@@ -242,13 +253,28 @@ class SessionTests(unittest.TestCase):
         s = self.run_session([])
         s.send_user("go"); s.wait_result(10)
         s.proc.stdin.close()          # the child sees EOF and exits of its own accord
+        outcome = {}
+
+        def do_close():
+            t0 = time.time()
+            outcome["code"] = s.close()
+            outcome["dt"] = time.time() - t0
+
+        # close() runs on its own thread with a join bound, so a regression that removes the
+        # timeout fails this test instead of hanging the suite with no failing assertion.
+        closer = threading.Thread(target=do_close, daemon=True)
         s._write_lock.acquire()       # a wedged writer never gives the lock back
         try:
-            t0 = time.time(); code = s.close(); dt = time.time() - t0
+            closer.start()
+            closer.join(20)
         finally:
             s._write_lock.release()
-        self.assertIsNotNone(code)    # close returned at all
-        self.assertLess(dt, 11.0)
+        self.assertFalse(closer.is_alive(), "close() never returned: the bounded acquire is gone")
+        self.assertIsNotNone(outcome["code"])
+        # Both ends: the bounded wait actually happened (a harness that skipped it and went
+        # straight to the signal would come back near zero) and it did not run away.
+        self.assertGreaterEqual(outcome["dt"], 4.9)
+        self.assertLess(outcome["dt"], 11.0)
 
     def test_request_round_trip_and_close_sequence_with_a_stubborn_child(self):
         s = self.run_session(["ignore_end_session"])

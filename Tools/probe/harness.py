@@ -47,6 +47,12 @@ SEND_USER_FILE_TOOL = {
 HOSTNAME_WORD_LIMIT = 8
 # §6.7 specifies a stderr *ring*; an unbounded list grows without limit on a chatty child.
 STDERR_RING_LINES = 2000
+# `allow` and `deny` answer with `{behavior, updatedInput}` / `{behavior, message}`, which is
+# the `can_use_tool` answer shape and nothing else's. A future subtype that takes the same
+# shape joins this tuple; anything else needs a callable. `leave` is shape-free, so it fits
+# every subtype.
+BEHAVIOUR_POLICY_SUBTYPES = ("can_use_tool",)
+STRING_POLICIES = ("allow", "deny", "leave")
 
 
 def word_shaped_hostname(hostname):
@@ -388,6 +394,22 @@ class Session:
 
     # ---- inbound policy
     def on(self, subtype, policy):
+        """Set the answer policy for one inbound subtype: `allow`, `deny`, `leave`, or a
+        callable taking the frame and returning the response body (or None to leave it).
+
+        A mis-shaped string policy is refused here rather than silently answered, because
+        the alternative is a scenario recording `{"behavior": "allow"}` as an elicitation
+        answer -- malformed, accepted by nothing, and invisible until someone reads the
+        fixture. The scenario author hears about it at the line that set it.
+        """
+        if not callable(policy):
+            if policy not in STRING_POLICIES:
+                raise ValueError("unknown policy %r for %s: use %s or a callable"
+                                 % (policy, subtype, ", ".join(STRING_POLICIES)))
+            if policy in ("allow", "deny") and subtype not in BEHAVIOUR_POLICY_SUBTYPES:
+                raise ValueError("the %r policy answers with a `behavior` body, which %s does not take: "
+                                 "use \"leave\" or a callable that builds the answer %s expects"
+                                 % (policy, subtype, subtype))
         self.policies[subtype] = policy
 
     def _dispatch(self, frame):
