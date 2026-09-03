@@ -1,6 +1,7 @@
 """Fixture layout and verifier tests (contract X8: spec §4.4, and §4.2's `verify` paragraph)."""
 import json
 import os
+import re
 import tempfile
 import unittest
 import _paths  # noqa: F401
@@ -178,6 +179,30 @@ class WriteAndLoadTests(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(root)), ["copy"])  # no temp dir left behind
         again = fixture.load(path)
         self.assertEqual(again["frames"], loaded["frames"]); self.assertEqual(again["meta"]["name"], "copy")
+
+    def test_an_empty_stream_directory_still_carries_a_file_git_can_track(self):
+        """A scenario that resumes nothing and starts no turn writes no `initial/` and no
+        `transcript/`. Git tracks no empty directory, so without a placeholder the fixture
+        passes the gate on the recording machine -- where `record` had just made the
+        directories -- and fails `missing initial/` on every clone."""
+        root, empty = tempfile.mkdtemp(), tempfile.mkdtemp()
+        src = build_fixture(tempfile.mkdtemp())
+        loaded = fixture.load(src)
+        path = fixture.write_fixture(root, "bare", loaded["meta"], loaded["frames"], loaded["census"], {"rules": {}},
+                                     empty, empty, empty)
+        for sub in ("initial", "transcript", "artifacts"):
+            self.assertEqual(os.listdir(os.path.join(path, sub)), [fixture.PLACEHOLDER], sub)
+        # The placeholder is not a stream: `streams.json` and every caller that asks whether
+        # the fixture has a transcript at all read it out of `stream_sizes`.
+        self.assertEqual(read_json(os.path.join(path, "streams.json")), {})
+        self.assertEqual(fixture.stream_sizes(os.path.join(path, "initial")), {})
+
+    def test_a_populated_stream_directory_gets_no_placeholder(self):
+        root = tempfile.mkdtemp(); src = build_fixture(tempfile.mkdtemp())
+        loaded = fixture.load(src)
+        path = fixture.write_fixture(root, "full", loaded["meta"], loaded["frames"], loaded["census"], {"rules": {}},
+                                     os.path.join(src, "initial"), os.path.join(src, "transcript"), os.path.join(src, "artifacts"))
+        self.assertNotIn(fixture.PLACEHOLDER, os.listdir(os.path.join(path, "transcript")))
 
 
 class VerifyTests(unittest.TestCase):
@@ -581,6 +606,27 @@ class VerifyTests(unittest.TestCase):
         def relocate(f):
             if f.get("type") == "transcript_mirror":
                 f["filePath"] = "~/.claude/projects/%s/%s.jsonl" % (fixture.slug_of(cwd), SID)
+
+        rewrite_frames(d, relocate)
+        self.assertEqual(self.errors(d), [])
+
+    def test_the_mirror_check_resolves_the_recorded_cwd_before_slugging_it(self):
+        """The CLI slugs the path it resolved to, not the one it was handed. Every recording
+        runs under `/tmp/afleet-fixtures/<name>`, which on macOS resolves into `/private/tmp`,
+        so the mirrored `filePath` carries a slug the unresolved cwd only partly matches --
+        rewriting its tail and leaving a `-private` stump that names no file under
+        `transcript/`. Built on a symlink of its own so it holds wherever the tests run."""
+        real = os.path.join(self.root, "resolved")
+        link = os.path.join(self.root, "link")
+        os.makedirs(real)
+        os.symlink(real, link)
+        cwd = os.path.join(link, "demo")
+        d = build_fixture(self.root, cwd=cwd)
+
+        def relocate(f):
+            if f.get("type") == "transcript_mirror":
+                f["filePath"] = "~/.claude/projects/%s/%s.jsonl" % (
+                    re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.join(real, "demo"))), SID)
 
         rewrite_frames(d, relocate)
         self.assertEqual(self.errors(d), [])

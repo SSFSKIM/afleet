@@ -21,10 +21,25 @@ import tempfile
 SLUG_TOKEN = "_slug_"
 ARTIFACT_TOKEN = "<artifacts>"
 REQUIRED_FILES = ("fixture.json", "frames.ndjson", "census.json", "redaction.json", "streams.json")
+# `verify` requires `initial/` and `transcript/` to be directories, and git tracks no empty
+# directory: a fixture whose scenario resumed nothing and wrote no transcript would pass the
+# gate on the recording machine, where `record` had just made the directories, and fail on
+# every clone. The placeholder is what carries an empty one into the repository. Everything
+# that walks a fixture's stream directories skips it by name, so it never becomes a phantom
+# stream, artifact or transcript.
+PLACEHOLDER = ".gitkeep"
 
 
 def slug_of(cwd):
-    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    """The project slug the CLI derives from a working directory.
+
+    Resolved first, because the CLI slugs the path it actually resolved to and not the one it
+    was handed. Every recording runs under `/tmp/afleet-fixtures/<name>`, and on macOS `/tmp`
+    is a symlink to `/private/tmp`, so the CLI writes `-private-tmp-afleet-fixtures-<name>`
+    while the recorded cwd still reads `/tmp/...`. Comparing the unresolved form against a
+    mirrored `filePath` rewrote only the tail of the slug and left a `-private` stump.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd))
 
 
 def find_session(config_home, session_id):
@@ -111,12 +126,25 @@ def snapshot(config_home, session_id, dest_dir, redactor):
 
 
 def stream_sizes(initial_dir):
+    """Stream path -> byte size for every real stream under a directory.
+
+    The placeholder is excluded, which is what keeps it out of `streams.json` and out of every
+    caller that asks "does this fixture have a transcript at all?" by testing this map.
+    """
     out = {}
     for root, _, files in os.walk(initial_dir):
         for f in files:
+            if f == PLACEHOLDER:
+                continue
             p = os.path.join(root, f)
             out[os.path.relpath(p, initial_dir)] = os.path.getsize(p)
     return out
+
+
+def keep_directory(path):
+    """Give an otherwise empty directory a tracked file, so a commit carries it."""
+    if not any(files for _, _, files in os.walk(path)):
+        open(os.path.join(path, PLACEHOLDER), "w").close()
 
 
 def _strings(obj):
@@ -210,6 +238,7 @@ def write_fixture(fixtures_root, name, meta, frames, census_obj, manifest, initi
                 shutil.copytree(src, dst)
             else:
                 os.makedirs(dst)
+            keep_directory(dst)
         with open(os.path.join(tmp, "streams.json"), "w", encoding="utf-8") as fh:
             json.dump(stream_sizes(os.path.join(tmp, "initial")), fh, indent=1, sort_keys=True)
         dest = os.path.join(fixtures_root, name)

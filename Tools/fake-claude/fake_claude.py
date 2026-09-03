@@ -12,10 +12,17 @@ SLUG_TOKEN = "_slug_"
 ARTIFACT_TOKEN = "<artifacts>"
 EXIT_REFUSED = 2
 EXIT_UNEXPECTED = 3
+# The file `probe`'s `write_fixture` drops into a fixture directory that would otherwise be
+# empty, so git carries the directory. It is not a stream and not an artifact, and both the
+# materialiser and the final-state comparison have to look past it.
+PLACEHOLDER = ".gitkeep"
 
 
 def slug_of(cwd):
-    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    """The project slug the CLI derives from a working directory; resolved first, because the
+    CLI slugs the path it resolved to. `/tmp` is a symlink to `/private/tmp` on macOS, so an
+    unresolved cwd yields a slug no real session ever wrote under."""
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd))
 
 
 def _read_json(path):
@@ -168,6 +175,8 @@ def materialize(fixture_dir, config_home, cwd, env=None, stderr=sys.stderr):
     initial = os.path.join(fixture_dir, "initial")
     for root, _, files in os.walk(initial):
         for f in files:
+            if f == PLACEHOLDER:
+                continue
             stream = os.path.relpath(os.path.join(root, f), initial)
             rel = stream.replace(SLUG_TOKEN, slug_of(cwd))
             dst = safe_path(real, os.path.join("projects", rel))
@@ -182,7 +191,8 @@ def materialize(fixture_dir, config_home, cwd, env=None, stderr=sys.stderr):
 
 def rel_files(base):
     """Every file beneath `base`, as paths relative to it."""
-    return set(os.path.relpath(os.path.join(root, f), base) for root, _, files in os.walk(base) for f in files)
+    return set(os.path.relpath(os.path.join(root, f), base)
+               for root, _, files in os.walk(base) for f in files if f != PLACEHOLDER)
 
 
 def compare_final_state(fixture_dir, config_home, cwd):
