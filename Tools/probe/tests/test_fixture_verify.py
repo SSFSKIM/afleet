@@ -335,9 +335,34 @@ class VerifyTests(unittest.TestCase):
         """
         d = build_fixture(self.root)
         append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "end-1", "request": {"subtype": "end_session"}}})
+        # A CLI frame after it, so this isolates the end_session carve-out from the separate
+        # tolerance for one unwritten record sitting at the very tail.
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
         self.assertEqual(self.errors(d), [])
-        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "user", "uuid": "u2", "message": {"role": "user", "content": "still open"}}})
+        append_frame(d, {"t": 97, "dir": "in", "frame": {"type": "user", "uuid": "u2", "message": {"role": "user", "content": "still open"}}})
         self.assertTrue(any("unanswered request end-1" in e for e in self.errors(d)))
+
+    def test_one_unwritten_trailing_host_request_is_tolerated_but_only_one(self):
+        """`Session._send_locked` records then writes while holding one lock (§4.3).
+
+        A child that exits between the two leaves exactly one frame in the capture that never
+        reached the wire, which is a legitimate recording. It can only sit at the tail: the
+        failing write raises, so nothing the host sent follows it. A second trailing request
+        is something other than one failed final write.
+        """
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "w1", "request": {"subtype": "get_settings"}}})
+        self.assertEqual(self.errors(d), [])
+        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_request", "request_id": "w2", "request": {"subtype": "get_settings"}}})
+        e = self.errors(d)
+        self.assertTrue(any("unanswered request w1" in x for x in e))
+        self.assertFalse(any("unanswered request w2" in x for x in e))
+
+    def test_an_unanswered_host_request_before_the_tail_still_fails(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "w1", "request": {"subtype": "get_settings"}}})
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertTrue(any("unanswered request w1" in e for e in self.errors(d)))
 
     def test_timestamps_must_not_go_backwards(self):
         d = build_fixture(self.root)

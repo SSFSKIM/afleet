@@ -63,6 +63,19 @@ def _lifecycle(frames, late_ok):
     # Once the host closes stdin nothing more can travel host to CLI, so the index of the
     # last inbound record is the point past which an unanswered host request is explicable.
     last_inbound = max((i for i, rec in enumerate(frames) if rec.get("dir") == "in"), default=-1)
+    # The very last record, when it is a host request, may be one the harness recorded but
+    # never managed to write. `Session._send_locked` records and writes as one step while
+    # holding the write lock -- which is what keeps capture order and wire order the same --
+    # so a child that exits between the two leaves exactly one frame in the capture that
+    # never reached the wire. That is a legitimate recording, and the tail is the only place
+    # it can sit, because the failing write raises and nothing the host sent follows it. A gap
+    # anywhere earlier means the recording is wrong, and a second unmatched trailing request
+    # means something other than one failed final write.
+    unwritten = None
+    if frames and frames[-1].get("dir") == "in":
+        tail = frames[-1].get("frame") or {}
+        if tail.get("type") == "control_request":
+            unwritten = tail.get("request_id")
     for i, rec in enumerate(frames):
         if "dropped" in rec:
             if rec.get("request_id"):
@@ -111,7 +124,9 @@ def _lifecycle(frames, late_ok):
     for rid, (origin, status) in state.items():
         if status != "open":
             continue
-        # The one carve-out, and it is about a mechanism rather than about a subtype: the
+        if rid is not None and rid == unwritten:
+            continue
+        # The other carve-out, and it too is about a mechanism rather than about a subtype: the
         # harness sends `end_session` and closes stdin in the same breath (§6.7), so that
         # response may legitimately never be captured. The reasoning holds only while nothing
         # further travels host to CLI -- a fixture with later inbound traffic still had an
