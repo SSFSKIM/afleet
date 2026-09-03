@@ -47,20 +47,28 @@ Terms of art used in this document, defined once here.
   requests. afleet is a host in the same sense as Claude Desktop and the VS Code extension.
 - **Protocol baseline**: the CLI version whose published SDK typings and recorded fixtures
   the app is built against. Initially 2.1.259 with `@anthropic-ai/claude-agent-sdk@0.3.259`.
+- **ConfigHome**: the directory Claude Code keeps its state in: `CLAUDE_CONFIG_DIR` from the
+  resolved environment when set, else `~/.claude` (*SPEC 35.1.1*). Written `<configHome>`
+  below. Every path afleet reads is rooted there.
 - **Workspace**: the afleet app and its one main window.
 - **Project**: a directory Claude Code has run in. A collapsible sidebar section, grouped
   further by worktree when a project has several.
 - **Channel**: one Claude Code session, identified by its session UUID, with one of four
   *origins* (§7.1): owned, foreign live, background job, archived.
 - **Transcript**: the session's on-disk record at
-  `~/.claude/projects/<slug>/<session-id>.jsonl` (*SPEC 35*), plus subagent transcripts
+  `<configHome>/projects/<slug>/<session-id>.jsonl` (*SPEC 35*), plus subagent transcripts
   beside it.
-- **Registry**: `~/.claude/sessions/<pid>.json`, one record per live Claude Code process,
-  with kind, status, name, cwd and session id (*SPEC 38.18*).
-- **Roster**: `~/.claude/daemon/roster.json`, the daemon's list of background workers
+- **Registry**: `<configHome>/sessions/<pid>.json`, one record per live Claude Code
+  process, with kind, status, name, cwd and session id (*SPEC 38.18*). afleet's own
+  headless children register there too, as `kind: interactive`, `entrypoint: sdk-cli`.
+- **Roster**: `<configHome>/daemon/roster.json`, the daemon's list of background workers
   (*SPEC 38.5.3*); `claude agents --json` lists interactive and background sessions together.
+- **Holder**: a live process that appends to a session's transcript. The *observed holder
+  set* of a session is every registry record, roster entry and `agents --json` row naming
+  its session id, minus afleet's own child pids. A session with more than one holder is
+  *contended* (§7.2).
 - **Timeline**: the ordered list of items a channel renders, produced identically from live
-  frames and from the transcript (§7.2).
+  frames and from the transcript (§7.3).
 - **Thread**: a drill-down attached to a timeline item, opened in the right panel.
 - **Decision**: a timeline item created from an inbound control request that needs a person:
   permission, question, plan approval, dialog, elicitation.
@@ -132,41 +140,68 @@ sources; evidence is in *Surprises & Discoveries*.
 7. **The stack is proven.** libghostty-spm ships the full libghostty as an MIT SwiftPM
    binary target; many Swift apps embed it. Monaco is VS Code's editor under MIT.
 
-## 5. Architecture: four modules, one-way dependencies
+## 5. Architecture: five modules, one-way dependencies
 
 ```
    Afleet      SwiftUI shell: sidebar, channel column, thread pane, Activity, Cmd+K,
-      │        notifications, settings, packaging
+      │        notifications, settings, packaging; owns its own persisted UI state
       ▼
    Workbench   panels: Files (Monaco + viewers), Source Control + GitHub, Terminal
-      │        (TerminalSurface over libghostty-spm + own PTY layer), Browser, LinkRouter
+      │        (TerminalSurface over libghostty-spm + own PTY layer), Browser; LinkRouter
+      │        behavior; receives ResolvedEnvironment by injection; owns panel state
       ▼
-   FleetKit    Timeline model; wire reducer + transcript reader (differential invariant);
-      │        Channel with four origins and lifecycle; fleet tracking (registry, roster,
-      │        agents --json); Activity query; command router; app store
+   FleetKit    Timeline model; wire reducer + transcript reader (durable projection
+      │        invariant); Channel origins, ownership protocol and lifecycle; fleet
+      │        tracking (registry, roster, agents --json); Activity query; command
+      │        router; namespaced key-value store
       ▼
    ClaudeWire  Codable frames from the SDK typings; ClaudeProcess actor; control
-               correlation; in-process MCP server; frame log; version gate; environment
-               resolution; fake-claude, fixtures, probe suite
+      │        correlation and request-answering policy; in-process MCP server;
+      │        diagnostics; version gate; environment resolution; fake-claude,
+      │        fixtures, probe suite
+      ▼
+   AfleetCore  value types only: WorkspaceLink, ResolvedEnvironment, ConfigHome,
+               SessionID, ChannelOrigin. No I/O, no dependencies.
 ```
 
-Each module is a SwiftPM package with its own tests, buildable without the modules above
-it. Inside each, targets stay small and single-purpose (for example `FleetKit` has
-`Timeline`, `WireReducer`, `TranscriptReader`, `Fleet`, `CommandRouter`, `Store`), but the
-public dependency graph is the four-layer one above, which is also the cut
-doperpowers:decomposing is expected to make. Workbench does not import ClaudeWire; the
-Terminal panel's raw-TUI hatch and job attach go through FleetKit's lifecycle API.
+Actual SwiftPM dependency edges, the only ones allowed:
+
+| Package | Depends on | Must not import |
+|---|---|---|
+| `AfleetCore` | — | anything |
+| `ClaudeWire` | `AfleetCore` | FleetKit, Workbench, Afleet |
+| `FleetKit` | `AfleetCore`, `ClaudeWire` | Workbench, Afleet |
+| `Workbench` | `AfleetCore`, `FleetKit` | ClaudeWire, Afleet |
+| `Afleet` (app) | all four | — |
+
+Each package has its own tests and builds without the packages above it. Inside each,
+targets stay small and single-purpose (for example `FleetKit` has `Timeline`,
+`WireReducer`, `TranscriptReader`, `Fleet`, `Ownership`, `CommandRouter`, `Store`), but the
+public dependency graph is the five-layer one above, which is also the cut
+doperpowers:decomposing is expected to make. Three rules keep the edges one-way:
+
+- Shared value contracts live in `AfleetCore`. FleetKit items *emit* `WorkspaceLink`
+  values; the behavior that opens them (`LinkRouter`) lives in Workbench.
+- The resolved environment is captured by ClaudeWire, carried as an `AfleetCore` value,
+  and handed to Workbench by the app, so Workbench-launched git, gh and shell processes
+  inherit it without importing ClaudeWire.
+- FleetKit's store is a namespaced key-value API (§7.8). Browser tabs and panel state are
+  types owned and persisted by Workbench and Afleet through that API; FleetKit never
+  models them. The Terminal panel's raw-TUI hatch and job attach go through FleetKit's
+  lifecycle API.
 
 Data flow in one paragraph. At launch, ClaudeWire resolves the environment through the
-login shell (§6.9) and checks the version gate; FleetKit indexes transcripts, reads the
-registry and roster, and restores the store; the sidebar renders channels with their
-origins. Opening a channel renders its timeline from the transcript immediately. If the
-origin allows, FleetKit asks ClaudeWire to spawn an owned process and perform the
-handshake; live frames flow through the wire reducer into the same timeline. Inbound
-control requests become decisions; answering one sends the control response. Composer
-input goes through the command router to a text frame, a control request, or a native
-action. When a process exits, the channel's origin changes and the timeline re-syncs from
-disk. Every link an item emits goes through LinkRouter to a panel tab.
+login shell (§6.9), derives ConfigHome, and checks the version gate; FleetKit indexes
+transcripts, reads the registry and roster, and restores the store; the sidebar renders
+channels with their origins. Opening a channel renders its timeline from the transcript
+immediately. If the origin allows and the ownership protocol (§7.2) finds no other holder,
+FleetKit asks ClaudeWire to spawn an owned process and perform the handshake; live frames
+flow through the wire reducer into the same timeline. Inbound control requests become
+decisions or are answered by policy; answering a decision sends the control response.
+Composer input goes through the command router to a text frame, a control request, a
+lifecycle action or a quiescent restart. When a process exits, the channel's origin
+changes and the timeline re-syncs from disk. Every link an item emits goes through
+LinkRouter to a panel tab.
 
 ## 6. ClaudeWire: the wire layer
 
@@ -203,8 +238,11 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
   the auth banner. `--prompt-suggestions true` is passed only when the *Prompt
   suggestions* setting is on; it is off by default because it costs a model call per turn.
 - New channels mint their own UUID and pass `--session-id`; existing channels pass
-  `--resume`; forks add `--fork-session`. The launch flags only set initial state; all of
-  them are changeable at runtime through the command router (§7.6).
+  `--resume`; forks add `--fork-session`. The launch flags only set initial state. Every
+  launch setting can be changed afterwards: some directly through control requests, the
+  rest through a quiescent restart under the same session id; the matrix is in §7.7.
+- Two preconditions gate an owned spawn: the ownership protocol must find no other holder
+  (§7.2), and the project must be trusted (§6.11).
 - The binary is resolved from `~/.local/bin/claude` through the resolved environment,
   overridable in settings. `CLAUDE_CODE_ENTRYPOINT` is left unset; afleet does not
   impersonate a first-party entrypoint.
@@ -244,11 +282,24 @@ subset, `mcp_servers`, `capabilities`, `claude_code_version`, `apiKeySource` and
 - Control requests without published typings (`side_question`, `rewind_conversation`,
   `add_directory`, `end_session`, `generate_session_title`) are modeled from the bundle's
   handler source (*SPEC 45.17*) and pinned by probe fixtures (S8).
-- Decoding is tolerant. A frame with an unknown `type` or `subtype`, or a known one that
-  fails to decode, is preserved as an opaque item with its raw JSON: never dropped, never
-  fatal, rendered as a collapsed "unrecognized event" row, counted for the drift check.
-- Every inbound and outbound frame is appended to
-  `~/Library/Logs/afleet/frames/<session-id>.ndjson`, rotated; these logs feed fixtures.
+- **Opacity applies to one-way frames only.** A message frame with an unknown `type` or
+  `subtype`, or a known one that fails to decode, is preserved as an opaque item with its
+  raw JSON: never dropped, never fatal, rendered as a collapsed "unrecognized event" row,
+  counted for the drift check.
+- **Every inbound control request is answered.** The stdio transport applies no
+  per-request deadline (*SPEC 45.16.4*; only `mcp_message` carries a 70 s bound), so a
+  request left unanswered blocks the engine indefinitely. Rules: an inbound request with
+  an unknown subtype is answered at once with a `control_response` error
+  `"subtype <x> not supported by afleet <version>"`, recorded as an opaque item and
+  counted for drift; a known subtype whose payload fails to decode is answered with an
+  error naming the failing field and raises a compatibility banner in the channel; a
+  decision request the user has not answered when the process must exit is cancelled by
+  the exit itself, and the card becomes inert. No code path may hold an inbound request
+  without a response or a cancellation.
+- **Diagnostics are metadata-only by default**: per frame, type, subtype, byte size, timing
+  and request id, written to `~/Library/Logs/afleet/`. Raw frame capture is a Developer
+  setting, off by default, and is the only source of fixtures; its redaction and retention
+  rules are in §11.
 
 ### 6.4 Inbound and outbound requests
 
@@ -260,7 +311,7 @@ subset, `mcp_servers`, `capabilities`, `claude_code_version`, `apiKeySource` and
 | inbound | `hook_callback` | No hooks registered in v1; if received, answer an empty continue. |
 | inbound | `mcp_message` | Route to the in-process MCP server (§6.8). |
 | outbound | `interrupt` | Esc while running; honor `still_queued`. |
-| outbound | `set_permission_mode`, `set_model`, `set_max_thinking_tokens`, `apply_flag_settings`, `rename_session`, `add_directory` | Command router targets (§7.6). |
+| outbound | `set_permission_mode`, `set_model`, `set_max_thinking_tokens`, `apply_flag_settings`, `rename_session`, `add_directory` | Command router targets (§7.7). |
 | outbound | `rewind_conversation`, `rewind_files` | Edit-and-resend; restore files, with `dry_run` first. |
 | outbound | `get_context_usage`, `get_session_cost`, `get_usage`, `get_binary_version` | Header meter, usage popover, version gate. |
 | outbound | `stop_task`, `background_tasks` | Task cards. |
@@ -275,8 +326,11 @@ At launch afleet runs `claude --version` and, on the first owned channel,
 `get_binary_version`. A binary older than the protocol baseline is refused with an upgrade
 screen naming installed and required versions; nothing spawns. A newer binary is accepted:
 unknown frames take the opaque path, and features gate on `capabilities` tokens, never on
-version comparison. The Settings screen shows the baseline, the installed version, and the
-count of unknown frame types seen since install.
+version comparison. When the probe census (§6.10) reports inbound control request
+subtypes that are new or whose key sets changed relative to the fixtures, the gate admits
+the binary but shows a warning naming them, because those are the frames afleet must
+answer rather than merely display. The Settings screen shows the baseline, the installed
+version, the count of unknown frame types seen since install, and the last census result.
 
 ### 6.6 Sending input
 
@@ -291,8 +345,10 @@ and never enters the transcript.
 
 Owned by `ClaudeProcess`: stdin writer with backpressure, stdout line reader, stderr
 capture ring, keep-alive, exit observation with code and signal, and a `terminate()` that
-sends `end_session`, closes stdin, waits up to 5 s, then SIGTERM. Lifecycle policy
-(when to spawn, reap, respawn) lives in FleetKit (§7.3); ClaudeWire only executes it.
+sends `end_session`, closes stdin, waits up to 5 s, then SIGTERM. Every spawn carries a
+monotonically increasing *process epoch*; every frame and exit event is tagged with it so
+FleetKit can discard events from a superseded process. Lifecycle policy (when to spawn,
+reap, respawn) lives in FleetKit (§7.4); ClaudeWire only executes it.
 
 ### 6.8 In-process MCP server
 
@@ -314,15 +370,22 @@ and captures the environment. Every spawn (claude, git, gh, shells) inherits it,
 PATH-dependent MCP servers, hooks and helpers behave exactly as in the terminal. Settings
 offers *Refresh environment* and shows the resolved PATH.
 
+**ConfigHome** is derived from the same capture: `CLAUDE_CONFIG_DIR` when set, else
+`~/.claude`; `CLAUDE_CODE_PROJECT_DIR_NAME` is honored only together with it
+(*SPEC 35.2.2*). Every registry, roster, transcript, daemon and `.claude.json` path the app
+reads routes through this value, and channels are keyed by ConfigHome plus session id.
+There is one ConfigHome per app launch. A project whose own environment (for example a
+`.envrc`) would set a different value is warned about and is unsupported in v1.
+
 ### 6.10 fake-claude, fixtures, probe suite
 
 - `Tools/fake-claude/`: a script that speaks the protocol from a fixture, answers
   `initialize`, replays frames with timing, and can inject arbitrary frames. UI tests spend
   no tokens.
-- **Golden fixtures**: NDJSON recorded from real sessions through the frame log, passed
-  through a redaction pass (emails, tokens, absolute home paths, account fields) before
-  they enter `Fixtures/`. Each fixture is paired with a snapshot of its transcript for the
-  differential test (§7.2).
+- **Golden fixtures**: NDJSON recorded from real sessions through opt-in raw capture
+  (§6.3, §11), already redacted on disk, passed through a second review pass (emails,
+  tokens, absolute home paths, account fields) before they enter `Fixtures/`. Each fixture is paired with a snapshot of its transcript for the
+  differential test (§7.3).
 - **Probe suite** (`Tools/probe/`, run on demand with `make probe`; the three scripts
   already in `probes/`, a stream-json baseline, an initialize-and-permission round trip,
   and a headless `SendUserFile` check, are its seed and move there): runs the installed
@@ -331,6 +394,21 @@ offers *Refresh environment* and shows the resolved PATH.
   `claude --help`), and diffs it against the census of the fixtures. A CLI upgrade is
   caught here before it breaks the app. New frame types found by the census are the queue
   for typing work.
+
+### 6.11 Trust precondition
+
+`-p` skips the trust dialog but does not grant trust: while a workspace is untrusted,
+hooks from settings, project plugins, project and local allow rules and related helpers
+are skipped (*SPEC 03 §15*, the "behaviour while untrusted" table), so an untrusted
+project launched headless would silently run a reduced harness. Before any owned spawn,
+afleet reads `projects[<canonical root>].hasTrustDialogAccepted` from
+`<configHome>/.claude.json`, read-only, where the canonical root is the git toplevel of
+the channel's directory, else the directory itself. If it is not `true`, the channel opens
+history-only with a banner "This project has not been trusted in Claude Code" and a
+*Review trust in terminal* action that runs `claude` interactively in a Terminal tab in
+that directory; afleet re-reads the value when the pane exits. afleet never writes trust.
+Spike S13 checks whether `set_cwd` with `trust_accepted: true` persists trust through the
+CLI, which would let afleet present the CLI's dialog text natively while the CLI writes it.
 
 ## 7. FleetKit: sessions, timeline and fleet
 
@@ -345,16 +423,58 @@ offers *Refresh environment* and shows the resolved PATH.
 
 All four render through the one Timeline view, which knows the origin only to pick the
 presence glyph and the composer state. Detection: a channel is *foreign live* when a
-registry record with `kind: "interactive"` names its session id and its pid is not ours;
+registry record names its session id and its pid is not one of afleet's own children;
 *background job* when the roster or `agents --json` names it; *owned* when afleet holds it;
 otherwise *archived*. The registry and roster are watched with FSEvents and polled every
-five seconds as a fallback.
+five seconds as a fallback. Observation alone is not a claim; the ownership protocol
+below decides who may spawn.
 
 **Foreign-session safety invariant.** afleet never stops, kills, signals or adopts a
 session that is running in the user's terminal. Adoption is offered only for background
 jobs. A foreign live channel is a read-only mirror until its process ends on its own.
 
-### 7.2 Timeline and the differential invariant
+### 7.2 Session ownership protocol
+
+Facts the protocol rests on. A headless afleet child registers in the registry like any
+other process (verified: `kind: interactive`, `entrypoint: sdk-cli`), so the registry is
+the shared holder set for every kind of holder. The transcript has one writer per process
+and no inter-process lock (*SPEC 35.6*); two live holders append competing chains from
+independent parent leaves, and the loader later keeps one leaf, so messages disappear and
+both engines may edit the same working tree. Registry observation plus a five-second poll
+is not atomic: a terminal `claude --resume` can start during an archived open, during
+dormancy, or during crash backoff.
+
+Rules:
+
+1. **Desired ownership is separate from the observed holder set.** Each channel records
+   what afleet wants (owned, mirror, none) and, independently, the holder set it last
+   observed. The two disagreeing is the *Contended* state, shown with a banner.
+2. **Process epochs.** Each spawn increments the channel's epoch; frames, exits and
+   registry events attributed to an older epoch are discarded.
+3. **Check before spawn.** Immediately before every spawn, re-read the registry and roster
+   and run `claude agents --json`; if any holder names the session id, do not spawn. The
+   channel becomes foreign live or background job as appropriate.
+4. **Check after handshake.** After the `initialize` response, re-read again, validating
+   each holder's pid and start token. If another holder appeared meanwhile, **afleet
+   yields**: it terminates its own process, moves the channel to foreign live, and shows
+   "Opened in your terminal; afleet released this session". The human's terminal always
+   wins; afleet is always the newcomer that backs off.
+5. **Quiescent handoffs.** Every transition that changes the holder (adopt via
+   `claude stop`, send to background, open in terminal, re-adopt after the pane exits)
+   waits for the previous holder's process to exit and its registry or roster record to
+   disappear, up to 10 s, before spawning. On timeout the channel enters Contended
+   instead of spawning.
+6. **Never resume a held session.** A session with any live holder cannot be resumed by
+   afleet; the composer offers *Fork* (`--resume <id> --fork-session` into a new channel)
+   instead.
+7. **Foreign-session safety** (above) is unchanged: afleet never signals a holder it does
+   not own.
+
+Spike S12 records what the interactive CLI itself does when it resumes a session that
+already has a registry holder; the `--bg --resume` help text says it "starts a copy and
+says so when the session is already running", which suggests the CLI detects the case.
+
+### 7.3 Timeline and the differential invariant
 
 ```swift
 enum TimelineItem: Identifiable {
@@ -378,12 +498,38 @@ enum TimelineItem: Identifiable {
 Two producers feed it: the **wire reducer**, which folds live frames including streaming
 deltas, `tool_use_summary`, task frames and `command_lifecycle`; and the **transcript
 reader**, which folds the JSONL records the CLI writes (*SPEC 35.4–35.5*) plus subagent
-transcripts (*35.11*). The invariant that keeps the app honest: **both producers yield the
-same items for the same session.** It is enforced by a differential test on every golden
-fixture and its transcript snapshot, comparing normalized items (streaming collapsed,
-timestamps within tolerance, ids by uuid). Categories that exist only on the wire
-(rate-limit events, keep-alives, partial deltas) are listed explicitly as exclusions in the
-test, and that list is reviewed whenever the baseline moves.
+transcripts (*35.11*). The transcript persists conversation records, not wire envelopes,
+so the timeline is defined in two layers.
+
+**The durable projection** is every item reconstructible from transcript records: user
+and assistant messages with their thinking and text blocks; tool calls with their results
+and structured `tool_use_result` (from `user` and `assistant` records); attachments;
+`system` records, which on disk include `turn_duration`, `stop_hook_summary`,
+`local_command`, `informational` and `compact_boundary`; subagent runs from the sidechain
+files; the compaction summary; peer messages, whose origin is on the user record;
+sent-file items, because the MCP `tool_use` and `tool_result` are transcript records; and
+aggregate session cost from the `cost-state` sidecar.
+
+**The ephemeral overlay** is everything only the wire carries: decisions and their state,
+cluster labels from `tool_use_summary`, hook runs, queue and `command_lifecycle` state,
+rate-limit and auth banners, per-turn cost and usage from `result`, notifications, and
+streaming deltas. Overlay items are rendered live, are not expected on reopen, and
+degrade gracefully: a cluster without its label shows counts and elapsed time; a decision
+whose outcome is only visible as a denied `tool_result` renders from that record.
+
+**The invariant that keeps the app honest**: on every golden fixture, the durable
+projection produced by the wire reducer equals the durable projection produced by the
+transcript reader from the paired transcript snapshot, item for item (streaming collapsed,
+timestamps within tolerance, identity by uuid, subagent items by agent id and source
+file). The overlay is tested separately against wire fixtures only. The list of overlay
+categories is explicit in the test and is reviewed whenever the baseline moves.
+
+**Compaction.** A compact boundary without a preserved segment is a hard truncation point
+and local garbage collection rewrites the file to drop what precedes it (*SPEC 35.8*,
+*35.5.13*). During a live session the items before the boundary stay on screen; after a
+reopen the timeline shows the boundary and the summary in their place. This is stated
+behavior, not drift. Subagent items carry provenance (agent id, source file) and are
+ordered by timestamp among the main items.
 
 Reducer rules: one internal assistant message may arrive as several wire frames sharing
 `message.id` (*SPEC 45.9.3*) and merges into one item; frames with a `parent_tool_use_id`
@@ -393,36 +539,57 @@ cursor when the channel is not in view; on process exit the transcript reader re
 and reconciles by uuid.
 
 The transcript index uses the head-and-tail read the CLI's picker uses (*SPEC 35.14*),
-watches `~/.claude/projects`, and caches `{sessionId, cwd, title, mtime, preview,
+watches `<configHome>/projects`, and caches `{sessionId, cwd, title, mtime, preview,
 turnCount}` in the store.
 
-### 7.3 Lifecycle
+### 7.4 Lifecycle
 
 State machine for one channel. "Reap" ends the process while the channel stays owned.
+Every spawn in this table is preceded by the ownership check (§7.2 rule 3) and followed by
+the post-handshake check (rule 4); every handoff waits for the previous holder (rule 5).
+
+**Dormant eligibility.** A channel may be reaped only when all of these hold: no running
+turn; no pending decision; no queued input; no running or armed background task, tracked
+from `task_started`, `task_updated`, `task_progress`, `task_notification`,
+`background_tasks_changed` and `tool_progress` heartbeats; and no uncertainty about task
+state (a task whose last frame is older than its heartbeat interval counts as running).
+This matters because at stream close the harness kills every still-running local shell
+and abandons other background work (*SPEC 20*, "print teardown"); a reap of a channel
+with live tasks would silently destroy work the user was told was running.
 
 | From | Event | Action | To |
 |---|---|---|---|
-| Archived, listed in a project section (active within 30 days) | opened | spawn `--resume <id>` (eager) | Owned, connecting |
+| Archived, listed in a project section (active within 30 days) | opened | ownership check; spawn `--resume <id>` (eager) | Owned, connecting |
 | Archived, listed under *Archived* (older) | opened | render history only; no process | Archived |
-| Archived (older) | user sends | spawn `--resume <id>`, then send | Owned, connecting |
-| Owned, connecting | handshake done | — | Owned, ready |
-| Owned, ready | 30 min with no turn, no pending decision, no input | `terminate()` | Owned, dormant |
-| Owned, dormant | user sends | spawn `--resume <id>` under the same session id; the send waits and then goes; no visible change except a brief connecting glyph | Owned, ready |
-| Owned, any | process exits non-zero | respawn with backoff 1 s, 2 s, 4 s (three attempts), then a system item with exit code, stderr tail and *Reopen* | Owned, ready or Archived |
-| Owned | more than 6 owned processes live | reap the least recently used dormant-eligible one | that one: Owned, dormant |
-| Background job | *Adopt* | `claude stop <short>`, then spawn `--resume <id>` | Owned, connecting |
-| Owned | *Send to background* | `terminate()`, then `claude --bg --resume <id>` | Background job |
-| Owned | *Open in terminal* | `terminate()`; run `claude --resume <id>` in a Terminal tab; keep mirroring the transcript | Foreign live (own tab) |
-| Foreign live (own tab) | the Terminal tab's process exits | spawn `--resume <id>` | Owned, connecting |
+| Archived (older) | user sends | ownership check; spawn `--resume <id>`, then send | Owned, connecting |
+| Owned, connecting | handshake done and post-handshake check clean | — | Owned, ready |
+| Owned, connecting | post-handshake check finds another holder | terminate own process; banner | Foreign live |
+| Owned, ready | 30 min dormant-eligible | `terminate()` | Owned, dormant |
+| Owned, dormant | user sends | ownership check; spawn `--resume <id>` under the same session id; the send waits and then goes; only a brief connecting glyph | Owned, ready |
+| Owned, dormant | another holder appears | — | Foreign live or Background job |
+| Owned, any | process exits non-zero | respawn with backoff 1 s, 2 s, 4 s (three attempts), each preceded by the ownership check; then a system item with exit code, stderr tail and *Reopen* | Owned, ready or Archived |
+| Owned, ready | 6 owned processes live and a seventh is needed | reap the least recently used **dormant-eligible** channel; if none is eligible, no eviction: the header shows the live count and offers *Send to background* | that one: Owned, dormant |
+| Background job | *Adopt* | `claude stop <short>`; wait for exit and roster removal; spawn `--resume <id>` | Owned, connecting |
+| Owned | *Send to background* | `terminate()`; wait for exit and registry removal; `claude --bg --resume <id>`; verify the roster lists it | Background job |
+| Owned | *Open in terminal* | `terminate()`; wait for exit and registry removal; run `claude --resume <id>` in a Terminal tab; keep mirroring the transcript | Foreign live (own tab) |
+| Foreign live (own tab) | the Terminal tab's process exits and its registry record is gone | spawn `--resume <id>` | Owned, connecting |
 | Foreign live (user's terminal) | registry record disappears | — | Archived |
-| Foreign live (user's terminal) | user presses send | refused with "running in your terminal"; adoption is never offered for interactive sessions | unchanged |
+| Foreign live (user's terminal) | user presses send | refused with "running in your terminal"; *Fork* offered | unchanged |
+| any | handoff wait exceeds 10 s, or desired and observed disagree | banner with the holders seen | Contended |
+| Contended | holder set settles to zero or one | re-evaluate | the matching origin |
+
+**Quiescent restart.** Used by the restart-required settings (§7.7) and by first-time
+bypass acceptance (§8.6): wait until the channel is dormant-eligible, `terminate()`,
+wait for exit and registry removal, spawn `--resume <id>` with the new flags under the
+same session id, showing only a connecting glyph. If the channel is not dormant-eligible
+the change is queued and the composer shows "applies when the current work finishes".
 
 Compaction is the `/compact` text command and renders as a divider from
 `compact_boundary`. File rewind uses `rewind_files` with `dry_run: true` first and shows the
 counts before applying. Forking a channel spawns `--resume <id> --fork-session` as a new
 channel.
 
-### 7.4 Threads
+### 7.5 Threads
 
 | Kind | Anchor | Content | Reply |
 |---|---|---|---|
@@ -435,7 +602,7 @@ channel.
 
 One thread is open at a time in the Thread tab, Slack-style.
 
-### 7.5 Decisions and the Activity view
+### 7.6 Decisions and the Activity view
 
 Every inbound request that needs a person becomes a Decision item and a card (§8.4).
 The **Activity view**, pinned at the top of the sidebar as a virtual channel, is a query
@@ -452,7 +619,7 @@ it. An `auth_status` frame that reports a problem renders a banner with the stat
 *Sign in* action that opens a Terminal tab running `claude auth login`; a healthy status
 clears it.
 
-### 7.6 The composer command router
+### 7.7 The composer command router
 
 Three classes, resolved in this order:
 
@@ -470,7 +637,7 @@ Three classes, resolved in this order:
    | `/clear` | sent as text; `conversation_reset` frame resets the timeline |
    | `/rewind` | `rewind_conversation` and `rewind_files` |
    | `/fork` | new channel with `--fork-session` |
-   | `/background` | send-to-background transition (§7.3) |
+   | `/background` | send-to-background transition (§7.4) |
    | `/stop` | `interrupt`, or `stop_task` when a task is selected |
    | `/mcp` | MCP popover from `mcp_status` |
    | `/agents` | agents list from the handshake |
@@ -487,14 +654,30 @@ Autocomplete comes from the handshake's `commands` list with the local table lay
 top. A local command that afleet has not implemented yet falls through as text, so the
 engine's refusal shows in the channel and in the drift log instead of failing silently.
 
-### 7.7 Store
+**Launch settings: mutable at runtime versus restart-required.** Every launch setting can
+be changed after launch, but not all through the running process.
 
-`~/Library/Application Support/afleet/state.json`, atomic writes, schema version:
-channel grouping and pins, section order and collapse, unread cursors per session,
-per-channel panel state, browser tabs, bypass disclaimer acceptance, fixture-recorded
-baseline. SQLite is revisited when search arrives. **The app never writes to `~/.claude`;
-every mutation goes through the CLI or the control channel.** This includes bypass
-acceptance, which the CLI stores in user settings but afleet keeps in its own store.
+| Class | Settings | Mechanism |
+|---|---|---|
+| Runtime-mutable | model; permission mode, within the modes the process was launched with; effort; agent, with the snapshot caveat; session name; additional directories; thinking tokens | the control requests in the table above |
+| Restart-required | session id; `--fork-session`; `--worktree`; stream and output flags; `--allow-dangerously-skip-permissions`; `--setting-sources`; `--prompt-suggestions`; `--enable-auth-status`; `--add-dir` when the running process rejects `add_directory` | a quiescent restart (§7.4) under the same session id, except fork and worktree, which create a new channel |
+
+The claim is therefore "every launch setting is changeable", not "every launch flag is
+changeable at runtime".
+
+### 7.8 Store
+
+`~/Library/Application Support/afleet/state.json`, atomic writes, schema version. The
+store is a **namespaced key-value API**: each package persists its own `Codable` types
+under its own namespace and FleetKit never models upper-layer state. FleetKit's own
+namespace holds channel grouping and pins, section order and collapse, unread cursors per
+session, desired ownership per channel, the bypass disclaimer acceptance, the
+fixture-recorded baseline and the last census. Workbench persists per-channel panel state
+and the shared browser tabs; Afleet persists window layout and settings. SQLite is
+revisited when search arrives. **The app never writes to `<configHome>`; every mutation
+goes through the CLI or the control channel.** This includes bypass acceptance, which the
+CLI stores in user settings but afleet keeps in its own store, and workspace trust, which
+only the CLI writes.
 
 ## 8. Afleet: the shell
 
@@ -525,7 +708,7 @@ material set; the sidebar uses native vibrancy; type is the system font.
 
 ### 8.2 Sidebar
 
-- **Activity** at the top with a count of pending decisions (§7.5).
+- **Activity** at the top with a count of pending decisions (§7.6).
 - **Sections are projects**, grouped further by worktree or cwd when a project has several,
   from the `projects` map in `~/.claude.json` joined with slugs under `~/.claude/projects`.
   Projects active in the last 30 days show by default; the rest under *All projects*;
@@ -590,10 +773,14 @@ default.
 ### 8.6 Bypass mode
 
 `bypassPermissions` appears in the mode picker only if the account allows it
-(`disableBypassPermissionsMode` unset, read via `get_settings`). Selecting it the first
-time shows the same disclaimer the CLI shows; acceptance is stored in afleet's store, after
-which owned channels launch with `--allow-dangerously-skip-permissions` so the mode is
-selectable at runtime via `set_permission_mode`. Declining leaves the mode unavailable.
+(`disableBypassPermissionsMode` unset, read via `get_settings`). A running process makes
+the mode selectable only if it was launched with `--allow-dangerously-skip-permissions`;
+`set_permission_mode` on any other process is rejected by the binary. Selecting bypass
+the first time therefore shows the same disclaimer the CLI shows; on acceptance afleet
+stores the acceptance in its own store, performs a quiescent restart of that channel with
+the flag (§7.4), and then sends `set_permission_mode`. Later owned spawns include the flag
+from the start, so the mode switches without a restart. Declining leaves the mode
+unavailable and nothing restarts.
 
 ### 8.7 Notifications and keyboard
 
@@ -639,7 +826,8 @@ Mitchell's Swift renderer or SwiftTerm is contained.
 `WKWebView` tabs shared across the window, since the browser is not bound to a working
 directory: URL bar, back, forward, reload, inspector. Quick-open lists dev-server URLs seen
 in the current channel's tool output; links in messages open here, Cmd-click in the system
-browser. Tabs persist across channel switches and are stored in the app store.
+browser. Tabs persist across channel switches; Workbench persists them under its own
+namespace of FleetKit's store.
 
 ### 9.5 Jobs
 
@@ -654,8 +842,9 @@ spoken directly in v1. Dispatching new jobs is v1.1.
 enum WorkspaceLink { case file(URL, line: Int?), diff(DiffRef), url(URL), commit(String), pullRequest(Int), command(String) }
 ```
 
-Items emit links; `LinkRouter` opens them in the right tab of the channel's panel or the
-popped-out window; Cmd-click forces a new window.
+`WorkspaceLink` is a value type in `AfleetCore`, so FleetKit items can emit links without
+knowing any panel. `LinkRouter`, in Workbench, opens them in the right tab of the channel's
+panel or the popped-out window; Cmd-click forces a new window.
 
 ## 10. Error handling
 
@@ -677,11 +866,21 @@ popped-out window; Cmd-click forces a new window.
 Deployment target **macOS 26**, built with Xcode 26 and Swift 6 with strict concurrency,
 because the author's machine is moving to macOS 26 and the app should adopt its material
 set natively. The project is generated by XcodeGen from `project.yml` so builds run from
-the command line, with ad-hoc signing for local use. `ClaudeWire` and `FleetKit` contain
-no UI and stay buildable and testable with the macOS 15 toolchain via `swift test`, so the
-protocol, transcript and differential work can proceed on the current machine before the
-move. Dependencies: libghostty-spm, swift-markdown, Monaco (vendored build output), the
-vendored SDK typings.
+the command line, with ad-hoc signing for local use. `AfleetCore`, `ClaudeWire` and
+`FleetKit` contain no UI and stay buildable and testable with the macOS 15 toolchain via
+`swift test`, so the protocol, transcript and differential work can proceed on the current
+machine before the move. Dependencies: libghostty-spm, swift-markdown, Monaco (build
+output committed), the SDK typings fetched on demand.
+
+**Files afleet owns and how they are protected.**
+
+| Path | Content | Rules |
+|---|---|---|
+| `~/Library/Application Support/afleet/state.json` | the namespaced store (§7.8) | atomic writes, schema version |
+| `~/Library/Logs/afleet/diagnostics.log` | metadata-only diagnostics: frame type, subtype, size, timing, request id, control answer behavior and classification without payload, lifecycle and ownership events | rotated, 50 MB budget |
+| `~/Library/Logs/afleet/capture/<configHomeHash>/<session-id>.ndjson` | raw frame capture, **only while the Developer setting is on** | redacted before disk: account fields, `update_environment_variables` frames, any field named like token, oauth, key or secret, MCP JSON-RPC bodies truncated to 4 KB; directory 0700, files 0600; 200 MB total budget, oldest deleted first; a session's capture is deleted when its transcript disappears from `<configHome>/projects`; *Delete diagnostics* in Settings removes everything |
+
+Nothing under `<configHome>` is written by afleet.
 
 ## 12. Security and policy
 
@@ -693,7 +892,10 @@ vendored SDK typings.
 - cmux is GPL and is read for architecture only; no code is copied. Monaco and
   libghostty-spm are MIT. The Agent SDK typings are all-rights-reserved and are fetched
   on demand, never committed.
-- Fixtures are redacted before commit; the frame log stays local.
+- Raw frame capture is opt-in, redacted before it reaches disk, permission-restricted,
+  bounded and deleted with its session (§11); fixtures come only from such captures and
+  pass a second review before commit.
+- Workspace trust is read, never written; an untrusted project never spawns owned (§6.11).
 
 ## 13. Acceptance
 
@@ -704,14 +906,19 @@ Behavior a person can observe. Commands assume the app is built with
    one second; the process spawns afterwards, shown by a connecting glyph that clears at
    handshake.
 2. **Continue.** Send `Reply with exactly: pong`. `pong` renders as a Claude message with a
-   turn summary; the transcript at `~/.claude/projects/<slug>/<id>.jsonl` gains records.
+   turn summary; the transcript at `<configHome>/projects/<slug>/<id>.jsonl` gains records.
 3. **New channel.** *New channel* on a project, send a message. A new transcript appears
    with the UUID afleet chose; the channel gains an AI title after the first turn.
-4. **Permission.** In `default` mode send `Run: ls -la`. A permission card shows the command;
-   *Allow once* runs it; repeating and choosing *Deny* lists the call in the turn summary's
-   denials.
-5. **Always allow.** When offered, *Always allow* makes the same command run without a card
-   on the next turn.
+4. **Permission.** In a disposable directory, with the Developer setting *Isolated
+   settings for this channel* on (it adds `--setting-sources ""` to the spawn, so no user
+   rule can pre-approve), in `default` mode send `Create a file named ask.txt containing
+   hello`. A permission card for `Write` shows the path and content; *Allow once* writes
+   the file and the diagnostics log records an `allow` answer classified `user_temporary`. (`ls -la` is on the
+   read-only allowlist and never asks, which is why the earlier draft of this item was
+   wrong.)
+5. **Always allow.** Repeat with a second file. The card offers *Always allow* because the
+   request carries a `setMode` suggestion; clicking it writes the file, the diagnostics log records an answer with
+   `updatedPermissions` classified `user_permanent`, and a third file is written with no card.
 6. **Question.** Send `Use AskUserQuestion to ask me whether I prefer tabs or spaces`; a
    question card renders; selecting an option continues the turn with that answer.
 7. **Plan.** Set the picker to `plan`, send `Plan a hello-world script`; a plan card
@@ -746,10 +953,14 @@ Behavior a person can observe. Commands assume the app is built with
 17. **Open in terminal.** *Open in terminal*; the owned process exits; the Terminal tab
     shows the interactive prompt for the same session; the composer is disabled; closing
     the tab makes the channel owned again and the composer works.
-18. **Reap and respawn.** Leave an owned channel idle past the timeout;
-    `pgrep -fl "claude -p" | wc -l` drops by one; sending a message continues the same
-    session id with only a brief connecting glyph.
-19. **Cap.** Open seven channels: at most 6 owned processes are live.
+18. **Reap and respawn.** Leave an owned channel idle past the timeout with no background
+    task; `pgrep -fl "claude -p" | wc -l` drops by one; sending a message continues the
+    same session id with only a brief connecting glyph. Repeat with a channel where Claude
+    started `sleep 3600 &` as a background shell: the process is not reaped while the task
+    card shows it running.
+19. **Cap.** Open seven channels: at most 6 owned processes are live. Make all six
+    non-eligible (a pending permission in each) and open a seventh: no process is
+    terminated, the header shows "6 live" and offers *Send to background*.
 20. **Crash.** `kill -9` an owned process; the channel respawns and shows a system item;
     kill it three more times quickly and a *Reopen* item appears instead.
 21. **Activity.** With two channels waiting on permissions and one rate-limit event,
@@ -772,10 +983,14 @@ Behavior a person can observe. Commands assume the app is built with
 29. **Sent file.** Send `Use mcp__afleet__send_user_file to send me README.md`; a sent-file
     item with a preview appears; *Open in Files* opens it.
 30. **Bypass gate.** Selecting `bypassPermissions` the first time shows the disclaimer;
-    declining leaves the mode unavailable; accepting enables it and a subsequent
-    `set_permission_mode` succeeds; `~/.claude/settings.json` is unchanged by afleet.
-31. **Differential invariant.** `swift test --package-path FleetKit` passes, including the
-    differential test over every fixture in `Fixtures/`.
+    declining leaves the mode unavailable and nothing restarts; accepting shows a
+    connecting glyph while the channel restarts under the same session id, after which the
+    mode picker reads `bypassPermissions` and `<configHome>/settings.json` is unchanged by
+    afleet.
+31. **Durable projection invariant.** `swift test --package-path FleetKit` passes,
+    including the test that, for every fixture in `Fixtures/`, the wire reducer's durable
+    projection equals the transcript reader's projection of the paired snapshot, and the
+    overlay test that decisions, cluster labels and turn cost render from wire frames.
 32. **Probe and drift.** `make probe` against the installed CLI prints a census diff of
     zero against the fixtures; against a `fake-claude` emitting an invented frame type it
     prints one added type, and the app renders that frame as an unrecognized event.
@@ -783,21 +998,47 @@ Behavior a person can observe. Commands assume the app is built with
     shows the upgrade screen naming both versions and opens no channel.
 34. **Environment.** With an MCP server that is only on PATH through `~/.zshrc`, the
     channel's `system/init.mcp_servers` lists it as connected.
-35. **Never writes `~/.claude`.** Run `fswatch ~/.claude` during a session that uses every
+35. **Never writes `<configHome>`.** Run `fswatch` on it during a session that uses every
     feature above: every write is attributable to a `claude` process, none to afleet.
 36. **Tests.** `xcodebuild test -scheme afleet` passes: ClaudeWire round-trip on every
     fixture frame type, FleetKit reducer and differential tests, command router, transcript
     reader, lane assignment, LinkRouter, and the `fake-claude` UI smoke.
 37. **Reply to a card.** Reply to a pending permission card with `use rg instead`. The
     card shows denied, the tool is not run, and Claude's next message reflects the
-    feedback; the frame log shows `deny` with that message.
+    feedback; the diagnostics log records a `deny` answer.
 38. **Members.** In a subagent thread, messages are authored by the agent type, for
     example `Explore`, with a model badge, not by "Claude".
 39. **Shared browser.** Open a page in the Browser tab, switch channels and back; the
     tab and its page are unchanged.
-40. **Prompt suggestions.** With the setting off, the frame log contains no
-    `prompt_suggestion` frames; turning it on and sending a message produces one and ghost
-    text appears in the composer.
+40. **Prompt suggestions.** With the setting off, the diagnostics log records no
+    `prompt_suggestion` frames; turning it on restarts the channel quiescently, and the
+    next turn produces one and ghost text appears in the composer.
+41. **Deny.** In the isolated channel from item 4, click *Deny…* on a Write card with the
+    reason `not now`. The file is not written, the card shows denied, the turn summary lists
+    the denial, and Claude's next message reflects the reason.
+42. **Cancelled by the binary.** With `fake-claude` replaying a fixture that sends
+    `can_use_tool` and then `control_cancel_request` for it, the card becomes inert with
+    "answered elsewhere" and the following frames render normally.
+43. **Malformed host answer.** With the Developer action *Send malformed answer to next
+    permission* armed, approve a card: the timeline shows the binary's own text "The
+    canUseTool callback returned an invalid permission result" as the tool's denial, and
+    the channel continues.
+44. **Exit while pending.** `kill -9` an owned process while a permission card is pending:
+    the card becomes inert with "session ended", the channel respawns, and no card is
+    answered after the fact.
+45. **Unknown inbound request.** With `fake-claude` sending a control request of subtype
+    `made_up_v9`, the diagnostics log shows an error response sent within one second, the
+    timeline shows an unrecognized-event row, and the session continues.
+46. **Contended session.** With an owned channel idle, run `claude --resume <id>` for it in
+    Terminal.app. Within ten seconds afleet's process for that channel exits, the channel
+    shows the terminal glyph and the banner "Opened in your terminal; afleet released this
+    session", and the composer offers *Fork*.
+47. **Trust.** In a directory never opened in Claude Code, *New channel* opens history-only
+    with the trust banner and no process; *Review trust in terminal* runs `claude`, and
+    after accepting the dialog and exiting, the channel spawns owned.
+48. **ConfigHome.** With `CLAUDE_CONFIG_DIR=/tmp/cc-alt` exported in `~/.zshrc` and one
+    session recorded there, the sidebar lists that session and none from `~/.claude`;
+    Settings shows the resolved ConfigHome.
 
 ## 14. Spike milestones
 
@@ -837,14 +1078,25 @@ doperpowers:writing-plans turns them into tasks.
   --resume-session-at <uuid> --fork-session` and record whether the named entry is
   included, and whether the fork's transcript starts there. Decides how *Fork from here*
   on a message is implemented.
+- **S12 Contention behavior of the CLI.** With a registry holder present for a session,
+  run an interactive `claude --resume <id>` and a `claude --bg --resume <id>` and record
+  whether each warns, refuses, or forks a copy. Decides the wording of the Contended
+  banner and whether afleet can rely on the CLI to refuse a second holder.
+- **S13 Trust over the wire.** Run `set_cwd` with `trust_accepted: true` for an untrusted
+  directory and check whether `projects[<root>].hasTrustDialogAccepted` becomes `true`
+  in `<configHome>/.claude.json`. Promote a native trust dialog if so; otherwise keep the
+  terminal flow.
 
 ## 15. Natural seams for decomposition
 
-1. ClaudeWire: frames from typings, `ClaudeProcess`, control correlation, MCP server,
-   frame log, version gate, environment resolution, fake-claude, fixtures, probe suite
-   (S2, S5, S8).
-2. FleetKit: Timeline, wire reducer, transcript reader with the differential test, four
-   origins and lifecycle, fleet tracking, Activity query, command router, store (S4, S9).
+1. AfleetCore and ClaudeWire: value types; frames from typings, `ClaudeProcess` with
+   epochs, control correlation and the request-answering policy, MCP server, diagnostics
+   and opt-in capture, version gate, environment and ConfigHome resolution, fake-claude,
+   fixtures, probe suite (S2, S5, S8).
+2. FleetKit: Timeline with the durable projection and overlay, wire reducer, transcript
+   reader with the differential test, four origins, ownership protocol, lifecycle with reap
+   exclusions and quiescent restart, trust precondition, fleet tracking, Activity query,
+   command router with the flag matrix, namespaced store (S4, S9, S12, S13).
 3. Afleet shell: sidebar, timeline view, cards, threads, composer, Activity view, Cmd+K,
    notifications, bypass gate, settings, packaging for macOS 26 (S7).
 4. Workbench terminal and jobs: `TerminalSurface`, PTY layer, panes, attach, raw-TUI hatch
@@ -854,7 +1106,8 @@ doperpowers:writing-plans turns them into tasks.
 7. v1.1: IDE registration, job dispatch, open-in-panel MCP tool.
 
 Seams 1 and 2 have no UI and unblock everything and can run on the macOS 15 machine now;
-3 depends on both; 4, 5 and 6 depend on 3 only through LinkRouter and the panel tab host.
+3 depends on both; 4, 5 and 6 depend on 3 only through the panel tab host, on FleetKit
+through its lifecycle and store APIs, and on AfleetCore for links and the environment.
 
 ## Decision Log
 
@@ -1064,6 +1317,81 @@ Seams 1 and 2 have no UI and unblock everything and can run on the macOS 15 mach
   work. Rejected: offering adoption for any live session.
   Date/Author: 2026-09-03 / kimmi with Claude
 
+- Decision: Opacity is for one-way frames; every inbound control request is answered,
+  unknown subtypes with an immediate error.
+  Rationale: The stdio transport has no per-request deadline (*SPEC 45.16.4*); an
+  unanswered request blocks the engine forever. Rejected: treating unknown requests as
+  opaque rows (deadlock); a Node sidecar running the official Agent SDK to own the control
+  protocol (adds a Node runtime to a Swift-native app, and the SDK does not expose the
+  unpublished controls either; kept as the named fallback if control drift ever becomes
+  unmanageable).
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: Launch settings split into runtime-mutable and restart-required, with a
+  quiescent restart under the same session id for the latter.
+  Rationale: Bypass availability, setting sources, stream flags and session identity are
+  process-scoped; the earlier claim that every launch flag was runtime-changeable was
+  false. Rejected: relaunching for every change; leaving restart-required settings fixed
+  for the channel's life.
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: A session ownership protocol: desired ownership separate from the observed
+  holder set, process epochs, checks before spawn and after handshake, quiescent handoffs
+  with a 10 s bound, a Contended state, afleet always yields to a terminal holder, and no
+  resume of a held session (Fork instead).
+  Rationale: The transcript has one writer per process and no lock (*SPEC 35.6*); two
+  holders append competing chains and the loader keeps one leaf. Rejected: treating
+  registry observation as an atomic claim; an afleet-side lock file (the CLI would not
+  honor it).
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: Reap only dormant-eligible channels: no turn, no decision, no queued input, no
+  running or armed background task, no task-state uncertainty; no eviction under cap
+  pressure when nothing is eligible.
+  Rationale: Stream close kills still-running local shells and abandons other background
+  work (*SPEC 20*). Rejected: reaping on main-turn idleness alone; force-evicting under
+  the cap.
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: The timeline is a durable projection plus an ephemeral overlay; the
+  differential invariant applies to the durable projection only; compaction truncation is
+  stated behavior.
+  Rationale: Real transcripts contain `turn_duration`, `stop_hook_summary`,
+  `compact_boundary`, `informational` and `local_command` system records but never
+  `tool_use_summary`, `hook_started`, `command_lifecycle` or `rate_limit_event`; whole-
+  timeline equality would be either vacuous or failing. Rejected: whole-timeline equality;
+  no invariant.
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: Workspace trust is a precondition for owned spawns; untrusted projects open
+  history-only with a terminal trust flow; afleet never writes trust.
+  Rationale: `-p` skips the dialog but untrusted workspaces skip hooks, project plugins and
+  project rules (*SPEC 03 §15*), contradicting "terminal configuration present unchanged".
+  Rejected: spawning regardless; writing `hasTrustDialogAccepted` ourselves.
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: ConfigHome from the resolved environment roots every path afleet reads;
+  channels are keyed by ConfigHome plus session id; one ConfigHome per launch.
+  Rationale: `CLAUDE_CONFIG_DIR` relocates the whole config home and
+  `CLAUDE_CODE_PROJECT_DIR_NAME` changes project keys (*SPEC 35.2*); a hardcoded
+  `~/.claude` would misclassify sessions. Rejected: hardcoded `~/.claude`; multiple
+  simultaneous config homes in v1.
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: A fifth bottom package, `AfleetCore`, holds shared value types; FleetKit's
+  store is a namespaced key-value API; Workbench receives the environment by injection.
+  Rationale: Otherwise FleetKit would import a Workbench type for links, persist UI state
+  it does not own, and Workbench would need ClaudeWire for the environment. Rejected:
+  reverse imports; a UI-aware FleetKit facade.
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: Diagnostics are metadata-only by default; raw frame capture is opt-in,
+  redacted before disk, 0700/0600, bounded to 200 MB, deleted with the session's
+  transcript; fixtures come only from such captures.
+  Rationale: An always-on raw log would keep prompts, tool results and account data after
+  the user deleted the session in Claude Code. Rejected: always-on raw logging.
+  Date/Author: 2026-09-03 / kimmi with Claude
+
 - Decision: Side questions use `side_question` with history, tool-free.
   Rationale: Verified control request with progress and history. Rejected for v1: hidden
   forked sessions as side chats (richer, more moving parts; revisit).
@@ -1160,6 +1488,51 @@ Seams 1 and 2 have no UI and unblock everything and can run on the macOS 15 mach
   system/status:2, system/thinking_tokens:2, rate_limit_event:1, result/success:1`;
   init `terminal-only 2 | skills 65 | plugins 14 | agents 11`; cost $0.0299.
 
+- Observation: A headless afleet-style process registers in the session registry.
+  Evidence: a `-p --input-format stream-json` child answering only `initialize` produced
+  `<configHome>/sessions/2665.json` with `kind: interactive, entrypoint: sdk-cli,
+  name: afleet-handshake-ae, cwd: /private/tmp/afleet-handshake`.
+
+- Observation: The stdio transport has no per-request deadline.
+  Evidence: *SPEC 45.16.4*: "The local stdio transport applies no per-request deadline. A
+  control request stays pending until it is answered, cancelled, or the stream closes";
+  the only bounds are 30 s for the two token refreshes, 45 s for the work secret and 70 s
+  for `mcp_message`.
+
+- Observation: Closing stdin kills still-running local shells.
+  Evidence: *SPEC 20* §"print wind-down": "At stream close, `Dl` kills every still-running
+  `local_bash` — except a foreground shell" and the log line "print teardown: killing shell
+  <id> ("<desc>") still running at stream close"; other task kinds are "abandoned,
+  emitting a `stopped` SDK event".
+
+- Observation: Untrusted workspaces run a reduced harness even in print mode.
+  Evidence: *SPEC 03 §15* table "Behaviour while untrusted": hook capture from settings
+  returns `{ kind: "none", reason: "untrusted_workspace" }`; project plugins and
+  `extraKnownMarketplaces` are skipped with reason `untrusted_for_folder`; trust is
+  `projects[<canonical repo root>].hasTrustDialogAccepted` in the global config.
+
+- Observation: The config home is relocatable.
+  Evidence: *SPEC 35.1.1*: `CLAUDE_CONFIG_DIR` "relocates the whole config home";
+  *35.2.2*: `CLAUDE_CODE_PROJECT_DIR_NAME` overrides the project key "only when
+  `CLAUDE_CONFIG_DIR` is also set".
+
+- Observation: Compaction can physically truncate a transcript.
+  Evidence: *SPEC 35.5.13*: a boundary with neither `preservedSegment` nor
+  `preservedMessages` "is a hard truncation point — everything before it can be
+  discarded"; *35.8*: local GC "rewrites the JSONL to drop records" with policy
+  `boundary-cleared` "discarded if it precedes the last compact boundary".
+
+- Observation: Several wire item types have no transcript record at all.
+  Evidence: a scan of the 40 most recent local transcripts found top-level record types
+  `attachment, assistant, user, last-prompt, mode, permission-mode, atis-latch,
+  queue-operation, bridge-session, ai-title, pr-link, system, custom-title, agent-name,
+  relocated, worktree-state, file-history-snapshot, history-suppression,
+  file-history-delta, cost-state`; `system` subtypes `turn_duration (369),
+  stop_hook_summary (330), local_command (109), away_summary (54), compact_boundary (29),
+  informational (26)`; the strings `tool_use_summary`, `hook_started`,
+  `command_lifecycle` and `rate_limit_event` occurred only inside message text, never as
+  a record type.
+
 - Observation: Local data is plentiful: 96 projects, 136 slugs, 695 transcripts, one
   daemon worker, 16 live sessions.
 
@@ -1190,3 +1563,14 @@ Pending — written at finish.
   as members, the foreign-session safety invariant named, rate-limit and auth banners made
   concrete, prompt suggestions off by default, browser tabs shared across the window,
   probes S10 and S11; project-then-worktree grouping was already present.
+- 2026-09-03: Revised after the Codex adversarial review. Inbound control requests are
+  always answered and opacity is limited to one-way frames (§6.3); a runtime-mutable
+  versus restart-required flag matrix with a quiescent restart, and bypass acceptance
+  restarts the channel (§7.7, §8.6); a session ownership protocol with holder sets,
+  epochs, checks around spawn, bounded handoffs and a Contended state (§7.2, §7.4); reap
+  exclusions for background work and no forced eviction (§7.4); the differential invariant
+  restated over a durable projection with an ephemeral overlay and explicit compaction
+  behavior (§7.3); a workspace-trust precondition (§6.11); ConfigHome (§2, §6.9); a fifth
+  `AfleetCore` package, a namespaced store and explicit dependency edges (§5, §7.8, §9.6);
+  metadata-only diagnostics with opt-in redacted capture (§6.3, §11); deterministic
+  permission acceptance with isolated settings and new items 41–48; spikes S12 and S13.
