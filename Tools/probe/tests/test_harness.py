@@ -233,6 +233,26 @@ class SessionTests(unittest.TestCase):
         s.on("mcp_message", lambda f: None)       # a callable always fits
         self.assertEqual(s.policies["can_use_tool"], "deny")
 
+    def test_cancel_lists_the_request_as_withdrawn(self):
+        s = self.run_session([])
+        self.assertEqual(s.withdrawn_requests, [])
+        rid = s.request_async("side_question", note="withdraw me")
+        s.cancel(rid)
+        self.assertEqual(s.withdrawn_requests, [rid])
+        s.cancel(rid)
+        self.assertEqual(s.withdrawn_requests, [rid])        # listed once, not once per call
+        s.send_user("go"); s.wait_result(10); s.close()
+        self.assertEqual(s.withdrawn_requests, [rid])
+
+    def test_a_cancel_the_harness_did_not_send_is_not_a_withdrawal(self):
+        """The list is a record of the scenario's own decisions, never a reading of the
+        capture: the `dialog` feature makes the CLI cancel its own request, which is captured
+        as a frame and must still leave nothing withdrawn."""
+        s = self.run_session(["dialog"])
+        s.send_user("go"); s.wait_result(10); s.close()
+        self.assertTrue(any(c.get("frame", {}).get("type") == "control_cancel_request" for c in s.frames()))
+        self.assertEqual(s.withdrawn_requests, [])
+
     def test_stderr_tail_is_redacted_at_the_source(self):
         s = self.run_session([])
         s._stderr.append("failed at /Users/probe/x on probe-mac\n")

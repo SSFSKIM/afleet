@@ -219,6 +219,7 @@ class Session:
         self._inbound_subtypes = {}  # CLI-originated request_id -> subtype (for the redactor's rule lookup)
         self._eof = False
         self._wait_cursor = 0
+        self._withdrawn = []         # ids a scenario cancelled, never inferred from frames
         self.system_init = None
         self.proc = None
         self._stderr = collections.deque(maxlen=STDERR_RING_LINES)
@@ -489,8 +490,34 @@ class Session:
         return self._wait_response(rid, timeout)
 
     def cancel(self, rid):
-        """Cancel one of our own outbound requests (recorded as an `in` control_cancel_request)."""
+        """Withdraw one of our own outbound requests. This does not settle it.
+
+        A `control_cancel_request` is never a reply in either direction, and the CLI's abort
+        map is populated by only three host subtypes -- `mcp_call`, `side_question` and
+        `remote_tools_announce` (2.1.258 `cli.pretty.js`). For every other host subtype the
+        cancel is a no-op and the request runs on, so a request cancelled here may never
+        receive an answer at all and the recording will show a lifecycle that never closes.
+
+        `verify` is strict about that by default, because a cancel line carrying an id must
+        not become a blanket excuse for any unanswered request. The id is therefore recorded
+        in `withdrawn_requests` for the recorder to declare in `fixture.json`, which is the
+        one narrow escape -- and it is recorded only from this call, so declaring it stays a
+        deliberate act by the scenario rather than something read back out of the capture.
+        """
         self._send({"type": "control_cancel_request", "request_id": rid})
+        # After the send, not before: an id listed as withdrawn whose cancel never reached
+        # the wire would be a false claim about what the recording contains.
+        with self._lock:
+            if rid not in self._withdrawn:
+                self._withdrawn.append(rid)
+
+    @property
+    def withdrawn_requests(self):
+        """Ids this scenario passed to `cancel()`, in order. Read by the recorder for
+        `fixture.json`; never derived from the captured frames, so a cancel the CLI sent for
+        its own request is not in here."""
+        with self._lock:
+            return list(self._withdrawn)
 
     def request(self, subtype, timeout=30, **payload):
         rid = self.request_async(subtype, **payload)
