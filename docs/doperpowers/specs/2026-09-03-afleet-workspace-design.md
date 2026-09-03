@@ -3071,3 +3071,17 @@ Pending — written at finish.
   at §17. Six Decision Log entries and one Surprises entry added. The 2026-09-03 draft
   decomposition into eleven children was removed from `main` at the author's request
   and served here as critique input.
+- 2026-09-04 C1/S5: The in-process MCP server registers through `initialize.sdkMcpServers`,
+  and it does so under `--strict-mcp-config`: on 2.1.259 the CLI opens the round trip out of
+  the §6.2 handshake, before any turn, with `control_request/mcp_message` carrying
+  `initialize`, then `notifications/initialized`, then `tools/list`, each answered
+  `mcp_response` by the host (fixture `zero-cost`, which sends no prompt and so shows the
+  bring-up alone). In a turn, `system/init.tools` then lists `mcp__afleet__send_user_file`
+  and `system/init.mcp_servers` reports `[{"name": "afleet", "status": "connected"}]` with
+  the flag set. `--strict-mcp-config` therefore stays on the launch line and no scenario
+  needs a fallback launch. The other half of §6.8's mechanism — the model calling the tool,
+  and the `tools/call` arguments and text result on the wire — is **not** recorded: the
+  account reached its weekly rate limit before any inference ran, so the one paid attempt
+  returned "You've hit your weekly limit" as the assistant text with no tool use. The
+  `send-user-file` fixture is therefore not in `Fixtures/`, and that half of S5 is open
+  until a recording is made after the cap resets (2026-09-06T15:00Z).

@@ -630,10 +630,75 @@ which `record` spills to its temporary file, set from the largest recorded scena
   for `transcript_mirror` frames. Evidence: `grep session-mirror probes/10-*.py` matches
   only the print statement. Impact: S14 needs a new scenario, as the parent already
   notes; the mirror flag has never been exercised in this repository.
-- Observation: `claude --help` on 2.1.259 lists 70 distinct flags, and the parent's
-  launch line uses one that `--help` omits (`--session-mirror`). Impact: the census
-  records the flag list from `--help` and separately asserts acceptance of each launch
-  flag by spawning with it, so hidden flags are covered.
+- Observation: `claude --help` on 2.1.259 **declares** 68 distinct long flags, not the 70
+  first counted here, and the parent's launch line uses one that `--help` omits
+  (`--session-mirror`). Evidence: the recorded `zero-cost` census. `--all` and
+  `--permission-prompt-tool` bring the naive count to 70, but on 2.1.259 each appears only
+  inside another flag's description prose — `--permission-prompt-tool` inside the
+  description of `--permission-prompts` — and `census.flags_from_help` anchors on the
+  two-space declaration column deliberately, so a flag merely mentioned is not
+  fingerprinted as one the CLI declares. Impact: the census records the flag list from
+  `--help` and separately asserts acceptance of each launch flag by spawning with it, so
+  hidden flags are covered; the number in this document was the estimate and the census is
+  the measurement.
+
+- Observation: Under `--replay-user-messages` the CLI re-emits every `control_response`
+  the host sends straight back on stdout. Evidence: the `zero-cost` recording shows each of
+  the three `mcp_message` round trips as the host's answer travelling in and the identical
+  body travelling out a few milliseconds later; the mechanism is the stdin loop's
+  `control_response` branch in the 2.1.258 bundle, `if (C.replayUserMessages)
+  bt.enqueue(d)`. Impact: the parent's §6.1 launch line always carries the flag, so every
+  recording made here contains these. `verify`'s lifecycle check read them as second
+  answers and failed the first live recording with three "duplicate response" errors; it
+  now reads a response travelling the same way as the request it names as an echo, which
+  it can only be, since the answer is by definition the other direction. A host reading
+  its own answers back off the stream must expect them.
+
+- Observation: The CLI mirrors every record it writes. Evidence: with the slug bug below
+  fixed, `verify`'s mirror-fidelity check passes on the `send-user-file` recording, where
+  eleven mirrored entries across three `transcript_mirror` frames reproduce all eleven
+  records of the session transcript exactly, with nothing in `initial/`. Impact: the check
+  was written on that assumption and no probe had confirmed it; it is now confirmed on one
+  real session, including record types the host does not otherwise see (`queue-operation`,
+  `attachment`, `file-history-snapshot`, `atis-latch`, `last-prompt`).
+
+- Observation: The CLI derives a project slug from the **resolved** working directory.
+  Evidence: every scenario runs in `/tmp/afleet-fixtures/<name>`, `/tmp` is a symlink to
+  `/private/tmp` on macOS, and the CLI wrote
+  `projects/-private-tmp-afleet-fixtures-send-user-file/`. Impact: a fixture's slug is the
+  resolved one, so any consumer computing it from `fixture.json`'s recorded `cwd` without
+  resolving disagrees with the fixture it is reading — which is how the mirror check came
+  to report a stream named `-private_slug_/…` as missing. `fixture.slug_of` and
+  `fake-claude`'s copy both resolve first. This binds C3: a replayer that materialises a
+  session under the unresolved slug lays it down where no real CLI would look.
+
+- Observation: `diff` decided whether a fixture takes part in the census only after loading
+  its scenario module, so the skip was unreachable for the fixtures it exists for. Evidence:
+  `make probe` reported both hand-written dialog fixtures as `FAILED to run (FileNotFoundError:
+  no scenario dialog-fable-overage)` on a tree where nothing was wrong. Impact: the test that
+  covered the skip used a fixture whose module did exist, which is why it passed; the
+  question is now asked of `fixture.json` alone, before anything is loaded.
+
+- Observation: An empty fixture directory does not survive a commit. Evidence: `git
+  ls-files Fixtures/` listed no `initial/` entry for any fixture, while `verify` requires
+  `initial/` and `transcript/` to be directories. Impact: a fixture recorded by a scenario
+  that resumes nothing and starts no turn — `zero-cost` leaves all three empty — passed the
+  gate on the recording machine, where `record` had just made the directories, and would
+  have failed `missing initial/` on every clone. `write_fixture` now places a `.gitkeep`,
+  and everything that walks those directories skips it by name, `fake-claude`'s
+  materialiser and final-state comparison included.
+
+- Observation: The account's weekly rate limit was reached during wave A, on 2026-09-04,
+  and no model tokens were available for the rest of it. Evidence: the `zero-cost`
+  fixture's own `get_usage` response, recorded minutes before the first paid attempt,
+  carries `rate_limits.seven_day.utilization: 100` and
+  `{"kind": "weekly_all", "percent": 100, "severity": "critical", "is_active": true,
+  "resets_at": "2026-09-06T15:00:00Z"}`, with `extra_usage.disabled_reason:
+  "out_of_credits"` and the five-hour window at 29 per cent. Impact: `send-user-file`,
+  `plain-two-turn` and therefore `resume-no-replay` could not be recorded. A rate-limited
+  turn is not an error frame: it returns `result` with `subtype: "success"`,
+  `is_error: true` and the limit text as `result`, and it emits `system/init` and writes a
+  full transcript first, which is why the wave still produced protocol evidence.
 
 - Observation: The extracted bundle's SPEC chapter files under
   `~/claude-code-bundle/2.1.257/SPEC/` are no longer on disk on 2026-09-04; the bundle
