@@ -408,6 +408,17 @@ that is not fast-capable promotes the session model to Opus, so the header re-re
 | outbound | `mcp_status`, `mcp_set_servers`, `mcp_reconnect`, `mcp_toggle`, `reload_skills`, `reload_plugins` | Header menus and `/mcp`. |
 | outbound | `end_session` | Graceful shutdown. |
 
+**Cancelling an outbound request.** `control_cancel_request` withdraws the sender's own
+request in either direction and is never a reply. The engine honours a host-sent cancel
+only for `side_question`, `mcp_call` and the cloud-only `remote_tools_announce`, the three
+subtypes it registers in its abort map, and even then it still answers the withdrawn
+request with an error `control_response`; for every other subtype the frame is ignored and
+the request runs to its normal answer. Two consequences: the host owns every deadline,
+because the wire has none, and a `control_response` for a request the host has already
+forgotten is ordinary traffic to drop with a diagnostic, never drift (`cli.pretty.js`
+2.1.258, the stdin loop's `control_cancel_request` arm and the envelope's schema text;
+C1's control-shapes recording confirms it on 2.1.259).
+
 ### 6.5 Version gate
 
 At launch afleet runs `claude --version` and, on the first owned channel,
@@ -3099,6 +3110,16 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   are intact; the 2.1.258 directory never had chapters.
   Impact: §17.2 records the loss; new protocol facts cite the bundle modules or the
   parity inventory until the chapters are restored.
+- Observation: A host-side `control_cancel_request` is best-effort and mostly ignored.
+  Evidence: In `cli.pretty.js` 2.1.258 the headless stdin loop resolves the cancel against
+  an abort map that only `mcp_call`, `side_question` and `remote_tools_announce` populate;
+  for every other subtype the abort is a no-op and telemetry records `in_flight: false`.
+  The honoured three still answer the withdrawn request with an error response. C1's
+  Task 4 worker surfaced it when the verifier's strict rule (host requests end only in a
+  response) met the control-shapes scenario cancelling `claude_oauth_wait_for_completion`.
+  Impact: §6.4 states the rule; C1's verifier keeps host requests response-terminated and
+  declares withdrawn requests in the manifest; C2's `cancel()` already limits itself to
+  the abortable pair and must drop responses for forgotten ids without alarm.
 
 ## Outcomes & Retrospective
 
@@ -3203,3 +3224,8 @@ Pending — written at finish.
 - 2026-09-04: Wave 1 in execution. Both child specs passed one Codex review each and were
   revised on their branches; their plans (C1: 12 tasks, C2: 14 tasks) passed one Codex
   review each; executors run them in the worktrees. §17.9 records the plan paths.
+- 2026-09-04: §6.4 records host-side cancellation semantics from the 2.1.258 bundle:
+  honoured only for `side_question`, `mcp_call` and `remote_tools_announce`, the withdrawn
+  request still receives an error response, the host owns every deadline. One Surprises
+  entry. Flags C1 (verifier, control-shapes recording) and C2 (`cancel()` documentation,
+  responses for forgotten ids).
