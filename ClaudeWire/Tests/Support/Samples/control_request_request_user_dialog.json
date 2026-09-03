@@ -1,0 +1,1 @@
+{"type":"control_request","request_id":"req-d1","request":{"subtype":"request_user_dialog","dialog_kind":"refusal_fallback_prompt","payload":{"originalModel":"claude-fable-5-1","fallbackModel":"claude-opus-5","retractedMessageUuids":["6d1d4b1e-0000-4000-8000-000000000001"]},"tool_use_id":"toolu_09"}}

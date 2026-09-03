@@ -1,0 +1,1 @@
+{"type":"control_request","request_id":"req-m1","request":{"subtype":"mcp_message","server_name":"afleet","message":{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}}}
