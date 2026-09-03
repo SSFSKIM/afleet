@@ -84,6 +84,20 @@ def _redact_file(src, dest, redactor):
         out.write(text)
 
 
+def redact_tree(root, redactor):
+    """Re-run the rules over every file under `root`, in place. `probe redact` (§4.2) is the caller.
+
+    The public half of `_redact_file`, which stays private because during `snapshot` a file's
+    source and destination differ. A committed fixture is re-redacted whole, so that is the
+    shape this module exports, rather than leaving the caller to reach across the boundary
+    for a private name and re-implement the walk beside it.
+    """
+    for dirpath, _, files in os.walk(root):
+        for name in files:
+            p = os.path.join(dirpath, name)
+            _redact_file(p, p, redactor)
+
+
 def snapshot(config_home, session_id, dest_dir, redactor):
     """Copy (never move) the session's transcript files, redacted, with the slug rewritten."""
     slug, projects_dir = find_session(config_home, session_id)

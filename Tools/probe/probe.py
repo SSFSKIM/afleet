@@ -3,15 +3,51 @@
 
 The one composition point. `census.py`, `redact.py`, `harness.py`, `fixture.py` and
 `verify.py` never import one another; this module wires them into the six subcommands and
-into the scenario contract that every recording and spike scenario is written against.
+into the scenario contract below.
+
+## The scenario contract
 
 A scenario is a module under `scenarios/` exposing `META` (a dict) and `run(session, ctx)`.
-`META` names the fixture, what the recording serves, whether it joins `diff`, whether it is
-compared exactly or by required shape, which of §4.6's two isolation levels it uses, the
-`Launch` overrides it needs, its prompts, the fixture whose session it resumes, an optional
-`setup(scratch_cwd)` and the spikes it informs. `ctx` carries `cwd`, `config_home`, `name`,
-`meta`, `launch` and a `notes` list the scenario appends observations to; those notes reach
-`fixture.json`, so a reviewer reads what the run saw without re-deriving it.
+
+`META` keys, all of them read by this module:
+
+- `name`             the fixture directory this recording lands in, and the scratch cwd it
+                     runs in under `SCRATCH_ROOT`.
+- `purpose`          one line a reviewer reads first.
+- `serves`           the acceptance items and spikes the recording is evidence for.
+- `spikes`           the spike ids it informs, so a finding walks back to its evidence.
+- `census`           whether `diff` re-runs it against a binary. False excludes it.
+- `deterministic`    True compares pair sets, key sets, capabilities and flags exactly;
+                     False compares required shapes and accumulates across re-recordings.
+- `isolation`        `"config-home"` (§4.6's default) or `"setting"`.
+- `launch`           `Launch(...)` overrides: `max_turns`, `model`, `permission_mode`,
+                     `extra_flags`, `session_id`, and `binary_args`, which the tests use to
+                     point the launch line at a Python stand-in.
+- `prompts`          what the recording sent, for the reviewer and for `fixture.json`. It
+                     **must** mirror what `run()` actually sends: nothing enforces it, and a
+                     fixture whose `prompts` misdescribe its own session is bad evidence.
+- `resume_of`        the fixture whose session this one resumes. Its session id becomes
+                     `--resume`, its transcript becomes `initial/`, and its scratch cwd is
+                     reused, because the transcript slug is derived from the cwd.
+- `setup`            optional `callable(scratch_cwd)` creating the synthetic content §4.5
+                     requires the model to read.
+- `keep_open`        True suppresses the `end_session` at close. The global constraint
+                     forbids ending a session while a background task is still running, and
+                     this is how a scenario says so -- `background-shell` sets it.
+- `late_responses`   request ids `fixture.json` declares, licensing one response arriving
+                     after the CLI cancelled its own request (§4.2).
+- `spill_after`      the capture length past which the harness spills to a mode-0600 file in
+                     a private directory outside the worktree (§4.2). A scenario expecting a
+                     large volume sets it; the harness default applies otherwise.
+
+`withdrawn_requests` is *not* a `META` key. It is written from the ids the scenario passed to
+`session.cancel()` and never inferred from the captured frames, which is what keeps it a
+declaration about what the host intended rather than an amnesty the recorder grants itself.
+
+`run(session, ctx)` drives the session and returns nothing. `ctx` carries `cwd`,
+`config_home`, `name`, `meta`, `launch` and a `notes` list the scenario appends observations
+to; those notes reach `fixture.json`, so a reviewer reads what the run saw without
+re-deriving it. `exit_code` and `stderr_tail` are added after `run()` returns, for the caller.
 """
 import argparse
 import datetime
@@ -37,6 +73,14 @@ SCENARIO_DIR = os.environ.get("AFLEET_SCENARIO_DIR") or os.path.join(HERE, "scen
 FIXTURES_ROOT = os.environ.get("AFLEET_FIXTURES_ROOT") or os.path.abspath(os.path.join(HERE, "..", "..", "Fixtures"))
 SCRATCH_ROOT = "/tmp/afleet-fixtures"
 GLOB_CHARS = "*?["
+# `verify`'s unsigned-review error, matched by equality. `record` reports this one as advice
+# -- a fresh recording is unsigned by construction and the reviewer signs it next -- and
+# every other error as a failure. Equality and not a substring test: `verify` formats a
+# scanner hit as a fixture-relative path followed by the hit, so a file whose path merely
+# contains the word would demote an unredacted byte to advice and exit 0. If `verify` ever
+# rewords this, the mismatch makes `record` fail on an unsigned fixture, which is the safe
+# direction to be wrong in.
+UNSIGNED_REVIEW = "review block is not signed (needs reviewer, date, checklist_version)"
 
 
 def log(msg):
@@ -89,8 +133,29 @@ def scenario_for_fixture(fixture_path, scenario_dir=None):
     return load_scenario(meta.get("scenario") or meta["name"], scenario_dir), meta
 
 
-def fresh_scratch(name, scratch_root=SCRATCH_ROOT):
+def config_home_paths(extra=None):
+    """Every directory nothing here may delete (contract X9, global constraint 3)."""
+    homes = [harness.SCRATCH_CONFIG_HOME, os.path.expanduser("~/.claude"),
+             os.environ.get("CLAUDE_CONFIG_DIR"), extra]
+    return sorted({os.path.realpath(h) for h in homes if h})
+
+
+def fresh_scratch(name, scratch_root=SCRATCH_ROOT, config_home=None):
+    """An empty scratch cwd for one scenario, refusing any name that resolves to a config home.
+
+    §4.6 puts the scratch config home at `/tmp/afleet-fixtures/config-home` and every
+    scenario's scratch cwd at `/tmp/afleet-fixtures/<name>`: siblings under one root. A
+    scenario named `config-home` -- or one whose name resolves to the root itself -- would
+    make the `rmtree` below delete a logged-in Claude configuration from inside `Tools/`,
+    which is the one thing X9 forbids outright. The test is on the resolved path and catches
+    a directory that merely *contains* a config home as well as one that is one.
+    """
     d = os.path.join(scratch_root, name)
+    real = os.path.realpath(d)
+    for home in config_home_paths(config_home):
+        if real == home or home.startswith(real + os.sep):
+            raise ValueError("scratch cwd %s for scenario %r would delete the config home %s; rename the scenario"
+                             % (d, name, home))
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
     return d
@@ -112,7 +177,7 @@ def resolve_config_home(meta, config_home):
     return harness.SCRATCH_CONFIG_HOME if meta.get("isolation", "config-home") == "config-home" else None
 
 
-def scenario_cwd(meta, scratch_root):
+def scenario_cwd(meta, scratch_root, config_home=None):
     """The scratch directory a scenario runs in.
 
     A resuming scenario reuses the directory the resumed recording used, because the
@@ -122,7 +187,7 @@ def scenario_cwd(meta, scratch_root):
     `FileNotFoundError` naming nothing the operator can act on.
     """
     if not meta.get("resume_of"):
-        return fresh_scratch(meta["name"], scratch_root)
+        return fresh_scratch(meta["name"], scratch_root, config_home)
     cwd = os.path.join(scratch_root, meta["resume_of"])
     if not os.path.isdir(cwd):
         raise FileNotFoundError("%s resumes %s, whose scratch cwd %s is gone; run %s first"
@@ -132,11 +197,18 @@ def scenario_cwd(meta, scratch_root):
 
 def run_scenario(mod, claude, config_home, scratch_root, redactor, resume=None):
     meta = mod.META
-    cwd = scenario_cwd(meta, scratch_root)
+    home = resolve_config_home(meta, config_home)
+    cwd = scenario_cwd(meta, scratch_root, home)
     if callable(meta.get("setup")):
         meta["setup"](cwd)
-    launch = make_launch(meta, claude, cwd, resolve_config_home(meta, config_home), resume=resume)
-    session = harness.Session(launch, redactor)
+    launch = make_launch(meta, claude, cwd, home, resume=resume)
+    session_kw = {}
+    if meta.get("spill_after") is not None:
+        # §4.2's spill clause: a scenario that declares a large expected volume spills the
+        # capture to a mode-0600 file in a private directory outside the worktree. The
+        # harness implements the spill; this is the only place a scenario can ask for it.
+        session_kw["spill_after"] = meta["spill_after"]
+    session = harness.Session(launch, redactor, **session_kw)
     ctx = {"cwd": cwd, "config_home": launch.config_home, "name": meta["name"], "meta": meta, "notes": [], "launch": launch}
     session.start(timeout=60)
     try:
@@ -149,7 +221,14 @@ def run_scenario(mod, claude, config_home, scratch_root, redactor, resume=None):
 
 
 def resolve_resume(meta, fixtures_root):
-    """The session id a scenario resumes, from the fixture named by META['resume_of'] (None when it resumes nothing)."""
+    """The session id a scenario resumes, from the fixture named by META['resume_of'] (None when it resumes nothing).
+
+    `meta` is the scenario's `META`, never a fixture's `fixture.json`. `resume_of` is a
+    property of the scenario and `record` has no reason to write it into the fixture, so
+    handing this function a fixture resolves every one of them to `None` and re-runs a
+    resuming scenario as a fresh session -- which against a replayer still produces a stream
+    and so shows up only as unexplained drift on a real binary.
+    """
     if not meta.get("resume_of"):
         return None
     with open(os.path.join(fixtures_root or FIXTURES_ROOT, meta["resume_of"], "fixture.json"), encoding="utf-8") as fh:
@@ -163,13 +242,23 @@ def session_id_of(session, launch):
     return launch.resume or launch.session_id
 
 
-def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None, scratch_root=SCRATCH_ROOT, reviewer=None):
+def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None,
+           scratch_root=SCRATCH_ROOT, reviewer=None, out=None):
     fixtures_root = fixtures_root or FIXTURES_ROOT
     mod = load_scenario(name, scenario_dir)
     meta = dict(mod.META)
     redactor = redact.Redactor()
     argv = tool_argv(claude, meta)
     version, help_text = claude_version(argv), claude_help(argv)
+    if not version:
+        # An empty version reaches both `fixture.json` and `census.json`, where `verify` only
+        # ever compares them to each other -- and finds them equal. A fixture that passes the
+        # gate while claiming no CLI version is worthless as the baseline four children will
+        # trust, and it costs nothing to refuse here rather than discover it at a review.
+        raise RuntimeError("%s printed no version; refusing to record with an empty cli_version" % " ".join(argv))
+    # `--out` (§4.2) names the directory this recording lands in, and its basename becomes the
+    # fixture's name. `fixtures_root` stays what a resume is resolved against.
+    out_root, out_name = os.path.split(os.path.abspath(out.rstrip("/"))) if out else (fixtures_root, meta["name"])
     work = tempfile.mkdtemp(prefix="afleet-record-")
     os.chmod(work, 0o700)
     try:
@@ -181,6 +270,13 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
         if resume:
             fixture.snapshot(ch or os.path.expanduser("~/.claude"), resume, initial_dir, redactor)
         session, ctx = run_scenario(mod, claude, config_home, scratch_root, redactor, resume=resume)
+        if ctx["exit_code"]:
+            # At the terminal, not only in the fixture: twenty live recordings cost real
+            # tokens, and an operator who sees the exit as it happens can stop the run.
+            log("%s: the recorded session exited %s" % (meta["name"], ctx["exit_code"]))
+            tail = (ctx["stderr_tail"] or "").strip()
+            if tail:
+                log("%s: stderr tail:\n%s" % (meta["name"], tail))
         sid = session_id_of(session, ctx["launch"])
         frames = session.frames()
         try:
@@ -200,12 +296,12 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
                     with open(p, "w", encoding="utf-8") as fh:
                         fh.write(text)
         c = census.census([r["frame"] for r in frames if "frame" in r], help_text=help_text, version=version)
-        existing = os.path.join(fixtures_root, meta["name"], "census.json")
+        existing = os.path.join(out_root, out_name, "census.json")
         if not meta.get("deterministic") and os.path.isfile(existing):
             with open(existing, encoding="utf-8") as fh:
                 c = census.merge_required(json.load(fh), c)
         out_meta = {
-            "name": meta["name"], "scenario": name, "purpose": meta.get("purpose"), "serves": meta.get("serves", []),
+            "name": out_name, "scenario": name, "purpose": meta.get("purpose"), "serves": meta.get("serves", []),
             "spikes": meta.get("spikes", []),
             "recorded_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "cli_version": version, "session_id": sid, "cwd": ctx["cwd"],
@@ -222,7 +318,7 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
             "review": {"reviewer": reviewer or "", "date": datetime.date.today().isoformat() if reviewer else "", "checklist_version": 1},
         }
         out_meta = redactor.redact_json(out_meta)          # fixture.json is a redaction target too (spec §4.5)
-        path = fixture.write_fixture(fixtures_root, meta["name"], out_meta, frames, c, redactor.manifest(), initial_dir, transcript_dir, artifacts_dir)
+        path = fixture.write_fixture(out_root, out_name, out_meta, frames, c, redactor.manifest(), initial_dir, transcript_dir, artifacts_dir)
     finally:
         # A run that dies mid-recording must not leave the staging directory behind. For a
         # resume it already holds the prior session's transcript -- redacted, but still a
@@ -232,6 +328,15 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
     for w in warnings:
         log("warning: " + w)
     return path, errors
+
+
+def classify_errors(errors):
+    """Split `verify`'s errors into (blocking, advisory).
+
+    Exactly one error is advisory: a fresh recording is unsigned by construction and the
+    reviewer signs it next. Every other error, redaction findings above all, blocks.
+    """
+    return [e for e in errors if e != UNSIGNED_REVIEW], [e for e in errors if e == UNSIGNED_REVIEW]
 
 
 def sign(path, reviewer):
@@ -310,7 +415,7 @@ def group_drift(lines):
 
 def diff(claude, scenario_dir=None, fixtures_root=None, config_home=None, scratch_root=SCRATCH_ROOT, only=None, script=None):
     fixtures_root = fixtures_root or FIXTURES_ROOT
-    drifted, report = 0, []
+    drifted, skipped, report = 0, 0, []
     names = [only] if only else sorted(n for n in os.listdir(fixtures_root) if os.path.isfile(os.path.join(fixtures_root, n, "fixture.json")))
     for n in names:
         fpath = os.path.join(fixtures_root, n)
@@ -321,6 +426,10 @@ def diff(claude, scenario_dir=None, fixtures_root=None, config_home=None, scratc
         try:
             mod, meta = scenario_for_fixture(fpath, scenario_dir)
             if not meta.get("census") or meta.get("synthetic"):
+                # Named, not passed over in silence: an omitted directory reads exactly like a
+                # fixture that passed, and this report is what says which is which.
+                report.append("%s: skipped (%s)" % (n, "synthetic" if meta.get("synthetic") else "census: false"))
+                skipped += 1
                 continue
             os.environ["FAKE_CLAUDE_FIXTURE"] = fpath
             if script:
@@ -328,19 +437,37 @@ def diff(claude, scenario_dir=None, fixtures_root=None, config_home=None, scratc
             os.environ.setdefault("FAKE_CLAUDE_SPEED", "0")
             argv = tool_argv(claude, mod.META)
             version, help_text = claude_version(argv), claude_help(argv)     # inside the env block so fake-claude answers from this fixture
-            session, ctx = run_scenario(mod, claude, config_home, scratch_root, redact.Redactor(), resume=resolve_resume(meta, fixtures_root))
+            session, ctx = run_scenario(mod, claude, config_home, scratch_root, redact.Redactor(),
+                                        resume=resolve_resume(mod.META, fixtures_root))
             observed = census.census([r["frame"] for r in session.frames() if "frame" in r], help_text=help_text, version=version)
             with open(os.path.join(fpath, "census.json"), encoding="utf-8") as fh:
                 recorded = json.load(fh)
-            lines = census.diff(recorded, observed, "exact" if meta.get("deterministic") else "required")
+            # `meta["deterministic"]`, not `.get`: `census.diff` raises on an unknown mode
+            # rather than defaulting, for exactly this reason -- an absent value would quietly
+            # relax the strict comparison into the permissive one. The `except` below reports
+            # the KeyError as the fixture defect it is.
+            lines = census.diff(recorded, observed, "exact" if meta["deterministic"] else "required")
+            if census.UNPARSEABLE_PAIR in observed["pairs"]:
+                # The other half of the alarm-on-appearance rule. `census.diff` cannot raise
+                # this unconditionally: `verify` recounts a fixture's own frames through the
+                # same function, and a fixture that legitimately holds one undecodable line
+                # would then fail its own recount for a reason that is not true of it. Here,
+                # at the live-binary gate, an undecodable line is always worth saying out loud.
+                lines = list(lines) + ["%s: %d undecodable stdout line(s) in this run"
+                                       % (census.UNPARSEABLE_PAIR, observed["pairs"][census.UNPARSEABLE_PAIR]["count"])]
         except Exception as e:
             # `make probe` is a verdict on every fixture, not on the first one that breaks. A
             # scenario that cannot be re-run at all -- a binary that has moved, a resume whose
             # scratch cwd was cleared, a census file that will not parse -- is itself drift
             # worth reporting, and catching it here is what keeps the other fixtures' verdicts
             # on the screen. It counts against the exit status like any other drift.
+            #
+            # Redacted, unlike `verify`'s findings: those are safe by construction because they
+            # name only a rule and a position, while an arbitrary exception message is not --
+            # `load_scenario` alone raises one carrying an absolute path.
             drifted += 1
-            report.append("%s: FAILED to run (%s: %s)" % (n, type(e).__name__, e))
+            report.append(redact.Redactor().redact_text(
+                "%s: FAILED to run (%s: %s)" % (n, type(e).__name__, e), record=False))
             continue
         finally:
             os.environ.clear(); os.environ.update(env_backup)
@@ -350,6 +477,12 @@ def diff(claude, scenario_dir=None, fixtures_root=None, config_home=None, scratc
             report += ["  " + l for l in group_drift(lines)]
         else:
             report.append("%s: ok" % n)
+    if len(names) - skipped == 0:
+        # `make probe` is the headline gate, and a gate that passes because it compared nothing
+        # is worse than one that fails: a run before any fixture exists, or a mistyped
+        # `AFLEET_FIXTURES_ROOT`, would otherwise report success in silence.
+        report.append("no census fixture was compared under %s; this run proves nothing" % fixtures_root)
+        return 1, "\n".join(report)
     return min(drifted, 125), "\n".join(report)
 
 
@@ -381,10 +514,12 @@ def _redact_in_place(path):
     with open(os.path.join(path, "fixture.json"), "w", encoding="utf-8") as fh:
         json.dump(r.redact_json(fx["meta"]), fh, indent=1, sort_keys=True)
     for sub in ("initial", "transcript", "artifacts"):
-        for root, _, files in os.walk(os.path.join(path, sub)):
-            for f in files:
-                p = os.path.join(root, f)
-                fixture._redact_file(p, p, r)
+        fixture.redact_tree(os.path.join(path, sub), r)
+    # `streams.json` holds the byte sizes of the files under `initial/`, so a rule that
+    # changed one of them has invalidated every offset in it. Recomputed exactly the way
+    # `write_fixture` computes it, from the files as they now stand.
+    with open(os.path.join(path, "streams.json"), "w", encoding="utf-8") as fh:
+        json.dump(fixture.stream_sizes(os.path.join(path, "initial")), fh, indent=1, sort_keys=True)
     with open(os.path.join(path, "redaction.json"), "w", encoding="utf-8") as fh:
         json.dump(r.manifest(), fh, indent=1, sort_keys=True)
 
@@ -402,6 +537,7 @@ def main(argv=None):
             sp.add_argument("--fixture", default=None); sp.add_argument("--script", default=None)
         if name == "record":
             sp.add_argument("scenario"); sp.add_argument("--reviewer", default=None)
+            sp.add_argument("--out", default=None, help="the fixture directory to write (default Fixtures/<name>)")
         if name in ("snapshot", "redact"):
             sp.add_argument("fixture")
         if name == "verify":
@@ -417,6 +553,10 @@ def main(argv=None):
         out = {}
         for name in ["zero_cost"] + list(args.scenario):
             mod = load_scenario(name)
+            # §4.2 qualifies the *named* scenarios with `census: true`; the zero-cost census is
+            # the command's own first line rather than a scenario that opts in.
+            if name in args.scenario and not mod.META.get("census"):
+                log("skipped %s (census: false)" % mod.META["name"]); continue
             argv_b = tool_argv(args.claude, mod.META)
             version, help_text = claude_version(argv_b), claude_help(argv_b)
             session, ctx = run_scenario(mod, args.claude, args.config_home, SCRATCH_ROOT, redact.Redactor(), resume=resolve_resume(mod.META, FIXTURES_ROOT))
@@ -426,12 +566,14 @@ def main(argv=None):
         code, report = diff(args.claude, config_home=args.config_home, only=args.fixture, script=args.script)
         print(report); return code
     if args.cmd == "record":
-        path, errors = record(args.scenario, args.claude, config_home=args.config_home, reviewer=args.reviewer)
+        path, errors = record(args.scenario, args.claude, config_home=args.config_home, reviewer=args.reviewer, out=args.out)
         print("recorded %s" % path)
-        real = [e for e in errors if "review" not in e]
-        for e in errors:
-            print(("ERROR " if e in real else "needs review: ") + e)
-        return 1 if real else 0
+        blocking, advisory = classify_errors(errors)
+        for e in blocking:
+            print("ERROR " + e)
+        for e in advisory:
+            print("needs review: " + e)
+        return 1 if blocking else 0
     if args.cmd == "snapshot":
         with open(os.path.join(args.fixture, "fixture.json"), encoding="utf-8") as fh:
             meta = json.load(fh)
