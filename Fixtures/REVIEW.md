@@ -8,8 +8,13 @@ run has walked this list and signed the `review` block in `fixture.json`.
    variables of the parent's §6.1 table (no PATH, HOME or anything else);
    `purpose`, `serves`, `prompts` are truthful; `synthetic`/`hypothesis` are set
    only for the two dialog fixtures.
-2. `grep -R` the whole fixture for your name, your e-mail, your hostname and
-   `/Users/`: only `~`, `<email>`, `<host>` and the scratch cwd may appear.
+2. `grep -R` the whole fixture for the **recording author's** name, e-mail and
+   hostname, and for `/Users/`: only `~`, `<email>`, `<host>` and the scratch cwd
+   may appear. The author is not you — item 1 of this list requires a reviewer
+   other than the recording run — so take the identifiers from the recording
+   machine rather than your own: `fixture.json`'s `recorded_at` and `launch` say
+   which run it was, and `verify --hostname <recording host>` applies rule 3's
+   hostname half off-machine, which it cannot infer.
 3. Open every `tool_result` block in `frames.ndjson` and every `attachment`
    record under `transcript/`: the content must come from the scratch repository
    under `/tmp/afleet-fixtures/<name>/`, never from a real project.
@@ -25,6 +30,17 @@ run has walked this list and signed the `review` block in `fixture.json`.
    gate, and deleting it is the fix.
 8. `README.md` (optional) says what the recording shows and which acceptance
    items and spikes it serves.
+9. Empty `initial/`, `transcript/` and `artifacts/` hold a `.gitkeep` and nothing
+   else, and `git ls-files` on the fixture lists it. Git tracks no empty
+   directory, and `verify` requires `initial/` and `transcript/` to exist, so a
+   fixture missing the placeholder passes on the recording machine and fails on
+   every clone.
+10. **Synthetic fixtures only** (`synthetic: true`): hold every asserted frame
+   against the bundle module the generator cites, field by field, and read
+   `fixture.json`'s `hypothesis` as the claim it is. A synthetic fixture asserts
+   a shape nobody observed on the wire, so this list's other items — which ask
+   whether a recording was faithfully captured — cannot catch a frame that is
+   simply wrong. Nothing but this reading can.
 
 Sign with `Tools/probe/probe.py sign Fixtures/<name> --reviewer "<your name>"`,
 which writes `{"reviewer", "date", "checklist_version": 1}`, then run
