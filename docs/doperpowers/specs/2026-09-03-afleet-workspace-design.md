@@ -2136,8 +2136,8 @@ notarized distribution, and any write under `<configHome>` (X9).
 
 | Child | Spec | Status |
 |---|---|---|
-| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md` on `child/c1-probes-fixtures` | in-flight (wave 1) |
-| C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md` on `child/c2-core-wire` | in-flight (wave 1); G2 pending C1.G1 |
+| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md` on `child/c1-probes-fixtures`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks) | in-flight (wave 1); executing since 2026-09-04 |
+| C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md` on `child/c2-core-wire`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks) | in-flight (wave 1); executing since 2026-09-04; G2 pending C1.G1 |
 | C3 FleetKit timeline | — | blocked-by C2 |
 | C4 FleetKit sessions and fleet | — | blocked-by C2 |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
@@ -3200,3 +3200,6 @@ Pending — written at finish.
   spec paths and branches, C2.G2 pending C1.G1; §17.2 records the missing bundle spec
   chapters; `.gitignore` gains `.typings/`. Seven Decision Log entries and three Surprises
   entries added.
+- 2026-09-04: Wave 1 in execution. Both child specs passed one Codex review each and were
+  revised on their branches; their plans (C1: 12 tasks, C2: 14 tasks) passed one Codex
+  review each; executors run them in the worktrees. §17.9 records the plan paths.
