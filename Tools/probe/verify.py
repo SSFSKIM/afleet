@@ -37,7 +37,8 @@ REVIEW_KEYS = ("reviewer", "date", "checklist_version")
 # recorded fixture gets these from `record`; a hand-written synthetic one is where the
 # omission is real.
 REQUIRED_META = ("name", "purpose", "recorded_at", "cli_version", "launch", "prompts", "serves",
-                 "census", "deterministic", "synthetic", "hypothesis", "late_responses", "review")
+                 "census", "deterministic", "synthetic", "hypothesis", "late_responses",
+                 "withdrawn_requests", "review")
 
 # The two fixture files that carry protocol *names* in key position: `census.json` is keyed
 # by `(type, subtype)` pair names and `redaction.json` by the field paths a rule touched. The
@@ -55,9 +56,9 @@ NAMES_ONLY_FILES = ("census.json", "redaction.json")
 
 # ---- request lifecycle (§4.2)
 
-def _lifecycle(frames, late_ok):
+def _lifecycle(frames, late_ok, withdrawn_ok=()):
     errors = []
-    state = {}      # rid -> (origin, status); origin in {"cli","host"}, status in {"open","closed","cancelled","dropped"}
+    state = {}      # rid -> (origin, status); origin in {"cli","host"}, status in {"open","closed","cancelled","withdrawn","dropped"}
     subtype = {}
     opened_at = {}
     # Once the host closes stdin nothing more can travel host to CLI, so the index of the
@@ -103,6 +104,11 @@ def _lifecycle(frames, late_ok):
             elif status == "closed":
                 errors.append("duplicate response to %s" % rid)
             else:
+                # "open" and "withdrawn" both land here. A response to a withdrawn request is
+                # an ordinary settlement, not the exception `late_responses` exists to license:
+                # the CLI honours a host cancel for only three subtypes and answers anyway even
+                # for those, so a host request always ends in a response and the cancel merely
+                # says the host stopped waiting.
                 expected_dir = "in" if origin == "cli" else "out"
                 if d != expected_dir:
                     errors.append("response to %s travels the wrong direction" % rid)
@@ -112,6 +118,15 @@ def _lifecycle(frames, late_ok):
             origin, status = state.get(rid, (None, None))
             if origin is None:
                 errors.append("cancel for unknown request %s" % rid)
+            elif origin == "host" and d == "in" and rid in withdrawn_ok:
+                # A declared withdrawal: the host cancelled its own request and `fixture.json`
+                # says so. All three halves are required -- host-originated, a host-to-CLI
+                # cancel frame carrying the id, and the id listed -- so the entry cannot excuse
+                # a request the fixture does not actually show being withdrawn. The list is
+                # written from a scenario's explicit cancel path and never inferred from the
+                # frames, which is what keeps it a declaration rather than a blanket amnesty.
+                if status == "open":
+                    state[rid] = (origin, "withdrawn")
             elif origin != "cli" or d != "out":
                 # §4.2 ends a lifecycle without a response in exactly one shape: the CLI
                 # cancelling its own request. Anything else leaves the request open, so a host
@@ -124,7 +139,8 @@ def _lifecycle(frames, late_ok):
                 # Strict on purpose: whether the CLI answers a request the host has cancelled is
                 # a protocol fact, so §4.2 is amended by a recording that shows one, not by a
                 # reading of what cancellation probably does. A hit here is evidence for S8, not
-                # a fixture defect to work around.
+                # a fixture defect to work around. The one declared escape is
+                # `withdrawn_requests` above, which a scenario opts into per request id.
                 errors.append("cancel for %s travels %s against a %s-originated request; only the CLI may cancel its own"
                               % (rid, d, origin))
             elif status == "open":
@@ -422,7 +438,8 @@ def verify_fixture(path, home=None, author=None, hostname=None):
     fx = fixture.load(path)
     errors = _check_meta(path, fx["meta"])
     errors += _check_frames(fx["frames"])
-    errors += _lifecycle(fx["frames"], set(fx["meta"].get("late_responses") or []))
+    errors += _lifecycle(fx["frames"], set(fx["meta"].get("late_responses") or []),
+                         set(fx["meta"].get("withdrawn_requests") or []))
     errors += _check_census(fx)
     errors += _check_artifacts(path, fx["frames"])
     errors += _check_mirror(path, fx)

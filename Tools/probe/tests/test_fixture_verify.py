@@ -63,6 +63,7 @@ def build_fixture(root, name="demo", **overrides):
     meta = {"name": name, "purpose": "test", "recorded_at": "2026-09-04T00:00:00Z", "cli_version": "2.1.259",
             "launch": {"argv": ["claude", "-p"], "env": {"CLAUDE_CODE_FORK_SUBAGENT": "1"}}, "prompts": ["hi"], "serves": ["item 1"],
             "census": True, "deterministic": True, "synthetic": False, "hypothesis": False, "late_responses": [],
+            "withdrawn_requests": [],
             "review": {"reviewer": "kimmi", "date": "2026-09-04", "checklist_version": 1}}
     meta.update(overrides)
     d = os.path.join(root, name)
@@ -302,6 +303,42 @@ class VerifyTests(unittest.TestCase):
         e = self.errors(d)
         self.assertTrue(any("cancel for h9" in x for x in e))
         self.assertTrue(any("unanswered request h9" in x for x in e))
+
+    def withdrawal(self, name, **overrides):
+        """A host request the host cancels: `control-shapes`' oauth-wait shape.
+
+        A CLI frame closes the recording so the tail tolerance cannot do the work, which keeps
+        each of these about `withdrawn_requests` and nothing else.
+        """
+        d = build_fixture(self.root, name=name, **overrides)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "o1", "request": {"subtype": "claude_oauth_wait_for_completion"}}})
+        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_cancel_request", "request_id": "o1"}})
+        return d
+
+    def test_a_declared_withdrawal_settles_a_host_request_that_never_answers(self):
+        d = self.withdrawal("demo", withdrawn_requests=["o1"])
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertEqual(self.errors(d), [])
+
+    def test_a_withdrawn_request_that_settles_later_needs_no_late_responses_entry(self):
+        """The CLI honours a host cancel for three subtypes and answers even for those, so a
+        response after the cancel is the ordinary case, not the exception `late_responses` licenses."""
+        d = self.withdrawal("demo", withdrawn_requests=["o1"])
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "error", "request_id": "o1", "error": "cancelled"}}})
+        self.assertEqual(self.errors(d), [])
+
+    def test_a_host_cancel_without_the_declaration_still_fails(self):
+        d = self.withdrawal("demo")
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        e = self.errors(d)
+        self.assertTrue(any("cancel for o1" in x for x in e))
+        self.assertTrue(any("unanswered request o1" in x for x in e))
+
+    def test_a_declaration_without_the_cancel_frame_still_fails(self):
+        d = build_fixture(self.root, withdrawn_requests=["o1"])
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "o1", "request": {"subtype": "claude_oauth_wait_for_completion"}}})
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertTrue(any("unanswered request o1" in e for e in self.errors(d)))
 
     def test_a_response_travelling_the_wrong_direction_fails(self):
         d = build_fixture(self.root)

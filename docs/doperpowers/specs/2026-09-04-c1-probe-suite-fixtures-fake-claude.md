@@ -753,3 +753,39 @@ Pending — written at finish.
   the contract's required core: `verify` fails a fixture that omits any of them, by presence
   and not by value, so a hand-written synthetic fixture cannot arrive with the census
   comparison quietly relaxed. The rest sit beside them.
+- 2026-09-04: X8 gains `withdrawn_requests: [request ids]` in `fixture.json`, beside
+  `late_responses`, and it joins §4.4's required core. `verify` honours an entry only when
+  three things hold together: the id belongs to a host-originated request, the fixture carries
+  a `control_cancel_request` for that id travelling host to CLI — `"dir": "in"` in §4.4's
+  vocabulary, because a cancel always names one of the sender's own in-flight requests and so
+  travels the same way as the request it withdraws — and the id is listed. Miss any one and the
+  request is unanswered exactly as before: an undeclared cancel still fails, a declaration
+  without a cancel frame still fails, and a CLI-originated request is untouched by the list.
+  The list is written from a scenario's explicit cancel path and never inferred from the
+  frames, which is the property that keeps it a declaration about what the host intended rather
+  than a blanket amnesty the recorder grants itself. A response that does arrive for a
+  withdrawn id closes the lifecycle as an ordinary settlement and needs no `late_responses`
+  entry; `late_responses` keeps its existing, narrower meaning, licensing one response after a
+  CLI cancel of a CLI-originated request. This supersedes nothing in §4.2: a cancel still does
+  not end a host-originated lifecycle, and `withdrawn_requests` is the narrow declared escape
+  that the strictness always implied.
+- 2026-09-04: The occasion for `withdrawn_requests`, and the reading of the binary behind it.
+  `control-shapes` fires `claude_oauth_wait_for_completion` and cancels after ten seconds when
+  nothing comes back; that request answers only when the flow promise settles, so it can stay
+  open past the cancel and on through `generate_session_title` and `end_session` — an
+  unanswered host request in the middle of a recording, which the tolerance for a single
+  unwritten frame at the tail deliberately does not cover. Without a declared withdrawal the
+  scenario cannot record at all. The reading, from `cli.pretty.js` in the 2.1.258 bundle and
+  therefore provisional: the CLI's own schema text for `control_cancel_request` says it tells
+  the other side that the sender no longer needs the answer to one of its own in-flight
+  `control_request`s, which is the same meaning in both directions and is never itself a reply;
+  the stdin handler maps the frame to an abort on the in-flight request, but the abort map is
+  populated by exactly three host subtypes, `mcp_call`, `side_question` and
+  `remote_tools_announce`, so for every other host subtype the cancel is a no-op and the
+  request runs on to whatever answer it would have produced; and even for those three the CLI
+  still emits an error `control_response` after the abort. A host-originated request therefore
+  always terminates in a response and a host cancel frame is never terminal, which is why
+  §4.2's asymmetry stands and why a withdrawal is a declaration about the host rather than a
+  claim about the wire. The `control-shapes` recording is the binding evidence; until it exists
+  these are readings of a binary, not protocol facts, and the finding they resolve into belongs
+  on the parent document as S8, written by whoever records it.
