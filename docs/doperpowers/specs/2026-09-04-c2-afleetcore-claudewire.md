@@ -885,8 +885,9 @@ Pending — written at finish.
   `files` of `{filename, file_id}` and `failed` of `{filename, error}`.
   `compact_boundary`'s `preserved_segment` and `preserved_messages` are objects. `request_id`
   is nullable on both `model_refusal_fallback` and `model_refusal_no_fallback`, which makes
-  five nullable-but-required fields in total across the modelled frames rather than the three
-  the plan named. `conversation_reset` was checked and the plan was right: the wire key is
+  four declared nullable-but-required fields across the modelled frames rather than the three
+  the plan named, with a fifth inside `tool_progress.subagent_retry` that needs no declaration
+  of its own because it sits within a `JSONValue`. `conversation_reset` was checked and the plan was right: the wire key is
   `new_conversation_id`, and the parity doc's `newConversationId` is a client-side internal.
   Wire evidence is taken from the engine's own schemas; a hand-written sample that agrees
   with a wrong model proves nothing, which is how two of these survived review of the tables.
