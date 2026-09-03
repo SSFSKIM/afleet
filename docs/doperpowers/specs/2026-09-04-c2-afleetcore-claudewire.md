@@ -891,3 +891,21 @@ Pending — written at finish.
   `new_conversation_id`, and the parity doc's `newConversationId` is a client-side internal.
   Wire evidence is taken from the engine's own schemas; a hand-written sample that agrees
   with a wrong model proves nothing, which is how two of these survived review of the tables.
+- 2026-09-04: `ShellEnvelope`'s neutraliser is syntactic, and the forged-prefix arm of it is
+  weaker than the rest — recorded as a known limit rather than left as a believed-solved
+  problem. The tag and turn-marker arms are substitutions the engine cannot re-read: a control
+  tag loses its `<` to an entity and a `Human:` turn marker loses its colon, so neither can be
+  parsed back into a control token by anything downstream. The forged-prefix arm instead
+  inserts a zero-width space before markers such as `[harness note]` and the subagent hand-back
+  line. That defeats the line-start regular expression the engine matches on, which is what the
+  test asserts, but it does not change what the text *looks like*: a model reading the
+  transcript still sees a line that reads as a harness note. The defence is therefore against
+  the parser, not against the reader, and it should not be described as preventing prompt
+  injection through shell output. Two smaller limits sit beside it: the entity escaping is
+  reversible, so a downstream consumer that HTML-decodes envelope text would reassemble the
+  original control tag (nothing in the current path decodes entities), and the envelope's own
+  `[afleet: N bytes of stdout omitted]` notice is not itself neutralised, so stream content can
+  forge the one trusted marker the envelope injects. All three are cheap to close if the threat
+  model ever demands it — a visible replacement rather than a zero-width one, a non-reversible
+  escape, and neutralising the notice form — and none is closed today. Found by review of the
+  C2 implementation; the parent's §6.6 wording should not claim more than this.
