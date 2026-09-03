@@ -661,3 +661,11 @@ Pending — written at finish.
   answers folded in: scratch config home by default, synthetic fixtures under the
   hypothesis rule, the `claude_authenticate` capture, Python standard library; the
   questions section is removed. Acceptance G1, G2 and G4 restated accordingly.
+- 2026-09-04: Planning corrections. (1) The CLI emits `transcript_mirror.entries` as parsed
+  records, not raw lines (bundle `chunk-sct99ax9.js`, `entries: R(de())`), so fake-claude
+  re-serialises them and the final-state check of §4.8 compares transcript files record
+  for record and artifacts byte for byte. (2) fake-claude scripts gain an additive step,
+  `{"patch": {matcher}, "remove": [keys]}`, which strips keys from matching replayed
+  frames, so G2's removed-required-key case is producible without a live binary. (3)
+  `keep_alive` frames are excluded from the census; they carry nothing and their timing
+  varies. Plan: `docs/doperpowers/plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md`.
