@@ -4,8 +4,7 @@ import WireFrames
 final class OutboundRequestTests: XCTestCase {
     private func request<R: ControlRequestSpec>(_ spec: R) throws -> JSONValue {
         let v = try JSONDecoder().decode(JSONValue.self, from: try OutboundEnvelope.encode(spec: spec, requestID: .init(rawValue: "r")))
-        guard let inner = v["request"] else { throw XCTSkip("no request object") }
-        return inner
+        return try XCTUnwrap(v["request"], "envelope carried no \"request\" object")
     }
     func testEnvelopeShape() throws {
         let data = try OutboundEnvelope.encode(spec: SetPermissionMode(mode: .plan), requestID: RequestID(rawValue: "abc"))
@@ -63,7 +62,7 @@ final class OutboundRequestTests: XCTestCase {
                        .object(["subtype": .string("side_question"), "question": .string("why?"),
                                 "history": .array([.object(["question": .string("a"), "response": .string("b")])])]))
         XCTAssertEqual(try request(MCPAuthenticate(serverName: "github")), .object(["subtype": .string("mcp_authenticate"), "serverName": .string("github")]))
-        XCTAssertEqual(try request(MCPAuthenticate(serverName: "github", redirectUri: "http://localhost:9/cb")),
+        XCTAssertEqual(try request(MCPAuthenticate(serverName: "github", redirectURI: "http://localhost:9/cb")),
                        .object(["subtype": .string("mcp_authenticate"), "serverName": .string("github"), "redirectUri": .string("http://localhost:9/cb")]))
         XCTAssertEqual(try request(MCPOAuthCallbackURL(serverName: "github", callbackURL: "http://localhost:9/cb?code=1")),
                        .object(["subtype": .string("mcp_oauth_callback_url"), "serverName": .string("github"), "callbackUrl": .string("http://localhost:9/cb?code=1")]))

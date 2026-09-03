@@ -75,11 +75,11 @@ public struct ClaudeOAuthCallback: ControlRequestSpec { public typealias Respons
     } }
 public struct ClaudeOAuthWaitForCompletion: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "claude_oauth_wait_for_completion"; public init() {}; public var payload: JSONValue { .object([:]) } }
 public struct MCPAuthenticate: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_authenticate"
-    public var serverName: String; public var redirectUri: String?
-    public init(serverName: String, redirectUri: String? = nil) { self.serverName = serverName; self.redirectUri = redirectUri }
+    public var serverName: String; public var redirectURI: String?
+    public init(serverName: String, redirectURI: String? = nil) { self.serverName = serverName; self.redirectURI = redirectURI }
     public var payload: JSONValue {
         var o: [String: JSONValue] = ["serverName": .string(serverName)]
-        if let redirectUri { o["redirectUri"] = .string(redirectUri) }
+        if let redirectURI { o["redirectUri"] = .string(redirectURI) }
         return .object(o)
     } }
 public struct MCPOAuthCallbackURL: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "mcp_oauth_callback_url"
@@ -90,8 +90,10 @@ public struct MCPClearAuth: ControlRequestSpec { public typealias Response = JSO
     public var serverName: String; public init(serverName: String) { self.serverName = serverName }
     public var payload: JSONValue { .object(["serverName": .string(serverName)]) } }
 
-/// `last_seen_user_message_uuid` is what makes a rewind succeed: with it absent the engine's staleness check refuses
-/// any target that has later turns after it, which is every real rewind.
+/// `last_seen_user_message_uuid` is what lets a rewind past the newest turn succeed: with it absent the engine's
+/// staleness check refuses any target followed by a later *human* user turn (its `O3` predicate wants a user message
+/// that is not a tool result, has `origin.kind == "human"` and is not a stacked expansion). A rewind to the most
+/// recent user turn has no such successor and works without the field.
 public struct RewindConversation: ControlRequestSpec { public typealias Response = JSONValue; public static let subtype = "rewind_conversation"
     public var targetMessageUUID: String; public var lastSeenUserMessageUUID: String?; public var interruptIfRunning: Bool?
     public init(targetMessageUUID: String, lastSeenUserMessageUUID: String? = nil, interruptIfRunning: Bool? = nil) {
