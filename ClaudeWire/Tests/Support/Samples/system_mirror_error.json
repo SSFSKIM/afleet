@@ -1,0 +1,1 @@
+{"type":"system","subtype":"mirror_error","error":"SessionStore.append timed out after 3 attempts","key":{"projectKey":"-tmp-scratch","sessionId":"1b2c3d4e-0000-4000-8000-00000000abcd","subpath":"subagents/agent_01.jsonl"},"uuid":"6d1d4b1e-0000-4000-8000-00000000004a","session_id":"1b2c3d4e-0000-4000-8000-00000000abcd"}

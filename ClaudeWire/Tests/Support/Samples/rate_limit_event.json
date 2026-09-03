@@ -1,0 +1,1 @@
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1757116800,"rateLimitType":"five_hour","utilization":0.82,"unifiedWindows":{"five_hour":{"utilization":0.82,"resetsAt":1757116800},"seven_day":{"utilization":0.31,"resetsAt":1757548800}}},"uuid":"6d1d4b1e-0000-4000-8000-00000000004d","session_id":"1b2c3d4e-0000-4000-8000-00000000abcd"}
