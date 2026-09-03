@@ -463,9 +463,46 @@ class Session:
             self.answer(rid, error="subtype %s not supported by afleet %s" % (sub, VERSION))
         except Exception as e:  # never leave a request unanswered because the policy crashed
             try:
-                self.answer(rid, error="probe policy failed: %s" % e)
+                self._settle_after_failure(rid, sub, req, e)
             except (ValueError, OSError):
                 pass                                  # stdin is gone; the exit cancels it (parent §6.3)
+
+    def _settle_after_failure(self, rid, sub, req, error):
+        """Settle a request whose policy raised, in the vocabulary that subtype accepts.
+
+        An error envelope settles most requests, but not a `request_user_dialog`: the CLI
+        swallows an error-shaped answer to a parked dialog outright -- `cli.pretty.js`'s
+        `ignoresErrorShapedDialogResponse` returns early unless the response subtype is
+        `error` and the pending request is a non-forwarded `request_user_dialog`, and then
+        logs "not a human choice; dialog stays parked" and drops it. The request stays
+        outstanding and only the dialog park deadline recovers it, so a live recording would
+        hang after it had already spent its tokens. `elicitation` gets its own settlement for
+        the same reason: an error is not one of the three actions it accepts.
+
+        This only matters because afleet declares dialog kinds in the §6.2 handshake, which
+        is what makes the CLI willing to send dialog requests at all.
+        """
+        if sub == "request_user_dialog":
+            if req.get("dialog_kind") not in self.declared:
+                # An undeclared kind must not be answered even to settle it: §6.3 forbids it,
+                # the response would be discarded, and the binary cancels it at its deadline.
+                self._warn_policy_failed(sub, error, "left for the binary's dialog deadline")
+                return
+            self._warn_policy_failed(sub, error, "settled as cancelled")
+            self.answer(rid, {"behavior": "cancelled"})
+        elif sub == "elicitation":
+            self._warn_policy_failed(sub, error, "settled as cancelled")
+            self.answer(rid, {"action": "cancel"})
+        else:
+            # The error envelope both settles the request and carries the reason into the
+            # capture, so these need no warning to stay visible.
+            self.answer(rid, error="probe policy failed: %s" % error)
+
+    @staticmethod
+    def _warn_policy_failed(sub, error, outcome):
+        """The two settlements above cannot carry the reason on the wire, so it would vanish
+        and the fixture would show a clean settlement where a scenario bug happened."""
+        warnings.warn("the %s policy raised %r; %s" % (sub, error, outcome))
 
     def answer(self, request_id, response=None, error=None):
         body = {"subtype": "error", "request_id": request_id, "error": error} if error is not None else \

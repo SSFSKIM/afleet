@@ -170,6 +170,46 @@ class SessionTests(unittest.TestCase):
         # elicitation" row, 31 §15.2).
         self.assertEqual(saw["elicitation"]["response"], {"action": "cancel"})
 
+    def test_a_crashed_policy_settles_in_the_vocabulary_each_subtype_accepts(self):
+        """An error envelope settles most requests, but the CLI swallows an error-shaped
+        answer to a parked dialog and leaves it outstanding, so a crashed policy there would
+        hang a live recording."""
+        def boom(frame):
+            raise RuntimeError("scenario bug")
+
+        s = self.run_session(["dialog_declared", "elicitation", "permission"])
+        for subtype in ("request_user_dialog", "elicitation", "can_use_tool"):
+            s.on(subtype, boom)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            s.send_user("go"); s.wait_result(10)
+        s.close()
+        saw = {c["frame"]["what"]: c["frame"] for c in s.frames() if c.get("frame", {}).get("subtype") == "stand_in_saw"}
+        self.assertEqual(saw["dialog_declared"]["response"], {"behavior": "cancelled"})
+        self.assertEqual(saw["elicitation"]["response"], {"action": "cancel"})
+        # Every other subtype keeps the error envelope, which does settle the request and
+        # carries the reason into the capture.
+        errors = [c["frame"]["response"] for c in s.frames()
+                  if c["dir"] == "in" and c.get("frame", {}).get("response", {}).get("subtype") == "error"]
+        self.assertTrue(any(e["error"].startswith("probe policy failed:") for e in errors))
+        # The two silent settlements say so, or a scenario bug would read as a clean answer.
+        raised = [str(w.message) for w in caught if "policy raised" in str(w.message)]
+        self.assertTrue(any("request_user_dialog" in m for m in raised), raised)
+        self.assertTrue(any(m.startswith("the elicitation") for m in raised), raised)
+
+    def test_a_crashed_policy_on_an_undeclared_dialog_kind_still_answers_nothing(self):
+        def boom(frame):
+            raise RuntimeError("scenario bug")
+
+        s = self.run_session(["dialog"])          # the stand-in asks with an undeclared kind
+        s.on("request_user_dialog", boom)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            s.send_user("go"); s.wait_result(10)
+        s.close()
+        saw = [c["frame"] for c in s.frames() if c.get("frame", {}).get("what") == "dialog"][0]
+        self.assertFalse(saw["answered"])          # §6.3 forbids answering a kind we did not declare
+
     def test_a_scenario_policy_overrides_the_neutral_defaults(self):
         s = self.run_session(["elicitation"])
         s.on("elicitation", lambda f: {"action": "accept", "content": {"choice": "second"}})

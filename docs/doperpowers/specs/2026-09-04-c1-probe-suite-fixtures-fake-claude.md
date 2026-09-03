@@ -789,3 +789,27 @@ Pending — written at finish.
   claim about the wire. The `control-shapes` recording is the binding evidence; until it exists
   these are readings of a binary, not protocol facts, and the finding they resolve into belongs
   on the parent document as S8, written by whoever records it.
+- 2026-09-04: Control-response envelope facts, bundle-derived, and the one shape a host must
+  never send. A host error response carries `subtype` exactly `"error"` and `error` as a bare
+  string; the stdio transport rejects with `Error(e.response.error)` without a type check, and
+  the subtype test is a strict equality against that literal, so anything whose subtype is not
+  exactly `"error"` is treated as success and fed to the pending request's schema. A response
+  whose payload will not parse is dropped with a log and leaves the request pending
+  (`dropped control_response with malformed response payload`). **An error-shaped response to a
+  pending `request_user_dialog` is swallowed**: `ignoresErrorShapedDialogResponse` returns early
+  unless the response subtype is `error` and the pending request is a non-forwarded
+  `request_user_dialog`, and otherwise logs `Ignoring error-shaped control_response for parked
+  request_user_dialog` with "not a human choice; dialog stays parked", fires
+  `tengu_request_user_dialog_response_ignored`, and drops the answer. The request stays
+  outstanding and only the dialog park deadline recovers it, which the parent's investigation
+  records as five minutes by default and configurable to never. A host that declares dialog
+  kinds in its §6.2 handshake -- which afleet and therefore `harness.py` does, unlike this
+  repository's earlier probes, which declared none and so never received a dialog request at
+  all -- must never answer one with an error. `harness.py` settles a crashed
+  `request_user_dialog` policy with `{behavior: "cancelled"}` for a declared kind, leaves an
+  undeclared kind for the binary's deadline, and settles a crashed `elicitation` policy with
+  `{action: "cancel"}`; every other subtype keeps the error envelope, which does settle.
+  Anchored on the strings above rather than line numbers; the two strings and the method name
+  are present in every extracted bundle from 2.1.220 through 2.1.258, and the parent confirms
+  them in the installed 2.1.259. Carried to the parent's S8 finding when `control-shapes`
+  records.
