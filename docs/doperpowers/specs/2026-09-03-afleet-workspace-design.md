@@ -1,8 +1,9 @@
 # afleet — a native macOS Slack-style workspace that hosts the Claude Code engine
 
 Status: design approved 2026-09-03, revised the same day with the author's thirteen
-additions, the Codex adversarial review, the parity inventory (`docs/tui-parity/`) and the
-Agents panel. Living spec; see the tail sections.
+additions, four Codex review waves, the parity inventory (`docs/tui-parity/`) and the
+Agents panel; decomposed into seven children on 2026-09-04 (§17). Composite living spec;
+see the tail sections.
 
 ## 1. Purpose
 
@@ -1633,8 +1634,485 @@ doperpowers:writing-plans turns them into tasks.
 7. v1.1: host-side editor context, job dispatch, open-in-panel MCP tool, usage-limit
    auto-continue.
 
-Seams 1 and 2 have no UI and unblock everything; 3 depends on both; 4, 5 and 6 depend on 3 only through the panel tab host, on FleetKit
-through its lifecycle and store APIs, and on AfleetCore for links and the environment.
+Seams 1 and 2 have no UI and unblock everything; 3 depends on both; 4, 5 and 6 depend on
+3 only through the panel tab host, on FleetKit through its lifecycle and store APIs, and
+on AfleetCore for links and the environment. The cut derived from these seams, with the
+gate and the frontier applied, is §17.
+
+## 17. Roadmap: the decomposition of v1
+
+> **Parent:** root — the project's standing purpose, stated in `CLAUDE.md` and in §1 of
+> this document. **Unit:** afleet v1 as scoped in §3. **Consumes:** the extracted 2.1.257
+> bundle spec, the installed 2.1.259 binary, the parity inventory (`docs/tui-parity/`)
+> and the fourteen scripts in `probes/`. This section extends the approved design above
+> in place, per doperpowers:decomposing: design up top, roadmap here, one document. Each
+> child spec opens by citing this document as
+> `2026-09-03-afleet-workspace-design.md §17 C<n>` and records a **parent-pin**: this
+> document's path plus the commit hash of the revision the child read at dispatch, so
+> "which contract did this child execute" is always answerable.
+
+### 17.1 Parent-level acceptance
+
+v1 is closed by a recomposition check on this machine, not by the sum of child gates:
+
+1. The walkthrough in §1 runs end to end in the built app against the installed CLI:
+   launch, open a project, open a past session and read its history without a spawn,
+   send a message and approve a permission card, open the Terminal tab in the project
+   directory, click a path in a Read row and land on that line in Files, and see a
+   session started in Terminal.app appear read-only with live status.
+2. Every item in §14, 1 through 64, passes as written, the fixture-driven ones against
+   `fake-claude` and the rest against the installed CLI, with any item still marked
+   provisional by an open spike either passed or its spike's finding recorded.
+3. `xcodebuild test -scheme afleet` passes (item 36), `make probe` prints a census diff
+   of zero against `Fixtures/` (item 32), and item 35's `fswatch` run shows no write
+   under `<configHome>` by afleet.
+4. The drift log after the walkthrough contains no intercepted slash-command refusal for
+   a command listed as local in §7.7.
+5. Because the parent is code-bearing, recomposition ends with an independent review of
+   the merged tree against §14 before the retrospective is written; the project runs no
+   issue board, so this review stands in for the scale review of the board pipeline.
+
+### 17.2 Grounding baseline
+
+Measured 2026-09-04 at the cut. No Swift code exists; the repository holds this spec, the
+parity inventory and `probes/01` through `12b`, fourteen Python scripts run ad hoc and not
+yet a suite. The machine runs macOS 26.5.2 with Xcode 26.6 (17F113) and Swift 6.3.3;
+XcodeGen is absent, `bun` 1.3.14 and `node` 24.18.0 are present. The installed CLI is
+2.1.259 and the extracted bundle is 2.1.257. The local config home holds 543 project
+directories and 2,989 top-level session transcripts, counted as `*.jsonl` directly under
+`projects/<slug>/`, 25 registry records (17 interactive, 8 background) and 8 roster
+workers. This is the data set the transcript index and fleet tracking are measured
+against; the earlier Surprises figure of 96 projects and 695 transcripts came from a
+narrower count, and S4's target applies to the full set.
+
+### 17.3 Design authority
+
+The design sections above are inheritance for every child. Authority is graded once here
+rather than line by line.
+
+**Binding** (settled only with the whole picture in view; a child that finds them wrong
+files a `[parent-impact]` note, never a local override): §5 in full, the five packages
+and their dependency edges; §6.1 through §6.4, the launch line, child environment,
+handshake payload, opacity and request-answering rules and the request table; §6.6, the
+user frame shape and the `!` envelope; §6.7's process epochs and `terminate()` sequence;
+§6.9's one ConfigHome per launch; §6.11 and §6.12, the spawn preconditions; §7.1 through
+§7.4, origins, the ownership protocol, the timeline model with its durable projection,
+overlay, source arbitration and invariant, and the lifecycle table with dormant
+eligibility and the quiescent restart; §7.7's three command classes and the flag matrix;
+§7.8's store API and never-write rule with its one exception; §8.4's answer mapping for
+every card kind; §9.6's `WorkspaceLink`; §11's owned-files table; §12 in full; and every
+Decision Log entry dated 2026-09-03.
+
+**Advisory** (the parent's best thinking on child-local means; a child may overturn it
+with evidence and a dated Revision Note on this document): §8's rendering specifics,
+including the thirty-updates-per-second cap, stable-prefix markdown parsing, the exact
+shortcut table, sidebar grouping thresholds and card layouts; §8.8's tree rendering
+choices short of the data model; §9.1 through §9.5's panel internals, including how
+Monaco is bundled and bridged, the lane-assignment approach, the GhosttyKit adapter shape
+and the browser's quick-open heuristic; every spike's fallback choice; the store's file
+format and the diagnostics log budgets; and the sub-cut sketches inside C6 and C7.
+
+**Delegated unknowns**, each assigned below: S2 is resolved (§15). The protocol facts of
+S5, S6, S8 and S10 through S18 go to C1; S4 and S9 to C3; S7 to C6; S1 and S3 to C7.
+
+### 17.4 Children
+
+The cut follows §16's seams, then applies the gate inside each and the frontier across
+them. Seams 1 and 2 divide where verification strategy changes (tooling against the real
+CLI versus Swift units against fixtures; pure data reduction versus process
+orchestration) and are cut to leaves now because they are the frontier. Seam 3 divides
+where an intermediate state is still meaningful, a fleet browser before a conversation
+surface, so the shell is a leaf now and the conversation surface with the Agents panel is
+one composite child cut at dispatch. Seams 4 through 6 are one composite Workbench child
+whose panels divide by state owner when its own decomposing run happens. Every leaf is a
+SwiftPM package or target that builds and tests without the children above it, per §5.
+
+#### C1: Probe suite, golden fixtures and `fake-claude` — controlled
+
+- **Purpose:** Turn the ad hoc `probes/` into the drift ritual of §6.10 and produce the
+  evidence every other child tests against: `Tools/probe/` with the frame census and
+  `make probe`; `Fixtures/` holding redacted golden NDJSON captures, each paired with its
+  transcript snapshot and, where agents ran, their sidecar files; `Tools/fake-claude/`
+  replaying any fixture with timing and injecting arbitrary frames; and the recorded
+  findings of the protocol spikes. This child is where the CLI is asked questions; no
+  other child spends tokens to learn protocol facts.
+- **Acceptance:** G1 (required): `Fixtures/` contains, redacted and reviewed, at least
+  these recordings from 2.1.259: a plain two-turn session; a permission ask answered
+  allow and one answered deny under isolated settings; an `AskUserQuestion` and an
+  `ExitPlanMode`; a depth-1 Explore run and a depth-2 nested run (S16); a background
+  shell with `task_notification` and the auto-turn; a `--session-mirror` session with a
+  `set_cwd` relocation (S14); an in-process MCP `send_user_file` round trip (S5); the
+  `claude_authenticate` shapes and `apply_flag_settings` readbacks (S8); an
+  `initialize` under `--resume` with no replay; and each recording's census. G2
+  (required): `make probe` against the installed CLI prints a zero census diff against
+  `Fixtures/`, and against `fake-claude` emitting an invented frame type prints one added
+  type (item 32). G3 (required): findings for S5, S6, S8, S10, S11, S12, S13, S14, S15,
+  S16, S17 and S18 are recorded as dated Revision Notes on this document, each naming
+  the design clause it settles (S14's build-flag promotion, S17's restart rule, S15's
+  environment value, S13's `/cd` trust dialog, S12's Contended wording, S10's *New
+  isolated session*, S11's *Fork from here*, S18's hook input shape). G4 (required): the
+  redaction pass of §11 is a script in `Tools/`, and a second-review checklist is
+  committed beside the fixtures.
+- **Edges:** blocked-by: —; blocks: C2.G2, C3.G1, the fixture-driven gates of C6, and
+  every child whose spike it answers.
+- **Contracts:** X8 (owner), X9.
+- **Design inheritance:** §6.10 (binding for the census shape and fixture pairing),
+  §6.3 diagnostics and §11 redaction rules (binding), §15's spike list (advisory in
+  method, binding in what each must settle).
+- **Required:** required for parent acceptance.
+- **Status:** not-dispatched, dispatchable now.
+
+#### C2: `AfleetCore` and `ClaudeWire` — controlled
+
+- **Purpose:** The two bottom packages of §5: the shared value types, the `Codable`
+  frame models generated from the fetched typings plus the hand-modelled unpublished
+  subtypes, the `ClaudeProcess` actor with epochs and the request-answering policy, the
+  in-process MCP server with `send_user_file`, metadata diagnostics and opt-in capture,
+  the version gate, and login-shell environment and ConfigHome resolution.
+- **Acceptance:** G1 (required): `swift test --package-path ClaudeWire` passes with the
+  launch line of §6.1 and the environment table asserted byte for byte, the
+  `initialize` payload of §6.2, the answer policy of §6.3 (unknown subtype answered
+  within one second with the stated error, undeclared dialog kinds left unanswered),
+  epoch tagging of frames and exits, and `terminate()`'s `end_session`, stdin close,
+  5 s wait, SIGTERM order. G2 (required, blocked-by C1.G1): every frame in every fixture
+  decodes and re-encodes without loss of known fields, unknown frames become opaque
+  values (item 36's ClaudeWire part). G3 (required): against the installed CLI, a
+  handshake completes, `mcp__afleet__send_user_file` appears in `system/init.tools` and
+  a round trip returns the file (S5's mechanism, item 29's wire half); `claude
+  --version` older than the baseline is refused (item 33's logic); the environment
+  resolver yields the login shell's PATH and a `CLAUDE_CONFIG_DIR` set in `~/.zshrc` is
+  honoured (items 34 and 48's wire half). G4 (required): `Tools/fetch-typings.sh`
+  fetches the pinned typings into an ignored directory and nothing under
+  `node_modules` or the typings is committed.
+- **Edges:** blocked-by: — (G2 gate-level on C1.G1); blocks: C3, C4, C7's cut.
+- **Contracts:** X1, X2 (owner), X3 (owner), X8, X9, X11 (owner).
+- **Design inheritance:** §5, §6.1 through §6.9 (binding); §6.10's fake-claude interface
+  as consumer.
+- **Required:** required.
+- **Status:** not-dispatched, dispatchable now.
+
+#### C3: `FleetKit` timeline: reducers, transcript index, agent tree, registry mirror — controlled
+
+- **Purpose:** The pure data half of FleetKit: the `TimelineItem` model, the
+  transcript-record reducer with source arbitration and logical stream identity, the
+  wire reducer for preview and overlay, the transcript index with the head-and-tail
+  read, the agent-run tree with the two-step join and sidecar enrichment, the
+  background-task registry mirror and task output tailing, and the differential
+  invariant as a test that runs on every fixture. No processes are spawned here; input
+  is files and frame streams.
+- **Acceptance:** G1 (required, blocked-by C1.G1): item 31 as written, both checks of
+  the invariant with the explicit exclusion lists, on every fixture in `Fixtures/`. G2
+  (required): the cold index of the local config home's full transcript set (2,989
+  files at the cut, §17.2) completes under 500 ms and an incremental update under 50 ms
+  (S4); a channel's history is produced from disk in under one second (item 1's data
+  half). G3 (required): the relocation fixture replays with no duplicate or missing
+  record and a rebound stream path (item 64's reducer half); the nested-agent fixture
+  yields a two-level tree with the child's parent id from its `.meta.json` (item 49's
+  data half); the background-shell fixture yields a synthesised completion item and a
+  tailed output file (item 61's data half). G4 (required): with the file watcher
+  disabled, mirror frames alone drive the reducer (item 56's data half), and
+  `mirror_error` switches the process to file-only.
+- **Edges:** blocked-by: C2; blocks: C4.G2, C6.
+- **Contracts:** X4 (owner), X8, X9.
+- **Design inheritance:** §7.3 in full (binding), §8.8's tree data model (binding), the
+  rendering choices of §8.3 (not inherited; they belong to C6).
+- **Required:** required.
+- **Status:** not-dispatched, blocked-by C2.
+
+#### C4: `FleetKit` sessions and fleet: origins, ownership, lifecycle, router, store — controlled
+
+- **Purpose:** The orchestration half of FleetKit: the four origins and their detection
+  from registry, roster and `claude agents --json`; the ownership protocol; the
+  lifecycle table with dormant eligibility, reap, respawn, adopt, send-to-background,
+  open-in-terminal and the quiescent restart with snapshot and readback; the spawn
+  preconditions (trust, project MCP consent with the decline write, managed settings,
+  the `--strict-mcp-config` rule); the Activity query; the command router with the flag
+  matrix, refusal interception and `/logout`; and the namespaced store.
+- **Acceptance:** G1 (required): with `fake-claude` and scripted registry and roster
+  files under a scratch ConfigHome, the lifecycle table of §7.4 is exercised row by row:
+  eager spawn, 30-minute reap only when dormant-eligible, respawn with backoff, the cap
+  of 6 with no eviction, yield after handshake when a holder appears, Contended after a
+  10 s handoff, and the restart snapshot with readback (items 18, 19, 20, 46, 58 and 63
+  at the API level). G2 (required, blocked-by C3.G3): dormant eligibility reads the
+  registry mirror, so a channel with a running background shell is never reaped. G3
+  (required): the preconditions: an untrusted root yields history-only (item 47's
+  logic); a pending `.mcp.json` server yields a consent request, a decline writes the
+  local store through the resolver and write policy of §6.12 with the marker-file
+  sentinel and the symlink refusal (item 54's logic), isolated sources add
+  `--strict-mcp-config`, a pending managed-settings payload refuses to spawn (item 55).
+  G4 (required): the router maps every row of §7.7 to its mechanism, hides
+  `terminal_slash_commands`, intercepts the bare refusal text, and `/logout` runs the
+  census and barrier of §7.7 (items 11 and 59 at the API level). G5 (required): against
+  the installed CLI, a foreign session started in Terminal.app is detected within five
+  seconds with its status, and a `claude --bg` job is listed, adopted and sent back
+  (items 14, 15, 16 at the API level).
+- **Edges:** blocked-by: C2; blocks: C5, C6, C7's lifecycle and store leaves.
+- **Contracts:** X1, X5 (owner), X6 (owner), X9, X10 (owner).
+- **Design inheritance:** §6.11, §6.12, §7.1, §7.2, §7.4, §7.6's query definition,
+  §7.7, §7.8 (binding).
+- **Required:** required.
+- **Status:** not-dispatched, blocked-by C2.
+
+#### C5: App shell, fleet browser, panel host and packaging — controlled
+
+- **Purpose:** The `Afleet` app target as a runnable fleet browser before the
+  conversation surface exists: the XcodeGen project and macOS 26 build, the three-region
+  window, the sidebar with projects, worktree grouping, channels, origin glyphs, badges,
+  Background and Archived sections, the Activity view, Cmd+K, the onboarding and
+  upgrade screens, Settings with the environment, ConfigHome, baseline and census
+  readouts and the Developer toggles, native notifications including the `Notification`
+  hook route, and the panel tab host that C6 and C7 plug into. Its timeline view is a
+  plain placeholder listing item kinds, replaced by C6.
+- **Acceptance:** G1 (required): `xcodebuild -scheme afleet -configuration Debug build`
+  succeeds from a clean checkout after `xcodegen generate`; the app launches, lists the
+  local fleet with correct origins within five seconds, and a session started in
+  Terminal.app appears with a terminal glyph and status (item 14's UI half). G2
+  (required): Activity shows rows for pending decisions, rate-limit events and auth
+  state from `fake-claude` fixtures and a row answers its decision (item 21); badges and
+  a native notification appear for a channel not in view (item 22); a native
+  notification arrives through the hook callback (item 53). G3 (required): the upgrade
+  screen names both versions and opens no channel (item 33); Settings shows the resolved
+  ConfigHome (item 48). G4 (required): the panel host exposes the tab protocol of X7 and
+  a placeholder tab pops out into its own window keeping channel context.
+- **Edges:** blocked-by: C4; blocks: C6, C7's UI leaves.
+- **Contracts:** X1, X7 (owner), X9, X11.
+- **Design inheritance:** §8.1, §8.2, §8.7, §11, §6.5's screens (binding where §17.3
+  says so, otherwise advisory).
+- **Required:** required.
+- **Status:** not-dispatched, blocked-by C4.
+
+#### C6: Conversation surface and Agents panel — decomposing run at dispatch
+
+- **Purpose:** The channel column and the Agents tab. The channel column is the native,
+  virtualized timeline with streaming markdown, clusters, thinking, agent chips,
+  members, turn summaries and hidden meta; every decision card of §8.4 including the two
+  dialog cards, with reply-to-card semantics; the Thread tab's thread kinds; the composer
+  with the router, `@` mentions, host-side `!` with the hardened envelope, image paste,
+  queueing, edit via rewind, prompt-suggestion ghost text and the mode, model and effort
+  pickers; the bypass gate; the consent sheets; the trust banner with its terminal
+  action; and the sent-file item. The Agents tab is §8.8: the nested run tree over C3's
+  agent-run model, the per-run transcript reusing the timeline view with agent-type
+  authorship, the per-node actions (Stop, Move to background, Send message with its
+  delivery state, Open transcript file, Copy agent id), Stop everything and Background
+  all, subagent permission cards mirrored on nodes, and the agent chips' navigation from
+  the timeline. It replaces C5's placeholder timeline. This branch is three waves from
+  the frontier and larger than one context should own, so its own decomposing run at
+  dispatch cuts it; the sketch below is advisory input to that run.
+- **Sub-cut sketch (advisory):** three likely leaves: timeline rendering with the
+  markdown engine and the composer; decision cards with threads, consent sheets, the
+  bypass gate and the sent-file item; and the Agents panel. `TimelineItem` (X4) and the
+  agent-run tree node are the contracts between them; the Agents leaf follows the other
+  two because it reuses the timeline view.
+- **Acceptance (coarse; the dispatch cut refines these into gates):** items 2 through
+  10, 12, 13, 29, 30, 37, 38, 40 through 45, 47, 49 through 52, 57, 60, 61 and 62, each
+  against the installed CLI or `fake-claude` fixtures as the item states; item 24's link
+  emission, a path in a Read row emitting a `WorkspaceLink.file` with its line; S7
+  passes on the ten-message corpus at thirty updates per second under 16 ms per frame,
+  or the WKWebView fallback is adopted with a Revision Note; and with S16's fixture the
+  depth-2 tree renders from the two-step join before the `.meta.json` is written and is
+  corrected by it afterwards.
+- **Edges:** blocked-by: C3, C4, C5; the `/login` and overage routes into the Browser tab
+  and item 47's *Review trust in terminal* action are blocked-by the matching C7 leaves;
+  blocks: recomposition.
+- **Contracts:** X4, X5, X7, X9, X10.
+- **Design inheritance:** §6.6 (binding); §7.5; §7.6's banners and agent rows; §7.7 as
+  consumer; §8.3 through §8.6 (binding for answer mappings and frame shapes; advisory for
+  layout and rendering tactics); §8.8 (data model binding; rendering advisory).
+- **Required:** required.
+- **Status:** not-dispatched, composite, blocked-by C3, C4, C5.
+
+#### C7: Workbench panels — decomposing run at dispatch; the cut is dispatchable when C2 lands
+
+- **Purpose:** The `Workbench` package and its four panel tabs. Terminal and jobs:
+  `TerminalSurface` over GhosttyKit from libghostty-spm with our PTY layer, panes per
+  channel in the channel's cwd with the resolved environment, Cmd+Shift+T, job attach
+  through `claude attach <id>`, the raw-TUI hatch through `claude --resume <id>` with
+  re-adoption on exit via C4's lifecycle API, and the Background section's *Attach*,
+  *Stop*, *Logs* and *Respawn* through CLI verbs. Files: the tree with gitignore toggle
+  and filter, Monaco in a `WKWebView` bundled at build time with bun and bridged for
+  open, save, goto-line, theme and diff, native viewers for markdown, images, PDF, audio
+  and video, the file watcher with dirty-buffer conflict banner, and `LinkRouter`, which
+  opens every `WorkspaceLink` case in the right tab or popped-out window. Browser: shared
+  `WKWebView` tabs across the window with URL bar, navigation, reload and inspector,
+  quick-open from dev-server URLs seen in the channel's tool output, Cmd-click to the
+  system browser, tabs persisted under Workbench's store namespace, and the target for
+  `/login`'s automatic URL, the overage card's billing page and GitHub's PR view. Source
+  Control and GitHub: the git graph on a SwiftUI `Canvas` from `git log --topo-order
+  --all` with lane assignment, branch and tag labels and the working tree as the top
+  row; commit detail with changed files and Monaco diffs; working-tree diffs against
+  HEAD; the GitHub tab with pull requests, checks and issues from `gh --json`, a PR
+  opening in the Browser tab; the `git` and `gh` binaries from the resolved environment;
+  no staging, committing or branch operations. Package-level work (the PTY layer, the
+  Monaco bundle and bridge, lane assignment, `LinkRouter`) needs only C2's types, so
+  this branch's decomposing run happens when C2 lands; its UI leaves wait for the panel
+  host.
+- **Sub-cut sketch (advisory):** four likely leaves, one per panel and state owner.
+  Terminal and jobs: items 15, 17 and 23; S1. Files with `LinkRouter`: items 24 and 25;
+  S3; `LinkRouter` unit tests routing every `WorkspaceLink` case. Browser: items 26 and
+  39; the `/login` and overage routes. Source Control and GitHub: items 27 and 28;
+  lane-assignment tests for a merge, an octopus merge and a detached tag; the
+  working-tree row updating within one second of an edit. Likely internal edges: Browser
+  after Files for routing; Source Control after Files (Monaco diffs) and Browser (PR
+  opening).
+- **Acceptance (coarse; the dispatch cut refines these into gates):** items 15, 17, 23
+  through 28 and 39 in the built app; `/login` opens its URL in the Browser tab and
+  completes (item 59's `/login` step) and the overage card's *Set up usage credits…*
+  opens there (item 62's false branch); S1 passes, a login shell and `claude attach`
+  rendering with live resize and IME and the detach key returning cleanly, or SwiftTerm
+  is adopted behind `TerminalSurface` with a Revision Note; S3 passes, cold load under
+  one second, a 5 MB file warm without jank and a 2,000-line diff, or its fallback is
+  adopted with a Revision Note; `swift test --package-path Workbench` covers the PTY
+  layer's spawn, resize and exit and `LinkRouter` without the app.
+- **Edges:** blocked-by: C2 (the cut and the package-level leaves), C4 (lifecycle and
+  store APIs), C5.G4 (every UI gate); blocks: the `/login` and overage paths in C6, item
+  47's *Review trust in terminal* action in C6, recomposition.
+- **Contracts:** X2, X5, X6, X7, X11.
+- **Design inheritance:** §9 in full: §9.3 and §9.5 advisory in adapter shape, binding
+  that attach and the hatch are CLI verbs in a PTY and that the hatch takes exclusive
+  ownership; §9.1's bundling and bridge advisory; §9.4 advisory except that tabs are
+  shared window-wide, binding by decision; §9.2's scope binding by decision and its
+  algorithm advisory; §9.6's `WorkspaceLink` binding.
+- **Required:** required.
+- **Status:** not-dispatched, composite; the cut is dispatchable when C2 lands; UI
+  blocked-by C5.G4.
+
+### 17.5 Cross-child contracts
+
+- **X1 Package edges.** The five packages and the only allowed dependency edges are
+  §5's table; each package builds and tests without the ones above it. Owner: C2 for
+  the two bottom packages, C4 for FleetKit's manifest, C5 for the app target, C7 for
+  Workbench's manifest. Binds every child; a CI check in C5 rejects a violating import.
+- **X2 Core value types.** `WorkspaceLink` exactly as §9.6; `ResolvedEnvironment`
+  (variables, PATH, shell, capture time); `ConfigHome` (root URL, source: env or
+  default); `SessionID` (UUID); `ChannelOrigin` (owned with its sub-state, foreignLive,
+  backgroundJob, archived). Owner: C2. Binds C3 through C7; additions need a Revision
+  Note, changes a `[parent-impact]`.
+- **X3 Wire API.** `ClaudeProcess` exposes spawn with the §6.1 flag builder and
+  environment table, `send(frame)`, `request(subtype, payload) async -> response`, an
+  inbound stream of epoch-tagged frames and requests, `terminate()`, and the answer
+  policy of §6.3 as the default handler for unknown inbound requests. The
+  `initialize` payload is §6.2's. Owner: C2. Binds C3, C4 and the fixtures of C1.
+- **X4 Timeline model.** `TimelineItem` as §7.3; record identity is logical stream plus
+  uuid or hash; the durable projection and overlay category lists and the wire exclusion
+  list are named constants the differential test and the renderer both read; the
+  agent-run tree node (task id, type, model, status, depth, parent, activity line,
+  elapsed origin) and the registry mirror entry (task id, kind, foreground or background,
+  output file, last frame time) are FleetKit types. Owner: C3. Binds C4, C6, and every
+  leaf C6's cut produces.
+- **X5 Lifecycle API.** Channel origin and sub-state as observable state; the actions
+  open, send, reap, adopt, sendToBackground, openInTerminal, fork, quiescentRestart,
+  stopEverything, backgroundAll, logout; the preconditions as a typed result (ready,
+  untrusted, consentNeeded with the server list, managedSettingsPending, contended with
+  holders); dormant eligibility as a query. The Terminal panel's attach and hatch and
+  the composer's send go through it and nothing else spawns. Owner: C4. Binds C5, C6,
+  C7.
+- **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
+  version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
+  types; FleetKit never models upper-layer state. Owner: C4. Binds C5, C7.
+- **X7 Panel tab host.** A tab registers with an id, title, icon, a view builder that
+  receives the current channel context (session id, cwd, environment, store handle)
+  and a `LinkRouter` target capability; the host owns tab order (Thread, Agents, Files,
+  Source Control, Terminal, Browser, GitHub, Cmd+1 through 7), pop-out and per-channel
+  panel state. Owner: C5. Binds C6, C7. Named now so that the two late cuts inherit a
+  fixed host rather than negotiating one.
+- **X8 Fixture and fake-claude format.** NDJSON frames with relative timestamps, paired
+  with a transcript snapshot directory and a census JSON; a redaction manifest naming
+  the fields removed; `fake-claude` accepts a fixture path, a speed factor, an
+  injection list and a scripted answer to `initialize`. Owner: C1. Binds C2, C3, C6.
+- **X9 Never-write and security rules.** §7.8's rule with its one exception written
+  per §6.12, §11's owned-files table, and §12 in full: no impersonation, no committed
+  typings, redacted fixtures only, no casual `submit_feedback`, trust read-only. Owner:
+  this document; C4 carries the decline-write tests and C1 the redaction script. Binds
+  every child; item 35 is the recomposition check.
+- **X10 Command router table.** §7.7's local, terminal-only and pass-through classes
+  and the flag matrix are data owned by C4; the composer renders them and never
+  re-implements a mapping. Owner: C4. Binds C6.
+- **X11 Environment injection.** `ResolvedEnvironment` is captured once by ClaudeWire,
+  carried as a Core value and handed to Workbench by the app; every git, gh, shell and
+  claude process inherits it. Owner: C2. Binds C2, C5, C7.
+
+### 17.6 Ordering and dependency map
+
+```
+C1 probes/fixtures ─────────────┐  (G1 unblocks C2.G2, C3.G1 and C6's fixture gates)
+C2 Core+Wire ──► C3 Timeline ───┼──► C6 Conversation + Agents  (composite)
+     │              │           │             ▲
+     ├──► C4 Sessions/fleet ────┴──► C5 Shell + panel host
+     │              │                         │
+     └──► C7 Workbench (composite) ◄──────────┘
+          package leaves after C2 and C4; UI leaves after C5.G4
+```
+
+Wave 1, in parallel now: C1 and C2. Wave 2: C3 and C4 in parallel once C2's API lands,
+plus C7's decomposing run and its package-level leaves against C2's types and a stub
+host. Wave 3: C5. Wave 4: C6's decomposing run and its leaves, alongside C7's UI leaves
+against the panel host. Then recomposition (§17.1). The critical path is C2 → C4 → C5 →
+C6; C1's fixtures gate tests, not development, so its G1 must land before wave 2's gates
+are evaluated.
+
+**Dispatch mechanics.** Each leaf runs in its own git worktree on a branch named
+`child/c<n>-<slug>` (a leaf produced by a composite's cut uses the composite's number and
+its own slug) and merges to `main` when its required gates pass, so packages appear on
+`main` only when green. A child's spec records its parent-pin, this document's path plus
+the commit it read. A composite child's decomposing run happens on `main`: it writes the
+child's own composite spec in `docs/doperpowers/specs/`, citing `§17 C<n>`, and updates
+the tracking map here; its leaves cite that document and get their own worktrees.
+
+### 17.7 Risks and mitigations
+
+- **CLI drift mid-build.** A CLI upgrade changes a frame the children depend on.
+  Mitigation: C1's census runs on every upgrade; the baseline stays pinned at 2.1.259
+  until the census is clean and the fixtures are re-recorded in one commit.
+- **Spike fallbacks fire.** S7 (native markdown), S1 (GhosttyKit) or S3 (Monaco) fail
+  their criteria. Mitigation: each has a named fallback in §15 that keeps the child's
+  contract; the fallback is a Revision Note, not a re-cut.
+- **Swift 6.3 strict concurrency friction** in the actor-based process layer and the
+  SwiftUI shell. Mitigation: C2 sets the concurrency conventions (actors for processes,
+  `Sendable` frames, `@MainActor` view models) that later children inherit.
+- **Live-CLI acceptance costs tokens and time.** Mitigation: every UI item that can be
+  driven by `fake-claude` is, and the installed-CLI items are batched into one
+  walkthrough session per child.
+- **The single write** to the project's `settings.local.json` is the one place afleet
+  can damage user state. Mitigation: C4's G3 sentinel and symlink tests are required,
+  and the write path is reviewed against SPEC 03 §13 line by line before merge.
+- **Recomposition surprises** at the seams between reducers, lifecycle and rendering.
+  Mitigation: the invariant tests in C3 and the row-by-row lifecycle test in C4 are
+  the integration seams; recomposition re-runs them in the built app.
+- **Late-cut composites drift from the leaves already landed.** C6 and C7 are cut two
+  to three waves from now, when C3, C4 and C5 have moved the ground. Mitigation: the
+  contracts those cuts depend on, X4 and X7, are named now with owners, so a later cut
+  inherits fixed shapes and negotiates only its internal seams; the sketches are graded
+  advisory so revising them costs a Revision Note.
+
+### 17.8 Deferred and out of scope
+
+**Deferred (may return in the next cut):** the v1.1 items of §3: host-side editor
+context, job dispatch from the composer, open-in-panel and further MCP tools, usage-limit
+auto-continue; presence publication for headless sessions as a protocol ask; honouring
+`~/.claude/keybindings.json`; SQLite and full-text search; a per-project API key; a
+direct daemon socket client; IDE registration for diagnostics; hidden forked sessions as
+side chats; a host-managed byte-stream terminal feed.
+
+**Explicitly out of scope (standing exclusions, §3):** agent teams as members, cloud and
+Remote Control sessions, DMs, reactions as actions, staging and committing from Source
+Control, branch and worktree management UI, a native code editor, LSP, other harnesses,
+notarized distribution, and any write under `<configHome>` (X9).
+
+### 17.9 Tracking map
+
+| Child | Spec | Status |
+|---|---|---|
+| C1 Probe suite, fixtures, fake-claude | — | not-dispatched, dispatchable now |
+| C2 AfleetCore and ClaudeWire | — | not-dispatched, dispatchable now |
+| C3 FleetKit timeline | — | blocked-by C2 |
+| C4 FleetKit sessions and fleet | — | blocked-by C2 |
+| C5 App shell, panel host, packaging | — | blocked-by C4 |
+| C6 Conversation surface and Agents panel | — | composite; blocked-by C3, C4, C5 |
+| C7 Workbench panels | — | composite; cut dispatchable when C2 lands; UI blocked-by C5.G4 |
+
+Each child's spec path is filled in when it is dispatched; a composite's row points at
+its own composite spec, whose tracking map lists its leaves. Children keep their own
+retrospectives, and this map points at them. Recomposition (§17.1) closes the unit.
 
 ## Decision Log
 
@@ -2151,6 +2629,71 @@ through its lifecycle and store APIs, and on AfleetCore for links and the enviro
   execplan; direct spike-first.
   Date/Author: 2026-09-03 / kimmi with Claude
 
+- Decision: v1 is cut into seven children along §16's seams with the gate applied
+  inside each and the frontier across them: C1 probes, fixtures and fake-claude; C2
+  AfleetCore and ClaudeWire; C3 FleetKit timeline; C4 FleetKit sessions and fleet; C5
+  app shell, panel host and packaging; C6 conversation surface and Agents panel
+  (composite); C7 Workbench panels (composite) (§17.4).
+  Rationale: Seam 1 divides where verification changes from tooling against the real
+  CLI to Swift units against fixtures, and C1 is the only place tokens are spent to
+  learn protocol facts; seam 2 divides between pure data reduction and process
+  orchestration, which have different state owners, failure modes and tests; seam 3
+  divides where the intermediate state is still meaningful, a fleet browser before a
+  conversation. Everything past C5 is three to five waves out, and the decomposing
+  doctrine keeps distant branches coarse because their gates go stale as landed
+  siblings move the ground; their sketches are captured as advisory inheritance.
+  Rejected: eleven children now, the 2026-09-03 draft that split the Agents panel and
+  the four Workbench panels into leaves with detailed gates (distant cuts, re-cut
+  anyway at dispatch); nine, splitting Workbench now but not the conversation surface
+  (same objection for the panels' UI gates); one child per package (FleetKit and the
+  shell each fail the ownability gate as a unit); a separate integration child
+  (recomposition is the parent's own verification, §17.1).
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: Authority is graded by section in §17.3 rather than per line: the wire
+  contract, the timeline model and invariant, the lifecycle and ownership protocol, the
+  preconditions, the store rule, the card answer mappings, the package edges and every
+  Decision Log entry dated 2026-09-03 are binding; rendering tactics, panel internals,
+  spike fallbacks and the composites' sub-cut sketches are advisory.
+  Rationale: The binding set is exactly what only the joint view could settle and what
+  two or more children must agree on; marking child-local means binding would turn
+  every child discovery into reconciliation traffic. Rejected: everything binding;
+  everything advisory.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: C6 and C7 carry the track hint "decomposing run at dispatch" with an
+  advisory sub-cut sketch each, rather than "controlled with a gate re-check".
+  Rationale: Both fail the ownability gate as written, so a re-check would only confirm
+  the split later; naming them composite now makes the tracking map honest and gives
+  the later cut its input. Their cross-child contracts, X4 and X7, are fixed now so
+  that the late cuts negotiate only internal seams. Rejected: cutting them now; folding
+  the Agents panel into a conversation leaf without a sketch.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: C7's decomposing run is dispatchable when C2 lands, not when C5's panel
+  host lands; its UI leaves stay blocked on C5.G4.
+  Rationale: The PTY layer, the Monaco bundle and bridge, lane assignment and
+  `LinkRouter` need only Core types and can run in wave 2 against a stub host, which
+  takes the panels off the critical path. Rejected: waiting for the panel host (idles
+  two waves of parallelizable package work).
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: Each leaf runs in its own git worktree on a branch `child/c<n>-<slug>` and
+  merges to `main` when its required gates pass; composite cuts happen on `main`.
+  Rationale: Wave 1 runs two children in parallel sessions and later waves more;
+  worktrees prevent concurrent-edit clashes and keep `main` green by construction.
+  Rejected: sequential work on `main` (no parallelism, red intermediate states).
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: The repository gains a root `CLAUDE.md` that states the standing purpose,
+  routes to this spec as the root, and restates the rules every child agent must hold
+  (X9).
+  Rationale: The tree is a citation chain and the root must exist for children to cite;
+  the never-write rule and the licensing constraints must be in every child's context
+  without re-reading thirty thousand words. Rejected: no root file; a separate registry
+  document.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
 ## Surprises & Discoveries
 
 - Observation: Anthropic paused the June 15, 2026 Agent SDK credit split.
@@ -2433,6 +2976,13 @@ through its lifecycle and store APIs, and on AfleetCore for links and the enviro
   Impact: §11 and §16 no longer stage work around a macOS 15 toolchain; XcodeGen install
   becomes a setup step.
 
+- Observation: The local data set is larger than the design session counted.
+  Evidence: 2026-09-04, `ls -d ~/.claude/projects/*/` gives 543 directories and
+  `find ~/.claude/projects -maxdepth 2 -name '*.jsonl'` gives 2,989 top-level
+  transcripts; the registry holds 25 records and the roster 8 workers. The earlier
+  figure of 96 projects and 695 transcripts came from a narrower count.
+  Impact: §17.2 records the full-set numbers and C3's index gate targets them.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
@@ -2513,3 +3063,11 @@ Pending — written at finish.
   Swift 6.3.3, XcodeGen to install) and drops the macOS 15 staging; §16 drops the
   "can run on the macOS 15 machine now" clause. One superseding Decision Log entry and
   one Surprises entry.
+- 2026-09-04: Decomposed, second cut. §17 extends the design with the roadmap:
+  parent-level acceptance with the closing review, the grounding baseline re-measured,
+  design authority grades, seven children C1–C7 of which C6 and C7 are composites cut at
+  dispatch, eleven cross-child contracts X1–X11, ordering with dispatch mechanics, risks,
+  deferred work and the tracking map. The status line and §16's closing paragraph point
+  at §17. Six Decision Log entries and one Surprises entry added. The 2026-09-03 draft
+  decomposition into eleven children was removed from `main` at the author's request
+  and served here as critique input.
