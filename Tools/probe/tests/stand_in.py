@@ -10,11 +10,13 @@ import uuid
 FEATURES = [f for f in os.environ.get("STAND_IN_FEATURES", "").split(",") if f]
 inbox = []
 lock = threading.Condition()
+out_lock = threading.Lock()   # main and the responder thread both emit
 
 
 def emit(frame):
-    sys.stdout.write(json.dumps(frame) + "\n")
-    sys.stdout.flush()
+    with out_lock:
+        sys.stdout.write(json.dumps(frame) + "\n")
+        sys.stdout.flush()
 
 
 def reader():
@@ -59,12 +61,28 @@ def control_request(subtype, **payload):
     return rid
 
 
+def responder():
+    """Answer every host control_request main() does not handle itself, so the harness's
+    own outbound request/await-response cycle can be driven end to end."""
+    answered = set()
+    while True:
+        m = wait(lambda x: x.get("type") == "control_request" and x.get("request_id") not in answered
+                 and (x.get("request") or {}).get("subtype") not in ("initialize", "end_session"), 60)
+        if m is None:
+            return
+        answered.add(m["request_id"])
+        req = m.get("request") or {}
+        emit({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"],
+              "response": {"echo": req.get("subtype"), "note": req.get("note")}}})
+
+
 def main():
     if "--version" in sys.argv:
         print("2.1.259 (Claude Code)"); return 0
     if "--help" in sys.argv:
         print("Options:\n  -p, --print  x\n  --input-format <f>  y\n  --permission-prompt-tool <t>  z\n"); return 0
     threading.Thread(target=reader, daemon=True).start()
+    threading.Thread(target=responder, daemon=True).start()
     init = wait(lambda m: m.get("type") == "control_request" and (m.get("request") or {}).get("subtype") == "initialize", 10)
     if init is None:
         return 4
@@ -91,6 +109,18 @@ def main():
             r = response_to(rid, timeout=1.5)
             emit({"type": "system", "subtype": "stand_in_saw", "what": "dialog", "answered": r is not None})
             emit({"type": "control_cancel_request", "request_id": rid})
+        elif feature == "dialog_declared":
+            rid = control_request("request_user_dialog", dialog_kind="refusal_fallback_prompt", payload={})
+            r = response_to(rid)
+            emit({"type": "system", "subtype": "stand_in_saw", "what": "dialog_declared",
+                  "response": ((r or {}).get("response") or {}).get("response")})
+        elif feature == "elicitation":
+            # Field names as the parity inventory records them (31-27 §15.3).
+            rid = control_request("elicitation", mcp_server_name="afleet", message="pick one",
+                                  requested_schema={"type": "object", "properties": {"choice": {"type": "string"}}})
+            r = response_to(rid)
+            emit({"type": "system", "subtype": "stand_in_saw", "what": "elicitation",
+                  "response": ((r or {}).get("response") or {}).get("response")})
         elif feature == "mcp":
             for msg in ({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "stand-in", "version": "0"}}},
                         {"jsonrpc": "2.0", "method": "notifications/initialized"},

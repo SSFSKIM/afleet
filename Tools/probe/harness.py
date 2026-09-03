@@ -1,6 +1,8 @@
 """Launch line, redact-then-capture, control correlation, answer policies, MCP mini-server (spec §4.3)."""
+import atexit
 import json
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -187,7 +189,7 @@ class Session:
         self.policies = {"can_use_tool": "allow"}
         self.mcp = MCPServer(launch.cwd)
         self._capture = []           # in-memory redacted records
-        self._spool = None           # (path, fh) once spilled
+        self._spool = None           # (dir, path, fh) once spilled
         self._spooled = 0
         self._lock = threading.Condition()
         # A separate lock, never held together with `_lock`: a policy dispatch thread
@@ -253,21 +255,40 @@ class Session:
             os.chmod(d, 0o700)
             path = os.path.join(d, "capture.ndjson")
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            self._spool = (path, os.fdopen(fd, "w"))
+            self._spool = (d, path, os.fdopen(fd, "w"))
+            # A recording that dies without a clean close must not leave the directory
+            # behind either; the handler is idempotent and unregisters itself.
+            atexit.register(self._discard_spool)
         for rec in self._capture:
-            self._spool[1].write(json.dumps(rec) + "\n")
-        self._spool[1].flush()
+            self._spool[2].write(json.dumps(rec) + "\n")
+        self._spool[2].flush()
         self._spooled += len(self._capture)
         self._capture = []
 
+    def _spooled_records_locked(self):
+        self._spool[2].flush()
+        with open(self._spool[1]) as fh:
+            return [json.loads(l) for l in fh if l.strip()]
+
+    def _discard_spool(self):
+        """Draw the spilled records back into memory, then delete the spool directory.
+
+        Draining first is what makes the deletion safe: `frames()` is normally called after
+        `close()`, and it already materialises the whole capture in memory, so reading it
+        back costs no peak that the caller was not about to pay anyway. Idempotent, so a
+        second `close()` and the atexit handler are both harmless."""
+        with self._lock:
+            if self._spool is None:
+                return
+            self._capture = self._spooled_records_locked() + self._capture
+            self._spool[2].close()
+            shutil.rmtree(self._spool[0], ignore_errors=True)
+            self._spool = None
+        atexit.unregister(self._discard_spool)
+
     def frames(self):
         with self._lock:
-            out = []
-            if self._spool is not None:
-                if not self._spool[1].closed:      # `close()` releases the writer; the path stays readable
-                    self._spool[1].flush()
-                with open(self._spool[0]) as fh:
-                    out = [json.loads(l) for l in fh if l.strip()]
+            out = self._spooled_records_locked() if self._spool is not None else []
             return out + list(self._capture)
 
     # ---- process
@@ -338,12 +359,29 @@ class Session:
         try:
             if sub == "mcp_message":
                 self.answer(rid, {"mcp_response": self.mcp.handle(req.get("message") or {})}); return
-            if sub == "request_user_dialog" and req.get("dialog_kind") not in self.declared and policy is None:
-                return                                    # left for the CLI's deadline (parent §6.3)
-            if sub == "hook_callback" and policy is None:
-                self.answer(rid, {"continue": True}); return
-            if policy is None and sub not in ("can_use_tool", "elicitation", "request_user_dialog", "hook_callback"):
-                self.answer(rid, error="subtype %s not supported by afleet %s" % (sub, VERSION)); return   # the parent §6.3 string, verbatim
+            if policy is None:
+                # Parent §6.3: no code path may hold an inbound request without a response
+                # or a cancellation. A dialog kind we did not declare is the single
+                # deliberate exception -- the schema forbids answering one, an off-subtype
+                # answer is discarded, and the binary settles it at its own dialog deadline.
+                # Every other default below therefore settles, and each settles neutrally:
+                # a scenario that wants a substantive answer says so with `on(...)`.
+                if sub == "request_user_dialog":
+                    if req.get("dialog_kind") not in self.declared:
+                        return                                            # the one exception
+                    # A kind we declared in the handshake must not come back "not
+                    # supported"; §6.3 records `cancelled` as a real settlement, which is
+                    # the neutral one -- it closes the dialog without choosing for the user.
+                    self.answer(rid, {"behavior": "cancelled"}); return
+                if sub == "hook_callback":
+                    self.answer(rid, {"continue": True}); return
+                if sub == "elicitation":
+                    # §6.4's settlements are accept, decline and cancel; the host answers
+                    # `{action, content?}` (parity 31-27 §15.3). Declining settles without
+                    # inventing form content.
+                    self.answer(rid, {"action": "decline"}); return
+                if sub != "can_use_tool":
+                    self.answer(rid, error="subtype %s not supported by afleet %s" % (sub, VERSION)); return   # the parent §6.3 string, verbatim
             if policy == "leave":
                 return
             if policy == "allow" or (policy is None and sub == "can_use_tool"):
@@ -463,9 +501,7 @@ class Session:
                     stream.close()
                 except OSError:
                     pass
-        with self._lock:
-            if self._spool is not None and not self._spool[1].closed:
-                self._spool[1].close()
+        self._discard_spool()
 
     def stderr_tail(self, n=2000):
         return "".join(self._stderr)[-n:]

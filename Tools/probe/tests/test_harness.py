@@ -144,12 +144,59 @@ class SessionTests(unittest.TestCase):
         rid = tomb[0]["request_id"]
         self.assertFalse(any(c.get("frame", {}).get("response", {}).get("request_id") == rid for c in s.frames()))
 
+    def test_declared_dialog_and_elicitation_settle_neutrally(self):
+        # Parent §6.3: everything except an undeclared dialog kind must be settled, and a
+        # kind named in our own handshake must not come back "not supported".
+        s = self.run_session(["dialog_declared", "elicitation"])
+        s.send_user("go"); s.wait_result(10); s.close()
+        saw = {c["frame"]["what"]: c["frame"] for c in s.frames() if c.get("frame", {}).get("subtype") == "stand_in_saw"}
+        self.assertEqual(saw["dialog_declared"]["response"], {"behavior": "cancelled"})
+        self.assertEqual(saw["elicitation"]["response"], {"action": "decline"})
+
+    def test_a_scenario_policy_overrides_the_neutral_defaults(self):
+        s = self.run_session(["elicitation"])
+        s.on("elicitation", lambda f: {"action": "accept", "content": {"choice": "second"}})
+        s.send_user("go"); s.wait_result(10); s.close()
+        saw = [c["frame"] for c in s.frames() if c.get("frame", {}).get("what") == "elicitation"][0]
+        self.assertEqual(saw["response"], {"action": "accept", "content": {"choice": "second"}})
+
+    def test_request_returns_the_response_and_captures_both_directions(self):
+        s = self.run_session([])
+        resp = s.request("set_model", timeout=10, model="haiku", note="round trip")
+        self.assertEqual(resp["subtype"], "success")
+        self.assertEqual(resp["response"], {"echo": "set_model", "note": "round trip"})
+        s.send_user("go"); s.wait_result(10); s.close()
+        captured = s.frames()
+        sent = [c for c in captured if c["dir"] == "in" and c.get("frame", {}).get("request", {}).get("subtype") == "set_model"]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["frame"]["request"]["model"], "haiku")
+        rid = sent[0]["frame"]["request_id"]
+        self.assertEqual(resp["request_id"], rid)
+        back = [c for c in captured if c["dir"] == "out" and c.get("frame", {}).get("response", {}).get("request_id") == rid]
+        self.assertEqual(len(back), 1)
+        self.assertLess(captured.index(sent[0]), captured.index(back[0]))
+
     def test_request_round_trip_and_close_sequence_with_a_stubborn_child(self):
         s = self.run_session(["ignore_end_session"])
         s.send_user("go"); s.wait_result(10)
         t0 = time.time(); code = s.close(); dt = time.time() - t0
         self.assertIn(code, (-15, 143))           # SIGTERM after the 5 s end_session wait
         self.assertGreaterEqual(dt, 5.0); self.assertLess(dt, 11.0)
+
+    def test_the_spill_directory_is_removed_on_close_without_losing_frames(self):
+        s = self.run_session(["leak", "leak"])
+        s.spill_after = 3
+        s.send_user("hi"); s.wait_result(10)
+        spool_dir = s._spool[0]
+        self.assertTrue(os.path.isdir(spool_dir))
+        spilled = len(s.frames())
+        s.close()
+        self.assertFalse(os.path.exists(spool_dir))
+        kept = s.frames()
+        self.assertGreaterEqual(len(kept), spilled)        # the spilled records came back
+        self.assertEqual([c["t"] for c in kept], sorted(c["t"] for c in kept))
+        s.close()                                          # idempotent: a second close is harmless
+        self.assertEqual(len(s.frames()), len(kept))
 
     def test_spill_keeps_order_and_content(self):
         s = self.run_session(["leak", "leak"], )
