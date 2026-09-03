@@ -187,6 +187,23 @@ def _set_diff(prefix, what, before, after, lines):
         lines.append("%s: added %s%s" % (prefix, what, " ".join(added)))
 
 
+def _captured_set_diff(prefix, recorded, observed, lines):
+    """Compare a top-level field that may never have been captured at all.
+
+    `None` is not `[]` here either. A run whose `claude --help` never answered holds no
+    evidence about the flags, and folding that in as an empty set would report every
+    recorded flag as removed -- blaming the binary for a gap in the recording. Report the
+    gap as a gap, and stay silent only when neither side has the field, which is the
+    ordinary case for a scenario that never carries one.
+    """
+    if recorded is None and observed is None:
+        return
+    if recorded is None or observed is None:
+        lines.append("%s: not captured in %s" % (prefix, "observed" if observed is None else "recorded"))
+        return
+    _set_diff(prefix, "", recorded, observed, lines)
+
+
 def diff(recorded, observed, mode):
     """Human-readable drift lines; empty means no drift. mode: 'exact' | 'required'.
 
@@ -225,6 +242,6 @@ def diff(recorded, observed, mode):
             bmissing = sorted(set(r.get("required_body_keys", [])) - set(o.get("body_keys", [])))
             if bmissing:
                 lines.append("%s: removed required body keys %s" % (pair, " ".join(bmissing)))
-    _set_diff("capabilities", "", recorded.get("capabilities"), observed.get("capabilities"), lines)
-    _set_diff("flags", "", recorded.get("flags"), observed.get("flags"), lines)
+    _captured_set_diff("capabilities", recorded.get("capabilities"), observed.get("capabilities"), lines)
+    _captured_set_diff("flags", recorded.get("flags"), observed.get("flags"), lines)
     return lines

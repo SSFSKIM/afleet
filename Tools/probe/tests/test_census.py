@@ -157,7 +157,7 @@ class CensusTests(unittest.TestCase):
         self.assertNotIn("body_keys", p)
         self.assertNotIn("required_body_keys", p)
 
-    def test_merge_required_lets_no_body_less_recording_empty_the_body_shape(self):
+    def test_merge_required_keeps_the_body_shape_when_one_recording_has_no_body(self):
         with_body = census.census([
             frame("control_request", request_id="r1", request={"subtype": "get_usage"}),
             frame("control_response", response={"subtype": "success", "request_id": "r1", "response": {"tokens": 1}}),
@@ -258,13 +258,40 @@ class DiffTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             census.diff(self.base(), self.base(), "")
 
-    def test_diff_tolerates_an_uncaptured_flag_list_on_either_side(self):
+    def test_an_uncaptured_flag_list_is_reported_as_a_gap_not_as_wholesale_drift(self):
         captured = census.census([frame("system", subtype="init")], help_text="  --foo  x\n")
         uncaptured = census.census([frame("system", subtype="init")])
         self.assertIsNone(uncaptured["flags"])
+        # neither side captured the help: nothing to say
         self.assertEqual(census.diff(uncaptured, uncaptured, "exact"), [])
-        self.assertEqual(census.diff(uncaptured, captured, "exact"), ["flags: added --foo"])
-        self.assertEqual(census.diff(captured, uncaptured, "exact"), ["flags: removed --foo"])
+        # one side did: name the gap rather than blame the binary for every flag
+        self.assertEqual(census.diff(captured, uncaptured, "exact"), ["flags: not captured in observed"])
+        self.assertEqual(census.diff(uncaptured, captured, "exact"), ["flags: not captured in recorded"])
+        # captured-and-empty is still a real, comparable value
+        answered_empty = census.census([frame("system", subtype="init")], help_text="")
+        self.assertEqual(census.diff(captured, answered_empty, "exact"), ["flags: removed --foo"])
+
+    def test_exact_mode_reports_payload_body_and_block_type_changes(self):
+        rec = census.census([
+            frame("control_request", request_id="r1", request={"subtype": "get_usage"}),
+            frame("control_response", response={"subtype": "success", "request_id": "r1", "response": {"tokens": 1}}),
+            frame("assistant", message={"role": "assistant", "content": [{"type": "text"}]}),
+        ])
+        obs = census.census([
+            frame("control_request", request_id="r1", request={"subtype": "get_usage", "extra": 1}),
+            frame("control_response", response={"subtype": "success", "request_id": "r1", "response": {"cost": 2}}),
+            frame("assistant", message={"role": "assistant", "content": [{"type": "thinking"}]}),
+        ])
+        self.assertEqual(census.diff(rec, obs, "exact"), [
+            "assistant: removed block types text",
+            "assistant: added block types thinking",
+            "control_request/get_usage: added payload keys extra",
+            "control_request/get_usage: added required payload keys extra",
+            "control_response/get_usage: removed body keys tokens",
+            "control_response/get_usage: added body keys cost",
+            "control_response/get_usage: removed required body keys tokens",
+            "control_response/get_usage: added required body keys cost",
+        ])
 
     def test_identical_census_has_no_diff(self):
         self.assertEqual(census.diff(self.base(), self.base(), "exact"), [])

@@ -686,3 +686,23 @@ Pending — written at finish.
   hostname half is accordingly enforced at record time, and at verify time holds on the
   recording machine and only opportunistically elsewhere, where a cross-machine review has to
   pass the recording hostname explicitly.
+- 2026-09-04: The census fingerprints a `control_response` at two levels, not one.
+  `payload_keys` and `required_payload_keys` hold the `response` envelope — the key set
+  §4.4 names — and a new `body_keys` and `required_body_keys` hold the body that envelope
+  wraps. The envelope is what tells a success from an error: `subtype` and `request_id` are
+  always present, `response` appears on success and `error` on failure, so recording the
+  body in the envelope's place left the two indistinguishable. The body fields accumulate
+  only over the frames of a pair that actually carry a body and are omitted entirely when
+  none does; `merge_required` likewise skips a side that has none rather than intersecting
+  against it. That rule — an absent body is never folded in as an empty one — is what the
+  design turns on. The required sets are intersections, so a single error response would
+  otherwise empty the required body set for that pair permanently and the required-shape
+  check could never alarm on it again; and errors are ordinary traffic here, not an edge
+  case, since `control-shapes` hands `claude_oauth_callback` an invalid code on purpose
+  (§4.7) and the zero-cost census draws them too. The same distinction now holds at the top
+  level: `flags` is `null` when `claude --help` was never captured and `[]` when it answered
+  and declared nothing, and `diff` reports a one-sided gap as not captured rather than as
+  every flag removed. Exact comparison reads the required sets as well as the unions, since
+  a key that goes from always present to sometimes present leaves the union untouched.
+  Nothing needs migrating: no `census.json` recorded before this change exists, `Fixtures/`
+  holds only its placeholder, and no later run should accumulate onto a stale file.
