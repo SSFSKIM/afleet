@@ -138,12 +138,14 @@
   "result/success": {
    "count": 5,
    "keys": [
+    "is_error",
     "num_turns",
     "result",
     "subtype",
     "type"
    ],
    "required_keys": [
+    "is_error",
     "num_turns",
     "result",
     "subtype",

@@ -18,9 +18,11 @@
   "message uuids are readable synthetic ids, not RFC 4122 uuids; the bundle types these fields as uuids",
   "timestamps are synthetic deltas chosen so a replay is quick, not measured intervals",
   "transcript/ holds the session's user and assistant messages as delivered; whether the CLI removes a tombstoned or superseded message from its own history file is unknown and unmodelled",
-  "the tombstone frame's message field is opaque in the bundle schema; only the tombstoned uuid is carried",
+  "the decline legs carry no wire retraction signal by design: tombstone is an internal event the stream-json emitter filters out, so evicting retractedMessageUuids on resolution is the host's only mechanism",
+  "both content strings are partly [placeholder: ...]; the CLI assembles them from parts this fixture cannot resolve, and invented copy would be worse than a marked gap",
   "the result subtype on the decline legs is this fixture's assumption, not a bundle reading",
   "the 1.5s gap before the CLI retires the undeclared-kind dialog stands in for the dialog park deadline, which the parent's investigation records as five minutes by default",
+  "whether an undeclared kind reaches the host at all is open; undeclared_probe_kind is a synthetic placeholder no binary contains",
   "system/model_refusal_no_fallback is deliberately absent: its schema says it is not emitted when the user declined the retry dialog"
  ],
  "prompts": [
@@ -30,7 +32,7 @@
   "prompt 3",
   "prompt that triggers an undeclared kind"
  ],
- "purpose": "every refusal_fallback_prompt result, the close path, the tombstones and supersedes after a refusal, an undeclared kind cancelled by the CLI",
+ "purpose": "every refusal_fallback_prompt result, the close path, supersedes on the retry leg and no wire retraction on the declines, an undeclared kind cancelled by the CLI",
  "recorded_at": "2026-09-04T00:00:00Z",
  "review": {
   "checklist_version": 1,

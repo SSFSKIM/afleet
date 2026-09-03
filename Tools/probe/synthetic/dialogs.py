@@ -10,7 +10,10 @@ no `result` at all -- indistinguishable from an explicit `cancelled`, and both f
 the pair so no consumer reads the missing field as a fifth outcome.
 
 `chunk-sct99ax9.js` carries the frame schemas the answers produce: `assistant.supersedes`,
-`tombstone`, `system/model_refusal_fallback` and `system/model_consent_fallback`.
+`system/model_refusal_fallback` and `system/model_consent_fallback`. It also carries a
+`tombstone` schema, which is *not* used here: the same module's emitter filter drops the
+event before the wire and the parity inventory rates it "Dropped (45.9.2)", so a fixture
+carrying one would assert a frame no host can receive.
 
 They stay `hypothesis: true` until the same strings are extracted from the installed 2.1.259
 binary.
@@ -79,30 +82,27 @@ def _assistant(t, uid, sid, text, **extra):
     return {"t": t, "dir": "out", "frame": f}
 
 
-def _tombstone(t, sid, uid, target_uuid, target_text):
-    """`{type: "tombstone", message, uuid, session_id}` (chunk-sct99ax9.js).
-
-    The decline branch yields one per already-streamed message before it resets the turn:
-    `for (let sk of Xo) yield {type:"tombstone", message: sk}`. The schema types `message` as
-    opaque -- "The internal Message being tombstoned. Wire shape pending a dedicated schema"
-    -- so what sits there is the one part of this frame a recording still has to settle, and
-    the fixture carries the smallest thing a consumer could evict by: the message's own uuid.
-    """
-    return {"t": t, "dir": "out", "frame": {
-        "type": "tombstone",
-        "message": {"type": "assistant", "uuid": target_uuid,
-                    "message": {"role": "assistant", "content": [{"type": "text", "text": target_text}]}},
-        "uuid": uid, "session_id": sid}}
-
-
 def _result(t, text, subtype="success", is_error=False):
-    f = {"type": "result", "subtype": subtype, "result": text, "num_turns": 1}
-    if is_error:
-        f["is_error"] = True
-    return {"t": t, "dir": "out", "frame": f}
+    """Both `result` schemas require `is_error`, so it is always written even when false.
+
+    The rest of what those schemas require -- `duration_ms`, `total_cost_usd`, `usage`,
+    `modelUsage` and the rest -- is deliberately absent: this fixture has no measurements to
+    put there and a fabricated zero would enter the census as a shape nothing observed. The
+    fields present are the ones whose value is known from the branch that produced the frame.
+    """
+    return {"t": t, "dir": "out", "frame": {"type": "result", "subtype": subtype, "result": text,
+                                            "is_error": is_error, "num_turns": 1}}
 
 
 PARTIAL_TEXT = "partial text before the refusal"
+
+# `chunk-1kg58a1a.js` assembles the refusal prose from several helpers -- a prefix, the
+# category-dependent safeguards sentence, an edit hint and a "learn more" URL this fixture
+# cannot resolve -- so only the two sentences that are readable verbatim are carried, and the
+# README lists the full string as something S6 has to settle. Inventing the URL would put a
+# string a rendering test could be written against into a fixture that never saw one.
+REFUSAL_PROSE = ("Fable 5's safeguards flagged this message. This sometimes happens with safe, normal "
+                 "conversations. [placeholder: the CLI also appends an edit hint and a learn-more URL]")
 
 
 def refusal_frames():
@@ -110,12 +110,23 @@ def refusal_frames():
 
     The branch is a single `if (result !== "retry_fallback")` in the refusal-fallback loop, so
     three of the four answers -- `edit_prompt`, `cancelled` and the close path, which the
-    dialog schema's `default: "cancelled"` collapses onto `cancelled` -- share a tail and only
-    differ in what follows the tombstones. That collapse is itself something a host has to
-    know, so the fixture shows the close path and `cancelled` producing the same frames rather
-    than eliding one of them.
+    dialog schema's `default: "cancelled"` collapses onto `cancelled` -- share a tail. That
+    collapse is itself something a host has to know, so the fixture shows the close path and
+    `cancelled` producing the same frames rather than eliding one of them.
+
+    What the decline legs deliberately do *not* carry is a retraction frame. The CLI's decline
+    branch yields internal `tombstone` events, but `Gxn` in the same module lists `tombstone`
+    among the event types the stream-json emitter filters out, its schema is annotated
+    `@internal ... From internal QueryEvent 'tombstone'`, and `docs/tui-parity` rates it
+    "Dropped (45.9.2)". So the wire carries no retraction signal on a decline at all, and the
+    host's own eviction of `retractedMessageUuids` on resolution is the whole mechanism.
+    §4.7's "tombstones after a refusal" is the parent's timeline sense of the word, which its
+    §8.4 resolves to the `supersedes` rule -- not a frame type.
     """
-    p = {"originalModel": "claude-fable-5-1", "fallbackModel": "claude-opus-5", "apiRefusalCategory": "safety",
+    # `bio` rather than an invented category: the schema types this as an open string but
+    # names `cyber` and `bio` as the values it has seen, and `cyber` selects a different copy
+    # branch and an extra `saw_cyber_refusal` field this fixture would then have to model.
+    p = {"originalModel": "claude-fable-5-1", "fallbackModel": "claude-opus-5", "apiRefusalCategory": "bio",
          "guidanceText": "The model declined; retry on the fallback model or edit your prompt."}
     fr = _init_pair(0)
     t = 100
@@ -136,18 +147,22 @@ def refusal_frames():
             fr.append({"t": t, "dir": "out", "frame": {
                 "type": "system", "subtype": "model_refusal_fallback", "trigger": "refusal", "direction": "retry",
                 "scope": "session", "original_model": "claude-fable-5-1", "fallback_model": "claude-opus-5",
-                "request_id": None, "api_refusal_category": "safety", "api_refusal_explanation": None,
+                "request_id": None, "api_refusal_category": "bio", "api_refusal_explanation": None,
+                # This one is reconstructed from the module's own notice builder, which reads
+                # `<original>'s safeguards flagged this message. This sometimes happens with
+                # safe, normal conversations. Switched to <fallback>.` before appending a URL
+                # the fixture cannot resolve.
                 "retracted_message_uuids": [partial], "refused_user_message_uuid": uid,
-                "content": "Claude Fable 5.1 declined this request; retried on Claude Opus 5.",
+                "content": "Fable 5's safeguards flagged this message. This sometimes happens with safe, "
+                           "normal conversations. Switched to Opus 5. [placeholder: a learn-more URL follows]",
                 "uuid": "s-%d" % n, "session_id": SID_R}}); t += 50
             fr.append(_result(t, "answer from the fallback model")); t += 50
         else:
-            fr.append(_tombstone(t, SID_R, "tomb-%d" % n, partial, PARTIAL_TEXT)); t += 50
+            # No frame stands between the answer and the result on a decline: the CLI's
+            # retraction events do not reach the wire, and `edit_prompt` only aborts the turn.
             if choice == "cancelled":
-                # Only the `cancelled` branch builds the refusal notice; `edit_prompt` aborts
-                # the turn instead and emits nothing between the tombstones and the result.
-                fr.append(_assistant(t, "a-refusal-%d" % n, SID_R,
-                                     "Claude Fable 5.1's safeguards flagged this message. Edit your last message, or try a different model.")); t += 50
+                # Only the `cancelled` branch builds a refusal message for the user.
+                fr.append(_assistant(t, "a-refusal-%d" % n, SID_R, REFUSAL_PROSE)); t += 50
             fr.append(_result(t, "refusal", subtype="error_during_execution", is_error=True)); t += 50
     fr.append(_user(t, "u-undeclared", "prompt that triggers an undeclared kind")); t += 50
     fr += _dialog(t, "dlg-undeclared", "undeclared_probe_kind", {}, None); t += 1600
@@ -155,11 +170,37 @@ def refusal_frames():
     return fr
 
 
+def _consent_content(persisted):
+    """`model_consent_fallback.content`, from the template the module builds it with.
+
+    Carried rather than paraphrased because the frame's `content` is what a decision card
+    renders, so a child's rendering test written against invented copy would test nothing --
+    and would miss that the real string ends in a `/model to change` instruction naming a
+    slash command a GUI has to rewrite. The clause varies with `persisted_as_default`, so one
+    string for every frame would have asserted that a persisted swap can say "for this
+    session". The two model names substituted in are this fixture's synthetic models.
+    """
+    return ("Switched to Opus 5 %s · Fable 5 requires usage credits · /model to change"
+            % ("— now your default model" if persisted else "for this session"))
+
+
 def fable_frames():
+    """Every outcome of the consent prompt, with `overagesEnabled` both ways.
+
+    `consent` is only ever answered against `overagesEnabled: true`. The parent's §8.4 offers
+    it "only when `overagesEnabled` is true, because a bare wire reply never enables billing",
+    and its acceptance item 62 has the false branch stay pending until *Switch to the default
+    model* or *Not now* -- so a leg answering `consent` to a false payload would depict a reply
+    afleet is specified never to send, and a conforming host replaying this fixture would
+    diverge from it. The false branch is covered instead by `switch_default` and by the close
+    path, which is what item 62 actually asks for.
+    """
     fr = _init_pair(0)
     t = 100
-    cases = [(True, {"behavior": "completed", "result": "consent"}), (False, {"behavior": "completed", "result": "consent"}),
-             (True, {"behavior": "completed", "result": "switch_default"}), (True, {"behavior": "completed", "result": "cancelled"}),
+    cases = [(True, {"behavior": "completed", "result": "consent"}),
+             (False, {"behavior": "completed", "result": "switch_default"}),
+             (True, {"behavior": "completed", "result": "switch_default"}),
+             (True, {"behavior": "completed", "result": "cancelled"}),
              (False, {"behavior": "cancelled"})]
     for n, (enabled, answer) in enumerate(cases):
         fr.append(_user(t, "u%d" % n, "prompt %d" % n)); t += 50
@@ -167,9 +208,10 @@ def fable_frames():
         fr += _dialog(t, "fab-%d" % n, "fable_overage_consent_prompt", payload, answer); t += 300
         choice = answer.get("result", "cancelled")
         if not (choice == "consent" and enabled):
+            persisted = choice == "switch_default"
             fr.append({"t": t, "dir": "out", "frame": {"type": "system", "subtype": "model_consent_fallback", "choice": choice,
                        "original_model": "claude-fable-5-1", "original_model_name": "Fable 5", "fallback_model": "claude-opus-5",
-                       "persisted_as_default": choice == "switch_default", "content": "Switched to Opus for this session.",
+                       "persisted_as_default": persisted, "content": _consent_content(persisted),
                        "uuid": "mcf-%d" % n, "session_id": SID_F}}); t += 50
         fr.append(_assistant(t, "a-%d" % n, SID_F, "answer")); t += 50
         fr.append(_result(t, "answer")); t += 50
@@ -196,18 +238,38 @@ whose payload names that partial in `retractedMessageUuids`, and answer it a dif
   the partial it replaces. The turn then ends with a `system/model_refusal_fallback` notice
   (`direction: "retry"`), whose `retracted_message_uuids` repeats the same retraction -- the
   two are documented as idempotent with each other, so a host may act on whichever arrives.
-- `edit_prompt`: one `tombstone` frame per already-streamed message, then nothing. The CLI
-  aborts the turn so the user can edit, and emits no notice.
-- `cancelled`: the same tombstones, then an `assistant` frame carrying the refusal prose the
-  CLI composes for the user.
+- `edit_prompt`: nothing at all between the answer and the result. The CLI aborts the turn so
+  the user can edit.
+- `cancelled`: an `assistant` frame carrying the refusal prose the CLI composes for the user.
 - The close path, `{"behavior": "cancelled"}` with no `result` at all: identical to
   `cancelled`, because the dialog schema declares `default: "cancelled"`. A host that treats
   a missing `result` as a distinct outcome would be wrong, which is why both appear here.
+
+**The decline legs carry no retraction signal on the wire, and that is the point.** The CLI's
+decline branch does yield internal `tombstone` events, but they never reach a stream-json
+host: the emitter's own filter lists `tombstone` among the event types it drops, the schema
+is annotated `@internal ... From internal QueryEvent 'tombstone'`, and this repository's
+parity inventory rates it "Dropped (45.9.2)" with a D verdict, listing a wire tombstone among
+the signals the CLI still ought to add. So on `edit_prompt`, on `cancelled` and on the close
+path there is nothing to react to, and the only mechanism a host has is the one the dialog
+payload describes: evict the uuids in `retractedMessageUuids` yourself, on resolution --
+"your own response (any choice) or `control_cancel_request` retirement, never on receipt", and
+idempotently. Only the retry leg gets a wire signal, through `supersedes` and the notice's
+`retracted_message_uuids`. A host that waits for a frame before evicting will leave the
+refused partial on screen forever on three of the four outcomes.
 
 A fifth turn opens a dialog of a kind the host never declared in
 `initialize.supportedDialogKinds`. The host must leave it alone -- an error-shaped answer to
 a parked dialog is swallowed -- and the CLI retires it itself with `control_cancel_request`,
 the one shape in which a lifecycle closes without a response (spec §4.2).
+
+**Whether that fifth turn can happen at all is open.** The parent's S6 and §6.3 mandate
+modelling it, so the frames are not wrong to be here, but the parity inventory finds that
+only three dialog families cross the wire and that every other kind "resolves to its declared
+default immediately, whatever the host declares in `supportedDialogKinds`" -- which would mean
+an undeclared kind never reaches a host to be left unanswered. `undeclared_probe_kind` is also
+a synthetic placeholder: no binary contains that string, and a recording would have to
+substitute a real kind outside the forwarded set. S6 should settle both.
 
 Serves item 62 and spike S6.
 
@@ -222,15 +284,24 @@ fixture is excluded from `diff`, and every gate resting on it stays provisional 
 extracts the same strings from the installed 2.1.259 binary and clears the flag (spec §4.7).
 A synthetic fixture is never baseline evidence by itself.
 
-Three things S6 should settle, because the bundle does not:
+What S6 should settle, because the bundle does not:
 
-1. The `tombstone` frame's `message` field. Its schema types it as opaque and says the wire
-   shape is pending, so the fixture carries only the tombstoned message's own uuid.
-2. The `result` subtypes on the decline legs. `error_during_execution` is this fixture's
-   assumption, not a bundle reading; the decline branch's own code says nothing about it.
-3. The gap before the CLI retires the undeclared-kind dialog. It is 1.5 s here so a replay is
-   quick; the real dialog park deadline is five minutes by default per the parent's
+1. **Both `content` strings are partly placeholders.** The CLI assembles the refusal prose
+   from a prefix, a category-dependent safeguards sentence, an edit hint and a learn-more URL.
+   Only the safeguards sentence is readable verbatim; the rest is marked `[placeholder: ...]`
+   in the frames rather than invented, because a rendering test written against invented copy
+   would test nothing. The `model_refusal_fallback` notice is in the same position. The
+   `edit_prompt` hint in the real copy names a keystroke and `/model`, both of which a GUI has
+   to rewrite.
+2. **The `result` subtypes on the decline legs.** `error_during_execution` is this fixture's
+   assumption; the decline branch's own code says nothing about it. The `result` frames here
+   also carry only `subtype`, `result`, `is_error` and `num_turns` -- the schemas require
+   durations, costs and usage too, and a fabricated zero would be worse than an absence.
+3. **The gap before the CLI retires the undeclared-kind dialog.** It is 1.5 s here so a replay
+   is quick; the real dialog park deadline is five minutes by default per the parent's
    investigation, and no gate should read the fixture's timing as the deadline.
+4. **Whether an undeclared kind is forwarded at all**, and what real kind to use in place of
+   `undeclared_probe_kind`. See above.
 
 `system/model_refusal_no_fallback` is deliberately **absent**. Its own schema says it is "not
 emitted when the retry ran or the user declined the retry dialog" -- it covers the case where
@@ -244,11 +315,21 @@ FABLE_README = """# dialog-fable-overage (synthetic, hypothesis)
 
 What it shows: the CLI asking the host for consent before spending past a Fable balance.
 Five turns each open a `request_user_dialog` of kind `fable_overage_consent_prompt` and cover
-every outcome the enum allows -- `consent` with `overagesEnabled` true and again false,
-`switch_default`, `cancelled`, and the close path `{"behavior": "cancelled"}` with no
-`result`. Every outcome other than consenting while overages are already enabled is followed
-by a `system/model_consent_fallback` frame naming the original and fallback models and
-whether the choice was persisted as the default.
+every outcome the enum allows, with `overagesEnabled` both ways -- `consent`,
+`switch_default` against a false payload and again against a true one, `cancelled`, and the
+close path `{"behavior": "cancelled"}` with no `result`. Every outcome other than consenting
+while overages are already enabled is followed by a `system/model_consent_fallback` frame
+naming the original and fallback models and whether the choice was persisted as the default.
+
+`consent` appears only against `overagesEnabled: true`, deliberately. The parent's §8.4 offers
+that action "only when `overagesEnabled` is true, because a bare wire reply never enables
+billing", and acceptance item 62 has the false branch stay pending until *Switch to the
+default model* or *Not now*. A leg answering `consent` to a false payload would depict a reply
+afleet is specified never to send, and a conforming host replaying this fixture would diverge
+from it. The engine does have a behaviour there -- `model_consent_fallback`'s schema says
+`choice: "consent"` reaches it "only when the gate could not honor it" -- but that is engine
+behaviour afleet cannot trigger, so it belongs in an S6 finding rather than in a fixture
+afleet replays against.
 
 Serves item 62 and spike S6.
 
@@ -263,13 +344,17 @@ resting on it stays provisional until S6 extracts the same strings from the inst
 binary and clears the flag (spec §4.7). A synthetic fixture is never baseline evidence by
 itself.
 
-Two readings this fixture encodes, which S6 should confirm on a recording. First, the second
-turn: consenting while `overagesEnabled` is false still produces a `model_consent_fallback`,
-because the schema says `choice: "consent"` appears there "only when the gate could not
-honor it". Second, the fifth turn: the close path carries no `result` and the schema's
-`default: "cancelled"` makes it behave as `cancelled`, so the two produce the same frames.
-The message uuids here are readable synthetic ids rather than RFC 4122 uuids, and the
-timestamps are chosen for a fast replay rather than measured.
+Each `model_consent_fallback.content` is built from the template the CLI builds it with --
+`Switched to <fallback> <"— now your default model" | "for this session"> · <original>
+requires usage credits · /model to change` -- so the clause tracks `persisted_as_default`
+rather than contradicting it, and the `/model to change` instruction a GUI has to rewrite is
+visible. The two model display names substituted into the template are this fixture's own
+synthetic models.
+
+One reading S6 should confirm on a recording: the fifth turn's close path carries no `result`,
+and the schema's `default: "cancelled"` makes it behave as `cancelled`, so it and the fourth
+turn produce the same frames. The message uuids here are readable synthetic ids rather than
+RFC 4122 uuids, and the timestamps are chosen for a fast replay rather than measured.
 
 Rebuild with `make synthetic`, which overwrites this directory and drops the review block
 back to unsigned; walk `Fixtures/REVIEW.md` and `make sign` again afterwards.
@@ -321,11 +406,17 @@ def build(fixtures_root):
                    "every fable_overage_consent_prompt outcome, overagesEnabled both ways, model_consent_fallback",
                    ["item 62"], FABLE_README),
             _write(fixtures_root, "dialog-refusal-fallback", SID_R, refusal_frames(),
-                   "every refusal_fallback_prompt result, the close path, the tombstones and supersedes after a refusal, an undeclared kind cancelled by the CLI",
+                   "every refusal_fallback_prompt result, the close path, supersedes on the retry leg and no wire retraction on the declines, an undeclared kind cancelled by the CLI",
                    ["item 62"], REFUSAL_README,
-                   ["the tombstone frame's message field is opaque in the bundle schema; only the tombstoned uuid is carried",
+                   ["the decline legs carry no wire retraction signal by design: tombstone is an internal event "
+                    "the stream-json emitter filters out, so evicting retractedMessageUuids on resolution is the "
+                    "host's only mechanism",
+                    "both content strings are partly [placeholder: ...]; the CLI assembles them from parts this "
+                    "fixture cannot resolve, and invented copy would be worse than a marked gap",
                     "the result subtype on the decline legs is this fixture's assumption, not a bundle reading",
                     "the 1.5s gap before the CLI retires the undeclared-kind dialog stands in for the dialog park "
                     "deadline, which the parent's investigation records as five minutes by default",
+                    "whether an undeclared kind reaches the host at all is open; undeclared_probe_kind is a "
+                    "synthetic placeholder no binary contains",
                     "system/model_refusal_no_fallback is deliberately absent: its schema says it is not emitted "
                     "when the user declined the retry dialog"])]

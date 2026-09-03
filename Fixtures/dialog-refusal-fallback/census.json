@@ -167,12 +167,14 @@
   "result/success": {
    "count": 2,
    "keys": [
+    "is_error",
     "num_turns",
     "result",
     "subtype",
     "type"
    ],
    "required_keys": [
+    "is_error",
     "num_turns",
     "result",
     "subtype",
@@ -212,21 +214,6 @@
     "session_id",
     "subtype",
     "trigger",
-    "type",
-    "uuid"
-   ]
-  },
-  "tombstone": {
-   "count": 3,
-   "keys": [
-    "message",
-    "session_id",
-    "type",
-    "uuid"
-   ],
-   "required_keys": [
-    "message",
-    "session_id",
     "type",
     "uuid"
    ]
