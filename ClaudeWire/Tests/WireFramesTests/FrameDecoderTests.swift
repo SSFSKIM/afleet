@@ -66,7 +66,8 @@ final class FrameDecoderTests: XCTestCase {
         XCTAssertEqual(s.pendingPermissionRequests, [])
         XCTAssertEqual(s.pendingUserDialogRequests.count, 1)
         XCTAssertEqual(s.pendingUserDialogRequests[0].requestID.rawValue, "req-010")
-        XCTAssertEqual(s.pendingUserDialogRequests[0].subtype, "user_dialog")
+        XCTAssertEqual(s.pendingUserDialogRequests[0].subtype, "request_user_dialog")
+        XCTAssertEqual(s.pendingUserDialogRequests[0].request["dialog_kind"], .string("refusal_fallback_prompt"))
         let again = try JSONDecoder().decode(JSONValue.self, from: try FrameDecoder.encode(.controlResponse(f)))
         XCTAssertEqual(again["response"]?["pending_permission_requests"], .array([]), "an empty pending array lost its key")
         XCTAssertEqual(again["response"]?["pending_user_dialog_requests"]?[0]?["received_at"], .string("2026-09-04T00:00:02.000Z"),
@@ -90,6 +91,26 @@ final class FrameDecoderTests: XCTestCase {
         XCTAssertEqual(ControlSuccess(requestID: RequestID(rawValue: "r1"), response: nil, pendingPermissionRequests: [req]).pendingPermissionRequests, [req])
         let error: String = ControlFailure(requestID: RequestID(rawValue: "r3"), error: "boom").error
         XCTAssertEqual(error, "boom")
+    }
+
+    /// A key one subtype models but the other does not must land in `additional` rather than being
+    /// swallowed: an `error` response carrying `response` / `pending_*`, and a `success` response
+    /// carrying `error`.
+    func testCrossBranchKeysSurviveInAdditional() throws {
+        let errorFrame = Data(#"{"type":"control_response","response":{"subtype":"error","request_id":"req-012","error":"nope","response":{"leftover":1},"pending_permission_requests":[]}}"#.utf8)
+        guard case .controlResponse(let e) = FrameDecoder.decode(line: errorFrame), case .error = e.body else { return XCTFail() }
+        XCTAssertEqual(e.additional["response"]?["leftover"], .integer(1))
+        XCTAssertEqual(e.additional["pending_permission_requests"], .array([]))
+        let againError = try JSONDecoder().decode(JSONValue.self, from: try FrameDecoder.encode(.controlResponse(e)))
+        XCTAssertTrue(againError.numericallyEqual(try JSONDecoder().decode(JSONValue.self, from: errorFrame)),
+                      "an error response dropped a key only the success branch models")
+
+        let successFrame = Data(#"{"type":"control_response","response":{"subtype":"success","request_id":"req-013","response":{"ok":true},"error":"stray"}}"#.utf8)
+        guard case .controlResponse(let s) = FrameDecoder.decode(line: successFrame), case .success = s.body else { return XCTFail() }
+        XCTAssertEqual(s.additional["error"], .string("stray"))
+        let againSuccess = try JSONDecoder().decode(JSONValue.self, from: try FrameDecoder.encode(.controlResponse(s)))
+        XCTAssertTrue(againSuccess.numericallyEqual(try JSONDecoder().decode(JSONValue.self, from: successFrame)),
+                      "a success response dropped a key only the error branch models")
     }
 
     /// A missing `error` must not be invented as `"error":""` on re-encode.

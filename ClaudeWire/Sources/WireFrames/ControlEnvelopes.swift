@@ -75,20 +75,28 @@ public struct ControlResponseFrame: Hashable, Sendable, Codable {
     public init(body: ControlResponseBody, additional: [String: JSONValue] = [:]) { self.body = body; self.additional = additional }
     public var requestID: RequestID { switch body { case .success(let s): s.requestID; case .error(let e): e.requestID } }
 
+    /// The keys each subtype's body stores; everything else inside "response" goes to `additional`.
+    private static let successKeys: Set<String> = ["subtype", "request_id", "response", "pending_permission_requests", "pending_user_dialog_requests"]
+    private static let errorKeys: Set<String> = ["subtype", "request_id", "error"]
+
     public init(from decoder: any Decoder) throws {
         let v = try JSONValue(from: decoder)
         guard let r = v["response"]?.objectValue, let id = r["request_id"]?.stringValue, let sub = r["subtype"]?.stringValue else {
             throw DecodingError.keyNotFound(AnyCodingKey(stringValue: "response.request_id"), .init(codingPath: decoder.codingPath, debugDescription: "control_response without response.request_id/subtype"))
         }
-        // Every key here is either modelled by the body or carried in `additional`, and `jsonValue`
-        // writes each exactly once, so the "response" object round-trips key for key.
-        let known: Set<String> = ["subtype", "request_id", "response", "error", "pending_permission_requests", "pending_user_dialog_requests"]
-        additional = r.filter { !known.contains($0.key) }
+        // The modelled key set is per subtype, because the two bodies model different keys: a key
+        // the other branch would have stored must land in `additional`, not vanish. Every key here
+        // is therefore either modelled by the body it belongs to or carried in `additional`, and
+        // `jsonValue` writes each exactly once, so the "response" object round-trips key for key.
         switch sub {
-        case "success": body = .success(.init(requestID: .init(rawValue: id), response: r["response"],
-                                              rawPendingPermissionRequests: r["pending_permission_requests"],
-                                              rawPendingUserDialogRequests: r["pending_user_dialog_requests"]))
-        case "error": body = .error(.init(requestID: .init(rawValue: id), rawError: r["error"]))
+        case "success":
+            additional = r.filter { !Self.successKeys.contains($0.key) }
+            body = .success(.init(requestID: .init(rawValue: id), response: r["response"],
+                                  rawPendingPermissionRequests: r["pending_permission_requests"],
+                                  rawPendingUserDialogRequests: r["pending_user_dialog_requests"]))
+        case "error":
+            additional = r.filter { !Self.errorKeys.contains($0.key) }
+            body = .error(.init(requestID: .init(rawValue: id), rawError: r["error"]))
         default: throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath + [AnyCodingKey(stringValue: "response.subtype")], debugDescription: "unknown control_response subtype \(sub)"))
         }
     }
