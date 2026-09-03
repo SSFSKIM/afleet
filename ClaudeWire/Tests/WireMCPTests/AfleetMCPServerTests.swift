@@ -97,6 +97,35 @@ final class AfleetMCPServerTests: XCTestCase {
         guard case .sentFile(let paths, _, let status, _) = inv else { return XCTFail() }
         XCTAssertEqual(paths.first?.path, "/etc/hosts"); XCTAssertEqual(status, "proactive")
     }
+    /// `SendUserFileTool.resolve` is the tool's path policy with the I/O taken out, so all three
+    /// rules are decidable without a file existing anywhere. This is what lets the tilde rule be
+    /// asserted at all: welded to the readability check, expansion and non-expansion both end at a
+    /// missing file and the assertion cannot discriminate them.
+    func testPathResolutionPolicy() throws {
+        let cwd = URL(fileURLWithPath: "/private/tmp/afleet-cwd")
+
+        // A leading `~` expands to the home directory, and does so BEFORE the absolute test, so it
+        // never lands under the cwd.
+        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL
+        let tilde = SendUserFileTool.resolve("~/report.pdf", against: cwd)
+        XCTAssertEqual(tilde, home.appendingPathComponent("report.pdf").standardizedFileURL)
+        XCTAssertFalse(tilde.path.hasPrefix(cwd.path), "~ must not resolve under the cwd")
+
+        // An absolute path is taken as given, whatever the cwd is.
+        XCTAssertEqual(SendUserFileTool.resolve("/etc/hosts", against: cwd).path, "/etc/hosts")
+        XCTAssertEqual(SendUserFileTool.resolve("/etc/hosts", against: URL(fileURLWithPath: "/var")).path, "/etc/hosts")
+
+        // A relative path resolves against the cwd.
+        XCTAssertEqual(SendUserFileTool.resolve("a.txt", against: cwd).path, "/private/tmp/afleet-cwd/a.txt")
+        XCTAssertEqual(SendUserFileTool.resolve("sub/a.txt", against: cwd).path, "/private/tmp/afleet-cwd/sub/a.txt")
+
+        // A `..` walks out of the cwd. Pinned as intentional: this tool accepts any absolute path
+        // the model can read, so confining the relative form would be an inconsistency rather than
+        // a boundary. If this assertion ever fails, that is a deliberate policy change, not a bug fix.
+        let escaped = SendUserFileTool.resolve("../../etc/hosts", against: cwd)
+        XCTAssertEqual(escaped.path, "/etc/hosts")
+        XCTAssertFalse(escaped.path.hasPrefix(cwd.path))
+    }
     func testCancelledNotificationCancelsAnInFlightCall() async throws {
         struct SleepingTool: MCPTool {
             var name: String { "sleep" }; var description: String { "sleeps until cancelled" }

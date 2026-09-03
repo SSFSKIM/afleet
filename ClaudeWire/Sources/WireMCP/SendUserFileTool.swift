@@ -19,6 +19,26 @@ public struct SendUserFileTool: MCPTool {
                  ]),
                  "required": .array([.string("files"), .string("status")])])
     }
+    /// The tool's path policy, as a pure function: no filesystem is touched, so every rule below is
+    /// decidable without a file existing. The readability and directory checks in `call` operate on
+    /// this result.
+    ///
+    /// Three rules, all deliberate:
+    /// - A leading `~` expands to the home directory *before* the absolute test, so `~/report.pdf`
+    ///   does not become `<cwd>/~/report.pdf`.
+    /// - A leading `/` is absolute and is taken as given. This tool accepts any absolute path the
+    ///   model can read, matching the built-in's domain.
+    /// - Anything else resolves against the channel cwd, and a `..` may walk out of it. That is
+    ///   intended rather than a hole: confining the relative form while accepting absolute paths
+    ///   anywhere would be an inconsistency, not a boundary.
+    public static func resolve(_ path: String, against cwd: URL) -> URL {
+        let expanded = (path as NSString).expandingTildeInPath
+        let base = expanded.hasPrefix("/")
+            ? URL(fileURLWithPath: expanded)
+            : cwd.standardizedFileURL.appendingPathComponent(expanded)
+        return base.standardizedFileURL
+    }
+
     public func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
         // A bare string is coerced to a one-element array, mirroring the built-in's Zod preprocess
         // (`fs((e) => typeof e === "string" ? [e] : e, R(i()).min(1))`, bundle 2.1.258:485919). The
@@ -35,16 +55,9 @@ public struct SendUserFileTool: MCPTool {
         guard let status = arguments["status"]?.stringValue, ["normal", "proactive"].contains(status) else { throw MCPArgumentError("status must be 'normal' or 'proactive'") }
         let display = arguments["display"]?.stringValue
         if let display, !["render", "attach"].contains(display) { throw MCPArgumentError("display must be 'render' or 'attach'") }
-        let root = context.cwd.standardizedFileURL
         var resolved: [URL] = []
         for f in files.compactMap(\.stringValue) {
-            // `~` is expanded before the absolute-path test, so `~/report.pdf` does not become
-            // `<cwd>/~/report.pdf`. A relative path resolves against the channel cwd and a `..` may
-            // walk out of it; that is intended, not a hole — this tool deliberately accepts any
-            // absolute path the model can read, so confining the relative form would be an
-            // inconsistency rather than a boundary.
-            let expanded = (f as NSString).expandingTildeInPath
-            let url = (expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : root.appendingPathComponent(expanded)).standardizedFileURL
+            let url = Self.resolve(f, against: context.cwd)
             // isReadableFile(atPath:) is also true for a readable directory, which would report a send
             // Task 10 cannot perform; the built-in resolves per-file metadata and cannot reach that state.
             var isDirectory: ObjCBool = false
