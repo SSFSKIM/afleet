@@ -38,6 +38,24 @@ final class SystemFrameTests: XCTestCase {
         guard case .decodeFailure(let field, _) = o.reason else { return XCTFail("\(o.reason)") }
         XCTAssertEqual(field, "attempt")
     }
+    /// `request_id` is nullable but always present on both refusal frames, like `parent_tool_use_id`:
+    /// it must decode typed with a nil property and re-emit the null.
+    func testNullableRequiredRequestIDStaysTyped() throws {
+        guard case .modelRefusalFallback(let r) = try system("system_model_refusal_fallback") else { return XCTFail() }
+        XCTAssertNil(r.requestID)
+        XCTAssertTrue(r.explicitNulls.contains("request_id"))
+        guard case .modelRefusalNoFallback(let n) = try system("system_model_refusal_no_fallback") else { return XCTFail() }
+        XCTAssertEqual(n.requestID, "req_012")
+    }
+    /// A `system` frame whose subtype cannot be identified — key absent, or present but not a string —
+    /// is the top-level opaque with `.unknownSubtype`. It is not `.system(.opaque(subtype: ""))`, which
+    /// would assert a subtype no engine emits.
+    func testUnidentifiableSubtypeIsTopLevelOpaqueWithUnknownSubtype() throws {
+        for line in [#"{"type":"system","uuid":"u","session_id":"s"}"#, #"{"type":"system","subtype":7,"uuid":"u","session_id":"s"}"#] {
+            guard case .opaque(let o) = FrameDecoder.decode(line: Data(line.utf8)) else { return XCTFail(line) }
+            XCTAssertEqual(o.type, "system"); XCTAssertNil(o.subtype); XCTAssertEqual(o.reason, .unknownSubtype)
+        }
+    }
     func testSubtypeAccessorMatchesWire() throws {
         XCTAssertEqual(try system("system_mirror_error").subtype, "mirror_error")
         XCTAssertEqual(try system("system_model_consent_fallback").subtype, "model_consent_fallback")

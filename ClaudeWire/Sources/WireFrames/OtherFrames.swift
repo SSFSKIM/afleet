@@ -61,9 +61,11 @@ public typealias TranscriptMirrorFrame = Lossless<TranscriptMirrorFields>
 
 /// Not in the public union; modelled from the bundle. The wire key is `state`, not `event`:
 /// `queued | started | completed | cancelled | discarded | refused`
-/// [2.1.258 `cli.pretty.js` schema `yse`]. The plan's table said `event`, which is on no frame.
+/// [2.1.258 `cli.pretty.js` schema `yse`]. The plan's table said `event`, which is on no frame, and
+/// marked `command_uuid`, `uuid` and `session_id` optional; the schema requires all three, and this
+/// is the frame whose drift the routing table exists to catch, so they are required here.
 public struct CommandLifecycleFields: Codable, Hashable, Sendable, DeclaredKeys {
-    public var type: String; public var state: String; public var commandUUID: String?; public var uuid: String?; public var sessionID: String?
+    public var type: String; public var state: String; public var commandUUID: String; public var uuid: String; public var sessionID: String
     public enum CodingKeys: String, CodingKey, CaseIterable { case type, state, commandUUID = "command_uuid", uuid, sessionID = "session_id" }
 }
 public typealias CommandLifecycleFrame = Lossless<CommandLifecycleFields>

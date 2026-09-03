@@ -166,9 +166,12 @@ public typealias ControlRequestProgress = Lossless<ControlRequestProgressFields>
 
 // MARK: - model fallbacks
 
+/// `request_id` is nullable but always present (schema `i().nullable()`, unchanged in 2.1.257 and
+/// 2.1.258): the server refusal lane emits it as null. Declared `String?` like `parent_tool_use_id`,
+/// so `Lossless.explicitNulls` re-emits the null and the frame stays typed.
 public struct ModelRefusalFallbackFields: Codable, Hashable, Sendable, DeclaredKeys {
     public var type: String; public var subtype: String; public var trigger: String; public var direction: String; public var scope: String?
-    public var originalModel: String; public var fallbackModel: String; public var requestID: String
+    public var originalModel: String; public var fallbackModel: String; public var requestID: String?
     public var apiRefusalCategory: String?; public var apiRefusalExplanation: String?
     public var retractedMessageUUIDs: [String]?; public var refusedUserMessageUUID: String?; public var content: String
     public var uuid: String; public var sessionID: String
@@ -180,8 +183,9 @@ public struct ModelRefusalFallbackFields: Codable, Hashable, Sendable, DeclaredK
 }
 public typealias ModelRefusalFallback = Lossless<ModelRefusalFallbackFields>
 
+/// `request_id` is nullable but always present, as on `model_refusal_fallback`.
 public struct ModelRefusalNoFallbackFields: Codable, Hashable, Sendable, DeclaredKeys {
-    public var type: String; public var subtype: String; public var originalModel: String; public var requestID: String
+    public var type: String; public var subtype: String; public var originalModel: String; public var requestID: String?
     public var apiRefusalCategory: String?; public var apiRefusalExplanation: String?; public var refusedUserMessageUUID: String?
     public var content: String; public var uuid: String; public var sessionID: String
     public enum CodingKeys: String, CodingKey, CaseIterable {
@@ -358,14 +362,16 @@ public enum SystemFrame: Sendable {
     ]
     public static var knownSubtypes: Set<String> { Set(routes.keys) }
 
-    /// An unmodelled subtype becomes `.system(.opaque)` — a new subtype the drift counter can name.
-    /// A modelled subtype whose payload does not decode becomes the top-level `.opaque` with
-    /// `type: "system"` and a `decodeFailure` reason, so "new subtype" and "known subtype, new
-    /// shape" stay distinguishable.
+    /// Three outcomes, kept distinct so the drift counter can tell them apart:
+    /// no identifiable subtype (key absent, or present but not a string) is the top-level `.opaque`
+    /// with `.unknownSubtype`; an identified but unmodelled subtype is `.system(.opaque)`, a new
+    /// subtype the counter can name; and a modelled subtype whose payload does not decode is the
+    /// top-level `.opaque` with a `decodeFailure` reason — a known subtype with a new shape.
     static func decode(line: Data, value: JSONValue, subtype: String?) -> Frame {
-        guard let subtype, let route = routes[subtype] else {
-            return .system(.opaque(subtype: subtype ?? "", value))
+        guard let subtype else {
+            return .opaque(.init(raw: line, value: value, type: "system", subtype: nil, reason: .unknownSubtype))
         }
+        guard let route = routes[subtype] else { return .system(.opaque(subtype: subtype, value)) }
         do { return .system(try route(line)) }
         catch {
             let f = DecodeFailure(error)

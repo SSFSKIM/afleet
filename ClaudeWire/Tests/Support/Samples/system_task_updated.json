@@ -1,1 +1,1 @@
-{"type":"system","subtype":"task_updated","task_id":"a1b2c3d4e5f6a7b8c","patch":{"status":"completed","end_time":"2026-09-04T00:00:05.000Z"},"uuid":"6d1d4b1e-0000-4000-8000-000000000033","session_id":"1b2c3d4e-0000-4000-8000-00000000abcd"}
+{"type":"system","subtype":"task_updated","task_id":"a1b2c3d4e5f6a7b8c","patch":{"status":"completed","end_time":1788480005000},"uuid":"6d1d4b1e-0000-4000-8000-000000000033","session_id":"1b2c3d4e-0000-4000-8000-00000000abcd"}
