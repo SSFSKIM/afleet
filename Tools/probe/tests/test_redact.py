@@ -1,4 +1,4 @@
-import json
+import copy
 import unittest
 import _paths  # noqa: F401
 import redact
@@ -18,6 +18,13 @@ class RedactTextTests(unittest.TestCase):
         self.assertNotIn("sk-ant-api03", out)
         self.assertNotIn("eyJhbGci", out)
         self.assertIn("<redacted>", out)
+
+    def test_single_letter_tld_and_deliberate_over_match(self):
+        # The TLD quantifier is `+`, so a one-character TLD is caught (fail-closed) and
+        # version specifiers are over-matched. Both are intended; pin them so a fixture
+        # reviewer meeting `<email>` where `pkg@1.x` was is not surprised.
+        self.assertEqual(self.r.redact_text("a@b.c"), "<email>")
+        self.assertEqual(self.r.redact_text("install pkg@1.x"), "install <email>")
 
     def test_long_hex_in_url_query_only(self):
         url = "https://x.test/cb?code=0123456789abcdef0123456789abcdef&state=s"
@@ -118,6 +125,143 @@ class ScanTests(unittest.TestCase):
     def test_report_only(self):
         hits = redact.scan_report_only("by Probe Person in /Users/someone/x", author="Probe Person", home="/Users/probe")
         self.assertEqual(len(hits), 2)
+
+
+class RedactKeyTests(unittest.TestCase):
+    """C1: a string in key position is data too."""
+
+    def setUp(self):
+        self.r = redact.Redactor(home="/Users/probe", hostname="probe-mac")
+
+    def test_home_path_and_email_in_key_position_are_redacted(self):
+        out = self.r.redact_json({"projects": {"/Users/probe/code/app": {"a": 1}},
+                                  "contacts": {"a.b@example.com": {"n": 1}}})
+        self.assertEqual(out, {"projects": {"~/code/app": {"a": 1}},
+                               "contacts": {"<email>": {"n": 1}}})
+
+    def test_colliding_redacted_keys_are_disambiguated(self):
+        out = self.r.redact_json({"a@x.com": 1, "b@y.com": 2})
+        self.assertEqual(out, {"<email>": 1, "<email>#2": 2})
+        self.assertEqual(self.r.redact_json(out), out)
+
+    def test_manifest_paths_do_not_leak_the_home_directory(self):
+        self.r.redact_json({"projects": {"/Users/probe/code/app": {"token": "t"}}})
+        self.assertIn("projects.~/code/app.token", self.r.manifest()["rules"]["secrets"]["paths"])
+        self.assertEqual(redact.scan(self.r.manifest(), home="/Users/probe"), [])
+
+    def test_scan_flags_strings_in_key_position(self):
+        hits = redact.scan({"projects": {"/Users/probe/code/app": {}}, "c": {"a.b@example.com": {}}},
+                           home="/Users/probe")
+        self.assertEqual(len(hits), 2)
+        self.assertTrue(all("in key" in h for h in hits))
+
+
+class SecretKeyPredicateTests(unittest.TestCase):
+    """C2 and I3: the predicate `redact_json` and `scan` share."""
+
+    def setUp(self):
+        self.r = redact.Redactor(home="/Users/probe", hostname="probe-mac")
+
+    def test_plural_token_field_is_redacted_but_int_counters_survive(self):
+        out = self.r.redact_json({"access_tokens": "aBcD1234secretvalue", "ephemeral_5m_input_tokens": 12})
+        self.assertEqual(out["access_tokens"], "<redacted>")
+        self.assertEqual(out["ephemeral_5m_input_tokens"], 12)
+        self.assertEqual(redact.scan({"access_tokens": "aBcD1234secretvalue"}, home="/Users/probe"),
+                         ["access_tokens: secret-named field not redacted"])
+
+    def test_password_and_bearer_named_fields(self):
+        self.assertEqual(self.r.redact_json({"password": "p", "bearerToken": "b", "PASSWORD": "q"}),
+                         {"password": "<redacted>", "bearerToken": "<redacted>", "PASSWORD": "<redacted>"})
+
+    def test_camelcase_and_cased_identity_keys(self):
+        out = self.r.redact_json({"subscriptionType": "max", "accountUuid": "u", "Account": {"x": 1},
+                                  "user_id": 7, "emailAddress": "opaque-id-12345", "organizationId": 3})
+        self.assertEqual(out, {"subscriptionType": "<subscriptionType>", "accountUuid": "<accountUuid>",
+                               "Account": "<Account>", "user_id": "<user_id>", "emailAddress": "<email>",
+                               "organizationId": "<organizationId>"})
+        self.assertEqual(len(redact.scan({"subscriptionType": "max"}, home="/Users/probe")), 1)
+
+    def test_hook_event_keys_are_structural_and_survive(self):
+        hooks = {"hooks": {"UserPromptSubmit": [{"matcher": "*"}], "PreToolUse": []}}
+        self.assertEqual(self.r.redact_json(hooks), hooks)
+
+
+class FrameFailClosedTests(unittest.TestCase):
+    """I4 and I5: the request subtype is a hint, not a gate."""
+
+    def setUp(self):
+        self.r = redact.Redactor(home="/Users/probe", hostname="probe-mac")
+
+    def test_uncorrelated_response_still_drops_settings_and_oauth_queries(self):
+        resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "rX", "response": {
+            "effective": {"env": {"P": "hunter2"}},
+            "nested": {"manualUrl": "https://claude.ai/o?code_challenge=abc&state=xyz"}}}}
+        body = self.r.redact_frame(resp, "in", {})["response"]["response"]
+        self.assertNotIn("effective", body)
+        self.assertEqual(body["effective_keys"], ["env"])
+        self.assertEqual(body["nested"]["manualUrl"], "https://claude.ai/o?<redacted>")
+
+    def test_correlated_non_oauth_response_keeps_its_urls(self):
+        resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r7",
+                "response": {"docsUrl": "https://docs.test/page?section=intro"}}}
+        body = self.r.redact_frame(resp, "in", {"r7": "get_settings"})["response"]["response"]
+        self.assertEqual(body["docsUrl"], "https://docs.test/page?section=intro")
+
+    def test_non_dict_effective_is_still_dropped(self):
+        resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r2",
+                "response": {"effective": "model=opus;env.SECRET=hunter2"}}}
+        body = self.r.redact_frame(resp, "in", {"r2": "get_settings"})["response"]["response"]
+        self.assertNotIn("effective", body)
+        self.assertEqual(body["effective_keys"], [])
+
+    def test_redact_frame_does_not_mutate_the_caller_frame(self):
+        frames = [({"type": "control_request", "request_id": "r1", "request": {"subtype": "mcp_message",
+                    "message": {"jsonrpc": "2.0", "id": 7, "method": "t", "params": {"b": "x" * 5000}}}}, {}),
+                  ({"type": "control_response", "response": {"request_id": "r2", "response": {
+                    "effective": {"model": "opus"}, "url": "https://c.ai/o?a=b"}}}, {"r2": "get_settings"}),
+                  ({"type": "assistant", "message": {"text": "from /Users/probe on probe-mac"}}, {})]
+        for frame, subs in frames:
+            before = copy.deepcopy(frame)
+            self.r.redact_frame(frame, "in", subs)
+            self.assertEqual(frame, before)
+
+
+class ManifestAndScanContractTests(unittest.TestCase):
+    def setUp(self):
+        self.r = redact.Redactor(home="/Users/probe", hostname="probe-mac")
+
+    def test_manifest_is_idempotent_across_runs(self):
+        frame = {"type": "control_response", "response": {"request_id": "r3",
+                 "response": {"manualUrl": "https://c.ai/o?a=b"}}}
+        subs = {"r3": "claude_authenticate"}
+        once = self.r.redact_frame(frame, "in", subs)
+        first = self.r.manifest()
+        self.r.redact_frame(once, "in", subs)
+        self.assertEqual(self.r.manifest(), first)
+
+    def test_scan_is_clean_on_redactor_output(self):
+        payload = {"account": {"uuid": "u"}, "subscriptionType": "max", "apiKeySource": "user",
+                   "emailAddress": "opaque-id-1", "accessToken": "sk-ant-api03-XYZ", "oauth": {"r": "t"},
+                   "access_tokens": "aBcD1234secretvalue", "input_tokens": 5,
+                   "projects": {"/Users/probe/code/app": {"note": "dev.ops@corp.example on probe-mac"}},
+                   "url": "https://x.test/cb?code=0123456789abcdef0123456789abcdef"}
+        out = self.r.redact_json(payload)
+        self.assertEqual(redact.scan(out, home="/Users/probe", hostname="probe-mac"), [])
+
+    def test_scan_flags_the_recording_hostname_only_when_given_one(self):
+        self.assertEqual(redact.scan({"a": "built on probe-mac"}, home="/Users/probe"), [])
+        self.assertEqual(redact.scan({"a": "built on probe-mac"}, home="/Users/probe", hostname="probe-mac"),
+                         ["a: hostname"])
+
+    def test_scan_flags_an_unredacted_api_key_source(self):
+        self.assertEqual(redact.scan({"apiKeySource": "user"}, home="/Users/probe"),
+                         ["apiKeySource: identity field not redacted"])
+        self.assertEqual(redact.scan({"apiKeySource": "none"}, home="/Users/probe"), [])
+        self.assertEqual(redact.scan({"apiKeySource": "<apiKeySource>"}, home="/Users/probe"), [])
+
+    def test_report_only_tolerates_a_missing_home(self):
+        self.assertEqual(redact.scan_report_only("in /Users/someone/x", author=None, home=None),
+                         ["path under /Users: /Users/someone"])
 
 
 if __name__ == "__main__":

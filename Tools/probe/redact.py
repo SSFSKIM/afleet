@@ -1,4 +1,15 @@
-"""Redaction rules (spec §4.5), applied structurally and in memory, with a manifest."""
+"""Redaction rules (spec §4.5), applied structurally and in memory, with a manifest.
+
+Two properties hold this module together and both are load-bearing for the child:
+
+*Fail closed.* Where a rule cannot tell whether something is sensitive, it redacts.
+Over-redacting a synthetic fixture costs a reviewer a moment of confusion; under-redacting
+writes a real secret to a committed file.
+
+*One predicate, two consumers.* `scan` reuses this module's own predicates, so wherever
+the redactor is blind `verify` is blind to the same thing and the leak is undetectable by
+the tooling. Widen a predicate and both halves widen together; never fork them.
+"""
 import collections
 import json
 import os
@@ -7,27 +18,62 @@ import socket
 
 # The TLD quantifier is deliberately `+`, not `{2,}`: these rules are fail-closed, and a
 # single-letter TLD that slips through reaches disk unredacted. Over-matching is harmless
-# here (a version spec redacted to <email> in a synthetic fixture costs nothing).
+# here (a version spec like `pkg@1.x` redacted to <email> in a synthetic fixture costs
+# nothing) and is pinned by a test so a fixture reviewer is not surprised by it.
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]+")
 SK_ANT_RE = re.compile(r"sk-ant-[A-Za-z0-9_\-]+")
 JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}")
 QUERY_RUN_RE = re.compile(r"([?&][A-Za-z0-9_\-]+=)([A-Fa-f0-9]{32,}|[A-Za-z0-9+/=_\-]{32,})")
 QUERY_RE = re.compile(r"\?.*$")
-IDENTITY_KEYS = ("account", "organization", "user", "subscription_type")
-SECRET_WORDS = ("token", "oauth", "key", "secret", "credential", "authorization", "cookie")
+# A key that redaction already replaced. `redact` re-runs on a committed fixture, and
+# without this a `<email>` key would re-trigger the `email` substring test below and
+# overwrite its own value on the second pass.
+PLACEHOLDER_KEY_RE = re.compile(r"^<[^<>]*>(#\d+)?$")
+
+# Identity keys match *exactly* against the normalised key, never as a substring: `user`
+# as a substring would swallow the `UserPromptSubmit` hook-event name, which appears as a
+# dictionary key in the `hooks` object of the §6.2 initialize payload. `email` is the one
+# substring match, because no structural protocol key contains it innocuously.
+IDENTITY_KEYS = frozenset(("account", "accountuuid", "accountid",
+                           "organization", "organizationuuid", "organizationid",
+                           "user", "userid", "useruuid",
+                           "subscription", "subscriptiontype"))
+SECRET_WORDS = ("token", "oauth", "key", "secret", "credential", "authorization", "cookie",
+                "password", "bearer")
 USAGE_COUNTERS = {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
                   "thinking_tokens", "max_tokens", "tokens", "total_tokens", "maxtokens", "rawmaxtokens"}
-SECRET_EXEMPT = {"apikeysource", "hookcallbackids", "projectkey", "sessionkey"}
+SECRET_EXEMPT = frozenset(("apikeysource", "hookcallbackids", "projectkey", "sessionkey"))
 OAUTH_SUBTYPES = ("claude_authenticate", "claude_oauth_callback", "claude_oauth_wait_for_completion",
                   "mcp_authenticate", "mcp_oauth_callback_url")
 MCP_LIMIT = 4096
 
 
-def _is_secret_key(k):
+def _norm_key(k):
+    """Fold the casing and separators the wire mixes freely: the protocol uses camelCase
+    (`subscriptionType`, `accountUuid`) where the spec's prose uses snake_case."""
+    return k.lower().replace("_", "").replace("-", "")
+
+
+def _is_secret_key(k, value=None):
+    """Rule 2's name test, which needs the value for one exemption.
+
+    `*_tokens` names are exempted only when the value is an integer. The suffix earns its
+    exemption because `ephemeral_5m_input_tokens` is a counter that is not in the explicit
+    set, but the distinguishing property is the value, not the name: `access_tokens` is a
+    secret with a plural name and must not ride the same exemption.
+    """
     lk = k.lower()
-    if lk in SECRET_EXEMPT or lk in USAGE_COUNTERS or lk.endswith("_tokens"):
+    if _norm_key(k) in SECRET_EXEMPT or lk in USAGE_COUNTERS:
+        return False
+    if lk.endswith("_tokens") and isinstance(value, int):
         return False
     return any(w in lk for w in SECRET_WORDS)
+
+
+def _is_identity_key(nk):
+    if PLACEHOLDER_KEY_RE.match(nk):
+        return False
+    return nk in IDENTITY_KEYS or "email" in nk
 
 
 class Redactor:
@@ -42,28 +88,35 @@ class Redactor:
 
     # ---- bookkeeping
     def _hit(self, rule, path):
+        # The manifest is written to `redaction.json`, which §4.4 commits, and its paths are
+        # built from key names -- which are themselves data. Scrub here so the guarantee holds
+        # at one chokepoint for every rule rather than at each call site.
         self.counts[rule]["count"] += 1
-        self.counts[rule]["paths"][path or "$"] += 1
+        self.counts[rule]["paths"][self.redact_text(path, record=False) or "$"] += 1
 
     def manifest(self):
         return {"rules": {r: {"count": v["count"], "paths": dict(v["paths"])} for r, v in self.counts.items()}}
 
     # ---- text
-    def redact_text(self, s, path=""):
+    def redact_text(self, s, path="", record=True):
+        """Rules 1, 2 and 3 over a string. `record=False` suppresses bookkeeping, which is
+        what `_hit` needs to sanitise a manifest path without recursing into itself."""
         out = s
         out, k = EMAIL_RE.subn("<email>", out)
-        if k: self._hit("identity", path)
+        if k and record: self._hit("identity", path)
         for rx in (SK_ANT_RE, JWT_RE):
             out, k = rx.subn("<redacted>", out)
-            if k: self._hit("secrets", path)
+            if k and record: self._hit("secrets", path)
         out, k = QUERY_RUN_RE.subn(lambda m: m.group(1) + "<redacted>", out)
-        if k: self._hit("secrets", path)
+        if k and record: self._hit("secrets", path)
         for h in (self.home, self.home_raw):
             if h and h != "/" and h in out:
-                out = out.replace(h, "~"); self._hit("paths_host", path)
+                out = out.replace(h, "~")
+                if record: self._hit("paths_host", path)
         for h in (self.hostname, self.short_host):
             if h and len(h) > 2 and h in out:
-                out = out.replace(h, "<host>"); self._hit("paths_host", path)
+                out = out.replace(h, "<host>")
+                if record: self._hit("paths_host", path)
         return out
 
     # ---- structural
@@ -71,27 +124,43 @@ class Redactor:
         if isinstance(obj, dict):
             out = {}
             for k, v in obj.items():
-                p = "%s.%s" % (path, k) if path else k
-                lk = k.lower()
-                if k in IDENTITY_KEYS or lk.endswith("email") or lk == "email":
-                    if v is not None and v != "<%s>" % k and v != "<email>":
-                        out[k] = "<email>" if "email" in lk else "<%s>" % k
+                # A key is data too: project maps are keyed by absolute path and contact maps
+                # by address. Predicates read the original key (structural meaning); the output
+                # and the manifest path use the redacted one.
+                rk = self.redact_text(k, path)
+                if rk in out:
+                    # Redaction can map two distinct keys onto one placeholder (two addresses
+                    # both become `<email>`). Disambiguate rather than let the second silently
+                    # overwrite the first: a fixture that quietly loses a subtree is wrong
+                    # evidence, and wrong evidence is worse than verbose evidence.
+                    n = 2
+                    while "%s#%d" % (rk, n) in out:
+                        n += 1
+                    rk = "%s#%d" % (rk, n)
+                p = "%s.%s" % (path, rk) if path else rk
+                nk = _norm_key(k)
+                if _is_identity_key(nk):
+                    placeholder = "<email>" if "email" in nk else "<%s>" % rk
+                    if v is None or v == placeholder or v == "<email>":
+                        out[rk] = v
+                    else:
+                        out[rk] = placeholder
                         self._hit("identity", p)
-                    else:
-                        out[k] = v
                     continue
-                if k == "apiKeySource":
-                    if v not in ("none", "<apiKeySource>", None):
-                        out[k] = "<apiKeySource>"; self._hit("identity", p)
+                if nk == "apikeysource":
+                    placeholder = "<%s>" % rk
+                    if v in ("none", placeholder, None):
+                        out[rk] = v
                     else:
-                        out[k] = v
+                        out[rk] = placeholder
+                        self._hit("identity", p)
                     continue
-                if _is_secret_key(k) and (isinstance(v, str) or (isinstance(v, (dict, list)) and lk in ("oauth", "credentials", "credential"))):
+                if _is_secret_key(k, v) and (isinstance(v, str) or (isinstance(v, (dict, list)) and nk in ("oauth", "credentials", "credential"))):
                     if v != "<redacted>":
                         self._hit("secrets", p)
-                    out[k] = "<redacted>"
+                    out[rk] = "<redacted>"
                     continue
-                out[k] = self.redact_json(v, request_subtype, p)
+                out[rk] = self.redact_json(v, request_subtype, p)
             return out
         if isinstance(obj, list):
             return [self.redact_json(v, request_subtype, "%s[%d]" % (path, i)) for i, v in enumerate(obj)]
@@ -99,7 +168,7 @@ class Redactor:
             return self.redact_text(obj, path)
         return obj
 
-    # ---- frame-level rules (4, 5, 6 need the request subtype; 2's drop rule needs the frame)
+    # ---- frame-scoped rules
     def _truncate_mcp(self, msg, path):
         if isinstance(msg, dict) and len(json.dumps(msg)) > MCP_LIMIT:
             kept = {k: msg[k] for k in ("jsonrpc", "id", "method") if k in msg}
@@ -108,7 +177,33 @@ class Redactor:
             return kept
         return msg
 
+    def _redact_urls(self, node, path):
+        """Rule 6, applied to nested strings too: a callback URL is not always top-level."""
+        if isinstance(node, dict):
+            for k, v in list(node.items()):
+                node[k] = self._redact_urls(v, "%s.%s" % (path, k))
+            return node
+        if isinstance(node, list):
+            return [self._redact_urls(v, "%s[%d]" % (path, i)) for i, v in enumerate(node)]
+        if isinstance(node, str) and node.startswith("http") and "?" in node:
+            new = QUERY_RE.sub("?<redacted>", node)
+            if new != node:
+                # Only on a real substitution: `redact` re-runs on a committed fixture and
+                # `redaction.json` is committed, so the manifest must be idempotent too.
+                self._hit("oauth_flow", path)
+            return new
+        return node
+
     def redact_frame(self, frame, direction, request_subtypes):
+        """`direction` is unused here by design: the caller owns the tombstone line that
+        records it (`{"t":..,"dir":"out","dropped":..}`), and only the caller knows the
+        timestamp that goes beside it.
+
+        The frame-scoped rules (4, 5, 6) run before the recursive walk of rules 1-3 even
+        though §4.5 numbers them the other way. They must: rule 5 needs the pre-redaction
+        `effective` dict and rule 4 needs the pre-redaction body size. §4.5's "in this
+        order" numbers the rules, it does not sequence execution.
+        """
         t = frame.get("type")
         if t == "control_request":
             sub = (frame.get("request") or {}).get("subtype")
@@ -125,36 +220,69 @@ class Redactor:
             f = json.loads(json.dumps(frame))
             body = (f.get("response") or {}).get("response")
             if isinstance(body, dict):
-                if sub == "mcp_message" and "mcp_response" in body:
+                # The subtype is a hint, not a gate. Correlation is lost for a late response
+                # (§4.4's `late_responses`), and a rule that only fires on a known subtype
+                # fails open exactly when the frame is least understood. Rules 4 and 5 key off
+                # the body's own shape; rule 6 fires on an OAuth subtype or an unknown one, so
+                # a correlated non-OAuth response keeps its URLs and an uncorrelated one is
+                # treated as possibly-OAuth.
+                if "mcp_response" in body:
                     body["mcp_response"] = self._truncate_mcp(body["mcp_response"], "response.mcp_response")
-                if sub == "get_settings":
-                    if "effective" in body:
-                        body["effective_keys"] = sorted(body.pop("effective").keys()) if isinstance(body.get("effective"), dict) else []
-                        self._hit("settings_bodies", "response.effective")
-                    if "sources" in body:
-                        srcs = body.pop("sources")
-                        body["sources_keys"] = [{"source": s.get("source"), "keys": sorted((s.get("settings") or {}).keys())}
-                                                for s in srcs if isinstance(s, dict)]
-                        self._hit("settings_bodies", "response.sources")
-                if sub in OAUTH_SUBTYPES:
-                    for k, v in list(body.items()):
-                        if isinstance(v, str) and "?" in v and v.startswith("http"):
-                            body[k] = QUERY_RE.sub("?<redacted>", v); self._hit("oauth_flow", "response.%s" % k)
+                if "effective" in body:
+                    eff = body.pop("effective")
+                    body["effective_keys"] = sorted(eff.keys()) if isinstance(eff, dict) else []
+                    self._hit("settings_bodies", "response.effective")
+                if "sources" in body:
+                    srcs = body.pop("sources")
+                    body["sources_keys"] = [{"source": s.get("source"), "keys": sorted((s.get("settings") or {}).keys())}
+                                            for s in srcs if isinstance(s, dict)] if isinstance(srcs, list) else []
+                    self._hit("settings_bodies", "response.sources")
+                if sub is None or sub in OAUTH_SUBTYPES:
+                    self._redact_urls(body, "response")
             return self.redact_json(f)
         return self.redact_json(frame)
 
 
-def scan(obj_or_text, home):
-    """Hard failures: anything a redaction rule would still change."""
+def _string_hits(s, path, probe, where=""):
+    """Rules 1, 2 and 3 as assertions rather than substitutions."""
     hits = []
-    probe = Redactor(home=home, hostname="\x00nohost\x00")
+    if EMAIL_RE.search(s):
+        hits.append("%s: email%s" % (path, where))
+    if SK_ANT_RE.search(s) or JWT_RE.search(s) or QUERY_RUN_RE.search(s):
+        hits.append("%s: secret pattern%s" % (path, where))
+    if probe.home in s or probe.home_raw in s:
+        hits.append("%s: home directory%s" % (path, where))
+    for h in (probe.hostname, probe.short_host):
+        if len(h) > 2 and h in s:
+            hits.append("%s: hostname%s" % (path, where))
+            break
+    return hits
+
+
+def scan(obj_or_text, home, *, hostname=None):
+    """Hard failures: anything a redaction rule would still change.
+
+    `hostname` is optional because the default cannot be inferred: `Redactor` falls back to
+    the local hostname, which on a reviewing machine is the wrong one. Without it the
+    hostname half of rule 3 is not checked, so a cross-machine review must pass the
+    recording hostname explicitly. The sentinel default cannot occur in real data.
+    """
+    hits = []
+    probe = Redactor(home=home, hostname=hostname or "\x00nohost\x00")
+
     def walk(o, path):
         if isinstance(o, dict):
             for k, v in o.items():
                 p = "%s.%s" % (path, k) if path else k
-                if (k in IDENTITY_KEYS or k.lower().endswith("email")) and v not in (None, "<email>", "<%s>" % k):
-                    hits.append("%s: identity field not redacted" % p)
-                elif _is_secret_key(k) and isinstance(v, str) and v != "<redacted>":
+                hits.extend(_string_hits(k, p, probe, " in key"))
+                nk = _norm_key(k)
+                if _is_identity_key(nk):
+                    if v not in (None, "<email>", "<%s>" % k):
+                        hits.append("%s: identity field not redacted" % p)
+                elif nk == "apikeysource":
+                    if v not in (None, "none", "<%s>" % k):
+                        hits.append("%s: identity field not redacted" % p)
+                elif _is_secret_key(k, v) and isinstance(v, str) and v != "<redacted>":
                     hits.append("%s: secret-named field not redacted" % p)
                 else:
                     walk(v, p)
@@ -162,18 +290,18 @@ def scan(obj_or_text, home):
             for i, v in enumerate(o):
                 walk(v, "%s[%d]" % (path, i))
         elif isinstance(o, str):
-            if EMAIL_RE.search(o): hits.append("%s: email" % path)
-            if SK_ANT_RE.search(o) or JWT_RE.search(o) or QUERY_RUN_RE.search(o): hits.append("%s: secret pattern" % path)
-            if probe.home in o or probe.home_raw in o: hits.append("%s: home directory" % path)
+            hits.extend(_string_hits(o, path, probe))
+
     walk(obj_or_text, "")
     return hits
 
 
 def scan_report_only(text, author, home):
+    """The two findings only a human can judge in context: reported, never failed."""
     hits = []
     if author and author in text:
         hits.append("author name appears: %s" % author)
     for m in re.finditer(r"/Users/[A-Za-z0-9._-]+", text):
-        if not m.group(0).startswith(home):
+        if not (home and m.group(0).startswith(home)):
             hits.append("path under /Users: %s" % m.group(0))
     return hits
