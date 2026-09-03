@@ -219,7 +219,7 @@ class Session:
         self._inbound_subtypes = {}  # CLI-originated request_id -> subtype (for the redactor's rule lookup)
         self._eof = False
         self._wait_cursor = 0
-        self._withdrawn = []         # ids a scenario cancelled, never inferred from frames
+        self._withdrawn = []         # ids a scenario cancelled; a set in all but type
         self.system_init = None
         self.proc = None
         self._stderr = collections.deque(maxlen=STDERR_RING_LINES)
@@ -513,9 +513,11 @@ class Session:
 
     @property
     def withdrawn_requests(self):
-        """Ids this scenario passed to `cancel()`, in order. Read by the recorder for
-        `fixture.json`; never derived from the captured frames, so a cancel the CLI sent for
-        its own request is not in here."""
+        """Ids this scenario passed to `cancel()`. Membership is the contract and order is
+        not: the append sits outside the stdin write, so two concurrent `cancel()` calls can
+        land here in either order, and `verify` reads the list as a set. Read by the recorder
+        for `fixture.json`; never derived from the captured frames, so a cancel the CLI sent
+        for its own request is not in here."""
         with self._lock:
             return list(self._withdrawn)
 
@@ -579,7 +581,12 @@ class Session:
         finally:
             if took_write_lock:
                 self._write_lock.release()
-        for sig in (None, signal.SIGTERM, signal.SIGKILL):
+        # The leading `None` is the graceful wait: five seconds for a child that was asked
+        # to leave. If the lock was never taken there was no asking -- no `end_session`, no
+        # stdin close -- so that wait can only measure nothing and then spend §6.7's budget
+        # twice over. Skip straight to the signal in that case.
+        escalation = (None, signal.SIGTERM, signal.SIGKILL) if took_write_lock else (signal.SIGTERM, signal.SIGKILL)
+        for sig in escalation:
             if sig is not None and self.proc.poll() is None:
                 self.proc.send_signal(sig)
             try:

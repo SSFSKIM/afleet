@@ -270,9 +270,10 @@ class SessionTests(unittest.TestCase):
     def test_close_is_bounded_when_a_writer_holds_the_stdin_lock(self):
         """§6.7's 5 s bound has to hold even when a dispatch thread is wedged mid-write:
         otherwise SIGTERM waits on the very writer only SIGTERM can unblock."""
-        s = self.run_session([])
+        # A child that stays alive, which is the case a wedged writer actually leaves behind:
+        # stdin is never closed and no end_session is sent, so nothing asks the child to go.
+        s = self.run_session(["ignore_end_session"])
         s.send_user("go"); s.wait_result(10)
-        s.proc.stdin.close()          # the child sees EOF and exits of its own accord
         outcome = {}
 
         def do_close():
@@ -291,10 +292,12 @@ class SessionTests(unittest.TestCase):
             s._write_lock.release()
         self.assertFalse(closer.is_alive(), "close() never returned: the bounded acquire is gone")
         self.assertIsNotNone(outcome["code"])
-        # Both ends: the bounded wait actually happened (a harness that skipped it and went
-        # straight to the signal would come back near zero) and it did not run away.
+        self.assertIn(outcome["code"], (-15, 143))     # settled by SIGTERM
+        # Both ends. The lower bound catches a harness that skipped the bounded acquire and
+        # went straight to the signal; the upper one catches spending §6.7's five seconds
+        # twice, once on the lock and again on a graceful wait for a child nobody asked to go.
         self.assertGreaterEqual(outcome["dt"], 4.9)
-        self.assertLess(outcome["dt"], 11.0)
+        self.assertLess(outcome["dt"], 8.0)
 
     def test_request_round_trip_and_close_sequence_with_a_stubborn_child(self):
         s = self.run_session(["ignore_end_session"])
