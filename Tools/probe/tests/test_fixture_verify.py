@@ -304,15 +304,19 @@ class VerifyTests(unittest.TestCase):
         self.assertTrue(any("cancel for h9" in x for x in e))
         self.assertTrue(any("unanswered request h9" in x for x in e))
 
-    def withdrawal(self, name, **overrides):
+    def withdrawal(self, name, cancel_dir="in", **overrides):
         """A host request the host cancels: `control-shapes`' oauth-wait shape.
+
+        The request travels `in`, host to CLI, so the cancel that withdraws it travels `in`
+        too -- a cancel always names one of the sender's own in-flight requests. `cancel_dir`
+        exists to state that the other way round and watch the escape refuse to apply.
 
         A CLI frame closes the recording so the tail tolerance cannot do the work, which keeps
         each of these about `withdrawn_requests` and nothing else.
         """
         d = build_fixture(self.root, name=name, **overrides)
         append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "o1", "request": {"subtype": "claude_oauth_wait_for_completion"}}})
-        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_cancel_request", "request_id": "o1"}})
+        append_frame(d, {"t": 96, "dir": cancel_dir, "frame": {"type": "control_cancel_request", "request_id": "o1"}})
         return d
 
     def test_a_declared_withdrawal_settles_a_host_request_that_never_answers(self):
@@ -329,6 +333,15 @@ class VerifyTests(unittest.TestCase):
 
     def test_a_host_cancel_without_the_declaration_still_fails(self):
         d = self.withdrawal("demo")
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        e = self.errors(d)
+        self.assertTrue(any("cancel for o1" in x for x in e))
+        self.assertTrue(any("unanswered request o1" in x for x in e))
+
+    def test_a_declared_withdrawal_cancelled_the_wrong_way_round_is_not_excused(self):
+        """The direction is the hazard: it is easy to state backwards, and backwards it either
+        excuses nothing or excuses everything, both invisibly until a recording is rejected."""
+        d = self.withdrawal("demo", cancel_dir="out", withdrawn_requests=["o1"])
         append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
         e = self.errors(d)
         self.assertTrue(any("cancel for o1" in x for x in e))
