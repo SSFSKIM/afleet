@@ -377,9 +377,13 @@ class Session:
                     self.answer(rid, {"continue": True}); return
                 if sub == "elicitation":
                     # §6.4's settlements are accept, decline and cancel; the host answers
-                    # `{action, content?}` (parity 31-27 §15.3). Declining settles without
-                    # inventing form content.
-                    self.answer(rid, {"action": "decline"}); return
+                    # `{action, content?}`. `cancel` rather than `decline` because that is
+                    # what the CLI itself answers when an elicitation cannot be completed
+                    # (parity 31-27 line 228), and because declining is a decision the
+                    # scenario did not make. Settling matters more here than elsewhere: the
+                    # idle watchdog is paused while an elicitation is open, so a host that
+                    # never answers hangs the tool call until the tool timeout.
+                    self.answer(rid, {"action": "cancel"}); return
                 if sub != "can_use_tool":
                     self.answer(rid, error="subtype %s not supported by afleet %s" % (sub, VERSION)); return   # the parent §6.3 string, verbatim
             if policy == "leave":

@@ -151,7 +151,9 @@ class SessionTests(unittest.TestCase):
         s.send_user("go"); s.wait_result(10); s.close()
         saw = {c["frame"]["what"]: c["frame"] for c in s.frames() if c.get("frame", {}).get("subtype") == "stand_in_saw"}
         self.assertEqual(saw["dialog_declared"]["response"], {"behavior": "cancelled"})
-        self.assertEqual(saw["elicitation"]["response"], {"action": "decline"})
+        # `cancel`, not `decline`: settling without making a decision the scenario did not
+        # make, which is what the CLI itself answers (parity 31-27 line 228).
+        self.assertEqual(saw["elicitation"]["response"], {"action": "cancel"})
 
     def test_a_scenario_policy_overrides_the_neutral_defaults(self):
         s = self.run_session(["elicitation"])
