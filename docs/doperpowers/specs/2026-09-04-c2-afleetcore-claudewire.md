@@ -229,7 +229,9 @@ only for the tools whose cards need fields — `Bash`, `Edit`, `Write`, `Read`, 
 `redactedThinking`, `toolUse`, `toolResult`, `image`, `document`, `.opaque(JSONValue)`).
 
 **Two-stage decoding.** A line is parsed once into `JSONValue`; the `type` and
-`subtype` strings select the model; the model decodes from the same value. Any failure
+`subtype` strings select the model; the typed model is then decoded by `JSONDecoder` from
+the same bytes (a `JSONValue`-backed `Decoder` would buy nothing observable), and every
+typed model keeps its undeclared keys in an `additional` bag so re-encoding is lossless. Any failure
 yields `Frame.opaque(OpaqueFrame(raw:, value:, reason:))` with
 `reason ∈ {unknownType, unknownSubtype, decodeFailure(field:, description:)}`. Opacity
 is for one-way frames; inbound `control_request` lines always produce an
@@ -364,6 +366,7 @@ public struct LaunchConfiguration: Hashable, Sendable {
   public var settingSources: [SettingSource]?      // nil = CLI default; [] = --setting-sources ""
   public var strictMCPConfig: Bool
   public var environment: ChildEnvironmentOptions  // forkSubagents = true, automodeDecisionLog = false, questionPreviewFormat: String? = nil
+  public var configHomeOverride: URL?              // tests and C1 recordings only: sets CLAUDE_CONFIG_DIR in the child; FleetKit never sets it (§6.9)
   public func arguments() -> [String]              // §6.1, fixed order
   public func childEnvironment(over base: ResolvedEnvironment) -> [String: String]  // §6.1 table applied; REMOTE, CONTAINER_ID, ENTRYPOINT removed
 }
@@ -402,10 +405,11 @@ public struct Handshake: Sendable {
 public actor ClaudeProcess {
   public init(epoch: ProcessEpoch, launch: LaunchConfiguration, environment: ResolvedEnvironment,
               configHome: ConfigHome, initialize: InitializeConfiguration = .init(),
-              policy: InboundPolicy = .default, mcpServer: AfleetMCPServer,
-              diagnostics: any DiagnosticsSink, capture: RawCapture?)
-  public nonisolated let events: AsyncStream<WireEvent>
-  public func spawn() async throws -> Handshake    // launches, writes initialize, waits ≤ 30 s for its response and system/init
+              policy: InboundPolicy? = nil,      // nil derives the §6.3 policy from `initialize` (declared kinds, registered hook ids)
+              mcpServer: AfleetMCPServer, diagnostics: any DiagnosticsSink, capture: RawCapture?,
+              eventBufferCapacity: Int = 4096)
+  public nonisolated let events: WireEventStream<WireEvent>   // an AsyncSequence over a bounded, lossless channel; iterate with for await
+  public func spawn(handshakeTimeout: Duration = .seconds(30)) async throws -> Handshake  // launches, writes initialize, waits for its response and system/init
   public func send(_ input: UserInput) async throws -> UUID
   public func send(raw frame: JSONValue) async throws
   public func request<R: ControlRequestSpec>(_ request: R, timeout: Duration? = nil) async throws -> R.Response
@@ -451,9 +455,11 @@ credential must not pretend to.
 `send` and `request` suspend until their bytes have been written to the pipe, so a
 caller cannot outrun the child and `EPIPE` surfaces as the crash path on the call that
 hit it. The stdout reader splits on `\n`, tolerates a final unterminated line at exit,
-and hands each line to the decoder and the raw tap; `events` is backed by a bounded
-buffer (4,096 frames by default, configurable at init) and when it is full the reader
-stops reading, so the CLI blocks on its own pipe write. Nothing is ever dropped and
+and hands each line to the decoder and the raw tap; `events` is a `WireEventStream`, an
+`AsyncSequence` over a bounded lossless channel (4,096 frames by default, configurable at
+init); `AsyncStream` cannot suspend its producer, which is why the type is not
+`AsyncStream`. When the channel is full the reader stops reading, so the CLI blocks on its
+own pipe write. Nothing is ever dropped and
 memory is bounded; the cost is that a stalled consumer pauses the engine, which is the
 right failure for a reducer that drains a frame in microseconds and is the failure the
 stress test in G1 provokes on purpose. There is no disk spool. A stderr reader fills a
@@ -832,3 +838,12 @@ Pending — written at finish.
   as evaluable at C1.G1 with merge allowed pending (§17.6); the token-refresh requests
   recorded as unreachable for afleet. The "Questions for the human gate" section is
   removed.
+- 2026-09-04: v3 at planning. Planning's hostile read changed three things: `events` is a
+  `WireEventStream<WireEvent>` (an `AsyncSequence` over a bounded channel) rather than
+  `AsyncStream`, which cannot suspend its producer and so cannot give the bounded lossless
+  buffer G1 requires; typed models decode with `JSONDecoder` from the same bytes rather
+  than from the parsed `JSONValue`, and keep undeclared keys in an `additional` bag, which
+  is what makes G2's lossless re-encoding provable; `LaunchConfiguration` gains
+  `configHomeOverride` for tests and recordings only. X3's consumers iterate `events` with
+  `for await` exactly as before. Plan:
+  `docs/doperpowers/plans/2026-09-04-c2-afleetcore-claudewire.md`.
