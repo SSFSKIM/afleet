@@ -669,3 +669,9 @@ Pending — written at finish.
   frames, so G2's removed-required-key case is producible without a live binary. (3)
   `keep_alive` frames are excluded from the census; they carry nothing and their timing
   varies. Plan: `docs/doperpowers/plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md`.
+- 2026-09-04: Planning split the tooling into `fixture.py` (layout, snapshot, streams,
+  artifacts, assembly) and `verify.py` (structural, lifecycle, redaction and review
+  checks) beside the four modules §4.1 names, so both are unit-testable without a live
+  binary; `probe.py` remains the only composition point. Discovery runs one
+  `unittest discover` per tool because `Tools/fake-claude` is not an importable
+  package name.

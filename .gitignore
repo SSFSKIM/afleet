@@ -6,3 +6,4 @@ DerivedData/
 /Fixtures/**/*.secret*
 
 .doperpowers/
+__pycache__/
