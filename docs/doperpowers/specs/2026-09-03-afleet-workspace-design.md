@@ -66,6 +66,9 @@ Terms of art used in this document, defined once here.
   permission, question, plan approval, dialog, elicitation.
 - **Cluster**: consecutive tool calls between two pieces of assistant prose, rendered
   collapsed under the prose and labeled by the engine's own `tool_use_summary` frame.
+- **Member**: an author in a channel: you; the main agent, shown as "Claude" with a model
+  badge or as the persona name when an agent is set; and each subagent type that has run
+  in the channel, authored by that type with its model badge.
 - **Panel**: the tabbed right-hand region: Thread, Files, Source Control, Terminal, Browser,
   GitHub.
 - **Link**: a typed reference (file, diff, URL, commit, pull request, command) any item can
@@ -181,7 +184,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
   [--session-id <uuid> | --resume <session-id> [--fork-session]] \
   [--model <m>] [--permission-mode <mode>] [--agent <a>] [--effort <l>] \
   [-n <name>] [--add-dir <dir>...] [-w [<worktree-name>]] \
-  [--allow-dangerously-skip-permissions]
+  [--allow-dangerously-skip-permissions] --enable-auth-status [--prompt-suggestions true]
 ```
 
 - `--permission-prompt-tool stdio` is the correctness fix and is sufficient on its own:
@@ -196,6 +199,9 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
 - `--allow-dangerously-skip-permissions` is passed only after the user accepted afleet's
   bypass disclaimer (§8.6); it makes `bypassPermissions` selectable at runtime without
   defaulting to it.
+- `--enable-auth-status` (hidden, present since 2.1.257) emits `auth_status` frames for
+  the auth banner. `--prompt-suggestions true` is passed only when the *Prompt
+  suggestions* setting is on; it is off by default because it costs a model call per turn.
 - New channels mint their own UUID and pass `--session-id`; existing channels pass
   `--resume`; forks add `--fork-session`. The launch flags only set initial state; all of
   them are changeable at runtime through the command router (§7.6).
@@ -344,6 +350,10 @@ registry record with `kind: "interactive"` names its session id and its pid is n
 otherwise *archived*. The registry and roster are watched with FSEvents and polled every
 five seconds as a fallback.
 
+**Foreign-session safety invariant.** afleet never stops, kills, signals or adopts a
+session that is running in the user's terminal. Adoption is offered only for background
+jobs. A foreign live channel is a read-only mirror until its process ends on its own.
+
 ### 7.2 Timeline and the differential invariant
 
 ```swift
@@ -416,10 +426,10 @@ channel.
 
 | Kind | Anchor | Content | Reply |
 |---|---|---|---|
-| Subagent | a task run with a subagent type | frames whose `parent_tool_use_id` matches (forwarded text and thinking), agent progress summaries, the subagent transcript when over | posts to the main session with a quoted reference `Re: agent <name>:`; appears in both places |
+| Subagent | a task run with a subagent type | frames whose `parent_tool_use_id` matches (forwarded text and thinking) rendered as messages authored by the agent type with its model badge, agent progress summaries, the subagent transcript when over; reads like a group chat | posts to the main session with a quoted reference `Re: agent <name>:`; appears in both places |
 | Tool detail | any tool call | full input, full output, structured `tool_use_result`, timing; copy and open-in-panel | posts to the main session with `Re: <tool> <short id>:` |
 | Task | background shell or monitor | its task frames and output | stop only |
-| Decision | a decision card | the decision and its outcome | replying instead of clicking sends text to the main session while the decision stays pending |
+| Decision | a decision card | the decision and its outcome | replying instead of clicking is the card's textual outcome: a permission card sends `deny` with your text as the `message`; a plan card sends the rejection with your text as feedback; a question card answers *Other* with your text |
 | Side question | *Ask on the side* on any message | question and answer pairs, tool-free | `side_question` with the accumulated `history` |
 | Sent file | a sent-file item | preview and caption | posts to the main session |
 
@@ -435,6 +445,12 @@ and `system/permission_denied`, `rate_limit_event` frames, and auth state from
 `auth_status` frames. Each row links to its channel and item; decisions can be answered
 from the Activity view. macOS notifications fire for decisions and completed turns in
 channels not in view.
+
+**Banners.** A `rate_limit_event` renders a banner at the top of the channel with the
+limit that applies and its reset time, and a row in Activity, until the next event clears
+it. An `auth_status` frame that reports a problem renders a banner with the state and a
+*Sign in* action that opens a Terminal tab running `claude auth login`; a healthy status
+clears it.
 
 ### 7.6 The composer command router
 
@@ -537,6 +553,9 @@ material set; the sidebar uses native vibrancy; type is the system font.
   elapsed time when no summary arrives; expandable inline to one row per call.
 - **Thinking** renders as a collapsible "Thought for N seconds", with the live estimate
   from `system/thinking_tokens` while streaming.
+- **Members.** Authorship follows the member model: your messages, the main agent's
+  messages with a model badge, and in threads the subagent type as author with its model
+  badge, so a subagent thread reads like a group chat.
 - **Turn summary** rows show duration, cost and stop reason; compaction is a divider.
 - **Header**: branch, model, mode, effort, a context meter from `get_context_usage`, and
   menus for MCP, reload skills and plugins, rename, fork, send to background, open in
@@ -564,7 +583,9 @@ router; `@` completes files via `file_suggestions`; `!` sends `bash_command`; im
 and file drop attach. Pickers for permission mode, model and effort on the right. Sending
 while a turn runs queues; `command_lifecycle` drives a "queued" chip with cancel via
 `cancel_async_message`. Editing a past user message calls `rewind_conversation` and
-prefills the returned text.
+prefills the returned text. When *Prompt suggestions* is on, the `prompt_suggestion`
+frame after each turn renders as ghost text in the composer that Tab accepts; it is off by
+default.
 
 ### 8.6 Bypass mode
 
@@ -615,9 +636,10 @@ Mitchell's Swift renderer or SwiftTerm is contained.
 
 ### 9.4 Browser
 
-`WKWebView` tabs per channel with URL bar, back, forward, reload, inspector; quick-open of
-dev-server URLs seen in tool output; links in messages open here, Cmd-click in the system
-browser.
+`WKWebView` tabs shared across the window, since the browser is not bound to a working
+directory: URL bar, back, forward, reload, inspector. Quick-open lists dev-server URLs seen
+in the current channel's tool output; links in messages open here, Cmd-click in the system
+browser. Tabs persist across channel switches and are stored in the app store.
 
 ### 9.5 Jobs
 
@@ -766,6 +788,16 @@ Behavior a person can observe. Commands assume the app is built with
 36. **Tests.** `xcodebuild test -scheme afleet` passes: ClaudeWire round-trip on every
     fixture frame type, FleetKit reducer and differential tests, command router, transcript
     reader, lane assignment, LinkRouter, and the `fake-claude` UI smoke.
+37. **Reply to a card.** Reply to a pending permission card with `use rg instead`. The
+    card shows denied, the tool is not run, and Claude's next message reflects the
+    feedback; the frame log shows `deny` with that message.
+38. **Members.** In a subagent thread, messages are authored by the agent type, for
+    example `Explore`, with a model badge, not by "Claude".
+39. **Shared browser.** Open a page in the Browser tab, switch channels and back; the
+    tab and its page are unchanged.
+40. **Prompt suggestions.** With the setting off, the frame log contains no
+    `prompt_suggestion` frames; turning it on and sending a message produces one and ghost
+    text appears in the composer.
 
 ## 14. Spike milestones
 
@@ -797,6 +829,14 @@ doperpowers:writing-plans turns them into tasks.
 - **S9 Differential harness.** Record one real session as a golden fixture with its
   transcript snapshot; make the wire reducer and transcript reader agree; write down the
   wire-only exclusion list.
+- **S10 Worktree under print mode.** Launch with `-p -w probe-wt` and confirm a worktree is
+  created, the session's cwd is inside it, and the transcript lands under the worktree's
+  slug. Promote *New isolated session*; otherwise create the worktree with `git worktree
+  add` before spawning.
+- **S11 Resume-at inclusivity.** With a recorded session, run `--resume <id>
+  --resume-session-at <uuid> --fork-session` and record whether the named entry is
+  included, and whether the fork's transcript starts there. Decides how *Fork from here*
+  on a message is implemented.
 
 ## 15. Natural seams for decomposition
 
@@ -995,6 +1035,35 @@ Seams 1 and 2 have no UI and unblock everything and can run on the macOS 15 mach
   (duplicates the CLI; one more protocol to drift).
   Date/Author: 2026-09-03 / kimmi with Claude
 
+- Decision: Replying to a decision card is the card's textual outcome: deny with message,
+  reject with feedback, or the *Other* answer.
+  Rationale: The turn is blocked on the decision, so a separate user message could not
+  reach the model until it resolves; deny-with-message is what the terminal's "No, and
+  tell Claude what to do differently" does. Rejected: reply posts text while the decision
+  stays pending (the earlier draft).
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: Subagents are members: frames with a `parent_tool_use_id` render authored by
+  the agent type with a model badge.
+  Rationale: Threads read like a group chat and the author is a fact the frames carry.
+  Rejected: all agent text authored as "Claude".
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: Browser tabs are shared across the window.
+  Rationale: The browser is not bound to a working directory; per-channel tabs lose
+  dev-server pages on every switch. Rejected: per-channel browser tabs (the earlier draft).
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: Prompt suggestions are off by default and toggleable.
+  Rationale: One model call per turn. Rejected: on by default.
+  Date/Author: 2026-09-03 / kimmi with Claude
+
+- Decision: Foreign-session safety is a named invariant: never stop, kill or adopt a
+  session running in the user's terminal; adoption only for background jobs.
+  Rationale: The user's terminal session is theirs; a wrong adoption would destroy live
+  work. Rejected: offering adoption for any live session.
+  Date/Author: 2026-09-03 / kimmi with Claude
+
 - Decision: Side questions use `side_question` with history, tool-free.
   Rationale: Verified control request with progress and history. Rejected for v1: hidden
   forked sessions as side chats (richer, more moving parts; revisit).
@@ -1117,3 +1186,7 @@ Pending — written at finish.
   interactive login shell; the existing `probes/` scripts seed the probe suite.
 - 2026-09-03: SDK typings are fetched on demand rather than vendored (all-rights-reserved
   license); unpublished control subtypes are modeled from source and fixtures.
+- 2026-09-03: Eight adoptions from the parallel design: reply-to-card semantics, subagents
+  as members, the foreign-session safety invariant named, rate-limit and auth banners made
+  concrete, prompt suggestions off by default, browser tabs shared across the window,
+  probes S10 and S11; project-then-worktree grouping was already present.
