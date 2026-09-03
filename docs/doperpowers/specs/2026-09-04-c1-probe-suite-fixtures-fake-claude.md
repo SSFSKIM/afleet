@@ -29,8 +29,8 @@ checklist; the recording scenarios that produce G1's fixture list; the spike sce
 and their findings; unit tests for the tools. **Out:** any Swift code (C2 owns the first
 package); fixtures for acceptance items the G1 list does not name, which later children
 record with the same tools when they need them; a hosted or continuous run of `make
-probe`, which stays an on-demand ritual; and any write under Claude Code's config home
-by anything in `Tools/`.
+probe`, which stays an on-demand ritual; any unredacted capture on disk, even
+git-ignored; and any write under Claude Code's config home by anything in `Tools/`.
 
 ## 3. Grounding
 
@@ -89,19 +89,29 @@ else, so it can be rewritten in another language without touching `Tools/probe`.
   removed `(type, subtype)` pairs, changed top-level key sets per pair, changed
   `capabilities`, and added or removed flags. This is what `make probe` runs.
 - `record <scenario> [--claude <path>] [--out Fixtures/<name>]`: runs one scenario
-  through the harness, writes the raw capture to `Fixtures/<name>/raw/` (ignored by git
-  through a `.gitignore` inside `Fixtures/` that excludes every `raw/` directory), then
-  runs `snapshot`, `redact` and `verify` in sequence and leaves the reviewer with the
-  redacted fixture plus a `redaction.json` manifest.
+  through the harness with the redaction rules of §4.5 applied to every frame in memory
+  as it arrives, so no unredacted byte is ever written. The redacted stream is held in
+  memory; a scenario that declares a large expected volume spills to a mode-0600
+  temporary file in a private directory outside the worktree, deleted when the run ends.
+  On completion it runs `snapshot`, assembles the fixture in a temporary directory and
+  renames it into `Fixtures/<name>/` in one step, then runs `verify` and leaves the
+  reviewer with the redacted fixture plus its `redaction.json` manifest. There is no
+  `raw/` directory and no `.gitignore` exception for one.
 - `snapshot <fixture>`: copies the session's transcript files out of the config home the
   scenario used into `Fixtures/<name>/transcript/` (§4.4), rewriting the project slug.
 - `redact <fixture>`: applies the rules of §4.5 in place, idempotently, and writes the
   manifest.
-- `verify <fixture>...`: runs the scanners of §4.5 against everything in the fixture and
-  fails on any hit; also checks the fixture's structural invariants (every `in`
-  control_response has a preceding `out` control_request with that id and vice versa,
-  timestamps are non-decreasing, `census.json` matches a recount of `frames.ndjson`).
-  `make verify-fixtures` runs it on every fixture and is the pre-commit check.
+- `verify <fixture>...`: runs the scanners of §4.5 against every file in the fixture and
+  fails on any hit; also checks the structural invariants. Request lifecycles are
+  checked as a state machine: every `control_request`, in either direction, must end in
+  a `control_response` in the opposite direction with the same `request_id`, or, for a
+  CLI-originated request, in a CLI `control_cancel_request` with that id, which itself
+  needs no reply; a response arriving after a cancel is permitted only when
+  `fixture.json` lists the id under `late_responses`. Timestamps are non-decreasing,
+  `census.json` matches a recount of `frames.ndjson`, every `<artifacts>/` token in a
+  frame or record resolves to a file under `artifacts/`, and `streams.json` offsets fall
+  inside the corresponding files under `initial/`. `make verify-fixtures` runs it on
+  every fixture and is the pre-commit check.
 
 Every subcommand takes `--claude <path>` and honours `AFLEET_CLAUDE_BINARY`; `make probe
 CLAUDE=Tools/fake-claude/fake-claude FIXTURE=<name>` is how item 32's second half runs.
@@ -120,29 +130,47 @@ policies a scenario picks per request kind: `allow` (echo `updatedInput`), `deny
 it does not know is the parent's §6.3 answer, an immediate error naming the subtype,
 so recordings exhibit the same behaviour the app will. It embeds a minimal in-process
 MCP server for `sdkMcpServers: ["afleet"]`: it answers the JSON-RPC `initialize`,
-`tools/list` with one tool, `send_user_file {path}`, and `tools/call` by returning the
-file's bytes as a resource, which is exactly what S5 needs to observe and what C2 will
-implement in Swift. Every frame in both directions is appended to the raw capture with
-a monotonic timestamp before anything else looks at it.
+`notifications/initialized`, `ping`, `tools/list` with one tool, and `tools/call`. The
+tool is `send_user_file {files: [string], caption?: string, status: "normal" |
+"proactive", display?: "render" | "attach"}`, the schema of the built-in `SendUserFile`
+that the parity inventory says a replacement must mirror
+(`docs/tui-parity/areas/13-10-23-context-memory-session-tools.md`, the `SendUserFile`
+rows) and the schema C2 implements in Swift; `tools/call` resolves each path against the
+scratch cwd, requires that it exists, and returns a text result naming the files sent.
+A JSON-RPC notification is answered, as the SDK does, with an outer `mcp_response` of
+`{"jsonrpc":"2.0","result":{},"id":0}`. Every frame in both directions passes through
+the redactor of §4.5 and is then appended to the in-memory capture with a monotonic
+timestamp before anything else looks at it.
 
 ### 4.4 Fixture format (contract X8, concrete)
 
 ```
 Fixtures/<name>/
   fixture.json        metadata: name, purpose, recorded_at, cli_version, launch (the
-                      exact argv and environment table), prompts, serves (acceptance
-                      items and spikes), census: true|false, synthetic: true|false,
-                      review: {reviewer, date, checklist_version}
+                      exact argv, plus the names and values of the child-environment
+                      variables the parent's §6.1 table names — an allowlist, never the
+                      full environment), prompts, serves (acceptance items and spikes),
+                      census: true|false, synthetic: true|false, hypothesis: true|false
+                      (a synthetic fixture whose shapes are not yet confirmed on the
+                      baseline binary), late_responses: [request ids], review:
+                      {reviewer, date, checklist_version}
   frames.ndjson       one JSON object per line: {"t": <ms since first frame, int>,
                       "dir": "out"|"in", "frame": {...}}; "out" is CLI to host, "in" is
                       host to CLI; both directions are recorded so replay can wait for
                       the host
-  transcript/         the session's files copied from <configHome>/projects/<slug>/:
-                      <sessionId>.jsonl, <sessionId>/ (subagents, tool results), and
-                      sidecars named <sessionId>*; paths are relative to projects/ and
-                      the slug is replaced by the literal directory name `_slug_`, with
-                      the original cwd recorded in fixture.json so fake-claude can
-                      rewrite it
+  initial/            the transcript state at spawn, relative to projects/ with the slug
+                      rewritten to `_slug_`: empty for a new session; for a resume, the
+                      prior session files exactly as they were before the CLI appended
+                      anything
+  streams.json        per logical stream (the main <sessionId>.jsonl, each subagent
+                      file, each sidecar), the byte offset at which the recorded appends
+                      begin; zero for streams that did not exist at spawn
+  transcript/         the final state of the same files after the last frame
+  artifacts/          files the CLI wrote outside the transcript that a frame or record
+                      names — background task output files under
+                      /private/tmp/claude-<uid>/<slug>/<session>/tasks/ above all — each
+                      stored under a tokenised relative path; the frames and records
+                      carry `<artifacts>/<relative path>` in place of the absolute path
   census.json         the census of frames.ndjson plus the flag list and version at
                       recording time
   redaction.json      the manifest: each rule applied, the field paths it touched and
@@ -153,20 +181,43 @@ Fixtures/<name>/
 Timestamps are relative and integer milliseconds because replay only needs deltas and
 absolute times are a redaction hazard. Session ids stay as recorded because the
 transcript snapshot, the `filePath` fields inside `transcript_mirror` frames and the
-registry semantics all key on them. The census is a set-based structure: for each
-`(type, subtype)` pair, the union of top-level keys seen, the count seen (informational,
-never compared, because model output varies between runs), the `capabilities` object
-from `system/init`, the CLI version and the sorted flag list. Comparison uses the pair
-set, the key sets, the capabilities and the flags; counts are printed, not diffed.
+registry semantics all key on them. `initial/`, `streams.json` and `transcript/`
+together let a replay reproduce the filesystem the app saw: the state at open, the
+appends in order, and the state at the end, which is what the parent's append-range
+invariant and C3's mirror tests compare against.
 
-A `synthetic: true` fixture is hand-written from the bundle's schemas rather than
-recorded, is excluded from `diff`, and is allowed only for wire paths that cannot be
-provoked on demand (§4.7 names them). Everything else is recorded.
+**The census** is a set-based fingerprint. For each frame it records the `(type,
+subtype)` pair and the frame's top-level key set, and one level down per discriminated
+payload: for `control_request` and `control_response` frames the key set of `request`
+and `response` keyed by the request's `subtype`; for `assistant` and `user` frames the
+key set of `message` and the set of content-block types; for `system` frames nothing
+further than the frame's own keys, which already carry the payload. It also records the
+`capabilities` object from `system/init`, the CLI version and the sorted flag list from
+`claude --help`, and per-pair counts as information only. Comparison distinguishes two
+kinds of scenario. Deterministic scenarios (the zero-cost census, `resume-no-replay`,
+the control-shape probes) compare pair sets, key sets, capabilities and flags exactly.
+Model-driven scenarios compare *required shapes*: the keys present in every recording of
+that scenario, accumulated across re-recordings in `census.json`; they alarm on a removed
+pair, a removed required key or a new pair, and never on an optional key or a count,
+because the model's choices vary between runs. This nested, required-versus-optional
+fingerprint extends the top-level-keys census the parent's §6.10 describes; the parent
+records the extension as a Revision Note at merge.
+
+A `synthetic: true` fixture is hand-written from schemas rather than recorded, is
+excluded from `diff`, and is allowed only for wire paths that cannot be provoked on
+demand (§4.7 names them). A synthetic fixture whose shapes have not yet been confirmed
+against the installed baseline binary is also `hypothesis: true`; `verify` accepts it,
+and every gate that rests on it stays provisional until the hypothesis flag is cleared
+by evidence from the baseline (§4.7). Everything else is recorded.
 
 ### 4.5 Redaction and review
 
-Redaction rules, applied to `frames.ndjson`, every file under `transcript/` and
-`census.json`, in this order, each recorded in the manifest:
+Redaction rules, applied to every file in the fixture — `frames.ndjson`,
+`fixture.json`, everything under `initial/`, `transcript/` and `artifacts/`, and
+`census.json` — in this order, each recorded in the manifest. They run in memory on each
+frame as the harness receives it and on each file as `snapshot` copies it, so the first
+byte written under `Fixtures/` is already redacted; `redact` re-runs them idempotently
+on a committed fixture.
 
 1. Account and identity: `account`, `apiKeySource` values other than `none`,
    `subscription_type`, `organization`, `user` and `email`-named fields anywhere are
@@ -203,22 +254,26 @@ and every path it touches is synthetic.
 
 ### 4.6 Recording isolation
 
-Two isolation levels, chosen per scenario in `fixture.json`:
+Two isolation levels, chosen per scenario in `fixture.json`; both run every scenario in
+a fresh synthetic scratch cwd:
 
-- **Setting isolation**, the default: the real config home, `--setting-sources ""` so no
-  user allow rule silently approves a tool, `--strict-mcp-config` so no user or project
-  MCP server joins the census, model `haiku` unless the scenario says otherwise,
-  `--max-turns` set per scenario. This is the configuration this session's probes used
-  and it is known to work with the machine's login.
-- **Config-home isolation**, preferred once the login question at the gate is settled:
-  `CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home`, a scratch home logged in once
-  by hand, so recordings leave nothing in the real `~/.claude`, the census sees no user
-  plugins, skills or memory files, and S13's trust write and S17's agent definitions
-  land in a throwaway `.claude.json`. The harness never writes into either home; the CLI
-  does what it does.
+- **Config-home isolation**, the default (settled at the gate):
+  `CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home`, a scratch home the user logs
+  into once by hand before the first recording. Recordings leave nothing in the real
+  `~/.claude`; the census sees no user plugins, skills or memory files; S13's trust
+  write and S17's agent definitions land in a throwaway `.claude.json`. Setting sources
+  default to `--setting-sources ""` for a stable census, and a scenario that needs the
+  project source (S17's `.claude/agents/` in the scratch cwd) widens it, which is safe
+  under the scratch home. `--strict-mcp-config` keeps the census free of MCP servers,
+  with the S5 exception in §4.7. Model `haiku` unless the scenario says otherwise,
+  `--max-turns` set per scenario.
+- **Setting isolation**, the fallback for a machine whose scratch home is not logged
+  in: the real config home with `--setting-sources ""` and `--strict-mcp-config`, the
+  configuration this session's probes used. It leaves one transcript per recording under
+  the real `~/.claude/projects` and is used only when the default cannot be.
 
-Both levels use a fresh scratch cwd per recording. Nothing in `Tools/` ever deletes or
-edits files under either config home, including the probe sessions' own transcripts;
+Nothing in `Tools/` ever creates, edits or deletes a file under either config home,
+including the probe sessions' own transcripts, which `snapshot` copies and never moves;
 the scratch home is deleted as a whole by the person who created it when they choose.
 
 ### 4.7 Scenario catalogue
@@ -236,13 +291,22 @@ parent's launch line with `--session-mirror` present:
 | `exit-plan-mode` | `--permission-mode plan`, a plan, approved with `setMode` | item 7 |
 | `explore-depth-1` | one Explore agent | items 9, 38, 49; C3.G3 |
 | `nested-depth-2` | a general-purpose agent that spawns Explore (S16) | items 49, 52 |
-| `background-shell` | `run_in_background` Bash, the `task_notification` and the auto-turn | items 61, 15's data; C3.G3 |
+| `background-shell` | `run_in_background` Bash, the `task_notification` and the auto-turn; the task output file bundled under `artifacts/` with its path tokenised | items 61, 15's data; C3.G3 |
 | `session-mirror-relocation` | two turns, `set_cwd` to a trusted sibling, two more, resume, one more (S14) | items 56, 64; C3.G3, C3.G4 |
-| `send-user-file` | the in-process MCP round trip (S5) | item 29; C2.G3 |
+| `send-user-file` | the in-process MCP round trip (S5): two files with a caption and `status: "normal"`, the JSON-RPC request and response recorded; the scenario first confirms that the SDK server registers under `--strict-mcp-config` and drops that flag for this scenario if it does not, recording which | item 29; C2.G3 |
 | `control-shapes` | `apply_flag_settings {effortLevel}` with readback, `rewind_conversation`, `set_cwd` needing trust, `claude_authenticate` family shapes (S8) | items 11, 13; C4.G4 |
 | `resume-no-replay` | `--resume` of `plain-two-turn`, `initialize`, six idle seconds | item 1; S2's record |
-| `dialog-refusal-fallback` and `dialog-fable-overage` | **synthetic** (S6): every result value, the close path, the tombstones after a refusal, `model_consent_fallback`, `overagesEnabled` both ways, an undeclared kind left to `control_cancel_request` | item 62 |
+| `dialog-refusal-fallback` and `dialog-fable-overage` | **synthetic, `hypothesis: true` until confirmed** (S6): every result value, the close path, the tombstones after a refusal, `model_consent_fallback`, `overagesEnabled` both ways, an undeclared kind left to `control_cancel_request` | item 62 (provisional until S6 closes) |
 | `notification-hook` | `Notification` registered through `initialize.hooks`, a permission ask left waiting past the idle threshold (S18) | item 53 |
+
+S6 closes only on baseline evidence: the dialog payload shapes and result enums are
+extracted from the installed 2.1.259 binary's embedded source under
+`~/.local/share/claude/versions/2.1.259` (the same strings the 2.1.257 bundle modules
+carry: `refusal_fallback_prompt` with `retry_fallback | edit_prompt | cancelled`,
+`fable_overage_consent_prompt` with `consent | switch_default | cancelled`), the
+extraction is recorded in the finding, and only then are the two fixtures' `hypothesis`
+flags cleared and item 62 taken off provisional. A synthetic fixture never counts as
+baseline evidence by itself.
 
 Spikes without a fixture of their own produce findings only: S10 (`-p -w probe-wt`),
 S11 (`--resume-session-at` inclusivity), S12 (a second holder against a registry record;
@@ -268,9 +332,9 @@ environment, because the caller controls argv:
 |---|---|
 | `FAKE_CLAUDE_FIXTURE` | fixture directory to replay (required for a session) |
 | `FAKE_CLAUDE_SPEED` | speed factor; `0` means no delays, `1` real time, `10` ten times faster |
-| `FAKE_CLAUDE_INJECT` | path to a JSON list of `{"at": <ms> | "after": <out-frame index>, "frame": {...}}` |
+| `FAKE_CLAUDE_SCRIPT` | path to a JSON list of duplex steps (below) |
 | `FAKE_CLAUDE_INIT` | path to a JSON object that replaces the recorded `initialize` response |
-| `FAKE_CLAUDE_CONFIG_HOME` | when set, the transcript snapshot is materialised there before replay and appended in step with `transcript_mirror` frames |
+| `FAKE_CLAUDE_CONFIG_HOME` | when set, the fixture's `initial/` state is materialised there before replay and the mirrored appends and artifacts are written in step with replay |
 | `FAKE_CLAUDE_VERSION` | what `--version` prints; defaults to the fixture's recorded version |
 
 Replay is reactive, not a timed dump. The replayer walks `frames.ndjson`: an `out` line
@@ -279,22 +343,54 @@ line blocks until the host sends a frame that matches it, where a `control_respo
 matches by `request_id`, a `user` frame matches any `user` frame (the text is not
 compared, and a mismatch is logged to stderr), and a host `control_request` matches by
 subtype, after which the replayer emits the recorded response with the host's
-`request_id` substituted. A host request the fixture never saw gets a generic success
-response, or the recorded shape from another fixture when `FAKE_CLAUDE_INIT` style
-overrides are given; an `interrupt` is answered with success and replay continues,
-which is a stated limitation. `--version` prints the version; `--help` prints the flag
-list from the fixture's census so a census run against fake-claude sees the recorded
-flags. After the last line the replayer waits for stdin to close or `end_session`, then
-exits 0; a closed stdin mid-replay exits 0 immediately, like the CLI. Injected frames
-are emitted at their time or after the numbered `out` frame, unchanged, which is how
-item 32's invented frame type and the malformed-payload items of §14 are produced.
+`request_id` substituted. **Host traffic the fixture and the script do not expect fails
+the replay** with a stderr line naming the frame and exit code 3; a generic success
+answer for named subtypes is available only through an explicit script rule. An
+`interrupt` outside the recording is likewise a failure unless a rule allows it, which
+is what the parent's interrupt items script. `--version` prints the version; `--help`
+prints the flag list from the fixture's census so a census run against fake-claude sees
+the recorded flags. After the last line the replayer waits for stdin to close or
+`end_session`, then exits 0; a closed stdin mid-replay exits 0 immediately, like the
+CLI.
 
-`fake-claude materialize <fixture> <configHome> [--cwd <path>]` copies the transcript
-snapshot into `<configHome>/projects/<slug-of-cwd>/`, rewriting `_slug_` and the `cwd`
-fields inside the records, so a channel opens with history before anything is replayed.
-During replay with `FAKE_CLAUDE_CONFIG_HOME` set, each `transcript_mirror` frame's
-`entries` are appended to the materialised file at the moment the frame is emitted, so
-the file watcher and the mirror agree, which is what C3.G4 and item 56 exercise.
+**Scripts are duplex.** `FAKE_CLAUDE_SCRIPT` is a JSON list of steps, applied in order
+around the recording:
+
+```
+{"at": <ms> | "after": <out-frame index>, "emit": {frame}}          inject a frame
+{"expect": {matcher}, "timeout_ms": <n>}                           require host traffic
+{"answer": {frame}}                                                 reply to the last match
+{"rule": "generic-success", "subtypes": ["<subtype>", ...]}         permit unseen requests
+```
+
+A matcher names a frame `type`, and optionally `subtype`, `request_id` (or `"$last"`
+for the id of the last emitted `control_request`), and JSON fields that must be equal. An
+`expect` that times out fails the replay; an `answer` that follows an `expect` for a host
+`control_request` is emitted with the host's `request_id`. This is how item 32's invented
+frame type, the malformed-payload and unknown-request items of the parent's §14, and the
+"host must have answered with this error" assertions are produced without a live binary.
+
+**Materialisation.** `fake-claude materialize <fixture> <configHome> [--cwd <path>]`
+lays down the fixture's `initial/` state under `<configHome>/projects/<slug-of-cwd>/`,
+rewriting `_slug_` and the `cwd` fields inside the records, so a channel opens with
+exactly the history the app saw at spawn. During replay with `FAKE_CLAUDE_CONFIG_HOME`
+set, each `transcript_mirror` frame's `entries` are appended to the matching stream at
+the moment the frame is emitted, starting at the offsets in `streams.json`, and each
+artifact is written under a `tasks/` directory beneath the fake home when the frame that
+names it is emitted; the fake home's path replaces the `<artifacts>` token in emitted
+frames. A tool test asserts that after a full replay the files under the fake home equal
+`transcript/` plus `artifacts/` byte for byte, which is what C3.G3, C3.G4 and item 56
+rest on.
+
+**Materialisation writes only into a home fake-claude created.** The destination must
+be a directory `materialize` creates itself, or one it created earlier and marked with
+an `.afleet-fake-home` file at its root. Before writing, the destination path is
+resolved through every symlink and refused if it equals or lies within the real
+`~/.claude`, the resolved value of `CLAUDE_CONFIG_DIR` in fake-claude's own
+environment, or any existing directory without the marker; it is also refused if a
+transcript with the fixture's session id already exists there. The refusal is a
+non-zero exit with the reason on stderr, before any write. These checks are the X9
+guarantee for the one tool that writes transcript files at all.
 
 ### 4.9 Findings flow back
 
@@ -317,8 +413,15 @@ count changes ignored); redaction on a crafted fixture containing every pattern,
 idempotence (`redact(redact(x)) == redact(x)`) and manifest counts; the harness's answer
 policies and unknown-request error against an in-process fake stream; fake-claude
 replaying a tiny hand-written fixture against a test host that answers `can_use_tool`,
-checking order, blocking on `in` lines, injection at time and index, `--version`,
-`--help`, and materialise-plus-append. These tests are C1's own; the parent's item 36
+checking order, blocking on `in` lines, script steps (`emit` at time and index,
+`expect` with timeout, `answer`, and the failure on unexpected host traffic),
+`--version`, `--help`, materialisation refusals (a symlink into `~/.claude`, a directory
+without the marker, an existing transcript) and the final-filesystem equality after
+materialise-plus-replay; `verify`'s lifecycle checks on crafted frame lists (answered,
+cancelled, cancelled-then-late without and with the `late_responses` entry, orphaned);
+and `record`'s no-unredacted-byte property, proven by streaming a planted secret and a
+planted email through the harness and asserting neither ever appears in any file the run
+created. These tests are C1's own; the parent's item 36
 runs them as part of the repository's test target once C5's project exists, and until
 then `make test-tools` is the gate.
 
@@ -329,21 +432,31 @@ required.
 
 - **G1 Fixtures.** `Fixtures/` contains the thirteen recorded fixtures and two synthetic
   ones of §4.7, each with a signed review block, and `make verify-fixtures` exits 0.
-  Each fixture's `frames.ndjson` contains `transcript_mirror` frames and its
-  `transcript/` holds the matching session file; `nested-depth-2` holds two subagent
-  files and their `.meta.json`; `background-shell` holds the task output file path
-  inside its `task_notification`.
+  Each fixture carries `initial/`, `streams.json` and `transcript/`; each recorded
+  fixture's `frames.ndjson` contains `transcript_mirror` frames whose entries, appended
+  from the recorded offsets onto `initial/`, reproduce `transcript/`; `nested-depth-2`
+  holds two subagent files and their `.meta.json`; `background-shell` holds the task
+  output file under `artifacts/` and its `task_notification` names it by token;
+  `send-user-file` holds the JSON-RPC `tools/call` request and response with two files.
+  The two dialog fixtures carry `hypothesis: true` until S6 closes.
 - **G2 Census.** `make probe` against the installed 2.1.259 exits 0 and prints a zero
-  diff for every `census: true` fixture. `make probe CLAUDE=Tools/fake-claude/fake-claude
-  FIXTURE=plain-two-turn` with an injection file adding a frame of type
-  `afleet_invented` exits 1 and prints exactly one added pair.
+  diff for every `census: true` fixture, using exact comparison for deterministic
+  scenarios and required-shape comparison for model-driven ones. `make probe
+  CLAUDE=Tools/fake-claude/fake-claude FIXTURE=plain-two-turn` with a script that emits
+  a frame of type `afleet_invented` exits 1 and prints exactly one added pair; the same
+  run with a script that removes a required key from `system/init` exits 1 and names
+  the key.
 - **G3 Findings.** The parent document in this branch carries a dated `C1/S<n>:`
   Revision Note for each of S5, S6, S8, S10, S11, S12, S13, S14, S15, S16, S17 and
-  S18, each naming the clause it settles, and this document's Surprises section names
-  any `[parent-impact]`.
-- **G4 Redaction.** `Tools/probe/redact.py` exists and is what `record` runs;
-  `Fixtures/REVIEW.md` exists; `verify` fails a fixture whose review block is unsigned
-  and one that contains a planted email address, and passes every committed fixture.
+  S18, each naming the clause it settles; S6's note either records the 2.1.259
+  extraction that cleared the two fixtures' `hypothesis` flags or states that S6 stays
+  open and item 62 provisional; this document's Surprises section names any
+  `[parent-impact]`.
+- **G4 Redaction.** `Tools/probe/redact.py` exists and is what `record` and `snapshot`
+  run before any write; `Fixtures/REVIEW.md` exists; `verify` fails a fixture whose
+  review block is unsigned, one that contains a planted email address, and one with an
+  unresolved request lifecycle, and passes every committed fixture; no `raw/` directory
+  exists under `Fixtures/`; the no-unredacted-byte test of §4.10 passes.
 - **Tool tests.** `make test-tools` passes on the system `python3` (3.9) and on 3.14.
 
 ## 6. Edges and contracts
@@ -353,45 +466,26 @@ required.
   fixture-driven gates, and every child whose spike C1 answers (S14 and S17 for C4's
   restart rule, S15 for C6's question card, S16 for C6's Agents leaf, S18 for C5's
   notification route, S10 through S13 for C4).
-- **Owns:** X8, the fixture and fake-claude format of §4.4 and §4.8. Changes after the
-  first consumer lands need a Revision Note here and on the parent; additive fields
-  are free.
-- **Bound by:** X9. Nothing in `Tools/` writes under a config home; fixtures are
-  redacted and reviewed before commit; `submit_feedback` is never sent by any scenario;
-  the typings are never committed (C1 does not fetch them at all).
+- **Owns:** X8, the fixture and fake-claude format of §4.4 and §4.8: the directory
+  layout with `initial/`, `streams.json`, `transcript/` and `artifacts/`, the
+  `<artifacts>` token, the nested required-versus-optional census, and the duplex
+  script format. Changes after the first consumer lands need a Revision Note here and
+  on the parent; additive fields are free.
+- **Bound by:** X9. Nothing in `Tools/` writes under a config home: the harness only
+  reads and copies transcripts, and `materialize` refuses every destination it did not
+  create and mark (§4.8). Fixtures are redacted before the first byte reaches disk and
+  reviewed before commit; `submit_feedback` is never sent by any scenario; the typings
+  are never committed (C1 does not fetch them at all).
 
 ## 7. Delegated unknowns
 
-Empirical residue that execution answers, not this document: whether a scratch
-`CLAUDE_CONFIG_DIR` shares the machine's keychain login or needs its own (settled by the
-first recording under it); whether the idle threshold for the waiting-permission
-notification can be reached inside a scenario's budget or needs a setting (S18);
-whether `os.openpty` is enough for the interactive `claude --resume` in S12 or the
-scenario must drive `script(1)`; and the exact byte budget at which a fixture's raw
-capture becomes unwieldy in git, which sets the truncation rule for long
-`stream_event` runs if one is ever needed (none is expected at `--max-turns` 6).
-
-## 8. Questions for the human gate
-
-Each with the recommendation the plan will follow unless overruled.
-
-1. **Recording home.** Record under a dedicated scratch config home that you log into
-   once by hand (recommended: keeps probe sessions out of your real history and keeps
-   your plugins, skills and memory files out of the census), or under the real config
-   home with setting sources disabled, which needs no login step but leaves about twenty
-   probe transcripts under `~/.claude/projects` that afleet will later list as archived
-   channels of `/tmp` projects.
-2. **Synthetic dialog fixtures.** Allow hand-written fixtures for the two dialog kinds,
-   marked `synthetic: true` and excluded from the census (recommended: neither a
-   refusal fallback nor the overage prompt can be provoked on demand), or keep S6 open
-   until one occurs naturally in a capture.
-3. **OAuth shape capture.** Let the `control-shapes` scenario call `claude_authenticate`
-   to capture the response shape and then abandon the flow (recommended: harmless, the
-   URLs are redacted, no login completes), or model those shapes from the bundle source
-   only.
-4. **Tooling language.** Python 3 standard library for both tools (recommended, §4.1),
-   or Swift executables in a `Tools` package for a single-language repository at the
-   cost of a build step and a dependency direction that has to be policed.
+Empirical residue that execution answers, not this document: whether the scratch config
+home's login persists across CLI upgrades or needs repeating; whether the SDK MCP server
+registers under `--strict-mcp-config` (settled by the first S5 run); whether the idle
+threshold for the waiting-permission notification can be reached inside a scenario's
+budget or needs a setting (S18); whether `os.openpty` is enough for the interactive
+`claude --resume` in S12 or the scenario must drive `script(1)`; and the memory budget at
+which `record` spills to its temporary file, set from the largest recorded scenario.
 
 ## Decision Log
 
@@ -431,20 +525,27 @@ Each with the recommendation the plan will follow unless overruled.
   Rejected: fixtures that ship only frames; a separate file-writer tool.
   Date/Author: 2026-09-04 / Claude for kimmi
 
-- Decision: Scenarios run in a fresh synthetic scratch repository, with setting
-  isolation by default and config-home isolation preferred once the login question is
-  settled.
-  Rationale: Redaction is tractable only when the model reads synthetic files; setting
-  isolation is proven on this machine; config-home isolation keeps the census and the
-  user's history clean. Rejected: recording in real projects; recording with the
-  user's settings active.
-  Date/Author: 2026-09-04 / Claude for kimmi
+- Decision: Scenarios run in a fresh synthetic scratch repository under a scratch
+  config home (`CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home`) that the user logs
+  into once by hand; setting isolation on the real config home is the fallback level.
+  Rationale: Redaction is tractable only when the model reads synthetic files; the
+  scratch home keeps the census and the user's history clean and gives S13 and S17 a
+  throwaway `.claude.json`; the user chose it at the gate. Rejected: the real config
+  home by default (about twenty `/tmp` projects would appear as archived channels and
+  the census would see the user's plugins and skills); recording in real projects;
+  recording with the user's settings active.
+  Date/Author: 2026-09-04 / kimmi with Claude
 
 - Decision: Synthetic fixtures are permitted only for wire paths that cannot be
-  provoked on demand, marked and excluded from the census, pending the gate.
+  provoked on demand, marked and excluded from the census, and carry `hypothesis: true`
+  until their shapes are confirmed from the installed baseline binary's embedded
+  source; S6 closes only on that evidence.
   Rationale: The dialog cards need fixtures for every enum value and no live trigger
-  exists. Rejected: leaving S6 unanswered; recording until a refusal happens.
-  Date/Author: 2026-09-04 / Claude for kimmi
+  exists, but the two hand-written fixtures come from the 2.1.257 bundle and the
+  baseline is 2.1.259, so they are schema hypotheses until the 2.1.259 strings are
+  extracted. Rejected: leaving S6 unanswered; recording until a refusal happens; closing
+  S6 on the 2.1.257 bundle alone.
+  Date/Author: 2026-09-04 / kimmi with Claude
 
 - Decision: Spike findings are dated `C1/S<n>:` Revision Notes on the parent in this
   branch, with `[parent-impact]` recorded here for anything binding.
@@ -459,6 +560,70 @@ Each with the recommendation the plan will follow unless overruled.
   Rejected: a checklist alone.
   Date/Author: 2026-09-04 / Claude for kimmi
 
+- Decision: Redaction runs in memory before any write; `record` keeps no `raw/`
+  directory, and `fixture.json` records an allowlist of launch variables.
+  Rationale: The parent's rule is redacted before disk; a git-ignored plaintext capture
+  is still indexed, backed up and copyable, and the full environment table is itself
+  identity data. Rejected: a git-ignored `raw/` directory; redacting after the fact.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: `fake-claude materialize` writes only into a directory it created and
+  marked, after symlink resolution, and refuses the real config home, the resolved
+  `CLAUDE_CONFIG_DIR`, unmarked directories and existing transcripts.
+  Rationale: It is the one tool that writes transcript files; without the refusal it
+  could overwrite or duplicate the original recording session in the real home.
+  Rejected: trusting the caller's path; a warning instead of a refusal.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: The harness's MCP tool mirrors `SendUserFile`'s schema, `files`, `caption?`,
+  `status` and `display?`, and answers JSON-RPC notifications with the SDK's empty
+  result under `mcp_response`.
+  Rationale: The parent binds the tool as `send_user_file(files, caption?)`, the parity
+  inventory says to mirror the built-in tool's `status` and `display` axes so the
+  model's trained behaviour transfers, and C2 implements the same shape; a `{path}`
+  schema would validate C2 against an incompatible fixture. Rejected: a single `path`
+  argument.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: X8 records the filesystem as well as the wire: `initial/`, `streams.json`,
+  `transcript/` and `artifacts/` with tokenised paths; replay materialises the initial
+  state and appends in recorded order; a test asserts the final state.
+  Rationale: A final snapshot copied before replay and then appended to again puts
+  future turns on screen at open and duplicates every record; task output files live
+  under `/private/tmp`, not the transcript, so a fixture without them points item 61 at
+  a missing file. Rejected: a final snapshot only; excluding task artifacts.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: The census fingerprints one level down per discriminated payload and
+  compares exactly for deterministic scenarios and by required shape for model-driven
+  ones; this extends the parent's §6.10 shape and is filed as a parent Revision Note.
+  Rationale: The fields the app decodes in control traffic sit under `request` and
+  `response`, invisible to a frame-level key set; one observed union of a model-driven
+  run would call conditional frames and optional keys drift. Rejected: frame-level keys
+  only; exact comparison everywhere; repeated sampling as the only mitigation.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: `verify` checks request lifecycles as a state machine that accepts a
+  cancellation as a terminal state.
+  Rationale: The undeclared-dialog fixture must show a request that is never answered
+  and ends in `control_cancel_request`; a pairing rule would reject the very fixture G1
+  requires. Rejected: the pairing rule with a per-fixture exemption list.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: fake-claude scripts are duplex (`emit`, `expect`, `answer`, `rule`), and
+  unexpected host traffic fails the replay by default.
+  Rationale: An injection without an expectation cannot prove the host answered an
+  unknown request with the required error, and generic success for unseen requests
+  would let a test pass while the host misbehaves. Rejected: emit-only injection with
+  generic success.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
+- Decision: The `control-shapes` scenario calls `claude_authenticate` to capture the
+  response shape and abandons the flow.
+  Rationale: The shapes are needed for S8 and the fixture; the URLs are redacted and no
+  login completes. Rejected: modelling the shapes from the bundle source only.
+  Date/Author: 2026-09-04 / kimmi with Claude
+
 ## Surprises & Discoveries
 
 - Observation: The committed probe 10 never passes `--session-mirror`; it only listens
@@ -470,6 +635,13 @@ Each with the recommendation the plan will follow unless overruled.
   records the flag list from `--help` and separately asserts acceptance of each launch
   flag by spawning with it, so hidden flags are covered.
 
+- Observation: The extracted bundle's SPEC chapter files under
+  `~/claude-code-bundle/2.1.257/SPEC/` are no longer on disk on 2026-09-04; the bundle
+  source (`cli.pretty.js`, `modules/`) and `docs/tui-parity/` remain. Impact: chapter
+  citations inherited from the parent are kept as recorded; new facts in this document
+  cite the parity files or the bundle modules, and S6's baseline evidence comes from the
+  installed binary's embedded source rather than a chapter.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
@@ -477,3 +649,15 @@ Pending — written at finish.
 ## Revision Notes
 
 - 2026-09-04: v1, written at dispatch from the parent's §17 C1 at commit `9fd067c`.
+- 2026-09-04: v2 after the parent's Codex review of v1 (eight findings, all accepted)
+  and the gate answers. Redaction now precedes every write and `raw/` is gone (§4.2,
+  §4.5); `materialize` refuses every destination it did not create and mark (§4.8, X9);
+  the harness's MCP tool mirrors `SendUserFile`'s schema and the S5 scenario checks
+  `--strict-mcp-config` (§4.3, §4.7); X8 gains `initial/`, `streams.json`, `artifacts/`
+  and the final-state test (§4.4, §4.8); the census fingerprints nested payloads with
+  required-versus-optional comparison (§4.4); `verify` checks request lifecycles as a
+  state machine (§4.2); the S6 fixtures are schema hypotheses until the 2.1.259
+  extraction (§4.7); scripts are duplex and unexpected traffic fails replay (§4.8). Gate
+  answers folded in: scratch config home by default, synthetic fixtures under the
+  hypothesis rule, the `claude_authenticate` capture, Python standard library; the
+  questions section is removed. Acceptance G1, G2 and G4 restated accordingly.
