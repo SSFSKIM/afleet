@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""probe: census | diff | record | snapshot | redact | verify (spec §4.2).
+"""probe: census | diff | record | snapshot | redact | verify | sign | synthetic (spec §4.2).
 
 The one composition point. `census.py`, `redact.py`, `harness.py`, `fixture.py` and
-`verify.py` never import one another; this module wires them into the six subcommands and
-into the scenario contract below.
+`verify.py` never import one another; this module wires them into the eight subcommands and
+into the scenario contract below. `sign` and `synthetic` are the two that need no binary:
+`sign` writes the review block §4.5 requires and `verify` refuses a fixture without, and
+`synthetic` rebuilds the two hand-written dialog fixtures of §4.7 from their schemas.
 
 ## The scenario contract
 
@@ -552,7 +554,7 @@ def _redact_in_place(path):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="probe")
     sub = ap.add_subparsers(dest="cmd")
-    for name in ("census", "diff", "record", "snapshot", "redact", "verify"):
+    for name in ("census", "diff", "record", "snapshot", "redact", "verify", "sign", "synthetic"):
         sp = sub.add_parser(name)
         sp.add_argument("--claude", default=None)
         sp.add_argument("--config-home", default=None)
@@ -571,6 +573,8 @@ def main(argv=None):
             # was made. A review elsewhere has to name the recording host or rule 3's hostname
             # half cannot fire at all (spec Revision Note, 2026-09-04).
             sp.add_argument("--hostname", default=None, help="the hostname the fixture was recorded on")
+        if name == "sign":
+            sp.add_argument("fixture"); sp.add_argument("--reviewer", required=True)
     args = ap.parse_args(argv)
     if not args.cmd:
         ap.print_usage(); return 2
@@ -614,6 +618,17 @@ def main(argv=None):
             print(report)
         print("%d fixture(s) failed" % failed if failed else "all fixtures pass")
         return 1 if failed else 0
+    if args.cmd == "sign":
+        sign(args.fixture.rstrip("/"), args.reviewer); print("signed %s" % args.fixture); return 0
+    if args.cmd == "synthetic":
+        # Rebuilding is deliberately destructive of the two directories it owns: `build`
+        # writes each fixture whole through `write_fixture`, so a rebuild drops the review
+        # block back to unsigned and the fixture has to be walked and signed again. That is
+        # the intended cost -- the frames changed, so the signature no longer covers them.
+        from synthetic import dialogs
+        for p in dialogs.build(FIXTURES_ROOT):
+            print("built %s" % p)
+        return 0
 
 
 if __name__ == "__main__":

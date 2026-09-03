@@ -3,8 +3,9 @@ CLAUDE ?= claude
 FIXTURE ?=
 SCENARIO ?=
 SCRIPT ?=
+REVIEWER ?=
 
-.PHONY: test-tools probe census record redact verify-fixtures
+.PHONY: test-tools probe census record redact verify-fixtures synthetic sign
 
 # The fake-claude suite is empty until its task lands; exit 5 is 3.12+'s "no tests ran",
 # which is not a failure here. A missing start directory still fails (ImportError).
@@ -30,3 +31,13 @@ redact:
 
 verify-fixtures:
 	$(PYTHON) Tools/probe/probe.py verify Fixtures/*/
+
+# Rebuilds both synthetic dialog fixtures (spec §4.7) from their schemas. It replaces the two
+# directories whole, signature included, so each rebuild has to be reviewed and signed again.
+synthetic:
+	$(PYTHON) Tools/probe/probe.py synthetic
+
+# The human half of the gate: run it only after walking Fixtures/REVIEW.md for the fixture.
+sign:
+	@test -n "$(FIXTURE)" -a -n "$(REVIEWER)" || (echo "usage: make sign FIXTURE=Fixtures/<name> REVIEWER=<name>" && exit 2)
+	$(PYTHON) Tools/probe/probe.py sign "$(FIXTURE)" --reviewer "$(REVIEWER)"
