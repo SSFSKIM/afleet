@@ -230,9 +230,14 @@ subset, `mcp_servers`, `capabilities`, `claude_code_version`, `apiKeySource` and
 ### 6.3 Frames, typing and opacity
 
 - Every frame type in the typings of `@anthropic-ai/claude-agent-sdk@0.3.259`
-  (`sdk.d.ts`) becomes a Swift `Codable` model. The typings are vendored at
-  `vendor/claude-agent-sdk/0.3.259/sdk.d.ts` with their license; the version is the
-  protocol baseline.
+  (`sdk.d.ts`, plus `sdk-tools.d.ts` for per-tool input shapes used to format cards)
+  becomes a Swift `Codable` model. The package license is all-rights-reserved, so the
+  typings are **not vendored**: `Tools/fetch-typings.sh` runs `npm pack` for the pinned
+  version into an ignored directory for model generation and the probe census, and only
+  our own Swift models are committed. The pinned version is the protocol baseline.
+- Control requests without published typings (`side_question`, `rewind_conversation`,
+  `add_directory`, `end_session`, `generate_session_title`) are modeled from the bundle's
+  handler source (*SPEC 45.17*) and pinned by probe fixtures (S8).
 - Decoding is tolerant. A frame with an unknown `type` or `subtype`, or a known one that
   fails to decode, is preserved as an opaque item with its raw JSON: never dropped, never
   fatal, rendered as a collapsed "unrecognized event" row, counted for the drift check.
@@ -664,7 +669,8 @@ vendored SDK typings.
   Agent SDK credit, the usage popover already shows the meter and a per-project API key is
   a one-setting addition logged as backlog.
 - cmux is GPL and is read for architecture only; no code is copied. Monaco and
-  libghostty-spm are MIT; the SDK typings are vendored with their license.
+  libghostty-spm are MIT. The Agent SDK typings are all-rights-reserved and are fetched
+  on demand, never committed.
 - Fixtures are redacted before commit; the frame log stays local.
 
 ## 13. Acceptance
@@ -864,6 +870,15 @@ Seams 1 and 2 have no UI and unblock everything and can run on the macOS 15 mach
   hard-coding a static list.
   Date/Author: 2026-09-03 / kimmi with Claude
 
+- Decision: Codable models derived from the `@anthropic-ai/claude-agent-sdk@0.3.259`
+  typings, fetched on demand and never committed; unpublished control subtypes modeled
+  from the bundle source and probe fixtures; unknown frames preserved as opaque items.
+  Rationale: The typings are the published, versioned source for what they cover; their
+  license forbids vendoring; the schema says to ignore unknown members. Rejected:
+  vendoring the typings; hand-modeling everything from the extracted spec (unversioned);
+  strict decoding (breaks on every release).
+  Date/Author: 2026-09-03 / kimmi with Claude
+
 - Decision: Golden redacted NDJSON fixtures, an on-demand frame census diffed against the
   installed CLI, and a version gate that refuses CLIs older than the fixture baseline.
   Rationale: The wire grows per release; drift must be caught before it breaks the app.
@@ -1056,6 +1071,15 @@ Seams 1 and 2 have no UI and unblock everything and can run on the macOS 15 mach
   defaulting to it.
   Evidence: *SPEC 24.17.3*; `claude --help` line 18.
 
+- Observation: The 0.3.259 typings cover the control protocol but not every subtype, and
+  carry an all-rights-reserved license.
+  Evidence: `sdk.d.ts` (8,721 lines) declares `subtype: 'initialize' | 'can_use_tool' |
+  'request_user_dialog' | 'hook_callback' | 'mcp_message' | 'set_model' |
+  'set_permission_mode' | 'apply_flag_settings' | 'file_suggestions' |
+  'get_context_usage' | 'rename_session' | 'interrupt' | 'elicitation'` and a 39-member
+  `SDKMessage` union; no `side_question`, `rewind_conversation` or `add_directory`;
+  `LICENSE.md`: "© Anthropic PBC. All rights reserved."
+
 - Observation: Claude Desktop embeds the Agent SDK client.
   Evidence: strings in `/Applications/Claude.app/Contents/Resources/app.asar`:
   `supportedDialogKinds:this.initConfig?.supportedDialogKinds` and `sdk_interrupt`.
@@ -1091,3 +1115,5 @@ Pending — written at finish.
   history-only and spawn on first send; job attach and the raw-TUI hatch run CLI verbs in
   a PTY pane instead of a hand-written daemon socket client; environment capture uses an
   interactive login shell; the existing `probes/` scripts seed the probe suite.
+- 2026-09-03: SDK typings are fetched on demand rather than vendored (all-rights-reserved
+  license); unpublished control subtypes are modeled from source and fixtures.
