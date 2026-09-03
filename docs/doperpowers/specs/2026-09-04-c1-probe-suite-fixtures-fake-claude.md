@@ -728,3 +728,28 @@ Pending — written at finish.
   spawn, whose offset is zero. A computed start beyond the end of the file is refused by name
   rather than padded, because that combination means the fixture was never materialised into
   that home and no replay from it could reproduce the final state.
+- 2026-09-04: §4.4's `fixture.json` enumeration is the metadata the format's design turns
+  on, not the whole record `record` writes, and against the constraint that field names are
+  exactly those of §4.4 and §4.7 that difference reads as a contradiction rather than as a
+  summary. Eight omitted fields are written and each is load-bearing. `cwd` holds the
+  recording's scratch cwd, and `verify`'s mirror check derives the recording slug from it: a
+  recorded `transcript_mirror.filePath` names the slug the CLI wrote under, so without the
+  cwd there is nothing to rewrite that slug into the `_slug_` token space with and no
+  mirrored stream resolves to a file under `transcript/`. `session_id` is what `snapshot`
+  resolves a session's transcript files by, and what a resuming scenario reads out of the
+  fixture it resumes to learn which session that is; §4.4's own note that session ids stay as
+  recorded already presumes the field. `deterministic` chooses between this section's two
+  comparisons, exact and required-shape, so its absence is not a default but a silent
+  downgrade of the strict gate to the permissive one — the ambiguity `diff` already refuses
+  to resolve by defaulting. `scenario` names the module that produced the fixture, which
+  `diff` re-runs against a binary and which need not equal the fixture's name — §4.7 names
+  two fixtures on one row. `isolation` records which of §4.6's two levels the recording used,
+  which §4.6 already says is chosen per scenario in `fixture.json`; the enumeration never
+  caught up. `spikes` records which of §4.7's spikes the recording informs, so a finding can
+  be walked back to its evidence. `notes` and `exit_code` carry what the scenario observed
+  about its own run — S5's dropped `--strict-mcp-config`, a transcript that was not there to
+  snapshot, the exit status under §6.7's shutdown — which is the difference between a fixture
+  a reviewer can judge and one they have to re-derive. §4.4's list plus `deterministic` is
+  the contract's required core: `verify` fails a fixture that omits any of them, by presence
+  and not by value, so a hand-written synthetic fixture cannot arrive with the census
+  comparison quietly relaxed. The rest sit beside them.

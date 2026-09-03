@@ -95,6 +95,21 @@ def append_frame(path, rec):
     write(os.path.join(path, "census.json"), json.dumps(c))
 
 
+def rewrite_frames(path, mutate):
+    """Apply `mutate` to every frame in frames.ndjson and write it back.
+
+    For edits that change a frame's values but not its key sets, which leaves census.json
+    describing the result as faithfully as it described the original.
+    """
+    frames = fixture.load(path)["frames"]
+    for rec in frames:
+        if "frame" in rec:
+            mutate(rec["frame"])
+    with open(os.path.join(path, "frames.ndjson"), "w") as fh:
+        for rec in frames:
+            fh.write(json.dumps(rec) + "\n")
+
+
 class SlugAndSnapshotTests(unittest.TestCase):
     def test_slug_of_replaces_every_non_alphanumeric(self):
         self.assertEqual(fixture.slug_of("/Users/new/Developer/GitHub/afleet"), "-Users-new-Developer-GitHub-afleet")
@@ -206,11 +221,34 @@ class VerifyTests(unittest.TestCase):
         write(os.path.join(d2, "census.json"), json.dumps(c2))
         self.assertEqual(self.errors(d2), [])
 
-    def test_hypothesis_requires_synthetic_and_synthetic_skips_census_recount(self):
+    def test_hypothesis_requires_synthetic_and_a_synthetic_census_is_still_recounted(self):
+        """The recount needs no binary, so a hand-written census is held to its own frames.
+
+        §4.4 excludes a synthetic fixture from `diff`, the live-binary drift command. This
+        is not that command, and a hand-written census is the one nothing else reads.
+        """
         d = build_fixture(self.root, hypothesis=True, synthetic=False)
         self.assertTrue(any("hypothesis" in e for e in self.errors(d)))
         d2 = build_fixture(self.root, name="demo2", hypothesis=True, synthetic=True, census=False)
         self.assertEqual(self.errors(d2), [])
+        c = read_json(os.path.join(d2, "census.json")); c["pairs"]["system/init"]["keys"].append("ghost")
+        write(os.path.join(d2, "census.json"), json.dumps(c))
+        self.assertTrue(any("census" in e for e in self.errors(d2)))
+
+    def test_fixture_json_must_declare_the_required_metadata(self):
+        """A missing `deterministic` is not a default but a silent downgrade.
+
+        It reads as false, which picks the permissive census comparison over the strict one
+        -- the ambiguity `census.diff` refuses to resolve by defaulting at its own boundary.
+        """
+        d = build_fixture(self.root)
+        meta = read_json(os.path.join(d, "fixture.json")); del meta["deterministic"]
+        write(os.path.join(d, "fixture.json"), json.dumps(meta, indent=1))
+        self.assertTrue(any("missing deterministic" in e for e in self.errors(d)))
+
+    def test_census_version_must_match_the_declared_cli_version(self):
+        d = build_fixture(self.root, cli_version="2.1.260")
+        self.assertTrue(any("cli_version" in e for e in self.errors(d)))
 
     def test_mirror_entries_must_reproduce_the_transcript(self):
         d = build_fixture(self.root)
@@ -224,13 +262,14 @@ class VerifyTests(unittest.TestCase):
         write_bytes(os.path.join(d, "artifacts", "_slug_", SID, "tasks", "t2.output"), b"\xff\xfe\x00 secret")
         self.assertTrue(any("not UTF-8" in e for e in self.errors(d)))
 
-    def test_names_only_files_are_scanned_as_text_not_as_structure(self):
-        """census.json and redaction.json fingerprint names; nothing in them is a value.
+    def test_name_bearing_keys_are_moved_out_of_key_position_before_the_scan(self):
+        """A protocol name promoted into key position is not a field whose value can leak.
 
-        Read structurally they trip the scanner's identity-key predicate on ordinary
-        content -- the census of any fixture carrying a `user` frame has the pair key
-        `user`, and redacting an `email` field leaves `...email` as a manifest path. Read
-        as text, the pattern rules still apply, so a planted address still fails.
+        The census of any fixture carrying a `user` frame has the pair key `user`, and
+        redacting an `email` field leaves `...email` as a manifest path, so read as they sit
+        both files trip the identity-key predicate on ordinary content. Moved into value
+        position they get the pattern rules and nothing else, and a planted address still
+        fails.
         """
         d = build_fixture(self.root)
         write(os.path.join(d, "redaction.json"),
@@ -239,6 +278,122 @@ class VerifyTests(unittest.TestCase):
         write(os.path.join(d, "redaction.json"),
               json.dumps({"rules": {"identity": {"count": 1, "paths": {"leak@example.com": 1}}}}))
         self.assertTrue(any("email" in e for e in self.errors(d)))
+
+    def test_capabilities_keep_every_predicate_inside_the_census(self):
+        """The counterpart: `capabilities` is a value the census copies verbatim off the wire.
+
+        Unreachable for a recorded fixture, whose frames met the redactor before the census
+        saw them; reachable for any hand-written `synthetic: true` one, and §4.7 makes those
+        load-bearing for the wire paths that cannot be provoked on demand.
+        """
+        d = build_fixture(self.root)
+        c = read_json(os.path.join(d, "census.json"))
+        c["capabilities"] = {"account": "11111111-1111-4111-8111-111111111111", "oauthToken": "zzz"}
+        write(os.path.join(d, "census.json"), json.dumps(c))
+        e = self.errors(d)
+        self.assertTrue(any("capabilities.account" in x for x in e))
+        self.assertTrue(any("capabilities.oauthToken" in x for x in e))
+
+    def test_only_a_cli_cancel_of_a_cli_request_ends_a_lifecycle(self):
+        """§4.2 permits exactly one shape; a host request cannot be excused by a cancel line."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "h9", "request": {"subtype": "interrupt"}}})
+        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_cancel_request", "request_id": "h9"}})
+        e = self.errors(d)
+        self.assertTrue(any("cancel for h9" in x for x in e))
+        self.assertTrue(any("unanswered request h9" in x for x in e))
+
+    def test_a_response_travelling_the_wrong_direction_fails(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "c9", "request": {"subtype": "can_use_tool"}}})
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c9", "response": {}}}})
+        self.assertTrue(any("c9" in e and "wrong direction" in e for e in self.errors(d)))
+
+    def test_a_duplicate_response_fails(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}}})
+        self.assertTrue(any("duplicate response to c1" in e for e in self.errors(d)))
+
+    def test_a_response_to_an_unknown_request_fails(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "nope", "response": {}}}})
+        self.assertTrue(any("response to unknown request nope" in e for e in self.errors(d)))
+
+    def test_late_responses_licenses_one_answer_not_a_stream(self):
+        d = build_fixture(self.root, late_responses=["d1"])
+        late = {"t": 95, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "d1", "response": {}}}}
+        append_frame(d, late)
+        self.assertEqual(self.errors(d), [])
+        append_frame(d, dict(late, t=96))
+        self.assertTrue(any("duplicate response to d1" in e for e in self.errors(d)))
+
+    def test_end_session_may_go_unanswered_only_as_the_last_host_frame(self):
+        """The harness sends it and closes stdin in the same breath (§6.7).
+
+        That is the whole reason its response may be absent, so later host traffic means the
+        stream was still open and the missing response is a real gap.
+        """
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "end-1", "request": {"subtype": "end_session"}}})
+        self.assertEqual(self.errors(d), [])
+        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "user", "uuid": "u2", "message": {"role": "user", "content": "still open"}}})
+        self.assertTrue(any("unanswered request end-1" in e for e in self.errors(d)))
+
+    def test_timestamps_must_not_go_backwards(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 1, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertTrue(any("non-decreasing" in e for e in self.errors(d)))
+
+    def test_a_bad_timestamp_does_not_poison_the_records_after_it(self):
+        """One malformed value costs the reviewer one line, not every line that follows."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": "95", "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertEqual([e for e in self.errors(d) if "timestamp" in e],
+                         ["frames.ndjson line 12: timestamp not a non-decreasing int"])
+
+    def test_a_stream_offset_must_be_a_non_negative_integer(self):
+        d = build_fixture(self.root)
+        write(os.path.join(d, "streams.json"), json.dumps({"_slug_/%s.jsonl" % SID: -1}))
+        self.assertTrue(any("non-negative integer" in e for e in self.errors(d)))
+
+    def test_transcript_must_extend_initial(self):
+        d = build_fixture(self.root)
+        write(os.path.join(d, "initial", "_slug_", SID + ".jsonl"), json.dumps({"type": "assistant", "uuid": "prior"}) + "\n")
+        self.assertTrue(any("does not extend" in e for e in self.errors(d)))
+
+    def test_an_artifact_named_only_by_initial_is_required(self):
+        """A resume fixture's `initial/` is a prior session's records and names artifacts too."""
+        d = build_fixture(self.root)
+        write(os.path.join(d, "initial", "_slug_", SID + ".jsonl"),
+              json.dumps({"type": "assistant", "uuid": "prior",
+                          "output_file": "<artifacts>/_slug_/%s/tasks/prior.output" % SID}) + "\n")
+        self.assertTrue(any("tasks/prior.output" in e and "missing" in e for e in self.errors(d)))
+
+    def test_an_artifact_path_with_a_space_is_not_truncated(self):
+        """A false missing-artifact failure trains a reviewer to override the gate."""
+        d = build_fixture(self.root)
+        tasks = os.path.join(d, "artifacts", "_slug_", SID, "tasks")
+        os.rename(os.path.join(tasks, "t1.output"), os.path.join(tasks, "t 1.output"))
+
+        def retarget(f):
+            if f.get("subtype") == "task_notification":
+                f["output_file"] = "<artifacts>/_slug_/%s/tasks/t 1.output" % SID
+
+        rewrite_frames(d, retarget)
+        self.assertEqual(self.errors(d), [])
+
+    def test_the_mirror_check_rewrites_the_recorded_slug_from_meta_cwd(self):
+        """A recorded `transcript_mirror.filePath` names the recording slug, not the token."""
+        cwd = "/private/tmp/afleet-fixtures/demo"
+        d = build_fixture(self.root, cwd=cwd)
+
+        def relocate(f):
+            if f.get("type") == "transcript_mirror":
+                f["filePath"] = "~/.claude/projects/%s/%s.jsonl" % (fixture.slug_of(cwd), SID)
+
+        rewrite_frames(d, relocate)
+        self.assertEqual(self.errors(d), [])
 
     def test_malformed_transcript_is_reported_rather_than_crashing(self):
         """A gate's input is by definition possibly-malformed, so a bad line is a finding.
@@ -257,6 +412,16 @@ class VerifyTests(unittest.TestCase):
         write(os.path.join(d, "README.md"), "recorded by Probe Person\n")
         e, w = verify.verify_fixture(d, home="/Users/probe", author="Probe Person")
         self.assertEqual(e, []); self.assertTrue(any("author" in x for x in w))
+
+    def test_the_review_signature_is_not_a_finding_but_a_second_mention_is(self):
+        """§4.5 asks the reviewer to sign; a warning that fires on every run is one nobody reads."""
+        signed = {"reviewer": "Probe Person", "date": "2026-09-04", "checklist_version": 1}
+        d = build_fixture(self.root, review=signed)
+        e, w = verify.verify_fixture(d, home="/Users/probe", author="Probe Person")
+        self.assertEqual(e, []); self.assertEqual([x for x in w if "author" in x], [])
+        d2 = build_fixture(self.root, name="demo2", review=signed, purpose="asked for by Probe Person")
+        e2, w2 = verify.verify_fixture(d2, home="/Users/probe", author="Probe Person")
+        self.assertEqual(e2, []); self.assertTrue(any("author" in x for x in w2))
 
 
 if __name__ == "__main__":

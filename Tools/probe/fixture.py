@@ -62,7 +62,7 @@ def _redact_file(src, dest, redactor):
     except UnicodeDecodeError:
         # Not copied through: see the module docstring. The stub is valid JSON and valid
         # UTF-8, so a second `redact` pass over a committed fixture leaves it alone.
-        with open(dest, "w") as out:
+        with open(dest, "w", encoding="utf-8") as out:
             out.write(_omitted_stub("undecodable file", raw))
         return
     if src.endswith(".jsonl"):
@@ -80,7 +80,7 @@ def _redact_file(src, dest, redactor):
             text = json.dumps(redactor.redact_json(json.loads(text)))
         except ValueError:
             text = redactor.redact_text(text)
-    with open(dest, "w") as out:
+    with open(dest, "w", encoding="utf-8") as out:
         out.write(text)
 
 
@@ -135,7 +135,7 @@ def collect_artifacts(frames, record_dirs, dest_dir, redactor, task_root=None):
     for d in record_dirs:
         for root, _, files in os.walk(d):
             for name in files:
-                with open(os.path.join(root, name), errors="replace") as fh:
+                with open(os.path.join(root, name), encoding="utf-8", errors="replace") as fh:
                     for line in fh:
                         for m in re.finditer(re.escape(task_root) + r"[^\s\"']+", line):
                             candidates.add(m.group(0))
@@ -153,7 +153,7 @@ def collect_artifacts(frames, record_dirs, dest_dir, redactor, task_root=None):
             text = redactor.redact_text(raw.decode("utf-8"), path="artifacts/" + rel)
         except UnicodeDecodeError:
             text = _omitted_stub("binary artifact", raw)
-        with open(dest, "w") as out:
+        with open(dest, "w", encoding="utf-8") as out:
             out.write(text)
         mapping[path] = ARTIFACT_TOKEN + "/" + rel
     return mapping
@@ -181,14 +181,14 @@ def write_fixture(fixtures_root, name, meta, frames, census_obj, manifest, initi
     meta = dict(meta, name=name)
     tmp = tempfile.mkdtemp(prefix=".tmp-%s-" % name, dir=fixtures_root)
     try:
-        with open(os.path.join(tmp, "fixture.json"), "w") as fh:
+        with open(os.path.join(tmp, "fixture.json"), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, indent=1, sort_keys=True)
-        with open(os.path.join(tmp, "frames.ndjson"), "w") as fh:
+        with open(os.path.join(tmp, "frames.ndjson"), "w", encoding="utf-8") as fh:
             for rec in frames:
                 fh.write(json.dumps(rec) + "\n")
-        with open(os.path.join(tmp, "census.json"), "w") as fh:
+        with open(os.path.join(tmp, "census.json"), "w", encoding="utf-8") as fh:
             json.dump(census_obj, fh, indent=1, sort_keys=True)
-        with open(os.path.join(tmp, "redaction.json"), "w") as fh:
+        with open(os.path.join(tmp, "redaction.json"), "w", encoding="utf-8") as fh:
             json.dump(manifest, fh, indent=1, sort_keys=True)
         for sub, src in (("initial", initial_dir), ("transcript", transcript_dir), ("artifacts", artifacts_dir)):
             dst = os.path.join(tmp, sub)
@@ -196,7 +196,7 @@ def write_fixture(fixtures_root, name, meta, frames, census_obj, manifest, initi
                 shutil.copytree(src, dst)
             else:
                 os.makedirs(dst)
-        with open(os.path.join(tmp, "streams.json"), "w") as fh:
+        with open(os.path.join(tmp, "streams.json"), "w", encoding="utf-8") as fh:
             json.dump(stream_sizes(os.path.join(tmp, "initial")), fh, indent=1, sort_keys=True)
         dest = os.path.join(fixtures_root, name)
         old = None
@@ -214,15 +214,15 @@ def write_fixture(fixtures_root, name, meta, frames, census_obj, manifest, initi
 
 
 def load(path):
-    with open(os.path.join(path, "fixture.json")) as fh:
+    with open(os.path.join(path, "fixture.json"), encoding="utf-8") as fh:
         meta = json.load(fh)
     frames = []
-    with open(os.path.join(path, "frames.ndjson")) as fh:
+    with open(os.path.join(path, "frames.ndjson"), encoding="utf-8") as fh:
         for line in fh:
             if line.strip():
                 frames.append(json.loads(line))
-    with open(os.path.join(path, "census.json")) as fh:
+    with open(os.path.join(path, "census.json"), encoding="utf-8") as fh:
         c = json.load(fh)
-    with open(os.path.join(path, "streams.json")) as fh:
+    with open(os.path.join(path, "streams.json"), encoding="utf-8") as fh:
         streams = json.load(fh)
     return {"path": path, "meta": meta, "frames": frames, "census": c, "streams": streams}
