@@ -20,6 +20,11 @@ final class SystemFrameTests: XCTestCase {
         XCTAssertEqual(t.taskID, "a1b2c3d4e5f6a7b8c"); XCTAssertEqual(t.spawnDepth, 1); XCTAssertEqual(t.subagentType, "Explore")
         guard case .taskNotification(let n) = try system("system_task_notification") else { return XCTFail() }
         XCTAssertEqual(n.status, "completed"); XCTAssertTrue(n.outputFile.hasSuffix(".output"))
+        // `workflow_name` is legal only alongside task_type "local_workflow", so it needs its own frame;
+        // between the two task_started samples every declared key of TaskStartedFields is exercised.
+        guard case .taskStarted(let w) = try system("system_task_started_workflow") else { return XCTFail() }
+        XCTAssertEqual(w.taskType, "local_workflow"); XCTAssertEqual(w.workflowName, "spec")
+        XCTAssertNil(w.subagentType); XCTAssertNil(w.spawnDepth)
     }
     func testUnknownSubtypeIsSystemOpaqueAndReEncodes() throws {
         let raw = try TestPaths.sample("system_unknown_subtype")
