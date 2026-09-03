@@ -497,7 +497,7 @@ There is one ConfigHome per app launch. A project whose own environment (for exa
   (§6.3, §11), already redacted on disk, passed through a second review pass (emails,
   tokens, absolute home paths, account fields) before they enter `Fixtures/`. Each fixture is paired with a snapshot of its transcript for the
   differential test (§7.3).
-- **Probe suite** (`Tools/probe/`, run on demand with `make probe`; the twelve scripts
+- **Probe suite** (`Tools/probe/`, run on demand with `make probe`; the fourteen scripts
   already in `probes/`, from the stream-json baseline through the zero-cost census, slash
   commands, background turn boundary, resume and control shapes, checkpoints, fast mode,
   session mirror, `tool_progress` and the registry record, are its seed and move there): runs the installed
