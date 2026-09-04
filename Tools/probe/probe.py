@@ -127,7 +127,16 @@ def claude_help(argv):
 
 
 def load_scenario(name, scenario_dir=None):
-    path = os.path.join(scenario_dir or SCENARIO_DIR, name.replace("-", "_") + ".py")
+    directory = scenario_dir or SCENARIO_DIR
+    # A scenario may import a sibling: `session-mirror-resume` reuses the mirror comparison
+    # `session-mirror-relocation` defines, because the two fixtures are one catalogue row and
+    # a second copy of that comparison could drift from the first. Modules loaded from a file
+    # location are not importable by name, so the directory they came from goes on the path --
+    # the directory this call was given, so a scenario set pointed at by `AFLEET_SCENARIO_DIR`
+    # imports its own siblings rather than the installed ones.
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    path = os.path.join(directory, name.replace("-", "_") + ".py")
     if not os.path.isfile(path):
         raise FileNotFoundError("no scenario %s (%s)" % (name, path))
     spec = importlib.util.spec_from_file_location("scenario_" + name.replace("-", "_"), path)

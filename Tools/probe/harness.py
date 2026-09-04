@@ -20,6 +20,11 @@ DEFAULT_ENV_TABLE = {
     "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
     "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
     "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+    # S15, settled from the bundle: the variable is compared by equality against exactly
+    # `"markdown"` and `"html"`, and anything else falls to a default that depends on the
+    # client type. `markdown` is the value the parent's §6.1 table takes, so the launch line
+    # pins it rather than inheriting whatever the entrypoint heuristic would have chosen.
+    "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown",
     "CLAUDE_CODE_FORK_SUBAGENT": "1",
 }
 FORBIDDEN_ENV = ("CLAUDE_CODE_REMOTE", "CLAUDE_CODE_CONTAINER_ID", "CLAUDE_CODE_ENTRYPOINT")
