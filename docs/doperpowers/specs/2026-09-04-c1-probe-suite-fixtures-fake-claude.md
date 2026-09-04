@@ -768,6 +768,20 @@ which `record` spills to its temporary file, set from the largest recorded scena
   same account pays for the agents working on this repository. Recorded so the cost is a
   decision rather than a surprise.
 
+- Observation: A session's **first** resume appends one `mode` record to its transcript and
+  mirrors it; no later resume of that session appends or mirrors anything. Evidence: three
+  experiments against a session already resumed once — idling fifteen seconds rather than
+  six, closing the session, and resuming with a different `--permission-mode` — each
+  produced zero `transcript_mirror` frames and left the transcript at 32 records with one
+  `mode` record. So the write is not on a timer, not at close, and not a write-on-change of
+  the mode. The mechanism was not located in the extracted bundle; this is recorded
+  behaviour, not a reading of the source. Impact: C3's reducer must expect one non-history
+  append across a resume and must not render it as conversation, and `resume-no-replay`
+  cannot take part in the census — `diff` resumes the session `plain-two-turn` recorded,
+  which the fixture itself has already resumed, so the mirror never comes back and the strict
+  comparison reports `removed pair transcript_mirror` for a reason that has nothing to do
+  with the binary.
+
 - Observation: The extracted bundle's SPEC chapter files under
   `~/claude-code-bundle/2.1.257/SPEC/` are no longer on disk on 2026-09-04; the bundle
   source (`cli.pretty.js`, `modules/`) and `docs/tui-parity/` remain. Impact: chapter
@@ -992,3 +1006,12 @@ Pending — written at finish.
   `rate-limited-turn` from the interrupted attempt. S5 and S2 are both settled on the parent.
   The three model-driven recordings cost about 0.034 USD in total and each succeeded on its
   first attempt.
+- 2026-09-04: The census-exclusion rule now has two instances and one statement. A scenario
+  leaves the census when re-running it cannot be expected to reproduce what was recorded.
+  `rate-limited-turn` qualifies because its precondition — an exhausted seven-day window —
+  is not something anyone can arrange; `resume-no-replay` qualifies because its precondition,
+  a session that has never been resumed, is consumed by the act of recording it. The rule
+  generalises §4.7's existing exclusion of synthetic fixtures, whose content was never on the
+  wire at all, and it is the reason neither fixture is instead marked `deterministic: false`:
+  §4.4 alarms on a removed pair in required mode as well as exact, deliberately, so the
+  permissive comparison is not an escape from an unreproducible recording.
