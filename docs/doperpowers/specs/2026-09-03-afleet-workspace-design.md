@@ -340,6 +340,13 @@ event stream, not on the handshake value. Both payloads are kept on the channel'
 object, each when it arrives; anything that needs `system/init` before the first turn does
 not have it and must not block on it.
 
+The in-process MCP server is likewise not connected at the moment the `initialize`
+response arrives: on 2.1.260 its bring-up completed about 0.9 s later, and an `mcp_status`
+sent immediately after the handshake returned an empty list. A negative check ("the declined
+server is absent", item 54) is safe at any time; a positive one ("`afleet` is connected")
+reads `mcp_servers` off the first `system/init` or polls `mcp_status` after a settle, and
+never fails a launch on the first empty answer.
+
 `supportedDialogKinds` names exactly the two families the headless dialog dispatcher ever
 forwards, `refusal_fallback_prompt` and `fable_overage_consent_prompt`; MCP elicitation
 arrives as the separate `elicitation` request, the nine `permission_*` kinds travel as
@@ -969,7 +976,11 @@ channels not in view.
 
 **Banners.** A `rate_limit_event` renders a banner at the top of the channel with the
 limit that applies and its reset time, and a row in Activity, until the next event clears
-it. An `auth_status` frame that reports a problem renders a banner with the state and a
+it. Whether the turn ran is decided by `status` alone. `overageStatus` is a separate fact
+about buying credits past the plan: an organisation that has switched overage off reports
+`status: "allowed"` together with `overageStatus: "rejected"` and
+`overageDisabledReason: "org_level_disabled"` on a turn that runs to completion (observed
+live on 2026-09-05), and that pair must not render as a refusal. An `auth_status` frame that reports a problem renders a banner with the state and a
 *Sign in* action that opens a Terminal tab running `claude auth login`; a healthy status
 clears it.
 
@@ -3363,6 +3374,21 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   stand-in's contract becomes "models the recorded engine; behaviour no fixture shows is a
   stand-in defect". G1 could not have caught this by construction — it is defined as provable
   without the real CLI — which is the case for G3's existence in one line.
+- Observation: `overageStatus: "rejected"` arrives on turns that run, and a guard that reads
+  it as a refusal wastes exactly the budget it exists to protect.
+  Evidence: C2's G3. Its live-signal guard keyed on `overageStatus`; the shared scratch
+  organisation has overage disabled, so an allowed turn reported `status: "allowed"`,
+  `overageStatus: "rejected"`, `overageDisabledReason: "org_level_disabled"`, and the guard
+  read the completed turn as rejected. One model turn was spent learning this; the second
+  made the gate assert the round trip, and the worker stopped there.
+  Impact: §7.6 states that `status` alone decides whether a turn ran and that the
+  overage pair is a fact about credit purchase, not about the turn. The guard now keys on
+  `status` with a regression test for the overage-disabled shape.
+- Observation: The in-process MCP server connects after the handshake, not with it.
+  Evidence: C2's G3 measured about 0.9 s between the `initialize` response and the `afleet`
+  server reporting connected; an `mcp_status` sent at once returned an empty list.
+  Impact: §6.2 records the latency; positive connection checks read the first `system/init`
+  or poll after a settle, and no launch fails on the first empty answer.
 
 ## Outcomes & Retrospective
 
@@ -3838,3 +3864,9 @@ Pending — written at finish.
   "both arrive with the handshake". Flags C2 (in flight, fix wave dispatched), C3 and C4
   (both consume `Handshake`; anything written to read `tools`, `capabilities` or
   `mcp_servers` off it must read them off the first `system/init` on the stream instead).
+- 2026-09-05: §6.2 records that the in-process MCP server connects about 0.9 s after the
+  `initialize` response and that an immediate `mcp_status` is empty; §7.6 records that
+  `status` alone decides whether a turn ran and that `overageStatus: "rejected"` with
+  `overageDisabledReason: "org_level_disabled"` is the normal shape for an organisation
+  with overage off. Both measured live by C2's G3 on 2.1.260. Flags C4 (post-handshake
+  checks, §6.12) and C6 (banners).
