@@ -42,11 +42,11 @@ final class Harness {
         env = ResolvedEnvironment(variables: vars, shell: "/bin/zsh", capturedAt: .init(), mode: .processFallback)
     }
     func make(scenario: String, epoch: ProcessEpoch = .first, bufferCapacity: Int = 4096, capture: RawCapture? = nil,
-              diagnostics: any DiagnosticsSink = NullDiagnostics()) -> ClaudeProcess {
+              diagnostics: any DiagnosticsSink = NullDiagnostics(), extraTools: [any MCPTool] = []) -> ClaudeProcess {
         var e = env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = scenario
         let launch = LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: cwd, session: .new(SessionID()))
         let p = ClaudeProcess(epoch: epoch, launch: launch, environment: e, configHome: ConfigHome(root: cwd.appendingPathComponent("cfg"), source: .environment),
-                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: cwd, tools: [SendUserFileTool()]),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: cwd, tools: [SendUserFileTool()] + extraTools),
                               diagnostics: diagnostics, capture: capture, eventBufferCapacity: bufferCapacity)
         let log = self.log      // capture the actor, not the non-Sendable Harness
         Task { for await ev in p.events { await log.append(ev) } }
@@ -235,6 +235,69 @@ final class ClaudeProcessTests: XCTestCase {
         _ = try await p.spawn()
         _ = await h.expect({ if case .frame(.keepAlive, _) = $0 { return true }; return false }, "keep_alive frame")
         await p.terminate()
+    }
+    /// The other half of the MCP failure path: the server hands the metadata back through `handle`, and this
+    /// actor — the only place that knows the epoch — is what actually records it. The unit test in
+    /// `WireMCPTests` covers the server's side; without this one the transport could ignore the descriptor
+    /// entirely and nothing would notice.
+    func testMCPToolFailureIsRecordedByTheTransportWithoutLeakingPayload() async throws {
+        struct ExplodingTool: MCPTool {
+            struct Boom: Error { let modelNamedPath: String }
+            var name: String { "explode" }
+            var description: String { "throws" }
+            var inputSchema: JSONValue { .object([:]) }
+            func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
+                throw Boom(modelNamedPath: arguments["path"]?.stringValue ?? "")
+            }
+        }
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "mcp_tool_throws", diagnostics: sink, extraTools: [ExplodingTool()])
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("MCP m7 ") }; return false }, "the tool call was answered")
+        let answer = await h.stderrLines().first { $0.hasPrefix("MCP m7 ") } ?? ""
+        XCTAssertTrue(answer.contains("failed unexpectedly (Boom)"), "model-visible text must be the summary: \(answer)")
+        XCTAssertFalse(answer.contains("ledger.csv"), "the model must not be handed the error's own description")
+        let recorded = sink.entries.filter { $0.contains("\"event\":\"mcp_tool_failure\"") }
+        XCTAssertEqual(recorded.count, 1, "entries: \(sink.entries)")
+        let entry = recorded[0]
+        XCTAssertTrue(entry.contains("\"tool\":\"explode\""))
+        XCTAssertTrue(entry.contains("\"error_type\":\"Boom\""))
+        XCTAssertTrue(entry.contains("\"epoch\":1"), "the epoch is why this is recorded here and not in the server: \(entry)")
+        XCTAssertFalse(entry.contains("ledger.csv"), "the metadata log stays metadata: \(entry)")
+        await p.terminate()
+    }
+    /// Fix 3: `finish()` used to run on a fixed 50 ms timer after the exit, and everything the reader had not
+    /// yet handed over was pushed into a finished channel, where `push` drops it.
+    ///
+    /// Getting this to discriminate took a second attempt. A fast consumer does not expose it: the child can
+    /// only exit once it has written everything, so at most a pipe buffer plus one read chunk is ever in
+    /// flight, and 50 ms drains that easily. The case a timer actually loses is a *slow* consumer — the reader
+    /// parked in `push` when the child exits, with the whole backlog still on its side of the channel. The
+    /// flood is sized to fit the pipe buffer so the child can exit without blocking, and the consumer paces
+    /// itself well past the old window.
+    func testEveryFrameWrittenBeforeExitIsDeliveredToASlowConsumer() async throws {
+        let h = try Harness()
+        let total = 100
+        var e = h.env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = "flood:\(total),exit:0"
+        let p = ClaudeProcess(epoch: .first, launch: LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: h.cwd, session: .new(SessionID())),
+                              environment: e, configHome: ConfigHome(root: h.cwd, source: .environment),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: h.cwd, tools: []),
+                              diagnostics: NullDiagnostics(), capture: nil, eventBufferCapacity: 4)
+        _ = try await p.spawn()
+        var assistants = 0, sawResult = false, sawExit = false
+        for await ev in p.events {
+            switch ev {
+            case .frame(.assistant, _): assistants += 1
+            case .frame(.result, _): sawResult = true
+            case .exited: sawExit = true
+            default: break
+            }
+            if sawExit { break }
+            try await Task.sleep(for: .milliseconds(2))     // ~200 ms of draining against a 50 ms window
+        }
+        XCTAssertEqual(assistants, total, "frames still held by the reader at exit must not be dropped by finish()")
+        XCTAssertTrue(sawResult, "the result frame is the one that matters most")
+        XCTAssertTrue(sawExit, "the exit must still be published after the drain")
     }
     func testCaptureReceivesRedactedLinesForBothDirections() async throws {
         let h = try Harness()

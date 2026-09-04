@@ -69,6 +69,10 @@ def after_init():
                 ("m5", {"jsonrpc": "2.0", "id": 5, "method": "resources/list"}),
                 ("m6", {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 4}})]
         for rid, msg in msgs: control_request(rid, {"subtype": "mcp_message", "server_name": "afleet", "message": msg})
+    if has("mcp_tool_throws"):
+        control_request("m7", {"subtype": "mcp_message", "server_name": "afleet",
+                               "message": {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                                           "params": {"name": "explode", "arguments": {"path": "/Users/someone/private/ledger.csv"}}}})
     if scenario_value("flood"):
         count = int(scenario_value("flood"))
         for i in range(count):

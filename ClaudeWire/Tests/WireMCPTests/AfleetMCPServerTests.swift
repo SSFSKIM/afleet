@@ -1,7 +1,6 @@
 import XCTest
 import WireFrames
 import WireMCP
-import WireDiagnostics
 
 final class AfleetMCPServerTests: XCTestCase {
     private var tmp: URL!
@@ -17,7 +16,7 @@ final class AfleetMCPServerTests: XCTestCase {
 
     func testInitializeThenInitializedNotification() async throws {
         let s = server()
-        let (r1, inv1) = await s.handle(req(1, "initialize", .object(["protocolVersion": .string("2025-06-18"), "capabilities": .object([:]), "clientInfo": .object(["name": .string("claude-code")])])))
+        let (r1, inv1, _) = await s.handle(req(1, "initialize", .object(["protocolVersion": .string("2025-06-18"), "capabilities": .object([:]), "clientInfo": .object(["name": .string("claude-code")])])))
         guard case .response(.response(let resp)) = r1 else { return XCTFail("\(r1)") }
         XCTAssertEqual(resp.id, .number(1)); XCTAssertEqual(resp.result["serverInfo"]?["name"], .string("afleet"))
         XCTAssertEqual(resp.result["serverInfo"]?["version"], .string("0.1.0")); XCTAssertNotNil(resp.result["capabilities"]?["tools"]); XCTAssertNil(inv1)
@@ -27,16 +26,16 @@ final class AfleetMCPServerTests: XCTestCase {
         // with 2025-11-25 (bundle 2.1.258:143537) and it sends its newest (679251), so echoing would
         // have afleet claim a surface it does not implement. We answer with what we do speak, which
         // is still inside the engine's list, so its `!r.includes(...)` check (679254) passes.
-        let (newer, _) = await s.handle(req(11, "initialize", .object(["protocolVersion": .string("2025-11-25")])))
+        let (newer, _, _) = await s.handle(req(11, "initialize", .object(["protocolVersion": .string("2025-11-25")])))
         guard case .response(.response(let negotiated)) = newer else { return XCTFail("\(newer)") }
         XCTAssertEqual(negotiated.result["protocolVersion"], .string("2025-06-18"))
         // A supported revision that is NOT the preferred one. This is the only case that proves the
         // supported set is consulted at all: both assertions above expect preferredProtocolVersion,
         // so a body of `return .string(Self.preferredProtocolVersion)` would satisfy them both.
-        let (older, _) = await s.handle(req(12, "initialize", .object(["protocolVersion": .string("2025-03-26")])))
+        let (older, _, _) = await s.handle(req(12, "initialize", .object(["protocolVersion": .string("2025-03-26")])))
         guard case .response(.response(let olderResp)) = older else { return XCTFail("\(older)") }
         XCTAssertEqual(olderResp.result["protocolVersion"], .string("2025-03-26"))
-        let (r2, _) = await s.handle(.notification(.init(method: "notifications/initialized")))
+        let (r2, _, _) = await s.handle(.notification(.init(method: "notifications/initialized")))
         guard case .notificationAck = r2 else { return XCTFail("\(r2)") }
     }
     func testPingListCallUnknownAndCancel() async throws {
@@ -47,7 +46,7 @@ final class AfleetMCPServerTests: XCTestCase {
         let tools = list.result["tools"]?.arrayValue
         XCTAssertEqual(tools?.count, 1); XCTAssertEqual(tools?[0]["name"], .string("send_user_file"))
         XCTAssertEqual(tools?[0]["inputSchema"]?["required"], .array([.string("files"), .string("status")]))
-        let (call, inv) = await s.handle(req(4, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("a.txt"), .string("b.txt")]), "caption": .string("two"), "status": .string("normal"), "display": .string("render")])])))
+        let (call, inv, _) = await s.handle(req(4, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("a.txt"), .string("b.txt")]), "caption": .string("two"), "status": .string("normal"), "display": .string("render")])])))
         guard case .response(.response(let callResp)) = call else { return XCTFail() }
         XCTAssertEqual(callResp.result["isError"], .bool(false))
         XCTAssertEqual(callResp.result["content"]?[0]?["text"], .string("Sent 2 files to the user: a.txt, b.txt"))
@@ -59,14 +58,14 @@ final class AfleetMCPServerTests: XCTestCase {
     }
     func testMissingFileAndBadArgumentsAreToolErrorsNotProtocolErrors() async throws {
         let s = server()
-        let (r, inv) = await s.handle(req(6, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("nope.txt")]), "status": .string("normal")])])))
+        let (r, inv, _) = await s.handle(req(6, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("nope.txt")]), "status": .string("normal")])])))
         guard case .response(.response(let resp)) = r else { return XCTFail() }
         XCTAssertEqual(resp.result["isError"], .bool(true)); XCTAssertNil(inv)
         XCTAssertTrue(resp.result["content"]?[0]?["text"]?.stringValue?.contains("nope.txt") ?? false)
         // A bare-string `files` is coerced to a one-element array, matching the built-in's Zod
         // preprocess (bundle 2.1.258:485919) rather than rejecting an unambiguous input. This amends
         // the plan's assertion; see "Fix round 1" in the task-6 report for the reasoning.
-        let (r2, inv2) = await s.handle(req(7, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .string("a.txt"), "status": .string("normal")])])))
+        let (r2, inv2, _) = await s.handle(req(7, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .string("a.txt"), "status": .string("normal")])])))
         guard case .response(.response(let coerced)) = r2 else { return XCTFail("\(r2)") }
         XCTAssertEqual(coerced.result["isError"], .bool(false))
         XCTAssertEqual(coerced.result["content"]?[0]?["text"], .string("Sent 1 file to the user: a.txt"))
@@ -75,30 +74,30 @@ final class AfleetMCPServerTests: XCTestCase {
         // The assertion the bare-string case was standing in for: a `files` that is neither a string
         // nor a non-empty array of strings stays a protocol error.
         for bad: JSONValue in [.integer(5), .array([]), .array([.integer(1), .integer(2)]), .null] {
-            let (badReply, _) = await s.handle(req(70, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": bad, "status": .string("normal")])])))
+            let (badReply, _, _) = await s.handle(req(70, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": bad, "status": .string("normal")])])))
             guard case .response(.error(let badErr)) = badReply else { return XCTFail("files: \(bad) should be a protocol error, got \(badReply)") }
             XCTAssertEqual(badErr.error.code, -32602, "files: \(bad)")
         }
         // A bad `status` and a bad `display` are protocol errors too.
-        let (badStatus, _) = await s.handle(req(71, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("a.txt")]), "status": .string("urgent")])])))
+        let (badStatus, _, _) = await s.handle(req(71, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("a.txt")]), "status": .string("urgent")])])))
         guard case .response(.error(let statusErr)) = badStatus else { return XCTFail("\(badStatus)") }
         XCTAssertEqual(statusErr.error.code, -32602)
-        let (badDisplay, _) = await s.handle(req(72, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("a.txt")]), "status": .string("normal"), "display": .string("popup")])])))
+        let (badDisplay, _, _) = await s.handle(req(72, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("a.txt")]), "status": .string("normal"), "display": .string("popup")])])))
         guard case .response(.error(let displayErr)) = badDisplay else { return XCTFail("\(badDisplay)") }
         XCTAssertEqual(displayErr.error.code, -32602)
         // A directory is readable but not sendable: a runtime failure, not a protocol error, and it
         // must not carry a host invocation.
-        let (dir, dirInv) = await s.handle(req(73, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string(".")]), "status": .string("normal")])])))
+        let (dir, dirInv, _) = await s.handle(req(73, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string(".")]), "status": .string("normal")])])))
         guard case .response(.response(let dirResp)) = dir else { return XCTFail("\(dir)") }
         XCTAssertEqual(dirResp.result["isError"], .bool(true)); XCTAssertNil(dirInv)
-        let (r3, _) = await s.handle(req(8, "tools/call", .object(["name": .string("no_such_tool"), "arguments": .object([:])])))
+        let (r3, _, _) = await s.handle(req(8, "tools/call", .object(["name": .string("no_such_tool"), "arguments": .object([:])])))
         guard case .response(.error(let e3)) = r3 else { return XCTFail() }
         XCTAssertEqual(e3.error.code, -32602)
     }
     func testAbsolutePathsAnywhereReadableAreAllowed() async throws {
         // The built-in SendUserFile accepts any file the model can read; afleet mirrors that domain (child spec, WireMCP).
         let s = server()
-        let (r, inv) = await s.handle(req(9, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("/etc/hosts")]), "status": .string("proactive")])])))
+        let (r, inv, _) = await s.handle(req(9, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("/etc/hosts")]), "status": .string("proactive")])])))
         guard case .response(.response(let resp)) = r else { return XCTFail() }
         XCTAssertEqual(resp.result["isError"], .bool(false))
         guard case .sentFile(let paths, _, let status, _) = inv else { return XCTFail() }
@@ -154,7 +153,7 @@ final class AfleetMCPServerTests: XCTestCase {
             }
         }
         let s = AfleetMCPServer(serverVersion: "0.1.0", cwd: tmp, tools: [LyingTool()])
-        let (reply, invocation) = await s.handle(req(13, "tools/call", .object(["name": .string("lies"), "arguments": .object([:])])))
+        let (reply, invocation, _) = await s.handle(req(13, "tools/call", .object(["name": .string("lies"), "arguments": .object([:])])))
         guard case .response(.response(let resp)) = reply else { return XCTFail("\(reply)") }
         // The failure still reaches the model as a successful response carrying isError...
         XCTAssertEqual(resp.result["isError"], .bool(true))
@@ -177,41 +176,47 @@ final class AfleetMCPServerTests: XCTestCase {
         let call = Task { await s.handle(sleepCall) }
         try await Task.sleep(for: .milliseconds(100))
         _ = await s.handle(.notification(.init(method: "notifications/cancelled", params: .object(["requestId": .integer(10)]))))
-        let (r, _) = await call.value
+        let (r, _, _) = await call.value
         guard case .response(.error(let e)) = r else { return XCTFail("\(r)") }
         XCTAssertEqual(e.error.code, -32800)
     }
 }
 
-/// An unexpected throw is summarised for the model — a Foundation error's description carries the path it
-/// failed on — but the text used to be lost entirely, because this actor had nowhere to write it. It goes to
-/// the diagnostics sink now: the local metadata log is where an operator can diagnose the failure.
-final class MCPToolFailureDiagnosticsTests: XCTestCase {
-    private final class Sink: DiagnosticsSink, @unchecked Sendable {
-        private let lock = NSLock(); private var stored: [DiagnosticEvent] = []
-        func record(_ event: DiagnosticEvent) { lock.lock(); stored.append(event); lock.unlock() }
-        var events: [DiagnosticEvent] { lock.lock(); defer { lock.unlock() }; return stored }
-    }
+/// An unexpected throw is summarised for the model — an error's own description is frame-derived payload,
+/// because an MCP tool's arguments come straight off engine frames. The metadata a host needs to diagnose it
+/// leaves through `handle`'s return instead, so this module keeps its single dependency on `WireFrames`.
+final class MCPToolFailureTests: XCTestCase {
     private struct ExplodingTool: MCPTool {
-        struct Boom: Error { let secretPath = "/Users/someone/private/ledger.csv" }
+        struct Boom: Error { let modelNamedPath = "/Users/someone/private/ledger.csv" }
         var name: String { "explode" }
         var description: String { "throws" }
         var inputSchema: JSONValue { .object([:]) }
         func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult { throw Boom() }
     }
-    func testUnexpectedToolErrorTextReachesDiagnosticsAndNotTheModel() async throws {
-        let sink = Sink()
-        let server = AfleetMCPServer(serverVersion: "0.1.0", cwd: URL(fileURLWithPath: "/tmp"), tools: [ExplodingTool()], diagnostics: sink)
-        let (reply, invocation) = await server.handle(.request(.init(id: .number(1), method: "tools/call", params: .object(["name": .string("explode"), "arguments": .object([:])]))))
+    func testUnexpectedToolErrorReturnsMetadataAndKeepsPayloadFromTheModel() async throws {
+        let server = AfleetMCPServer(serverVersion: "0.1.0", cwd: URL(fileURLWithPath: "/tmp"), tools: [ExplodingTool()])
+        let (reply, invocation, failure) = await server.handle(.request(.init(id: .number(1), method: "tools/call", params: .object(["name": .string("explode"), "arguments": .object([:])]))))
         XCTAssertNil(invocation)
         guard case .response(.response(let r)) = reply else { return XCTFail("expected a response, got \(reply)") }
         XCTAssertEqual(r.result["isError"], .bool(true))
         let modelText = r.result["content"]?[0]?["text"]?.stringValue ?? ""
         XCTAssertEqual(modelText, "Tool explode failed unexpectedly (Boom)")
         XCTAssertFalse(modelText.contains("ledger.csv"), "the model must not see the error's own description")
-        let recorded = sink.events.compactMap { e -> (String, String)? in if case .mcpToolFailure(let t, let m) = e { return (t, m) }; return nil }
-        XCTAssertEqual(recorded.count, 1)
-        XCTAssertEqual(recorded.first?.0, "explode")
-        XCTAssertTrue(recorded.first?.1.contains("ledger.csv") == true, "the full error text must survive in diagnostics: \(recorded)")
+        let failed = try XCTUnwrap(failure)
+        XCTAssertEqual(failed.tool, "explode")
+        XCTAssertEqual(failed.errorType, "Boom")
+        XCTAssertFalse(failed.domain.contains("ledger.csv"))
+        XCTAssertTrue(failed.domain.contains("Boom"), "the bridged NSError domain names the error type: \(failed.domain)")
+    }
+    /// A call that does not throw carries no failure, so the transport cannot record one for a healthy tool.
+    func testASuccessfulCallCarriesNoFailure() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mcp-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("x".utf8).write(to: dir.appendingPathComponent("a.txt"))
+        let server = AfleetMCPServer(serverVersion: "0.1.0", cwd: dir, tools: [SendUserFileTool()])
+        let (_, invocation, failure) = await server.handle(.request(.init(id: .number(1), method: "tools/call", params: .object(["name": .string("send_user_file"), "arguments": .object(["files": .array([.string("a.txt")]), "status": .string("normal")])]))))
+        XCTAssertNotNil(invocation)
+        XCTAssertNil(failure)
     }
 }

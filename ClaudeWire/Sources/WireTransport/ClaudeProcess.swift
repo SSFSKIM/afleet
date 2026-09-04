@@ -54,6 +54,9 @@ public actor ClaudeProcess {
     }
 
     public var bufferedEventCount: Int { get async { await channel.count } }
+    /// 0 until `run()` succeeds. Exposed because "there is no pid to signal yet" is a property worth asserting:
+    /// `kill(0, ...)` is group-wide, so the pre-launch guard in `terminate()` is not a nicety.
+    public var childProcessIdentifier: Int32 { box.process.processIdentifier }
     private var isExited: Bool { if case .exited = status { return true }; return false }
 
     // MARK: spawn and handshake
@@ -95,10 +98,11 @@ public actor ClaudeProcess {
             if let wire = error as? WireError, case .handshakeTimeout = wire { throw WireError.handshakeTimeout(stderrTail: tail) }
             throw error
         }
-        // A child that exits between the handshake frames and here must not be reported as running: the
-        // termination handler waits 50 ms for the stderr reader, so this window is real if narrow.
-        if isExited { throw WireError.processExited }
-        status = .running
+        // The handshake completed, so it is reported: a child can answer and exit in the same breath, and
+        // that is a real session that produced a real init. What must not happen is overwriting an observed
+        // exit with `.running` — the exit is already on the stream and `send` already refuses. Throwing here
+        // instead, as an earlier revision did, called an answered handshake a failure.
+        if !isExited { status = .running }
         diagnostics.record(.handshake(durationMs: Int((ContinuousClock.now - started) / .milliseconds(1)), epoch: epoch))
         let pending = handshakePending
         let handshake = Handshake(initialize: InitializeResponse(raw: pair.initialize.response ?? .object([:])), systemInit: pair.systemInit, pending: pending)
@@ -225,17 +229,23 @@ public actor ClaudeProcess {
                 // Off the reader: a long tools/call must not stall stdout, and notifications/cancelled must reach the server while it runs.
                 let id = request.id
                 mcpTasks[id] = Task { [mcpServer] in
-                    let (reply, invocation) = await mcpServer.handle(m.message)
-                    await self.deliverMCP(id, reply: reply, invocation: invocation)
+                    let (reply, invocation, failure) = await mcpServer.handle(m.message)
+                    await self.deliverMCP(id, reply: reply, invocation: invocation, failure: failure)
                 }
             default:
-                let (reply, invocation) = await mcpServer.handle(m.message)
-                await deliverMCP(request.id, reply: reply, invocation: invocation)
+                let (reply, invocation, failure) = await mcpServer.handle(m.message)
+                await deliverMCP(request.id, reply: reply, invocation: invocation, failure: failure)
             }
         }
     }
-    private func deliverMCP(_ id: RequestID, reply: MCPReply, invocation: HostToolInvocation?) async {
+    /// The MCP server has no sink of its own and no epoch; the failure metadata rides out on its return and
+    /// is recorded here, where both are known. Metadata only — the error's own description is frame-derived
+    /// payload and the diagnostics log is metadata by contract.
+    private func deliverMCP(_ id: RequestID, reply: MCPReply, invocation: HostToolInvocation?, failure: MCPToolFailure?) async {
         mcpTasks[id] = nil
+        if let failure {
+            diagnostics.record(.mcpToolFailure(tool: failure.tool, errorType: failure.errorType, domain: failure.domain, code: failure.code, epoch: epoch))
+        }
         let rpc: JSONRPCMessage = { if case .response(let r) = reply { return r }; return .response(.init(id: .number(0), result: .object([:]))) }()
         try? await writeAnswer(id, .mcpResponse(rpc), subtype: "mcp_message")
         if let invocation { await channel.push(.hostToolInvoked(invocation, epoch)) }
@@ -321,24 +331,43 @@ public actor ClaudeProcess {
 
     // MARK: exit and terminate
 
+    /// Two phases, and the split is the point.
+    ///
+    /// **Ownership first, with no suspension point before it.** `terminate()` waits on `exitWaiters`, so if
+    /// settlement sat behind the `.exited` push — which suspends while the channel is full — a slow or stopped
+    /// consumer could make that wait time out and send the escalation on to signal a pid Foundation has
+    /// already reaped. Exit observation must not be hostage to consumer liveness.
+    ///
+    /// **Then publication, gated on the readers rather than on a clock.** The readers end at EOF, and EOF is
+    /// guaranteed once the child is gone; awaiting them is an actual completion condition where the old fixed
+    /// 50 ms sleep was a guess. Any line still in flight was pushed after `finish()`, where `push` drops it —
+    /// so the last frames before exit, plausibly the `result`, were being lost on a timer.
     private func processDidExit(_ raw: ExitStatus) async {
-        try? await Task.sleep(for: .milliseconds(50))      // let the stderr reader drain the last lines
-        let tail = stderrTail()
-        let status: ExitStatus = { switch raw { case .code(let c, _): .code(c, stderrTail: tail); case .signal(let sig, _): .signal(sig, stderrTail: tail) } }()
-        self.status = .exited(status)
+        let interim = raw.withTail(stderrTail())
+        status = .exited(interim)
+        // Deliberately asymmetric. Outbound waiters fail now, because a `request()` with no timeout that hangs
+        // on a dead child is worse than a late answer lost — and callers who care have `timeout:`. The
+        // handshake waiter is the opposite case and settles below instead: a child that writes its handshake
+        // and exits in the same breath has answered, and failing it here would call that a protocol failure
+        // purely because the termination handler beat the reader to the actor.
         for (_, w) in pendingOutbound { w.settle(.failure(WireError.processExited)) }; pendingOutbound.removeAll()
         pendingInbound.removeAll()
         for (_, t) in mcpTasks { t.cancel() }; mcpTasks.removeAll()
+        for w in exitWaiters { w.settle(.success(interim)) }; exitWaiters.removeAll()
+        await writer?.close()
+
+        let inFlight = readers; readers.removeAll()
+        for r in inFlight { await r.value }
+        // First settle wins, so this is a no-op when the frames in the pipe completed the handshake.
         handshakeWaiter.settle(.failure(WireError.processExited))
-        diagnostics.record(.lifecycle("exited \(status)", epoch: epoch))
-        // Read the result rather than trusting ordering: nothing enforces that this push precedes the
-        // finish below in some other path, and a dropped `.exited` is a channel FleetKit never releases.
-        if await channel.push(.exited(status, epoch)) == false {
+        let final = raw.withTail(stderrTail())
+        status = .exited(final)
+        diagnostics.record(.lifecycle("exited \(final)", epoch: epoch))
+        // Read the result rather than trusting ordering: a dropped `.exited` is a channel FleetKit never releases.
+        if await channel.push(.exited(final, epoch)) == false {
             diagnostics.record(.lifecycle("exit event dropped: channel already finished", epoch: epoch))
         }
         await channel.finish()
-        for w in exitWaiters { w.settle(.success(status)) }; exitWaiters.removeAll()
-        await writer?.close()
     }
     /// nil on timeout; the caller escalates. Never deadlocks: the timeout settles the waiter itself.
     private func waitForExit(upTo timeout: Duration) async -> ExitStatus? {
@@ -352,6 +381,24 @@ public actor ClaudeProcess {
     /// §6.7 as amended: end_session, close stdin, wait 5 s, SIGTERM, wait 5 s, SIGKILL; returns only after the exit is observed.
     public func terminate() async {
         if isExited { return }
+        // Never launched. There is no child to end, no stdin to close, and above all nothing to signal:
+        // `Process.terminate()` raises `NSInvalidArgumentException` on an unlaunched process — an uncatchable
+        // crash of the host app — and `Process.processIdentifier` is 0 until `run()` succeeds, so
+        // `kill(0, SIGKILL)` beyond it would signal *every process in afleet's own group*. Constructing a
+        // channel, being torn down before launch and calling `terminate()` for cleanup is ordinary caller
+        // behaviour, so this is a live path, not a defensive one. The status is recorded the way the
+        // launch-failure path records its own, which also makes a later `spawn()` refuse and this call
+        // idempotent.
+        if status == .launching {
+            let never = ExitStatus.code(-1, stderrTail: "terminated before launch")
+            terminating = true
+            status = .exited(never)
+            diagnostics.record(.terminateEscalated(step: "never_launched", epoch: epoch))
+            for w in exitWaiters { w.settle(.success(never)) }; exitWaiters.removeAll()
+            await channel.push(.exited(never, epoch))
+            await channel.finish()
+            return
+        }
         if terminating { _ = await waitForExit(upTo: .seconds(60)); return }
         terminating = true
         let wasRunning = status == .running
@@ -363,12 +410,27 @@ public actor ClaudeProcess {
         await writer?.close()
         diagnostics.record(.terminateEscalated(step: "stdin_closed", epoch: epoch))
         if await waitForExit(upTo: .seconds(5)) != nil { return }
+        // The backstop for any path that reaches the escalation with no live child. `processIdentifier` is 0
+        // before a successful `run()` and stays set afterwards; `isRunning` goes false once Foundation has
+        // reaped the child, and signalling a reaped pid can land on an unrelated process after pid reuse.
+        let pid = box.process.processIdentifier
+        guard pid > 0, box.process.isRunning else {
+            diagnostics.record(.terminateEscalated(step: "no_live_child_to_signal", epoch: epoch))
+            _ = await waitForExit(upTo: .seconds(30))
+            return
+        }
         diagnostics.record(.terminateEscalated(step: "SIGTERM", epoch: epoch))
         box.process.terminate()
         if await waitForExit(upTo: .seconds(5)) != nil { return }
         diagnostics.record(.terminateEscalated(step: "SIGKILL", epoch: epoch))
-        kill(box.process.processIdentifier, SIGKILL)
+        kill(pid, SIGKILL)
         _ = await waitForExit(upTo: .seconds(30))
+    }
+}
+
+private extension ExitStatus {
+    func withTail(_ tail: String) -> ExitStatus {
+        switch self { case .code(let c, _): .code(c, stderrTail: tail); case .signal(let sig, _): .signal(sig, stderrTail: tail) }
     }
 }
 

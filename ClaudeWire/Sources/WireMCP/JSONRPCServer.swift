@@ -1,6 +1,5 @@
 import Foundation
 import WireFrames
-import WireDiagnostics
 
 public struct MCPToolContext: Sendable { public var cwd: URL; public init(cwd: URL) { self.cwd = cwd } }
 
@@ -26,6 +25,20 @@ public protocol MCPTool: Sendable {
 
 public enum MCPReply: Sendable { case response(JSONRPCMessage), notificationAck }
 
+/// What an unexpected tool throw leaves behind for the host, alongside the summarised result the model sees.
+/// Metadata only, and deliberately so: the error's own description is frame-derived payload. This travels out
+/// through `handle`'s return rather than through a sink on this actor, so the module keeps its single
+/// dependency on `WireFrames` and the recorded event can carry the epoch, which only the transport knows.
+public struct MCPToolFailure: Hashable, Sendable {
+    public let tool: String
+    public let errorType: String
+    public let domain: String
+    public let code: Int
+    public init(tool: String, errorType: String, domain: String, code: Int) {
+        self.tool = tool; self.errorType = errorType; self.domain = domain; self.code = code
+    }
+}
+
 public actor AfleetMCPServer {
     /// The MCP protocol revisions whose surface afleet actually implements.
     ///
@@ -43,25 +56,23 @@ public actor AfleetMCPServer {
     public let serverVersion: String
     public let cwd: URL
     private let tools: [String: any MCPTool]
-    private let diagnostics: any DiagnosticsSink
     private var inFlight: [JSONRPCID: Task<MCPToolResult, any Error>] = [:]
 
-    public init(serverVersion: String, cwd: URL, tools: [any MCPTool], diagnostics: any DiagnosticsSink = NullDiagnostics()) {
+    public init(serverVersion: String, cwd: URL, tools: [any MCPTool]) {
         self.serverVersion = serverVersion; self.cwd = cwd
         self.tools = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0) })
-        self.diagnostics = diagnostics
     }
 
-    public func handle(_ message: JSONRPCMessage) async -> (MCPReply, HostToolInvocation?) {
+    public func handle(_ message: JSONRPCMessage) async -> (MCPReply, HostToolInvocation?, MCPToolFailure?) {
         switch message {
         case .notification(let n):
             if n.method == "notifications/cancelled", let idv = n.params?["requestId"] {
                 let id: JSONRPCID? = idv.intValue.map(JSONRPCID.number) ?? idv.stringValue.map(JSONRPCID.string)
                 if let id { inFlight[id]?.cancel() }
             }
-            return (.notificationAck, nil)
+            return (.notificationAck, nil, nil)
         case .response, .error:
-            return (.notificationAck, nil)             // the CLI never sends these to a server; acknowledge and move on
+            return (.notificationAck, nil, nil)             // the CLI never sends these to a server; acknowledge and move on
         case .request(let r):
             switch r.method {
             case "initialize":
@@ -72,18 +83,18 @@ public actor AfleetMCPServer {
                     "protocolVersion": .string(negotiated),
                     "capabilities": .object(["tools": .object([:])]),
                     "serverInfo": .object(["name": .string("afleet"), "version": .string(serverVersion)]),
-                ])))), nil)
-            case "ping": return (.response(.response(.init(id: r.id, result: .object([:])))), nil)
+                ])))), nil, nil)
+            case "ping": return (.response(.response(.init(id: r.id, result: .object([:])))), nil, nil)
             case "tools/list":
                 let list = tools.values.sorted { $0.name < $1.name }.map { t -> JSONValue in
                     .object(["name": .string(t.name), "description": .string(t.description), "inputSchema": t.inputSchema])
                 }
-                return (.response(.response(.init(id: r.id, result: .object(["tools": .array(list)])))), nil)
+                return (.response(.response(.init(id: r.id, result: .object(["tools": .array(list)])))), nil, nil)
             case "tools/call":
                 // Runs inline on the actor; the transport (Task 10) calls handle() from a detached task per request so a long tool
                 // never blocks the stdout reader, and notifications/cancelled reaches inFlight while the call is still running.
                 guard let name = r.params?["name"]?.stringValue, let tool = tools[name] else {
-                    return (.response(.error(.init(id: r.id, error: .init(code: -32602, message: "Unknown tool: \(r.params?["name"]?.stringValue ?? "?")")))), nil)
+                    return (.response(.error(.init(id: r.id, error: .init(code: -32602, message: "Unknown tool: \(r.params?["name"]?.stringValue ?? "?")")))), nil, nil)
                 }
                 let args = r.params?["arguments"] ?? .object([:])
                 let task = Task { try await tool.call(arguments: args, context: MCPToolContext(cwd: cwd)) }
@@ -96,21 +107,22 @@ public actor AfleetMCPServer {
                     // isError result would announce something that did not happen. No tool sets both
                     // today; this guards the contract for the ones that come later.
                     let invocation = result.isError ? nil : result.hostInvocation
-                    return (.response(.response(.init(id: r.id, result: .object(["content": .array(result.content), "isError": .bool(result.isError)])))), invocation)
+                    return (.response(.response(.init(id: r.id, result: .object(["content": .array(result.content), "isError": .bool(result.isError)])))), invocation, nil)
                 } catch let e as MCPArgumentError {
-                    return (.response(.error(.init(id: r.id, error: .init(code: -32602, message: e.message)))), nil)
+                    return (.response(.error(.init(id: r.id, error: .init(code: -32602, message: e.message)))), nil, nil)
                 } catch is CancellationError {
-                    return (.response(.error(.init(id: r.id, error: .init(code: -32800, message: "Request cancelled")))), nil)
+                    return (.response(.error(.init(id: r.id, error: .init(code: -32800, message: "Request cancelled")))), nil, nil)
                 } catch {
                     // An unexpected throw stays a runtime failure (isError), not a protocol error —
                     // but this text is model-visible, and a Foundation error's description carries the
                     // full filesystem path it failed on. Summarise instead of echoing it.
-                    diagnostics.record(.mcpToolFailure(tool: name, error: String(describing: error)))
+                    let ns = error as NSError
+                    let failure = MCPToolFailure(tool: name, errorType: "\(type(of: error))", domain: ns.domain, code: ns.code)
                     let summary = "Tool \(name) failed unexpectedly (\(type(of: error)))"
-                    return (.response(.response(.init(id: r.id, result: .object(["content": .array([.object(["type": .string("text"), "text": .string(summary)])]), "isError": .bool(true)])))), nil)
+                    return (.response(.response(.init(id: r.id, result: .object(["content": .array([.object(["type": .string("text"), "text": .string(summary)])]), "isError": .bool(true)])))), nil, failure)
                 }
             default:
-                return (.response(.error(.init(id: r.id, error: .init(code: -32601, message: "Method not found: \(r.method)")))), nil)
+                return (.response(.error(.init(id: r.id, error: .init(code: -32601, message: "Method not found: \(r.method)")))), nil, nil)
             }
         }
     }
