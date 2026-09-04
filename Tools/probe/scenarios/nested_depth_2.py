@@ -15,7 +15,13 @@ from _tasks import wait_for_tasks
 
 META = {"name": "nested-depth-2", "purpose": "a depth-2 run: general-purpose spawns Explore",
         "serves": ["item 49", "item 52"],
-        "spikes": ["S16"], "census": True, "optional_pairs": ["system/thinking_tokens"],
+        "spikes": ["S16"], "census": True, "optional_pairs": ["system/thinking_tokens",
+                            # Whether a run needs a permission ask is the model's choice here, not the
+                            # scenario's: nothing in the prompt drives one, and `nested-depth-2` recorded
+                            # a `can_use_tool` its own re-run did not produce. The three permission
+                            # fixtures and `notification-hook` are where an ask is the evidence, and they
+                            # stay strict.
+                            "control_request/can_use_tool", "control_response/can_use_tool"],
         "deterministic": False, "isolation": "config-home", "launch": {"max_turns": 6},
         "mirror_identity_only": ["subagents/"],
         "prompts": ["Use the Agent tool with subagent_type general-purpose. Instruct that agent to use the "

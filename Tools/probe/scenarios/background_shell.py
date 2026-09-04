@@ -12,7 +12,13 @@ The prompt pins both replies -- the one that starts the task and the one the aut
 META = {"name": "background-shell",
         "purpose": "background Bash, task_notification, auto-turn, task output file",
         "serves": ["item 61", "item 15", "C3.G3"],
-        "spikes": [], "census": True, "optional_pairs": ["system/thinking_tokens"],
+        "spikes": [], "census": True, "optional_pairs": ["system/thinking_tokens",
+                            # Whether a run needs a permission ask is the model's choice here, not the
+                            # scenario's: nothing in the prompt drives one, and `nested-depth-2` recorded
+                            # a `can_use_tool` its own re-run did not produce. The three permission
+                            # fixtures and `notification-hook` are where an ask is the evidence, and they
+                            # stay strict.
+                            "control_request/can_use_tool", "control_response/can_use_tool"],
         "deterministic": False, "isolation": "config-home", "launch": {"max_turns": 4},
         "keep_open": True,
         "prompts": ["Use the Bash tool with run_in_background=true to run exactly: sleep 6 && echo bg-done . "

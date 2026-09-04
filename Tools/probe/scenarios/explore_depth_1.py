@@ -10,7 +10,13 @@ from _tasks import wait_for_tasks
 
 META = {"name": "explore-depth-1", "purpose": "one Explore subagent searching synthetic files",
         "serves": ["item 9", "item 38", "item 49", "C3.G3"],
-        "spikes": [], "census": True, "optional_pairs": ["system/thinking_tokens"],
+        "spikes": [], "census": True, "optional_pairs": ["system/thinking_tokens",
+                            # Whether a run needs a permission ask is the model's choice here, not the
+                            # scenario's: nothing in the prompt drives one, and `nested-depth-2` recorded
+                            # a `can_use_tool` its own re-run did not produce. The three permission
+                            # fixtures and `notification-hook` are where an ask is the evidence, and they
+                            # stay strict.
+                            "control_request/can_use_tool", "control_response/can_use_tool"],
         "deterministic": False, "isolation": "config-home", "launch": {"max_turns": 4},
         "mirror_identity_only": ["subagents/"],
         "prompts": ["Use the Agent tool with subagent_type Explore to find which files in this directory "
