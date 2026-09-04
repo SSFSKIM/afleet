@@ -961,3 +961,16 @@ Pending — written at finish.
   rather than passing. It becomes evaluable at the reset without any code change. C1's fixture
   recordings for G2 are blocked by the same limit, so G2 remains pending C1.G1 as already
   planned.
+- 2026-09-04: The budget constraint in the preceding note has cleared and that note's conclusion
+  is superseded: the scratch config home is now logged into an account with capacity (seven-day
+  utilization 54, five-hour 12, confirmed by a real two-turn recording under it), so G3's
+  turn-dependent half runs and is expected to pass rather than being recorded as pending. The
+  split itself stands, because it is better structure independent of budget — it makes the
+  inference-free half of the gate provable on its own and permanently, rather than leaving the
+  whole gate hostage to a single model turn. One design consequence is worth stating, since it is
+  the part that would otherwise rot: the guard on the turn-dependent half must read a live signal
+  — a zero-cost `get_usage` showing seven-day utilization at 100, or a `rate_limit_event` with
+  status rejected observed on the spawn — and never a hard-coded reset timestamp. A test that
+  skips on a fixed date stops testing the moment that date passes, and does so silently, which is
+  the failure mode the gate exists to prevent. Live spawns stay at the minimum the gate needs,
+  because C1's fixture recordings share the account.
