@@ -4,13 +4,23 @@
 model spends one turn on `ToolSearch {"query": "select:ExitPlanMode"}` fetching its schema
 before it can call it -- the same extra turn `send-user-file` records for an SDK MCP tool --
 and it spends another writing the plan to a file first. At three the approval lands on the
-last turn and the recording ends `result/error_max_turns` with exit code 1, which is a
-degraded recording of item 7 and, being model-driven, an unstable one: a run that needed one
-turn fewer would end `result/success` and the drift ritual would report the added pair.
+last turn and the recording ends `result/error_max_turns` with exit code 1.
+
+Outside the census, and the reason generalises past this scenario. Approving a plan hands the
+work back to the model, so how many turns the session needs after the approval is the model's
+choice, and whether it finishes inside `--max-turns` varies run to run. That choice is
+visible in the census as the `result` pair: a run that finishes is `result/success` and a run
+that does not is `result/error_max_turns`. Pairs are compared exactly in required mode as
+well as exact -- §4.4 alarms on an added and on a removed pair deliberately -- so the
+permissive comparison is no escape, and measured both ways: recorded at five turns the run
+capped, and `make probe` re-running the same scenario at five finished. The rule this shares
+with `rate-limited-turn` and `resume-no-replay` is the one already stated on the child spec, a
+scenario leaves the census when re-running it cannot be expected to reproduce what was
+recorded. Here the cause is not a consumed precondition but a turn count the model picks.
 """
 META = {"name": "exit-plan-mode",
         "purpose": "--permission-mode plan, a plan presented through ExitPlanMode, approved with a setMode update",
-        "serves": ["item 7"], "spikes": [], "census": True, "deterministic": False, "isolation": "config-home",
+        "serves": ["item 7"], "spikes": [], "census": False, "deterministic": False, "isolation": "config-home",
         "launch": {"max_turns": 5, "permission_mode": "plan"},
         "prompts": ["Plan, in three short bullet points, how you would add a README.md to this directory. "
                     "Then call ExitPlanMode to present the plan. Do not create any file."],

@@ -466,7 +466,7 @@
    ]
   },
   "stream_event": {
-   "count": 63,
+   "count": 79,
    "keys": [
     "event",
     "parent_tool_use_id",

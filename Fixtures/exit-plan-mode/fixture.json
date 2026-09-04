@@ -1,5 +1,5 @@
 {
- "census": true,
+ "census": false,
  "cli_version": "2.1.259",
  "cwd": "/tmp/afleet-fixtures/exit-plan-mode",
  "deterministic": false,
@@ -25,7 +25,7 @@
    "--permission-prompts",
    "host",
    "--session-id",
-   "2c48668a-e2f1-4458-a703-f50b12fabb5c",
+   "b9ae6bce-a2f6-4b00-9772-5ec20f73bb15",
    "--model",
    "haiku",
    "--permission-mode",
@@ -49,13 +49,13 @@
  "name": "exit-plan-mode",
  "notes": [
   "ExitPlanMode asks: 1; plan keys: ['plan', 'planFilePath']; result: error_max_turns",
-  "status frames after approval: [None, None, None, None, 'acceptEdits', None]"
+  "status frames after approval: [None, None, None, 'acceptEdits', None, None]"
  ],
  "prompts": [
   "Plan, in three short bullet points, how you would add a README.md to this directory. Then call ExitPlanMode to present the plan. Do not create any file."
  ],
  "purpose": "--permission-mode plan, a plan presented through ExitPlanMode, approved with a setMode update",
- "recorded_at": "2026-09-04T10:58:14Z",
+ "recorded_at": "2026-09-04T11:13:02Z",
  "review": {
   "checklist_version": 2,
   "date": "2026-09-04",
@@ -65,8 +65,9 @@
  "serves": [
   "item 7"
  ],
- "session_id": "2c48668a-e2f1-4458-a703-f50b12fabb5c",
+ "session_id": "b9ae6bce-a2f6-4b00-9772-5ec20f73bb15",
  "spikes": [],
  "synthetic": false,
+ "unmirrored_prefix": 0,
  "withdrawn_requests": []
 }
