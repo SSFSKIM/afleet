@@ -812,6 +812,74 @@ which `record` spills to its temporary file, set from the largest recorded scena
   cite the parity files or the bundle modules, and S6's baseline evidence comes from the
   installed binary's embedded source rather than a chapter.
 
+- Observation: A completed `set_cwd` moves the session's transcript, so one file has two paths
+  in one recording. Evidence: `session-mirror-relocation`. The answer carries
+  `transcript_relocated: true`, and afterwards `projects/<old slug>/` holds no file for the
+  session while `projects/<new slug>/` holds it under the same session-id name; the mirror
+  frames name the old path for the first thirty entries and the new one for the rest, and the
+  transcript's records carry both `cwd` values. Impact: `verify`'s mirror-fidelity check keyed a
+  stream by its path and so split one file into two streams, one of which no fixture can hold —
+  it now resolves a mirrored path to the transcript file the name belongs to, falling back to
+  the path when the name is ambiguous. `snapshot` needs no change: it finds the file by session
+  id wherever it ended up. The parent's own record-ingestion decision already keys on *logical
+  stream* rather than file path, which is exactly the distinction this makes concrete.
+
+- Observation: A resume appends one transcript record that is never mirrored.
+  Evidence: `session-mirror-resume`. Between the state at spawn and the first mirrored entry
+  the CLI appends exactly one record — an `ai-title` duplicating the title the session already
+  had on the session's first resume, an `atis-latch` on a later one. Everything after it is
+  mirrored in order. Impact: **[parent-impact]** on §7.3's invariant clause, "the records
+  delivered in `transcript_mirror` frames during the recording equal, by record identity, the
+  file's records in the byte range appended during that same recording". That is true of every
+  fresh session recorded here and false of every resume, by exactly one record at the head of
+  the range. The clause is binding prose and is not edited here; the parent's tending session
+  reconciles it. X8 gains `unmirrored_prefix: <int>` in `fixture.json` to express it — declared
+  by the scenario in `META`, never inferred from the frames, and checked for exactness in both
+  directions, so a second unmirrored record still fails the gate and a declaration nothing needs
+  is reported as stale. Same shape and same reasoning as `late_responses` and
+  `withdrawn_requests`.
+
+- Observation: `claude_oauth_wait_for_completion` does not hang, so the occasion
+  `withdrawn_requests` was added for did not arise. Evidence: `control-shapes` sends it with no
+  login in progress and it answers within milliseconds, with the error `No active
+  claude_authenticate flow`. The scenario's ten-second wait never expires, no
+  `control_cancel_request` is sent and the fixture declares nothing. Impact: the reading of the
+  binary that motivated the field stands unchallenged — it was about what a cancel does, not
+  about what this request does — but the field is now an unexercised escape. It is kept: the
+  reasoning behind it is a property of every host-originated subtype outside the CLI's
+  three-entry abort map, and this request simply turned out to have an answer ready. A later
+  scenario that reaches a request with no answer ready is what will exercise it.
+
+- Observation: A capped model-driven scenario's `result` pair is not reproducible when the
+  model chooses how many turns to spend. Evidence: `exit-plan-mode`. Approving a plan hands the
+  work back to the model, which starts implementing; recorded at `--max-turns 5` the session hit
+  the cap and ended `result/error_max_turns`, and `make probe` re-running the same scenario at
+  the same cap finished and ended `result/success`. §4.4 alarms on an added and on a removed
+  pair in required mode as well as exact, deliberately, so `deterministic: false` is not an
+  escape. Impact: `exit-plan-mode` is `census: false`, the third instance of the exclusion rule
+  and the first whose cause is not a consumed precondition. The rule generalises accordingly:
+  what a scenario cannot be expected to reproduce may be a precondition it used up or an outcome
+  the model picks. Every later catalogue entry whose length the model chooses —
+  `background-shell`, `nested-depth-2`, `explore-depth-1` — should be recorded expecting this.
+
+- Observation: `ExitPlanMode` is a deferred tool and its plan file is written inside the config
+  home. Evidence: `exit-plan-mode`. The model spends a turn on
+  `ToolSearch {"query": "select:ExitPlanMode"}` before it can call the tool, the same extra turn
+  `send-user-file` records for an SDK MCP tool, and the ask's `input` carries `planFilePath`
+  pointing at `<config home>/plans/plan-<slug>.md`, a file the CLI wrote there itself. Impact:
+  the plan card may read that file and must never write it (X9); and the deferred-tool turn is a
+  real cost on every scenario that drives a tool the model has not already fetched.
+
+- Observation: `can_use_tool` does not have one key set. Evidence: the three permission
+  recordings. A `Write` ask carries `description`, `display_name`, `input`,
+  `permission_suggestions`, `subtype`, `tool_name`, `tool_use_id`; an `AskUserQuestion` and an
+  `ExitPlanMode` ask carry `display_name`, `input`, `requires_user_interaction`, `subtype`,
+  `tool_name`, `tool_use_id` — no `permission_suggestions` and no `description`. The
+  `decision_reason_type` field the recording plan expected on the `Write` ask is not present on
+  2.1.259 at all. Impact: the census's required-key sets are per pair, so a corpus holding only
+  one of these shapes would record its optional fields as required; C2's model for the ask must
+  make `permission_suggestions`, `description` and `requires_user_interaction` optional.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
@@ -1079,3 +1147,40 @@ Pending — written at finish.
   of the same wave, leaving half the corpus on four variables and half on five. That was
   repaired by re-recording, but the repair is not the lesson — the rule above is, because it
   makes the situation a non-event rather than a discipline to remember.
+- 2026-09-04: The catalogue's `session-mirror-relocation` row is recorded as two fixtures,
+  `session-mirror-relocation` and `session-mirror-resume`, because a fixture is one process and
+  the row's resume is a second one; G1 counts fourteen recorded fixtures. `session_mirror_resume`
+  imports the mirror comparison its sibling defines rather than keeping a second copy, so
+  `load_scenario` puts the scenario directory it was given on `sys.path` before loading —
+  the directory it was given, so a scenario set named by `AFLEET_SCENARIO_DIR` imports its own
+  siblings and not the installed ones.
+- 2026-09-04: X8 gains `unmirrored_prefix: <int>` in `fixture.json` and `unmirrored_prefix` as a
+  `META` key, joining `late_responses` and `withdrawn_requests` as a scenario-declared escape
+  from a strict check. It states how many records the engine appends at the head of this
+  recording's appended range without mirroring them. `verify` consumes them only at the head of
+  the range and only up to the declared count, and then requires the total consumed to equal the
+  declaration exactly, so the escape can neither hide a larger gap nor rot into a stale
+  allowance. It is not in `REQUIRED_META`: it defaults to zero and every fixture recorded before
+  it is unaffected. The occasion is the record a resume never mirrors (Surprises).
+- 2026-09-04: `harness.DEFAULT_ENV_TABLE` gains
+  `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT: "markdown"`, the value S15 settles. The parent's §6.1
+  table lists the variable as "always, once S15 settles", so it belongs on every launch line
+  rather than in one scenario's override — which is also what spares `ask-user-question` the
+  second recording the budget discipline exists to avoid. Fixtures recorded after this carry
+  five entries in `launch.env` instead of four; `Fixtures/REVIEW.md` item 1 allows six, no census
+  compares `env`, and `verify` does not read it, so the corpus tolerates the split. Only
+  `rate-limited-turn`, which can never be re-recorded, stays at four.
+- 2026-09-04: Wave B complete. `permission-allow`, `permission-deny`, `ask-user-question`,
+  `exit-plan-mode`, `control-shapes`, `session-mirror-relocation` and `session-mirror-resume`
+  are recorded, reviewed, signed and committed against 2.1.259, the declared baseline, and S8,
+  S13, S14 and S15 are settled on the parent. Twelve recorded fixtures and two synthetic ones;
+  nine take part in the census. `make probe` exits 0 against 2.1.259 and, run again against the
+  installed 2.1.260, exits 0 with no drift — the corpus's first comparison across a real version
+  bump, and the first evidence that a passing census means the binary held rather than that the
+  census compared a binary with itself. The wave cost about 0.65 USD: 0.17 in the seven
+  committed recordings, 0.05 in four discarded first attempts, and 0.43 in three full `make
+  probe` runs. The ritual is now the expensive half, at roughly 0.13 a run across nine census
+  fixtures and rising with every model-driven fixture added — worth stating plainly, since §4.7
+  budgeted the price of a baseline bump and not the price of the gate. Three scenarios needed a second recording, each for a defect the first recording
+  exposed rather than for flakiness: `exit-plan-mode`'s turn budget, `session-mirror-relocation`'s
+  trust call and its two path comparisons, and `session-mirror-resume`'s unmirrored record.

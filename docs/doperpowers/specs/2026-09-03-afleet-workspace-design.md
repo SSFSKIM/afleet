@@ -3110,3 +3110,87 @@ Pending — written at finish.
   `mode`, and the lone mirror frame carries exactly that entry — session state, not
   conversation — so a host watching the transcript for a resume sees one append it must not
   mistake for history.
+- 2026-09-04 C1/S15: `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` is compared by equality against
+  exactly two literals, `"markdown"` and `"html"`, and anything else is ignored in favour of a
+  default that depends on the client type — `markdown` for a plain `cli` entrypoint, nothing at
+  all for an `sdk-*`, `claude-desktop`, `local-agent` or `remote` one (2.1.257 bundle
+  `cli.pretty.js`, the `setQuestionPreviewFormat` branch; the same branch is present verbatim in
+  the installed 2.1.259 and 2.1.260). The value selects a block of prompt text appended to the
+  `AskUserQuestion` tool description telling the model when and how to fill `options[].preview`:
+  the `markdown` block says preview content is rendered as markdown in a monospace box and the
+  UI switches to a side-by-side layout, the `html` block requires a self-contained HTML fragment
+  with no `<script>` or `<style>`, and `html` additionally turns on a `validateInput` pass that
+  rejects a preview it will not accept. §6.1's table takes **`markdown`**: it needs no
+  sanitiser, and afleet's own question card renders markdown. Confirmed live — with the variable
+  on the launch line the recorded `AskUserQuestion` input carries a `preview` on both options
+  (fixture `ask-user-question`, 2.1.259). Two facts a host needs beside it: the ask arrives as
+  an ordinary `can_use_tool` carrying `requires_user_interaction: true` and, unlike a `Write`
+  ask, no `permission_suggestions` and no `description`; and the answer is the whole input
+  echoed back with an added `answers` map keyed by the question text, which the engine renders
+  to the model as `Your questions have been answered: "…"="…"`.
+- 2026-09-04 C1/S8: §6.4's unpublished request and response shapes, observed on 2.1.259
+  (fixture `control-shapes`). `apply_flag_settings {settings: {effortLevel}}` answers success
+  with **no `response` key at all**, and the readback is `get_settings`, which answers
+  `{applied: {model, effort, advisor, ultracode}, effective_keys, sources_keys: [{source,
+  keys}]}` — the applied flag appears as `effective_keys: ["effortLevel"]` with `source:
+  "flagSettings"`. `list_models` answers `{models: [{value, resolvedModel, displayName,
+  description, supportsEffort, supportedEffortLevels, supportsAdaptiveThinking,
+  supportsFastMode, supportsAutoMode}]}`. `get_workspace_diff` answers `{diff: null}` outside a
+  repository. `rewind_files {user_message_id, dry_run}` answers `{canRewind, filesChanged,
+  insertions, deletions}`. `rewind_conversation {target_message_uuid}` answers `{rewound,
+  targetMessageUuid, prefillText, precedingAssistantUuid}`, where `prefillText` is the prompt to
+  put back in the composer. `set_cwd` answers `{status, cwd, changed, transcript_relocated}` on
+  success and `{status: "needs_trust", directory}` when the directory is untrusted (S13 below).
+  `claude_authenticate` answers `{manualUrl, automaticUrl}`, both
+  `https://claude.com/cai/oauth/authorize?…`. `generate_session_title {description, persist}`
+  answers `{title}`. The **error envelope is confirmed on the wire** and matches the bundle
+  reading: `{subtype: "error", request_id, error: <a bare string>}`, with no `response` key —
+  `claude_oauth_callback` with an invalid code answers `"Request failed with status code 400"`.
+  One expectation the recording overturned: `claude_oauth_wait_for_completion` was expected to
+  hang, because the CLI's abort map holds only three host subtypes and a host cancel is a no-op
+  for the rest. With no flow in progress it answers immediately, and with an error —
+  `"No active claude_authenticate flow"`. No cancel was needed and the recording declares no
+  withdrawn request. The declared escape stays in C1's fixture contract for the case that does
+  hang; this is not it.
+- 2026-09-04 C1/S13: `set_cwd` trust, settling §7.7's `/cd` handling. Under the scratch config
+  home, `set_cwd {path}` into a directory the home has never seen answers success with
+  `{"status": "needs_trust", "directory": "<the resolved path>"}` and does not change the
+  directory. Repeating the call with `trust_accepted: true` **alone is refused**: the CLI
+  answers the error `set_cwd: invalid request — trust_accepted requires trusted_directory (echo
+  the directory from the needs_trust response)`. The accepted form carries both
+  `trust_accepted: true` and `trusted_directory` set to the directory the first answer named,
+  which is what stops a host granting trust to a directory other than the one it was asked
+  about. That call answers `{"status": "ok", cwd, "changed": true, "transcript_relocated":
+  true}`, and afterwards the config home's `.claude.json` holds `hasTrustDialogAccepted: true`
+  for the directory, keyed by its **resolved** path. So afleet's `/cd` needs a two-step exchange
+  and must echo the directory back, not a single call with a boolean (fixtures
+  `session-mirror-relocation`, `control-shapes`; 2.1.259).
+- 2026-09-04 C1/S14: `--session-mirror` holds across a relocation and a resume, with one
+  qualification (fixtures `session-mirror-relocation` and `session-mirror-resume`, 2.1.259).
+  A completed `set_cwd` **moves the transcript**: `transcript_relocated: true` is literal, the
+  session's JSONL file is moved from `projects/<old slug>/` into `projects/<new slug>/` keeping
+  its session-id file name, and the mirror frames name the old path before the move and the new
+  one after it. One session file therefore has two `filePath`s across one session, and a host
+  keying its record store on the mirrored path rather than on the session id will split one
+  conversation in two. The relocation also emits a `result` frame of its own — `subtype:
+  "success"`, `num_turns: 0`, empty `result` — for a turn nobody sent, so a host completing
+  turns off `result` frames must not attribute it to a prompt. Concatenated across both paths in
+  arrival order, the mirrored entries reproduce the transcript's records exactly, and no
+  `mirror_error` was emitted. The qualification: **a resume appends exactly one record that is
+  never mirrored**, at the head of the range, before the mirror carries anything — an `ai-title`
+  on a session's first resume and an `atis-latch` on a later one. So the mirror alone is one
+  record short across a resume and the file watcher, not the mirror, is what closes that gap.
+  The build flag that promotes the mirror to primary (§7.3) may be turned on for live records;
+  the watcher stays the fallback and is load-bearing at resume.
+- 2026-09-04 C1/G2: the first real drift measurement the census has made. `Fixtures/` is
+  recorded against 2.1.259, the declared baseline, and `make probe` was then run against the
+  installed 2.1.260. **Both runs exit 0 with no drift on any of nine census fixtures**,
+  including `zero-cost`, which is `deterministic: true` and so compares pair sets, key sets,
+  `capabilities` and the flag list `claude --help` declares, exactly. Nothing the census
+  exercises changed between the two builds. That is a result about coverage as much as about the
+  binary: the census is a fingerprint of the wire paths the fixtures drive, not of the whole
+  program, and 2.1.260 does differ from 2.1.259 in at least one place the fixtures cannot see —
+  it adds a `CLAUDE_CODE_QUESTION_EXTENDED` clause beside the preview-format branch, gated on a
+  variable afleet does not set and on the entrypoint. A version bump that the census passes
+  should be read as "nothing we exercise moved", which is what §6.5's gate needs, and not as
+  "nothing moved".
