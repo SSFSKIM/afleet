@@ -81,7 +81,7 @@
     "thinking",
     "tool_use"
    ],
-   "count": 33,
+   "count": 19,
    "keys": [
     "message",
     "parent_tool_use_id",
@@ -130,7 +130,7 @@
    ]
   },
   "auth_status": {
-   "count": 3,
+   "count": 1,
    "keys": [
     "isAuthenticating",
     "output",
@@ -147,7 +147,7 @@
    ]
   },
   "command_lifecycle": {
-   "count": 9,
+   "count": 3,
    "keys": [
     "command_uuid",
     "session_id",
@@ -161,48 +161,10 @@
     "state",
     "type",
     "uuid"
-   ]
-  },
-  "control_request/can_use_tool": {
-   "count": 1,
-   "keys": [
-    "request",
-    "request_id",
-    "type"
-   ],
-   "optional": true,
-   "payload_keys": [
-    "agent_id",
-    "decision_reason",
-    "decision_reason_type",
-    "description",
-    "display_name",
-    "input",
-    "permission_suggestions",
-    "subtype",
-    "tool_name",
-    "tool_use_id"
-   ],
-   "required_keys": [
-    "request",
-    "request_id",
-    "type"
-   ],
-   "required_payload_keys": [
-    "agent_id",
-    "decision_reason",
-    "decision_reason_type",
-    "description",
-    "display_name",
-    "input",
-    "permission_suggestions",
-    "subtype",
-    "tool_name",
-    "tool_use_id"
    ]
   },
   "control_request/end_session": {
-   "count": 3,
+   "count": 1,
    "keys": [
     "request",
     "request_id",
@@ -221,7 +183,7 @@
    ]
   },
   "control_request/initialize": {
-   "count": 3,
+   "count": 1,
    "keys": [
     "request",
     "request_id",
@@ -252,7 +214,7 @@
    ]
   },
   "control_request/mcp_message": {
-   "count": 9,
+   "count": 3,
    "keys": [
     "request",
     "request_id",
@@ -271,41 +233,11 @@
    "required_payload_keys": [
     "message",
     "server_name",
-    "subtype"
-   ]
-  },
-  "control_response/can_use_tool": {
-   "body_keys": [
-    "behavior",
-    "updatedInput"
-   ],
-   "count": 2,
-   "keys": [
-    "response",
-    "type"
-   ],
-   "optional": true,
-   "payload_keys": [
-    "request_id",
-    "response",
-    "subtype"
-   ],
-   "required_body_keys": [
-    "behavior",
-    "updatedInput"
-   ],
-   "required_keys": [
-    "response",
-    "type"
-   ],
-   "required_payload_keys": [
-    "request_id",
-    "response",
     "subtype"
    ]
   },
   "control_response/end_session": {
-   "count": 3,
+   "count": 1,
    "keys": [
     "response",
     "type"
@@ -343,7 +275,7 @@
     "remote_control_available",
     "session_state"
    ],
-   "count": 3,
+   "count": 1,
    "keys": [
     "response",
     "type"
@@ -386,7 +318,7 @@
    "body_keys": [
     "mcp_response"
    ],
-   "count": 18,
+   "count": 6,
    "keys": [
     "response",
     "type"
@@ -410,7 +342,7 @@
    ]
   },
   "rate_limit_event": {
-   "count": 4,
+   "count": 1,
    "keys": [
     "rate_limit_info",
     "session_id",
@@ -425,7 +357,7 @@
    ]
   },
   "result/success": {
-   "count": 6,
+   "count": 2,
    "keys": [
     "api_error_status",
     "duration_api_ms",
@@ -483,7 +415,7 @@
    ]
   },
   "stream_event": {
-   "count": 118,
+   "count": 40,
    "keys": [
     "event",
     "parent_tool_use_id",
@@ -503,7 +435,7 @@
    ]
   },
   "system/background_tasks_changed": {
-   "count": 6,
+   "count": 2,
    "keys": [
     "session_id",
     "subtype",
@@ -520,7 +452,7 @@
    ]
   },
   "system/init": {
-   "count": 6,
+   "count": 2,
    "keys": [
     "agents",
     "analytics_disabled",
@@ -575,7 +507,7 @@
    ]
   },
   "system/status": {
-   "count": 9,
+   "count": 3,
    "keys": [
     "session_id",
     "status",
@@ -592,7 +524,7 @@
    ]
   },
   "system/task_notification": {
-   "count": 3,
+   "count": 1,
    "keys": [
     "output_file",
     "session_id",
@@ -619,7 +551,7 @@
    ]
   },
   "system/task_progress": {
-   "count": 5,
+   "count": 7,
    "keys": [
     "description",
     "last_tool_name",
@@ -646,7 +578,7 @@
    ]
   },
   "system/task_started": {
-   "count": 3,
+   "count": 1,
    "keys": [
     "description",
     "is_backgrounded",
@@ -677,7 +609,7 @@
    ]
   },
   "system/task_updated": {
-   "count": 3,
+   "count": 1,
    "keys": [
     "patch",
     "session_id",
@@ -696,7 +628,7 @@
    ]
   },
   "system/thinking_tokens": {
-   "count": 18,
+   "count": 6,
    "keys": [
     "estimated_tokens",
     "estimated_tokens_delta",
@@ -715,7 +647,7 @@
    ]
   },
   "transcript_mirror": {
-   "count": 49,
+   "count": 25,
    "keys": [
     "entries",
     "filePath",
@@ -731,7 +663,7 @@
    "block_types": [
     "tool_result"
    ],
-   "count": 14,
+   "count": 10,
    "keys": [
     "isReplay",
     "message",
