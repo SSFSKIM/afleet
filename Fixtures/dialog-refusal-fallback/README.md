@@ -41,14 +41,30 @@ an undeclared kind never reaches a host to be left unanswered. `undeclared_probe
 a synthetic placeholder: no binary contains that string, and a recording would have to
 substitute a real kind outside the forwarded set. A recording should settle both.
 
+**The fixture exercises the broad-safeguards copy branch, and only that one.** The CLI picks
+the safeguards sentence from the refusal category: `cyber` and `bio` get "Our intentionally
+broad safeguards allow us to deliver more capabilities faster, but can sometimes flag
+legitimate coding, cybersecurity, and biology tasks", and every other category gets "This
+sometimes happens with safe, normal conversations". This fixture sends `bio`, so both of its
+copy strings carry the first sentence. The second branch is real and is **not covered here**;
+a host rendering refusal copy should expect either. The category also drives a `Details:
+`[<category>]`` suffix, which is appended for any non-empty category and so is present on both
+branches and on both frames.
+
+`bio` rather than a category from the other branch because the per-category fallback map is
+keyed by exactly `cyber` and `bio`: a category with no entry in it is the case that routes to
+`model_refusal_no_fallback` rather than offering this dialog at all, so picking a category to
+obtain the general sentence would have bought copy coverage at the cost of a dialog that might
+never be shown.
+
 Serves item 62 and spike S6.
 
 **These shapes are synthetic, and confirmed against the baseline.** Nothing here was recorded. Every field is read out of the
 2.1.257 bundle: `chunk-1kg58a1a.js` for the dialog kind, its
 `{originalModel, fallbackModel, apiRefusalCategory?, guidanceText?, retractedMessageUuids?}`
 payload, its `retry_fallback | edit_prompt | cancelled` result enum with `default:
-"cancelled"`, and the decline branch that yields the tombstones; `chunk-sct99ax9.js` for the
-`assistant.supersedes`, `tombstone` and `system/model_refusal_fallback` schemas. S6 then found
+"cancelled"`, the decline branch, and the copy builders; `chunk-sct99ax9.js` for the
+`assistant.supersedes` and `system/model_refusal_fallback` schemas. S6 then found
 each of those definitions exactly once in the installed 2.1.259 baseline binary, with every
 payload key, every enum value and `default: "cancelled"` inside its own definition's window,
 so `fixture.json` carries `hypothesis: false` (spec §4.7). `synthetic: true` stays, and with
@@ -64,10 +80,12 @@ What a recording should settle, because no schema states it:
    would test nothing. The `model_refusal_fallback` notice is in the same position. The
    `edit_prompt` hint in the real copy names a keystroke and `/model`, both of which a GUI has
    to rewrite.
-2. **The `result` subtypes on the decline legs.** `error_during_execution` is this fixture's
-   assumption; the decline branch's own code says nothing about it. The `result` frames here
-   also carry only `subtype`, `result`, `is_error` and `num_turns` -- the schemas require
-   durations, costs and usage too, and a fabricated zero would be worse than an absence.
+2. **The decline legs' `result` frames, subtype and text alike.** Both
+   `subtype: "error_during_execution"` and the `"result": "refusal"` string are this fixture's
+   assumptions; the decline branch's own code says nothing about either, and a host must not
+   read `"refusal"` as a value the engine emits. The frames here also carry only `subtype`,
+   `result`, `is_error` and `num_turns` -- the schemas require durations, costs and usage too,
+   and a fabricated zero would be worse than an absence.
 3. **The gap before the CLI retires the undeclared-kind dialog.** It is 1.5 s here so a replay
    is quick; the real dialog park deadline is five minutes by default per the parent's
    investigation, and no gate should read the fixture's timing as the deadline.

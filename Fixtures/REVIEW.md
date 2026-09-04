@@ -4,10 +4,18 @@ A fixture enters the repository only after one person other than the recording
 run has walked this list and signed the `review` block in `fixture.json`.
 `Tools/probe/probe.py verify` refuses an unsigned fixture.
 
+**Checklist version 2.** `sign` stamps this number into the review block, so a
+fixture signed at a lower version was reviewed against a shorter list than this
+one. Adding or changing an item here means bumping `verify.CHECKLIST_VERSION`
+and re-walking the fixtures whose signatures should still stand.
+
 1. `fixture.json`: `name` matches the directory; `launch.env` lists only the six
    variables of the parent's §6.1 table (no PATH, HOME or anything else);
-   `purpose`, `serves`, `prompts` are truthful; `synthetic`/`hypothesis` are set
-   only for the two dialog fixtures.
+   `purpose`, `serves`, `prompts` are truthful. `synthetic` is set only for the
+   two dialog fixtures; `hypothesis` is set only while a synthetic fixture's
+   shapes are still unconfirmed on the baseline, and S6 has cleared it on both,
+   so a fixture arriving with it set again should say in `notes` what is not
+   confirmed.
 2. `grep -R` the whole fixture for the **recording author's** name, e-mail and
    hostname, and for `/Users/`: only `~`, `<email>`, `<host>` and the scratch cwd
    may appear. The author is not you — item 1 of this list requires a reviewer

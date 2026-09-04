@@ -30,6 +30,13 @@ import redact
 
 REVIEW_KEYS = ("reviewer", "date", "checklist_version")
 
+# The version of `Fixtures/REVIEW.md` a signature attests to. Bump it whenever that file gains
+# or changes an item, because a block recording an older version says the reviewer walked a
+# shorter list than the one now in the repository -- which is the one thing the field is for.
+# `verify` checks the key is present and truthy, not that it is current: an old fixture is not
+# invalid, it is one whose signature a re-review can be judged against.
+CHECKLIST_VERSION = 2
+
 # §4.4's `fixture.json` enumeration, plus `deterministic`, which the same section's census
 # paragraph names in prose. Required by presence and not by value: a missing `deterministic`
 # reads as false and silently picks the permissive census comparison over the strict one,

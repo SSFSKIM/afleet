@@ -2,10 +2,11 @@
 """S6: confirm the dialog payload shapes and result enums on the installed baseline binary.
 
 The test is structural, not a bare string search. For every shape this asserts, the script
-first finds that shape's *own* definition site -- the anchor -- and then requires each of the
-shape's field names and enum values to sit inside the WINDOW bytes that follow it. A hit
-therefore means the fields belong to that definition, not merely that the string occurs
-somewhere in a 200 MB executable.
+first finds that shape's *own* definition site -- the anchor -- and then requires the anchor
+to occur exactly once and every one of the shape's field names and enum values to sit inside
+the single WINDOW bytes that follow it. A hit therefore means the fields belong to that one
+definition, not merely that the strings occur somewhere in a 200 MB executable and not that
+two different definitions satisfied the shape between them.
 
 Two definition sites matter, because the 2.1.257 reading behind the synthetic fixtures spans
 two of them. DIALOGS covers the `request_user_dialog` payload schemas and their `result`
@@ -47,14 +48,25 @@ FRAMES = {
 
 
 def scan(path, sites):
+    """Each site must have exactly one definition, and every needle must sit in *that* window.
+
+    Both halves are stricter than they look. Asking only that each needle appear in some
+    window lets two unrelated definitions of the same anchor satisfy a shape between them,
+    which is the confirmation this script exists to refuse -- so the needles are checked
+    against one window, not against the union. And a second definition is not a stronger
+    result but an ambiguous one: it means the anchor no longer identifies a single schema, so
+    the script cannot say which of them the fixtures were written against. Both fail closed.
+    """
     data = open(path, "rb").read()
     out = {}
     for name, (anchor, window, needles) in sites.items():
         windows = [data[m.start():m.start() + window] for m in re.finditer(re.escape(anchor), data)]
+        chosen = windows[0] if len(windows) == 1 else b""
         out[name] = {"anchor": anchor.decode(), "window": window,
                      "definitions": len(windows),
-                     "needles_in_definition_window": dict((n.decode(), any(n in w for w in windows)) for n in needles),
-                     "context": windows[0].decode("utf-8", "replace") if windows else ""}
+                     "unique": len(windows) == 1,
+                     "needles_in_definition_window": dict((n.decode(), n in chosen) for n in needles),
+                     "context": chosen.decode("utf-8", "replace")}
     return out
 
 
@@ -76,11 +88,13 @@ def report(title, hits):
     ok = True
     print("== %s" % title)
     for name, info in sorted(hits.items()):
-        print("%s: %d definition(s) of %s (window %d)" % (name, info["definitions"], info["anchor"], info["window"]))
+        print("%s: %d definition(s) of %s (window %d)%s"
+              % (name, info["definitions"], info["anchor"], info["window"],
+                 "" if info["unique"] else "  <-- not unique, so no window can be chosen"))
         for needle, present in info["needles_in_definition_window"].items():
             print("   %-48s %s" % (needle, "in window" if present else "NOT in window"))
             ok = ok and present
-        ok = ok and info["definitions"] > 0
+        ok = ok and info["unique"]
         print("   context: %s\n" % info["context"])
     return ok
 
@@ -95,7 +109,7 @@ def main():
     ok = report("dialog definitions", scan(path, DIALOGS))
     ok = report("stream-json frame definitions", scan(path, FRAMES)) and ok
     print("ALL SHAPES STRUCTURALLY CONFIRMED" if ok else
-          "NOT CONFIRMED (a definition is missing or a needle sits outside its own definition's window)")
+          "NOT CONFIRMED (an anchor is missing or not unique, or a needle sits outside its own definition's window)")
     return 0 if ok else 1
 
 

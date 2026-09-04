@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import census   # noqa: E402
 import fixture  # noqa: E402
 import redact   # noqa: E402
+import verify   # noqa: E402
 
 SID_R = "44444444-4444-4444-8444-444444444444"
 SID_F = "55555555-5555-4555-8555-555555555555"
@@ -102,13 +103,25 @@ def _result(t, text, subtype="success", is_error=False):
 
 PARTIAL_TEXT = "partial text before the refusal"
 
-# `chunk-1kg58a1a.js` assembles the refusal prose from several helpers -- a prefix, the
-# category-dependent safeguards sentence, an edit hint and a "learn more" URL this fixture
-# cannot resolve -- so only the two sentences that are readable verbatim are carried, and the
-# README lists the full string as something S6 has to settle. Inventing the URL would put a
+# The category the fixture sends decides which safeguards sentence the CLI writes:
+# `Xte(e){return e==="cyber"||e==="bio"}` selects the broad-safeguards sentence and anything
+# else selects the "safe, normal conversations" one. `bio` therefore commits both content
+# strings below to the first branch. Separately, `mTe` appends `\n\nDetails: `[<category>]``
+# for *any* non-empty category, so the suffix is not branch-specific and is always present.
+CATEGORY = "bio"
+SAFEGUARDS = ("Our intentionally broad safeguards allow us to deliver more capabilities faster, but can "
+              "sometimes flag legitimate coding, cybersecurity, and biology tasks.")
+DETAILS = "\n\nDetails: `[%s]`" % CATEGORY
+
+# `chunk-1kg58a1a.js` assembles the refusal message from a prefix, that sentence, an edit hint
+# and a "learn more" URL -- the last two chosen by a predicate this fixture cannot evaluate --
+# and then the Details suffix. What is readable verbatim is carried; the rest is marked, and
+# the README lists it as something a recording has to settle. Inventing the URL would put a
 # string a rendering test could be written against into a fixture that never saw one.
-REFUSAL_PROSE = ("Fable 5's safeguards flagged this message. This sometimes happens with safe, normal "
-                 "conversations. [placeholder: the CLI also appends an edit hint and a learn-more URL]")
+REFUSAL_PROSE = ("[placeholder: a short prefix label] Fable 5's safeguards flagged this message "
+                 "(https://www.anthropic.com/legal/aup). " + SAFEGUARDS +
+                 " [placeholder: an edit hint and a learn-more URL, both chosen by a branch this fixture "
+                 "cannot resolve]" + DETAILS)
 
 
 def refusal_frames():
@@ -129,10 +142,14 @@ def refusal_frames():
     §4.7's "tombstones after a refusal" is the parent's timeline sense of the word, which its
     §8.4 resolves to the `supersedes` rule -- not a frame type.
     """
-    # `bio` rather than an invented category: the schema types this as an open string but
-    # names `cyber` and `bio` as the values it has seen, and `cyber` selects a different copy
-    # branch and an extra `saw_cyber_refusal` field this fixture would then have to model.
-    p = {"originalModel": "claude-fable-5-1", "fallbackModel": "claude-opus-5", "apiRefusalCategory": "bio",
+    # `bio` rather than an invented category, and rather than one outside {cyber, bio}: the
+    # per-category fallback map is keyed by exactly those two, and a category with no entry in
+    # it is the case that routes to `model_refusal_no_fallback` instead of offering this dialog
+    # at all. Choosing a category to dodge the broad-safeguards copy branch would have bought
+    # the general sentence at the price of a dialog that might never be shown. `cyber` is the
+    # other member and takes the same copy branch, differing in `saw_cyber_refusal` and in the
+    # learn-more URL, so `bio` is the cheaper of the two to model.
+    p = {"originalModel": "claude-fable-5-1", "fallbackModel": "claude-opus-5", "apiRefusalCategory": CATEGORY,
          "guidanceText": "The model declined; retry on the fallback model or edit your prompt."}
     fr = _init_pair(0)
     t = 100
@@ -153,14 +170,13 @@ def refusal_frames():
             fr.append({"t": t, "dir": "out", "frame": {
                 "type": "system", "subtype": "model_refusal_fallback", "trigger": "refusal", "direction": "retry",
                 "scope": "session", "original_model": "claude-fable-5-1", "fallback_model": "claude-opus-5",
-                "request_id": None, "api_refusal_category": "bio", "api_refusal_explanation": None,
-                # This one is reconstructed from the module's own notice builder, which reads
-                # `<original>'s safeguards flagged this message. This sometimes happens with
-                # safe, normal conversations. Switched to <fallback>.` before appending a URL
-                # the fixture cannot resolve.
+                "request_id": None, "api_refusal_category": CATEGORY, "api_refusal_explanation": None,
+                # From the module's own notice builder: the category-selected safeguards
+                # sentence, `Switched to <fallback>.`, a learn-more URL the fixture cannot
+                # resolve, and the Details suffix.
                 "retracted_message_uuids": [partial], "refused_user_message_uuid": uid,
-                "content": "Fable 5's safeguards flagged this message. This sometimes happens with safe, "
-                           "normal conversations. Switched to Opus 5. [placeholder: a learn-more URL follows]",
+                "content": ("Fable 5's safeguards flagged this message. " + SAFEGUARDS +
+                            " Switched to Opus 5. [placeholder: a learn-more URL]" + DETAILS),
                 "uuid": "s-%d" % n, "session_id": SID_R}}); t += 50
             fr.append(_result(t, "answer from the fallback model")); t += 50
         else:
@@ -277,14 +293,30 @@ an undeclared kind never reaches a host to be left unanswered. `undeclared_probe
 a synthetic placeholder: no binary contains that string, and a recording would have to
 substitute a real kind outside the forwarded set. A recording should settle both.
 
+**The fixture exercises the broad-safeguards copy branch, and only that one.** The CLI picks
+the safeguards sentence from the refusal category: `cyber` and `bio` get "Our intentionally
+broad safeguards allow us to deliver more capabilities faster, but can sometimes flag
+legitimate coding, cybersecurity, and biology tasks", and every other category gets "This
+sometimes happens with safe, normal conversations". This fixture sends `bio`, so both of its
+copy strings carry the first sentence. The second branch is real and is **not covered here**;
+a host rendering refusal copy should expect either. The category also drives a `Details:
+`[<category>]`` suffix, which is appended for any non-empty category and so is present on both
+branches and on both frames.
+
+`bio` rather than a category from the other branch because the per-category fallback map is
+keyed by exactly `cyber` and `bio`: a category with no entry in it is the case that routes to
+`model_refusal_no_fallback` rather than offering this dialog at all, so picking a category to
+obtain the general sentence would have bought copy coverage at the cost of a dialog that might
+never be shown.
+
 Serves item 62 and spike S6.
 
 **These shapes are synthetic, and confirmed against the baseline.** Nothing here was recorded. Every field is read out of the
 2.1.257 bundle: `chunk-1kg58a1a.js` for the dialog kind, its
 `{originalModel, fallbackModel, apiRefusalCategory?, guidanceText?, retractedMessageUuids?}`
 payload, its `retry_fallback | edit_prompt | cancelled` result enum with `default:
-"cancelled"`, and the decline branch that yields the tombstones; `chunk-sct99ax9.js` for the
-`assistant.supersedes`, `tombstone` and `system/model_refusal_fallback` schemas. S6 then found
+"cancelled"`, the decline branch, and the copy builders; `chunk-sct99ax9.js` for the
+`assistant.supersedes` and `system/model_refusal_fallback` schemas. S6 then found
 each of those definitions exactly once in the installed 2.1.259 baseline binary, with every
 payload key, every enum value and `default: "cancelled"` inside its own definition's window,
 so `fixture.json` carries `hypothesis: false` (spec §4.7). `synthetic: true` stays, and with
@@ -300,10 +332,12 @@ What a recording should settle, because no schema states it:
    would test nothing. The `model_refusal_fallback` notice is in the same position. The
    `edit_prompt` hint in the real copy names a keystroke and `/model`, both of which a GUI has
    to rewrite.
-2. **The `result` subtypes on the decline legs.** `error_during_execution` is this fixture's
-   assumption; the decline branch's own code says nothing about it. The `result` frames here
-   also carry only `subtype`, `result`, `is_error` and `num_turns` -- the schemas require
-   durations, costs and usage too, and a fabricated zero would be worse than an absence.
+2. **The decline legs' `result` frames, subtype and text alike.** Both
+   `subtype: "error_during_execution"` and the `"result": "refusal"` string are this fixture's
+   assumptions; the decline branch's own code says nothing about either, and a host must not
+   read `"refusal"` as a value the engine emits. The frames here also carry only `subtype`,
+   `result`, `is_error` and `num_turns` -- the schemas require durations, costs and usage too,
+   and a fabricated zero would be worse than an absence.
 3. **The gap before the CLI retires the undeclared-kind dialog.** It is 1.5 s here so a replay
    is quick; the real dialog park deadline is five minutes by default per the parent's
    investigation, and no gate should read the fixture's timing as the deadline.
@@ -395,7 +429,7 @@ def _write(root, name, sid, frames, purpose, serves, readme, extra_notes=()):
                 "late_responses": [], "withdrawn_requests": [],
                 "notes": list(COMMON_NOTES) + list(extra_notes),
                 "exit_code": None,
-                "review": {"reviewer": "", "date": "", "checklist_version": 1}}
+                "review": {"reviewer": "", "date": "", "checklist_version": verify.CHECKLIST_VERSION}}
         c = census.census([r["frame"] for r in frames], version=CLI_VERSION)
         dest = fixture.write_fixture(root, name, meta, frames, c, redact.Redactor().manifest(),
                                      initial, os.path.join(work, "transcript"), None)

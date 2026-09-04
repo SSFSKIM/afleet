@@ -120,6 +120,27 @@ class SyntheticDialogFixturesTests(unittest.TestCase):
                 self.assertIn("for this session", n["content"])
             self.assertIn("/model to change", n["content"])
 
+    def test_the_refusal_copy_matches_the_branch_its_category_selects(self):
+        """The CLI picks the safeguards sentence from the refusal category -- `cyber` and `bio`
+        take the broad-safeguards branch, everything else takes "safe, normal conversations" --
+        and appends a `Details` suffix for any non-empty category. Copy from the wrong branch
+        is invisible to every other check here and is what a card would render."""
+        broad = "Our intentionally broad safeguards"
+        general = "This sometimes happens with safe, normal conversations"
+        frames = frames_of(self.refusal)
+        categories = {r["payload"]["apiRefusalCategory"] for r in out_requests(frames, "refusal_fallback_prompt")}
+        self.assertEqual(categories, {dialogs.CATEGORY})
+        category = dialogs.CATEGORY
+        wants_broad = category in ("cyber", "bio")
+        copy = [f["frame"]["content"] for f in frames if f["frame"].get("subtype") == "model_refusal_fallback"]
+        copy += [f["frame"]["message"]["content"][0]["text"] for f in frames
+                 if f["frame"].get("type") == "assistant" and f["frame"]["uuid"].startswith("a-refusal-")]
+        self.assertEqual(len(copy), 3)     # one notice on the retry leg, two refusal messages
+        for text in copy:
+            self.assertIn(broad if wants_broad else general, text)
+            self.assertNotIn(general if wants_broad else broad, text)
+            self.assertIn("Details: `[%s]`" % category, text)
+
     def test_every_result_frame_carries_is_error(self):
         """Both `result` schemas require it, so omitting it on a success would apply the
         fixture's own "keys the bundle shows" rule inconsistently within one frame type."""

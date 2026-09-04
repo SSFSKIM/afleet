@@ -413,7 +413,8 @@ def sign(path, reviewer):
     p = os.path.join(path, "fixture.json")
     with open(p, encoding="utf-8") as fh:
         meta = json.load(fh)
-    meta["review"] = {"reviewer": reviewer, "date": datetime.date.today().isoformat(), "checklist_version": 1}
+    meta["review"] = {"reviewer": reviewer, "date": datetime.date.today().isoformat(),
+                      "checklist_version": verify.CHECKLIST_VERSION}
     with open(p, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=1, sort_keys=True)
 
