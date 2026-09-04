@@ -700,6 +700,30 @@ which `record` spills to its temporary file, set from the largest recorded scena
   `is_error: true` and the limit text as `result`, and it emits `system/init` and writes a
   full transcript first, which is why the wave still produced protocol evidence.
 
+- Observation: A turn the engine rejects on a spent rate-limit window is a complete wire
+  path that costs nothing to record, and four of its details would defeat a hand-written
+  fixture. Evidence: `rate-limited-turn`, recorded twice with identical results. The
+  `rate_limit_event` fires **once for the session**, not once per rejected turn — the second
+  prompt is rejected in silence. The reply is an `assistant` message whose `message.model` is
+  the literal `"<synthetic>"`, the engine's own marker for a message no model produced and
+  not a redaction placeholder. `result` is `subtype: "success"` with `is_error: true`,
+  `duration_api_ms: 0` and zero usage, so a consumer keying failure off the subtype alone
+  reads a rejected turn as a clean one. And a rejected turn **is** written to the transcript
+  in full — seventeen records including both prompts, both synthetic replies and the usual
+  `attachment`, `queue-operation`, `file-history-snapshot`, `atis-latch` and `last-prompt` —
+  sixteen of them arriving mirrored live. Impact: item 21 and C2.G2 gain their only
+  `rate_limit_event` evidence; §8.4's "until the next event clears it" is confirmed as the
+  right rule precisely because there is no second event.
+
+- Observation: The identity rule redacted a counter. Evidence:
+  `result.subagent_stats.killed.user` counts subagents the user killed and sits beside
+  `killed.parent` and `killed.system`, and the rule rewrote the count as the string
+  `<user>` in every `result` frame of the first `rate-limited-turn` recording. Impact: the
+  loss is not cosmetic — C2.G2 asks that every frame decode and re-encode without loss, and
+  a `Codable` model typing the field `Int` cannot read a string back. Neither name nor type
+  separates it from a numeric account id (`user_id: 7` is identity and is an int), so the
+  exemption is written as the single path it applies to, with the scanner exempted in step.
+
 - Observation: The extracted bundle's SPEC chapter files under
   `~/claude-code-bundle/2.1.257/SPEC/` are no longer on disk on 2026-09-04; the bundle
   source (`cli.pretty.js`, `modules/`) and `docs/tui-parity/` remain. Impact: chapter
@@ -909,3 +933,13 @@ Pending — written at finish.
   the decline legs' `result` subtype, the placeholder copy, the park deadline, whether an
   undeclared kind reaches a host at all -- still need a recording, and S10, S11, S12 and S17
   still need live sessions, so their notes belong on the parent when those can run.
+- 2026-09-04: A turn rejected on a spent rate-limit window is recordable at zero cost — the
+  engine refuses before any model call — and `rate-limited-turn` records it. The fixture is
+  `census: false` with `synthetic: false`. §4.7 excludes synthetic fixtures from the drift
+  ritual because their content was never on the wire; this one's exclusion rests on the
+  neighbouring property, that its **precondition** is not reproducible on demand. `diff`
+  re-runs a census scenario against the live binary, so once the window resets this scenario
+  would run two real turns and report the difference as drift — a gate failing for a reason
+  unrelated to the CLI, which is how an operator learns to wave a gate through. The rule the
+  two cases share: a scenario stays out of the census when re-running it cannot be expected
+  to reproduce what was recorded.
