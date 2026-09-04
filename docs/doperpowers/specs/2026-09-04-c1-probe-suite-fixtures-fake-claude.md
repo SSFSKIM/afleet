@@ -724,6 +724,50 @@ which `record` spills to its temporary file, set from the largest recorded scena
   separates it from a numeric account id (`user_id: 7` is identity and is an int), so the
   exemption is written as the single path it applies to, with the scanner exempted in step.
 
+- Observation: `Fixtures/` spans two CLI versions. Evidence: `zero-cost` and
+  `rate-limited-turn` carry `cli_version: 2.1.259`; `send-user-file`, `plain-two-turn` and
+  `resume-no-replay` carry `2.1.260`, the CLI having been upgraded between waves. Impact:
+  the set is still one baseline. `census.diff` never compares `version`, `verify` only holds
+  each fixture's `census.json` version against its own `cli_version`, and the flag set
+  `claude --help` declares is byte-identical across the two — `zero-cost`, recorded on
+  2.1.259, re-runs green against 2.1.260. Uniformity is unattainable in any case:
+  `rate-limited-turn`'s precondition is gone, so it can never be re-recorded on a later
+  binary. A child reading these fixtures should take `cli_version` per fixture rather than
+  assuming one number for the directory.
+
+- Observation: An SDK MCP tool listed in `system/init.tools` is not immediately invocable.
+  Evidence: `send-user-file`. `mcp__afleet__send_user_file` appears in the tool list, and the
+  model's first act is nonetheless `ToolSearch {"query": "select:mcp__afleet__send_user_file"}`
+  to fetch its schema; the `tool_result` for that fetch is a `tool_reference` block rather
+  than text, and the transcript carries `deferred_tools_delta` and `deferred_tools_record`
+  attachments around it. Impact: a host modelling the first turn as "listed, therefore
+  called" will mis-read it, and the extra turn is a real cost on every scenario that drives
+  an SDK MCP tool. Also on the wire: `tools/call` params carry a `_meta` the host never
+  declared, holding `claudecode/toolUseId` and a `progressToken`.
+
+- Observation: A transcript holds far more than its exchanges. Evidence: `plain-two-turn`'s
+  two prompts and two replies produce thirty-one records — nine distinct `attachment` kinds
+  (`environment`, `model`, `deferred_tools_delta`, `agent_listing_delta`, `skill_listing`,
+  `total_tokens_reminder`, `session_context`, `date`, `prompt_snapshot`) alongside
+  `queue-operation`, `file-history-snapshot`, `atis-latch`, `ai-title` and `last-prompt`.
+  Impact: C3's reducer must account for all of them; a consumer modelling a transcript as
+  user and assistant records drops most of the file. A resume adds exactly one more, of type
+  `mode` (`resume-no-replay`).
+
+- Observation: The mirror-fidelity check holds on every recording with real turns.
+  Evidence: `send-user-file` (34 records), `plain-two-turn` (31 records across seven mirror
+  frames) and `resume-no-replay` (one `mode` record appended to a populated `initial/`) all
+  pass it. Impact: with the earlier slug defect fixed, nothing remains unconfirmed about the
+  check's premise, and `resume-no-replay` is the first fixture to exercise §4.4's
+  stream-offset contract against real bytes — `streams.json` records 171903, exactly the
+  size of the file under `initial/`, and the final file's first 171903 bytes are identical.
+
+- Observation: `plain-two-turn` makes the drift ritual cost money. Evidence: it is
+  `census: true`, so `make probe` re-runs it against the live binary and spends two `haiku`
+  turns, about one US cent, every time. Impact: the drift ritual is no longer free, and the
+  same account pays for the agents working on this repository. Recorded so the cost is a
+  decision rather than a surprise.
+
 - Observation: The extracted bundle's SPEC chapter files under
   `~/claude-code-bundle/2.1.257/SPEC/` are no longer on disk on 2026-09-04; the bundle
   source (`cli.pretty.js`, `modules/`) and `docs/tui-parity/` remain. Impact: chapter
@@ -943,3 +987,8 @@ Pending — written at finish.
   unrelated to the CLI, which is how an operator learns to wave a gate through. The rule the
   two cases share: a scenario stays out of the census when re-running it cannot be expected
   to reproduce what was recorded.
+- 2026-09-04: Wave A complete. `zero-cost`, `send-user-file`, `plain-two-turn` and
+  `resume-no-replay` are recorded, reviewed, signed and committed, alongside
+  `rate-limited-turn` from the interrupted attempt. S5 and S2 are both settled on the parent.
+  The three model-driven recordings cost about 0.034 USD in total and each succeeded on its
+  first attempt.

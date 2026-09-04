@@ -3085,3 +3085,28 @@ Pending — written at finish.
   returned "You've hit your weekly limit" as the assistant text with no tool use. The
   `send-user-file` fixture is therefore not in `Fixtures/`, and that half of S5 is open
   until a recording is made after the cap resets (2026-09-06T15:00Z).
+- 2026-09-04 C1/S5, completed: the `tools/call` half is now recorded (fixture
+  `send-user-file`, 2.1.260), and S5 is closed. The model calls the tool with exactly
+  `{"files": ["a.txt", "b.txt"], "caption": "two files", "status": "normal"}`; the round trip
+  is `control_request/mcp_message` carrying a JSON-RPC `tools/call` and the host's
+  `mcp_response` returning `{"content": [{"type": "text", "text": …}]}`; the reply then
+  arrives and `result` is `success`. Two additions to §6.8's mechanism. The `tools/call`
+  params carry a `_meta` the host never declared, holding `claudecode/toolUseId` and a
+  `progressToken`, so a host that validates params strictly against its own schema must
+  tolerate it. And **the tool is deferred**: although `system/init.tools` lists
+  `mcp__afleet__send_user_file`, the model's first act is
+  `ToolSearch {"query": "select:mcp__afleet__send_user_file"}` to fetch the schema, whose
+  `tool_result` is a `tool_reference` block rather than text, with `deferred_tools_delta` and
+  `deferred_tools_record` attachments around it in the transcript. Registration in
+  `system/init.tools` is therefore not the same as immediate invocability, and a host
+  modelling the first turn as "listed, therefore called" will mis-read it.
+- 2026-09-04 C1/S2: `--resume` plus `initialize` and six idle seconds emitted no assistant
+  and no user frames at all (fixture `resume-no-replay`, 2.1.260), though the resumed
+  session's transcript held thirty-one records and two complete exchanges. The whole capture
+  is the handshake, the in-process server's bring-up, one `auth_status`, the `end_session`
+  exchange and a single `transcript_mirror`. History comes only from the transcript, which
+  confirms §7.3's record-reducer-primary design; S2 stays resolved. One qualification the
+  recording adds: a resume is not silent on disk. It appends exactly one record, of type
+  `mode`, and the lone mirror frame carries exactly that entry — session state, not
+  conversation — so a host watching the transcript for a resume sees one append it must not
+  mistake for history.
