@@ -2,12 +2,21 @@
 
 Shared by the agent scenarios. `CLAUDE_CODE_FORK_SUBAGENT=1` is on every launch line, which
 backgrounds every subagent, so the initiating turn's `result` can arrive while the agents it
-spawned are still running. A scenario that closed there would send `end_session` — or close
-stdin — under a live agent and land a truncated sidecar in the fixture.
+spawned are still running. A scenario that closed there would send `end_session` under a live
+agent and land truncated evidence in the fixture.
 
-Not a scenario itself: `load_scenario` puts the scenario directory on `sys.path` before
-loading, which is what lets a sibling module be imported by bare name.
+Two things this has to get right, both learned from a recording that reported itself settled
+and ended `result/error_during_execution` two seconds later.
+
+A task id is not seen once. The engine re-emits `task_started` for the *same* `task_id` when
+an auto-turn re-engages a backgrounded agent, so a set difference reads the earlier
+`task_notification` as having settled the later start. The accounting is per occurrence.
+
+And settling is not a moment. A re-engagement can arrive a second or two after the last
+notification, so the wait ends only after nothing has been outstanding for `quiet` seconds --
+which also drains the auto-turn that follows the last agent.
 """
+import collections
 import time
 
 
@@ -21,13 +30,21 @@ def ended_ids(session):
             if f.get("frame", {}).get("subtype") == "task_notification"]
 
 
-def wait_for_tasks(session, timeout=300):
-    """True when every task_started has a task_notification; also drains the auto-turns that follow."""
+def pending(session):
+    """Task ids started more often than they have ended, with their outstanding counts."""
+    return collections.Counter(started_ids(session)) - collections.Counter(ended_ids(session))
+
+
+def wait_for_tasks(session, timeout=300, quiet=10):
+    """True when nothing has been outstanding for `quiet` seconds inside `timeout`."""
     deadline = time.time() + timeout
+    calm_since = None
     while time.time() < deadline:
-        pending = set(started_ids(session)) - set(ended_ids(session))
-        if not pending:
-            time.sleep(3)                      # let a trailing auto-turn's result arrive
-            return True
+        if pending(session):
+            calm_since = None
+        else:
+            calm_since = calm_since or time.time()
+            if time.time() - calm_since >= quiet:
+                return True
         time.sleep(1)
-    return False
+    return not pending(session)

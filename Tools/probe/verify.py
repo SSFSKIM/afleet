@@ -372,6 +372,42 @@ def _check_artifacts(path, frames):
             for rel in sorted(needed) if not os.path.isfile(os.path.join(art_dir, rel))]
 
 
+SIDECAR_ENTRY_TYPE = "agent_metadata"
+
+
+def _is_sidecar_entry(entry):
+    return isinstance(entry, dict) and entry.get("type") == SIDECAR_ENTRY_TYPE
+
+
+def _check_sidecar_entries(path, stream, entries):
+    """Every `agent_metadata` the mirror carried is the stream's `.meta.json`, field for field.
+
+    The mirror delivers the sidecar on the transcript's channel with a `type` added, so the
+    entry is not a record of that stream -- but it is a claim about a file the fixture holds,
+    and the claim is checkable. Holding it against the sidecar is what keeps the entries out of
+    the record comparison from being an amnesty.
+    """
+    sidecar = os.path.join(path, "transcript", stream[:-len(".jsonl")] + ".meta.json") \
+        if stream.endswith(".jsonl") else None
+    if not sidecar or not os.path.isfile(sidecar):
+        return ["mirror carried %s for %s but no .meta.json sidecar is in the fixture"
+                % (SIDECAR_ENTRY_TYPE, stream)]
+    with open(sidecar, encoding="utf-8") as fh:
+        try:
+            want = json.load(fh)
+        except ValueError:
+            return ["transcript/%s is not valid JSON" % (stream[:-len(".jsonl")] + ".meta.json")]
+    out = []
+    for e in entries:
+        got = dict(e)
+        got.pop("type", None)
+        if got != want:
+            out.append("a mirrored %s for %s does not equal its .meta.json sidecar (differs on %s)"
+                       % (SIDECAR_ENTRY_TYPE, stream,
+                          ", ".join(sorted(k for k in set(got) | set(want) if got.get(k) != want.get(k)))))
+    return out
+
+
 def _identities(records):
     """A stream's record identities, in order. `uuid` is what a transcript record is keyed by;
     a record without one falls back to its own content, so a stream of unkeyed records is still
@@ -448,14 +484,18 @@ def _check_mirror(path, fx):
     # count is checked for exactness in both directions: too few consumed still fails, and a
     # declaration nothing needs is reported as stale rather than left to rot.
     #
-    # The same escape exists in the other direction, for a phenomenon the engine turned out to
-    # have both ways round. A subagent's mirror opens with an `agent_metadata` entry that is
-    # never written into `subagents/agent-<id>.jsonl` at all: it is the content of the
-    # neighbouring `.meta.json` sidecar, delivered through the mirror with a `type` added
-    # (`explore-depth-1`, `nested-depth-2`). The mirror therefore carries one record the stream
-    # does not, at the head of the range, which is `unmirrored_prefix` reflected.
-    # `unwritten_prefix` states how many, on exactly the same terms: declared by the scenario,
-    # consumed only at the head, exact in both directions.
+    # There is no declaration in the other direction, because what the engine does there is not
+    # a record of that stream at all. A subagent's mirror carries `agent_metadata` entries that
+    # `subagents/agent-<id>.jsonl` never receives: each holds the neighbouring `.meta.json`
+    # sidecar's content with a `type` added, and the engine emits one when the agent starts and
+    # another each time an auto-turn re-engages it, so both their number and their position are
+    # the model's to decide (`explore-depth-1`, `nested-depth-2`) and a declared count would rot
+    # on the next recording. They are held out of the record comparison and *checked against the
+    # sidecar they claim to be* instead, which makes this a second assertion rather than an
+    # allowance: a fixture whose mirror announces metadata no `.meta.json` carries fails here.
+    # The discriminator is the entry type and not a missing `uuid`, because plenty of ordinary
+    # records -- `ai-title`, `atis-latch`, `file-history-snapshot`, `last-prompt`,
+    # `queue-operation` -- carry no `uuid` and are written to the file like any other.
     #
     # `mirror_identity_only` is the third declaration and the only one that is not a count,
     # because what it licenses does not have a stable one. A subagent's sidecar file and its
@@ -469,11 +509,9 @@ def _check_mirror(path, fx):
     # are still strict, and every field difference is reported as a note on every run rather
     # than passing in silence. Main streams are untouched and remain compared in full.
     declared = int(meta.get("unmirrored_prefix") or 0)
-    declared_unwritten = int(meta.get("unwritten_prefix") or 0)
     identity_pats = list(meta.get("mirror_identity_only") or ())
     used = set()
     skipped = 0
-    unwritten = 0
     for stream, entries in sorted(mirrored.items()):
         init_path = os.path.join(path, "initial", stream)
         final_path = os.path.join(path, "transcript", stream)
@@ -488,40 +526,36 @@ def _check_mirror(path, fx):
             continue
         hit = [pat for pat in identity_pats if pat in stream]
         used.update(hit)
-        if got == head + entries:
+        keyed = [e for e in entries if not _is_sidecar_entry(e)]
+        sidecars = [e for e in entries if _is_sidecar_entry(e)]
+        if sidecars:
+            errors += _check_sidecar_entries(path, stream, sidecars)
+            notes.append("mirror carried %d %s entry/entries on %s, checked against its .meta.json "
+                         "sidecar rather than against the stream"
+                         % (len(sidecars), SIDECAR_ENTRY_TYPE, stream))
+        if got == head + keyed:
             continue
         # Only ever at the head of the appended range, and only as many records as remain
         # undeclared: a gap anywhere later is a mirror that lost records mid-session, which is
         # the failure this check exists for.
         matched = False
         for n in range(1, declared - skipped + 1):
-            if got == head + got[len(head):len(head) + n] + entries:
+            if got == head + got[len(head):len(head) + n] + keyed:
                 skipped += n
                 matched = True
                 break
-        for n in range(0, declared_unwritten - unwritten + 1):
-            if matched:
-                break
-            want = head + entries[n:]
-            if got == want:
-                unwritten += n
-                matched = True
-            elif hit and _identities(got) == _identities(want):
-                unwritten += n
-                matched = True
-                notes.append("mirror content drift on %s: %d of %d records differ from the file by field "
-                             "(%s); the identity sequence is equal (mirror_identity_only)"
-                             % (stream, sum(1 for a, b in zip(got, want) if a != b), len(got),
-                                ", ".join(sorted(_drift_fields(got, want))) or "no top-level field"))
+        if not matched and hit and _identities(got) == _identities(head + keyed):
+            matched = True
+            notes.append("mirror content drift on %s: %d of %d records differ from the file by field "
+                         "(%s); the identity sequence is equal (mirror_identity_only)"
+                         % (stream, sum(1 for a, b in zip(got, head + keyed) if a != b), len(got),
+                            ", ".join(sorted(_drift_fields(got, head + keyed))) or "no top-level field"))
         if not matched:
-            errors.append("mirror entries for %s do not reproduce transcript/%s (%d mirrored + %d initial vs %d "
-                          "records, unmirrored_prefix %d, unwritten_prefix %d)"
-                          % (stream, stream, len(entries), len(head), len(got), declared, declared_unwritten))
+            errors.append("mirror entries for %s do not reproduce transcript/%s (%d mirrored, %d of them "
+                          "sidecar metadata, + %d initial vs %d records, unmirrored_prefix %d)"
+                          % (stream, stream, len(entries), len(sidecars), len(head), len(got), declared))
     if declared and skipped != declared:
         errors.append("fixture.json declares unmirrored_prefix %d but the mirror check needed %d" % (declared, skipped))
-    if declared_unwritten and unwritten != declared_unwritten:
-        errors.append("fixture.json declares unwritten_prefix %d but the mirror check needed %d"
-                      % (declared_unwritten, unwritten))
     for pat in sorted(set(identity_pats) - used):
         errors.append("fixture.json declares mirror_identity_only %r but no mirrored stream matches it" % pat)
     return errors, notes

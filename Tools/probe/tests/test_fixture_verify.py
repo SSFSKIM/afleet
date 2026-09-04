@@ -430,38 +430,57 @@ class VerifyTests(unittest.TestCase):
         write(os.path.join(d, "fixture.json"), json.dumps(meta))
         self.assertTrue(any("declares unmirrored_prefix 1" in e for e in self.errors(d)))
 
-    def test_a_declared_unwritten_prefix_licenses_a_mirror_only_record_at_the_head(self):
-        """A subagent's mirror opens with an `agent_metadata` entry the `.jsonl` never receives."""
-        d = build_fixture(self.root)
+    def _mirror_a_sidecar_entry(self, d, rel, entry, times=1):
+        """Put `times` copies of a mirror `agent_metadata` entry on the stream at `rel`."""
         path = os.path.join(d, "frames.ndjson")
         with open(path, encoding="utf-8") as fh:
             frames = [json.loads(l) for l in fh if l.strip()]
         for rec in frames:
             f = rec.get("frame") or {}
-            if f.get("type") == "transcript_mirror":
-                f["entries"] = [{"type": "agent_metadata", "agentType": "Explore"}] + f["entries"]
+            if f.get("type") == "transcript_mirror" and rel in f.get("filePath", ""):
+                f["entries"] = [entry] + f["entries"] + [entry] * (times - 1)
                 break
         write(path, "".join(json.dumps(f) + "\n" for f in frames))
-        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
-        meta = read_json(os.path.join(d, "fixture.json"))
-        meta["unwritten_prefix"] = 1
-        write(os.path.join(d, "fixture.json"), json.dumps(meta))
-        self.assertEqual(self.errors(d), [])
 
-    def test_an_unwritten_prefix_nothing_needs_is_reported_as_stale(self):
-        """Exact in both directions, like the declaration it reflects."""
+    def test_a_mirrored_agent_metadata_is_checked_against_the_sidecar_not_the_stream(self):
+        """The engine mirrors the `.meta.json` on the transcript's channel, at the head and again
+        on every re-engagement, so it is neither a record of that stream nor unchecked."""
         d = build_fixture(self.root)
-        meta = read_json(os.path.join(d, "fixture.json"))
-        meta["unwritten_prefix"] = 1
-        write(os.path.join(d, "fixture.json"), json.dumps(meta))
-        self.assertTrue(any("declares unwritten_prefix 1" in e for e in self.errors(d)))
+        self._with_subagent_stream(d, mirrored=[{"type": "assistant", "uuid": "s1"}],
+                                   on_disk=[{"type": "assistant", "uuid": "s1"}], sidecar={"agentType": "Explore"})
+        self._mirror_a_sidecar_entry(d, "subagents/", {"type": "agent_metadata", "agentType": "Explore"}, times=2)
+        errors, notes = verify.verify_fixture(d, home=self.root)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("agent_metadata" in n and "sidecar" in n for n in notes), notes)
 
-    def _with_subagent_stream(self, d, mirrored, on_disk):
+    def test_a_mirrored_agent_metadata_that_disagrees_with_its_sidecar_fails(self):
+        d = build_fixture(self.root)
+        self._with_subagent_stream(d, mirrored=[{"type": "assistant", "uuid": "s1"}],
+                                   on_disk=[{"type": "assistant", "uuid": "s1"}], sidecar={"agentType": "Explore"})
+        self._mirror_a_sidecar_entry(d, "subagents/", {"type": "agent_metadata", "agentType": "general-purpose"})
+        self.assertTrue(any("does not equal its .meta.json sidecar" in e for e in self.errors(d)))
+
+    def test_a_mirrored_agent_metadata_with_no_sidecar_in_the_fixture_fails(self):
+        d = build_fixture(self.root)
+        self._mirror_a_sidecar_entry(d, SID + ".jsonl", {"type": "agent_metadata", "agentType": "Explore"})
+        self.assertTrue(any("no .meta.json sidecar" in e for e in self.errors(d)))
+
+    def test_an_unkeyed_record_is_still_compared_like_any_other(self):
+        """`ai-title`, `atis-latch` and their kind carry no `uuid` and are written to the file;
+        holding them out would take most of a transcript out of the check."""
+        d = build_fixture(self.root)
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "ai-title", "aiTitle": "T"}) + "\n")
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+
+    def _with_subagent_stream(self, d, mirrored, on_disk, sidecar=None):
         """Add one subagent stream to a built fixture: what the mirror carried, what the file holds."""
         rel = os.path.join("_slug_", SID, "subagents", "agent-a1.jsonl")
         os.makedirs(os.path.dirname(os.path.join(d, "transcript", rel)), exist_ok=True)
         write(os.path.join(d, "transcript", rel),
               "".join(json.dumps(r) + "\n" for r in on_disk))
+        if sidecar is not None:
+            write(os.path.join(d, "transcript", rel[:-len(".jsonl")] + ".meta.json"), json.dumps(sidecar))
         append_frame(d, {"t": 95, "dir": "out", "frame": {
             "type": "transcript_mirror",
             "filePath": "~/.claude/projects/_slug_/%s/subagents/agent-a1.jsonl" % SID,
@@ -515,23 +534,6 @@ class VerifyTests(unittest.TestCase):
         meta["mirror_identity_only"] = ["subagents/"]
         write(os.path.join(d, "fixture.json"), json.dumps(meta))
         self.assertTrue(any("mirror_identity_only" in e and "no mirrored stream" in e for e in self.errors(d)))
-
-    def test_an_unwritten_prefix_does_not_license_a_gap_later_in_the_stream(self):
-        """The escape is a head allowance; a mirror that loses a record mid-stream still fails."""
-        d = build_fixture(self.root)
-        path = os.path.join(d, "frames.ndjson")
-        with open(path, encoding="utf-8") as fh:
-            frames = [json.loads(l) for l in fh if l.strip()]
-        for rec in frames:
-            f = rec.get("frame") or {}
-            if f.get("type") == "transcript_mirror":
-                f["entries"] = f["entries"] + [{"type": "agent_metadata", "agentType": "Explore"}]
-                break
-        write(path, "".join(json.dumps(f) + "\n" for f in frames))
-        meta = read_json(os.path.join(d, "fixture.json"))
-        meta["unwritten_prefix"] = 1
-        write(os.path.join(d, "fixture.json"), json.dumps(meta))
-        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
 
     def test_a_synthetic_fixture_that_declares_a_transcript_is_still_mirror_checked(self):
         """`synthetic` was only ever a proxy for "has no transcript"; the transcript is the fact."""

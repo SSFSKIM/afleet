@@ -12,7 +12,6 @@ META = {"name": "explore-depth-1", "purpose": "one Explore subagent searching sy
         "serves": ["item 9", "item 38", "item 49", "C3.G3"],
         "spikes": [], "census": True, "optional_pairs": ["system/thinking_tokens"],
         "deterministic": False, "isolation": "config-home", "launch": {"max_turns": 4},
-        "unwritten_prefix": 1,          # the subagent mirror's leading agent_metadata entry
         "mirror_identity_only": ["subagents/"],
         "prompts": ["Use the Agent tool with subagent_type Explore to find which files in this directory "
                     "contain the word gamma. Do not search yourself and do not use any other tool. "
