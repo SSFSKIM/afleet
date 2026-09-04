@@ -109,8 +109,36 @@ def _is_secret_key(k, value=None):
 IDENTITY_COUNTER_PATHS = frozenset(("subagent_stats.killed.user",))
 
 
+# The same problem one rule over. `get_usage` answers with `behaviors.day.behaviors[].key`
+# and its weekly twin, and the field named `key` there is an enum of behaviour names --
+# `cache_miss`, `long_context`, `subagent_heavy`, `high_parallel`, `cron` (2.1.258
+# `cli.pretty.js`, `behaviors: R(c({ key: ee([...])`). The secrets rule fires on any key
+# containing "key", so it replaced each with `<redacted>` and cost the fixture the one thing
+# that says what a usage behaviour is called. Type cannot save this one either: the value is
+# a string, exactly like a credential. Position can, so again the exemption is the path.
+SECRET_ENUM_PATHS = frozenset(("behaviors.key",))
+
+_PATH_INDEX_RE = re.compile(r"\[\d+\]")
+
+
+def _path_exempt(path, exempt):
+    """Whether a field's *position* takes it out of a name-keyed rule.
+
+    List indices are stripped before matching, so an exemption is written against the shape
+    of the path rather than against where an element happened to sit -- `behaviors[0].key`
+    and `behaviors[3].key` are the same field. Matching is on a full trailing segment run, so
+    a suffix cannot straddle a partial segment name.
+    """
+    bare = _PATH_INDEX_RE.sub("", path)
+    return any(bare == c or bare.endswith("." + c) for c in exempt)
+
+
 def _is_identity_counter(path):
-    return any(path == c or path.endswith("." + c) for c in IDENTITY_COUNTER_PATHS)
+    return _path_exempt(path, IDENTITY_COUNTER_PATHS)
+
+
+def _is_secret_enum(path):
+    return _path_exempt(path, SECRET_ENUM_PATHS)
 
 
 def _is_identity_key(nk):
@@ -198,7 +226,7 @@ class Redactor:
                         out[rk] = placeholder
                         self._hit("identity", p)
                     continue
-                if _is_secret_key(k, v) and (isinstance(v, str) or (isinstance(v, (dict, list)) and nk in ("oauth", "credentials", "credential"))):
+                if _is_secret_key(k, v) and not _is_secret_enum(p) and (isinstance(v, str) or (isinstance(v, (dict, list)) and nk in ("oauth", "credentials", "credential"))):
                     if v != "<redacted>":
                         self._hit("secrets", p)
                     out[rk] = "<redacted>"
@@ -334,7 +362,7 @@ def scan(obj_or_text, home, *, hostname=None):
                 elif nk == "apikeysource":
                     if v not in (None, "none", "<%s>" % k):
                         hits.append("%s: identity field not redacted" % p)
-                elif _is_secret_key(k, v) and isinstance(v, str) and v != "<redacted>":
+                elif _is_secret_key(k, v) and not _is_secret_enum(p) and isinstance(v, str) and v != "<redacted>":
                     hits.append("%s: secret-named field not redacted" % p)
                 else:
                     walk(v, p)

@@ -206,6 +206,23 @@ class SecretKeyPredicateTests(unittest.TestCase):
         self.assertEqual(redact.scan({"killed": {"user": 5}}, home="/Users/probe"),
                          ["killed.user: identity field not redacted"])
 
+    def test_the_usage_behaviour_enum_named_key_is_not_a_secret(self):
+        """`get_usage` answers with `behaviors.day.behaviors[].key`, an enum of behaviour
+        names -- `cache_miss`, `long_context`, `subagent_heavy`, `high_parallel`, `cron`
+        (2.1.258 `cli.pretty.js`). The secrets rule fires on any key containing "key" and
+        replaced each with `<redacted>`. The value is a string, exactly like a credential, so
+        only its position separates the two. Indices are stripped before matching, so the
+        exemption holds wherever the element sits."""
+        out = self.r.redact_json({"behaviors": {"day": {"behaviors": [{"key": "cache_miss", "cost": 1},
+                                                                      {"key": "cron"}]}},
+                                  "sessionKey": "s3cret", "elsewhere": {"key": "opaque"}})
+        self.assertEqual(out["behaviors"]["day"]["behaviors"], [{"key": "cache_miss", "cost": 1}, {"key": "cron"}])
+        self.assertEqual(out["sessionKey"], "<redacted>")
+        self.assertEqual(out["elsewhere"]["key"], "<redacted>")
+        self.assertEqual(redact.scan({"behaviors": {"day": {"behaviors": [{"key": "cron"}]}}}, home="/Users/probe"), [])
+        self.assertEqual(redact.scan({"elsewhere": {"key": "opaque"}}, home="/Users/probe"),
+                         ["elsewhere.key: secret-named field not redacted"])
+
     def test_name_shaped_identity_keys_are_exact_never_substring(self):
         out = self.r.redact_json({"organizationName": "Acme", "userName": "pp", "accountName": "a",
                                   "fullName": "Probe Person", "toolName": "Bash", "serverName": "afleet",

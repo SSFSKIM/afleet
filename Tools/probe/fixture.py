@@ -28,6 +28,8 @@ REQUIRED_FILES = ("fixture.json", "frames.ndjson", "census.json", "redaction.jso
 # that walks a fixture's stream directories skips it by name, so it never becomes a phantom
 # stream, artifact or transcript.
 PLACEHOLDER = ".gitkeep"
+# Written by hand, never by `record`, and carried across a re-recording rather than replaced.
+DOC_FILE = "README.md"
 
 
 def slug_of(cwd):
@@ -242,6 +244,15 @@ def write_fixture(fixtures_root, name, meta, frames, census_obj, manifest, initi
         with open(os.path.join(tmp, "streams.json"), "w", encoding="utf-8") as fh:
             json.dump(stream_sizes(os.path.join(tmp, "initial")), fh, indent=1, sort_keys=True)
         dest = os.path.join(fixtures_root, name)
+        # A re-recording replaces the fixture directory whole, which silently destroyed the
+        # hand-written README.md every time. Carrying it across is safe because `record`
+        # writes an *unsigned* review block: the fixture cannot be committed until someone
+        # re-walks the checklist, and the checklist requires reading the README against the
+        # recording. A stale README therefore cannot survive review, only inattention --
+        # which is what review is for -- whereas losing the file is unrecoverable.
+        carried = os.path.join(dest, DOC_FILE)
+        if os.path.isfile(carried):
+            shutil.copy2(carried, os.path.join(tmp, DOC_FILE))
         old = None
         if os.path.exists(dest):
             old = tempfile.mkdtemp(prefix=".old-%s-" % name, dir=fixtures_root)

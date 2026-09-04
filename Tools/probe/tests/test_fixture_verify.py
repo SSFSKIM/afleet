@@ -197,6 +197,21 @@ class WriteAndLoadTests(unittest.TestCase):
         self.assertEqual(read_json(os.path.join(path, "streams.json")), {})
         self.assertEqual(fixture.stream_sizes(os.path.join(path, "initial")), {})
 
+    def test_a_re_recording_carries_the_hand_written_readme_across(self):
+        """`record` replaces the fixture directory whole, which destroyed the README every
+        time a fixture was re-recorded. Carrying it is safe because the re-recorded review
+        block is unsigned, so the checklist -- which requires reading the README against the
+        recording -- has to be walked again before the fixture can be committed."""
+        root = tempfile.mkdtemp(); src = build_fixture(tempfile.mkdtemp())
+        loaded = fixture.load(src)
+        args = (loaded["meta"], loaded["frames"], loaded["census"], {"rules": {}},
+                os.path.join(src, "initial"), os.path.join(src, "transcript"), os.path.join(src, "artifacts"))
+        path = fixture.write_fixture(root, "again", *args)
+        self.assertFalse(os.path.isfile(os.path.join(path, fixture.DOC_FILE)))   # record writes none
+        write(os.path.join(path, fixture.DOC_FILE), "# again\nwhat this shows\n")
+        path = fixture.write_fixture(root, "again", *args)
+        self.assertEqual(read(os.path.join(path, fixture.DOC_FILE)), "# again\nwhat this shows\n")
+
     def test_a_populated_stream_directory_gets_no_placeholder(self):
         root = tempfile.mkdtemp(); src = build_fixture(tempfile.mkdtemp())
         loaded = fixture.load(src)
