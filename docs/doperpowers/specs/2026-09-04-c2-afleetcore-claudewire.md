@@ -77,7 +77,8 @@ that proves it.
   that the only changes are files the spawned `claude` wrote (its transcript, registry
   record and `.claude.json`), nothing created by the test; it completes the handshake,
   sees `mcp__afleet__send_user_file`
-  in `system/init.tools`, asks the model to send a file and receives the
+  in the first turn's `system/init.tools` observed on the event stream, asks the model to send a
+  file and receives the
   `hostToolInvoked` event naming that file with the model's turn completing normally
   (S5's mechanism; the wire half of item 29); `VersionGate` refuses a fabricated
   `claude --version` output older than the baseline and accepts 2.1.259 and a newer
@@ -398,7 +399,6 @@ public enum WireEvent: Sendable {
 
 public struct Handshake: Sendable {
   public let initialize: InitializeResponse        // commands, agents, models, output styles, account, current model and mode, session_state, pid
-  public let systemInit: SystemInit                // tools, skills, plugins, agents, slash_commands, mcp_servers, capabilities, version, apiKeySource, messaging_socket_path
   public let pending: [InboundRequest]             // re-armed once from pending_permission_requests and pending_user_dialog_requests
 }
 
@@ -409,7 +409,7 @@ public actor ClaudeProcess {
               mcpServer: AfleetMCPServer, diagnostics: any DiagnosticsSink, capture: RawCapture?,
               eventBufferCapacity: Int = 4096)
   public nonisolated let events: WireEventStream<WireEvent>   // an AsyncSequence over a bounded, lossless channel; iterate with for await
-  public func spawn(handshakeTimeout: Duration = .seconds(30)) async throws -> Handshake  // launches, writes initialize, waits for its response and system/init
+  public func spawn(handshakeTimeout: Duration = .seconds(30)) async throws -> Handshake  // launches, writes initialize, waits for its response only
   public func send(_ input: UserInput) async throws -> UUID
   public func send(raw frame: JSONValue) async throws
   public func request<R: ControlRequestSpec>(_ request: R, timeout: Duration? = nil) async throws -> R.Response
@@ -951,7 +951,8 @@ Pending — written at finish.
   and fail, which is both a false negative and a wasted spawn. The gate is therefore evaluated in
   two halves. The half that needs no inference is evaluable now and permanently: spawning the
   installed 2.1.259 binary under `CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home`, completing
-  the initialize handshake, seeing `mcp__afleet__send_user_file` in `system/init.tools`, the
+  the initialize handshake, seeing `mcp__afleet__send_user_file` in the first turn's
+  `system/init.tools` observed on the event stream, the
   before-and-after diff proving the test itself created nothing under the scratch home,
   `VersionGate` accepting 2.1.259 and refusing a fabricated older string, `EnvironmentResolver`
   returning the login shell's PATH, `CLAUDE_CONFIG_DIR` becoming `ConfigHome.root` with
@@ -974,3 +975,29 @@ Pending — written at finish.
   skips on a fixed date stops testing the moment that date passes, and does so silently, which is
   the failure mode the gate exists to prevent. Live spawns stay at the minimum the gate needs,
   because C1's fixture recordings share the account.
+- 2026-09-05: `Handshake` loses `systemInit` and `spawn()` completes on the `initialize` response
+  alone, because the engine does not emit `system/init` until a user message is submitted. As
+  written, `spawn()` waited for both and would therefore have timed out on every real launch — the
+  normal case, since a channel is opened before its user types. The evidence is unambiguous across
+  C1's corpus: in all sixteen recorded fixtures the `initialize` response is the first frame out,
+  `system/init` never precedes the first inbound `user` frame, and the two fixtures that submit no
+  message — `zero-cost` and `resume-no-replay` — contain no `system/init` at all. The engine source
+  agrees: the frame is built inside the per-turn query path, not the initialize handler. The
+  parent's §7.3 already said `system/init` opens every *turn*; this was C2 misreading §6.2 and X3,
+  not a contradiction in the parent. `system/init` now reaches consumers only as
+  `.frame(.system(.init(…)))` on the event stream. The field is **removed rather than made
+  optional**: one that is nil on essentially every launch invites reads that work in a fabricated
+  test and fail in production.
+  Two things this incident established that outlive the fix. First, it survived eleven tasks of
+  review because the scripted stand-in emitted `system/init` immediately, having been written to the
+  same assumption as this document — every transport test agreed with a wrong model and passed. The
+  stand-in's contract is therefore now explicit: its default scenario models the recorded engine, and
+  behaviour it emits that no fixture shows is a defect in the stand-in. Second, this is the class of
+  defect G1 cannot catch by construction, since G1 is defined as provable without the real CLI. G3
+  found it on its first live run.
+  A consequence worth stating separately, because it bears on §6.12 and on anything reading
+  `mcp_servers`: the in-process MCP server is **not** connected when the handshake completes. The
+  engine drives its JSON-RPC handshake against it about 0.9 s later — `Fixtures/zero-cost` records
+  `initialize` at t=887 ms, `notifications/initialized` at 891 ms and `tools/list` at 892 ms — so an
+  `mcp_status` issued immediately after `spawn()` returns an empty server list. Consumers must wait
+  for the server rather than assume it.
