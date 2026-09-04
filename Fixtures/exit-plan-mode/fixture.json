@@ -1,0 +1,72 @@
+{
+ "census": true,
+ "cli_version": "2.1.259",
+ "cwd": "/tmp/afleet-fixtures/exit-plan-mode",
+ "deterministic": false,
+ "exit_code": 1,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "~/.local/share/claude/versions/2.1.259",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--session-id",
+   "2c48668a-e2f1-4458-a703-f50b12fabb5c",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "plan",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "5"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
+  }
+ },
+ "name": "exit-plan-mode",
+ "notes": [
+  "ExitPlanMode asks: 1; plan keys: ['plan', 'planFilePath']; result: error_max_turns",
+  "status frames after approval: [None, None, None, None, 'acceptEdits', None]"
+ ],
+ "prompts": [
+  "Plan, in three short bullet points, how you would add a README.md to this directory. Then call ExitPlanMode to present the plan. Do not create any file."
+ ],
+ "purpose": "--permission-mode plan, a plan presented through ExitPlanMode, approved with a setMode update",
+ "recorded_at": "2026-09-04T10:58:14Z",
+ "review": {
+  "checklist_version": 2,
+  "date": "2026-09-04",
+  "reviewer": "Claude reviewer for kimmi"
+ },
+ "scenario": "exit_plan_mode",
+ "serves": [
+  "item 7"
+ ],
+ "session_id": "2c48668a-e2f1-4458-a703-f50b12fabb5c",
+ "spikes": [],
+ "synthetic": false,
+ "withdrawn_requests": []
+}

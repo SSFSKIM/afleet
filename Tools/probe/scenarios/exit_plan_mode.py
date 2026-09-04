@@ -1,8 +1,17 @@
-"""Plan mode, a plan presented through ExitPlanMode, approved with a setMode update (item 7)."""
+"""Plan mode, a plan presented through ExitPlanMode, approved with a setMode update (item 7).
+
+`--max-turns 5`, not the three the plan budgeted. `ExitPlanMode` is a deferred tool, so the
+model spends one turn on `ToolSearch {"query": "select:ExitPlanMode"}` fetching its schema
+before it can call it -- the same extra turn `send-user-file` records for an SDK MCP tool --
+and it spends another writing the plan to a file first. At three the approval lands on the
+last turn and the recording ends `result/error_max_turns` with exit code 1, which is a
+degraded recording of item 7 and, being model-driven, an unstable one: a run that needed one
+turn fewer would end `result/success` and the drift ritual would report the added pair.
+"""
 META = {"name": "exit-plan-mode",
         "purpose": "--permission-mode plan, a plan presented through ExitPlanMode, approved with a setMode update",
         "serves": ["item 7"], "spikes": [], "census": True, "deterministic": False, "isolation": "config-home",
-        "launch": {"max_turns": 3, "permission_mode": "plan"},
+        "launch": {"max_turns": 5, "permission_mode": "plan"},
         "prompts": ["Plan, in three short bullet points, how you would add a README.md to this directory. "
                     "Then call ExitPlanMode to present the plan. Do not create any file."],
         "resume_of": None, "setup": None}
