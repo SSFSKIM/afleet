@@ -387,8 +387,9 @@ public actor ClaudeProcess {
         let final = raw.withTail(stderrTail())
         status = .exited(final)
         diagnostics.record(.lifecycle("exited \(final)", epoch: epoch))
-        // `pushFinal` publishes and ends the stream in one actor step. Split into a `push` and a separate
-        // `finish()` there is a window in which another producer's element lands *after* the terminal event.
+        // `pushFinal` guarantees nothing interleaves between this element being enqueued and the stream
+        // ending. Split into a `push` and a separate `finish()` there is a window in which another producer's
+        // element lands *after* the terminal event.
         if await channel.pushFinal(.exited(final, epoch)) == false {
             diagnostics.record(.lifecycle("exit event dropped: channel already finished", epoch: epoch))
         }

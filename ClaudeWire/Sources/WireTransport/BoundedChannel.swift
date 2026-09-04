@@ -65,11 +65,20 @@ public actor BoundedChannel<Element: Sendable> {
             Task { await self.cancelPopWaiter(id) }
         }
     }
-    /// Publishes a final element and ends the stream in one actor step. The `push`/`finish()` pair spelled out
-    /// by a caller is not equivalent: between the two there is a suspension point, and an element another
-    /// producer pushes inside that window is delivered *after* the terminal one. Callers that guard themselves
-    /// with "don't push once the terminal event is out" still race, because their check and their push are
-    /// themselves two steps; making the terminal publish atomic is what actually closes it.
+    /// Publishes a final element and ends the stream, guaranteeing that **nothing interleaves between the
+    /// terminal element being enqueued and the stream ending**.
+    ///
+    /// Note what that does *not* claim. The pair is not a single step: `push` is `async` and suspends while the
+    /// channel is full, so this call can take arbitrarily long. The guarantee is narrower and is about the far
+    /// side of that suspension — once `push` resumes and enqueues, `finish()` is synchronous and follows with
+    /// no suspension point between them, so no other producer can be scheduled in between. A producer already
+    /// parked on a full channel is resumed by that `finish()`, observes the finished state and is refused with
+    /// `false`, which is both correct and observable to it.
+    ///
+    /// The `push`/`finish()` pair spelled out by a caller does not have this property: between the two there is
+    /// a suspension point, and an element another producer pushes inside that window is delivered *after* the
+    /// terminal one. Nor does a caller guarding itself with "don't push once the terminal event is out" — its
+    /// check and its push are themselves two steps, so it still races.
     @discardableResult
     public func pushFinal(_ element: Element) async -> Bool {
         let accepted = await push(element)
