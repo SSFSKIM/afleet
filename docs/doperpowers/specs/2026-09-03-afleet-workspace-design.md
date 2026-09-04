@@ -1377,6 +1377,18 @@ output committed), the SDK typings fetched on demand.
 | `~/Library/Logs/afleet/diagnostics.log` | metadata-only diagnostics: frame type, subtype, size, timing, request id, control answer behavior and classification without payload, lifecycle and ownership events | rotated, 50 MB budget |
 | `~/Library/Logs/afleet/capture/<configHomeHash>/<session-id>.ndjson` | raw frame capture, **only while the Developer setting is on** | redacted before disk: identity fields by key name, normalised and case-insensitive, on string values — the set C1's redactor fixes (`account`, `accountUuid`, `accountId`, `accountName`, `organization`, `organizationUuid`, `organizationId`, `organizationName`, `user`, `userId`, `userUuid`, `userName`, `subscription`, `subscriptionType`, `fullName`) plus any email-shaped string anywhere, and an `account`, `organization` or `user` object replaced whole; `update_environment_variables` frames; any string-valued field whose name contains token, oauth, key or secret, excluding the usage counters (`input_tokens`, `output_tokens`, `max_tokens`, `thinking_tokens` and their kin), with an assertion after redaction that every frame typed before it stays typed; the capture redactor implements the same rule set as C1's `Tools/probe/redact.py` in full — its secret words including `bearer`, its structural exemptions (`projectKey`, `apiKeySource` and the rest of `SECRET_EXEMPT` and `SECRET_STRUCTURE_PATHS`), its handling of arrays under identity names and its per-rule placeholders — so a divergence between the two is a defect, not a choice, with one stated exception: C1's home-directory and hostname rule is a publication rule and does not run at capture, because a capture stays in the user's own log directory and their own paths are the diagnostic they opened it for; any future affordance that exports or shares a capture applies that rule at export; MCP JSON-RPC bodies truncated to 4 KB; directory 0700, files 0600; 200 MB total budget, oldest deleted first; a session's capture is deleted when its transcript disappears from `<configHome>/projects`; *Delete diagnostics* in Settings removes everything |
 
+**Every engine byte that reaches a committed file is a publication.** The redaction rules
+above are stated for `Fixtures/`, but their premise is the byte's origin, not the directory:
+a `system/init` pasted into a test sample, a frame quoted in a stand-in's data file, a
+response body used as a test vector, a transcript excerpt in a report — each carries the
+account name, home directory, plugin inventory, socket path and identity fields of the
+machine it came from, and each goes through the publication rules (identity keys, secrets,
+email, home directory and hostname) before it is committed. Test inputs that exist to prove
+the redactor works use invented identifiers, never the author's own; a value the redactor
+must scrub is still a disclosure when it is committed as the input. The single check before
+any merge to `main` is a grep of the whole tree for the recording machine's account name,
+home directory and the author's handles, expected to match nothing outside `docs/`.
+
 Nothing under `<configHome>` is written by afleet.
 
 ## 12. Security and policy
@@ -3397,6 +3409,17 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   server reporting connected; an `mcp_status` sent at once returned an empty list.
   Impact: §6.2 records the latency; positive connection checks read the first `system/init`
   or poll after a settle, and no launch fails on the first empty answer.
+- Observation: The redaction discipline was read as being about a directory, and a real
+  capture walked past it by being called a sample.
+  Evidence: C2's branch committed `ClaudeWire/Tests/Support/Samples/system_init.json`, a
+  genuine `system/init` from the developer's machine — home directory, account name, the
+  full plugin, skill and agent inventory, a socket path — as the stand-in's shape sample,
+  and used the author's own handle and name as redactor test vectors. Four gates passed
+  over it, because none of them asks the question. A grep of the branch diff for the
+  account name found it in a minute.
+  Impact: §11 states the rule by the byte's origin — every engine byte that reaches a
+  committed file is a publication — requires invented identifiers in redactor test inputs,
+  and names the pre-merge grep as a fixed step.
 
 ## Outcomes & Retrospective
 
@@ -3886,3 +3909,9 @@ Pending — written at finish.
   the same class of unfaithfulness that hid the `system/init` defect. C2's transport already
   behaves correctly (G3 passed live); the stand-in is being brought into line. Flags C2 (in
   flight).
+- 2026-09-05: §11 gains the origin rule — every engine byte that reaches a committed file
+  is a publication and goes through the publication rules first, wherever it lives — plus
+  the requirement that redactor test inputs use invented identifiers, and the pre-merge
+  tree grep as a fixed step. Raised by the pre-merge leak sweep of C2's branch, which found
+  a real `system/init` committed as a stand-in sample. Flags C2 (fix wave in flight) and
+  every later child that commits engine output in any form.
