@@ -39,7 +39,7 @@ final class FrameDecoderTests: XCTestCase {
         XCTAssertEqual(e.event["delta"]?["text"], .string("Hel"))
         guard case .result(let r) = try decode("result") else { return XCTFail() }
         XCTAssertEqual(r.subtype, "success"); XCTAssertEqual(r.isError, false); XCTAssertEqual(r.numTurns, 1)
-        XCTAssertEqual(r.totalCostUSD, 0.0012, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(r.totalCostUSD), 0.0012, accuracy: 1e-9)
         XCTAssertEqual(r.fastModeState, "off")
         XCTAssertEqual(r.modelUsage?["claude-opus-5"]?["contextWindow"], .integer(200000))
     }

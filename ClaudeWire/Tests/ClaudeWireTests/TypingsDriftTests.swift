@@ -117,16 +117,43 @@ final class TypingsDriftTests: XCTestCase {
     /// step: sdk.d.ts 0.3.259 ships against CLI 2.1.259 but omits fields the CLI really emits. A declared key
     /// witnessed in a recording is therefore not stale — the typings lag.
     ///
-    /// Limitation, to be re-anchored in Task 12: the evidence read here is `Tests/Support/Samples`, which is
-    /// hand-written. `Fixtures/` is the externally verified corpus and the honest authority; this target does
-    /// not reach it yet. A frame with no sample falls back to the typings alone, which errs toward reporting
-    /// more findings rather than fewer.
+    /// The evidence is `Fixtures/`, C1's recorded corpus: externally verified by `make verify-fixtures` and
+    /// signed, and recorded from the engine rather than written alongside the Swift it vouches for. A frame the
+    /// corpus never carries falls back to `Tests/Support/Samples`, which is hand-written and therefore the
+    /// weaker witness — the same edit that made a key stale would ordinarily touch the sample too. A frame with
+    /// neither falls back to the typings alone, which errs toward reporting more findings rather than fewer.
     private func witnessedKeys(for key: String) -> Set<String> {
+        if let recorded = Self.corpusWitnessedKeys[key], !recorded.isEmpty { return recorded }
         let name = key.hasPrefix("system/") ? "system_" + key.dropFirst(7) : key
         guard let data = try? TestPaths.sample(name),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
         return Set(object.keys)
     }
+
+    /// Drift key → every top-level key the corpus's censuses record for it, unioned over all fixtures.
+    ///
+    /// The census's `keys` is the union of the keys seen on that pair, which is exactly the question asked
+    /// here: was this Swift-declared key ever witnessed on the wire. The census names a pair `type/subtype`;
+    /// only `system` carries its subtype into the drift key, so every other pair is folded onto its type
+    /// (`result/success` and `result/error_max_turns` both witness for `result`).
+    private static let corpusWitnessedKeys: [String: Set<String>] = {
+        let root = TestPaths.support.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Fixtures")
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: root.path) else { return [:] }
+        var out: [String: Set<String>] = [:]
+        for name in names.sorted() {
+            let url = root.appendingPathComponent(name).appendingPathComponent("census.json")
+            guard let data = try? Data(contentsOf: url),
+                  let census = try? JSONDecoder().decode(JSONValue.self, from: data),
+                  let pairs = census["pairs"]?.objectValue else { continue }
+            for (pair, entry) in pairs {
+                let key = pair.hasPrefix("system/") ? pair : String(pair.split(separator: "/", maxSplits: 1)[0])
+                let keys = (entry["keys"]?.arrayValue ?? []).compactMap(\.stringValue)
+                out[key, default: []].formUnion(keys)
+            }
+        }
+        return out
+    }()
 
     // MARK: - tests
 

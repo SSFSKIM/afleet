@@ -192,11 +192,19 @@ public struct StreamEventFields: Codable, Hashable, Sendable, DeclaredKeys {
 }
 public typealias StreamEventFrame = Lossless<StreamEventFields>
 
+/// `duration_ms`, `total_cost_usd`, `uuid` and `session_id` are optional even though every one of
+/// the sixteen recorded fixtures carries all four on every `result` frame, and every one of their
+/// censuses lists them in `required_keys`. The two synthetic dialog fixtures emit a `result` made
+/// only of `type`, `subtype`, `result`, `is_error` and `num_turns` — `Fixtures/dialog-fable-overage`
+/// line 7 is `{"type":"result","subtype":"success","result":"answer","is_error":false,"num_turns":1}`
+/// — and G2 requires every recorded line to decode. Requiredness is stated by the census's
+/// per-fixture `required_keys`, which is externally verified; it is not stated by Swift optionality,
+/// which has to admit the whole corpus.
 public struct ResultFields: Codable, Hashable, Sendable, DeclaredKeys {
-    public var type: String; public var subtype: String; public var durationMs: Int; public var durationApiMs: Int?; public var isError: Bool
-    public var numTurns: Int; public var result: String?; public var stopReason: String?; public var totalCostUSD: Double; public var usage: JSONValue?
+    public var type: String; public var subtype: String; public var durationMs: Int?; public var durationApiMs: Int?; public var isError: Bool
+    public var numTurns: Int; public var result: String?; public var stopReason: String?; public var totalCostUSD: Double?; public var usage: JSONValue?
     public var modelUsage: JSONValue?; public var permissionDenials: JSONValue?; public var queuedTurnCount: Int?; public var fastModeState: String?
-    public var fastModeDisabledReason: String?; public var terminalReason: String?; public var errors: [String]?; public var uuid: String; public var sessionID: String
+    public var fastModeDisabledReason: String?; public var terminalReason: String?; public var errors: [String]?; public var uuid: String?; public var sessionID: String?
     public enum CodingKeys: String, CodingKey, CaseIterable {
         case type, subtype, durationMs = "duration_ms", durationApiMs = "duration_api_ms", isError = "is_error", numTurns = "num_turns", result,
              stopReason = "stop_reason", totalCostUSD = "total_cost_usd", usage, modelUsage, permissionDenials = "permission_denials",
