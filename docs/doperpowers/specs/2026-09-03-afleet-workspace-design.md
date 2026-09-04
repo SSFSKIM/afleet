@@ -259,13 +259,20 @@ Child environment, on top of the resolved login-shell environment (§6.9):
 | `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1` | `rewind_files` answers "File rewinding is not enabled." without it (*Parity F-8*) | always |
 | `CLAUDE_AUTO_BACKGROUND_TASKS=1` | slow MCP calls and long tools background instead of blocking, as in the terminal (*A-31*) | always |
 | `CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK=1` | `PushNotification` fires; the CLI's presence guard cannot see the GUI (*A-50*) | always |
-| `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT=<value>` | `AskUserQuestion` previews are off for SDK-shaped clients otherwise (*A-24*); the value is settled by spike S15 | always, once S15 settles |
+| `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT=markdown` | `AskUserQuestion` previews are off for SDK-shaped clients otherwise (*A-24*); the value is compared by equality against `markdown` and `html`, `markdown` needs no sanitiser and afleet's card renders markdown, and with it the recorded ask carries a `preview` on every option (S15, fixture `ask-user-question`) | always |
 | `CLAUDE_CODE_FORK_SUBAGENT=1` | fork subagents do not exist headless without it; **with it, every subagent is backgrounded and `run_in_background` leaves the schema** (*A-18* §18.20) | setting *Fork subagents (backgrounds all subagents, as in the terminal)*, default on |
 | `AUTOMODE_DECISION_LOG=1` | per-decision classifier log for the auto-mode explain view (*A-26*) | Developer setting, default off |
 
-Never set `CLAUDE_CODE_REMOTE` (it disables auto-memory and changes compaction) or
-`CLAUDE_CODE_CONTAINER_ID` (it auto-backgrounds every command) to obtain the frames they
-unlock; neither carries tool output anyway (*Parity F-23*).
+The child environment carries **no variable beginning with `CLAUDE`** from the resolved
+environment (§6.9); the table's own entries and, when an override is chosen,
+`CLAUDE_CONFIG_DIR` are added back on purpose. A prefix rule, not a list: every marker the
+CLI sets on its own children changes its behaviour somewhere — `CLAUDE_CODE_REMOTE`
+disables auto-memory and changes compaction, `CLAUDE_CODE_CONTAINER_ID` auto-backgrounds
+every command, `CLAUDE_CODE_CHILD_SESSION` turns transcript saving off in the interactive
+CLI and hid a spike observation for a whole run (spike-contention) — a list needs extending
+each time the CLI gains one, and the markers reach afleet through the process-environment
+fallback of §6.9 whenever afleet itself was launched from inside a Claude Code session.
+None of them carries tool output anyway (*Parity F-23*).
 
 - `--permission-prompt-tool stdio` is the correctness fix and is sufficient on its own:
   the literal `stdio` installs the control-protocol answerer (*SPEC 45.23.1*); without it
@@ -284,8 +291,10 @@ unlock; neither carries tool output anyway (*Parity F-23*).
 - `--session-mirror` (a hidden flag, present in 2.1.257's flag table, *SPEC 02* line
   704, and accepted by 2.1.259) makes the CLI emit `transcript_mirror {filePath, entries}`
   with the JSONL records it just wrote (*Parity F-20*). It feeds the record reducer live
-  (§7.3); the FSEvents transcript watcher is primary until S14 passes and stays as the
-  fallback afterwards, and the probe census asserts the flag is still accepted.
+  (§7.3); S14 passed (fixtures `session-mirror-relocation`, `session-mirror-resume`), so
+  the build flag that promotes the mirror to primary may be on, with the FSEvents watcher
+  as the fallback that is load-bearing at resume, and the probe census asserts the flag is
+  still accepted.
 - `--prompt-suggestions true` is passed only when the *Prompt suggestions* setting is on;
   it is off by default because it costs a model call per turn.
 - New channels mint their own UUID and pass `--session-id`; existing channels pass
@@ -391,14 +400,14 @@ that is not fast-capable promotes the session model to Opus, so the header re-re
 
 | Direction | Subtype | Behavior |
 |---|---|---|
-| inbound | `can_use_tool` | Decision item and card; answer `allow` with optional `updatedInput` and `updatedPermissions`, or `deny` with message; set `decisionClassification`. |
+| inbound | `can_use_tool` | Decision item and card; answer `allow` with optional `updatedInput` and `updatedPermissions`, or `deny` with message; set `decisionClassification`. `AskUserQuestion` arrives as a `can_use_tool` carrying `requires_user_interaction: true` and, unlike a `Write` ask, no `permission_suggestions` and no `description`; its answer is the whole input echoed back with an added `answers` map keyed by question text (fixture `ask-user-question`). |
 | inbound | `request_user_dialog` | Dialog card for the two declared kinds (§8.4); an undeclared kind is left unanswered by design (§6.3) and the binary cancels it at its dialog deadline. |
 | inbound | `elicitation` | Elicitation card; `accept` with content, `decline`, or `cancel`. |
 | inbound | `hook_callback` | `afleet.notification` posts the native notification from the hook input and answers an empty continue; `afleet.config-change` refreshes `get_settings` and answers likewise; any other id is answered with an empty continue and logged. Retired-generation callbacks are settled by the binary itself (*SPEC 45.18.3*). |
 | inbound | `mcp_message` | Route to the in-process MCP server (§6.8). |
 | outbound | `interrupt` | Esc while running; honor `still_queued`. |
-| outbound | `set_permission_mode`, `set_model`, `list_models`, `set_max_thinking_tokens`, `apply_flag_settings`, `rename_session`, `set_cwd`, `get_settings` | Command router targets (§7.7). |
-| outbound | `claude_authenticate`, `claude_oauth_callback`, `claude_oauth_wait_for_completion` | `/login`: open `automaticUrl`, or `manualUrl` plus the pasted code; the CLI runs the localhost listener itself (*Parity F-14*). |
+| outbound | `set_permission_mode`, `set_model`, `list_models`, `set_max_thinking_tokens`, `apply_flag_settings`, `rename_session`, `set_cwd`, `get_settings` | Command router targets (§7.7). `apply_flag_settings` answers success with **no `response` key**; the readback is `get_settings`, which answers `{applied: {model, effort, advisor, ultracode}, effective_keys, sources_keys: [{source, keys}]}` with the applied flag under `effective_keys` and `source: "flagSettings"` (fixture `control-shapes`, spike-agent-switch). `set_cwd` into a directory the config home has never trusted answers success with `{status: "needs_trust", directory}` and changes nothing; trust is granted only by repeating the call with `trust_accepted: true` **and** `trusted_directory` echoing that directory — `trust_accepted` alone is refused with an error — after which the answer is `{status: "ok", cwd, changed, transcript_relocated}` and `.claude.json` records the resolved path as trusted (fixtures `session-mirror-relocation`, `control-shapes`). |
+| outbound | `claude_authenticate`, `claude_oauth_callback`, `claude_oauth_wait_for_completion` | `/login`: open `automaticUrl`, or `manualUrl` plus the pasted code; the CLI runs the localhost listener itself (*Parity F-14*). `claude_authenticate` answers `{manualUrl, automaticUrl}`; an invalid code to `claude_oauth_callback` answers the error `Request failed with status code 400`; `claude_oauth_wait_for_completion` with no active flow answers at once with the error `No active claude_authenticate flow` rather than hanging (fixture `control-shapes`). |
 | outbound | `mcp_authenticate`, `mcp_oauth_callback_url`, `mcp_clear_auth` | MCP OAuth from the MCP popover (*Parity F-14*). |
 | outbound | `rewind_conversation`, `rewind_files` | Edit-and-resend; restore files, with `dry_run` first. |
 | outbound | `get_context_usage`, `get_session_cost`, `get_usage`, `get_binary_version` | Header meter, usage popover, version gate. |
@@ -419,6 +428,9 @@ forgotten is ordinary traffic to drop with a diagnostic, never drift (`cli.prett
 2.1.258, the stdin loop's `control_cancel_request` arm and the envelope's schema text;
 C1's control-shapes recording confirms it on 2.1.259).
 
+**Error envelope.** `{subtype: "error", request_id, error: <a bare string>}` with no
+`response` key, confirmed on the wire (fixture `control-shapes`).
+
 ### 6.5 Version gate
 
 At launch afleet runs `claude --version` and, on the first owned channel,
@@ -430,6 +442,9 @@ subtypes that are new or whose key sets changed relative to the fixtures, the ga
 the binary but shows a warning naming them, because those are the frames afleet must
 answer rather than merely display. The Settings screen shows the baseline, the installed
 version, the count of unknown frame types seen since install, and the last census result.
+A census pass across a version bump means "nothing we exercise moved", not "nothing
+moved": 2.1.259 and 2.1.260 are census-identical on every fixture while 2.1.260 adds a
+`CLAUDE_CODE_QUESTION_EXTENDED` clause the fixtures cannot see (C1/G2).
 
 ### 6.6 Sending input
 
@@ -486,7 +501,14 @@ display?: "render" | "attach")`, mirroring the built-in tool's shape so the mode
 prompt-trained behaviour transfers (*Parity* area 13), because the built-in `SendUserFile`
 is enabled only on remote and desktop surfaces (*SPEC 23.4.2*) and is absent headless. Its effect is a *sent file* timeline item with a
 preview and an *Open in Files* link. Later tools ride the same server with their own
-decision-log entries.
+decision-log entries. Two facts from the recording (fixture `send-user-file`): the
+`tools/call` params carry a `_meta` the host never declared, holding `claudecode/toolUseId`
+and a `progressToken`, so the server tolerates undeclared params rather than validating
+strictly against its own schema; and the tool is **deferred** — `system/init.tools` lists
+`mcp__afleet__send_user_file`, yet the model's first act is `ToolSearch {"query":
+"select:mcp__afleet__send_user_file"}`, whose `tool_result` is a `tool_reference` block, so
+listing is not immediate invocability and the first turn must not be read as "listed,
+therefore called".
 
 ### 6.9 Environment resolution
 
@@ -495,7 +517,15 @@ At launch, once, afleet runs the user's login shell non-interactively
 apply; a non-interactive `-l -c` fallback if the interactive shell hangs)
 and captures the environment. Every spawn (claude, git, gh, shells) inherits it, so
 PATH-dependent MCP servers, hooks and helpers behave exactly as in the terminal. Settings
-offers *Refresh environment* and shows the resolved PATH.
+offers *Refresh environment* and shows the resolved PATH. The capture keeps everything it
+finds, because ConfigHome below is derived from the captured `CLAUDE_CONFIG_DIR`; the
+CLAUDE-prefix scrub of §6.1 is applied where the child environment is composed (contract
+X11), not here. The shell capture starts from a base of only `TERM`, `HOME` and `PATH`, so
+a hosting Claude Code session's markers do not enter through it; they enter through the
+process-environment fallback, which returns afleet's own environment verbatim and is the
+arm active when the shell capture fails. C1's corpus was recorded with the driving agent's
+`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_CHILD_SESSION` present (§6.10), a
+fidelity caveat a differential test suspects before it suspects the engine.
 
 **ConfigHome** is derived from the same capture: `CLAUDE_CONFIG_DIR` when set, else
 `~/.claude`; `CLAUDE_CODE_PROJECT_DIR_NAME` is honored only together with it
@@ -656,9 +686,21 @@ Rules:
 7. **Foreign-session safety** (above) is unchanged: afleet never signals a holder it does
    not own.
 
-Spike S12 records what the interactive CLI itself does when it resumes a session that
-already has a registry holder; the `--bg --resume` help text says it "starts a copy and
-says so when the session is already running", which suggests the CLI detects the case.
+S12 settled what the CLI itself does (spike-contention): it does **not** refuse a second
+interactive holder. With a headless `--resume` live and registered, an interactive
+`claude --resume <id>` opened the same session, rendered its history, warned about nothing
+and registered a second record under the same `sessionId`; the reverse order behaves the
+same, and both records disappear when their processes exit, so the registry is a live
+holder set. `kind` does not separate the holders — both are `interactive` — and
+`entrypoint` does (`sdk-cli` against `cli`). Rules 3, 4 and 6 are therefore load-bearing,
+because nothing below afleet stops two writers appending to one transcript. `--bg
+--resume` against a live session exits 0, prints on stderr `note: session <short> is open
+in another Claude Code process, so this started a copy as <short>. The original
+conversation is unchanged.`, starts a **new** session id registered as `{kind: "bg",
+entrypoint: "cli"}`, and `claude agents --json` reports the same process as `kind:
+"background"`, so rule 3's two reads name one holder by two words and are reconciled by
+pid rather than unioned. The Contended banner never says the CLI refused anything; it says
+another process has the session open and afleet released it, with *Fork* offered.
 
 ### 7.3 Timeline and the differential invariant
 
@@ -703,16 +745,31 @@ feed one idempotent ingestion rather than two reducers:
   directory into the new project directory and answers `transcript_relocated`
   (*SPEC 45.22.6*, *Parity* 35.9). On `transcript_relocated: true` afleet re-resolves
   every path for the session, reopens the watchers, and carries each stream's byte offset
-  across.
+  across. The move is literal — the JSONL keeps its session-id file name under the new
+  slug and the mirror frames name the old path before the move and the new one after it,
+  so one session has two `filePath`s across its life — and the relocation emits a `result`
+  frame of its own, `subtype: "success"`, `num_turns: 0`, empty `result`, for a turn
+  nobody sent, which the turn logic must not attribute to a prompt (fixture
+  `session-mirror-relocation`).
 - A mirror entry is applied only to the stream its frame's `filePath` aliases: the main
   JSONL, a subagent JSONL, or the `agent_metadata` record the CLI mirrors into the
   transcript stream when it writes a `.meta.json` (*SPEC 18.25.2*), which the reducer
-  treats as its own record type rather than expecting it in a JSONL.
+  treats as its own record type rather than expecting it in a JSONL. Confirmed on the wire:
+  the entry arrives at the head of the agent stream's mirror and again on each
+  re-engagement, so `parentAgentId` is known before the sidecar file exists (fixture
+  `nested-depth-2`).
 - On open and on resume the file is read first; mirror entries apply past the file's byte
   offset at that read, because a resumed mirror carries only later appends, never
-  history.
-- The **file watcher is primary until S14 passes**, after which a build flag promotes the
-  mirror to primary with the watcher as fallback. In either configuration a
+  history. A resume appends exactly one record the mirror never carries, at the head of
+  the range — an `ai-title` on a session's first resume, an `atis-latch` on a later one —
+  so the mirror alone is one record short across a resume and the file read is what closes
+  the gap; the `mode` record a first resume writes is mirrored and is session state, not
+  history (fixtures `resume-no-replay`, `session-mirror-resume`).
+- S14 passed (fixtures `session-mirror-relocation`, `session-mirror-resume`): concatenated
+  across both paths in arrival order the mirrored entries reproduced the file's appended
+  records exactly, with no `mirror_error`. The build flag that promotes the **mirror to
+  primary** may therefore be on for live records, with the file watcher as the fallback
+  that is load-bearing at resume. In either configuration a
   `system/mirror_error`, or a record the watcher sees that no mirror frame delivered
   within a short window, switches that process to file-only for its lifetime and writes a
   drift-log entry.
@@ -764,7 +821,11 @@ uuids; `user` frames with `isSynthetic` (meta reminders such as "Available agent
 are hidden from the timeline and kept only in the raw view; `session_state_changed`
 drives presence; `result` advances the unread cursor when the channel is not in view; on
 process exit the record reducer re-reads each stream's file and reconciles by uuid within
-the stream.
+the stream. For agent streams the `.jsonl` and the mirror are two snapshots of one record:
+the record closing an assistant message reaches the file with `stop_reason: null` and a
+partial `usage` on some runs and finalised on others, and the file is never rewritten, so
+the two agree by record identity, may disagree by field, and the file is not assumed the
+more complete (fixture `nested-depth-2`).
 
 Three rules come from how the engine reports background work (*Parity F-3*, *F-4*,
 *A-20*). A **background-task registry mirror** is maintained from `task_started`,
@@ -843,17 +904,28 @@ A restart never re-passes `--agent` unless the user is changing agent. Whenever
 prompt as a user turn ahead of stdin, whether or not the agent is already the session's
 (`cli.pretty.js` 178963–178982; *SPEC 45.7.5* lists resumed-agent prompts as a prepend
 source too), so re-passing it would start a model turn behind the connecting glyph.
-Until S17 establishes whether `--resume` without `--agent` keeps the session's agent and
-whether any prepend still fires, a channel whose agent has a non-empty `initialPrompt` is
-not transparently restartable: the restart-required settings show a notice that the
-agent's opening prompt will replay, and the user confirms or cancels. If the channel is not dormant-eligible the change is queued and the
-composer shows "applies when the current work finishes". `/logout` (§7.7) applies the
+S17 settled it (spike-agent-switch): `--resume` without `--agent` keeps the session's
+agent and prepends nothing, so a channel whose agent has a non-empty `initialPrompt` **is**
+transparently restartable and no replay notice is needed; re-passing `--agent` is
+precisely what fires the prepend, which is why a restart never does unless the user is
+changing agent. The one gap: no readback exists for an agent the session carries rather
+than the flag settings (`system/init.agent` is absent even on a session launched with
+`--agent`), so a restart verifies the agent only by behaviour. If the channel is not
+dormant-eligible the change is queued and the composer shows "applies when the current
+work finishes". `/logout` (§7.7) applies the
 same dormant-eligibility rule before it terminates an owned channel.
 
 Compaction is the `/compact` text command and renders as a divider from
 `compact_boundary`. File rewind uses `rewind_files` with `dry_run: true` first and shows the
 counts before applying. Forking a channel spawns `--resume <id> --fork-session` as a new
-channel.
+channel. *Fork from here* on a message adds `--resume-session-at <uuid>` naming that
+message's record: the flag is **inclusive**, so the fork keeps the clicked message and
+drops everything after it, preserves the source's record uuids, so the clicked item maps
+onto its copy without re-keying, and leaves the source untouched, so it needs no
+destructive-action warning; `--resume-drops-turn <prompt uuid>` is the CLI's own guard,
+refusing a fork point whose discarded range holds anything not attributable to that turn,
+and *Fork from here* passes it. Both flags are hidden and refused without `--resume`
+(spike-resume-at).
 
 ### 7.5 Threads
 
@@ -897,11 +969,11 @@ Three classes, resolved in this order:
    |---|---|
    | `/model <name>` and the picker | `list_models`, `set_model` |
    | `/permissions <mode>`, the picker, Shift+Tab cycle | `set_permission_mode`. `/permissions` alone opens a **read-only** rules view from `get_settings`; there is no request that removes a rule, and rules are added only through `updatedPermissions` on an open `can_use_tool`, whose `destination` may be `userSettings`, `projectSettings` or `localSettings`, so *Always allow* offers that scope choice like the terminal (*A-24*) |
-   | `/effort <level>` | `apply_flag_settings {effortLevel}`; the request answers `null` for any key, so the readback is `get_settings.applied`; `max` cannot be set mid-session (*A-06*) |
+   | `/effort <level>` | `apply_flag_settings {effortLevel}`; the request answers success with no `response` key, so the readback is `get_settings.applied` and `effective_keys` (fixture `control-shapes`); `max` cannot be set mid-session (*A-06*) |
    | `/rename <title>` | `rename_session` |
    | `/add-dir <path>` | a quiescent restart with the new `--add-dir` list. There is no runtime equivalent: `add_directory` is a cloud-container staging call that reads `mount_path`, and `register_repo_root` only registers a clone under cwd or under a launch-time root (*Parity F-6*) |
-   | `/agent <name>` | a quiescent restart with `--agent`, the one restart that passes it; the agent's `initialPrompt`, if any, replays as a user turn by design of the transport (§7.4); `apply_flag_settings {agent}` is accepted silently and unverified until spike S17 shows it takes effect on the next turn |
-   | `/cd <path>` | `set_cwd`, honouring `needs_trust`; a `transcript_relocated: true` answer rebinds the transcript paths and watchers (§7.3) |
+   | `/agent <name>` | `apply_flag_settings {agent}`, which takes effect on the very next turn with no restart (spike-agent-switch), with the snapshot caveat of §7.4; the readback is `get_settings.effective_keys` carrying `agent` with `source: "flagSettings"` — `system/init.agent` is absent even on a session launched with `--agent` and is not a readback. `--agent` on a launch line is reserved for a new channel; re-passing it replays the agent's `initialPrompt` (§7.4) |
+   | `/cd <path>` | `set_cwd`; an untrusted directory answers `{status: "needs_trust", directory}` and changes nothing, so afleet shows its trust dialog and repeats the call with `trust_accepted: true` and `trusted_directory` echoing that directory, the only form the CLI accepts (fixtures `session-mirror-relocation`, `control-shapes`); a `transcript_relocated: true` answer rebinds the transcript paths and watchers (§7.3) |
    | `/fast` | `apply_flag_settings {fastMode: true}` as the opt-in, then the toggle (*Parity F-13*) |
    | `/config [key=value]` | pass-through text; it runs headless for about forty keys and is the only route to persisted settings other than `outputStyle`, the one key `update_settings` accepts (*Parity F-7*) |
    | `/login` | `claude_authenticate` returns `manualUrl` and `automaticUrl`; afleet opens the automatic URL in the Browser tab and the CLI's localhost listener completes it; the manual URL plus `claude_oauth_callback` is the fallback; `claude_oauth_wait_for_completion` returns the account |
@@ -939,8 +1011,8 @@ be changed after launch, but not all through the running process.
 
 | Class | Settings | Mechanism |
 |---|---|---|
-| Runtime-mutable | model; permission mode, within the modes the process was launched with; effort; session name; thinking tokens; fast mode after its opt-in; working directory via `set_cwd` | the control requests in the table above |
-| Restart-required | session id; `--fork-session`; `--worktree`; stream and output flags; `--allow-dangerously-skip-permissions`; `--setting-sources` (with the derived `--strict-mcp-config` of §6.12); `--prompt-suggestions`; `--enable-auth-status`; `--session-mirror`; `--add-dir`; `--agent`; the child environment variables of §6.1 | a quiescent restart (§7.4) under the same session id, except fork and worktree, which create a new channel |
+| Runtime-mutable | model; permission mode, within the modes the process was launched with; effort; agent (S17); session name; thinking tokens; fast mode after its opt-in; working directory via `set_cwd` | the control requests in the table above |
+| Restart-required | session id; `--fork-session`; `--worktree`; stream and output flags; `--allow-dangerously-skip-permissions`; `--setting-sources` (with the derived `--strict-mcp-config` of §6.12); `--prompt-suggestions`; `--enable-auth-status`; `--session-mirror`; `--add-dir`; the child environment variables of §6.1 | a quiescent restart (§7.4) under the same session id, except fork and worktree, which create a new channel |
 
 The claim is therefore "every launch setting is changeable", not "every launch flag is
 changeable at runtime". A restart carries the runtime-mutable values across by snapshot
@@ -1007,7 +1079,14 @@ material set; the sidebar uses native vibrancy; type is the system font.
 - **Background** lists jobs with *Adopt*, *Attach* and *Stop*; **Archived** at the bottom.
 - **Cmd+K** switcher over projects, channels and jobs with fuzzy matching.
 - **New channel** from a section header: project, cwd or new worktree, model, permission
-  mode, agent persona and name, then spawn.
+  mode, agent persona and name, then spawn. *New isolated session* is promoted (S10,
+  spike-worktree): the CLI creates the worktree itself from `-w <name>` on the launch line,
+  inside the repository under `.claude/worktrees/<name>` on branch `worktree-<name>`, so it
+  sits in the tree the user is looking at, and the transcript lands under the worktree's
+  own slug, which is what the worktree grouping above keys on. `git worktree list` reports
+  it locked with a reason naming the CLI's pid, and the lock outlives the session, so a
+  lock is not proof of a live holder and any affordance that removes a worktree unlocks
+  first.
 
 ### 8.3 Timeline rendering
 
@@ -1096,7 +1175,11 @@ unavailable and nothing restarts.
 
 `UNUserNotification` for decisions and completed turns in channels not in view, each
 toggleable, plus every notification the engine raises through the `Notification` hook
-(§6.2), which carries the terminal's own notification types and texts. Shortcuts: Cmd+K
+(§6.2), which carries the terminal's own notification types and texts; the engine raises
+the permission-ask notification about six seconds after an ask is left waiting, a
+threshold that is the binary's, and its input (`message`, `notification_type`,
+`session_id`, `cwd`, `transcript_path`) is display-ready, so the notification posts from
+the input alone (fixture `notification-hook`). Shortcuts: Cmd+K
 switcher, Esc interrupt, Cmd+Shift+Esc stop everything (confirm), Cmd+Enter send, Cmd+1…7
 panel tabs, Cmd+Shift+T new terminal tab, Shift+Tab cycle permission mode, Cmd+Shift+A
 Activity.
@@ -1113,16 +1196,22 @@ activity line. Elapsed is ticked locally from `task_started`, because `task_prog
 tool-paced and an agent thinking for forty seconds emits nothing; the activity line comes
 from `task_progress.description` and `last_tool_name`, replaced by the model-written
 summary that arrives about every thirty seconds when `agentProgressSummaries` is on.
-Nodes nest by depth. `task_started` carries `spawn_depth` but no parent id, so the parent
-link is rebuilt with a two-step join: a frame's `parent_tool_use_id` names the `tool_use`
-block that spawned it; the frame that carried that block has its own
-`parent_tool_use_id`, which is the grandparent. Depth-1 tool calls and results are always
-forwarded; text, thinking and depth 2 and deeper need `--forward-subagent-text`, which
-afleet passes. The run's sidecar `subagents/agent-<taskId>.meta.json` supplies
-`parentAgentId`, `color`, `model`, `permissionMode` and `worktreePath` once written;
-agent colour is also read from the agent's markdown frontmatter, since no frame carries
-it. Parking, an agent that finished but holds children, shows as completed children under
-a node with no `task_notification` yet. Background agents and parallel groups render the
+Nodes nest by depth. `task_started` carries `spawn_depth` but no parent id (fixture
+`nested-depth-2`). The parent link comes first from the `agent_metadata` entry the engine
+mirrors at the head of the agent stream (§7.3), which carries `parentAgentId` below depth
+1 before the sidecar file exists; the two-step join is the fallback for a host not reading
+the mirror: a frame's `parent_tool_use_id` names the `tool_use` block that spawned it; the
+frame that carried that block has its own `parent_tool_use_id`, which is the grandparent.
+The engine re-emits `task_started` for the **same** `task_id` when an auto-turn re-engages
+a backgrounded agent, so a repeat is the same node, not a new one. Depth-1 tool calls and
+results are always forwarded; text, thinking and depth 2 and deeper need
+`--forward-subagent-text`, which afleet passes and which the depth-2 recording confirms.
+The run's sidecar `subagents/agent-<taskId>.meta.json` holds only `agentType`,
+`description`, `toolUseId`, `spawnDepth` and, below depth 1, `parentAgentId` on 2.1.259 —
+no `color`, `model`, `permissionMode` or `worktreePath` — so the model badge comes from the
+run's own assistant frames and agent colour from the agent's markdown frontmatter, since
+no frame carries it. Parking, an agent that finished but holds children, shows as
+completed children under a node with no `task_notification` yet. Background agents and parallel groups render the
 same way, with the group's `message.id` as a heading.
 
 **Transcript.** Selecting a node shows that run's transcript: live from the forwarded
@@ -1563,20 +1652,31 @@ doperpowers:writing-plans turns them into tasks.
 - **S2 Resume behavior.** Resolved 2026-09-03 by probe 07: `--resume` plus `initialize`
   and six idle seconds produced zero `assistant` or `user` frames, so the record reducer
   is the sole history source. The `--bg --resume` and `claude stop` round trip remains
-  open and moves to S12.
+  open and moves to S12. Confirmed on 2.1.259 (fixture `resume-no-replay`): the whole
+  capture is the handshake, the in-process server's bring-up, one `auth_status`,
+  `end_session` and a single `transcript_mirror` carrying the one `mode` record a resume
+  appends.
 - **S3 Monaco in WKWebView.** Cold load, warm open of a 5 MB file, diff on a 2,000-line
   change. Promote under one second cold and no visible jank.
 - **S4 Transcript index.** Cold index of all local transcripts under 500 ms with the
   head-and-tail read; incremental update under 50 ms.
 - **S5 In-process MCP.** Register `afleet`, have Claude call `mcp__afleet__send_user_file`.
   Promote when the tool is listed in `system/init.tools` and the round trip completes.
+  Settled 2026-09-04 (fixtures `zero-cost`, `send-user-file`): the server registers under
+  `--strict-mcp-config`, its bring-up runs out of the handshake before any turn, and the
+  round trip completes, with the `_meta` and deferred-tool facts recorded in §6.8.
 - **S6 Dialog kinds.** v1 declares `refusal_fallback_prompt` and
   `fable_overage_consent_prompt` (§6.2, §8.4). Record fixtures for every result value of
   both kinds, for the close path (`{behavior: "cancelled"}`), for the tombstones that
   follow a refusal resolution, for `system/model_consent_fallback`, for the overage card
   with `overagesEnabled` true and false, and for an undeclared kind left unanswered until
   the binary's `control_cancel_request`; confirm both payload shapes on the 2.1.259
-  baseline.
+  baseline. Settled structurally 2026-09-04: both payload shapes, result enums and defaults
+  are confirmed at their own definition sites in the installed 2.1.259 binary
+  (`Tools/probe/spikes/extract_dialog_enums.py`), so the two synthetic fixtures leave
+  `hypothesis` while staying synthetic. Open until a live dialog is recorded: the decline
+  legs' `result` subtype, the two placeholder `content` strings, the park deadline, and
+  whether an undeclared kind reaches a host at all.
 - **S7 Native markdown.** Ten real assistant messages with tables, nested lists and fenced
   code through swift-markdown at thirty updates per second on a long message. Promote when
   fidelity matches the terminal renderer and frame time stays under 16 ms; otherwise the
@@ -1585,27 +1685,38 @@ doperpowers:writing-plans turns them into tasks.
   it back through `get_settings.applied`, `rewind_conversation`, `set_cwd` with a
   directory that needs trust, and the `claude_authenticate` family on 2.1.259; record
   request and response shapes into fixtures. `add_directory` is dropped: it is a
-  cloud-container request.
+  cloud-container request. Settled 2026-09-04 (fixture `control-shapes`): the shapes are
+  in §6.4, including the bare-string error envelope and the immediate `No active
+  claude_authenticate flow` answer.
 - **S9 Differential harness.** Record one real session as a golden fixture with its
   transcript snapshot; make the wire reducer and transcript reader agree; write down the
   wire-only exclusion list.
 - **S10 Worktree under print mode.** Launch with `-p -w probe-wt` and confirm a worktree is
   created, the session's cwd is inside it, and the transcript lands under the worktree's
   slug. Promote *New isolated session*; otherwise create the worktree with `git worktree
-  add` before spawning.
+  add` before spawning. Settled 2026-09-04 (spike-worktree): all three conditions hold in
+  one launch; promoted, with the in-repository location, the outliving lock and the slug
+  recorded in §8.2.
 - **S11 Resume-at inclusivity.** With a recorded session, run `--resume <id>
   --resume-session-at <uuid> --fork-session` and record whether the named entry is
   included, and whether the fork's transcript starts there. Decides how *Fork from here*
-  on a message is implemented.
+  on a message is implemented. Settled 2026-09-04 (spike-resume-at): inclusive, uuids
+  preserved, source untouched, `--resume-drops-turn` as the guard; §7.4 carries it.
 - **S12 Contention behavior of the CLI.** With a registry holder present for a session,
   run an interactive `claude --resume <id>` and a `claude --bg --resume <id>` and record
   whether each warns, refuses, or forks a copy. Decides the wording of the Contended
-  banner and whether afleet can rely on the CLI to refuse a second holder.
+  banner and whether afleet can rely on the CLI to refuse a second holder. Settled
+  2026-09-04 (spike-contention): the CLI refuses nothing, `--bg --resume` starts a copy
+  under a new id, and afleet cannot delegate the refusal; §7.2 carries the facts and the
+  banner wording.
 - **S13 Trust over the wire.** Run `set_cwd` with `trust_accepted: true` for an untrusted
   directory and check whether `projects[<root>].hasTrustDialogAccepted` becomes `true`
   in `<configHome>/.claude.json`. This covers only a directory change, never the startup
   cwd, so the terminal flow stays for new projects regardless; the spike decides whether
-  `/cd` into an untrusted directory can use a native dialog.
+  `/cd` into an untrusted directory can use a native dialog. Settled 2026-09-04 (fixtures
+  `session-mirror-relocation`, `control-shapes`): it can, through the two-step exchange of
+  §6.4 that echoes `trusted_directory`, after which `.claude.json` records the resolved
+  path as trusted.
 - **S14 Session mirror.** A new probe (the committed probe 10 only listens for
   `transcript_mirror` and never passes the flag) launches with `--session-mirror`, runs
   two turns, `set_cwd` to a trusted sibling directory, runs two more, resumes, and runs
@@ -1614,26 +1725,36 @@ doperpowers:writing-plans turns them into tasks.
   record and that mirror `filePath` values switch with it, records how `agent_metadata`
   entries arrive, and confirms no `system/mirror_error` and no network side effect. The file
   watcher stays primary until the probe passes; passing sets the build flag that promotes
-  the mirror (§7.3).
+  the mirror (§7.3). Passed 2026-09-04 (fixtures `session-mirror-relocation`,
+  `session-mirror-resume`), with the one qualification §7.3 records: a resume's first
+  appended record is never mirrored, so the watcher stays load-bearing at resume.
 - **S15 Question preview format.** Find the accepted values of
   `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` in the bundle and confirm one renders previews on
-  an `AskUserQuestion` card; the value goes into §6.1.
+  an `AskUserQuestion` card; the value goes into §6.1. Settled 2026-09-04: `markdown`, in
+  §6.1 (fixture `ask-user-question`).
 - **S16 Depth-2 capture.** Record a live run where a general-purpose agent spawns an
   Explore agent; confirm `task_started` with `spawn_depth: 2`, the inner
   `parent_tool_use_id`, and the child's `.meta.json`. The tree join in §8.8 is inferred
-  from code until this lands.
+  from code until this lands. Landed 2026-09-04 (fixture `nested-depth-2`): §8.8 now
+  carries the sidecar's actual fields, the mirrored `agent_metadata` link and the repeated
+  `task_started`.
 - **S17 Agent switch at runtime and agent persistence across restart.** Send
   `apply_flag_settings {agent}` and run a turn; check whether the system prompt changed.
   If it does, `/agent` becomes runtime-mutable with the snapshot caveat instead of a
   restart. Then, on a session started with `--agent` whose agent has an `initialPrompt`,
   `--resume` it without `--agent`: record whether the session keeps the agent (system
   prompt, `system/init.agent`) and whether any user turn is prepended. The answer settles
-  whether such channels are transparently restartable (§7.4).
+  whether such channels are transparently restartable (§7.4). Settled 2026-09-04
+  (spike-agent-switch), both halves positively; §7.4 and §7.7 are updated. Open: no
+  readback exists for an agent the session carries rather than the flag settings.
 - **S18 Notification hook round trip.** Register `Notification` through
   `initialize.hooks`, trigger a notification (a permission ask left waiting past the idle
   threshold), and assert that a `hook_callback` request arrives carrying the notification
   input and that the empty-continue answer is accepted with no error frame; record the
-  input shape as a fixture. Until it lands, acceptance item 53 is provisional.
+  input shape as a fixture. Landed 2026-09-04 (fixture `notification-hook`): the callback
+  fires about six seconds after an unanswered ask with a display-ready input, and the
+  empty-continue answer is accepted with no error frame; acceptance item 53 is no longer
+  provisional.
 
 ## 16. Natural seams for decomposition
 
@@ -3120,6 +3241,26 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   Impact: §6.4 states the rule; C1's verifier keeps host requests response-terminated and
   declares withdrawn requests in the manifest; C2's `cancel()` already limits itself to
   the abortable pair and must drop responses for forgotten ids without alarm.
+- Observation: A CLI spawned from inside a Claude Code session inherits that session's
+  markers, and one of them silently changes the CLI's behaviour.
+  Evidence: spike-contention. The interactive holder rendered the resumed history and never
+  registered, its status line reading `Transcript saving is off -- inherited
+  CLAUDE_CODE_CHILD_SESSION marker`; with every `CLAUDE*` variable dropped the same run
+  registered a second record under the same `sessionId`, the observation S12 rests on.
+  C1's harness dropped only three named variables, so every fixture in the corpus was
+  recorded with the driving agent's `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and
+  `CLAUDE_CODE_CHILD_SESSION` present; nothing in print mode is known to be wrong for it.
+  Impact: §6.1 replaces its three-name list with a CLAUDE-prefix rule applied where the
+  child environment is composed; §6.9 states the exposure path (the process-environment
+  fallback, not the shell capture) and the corpus caveat.
+- Observation: An in-process MCP tool listed in `system/init.tools` is not immediately
+  invocable.
+  Evidence: fixture `send-user-file`. The model's first act was `ToolSearch {"query":
+  "select:mcp__afleet__send_user_file"}`, answered with a `tool_reference` block, and only
+  then `tools/call`, whose params carried an undeclared `_meta` with `claudecode/toolUseId`
+  and a `progressToken`.
+  Impact: §6.8 records both; a host must tolerate the `_meta` and must not read the first
+  turn as "listed, therefore called".
 
 ## Outcomes & Retrospective
 
@@ -3238,3 +3379,22 @@ Pending — written at finish.
   fourth fixture, `rate-limited-turn`, captured from the rejection itself, which also exposed
   and fixed an identity-rule redaction of the `subagent_stats.killed.user` counter. §17.9
   updated for C1 and C2.
+- 2026-09-04: Reconciliation from C1's spike findings, filed as the fifteen `C1/…` notes
+  below at merge. Design sections updated: §6.1 (question preview value `markdown`, the
+  CLAUDE-prefix rule replacing the three-name list, S14 passed), §6.4 (AskUserQuestion's
+  ask and answer shape, `apply_flag_settings` readback, `set_cwd`'s two-step trust, the
+  login family's answers, the bare-string error envelope), §6.5 (what a census pass on a
+  version bump means), §6.8 (`_meta` tolerance and the deferred tool), §6.9 (capture keeps
+  everything; scrub at composition; the exposure path), §7.2 (S12: no refusal, entrypoint
+  separates holders, `--bg --resume` copies, banner wording), §7.3 (relocation moves the
+  file and emits a `result`; the unmirrored first record of a resume; mirror may be
+  primary; agent streams as two snapshots), §7.4 (S17 interim removed; *Fork from here*),
+  §7.7 (`/effort`, `/agent`, `/cd`; agent runtime-mutable), §8.2 (*New isolated session*
+  promoted), §8.7 (the six-second threshold), §8.8 (sidecar fields, mirrored link, repeated
+  `task_started`), §15 (S2, S5, S6, S8, S10–S18 settled with their fixtures or spikes; S6's
+  live-dialog residue and S17's session-agent readback stay open). Two Surprises entries.
+  Flags C2, in flight: tolerate `_meta` in WireMCP's `tools/call` params, apply the
+  CLAUDE-prefix scrub where `LaunchConfiguration` composes the child environment (X11)
+  rather than at the login-shell capture, and cross-check its S8 request and response
+  models against the `control-shapes` fixture at G2. Flags C3, C4 and C6 at their dispatch
+  for §7.2, §7.3, §7.4, §7.7, §8.2, §8.7 and §8.8.
