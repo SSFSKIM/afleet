@@ -2268,7 +2268,7 @@ notarized distribution, and any write under `<configHome>` (X9).
 
 | Child | Spec | Status |
 |---|---|---|
-| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md` on `child/c1-probes-fixtures`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks) | in-flight (wave 1); tooling complete 2026-09-04 (193 probe and 22 fake-claude tests, fixture gate green in a fresh export); 3 of 16 fixtures recorded, S5 and S6's extraction half settled; a fourth fixture (`rate-limited-turn`) recorded from the spent budget at no cost; the scratch config home was re-logged into an account with capacity on 2026-09-04 and the thirteen recordings, seven spikes and G1 are running |
+| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `2515b04` from `child/c1-probes-fixtures` `13226e6` (89 commits); G1–G4 green: 18 fixtures (16 recorded on the pinned 2.1.259 binary, 2 synthetic with shapes confirmed on the installed binary), 242 probe and 24 fake-claude tests on Python 3.9 and 3.14, drift ritual clean 2.1.259→2.1.260, one independent Codex leak-risk review closed; fifteen `C1/…` notes filed and reconciled |
 | C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md` on `child/c2-core-wire`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks) | in-flight (wave 1); Tasks 1–6 landed 2026-09-04 (ClaudeWire 65 tests, AfleetCore 6); G2 pending C1.G1; G3 split into its inference-free half (provable now) and the live round trip (runnable again since the re-login) |
 | C3 FleetKit timeline | — | blocked-by C2 |
 | C4 FleetKit sessions and fleet | — | blocked-by C2 |
@@ -3681,3 +3681,12 @@ Pending — written at finish.
   and hostname rule applies at publication, not at capture. Raised by C2's Task 8, which
   now mirrors C1's rule set with a differential test against `redact.py` over C1's vectors
   and C2's sample corpus. Flags C2 (in flight) and whichever child later exports captures.
+- 2026-09-05: C1 merged to `main` at `2515b04` after its four gates passed first-hand and
+  a Codex leak-risk review of the branch was closed by one fix wave (secret-named
+  containers, symlink-safe redaction, signatures bound to a tree digest and the exact
+  checklist version, evidence-based `unwritten` marking, hard-link-safe materialisation,
+  process-group teardown, mirror-declaration shape on re-record; `record` can no longer
+  sign). `Tools/probe`, `Tools/fake-claude`, `Fixtures/` and the `Makefile` now live on
+  `main`; the child branch's early fixture commits carry the recording machine's account
+  name in two `ls -l` owner columns, redacted before merge and never pushed before it.
+  §17.9 updated. C2.G2 can now run against the complete corpus.
