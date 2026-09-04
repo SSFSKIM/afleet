@@ -1,0 +1,53 @@
+{
+ "census": false,
+ "cli_version": "2.1.257-bundle",
+ "cwd": "/private/tmp/afleet-fixtures/synthetic",
+ "deterministic": false,
+ "exit_code": null,
+ "hypothesis": false,
+ "isolation": "none",
+ "late_responses": [],
+ "launch": {
+  "argv": [],
+  "env": {}
+ },
+ "name": "dialog-refusal-fallback",
+ "notes": [
+  "hand-written from the 2.1.257 bundle modules; the payload shapes, result enums and frame subtypes were then confirmed at their own definition sites in the installed 2.1.259 binary (S6)",
+  "no process ran, so launch is empty and exit_code is null",
+  "message uuids are readable synthetic ids, not RFC 4122 uuids; the bundle types these fields as uuids",
+  "timestamps are synthetic deltas chosen so a replay is quick, not measured intervals",
+  "transcript/ holds the session's user and assistant messages as delivered; whether the CLI removes a tombstoned or superseded message from its own history file is unknown and unmodelled",
+  "the decline legs carry no wire retraction signal by design: tombstone is an internal event the stream-json emitter filters out, so evicting retractedMessageUuids on resolution is the host's only mechanism",
+  "both content strings are partly [placeholder: ...]; the CLI assembles them from parts this fixture cannot resolve, and invented copy would be worse than a marked gap",
+  "the result subtype on the decline legs is this fixture's assumption, not a bundle reading",
+  "the 1.5s gap before the CLI retires the undeclared-kind dialog stands in for the dialog park deadline, which the parent's investigation records as five minutes by default",
+  "whether an undeclared kind reaches the host at all is open; undeclared_probe_kind is a synthetic placeholder no binary contains",
+  "system/model_refusal_no_fallback is deliberately absent: its schema says it is not emitted when the user declined the retry dialog"
+ ],
+ "prompts": [
+  "prompt 0",
+  "prompt 1",
+  "prompt 2",
+  "prompt 3",
+  "prompt that triggers an undeclared kind"
+ ],
+ "purpose": "every refusal_fallback_prompt result, the close path, supersedes on the retry leg and no wire retraction on the declines, an undeclared kind cancelled by the CLI",
+ "recorded_at": "2026-09-04T00:00:00Z",
+ "review": {
+  "checklist_version": 3,
+  "date": "2026-09-05",
+  "reviewer": "Claude reviewer for kimmi",
+  "tree_sha256": "d79529c1fde615f9fef64cabba595892353cf8f4fef94bb6027f5a4126c1ae99"
+ },
+ "scenario": null,
+ "serves": [
+  "item 62"
+ ],
+ "session_id": "44444444-4444-4444-8444-444444444444",
+ "spikes": [
+  "S6"
+ ],
+ "synthetic": true,
+ "withdrawn_requests": []
+}

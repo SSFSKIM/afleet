@@ -1,0 +1,78 @@
+{
+ "census": true,
+ "cli_version": "2.1.259",
+ "cwd": "/tmp/afleet-fixtures/notification-hook",
+ "deterministic": false,
+ "exit_code": 0,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "~/.local/share/claude/versions/2.1.259",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--session-id",
+   "c16c57e7-5cc9-4d8f-98bc-d632e92b09c3",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "default",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "3"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
+  }
+ },
+ "mirror_identity_only": [],
+ "name": "notification-hook",
+ "notes": [
+  "hook_callback seen: True; callback_id: afleet.notification; input keys: ['cwd', 'hook_event_name', 'message', 'notification_type', 'prompt_id', 'session_id', 'transcript_path']; result: success",
+  "hook_callback ids: ['afleet.notification']; the ask waited 6.1s of the 75s budget",
+  "notification input: {'session_id': 'c16c57e7-5cc9-4d8f-98bc-d632e92b09c3', 'transcript_path': '/tmp/afleet-fixtures/config-home/projects/-private-tmp-afleet-fixtures-notification-hook/c16c57e7-5cc9-4d8f-98bc-d632e92b09c3.jsonl', 'cwd': '/private/tmp/afleet-fixtures/notification-hook', 'prompt_id': 'be2e27c3-6cec-4524-a"
+ ],
+ "prompts": [
+  "Use the Write tool to create a file named waiting.txt containing the text: wait. Then reply with the single word: done"
+ ],
+ "purpose": "a permission ask left waiting past the idle threshold; the hook_callback for afleet.notification and its input shape",
+ "recorded_at": "2026-09-04T11:57:30Z",
+ "review": {
+  "checklist_version": 3,
+  "date": "2026-09-05",
+  "reviewer": "Claude reviewer for kimmi",
+  "tree_sha256": "d6ab44370102ba69b3b3cf1a29dc206fddae673e0e6cf3067bf9e62c3ba5cc67"
+ },
+ "scenario": "notification_hook",
+ "serves": [
+  "item 53"
+ ],
+ "session_id": "c16c57e7-5cc9-4d8f-98bc-d632e92b09c3",
+ "spikes": [
+  "S18"
+ ],
+ "synthetic": false,
+ "unmirrored_prefix": 0,
+ "withdrawn_requests": []
+}

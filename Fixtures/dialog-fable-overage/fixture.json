@@ -1,0 +1,47 @@
+{
+ "census": false,
+ "cli_version": "2.1.257-bundle",
+ "cwd": "/private/tmp/afleet-fixtures/synthetic",
+ "deterministic": false,
+ "exit_code": null,
+ "hypothesis": false,
+ "isolation": "none",
+ "late_responses": [],
+ "launch": {
+  "argv": [],
+  "env": {}
+ },
+ "name": "dialog-fable-overage",
+ "notes": [
+  "hand-written from the 2.1.257 bundle modules; the payload shapes, result enums and frame subtypes were then confirmed at their own definition sites in the installed 2.1.259 binary (S6)",
+  "no process ran, so launch is empty and exit_code is null",
+  "message uuids are readable synthetic ids, not RFC 4122 uuids; the bundle types these fields as uuids",
+  "timestamps are synthetic deltas chosen so a replay is quick, not measured intervals",
+  "transcript/ holds the session's user and assistant messages as delivered; whether the CLI removes a tombstoned or superseded message from its own history file is unknown and unmodelled"
+ ],
+ "prompts": [
+  "prompt 0",
+  "prompt 1",
+  "prompt 2",
+  "prompt 3",
+  "prompt 4"
+ ],
+ "purpose": "every fable_overage_consent_prompt outcome, overagesEnabled both ways, model_consent_fallback",
+ "recorded_at": "2026-09-04T00:00:00Z",
+ "review": {
+  "checklist_version": 3,
+  "date": "2026-09-05",
+  "reviewer": "Claude reviewer for kimmi",
+  "tree_sha256": "3cde6ff98d06c7bbc9efaaa8c58538c3206e171b68f49895a0f44d38dc591fbe"
+ },
+ "scenario": null,
+ "serves": [
+  "item 62"
+ ],
+ "session_id": "55555555-5555-4555-8555-555555555555",
+ "spikes": [
+  "S6"
+ ],
+ "synthetic": true,
+ "withdrawn_requests": []
+}

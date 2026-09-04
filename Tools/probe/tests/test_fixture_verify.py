@@ -1,0 +1,1023 @@
+"""Fixture layout and verifier tests (contract X8: spec §4.4, and §4.2's `verify` paragraph)."""
+import json
+import os
+import re
+import tempfile
+import unittest
+import _paths  # noqa: F401
+import census
+import fixture
+import redact
+import verify
+
+SID = "22222222-2222-4222-8222-222222222222"
+HELP = "  --foo  x\n"
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(text)
+
+
+def write_bytes(path, raw):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(raw)
+
+
+def read(path):
+    with open(path) as fh:
+        return fh.read()
+
+
+def read_json(path):
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def fake_config_home(root, cwd="/private/tmp/afleet-fixtures/demo"):
+    slug = fixture.slug_of(cwd)
+    base = os.path.join(root, "projects", slug)
+    write(os.path.join(base, SID + ".jsonl"), json.dumps({"type": "user", "uuid": "u1", "cwd": cwd, "message": {"role": "user", "content": "hi a@b.c"}}) + "\n")
+    write(os.path.join(base, SID, "subagents", "agent-x.jsonl"), json.dumps({"type": "assistant", "uuid": "a1"}) + "\n")
+    write(os.path.join(base, SID, "subagents", "agent-x.meta.json"), json.dumps({"agentType": "Explore"}))
+    return slug
+
+
+def build_fixture(root, name="demo", **overrides):
+    """A tiny valid fixture: one host request answered, one CLI request answered, one cancelled."""
+    frames = [
+        {"t": 0, "dir": "in", "frame": {"type": "control_request", "request_id": "init-1", "request": {"subtype": "initialize"}}},
+        {"t": 5, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "init-1", "response": {"commands": []}}}},
+        {"t": 10, "dir": "in", "frame": {"type": "user", "uuid": "u1", "message": {"role": "user", "content": "hi"}}},
+        {"t": 20, "dir": "out", "frame": {"type": "system", "subtype": "init", "capabilities": ["x"], "session_id": SID}},
+        {"t": 30, "dir": "out", "frame": {"type": "control_request", "request_id": "c1", "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": {}}}},
+        {"t": 40, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}}},
+        {"t": 50, "dir": "out", "frame": {"type": "control_request", "request_id": "d1", "request": {"subtype": "request_user_dialog", "dialog_kind": "zzz"}}},
+        {"t": 60, "dir": "out", "frame": {"type": "control_cancel_request", "request_id": "d1"}},
+        {"t": 70, "dir": "out", "frame": {"type": "transcript_mirror", "filePath": "~/.claude/projects/_slug_/%s.jsonl" % SID, "entries": [{"type": "assistant", "uuid": "a2"}]}},
+        {"t": 80, "dir": "out", "frame": {"type": "system", "subtype": "task_notification", "output_file": "<artifacts>/_slug_/%s/tasks/t1.output" % SID}},
+        {"t": 90, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}},
+    ]
+    c = census.census([f["frame"] for f in frames], help_text=HELP, version="2.1.259")
+    meta = {"name": name, "purpose": "test", "recorded_at": "2026-09-04T00:00:00Z", "cli_version": "2.1.259",
+            "launch": {"argv": ["claude", "-p"], "env": {"CLAUDE_CODE_FORK_SUBAGENT": "1"}}, "prompts": ["hi"], "serves": ["item 1"],
+            "census": True, "deterministic": True, "synthetic": False, "hypothesis": False, "late_responses": [],
+            "withdrawn_requests": [],
+            "review": {"reviewer": "kimmi", "date": "2026-09-04", "checklist_version": 1}}
+    meta.update(overrides)
+    d = os.path.join(root, name)
+    os.makedirs(os.path.join(d, "initial"), exist_ok=True)
+    os.makedirs(os.path.join(d, "transcript", "_slug_"), exist_ok=True)
+    os.makedirs(os.path.join(d, "artifacts", "_slug_", SID, "tasks"), exist_ok=True)
+    write(os.path.join(d, "fixture.json"), json.dumps(meta, indent=1))
+    with open(os.path.join(d, "frames.ndjson"), "w") as fh:
+        for f in frames:
+            fh.write(json.dumps(f) + "\n")
+    write(os.path.join(d, "census.json"), json.dumps(c))
+    write(os.path.join(d, "redaction.json"), json.dumps({"rules": {}}))
+    write(os.path.join(d, "streams.json"), json.dumps({"_slug_/%s.jsonl" % SID: 0}))
+    write(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), json.dumps({"type": "assistant", "uuid": "a2"}) + "\n")
+    write(os.path.join(d, "artifacts", "_slug_", SID, "tasks", "t1.output"), "bg-done\n")
+    return d
+
+
+def restamp(path):
+    """Bring a hand-built fixture's review block up to date with the bytes it now covers.
+
+    `build_fixture` writes the files itself and most tests then mutate the result in place to
+    isolate one check, so for them the review block is scaffolding rather than the subject:
+    without this every such test would report the digest mismatch instead of the thing it
+    names. The signature binding has tests of its own, which call `verify` directly and so are
+    not re-stamped -- see `VerifyTests.raw_errors`.
+    """
+    p = os.path.join(path, "fixture.json")
+    with open(p, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    review = meta.get("review") or {}
+    if not review.get("reviewer"):
+        return                                  # deliberately unsigned; leave it that way
+    meta["review"] = dict(review, checklist_version=verify.CHECKLIST_VERSION,
+                          **{verify.DIGEST_KEY: verify.tree_digest(path)})
+    write(p, json.dumps(meta, indent=1))
+
+
+def mark_unwritten(path, request_id):
+    """Annotate the capture record for `request_id` as one the harness recorded and never wrote."""
+    frames = fixture.load(path)["frames"]
+    for rec in frames:
+        if (rec.get("frame") or {}).get("request_id") == request_id:
+            rec["unwritten"] = True
+    with open(os.path.join(path, "frames.ndjson"), "w") as fh:
+        for rec in frames:
+            fh.write(json.dumps(rec) + "\n")
+
+
+def append_frame(path, rec):
+    """Append one record to frames.ndjson and re-derive census.json from the result.
+
+    `census.json` is a fingerprint of `frames.ndjson`, so a test that appends a frame and
+    leaves the census behind is testing the census check, not the check it named. Only
+    the tests that isolate census drift edit `census.json` by hand.
+    """
+    with open(os.path.join(path, "frames.ndjson"), "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
+    frames = fixture.load(path)["frames"]
+    c = census.census([r["frame"] for r in frames if "frame" in r], help_text=HELP, version="2.1.259")
+    write(os.path.join(path, "census.json"), json.dumps(c))
+
+
+def accumulate(path, earlier_extra=(), previous=None):
+    """Rewrite census.json as `record` does on a re-recording: the stored census merged with
+    the new run's.
+
+    `earlier_extra` are frames the *earlier* run had and this one does not, which is how an
+    accumulated census comes to name a pair `frames.ndjson` no longer holds. Pass `previous`
+    instead when the earlier census is already in hand.
+    """
+    frames = [r["frame"] for r in fixture.load(path)["frames"] if "frame" in r]
+    latest = census.census(frames, help_text=HELP, version="2.1.259")
+    if previous is None:
+        previous = census.census(frames + list(earlier_extra), help_text=HELP, version="2.1.259")
+    write(os.path.join(path, "census.json"), json.dumps(census.merge_required(previous, latest)))
+
+
+def rewrite_frames(path, mutate):
+    """Apply `mutate` to every frame in frames.ndjson and write it back.
+
+    For edits that change a frame's values but not its key sets, which leaves census.json
+    describing the result as faithfully as it described the original.
+    """
+    frames = fixture.load(path)["frames"]
+    for rec in frames:
+        if "frame" in rec:
+            mutate(rec["frame"])
+    with open(os.path.join(path, "frames.ndjson"), "w") as fh:
+        for rec in frames:
+            fh.write(json.dumps(rec) + "\n")
+
+
+class SlugAndSnapshotTests(unittest.TestCase):
+    def test_slug_of_replaces_every_non_alphanumeric(self):
+        self.assertEqual(fixture.slug_of("/Users/new/Developer/GitHub/afleet"), "-Users-new-Developer-GitHub-afleet")
+        self.assertEqual(fixture.slug_of("/private/tmp/afleet-fixtures/x.y"), "-private-tmp-afleet-fixtures-x-y")
+
+    def test_find_and_snapshot_redacts_and_rewrites_the_slug(self):
+        home = tempfile.mkdtemp(); dest = tempfile.mkdtemp()
+        slug = fake_config_home(home)
+        self.assertEqual(fixture.find_session(home, SID)[0], slug)
+        sizes = fixture.snapshot(home, SID, dest, redact.Redactor(home="/Users/probe", hostname="probe-mac"))
+        self.assertEqual(sorted(sizes), ["_slug_/%s.jsonl" % SID, "_slug_/%s/subagents/agent-x.jsonl" % SID, "_slug_/%s/subagents/agent-x.meta.json" % SID])
+        text = read(os.path.join(dest, "_slug_", SID + ".jsonl"))
+        self.assertIn("<email>", text); self.assertNotIn("a@b.c", text)
+        # the source tree is untouched
+        self.assertIn("a@b.c", read(os.path.join(home, "projects", slug, SID + ".jsonl")))
+        self.assertEqual(fixture.stream_sizes(dest)["_slug_/%s.jsonl" % SID], sizes["_slug_/%s.jsonl" % SID])
+
+    def test_snapshot_stubs_a_file_it_cannot_decode(self):
+        """No unredacted byte reaches disk: a file the rules cannot read is not copied through."""
+        home = tempfile.mkdtemp(); dest = tempfile.mkdtemp()
+        slug = fake_config_home(home)
+        write_bytes(os.path.join(home, "projects", slug, SID, "blob.bin"), b"\xff\xfe\x00 a@b.c")
+        fixture.snapshot(home, SID, dest, redact.Redactor(home="/Users/probe", hostname="probe-mac"))
+        stub = read_json(os.path.join(dest, "_slug_", SID, "blob.bin"))
+        self.assertEqual(stub["omitted"], "undecodable file")
+
+    def test_collect_artifacts_and_tokenise(self):
+        art_src = tempfile.mkdtemp(); dest = tempfile.mkdtemp()
+        out = os.path.join(art_src, "claude-501", "-slug", SID, "tasks", "t9.output")
+        write(out, "hello\n")
+        binary = os.path.join(art_src, "claude-501", "-slug", SID, "tasks", "t10.output")
+        write_bytes(binary, b"\xff\xfe\x00 not utf-8")
+        write(out, "hello leak@example.com\n")
+        frames = [{"type": "system", "subtype": "task_notification", "output_file": out}, {"type": "system", "subtype": "task_notification", "output_file": binary}]
+        r = redact.Redactor(home="/Users/probe", hostname="probe-mac")
+        mapping = fixture.collect_artifacts(frames, [], dest, r, task_root=os.path.join(art_src, "claude-501"))
+        self.assertEqual(mapping[out], "<artifacts>/-slug/%s/tasks/t9.output" % SID)
+        self.assertEqual(read(os.path.join(dest, "-slug", SID, "tasks", "t9.output")), "hello <email>\n")
+        self.assertEqual(read_json(os.path.join(dest, "-slug", SID, "tasks", "t10.output"))["omitted"], "binary artifact")
+        self.assertEqual(fixture.tokenise(frames, mapping)[0]["output_file"], "<artifacts>/-slug/%s/tasks/t9.output" % SID)
+
+
+class RedactTreeTests(unittest.TestCase):
+    def test_redact_tree_refuses_a_symlink_rather_than_writing_through_it(self):
+        """`_redact_file` reads and truncates with an ordinary `open()`, so a link inside a
+        fixture made `make redact` rewrite whatever it pointed at -- a repository file or a
+        real Claude configuration file reachable by a relative link."""
+        root = tempfile.mkdtemp()
+        outside = os.path.join(root, "outside.jsonl")
+        write(outside, json.dumps({"type": "user", "note": "reach me at someone@example.invalid"}) + "\n")
+        before = read(outside)
+        tree = os.path.join(root, "tree", "transcript")
+        write(os.path.join(tree, "real.jsonl"), json.dumps({"type": "user"}) + "\n")
+        os.symlink(outside, os.path.join(tree, "linked.jsonl"))
+        with self.assertRaises(ValueError) as caught:
+            fixture.redact_tree(os.path.join(root, "tree"), redact.Redactor(home="/Users/probe", hostname="probe-mac"))
+        self.assertIn("linked.jsonl", str(caught.exception))
+        self.assertEqual(read(outside), before, "redact_tree wrote through the link")
+
+    def test_redact_tree_refuses_a_linked_directory_before_it_walks_into_it(self):
+        root = tempfile.mkdtemp()
+        write(os.path.join(root, "elsewhere", "x.jsonl"), "{}\n")
+        tree = os.path.join(root, "tree")
+        os.makedirs(os.path.join(tree, "transcript"))
+        os.symlink(os.path.join(root, "elsewhere"), os.path.join(tree, "transcript", "linked_dir"))
+        with self.assertRaises(ValueError):
+            fixture.redact_tree(tree, redact.Redactor(home="/Users/probe", hostname="probe-mac"))
+
+
+class WriteAndLoadTests(unittest.TestCase):
+    def test_a_fixture_the_validator_refuses_never_replaces_the_one_in_place(self):
+        """`record` removed the previous fixture and verified afterwards, so a recorder defect
+        destroyed a valid recording that costs real tokens to make again."""
+        root = tempfile.mkdtemp(); src = build_fixture(tempfile.mkdtemp())
+        loaded = fixture.load(src)
+        args = (loaded["meta"], loaded["frames"], loaded["census"], {"rules": {}},
+                os.path.join(src, "initial"), os.path.join(src, "transcript"), os.path.join(src, "artifacts"))
+        path = fixture.write_fixture(root, "keepme", *args)
+        write(os.path.join(path, "README.md"), "the recording worth keeping\n")
+        seen = {}
+        def refuse(staged):
+            seen["name"] = read_json(os.path.join(staged, "fixture.json"))["name"]
+            raise RuntimeError("no")
+        with self.assertRaises(RuntimeError):
+            fixture.write_fixture(root, "keepme", *args, validate=refuse)
+        self.assertEqual(seen["name"], "keepme", "the validator saw a directory named for the fixture")
+        self.assertEqual(read(os.path.join(path, "README.md")), "the recording worth keeping\n")
+        self.assertEqual(sorted(os.listdir(root)), ["keepme"])   # and no staging directory left behind
+
+    def test_write_is_atomic_and_load_round_trips(self):
+        root = tempfile.mkdtemp(); src = build_fixture(tempfile.mkdtemp())
+        loaded = fixture.load(src)
+        path = fixture.write_fixture(root, "copy", loaded["meta"], loaded["frames"], loaded["census"], {"rules": {}},
+                                     os.path.join(src, "initial"), os.path.join(src, "transcript"), os.path.join(src, "artifacts"))
+        self.assertEqual(path, os.path.join(root, "copy"))
+        self.assertEqual(sorted(os.listdir(root)), ["copy"])  # no temp dir left behind
+        again = fixture.load(path)
+        self.assertEqual(again["frames"], loaded["frames"]); self.assertEqual(again["meta"]["name"], "copy")
+
+    def test_an_empty_stream_directory_still_carries_a_file_git_can_track(self):
+        """A scenario that resumes nothing and starts no turn writes no `initial/` and no
+        `transcript/`. Git tracks no empty directory, so without a placeholder the fixture
+        passes the gate on the recording machine -- where `record` had just made the
+        directories -- and fails `missing initial/` on every clone."""
+        root, empty = tempfile.mkdtemp(), tempfile.mkdtemp()
+        src = build_fixture(tempfile.mkdtemp())
+        loaded = fixture.load(src)
+        path = fixture.write_fixture(root, "bare", loaded["meta"], loaded["frames"], loaded["census"], {"rules": {}},
+                                     empty, empty, empty)
+        for sub in ("initial", "transcript", "artifacts"):
+            self.assertEqual(os.listdir(os.path.join(path, sub)), [fixture.PLACEHOLDER], sub)
+        # The placeholder is not a stream: `streams.json` and every caller that asks whether
+        # the fixture has a transcript at all read it out of `stream_sizes`.
+        self.assertEqual(read_json(os.path.join(path, "streams.json")), {})
+        self.assertEqual(fixture.stream_sizes(os.path.join(path, "initial")), {})
+
+    def test_a_re_recording_carries_the_hand_written_readme_across(self):
+        """`record` replaces the fixture directory whole, which destroyed the README every
+        time a fixture was re-recorded. Carrying it is safe because the re-recorded review
+        block is unsigned, so the checklist -- which requires reading the README against the
+        recording -- has to be walked again before the fixture can be committed."""
+        root = tempfile.mkdtemp(); src = build_fixture(tempfile.mkdtemp())
+        loaded = fixture.load(src)
+        args = (loaded["meta"], loaded["frames"], loaded["census"], {"rules": {}},
+                os.path.join(src, "initial"), os.path.join(src, "transcript"), os.path.join(src, "artifacts"))
+        path = fixture.write_fixture(root, "again", *args)
+        self.assertFalse(os.path.isfile(os.path.join(path, fixture.DOC_FILE)))   # record writes none
+        write(os.path.join(path, fixture.DOC_FILE), "# again\nwhat this shows\n")
+        path = fixture.write_fixture(root, "again", *args)
+        self.assertEqual(read(os.path.join(path, fixture.DOC_FILE)), "# again\nwhat this shows\n")
+
+    def test_a_populated_stream_directory_gets_no_placeholder(self):
+        root = tempfile.mkdtemp(); src = build_fixture(tempfile.mkdtemp())
+        loaded = fixture.load(src)
+        path = fixture.write_fixture(root, "full", loaded["meta"], loaded["frames"], loaded["census"], {"rules": {}},
+                                     os.path.join(src, "initial"), os.path.join(src, "transcript"), os.path.join(src, "artifacts"))
+        self.assertNotIn(fixture.PLACEHOLDER, os.listdir(os.path.join(path, "transcript")))
+
+
+class VerifyTests(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="afleet-fx-")
+
+    def errors(self, path):
+        restamp(path)
+        return self.raw_errors(path)
+
+    def raw_errors(self, path):
+        """`verify` on the fixture exactly as it stands, signature included. What the tests
+        about the signature itself use."""
+        e, w = verify.verify_fixture(path, home="/Users/probe", author="Probe Person")
+        return e
+
+    def test_valid_fixture_passes(self):
+        self.assertEqual(self.errors(build_fixture(self.root)), [])
+
+    def test_a_symlink_anywhere_in_the_tree_fails_the_gate(self):
+        """A tracked link makes every tool that walks the fixture read -- and `redact` write --
+        whatever it points at, and makes the reviewer sign for bytes that are not in front of
+        them. The link is refused wherever it sits and whatever it points at."""
+        import probe
+        for where, target in (("transcript/_slug_/linked.jsonl", os.path.join(self.root, "outside.jsonl")),
+                              ("artifacts/linked.output", "../../../../etc/hosts"),
+                              ("initial/linked_dir", "..")):
+            write(os.path.join(self.root, "outside.jsonl"), "{}\n")
+            d = build_fixture(self.root, name="link-" + where.split("/")[0])
+            probe.sign(d, reviewer="Reviewer")
+            os.symlink(target, os.path.join(d, where))
+            e = self.raw_errors(d)
+            self.assertTrue(any("symlink" in x for x in e), (where, e))
+            self.assertTrue(any(os.path.basename(where) in x for x in e), (where, e))
+
+    def test_a_signature_does_not_survive_an_edit_to_the_bytes_it_covers(self):
+        """The review block used to attest three truthy strings and nothing else, so any frame,
+        record, artifact or census could be edited after signing while the block went on
+        passing. It now carries a digest of the tree and `verify` recomputes it."""
+        import probe
+        d = build_fixture(self.root, name="signed")
+        probe.sign(d, reviewer="Reviewer")
+        self.assertEqual(self.raw_errors(d), [])
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "uuid": "a9"}) + "\n")
+        self.assertTrue(any(verify.DIGEST_KEY in x for x in self.raw_errors(d)), self.raw_errors(d))
+        # Every file counts, README and placeholder included -- the checklist has the reviewer
+        # read both -- and so does a rename that leaves the bytes alone.
+        d2 = build_fixture(self.root, name="signed2")
+        probe.sign(d2, reviewer="Reviewer")
+        write(os.path.join(d2, "README.md"), "# signed2\n")
+        self.assertTrue(any(verify.DIGEST_KEY in x for x in self.raw_errors(d2)))
+        d3 = build_fixture(self.root, name="signed3")
+        probe.sign(d3, reviewer="Reviewer")
+        art = os.path.join(d3, "artifacts", "_slug_", SID, "tasks")
+        write(os.path.join(art, "t1.output"), "x")
+        probe.sign(d3, reviewer="Reviewer")
+        os.rename(os.path.join(art, "t1.output"), os.path.join(art, "t2.output"))
+        self.assertTrue(any(verify.DIGEST_KEY in x for x in self.raw_errors(d3)))
+
+    def test_a_signature_at_an_older_checklist_version_is_refused(self):
+        """The field says which list the reviewer walked. Accepting anything truthy asked no
+        question at all."""
+        import probe
+        d = build_fixture(self.root, name="oldversion")
+        probe.sign(d, reviewer="Reviewer")
+        p = os.path.join(d, "fixture.json")
+        meta = read_json(p)
+        meta["review"]["checklist_version"] = verify.CHECKLIST_VERSION - 1
+        write(p, json.dumps(meta, indent=1))
+        e = self.raw_errors(d)
+        self.assertTrue(any("checklist version" in x for x in e), e)
+
+    def test_a_committed_fixture_keeps_the_env_table_it_was_recorded_with(self):
+        """`launch.env` is a recorded fact about one recording, never a live value.
+
+        Every consumer -- `verify` here, `fake-claude`'s materialise, and whatever C2 reads
+        for X8 -- must take it from the fixture and never recompute it from
+        `harness.DEFAULT_ENV_TABLE`. The constant is an input to `record` when making a *new*
+        fixture and nothing else. Under that rule a fixture recorded under a smaller table
+        stays valid forever and growing the constant invalidates nothing, which is what lets
+        two waves record concurrently without coordinating on it.
+
+        The occasion was live: the table gained `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` between
+        two recordings of the same wave, leaving half the corpus on four variables and half on
+        five. The property already held, but only by nobody having written the recomputation
+        yet. This is the test that makes writing it fail.
+
+        Both directions are checked, because a consumer recomputing would break on either: a
+        fixture missing a variable the constant now has, and one carrying a variable the
+        constant never had. `rate-limited-turn` is a real instance of the first -- it predates
+        S15 and can never be re-recorded.
+        """
+        import harness
+        live = set(harness.DEFAULT_ENV_TABLE)
+        for env in ({}, {"CLAUDE_CODE_FORK_SUBAGENT": "1"}, {"CLAUDE_CODE_RETIRED_LONG_AGO": "1"}):
+            d = build_fixture(self.root, name="envdemo", launch={"argv": ["claude", "-p"], "env": dict(env)})
+            self.assertNotEqual(set(env), live, "the case is only meaningful if it disagrees with the constant")
+            self.assertEqual(self.errors(d), [], "verify recomputed launch.env instead of reading it: %r" % (env,))
+
+    def test_unsigned_review_fails(self):
+        d = build_fixture(self.root, review={"reviewer": "", "date": "", "checklist_version": 1})
+        self.assertTrue(any("review" in e for e in self.errors(d)))
+
+    def test_planted_email_fails_in_any_file(self):
+        d = build_fixture(self.root)
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"content": "write to someone@example.org"}}) + "\n")
+        self.assertTrue(any("email" in e for e in self.errors(d)))
+
+    def test_orphaned_request_fails(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "c9", "request": {"subtype": "can_use_tool"}}})
+        self.assertTrue(any("c9" in e and "unanswered" in e for e in self.errors(d)))
+
+    def test_cancelled_then_late_needs_the_late_responses_entry(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "d1", "response": {}}}})
+        self.assertTrue(any("d1" in e and "late" in e for e in self.errors(d)))
+        d2 = build_fixture(self.root, name="demo2", late_responses=["d1"])
+        append_frame(d2, {"t": 95, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "d1", "response": {}}}})
+        self.assertEqual(self.errors(d2), [])
+
+    def test_tombstone_is_skipped_by_the_lifecycle_check(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "dropped": "update_environment_variables", "request_id": "e1"})
+        self.assertEqual(self.errors(d), [])
+
+    def test_missing_artifact_and_bad_stream_offset_fail(self):
+        d = build_fixture(self.root)
+        os.remove(os.path.join(d, "artifacts", "_slug_", SID, "tasks", "t1.output"))
+        self.assertTrue(any("artifacts" in e for e in self.errors(d)))
+        d2 = build_fixture(self.root, name="demo2")
+        write(os.path.join(d2, "streams.json"), json.dumps({"_slug_/%s.jsonl" % SID: 999}))
+        self.assertTrue(any("streams.json" in e for e in self.errors(d2)))
+
+    def test_census_mismatch_fails_and_required_mode_tolerates_optional_keys(self):
+        d = build_fixture(self.root)
+        c = read_json(os.path.join(d, "census.json")); c["pairs"]["system/init"]["keys"].append("ghost")
+        write(os.path.join(d, "census.json"), json.dumps(c))
+        self.assertTrue(any("census" in e for e in self.errors(d)))
+        d2 = build_fixture(self.root, name="demo2", deterministic=False)
+        c2 = read_json(os.path.join(d2, "census.json")); c2["pairs"]["system/init"]["keys"].append("optional_key")
+        write(os.path.join(d2, "census.json"), json.dumps(c2))
+        self.assertEqual(self.errors(d2), [])
+
+    def test_hypothesis_requires_synthetic_and_a_synthetic_census_is_still_recounted(self):
+        """The recount needs no binary, so a hand-written census is held to its own frames.
+
+        §4.4 excludes a synthetic fixture from `diff`, the live-binary drift command. This
+        is not that command, and a hand-written census is the one nothing else reads.
+        """
+        d = build_fixture(self.root, hypothesis=True, synthetic=False)
+        self.assertTrue(any("hypothesis" in e for e in self.errors(d)))
+        d2 = build_fixture(self.root, name="demo2", hypothesis=True, synthetic=True, census=False)
+        self.assertEqual(self.errors(d2), [])
+        c = read_json(os.path.join(d2, "census.json")); c["pairs"]["system/init"]["keys"].append("ghost")
+        write(os.path.join(d2, "census.json"), json.dumps(c))
+        self.assertTrue(any("census" in e for e in self.errors(d2)))
+
+    def test_fixture_json_must_declare_the_required_metadata(self):
+        """A missing `deterministic` is not a default but a silent downgrade.
+
+        It reads as false, which picks the permissive census comparison over the strict one
+        -- the ambiguity `census.diff` refuses to resolve by defaulting at its own boundary.
+        """
+        d = build_fixture(self.root)
+        meta = read_json(os.path.join(d, "fixture.json")); del meta["deterministic"]
+        write(os.path.join(d, "fixture.json"), json.dumps(meta, indent=1))
+        self.assertTrue(any("missing deterministic" in e for e in self.errors(d)))
+
+    def test_a_flag_field_present_but_not_a_boolean_fails(self):
+        """Presence is the wrong instrument for the field whose value picks the comparison.
+
+        `"deterministic": null` is present and reads as false, which is the same silent
+        downgrade of the strict gate to the permissive one that a missing field makes.
+        """
+        for field in ("census", "deterministic", "synthetic", "hypothesis"):
+            d = build_fixture(self.root, name=field, **{field: None})
+            self.assertTrue(any("%s must be true or false" % field in e for e in self.errors(d)), field)
+
+    def test_census_version_must_match_the_declared_cli_version(self):
+        d = build_fixture(self.root, cli_version="2.1.260")
+        self.assertTrue(any("cli_version" in e for e in self.errors(d)))
+
+    def test_a_mis_shaped_census_is_reported_rather_than_crashing(self):
+        """The recount reads hand-written censuses now, which are the ones that are mis-shaped."""
+        d = build_fixture(self.root)
+        write(os.path.join(d, "census.json"), json.dumps({}))
+        self.assertTrue(any("pairs map" in e for e in self.errors(d)))
+        d2 = build_fixture(self.root, name="demo2")
+        c = read_json(os.path.join(d2, "census.json")); c["pairs"]["system/init"] = "not a record"
+        write(os.path.join(d2, "census.json"), json.dumps(c))
+        self.assertTrue(any("cannot read" in e for e in self.errors(d2)))
+
+    def test_an_accumulated_census_may_hold_a_pair_the_latest_run_did_not_produce(self):
+        """`record` merges a model-driven census across re-recordings (§4.4); the frames are one run.
+
+        Only the second recording of a scenario reaches this, which is after the live sessions
+        have been paid for. Both halves are pinned so the tolerance cannot spread to the strict
+        path, which never accumulates because `record` merges only when `deterministic` is false.
+        """
+        for name, deterministic in (("demo", False), ("demo2", True)):
+            d = build_fixture(self.root, name=name, deterministic=deterministic)
+            accumulate(d, [{"type": "control_request", "request_id": "r9",
+                            "request": {"subtype": "rewind_conversation"}}])
+            if deterministic:
+                self.assertTrue(any("removed pair" in e for e in self.errors(d)))
+            else:
+                self.assertEqual(self.errors(d), [])
+
+    def test_an_accumulated_body_survives_a_run_that_carried_none(self):
+        """The same accumulation one level down, which `merge_required` creates deliberately.
+
+        It keeps a body an earlier run recorded rather than intersecting it away, so a run of
+        nothing but error responses leaves the census holding a body shape its own frames do
+        not show. That is accumulation, not a removed required key.
+        """
+        def to_error(f):
+            if f.get("type") == "control_response" and (f.get("response") or {}).get("request_id") == "c1":
+                f["response"] = {"subtype": "error", "request_id": "c1", "error": "denied"}
+
+        d = build_fixture(self.root, deterministic=False)
+        earlier = read_json(os.path.join(d, "census.json"))   # the run whose response carried a body
+        rewrite_frames(d, to_error)
+        accumulate(d, previous=earlier)
+        self.assertEqual(self.errors(d), [])
+
+    def test_the_census_must_still_not_under_describe_its_own_frames(self):
+        """The direction the recount exists for, which the accumulation tolerance leaves intact."""
+        d = build_fixture(self.root, deterministic=False)
+        c = read_json(os.path.join(d, "census.json")); del c["pairs"]["system/init"]
+        write(os.path.join(d, "census.json"), json.dumps(c))
+        self.assertTrue(any("added pair system/init" in e for e in self.errors(d)))
+
+    def test_a_reused_request_id_is_reported(self):
+        """The second request takes the id's state entry, so the first stops being checked."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "c1", "request": {"subtype": "can_use_tool"}}})
+        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}}})
+        self.assertTrue(any("c1" in e and "opened twice" in e for e in self.errors(d)))
+
+    def test_mirror_entries_must_reproduce_the_transcript(self):
+        d = build_fixture(self.root)
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "uuid": "not-mirrored"}) + "\n")
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+
+    def test_a_declared_unmirrored_prefix_licenses_records_at_the_head_of_the_range(self):
+        """Resuming a session appends one `ai-title` the mirror never carries."""
+        d = build_fixture(self.root)
+        path = os.path.join(d, "transcript", "_slug_", SID + ".jsonl")
+        with open(path, encoding="utf-8") as fh:
+            records = [json.loads(l) for l in fh if l.strip()]
+        mirrored = 1                                    # build_fixture mirrors one entry
+        head = records[:-mirrored]
+        write(path, "".join(json.dumps(r) + "\n" for r in
+                            head + [{"type": "ai-title", "aiTitle": "T"}] + records[-mirrored:]))
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+        meta = read_json(os.path.join(d, "fixture.json"))
+        meta["unmirrored_prefix"] = 1
+        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+        self.assertEqual(self.errors(d), [])
+
+    def test_an_unmirrored_prefix_nothing_needs_is_reported_as_stale(self):
+        """A declaration that stops being true must not rot: it is an exact count both ways."""
+        d = build_fixture(self.root)
+        meta = read_json(os.path.join(d, "fixture.json"))
+        meta["unmirrored_prefix"] = 1
+        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+        self.assertTrue(any("declares unmirrored_prefix 1" in e for e in self.errors(d)))
+
+    def _mirror_a_sidecar_entry(self, d, rel, entry, times=1):
+        """Put `times` copies of a mirror `agent_metadata` entry on the stream at `rel`."""
+        path = os.path.join(d, "frames.ndjson")
+        with open(path, encoding="utf-8") as fh:
+            frames = [json.loads(l) for l in fh if l.strip()]
+        for rec in frames:
+            f = rec.get("frame") or {}
+            if f.get("type") == "transcript_mirror" and rel in f.get("filePath", ""):
+                f["entries"] = [entry] + f["entries"] + [entry] * (times - 1)
+                break
+        write(path, "".join(json.dumps(f) + "\n" for f in frames))
+
+    def test_a_mirrored_agent_metadata_is_checked_against_the_sidecar_not_the_stream(self):
+        """The engine mirrors the `.meta.json` on the transcript's channel, at the head and again
+        on every re-engagement, so it is neither a record of that stream nor unchecked."""
+        d = build_fixture(self.root)
+        self._with_subagent_stream(d, mirrored=[{"type": "assistant", "uuid": "s1"}],
+                                   on_disk=[{"type": "assistant", "uuid": "s1"}], sidecar={"agentType": "Explore"})
+        self._mirror_a_sidecar_entry(d, "subagents/", {"type": "agent_metadata", "agentType": "Explore"}, times=2)
+        restamp(d)
+        errors, notes = verify.verify_fixture(d, home=self.root)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("agent_metadata" in n and "sidecar" in n for n in notes), notes)
+
+    def test_a_mirrored_agent_metadata_that_disagrees_with_its_sidecar_fails(self):
+        d = build_fixture(self.root)
+        self._with_subagent_stream(d, mirrored=[{"type": "assistant", "uuid": "s1"}],
+                                   on_disk=[{"type": "assistant", "uuid": "s1"}], sidecar={"agentType": "Explore"})
+        self._mirror_a_sidecar_entry(d, "subagents/", {"type": "agent_metadata", "agentType": "general-purpose"})
+        self.assertTrue(any("does not equal its .meta.json sidecar" in e for e in self.errors(d)))
+
+    def test_a_mirrored_agent_metadata_with_no_sidecar_in_the_fixture_fails(self):
+        d = build_fixture(self.root)
+        self._mirror_a_sidecar_entry(d, SID + ".jsonl", {"type": "agent_metadata", "agentType": "Explore"})
+        self.assertTrue(any("no .meta.json sidecar" in e for e in self.errors(d)))
+
+    def test_an_unkeyed_record_is_still_compared_like_any_other(self):
+        """`ai-title`, `atis-latch` and their kind carry no `uuid` and are written to the file;
+        holding them out would take most of a transcript out of the check."""
+        d = build_fixture(self.root)
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "ai-title", "aiTitle": "T"}) + "\n")
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+
+    def _with_subagent_stream(self, d, mirrored, on_disk, sidecar=None):
+        """Add one subagent stream to a built fixture: what the mirror carried, what the file holds."""
+        rel = os.path.join("_slug_", SID, "subagents", "agent-a1.jsonl")
+        os.makedirs(os.path.dirname(os.path.join(d, "transcript", rel)), exist_ok=True)
+        write(os.path.join(d, "transcript", rel),
+              "".join(json.dumps(r) + "\n" for r in on_disk))
+        if sidecar is not None:
+            write(os.path.join(d, "transcript", rel[:-len(".jsonl")] + ".meta.json"), json.dumps(sidecar))
+        append_frame(d, {"t": 95, "dir": "out", "frame": {
+            "type": "transcript_mirror",
+            "filePath": "~/.claude/projects/_slug_/%s/subagents/agent-a1.jsonl" % SID,
+            "entries": mirrored}})
+        streams = read_json(os.path.join(d, "streams.json"))
+        streams[rel] = 0
+        write(os.path.join(d, "streams.json"), json.dumps(streams))
+
+    def _declare(self, d, scopes):
+        meta = read_json(os.path.join(d, "fixture.json"))
+        meta["mirror_identity_only"] = scopes
+        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+
+    def test_mirror_identity_only_licenses_a_declared_field_the_identities_survive(self):
+        """A subagent's sidecar and its mirror are two snapshots of one record; `stop_reason` and
+        `usage` can differ while the identity sequence is equal."""
+        d = build_fixture(self.root)
+        self._with_subagent_stream(
+            d,
+            mirrored=[{"type": "assistant", "uuid": "s1", "message": {"stop_reason": "end_turn"}}],
+            on_disk=[{"type": "assistant", "uuid": "s1", "message": {"stop_reason": None}}])
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+        self._declare(d, {"subagents/": ["message.stop_reason", "message.usage"]})
+        restamp(d)
+        errors, notes = verify.verify_fixture(d, home=self.root)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("message.stop_reason" in n for n in notes), notes)
+
+    def test_a_field_the_declaration_does_not_name_still_fails(self):
+        """*Whether* the two disagree is a race; *which fields* can is not, so it is declared."""
+        d = build_fixture(self.root)
+        self._with_subagent_stream(
+            d,
+            mirrored=[{"type": "assistant", "uuid": "s1", "message": {"content": "mirrored"}}],
+            on_disk=[{"type": "assistant", "uuid": "s1", "message": {"content": "on disk"}}])
+        self._declare(d, {"subagents/": ["message.stop_reason", "message.usage"]})
+        errors = self.errors(d)
+        self.assertTrue(any("does not declare: message.content" in e for e in errors), errors)
+
+    def test_mirror_identity_only_still_fails_when_an_identity_is_missing(self):
+        """Count, order and identity stay strict; only the declared fields are relaxed."""
+        d = build_fixture(self.root)
+        self._with_subagent_stream(
+            d,
+            mirrored=[{"type": "assistant", "uuid": "s1"}, {"type": "assistant", "uuid": "s2"}],
+            on_disk=[{"type": "assistant", "uuid": "s1"}])
+        self._declare(d, {"subagents/": ["message.stop_reason"]})
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+
+    def test_a_scope_matching_a_stream_that_is_not_an_agent_sidecar_is_refused(self):
+        """The match is a substring test, so `.jsonl` or an empty scope would otherwise relax
+        every stream in the fixture -- the one thing this declaration must not be able to do."""
+        d = build_fixture(self.root)
+        write(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"),
+              json.dumps({"type": "assistant", "uuid": "a2", "message": {"stop_reason": None}}) + "\n")
+        self._declare(d, {".jsonl": ["message.stop_reason"]})
+        errors = self.errors(d)
+        self.assertTrue(any("not an agent sidecar stream" in e for e in errors), errors)
+        self.assertTrue(any("mirror entries" in e for e in errors), errors)
+
+    def test_mirror_identity_only_does_not_reach_the_main_stream(self):
+        """A main transcript that drifts by field still fails even beside a valid declaration."""
+        d = build_fixture(self.root)
+        write(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"),
+              json.dumps({"type": "assistant", "uuid": "a2", "message": {"stop_reason": None}}) + "\n")
+        self._with_subagent_stream(d, mirrored=[{"type": "assistant", "uuid": "s1"}],
+                                   on_disk=[{"type": "assistant", "uuid": "s1"}])
+        self._declare(d, {"subagents/": ["message.stop_reason"]})
+        errors = self.errors(d)
+        self.assertTrue(any("mirror entries" in e for e in errors), errors)
+
+    def test_the_earlier_list_shape_of_the_declaration_is_reported_rather_than_crashing(self):
+        """`fixture.json` is data read off disk and this field used to be a bare list."""
+        d = build_fixture(self.root)
+        self._declare(d, ["subagents/"])
+        self.assertTrue(any("must map a stream scope" in e for e in self.errors(d)))
+
+    def test_a_mirror_identity_only_declaration_nothing_matches_is_reported_as_stale(self):
+        d = build_fixture(self.root)
+        self._declare(d, {"subagents/": ["message.stop_reason"]})
+        self.assertTrue(any("mirror_identity_only" in e and "no mirrored stream" in e for e in self.errors(d)))
+
+    def test_a_synthetic_fixture_that_declares_a_transcript_is_still_mirror_checked(self):
+        """`synthetic` was only ever a proxy for "has no transcript"; the transcript is the fact."""
+        d = build_fixture(self.root, synthetic=True, hypothesis=True)
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "uuid": "not-mirrored"}) + "\n")
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+
+    def test_a_token_inside_prose_is_not_read_as_a_path(self):
+        """A false missing-artifact failure is how a gate stops being read."""
+        d = build_fixture(self.root)
+
+        def mention(f):
+            if f.get("type") == "result":
+                f["result"] = "wrote <artifacts>/_slug_/%s/tasks/t1.output for you" % SID
+
+        rewrite_frames(d, mention)
+        self.assertEqual(self.errors(d), [])
+
+    def test_a_file_the_scanners_cannot_read_is_a_finding(self):
+        """The gate's coverage has to be total: an unscannable file is reported, not skipped."""
+        d = build_fixture(self.root)
+        write_bytes(os.path.join(d, "artifacts", "_slug_", SID, "tasks", "t2.output"), b"\xff\xfe\x00 secret")
+        self.assertTrue(any("not UTF-8" in e for e in self.errors(d)))
+
+    def test_name_bearing_keys_are_moved_out_of_key_position_before_the_scan(self):
+        """A protocol name promoted into key position is not a field whose value can leak.
+
+        The census of any fixture carrying a `user` frame has the pair key `user`, and
+        redacting an `email` field leaves `...email` as a manifest path, so read as they sit
+        both files trip the identity-key predicate on ordinary content. Moved into value
+        position they get the pattern rules and nothing else, and a planted address still
+        fails.
+        """
+        d = build_fixture(self.root)
+        write(os.path.join(d, "redaction.json"),
+              json.dumps({"rules": {"identity": {"count": 2, "paths": {"user": 1, "response.email": 1}}}}))
+        self.assertEqual(self.errors(d), [])
+        write(os.path.join(d, "redaction.json"),
+              json.dumps({"rules": {"identity": {"count": 1, "paths": {"leak@example.com": 1}}}}))
+        self.assertTrue(any("email" in e for e in self.errors(d)))
+
+    def test_capabilities_keep_every_predicate_inside_the_census(self):
+        """The counterpart: `capabilities` is a value the census copies verbatim off the wire.
+
+        Unreachable for a recorded fixture, whose frames met the redactor before the census
+        saw them; reachable for any hand-written `synthetic: true` one, and §4.7 makes those
+        load-bearing for the wire paths that cannot be provoked on demand.
+        """
+        d = build_fixture(self.root)
+        c = read_json(os.path.join(d, "census.json"))
+        c["capabilities"] = {"account": "11111111-1111-4111-8111-111111111111", "oauthToken": "zzz"}
+        write(os.path.join(d, "census.json"), json.dumps(c))
+        e = self.errors(d)
+        self.assertTrue(any("capabilities.account" in x for x in e))
+        self.assertTrue(any("capabilities.oauthToken" in x for x in e))
+
+    def test_only_a_cli_cancel_of_a_cli_request_ends_a_lifecycle(self):
+        """§4.2 permits exactly one shape; a host request cannot be excused by a cancel line."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "h9", "request": {"subtype": "interrupt"}}})
+        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_cancel_request", "request_id": "h9"}})
+        e = self.errors(d)
+        self.assertTrue(any("cancel for h9" in x for x in e))
+        self.assertTrue(any("unanswered request h9" in x for x in e))
+
+    def withdrawal(self, name, cancel_dir="in", **overrides):
+        """A host request the host cancels: `control-shapes`' oauth-wait shape.
+
+        The request travels `in`, host to CLI, so the cancel that withdraws it travels `in`
+        too -- a cancel always names one of the sender's own in-flight requests. `cancel_dir`
+        exists to state that the other way round and watch the escape refuse to apply.
+
+        A CLI frame closes the recording so the tail tolerance cannot do the work, which keeps
+        each of these about `withdrawn_requests` and nothing else.
+        """
+        d = build_fixture(self.root, name=name, **overrides)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "o1", "request": {"subtype": "claude_oauth_wait_for_completion"}}})
+        append_frame(d, {"t": 96, "dir": cancel_dir, "frame": {"type": "control_cancel_request", "request_id": "o1"}})
+        return d
+
+    def test_a_declared_withdrawal_settles_a_host_request_that_never_answers(self):
+        d = self.withdrawal("demo", withdrawn_requests=["o1"])
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertEqual(self.errors(d), [])
+
+    def test_a_withdrawn_request_that_settles_later_needs_no_late_responses_entry(self):
+        """The CLI honours a host cancel for three subtypes and answers even for those, so a
+        response after the cancel is the ordinary case, not the exception `late_responses` licenses."""
+        d = self.withdrawal("demo", withdrawn_requests=["o1"])
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "error", "request_id": "o1", "error": "cancelled"}}})
+        self.assertEqual(self.errors(d), [])
+
+    def test_a_host_cancel_without_the_declaration_still_fails(self):
+        d = self.withdrawal("demo")
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        e = self.errors(d)
+        self.assertTrue(any("cancel for o1" in x for x in e))
+        self.assertTrue(any("unanswered request o1" in x for x in e))
+
+    def test_a_declared_withdrawal_cancelled_the_wrong_way_round_is_not_excused(self):
+        """The direction is the hazard: it is easy to state backwards, and backwards it either
+        excuses nothing or excuses everything, both invisibly until a recording is rejected."""
+        d = self.withdrawal("demo", cancel_dir="out", withdrawn_requests=["o1"])
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        e = self.errors(d)
+        self.assertTrue(any("cancel for o1" in x for x in e))
+        self.assertTrue(any("unanswered request o1" in x for x in e))
+
+    def test_a_declaration_without_the_cancel_frame_still_fails(self):
+        d = build_fixture(self.root, withdrawn_requests=["o1"])
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "o1", "request": {"subtype": "claude_oauth_wait_for_completion"}}})
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertTrue(any("unanswered request o1" in e for e in self.errors(d)))
+
+    def test_a_response_travelling_the_request_direction_is_the_replay_echo_and_answers_nothing(self):
+        """`--replay-user-messages` makes the CLI re-emit every host `control_response` on
+        stdout, so a CLI-originated request shows its own answer coming back the way the
+        request went. The echo settles nothing: with no answer travelling the other way the
+        request is still unanswered, which is what this asserts."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "c9", "request": {"subtype": "can_use_tool"}}})
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c9", "response": {}}}})
+        self.assertTrue(any("unanswered request c9" in e for e in self.errors(d)))
+
+    def test_the_replay_echo_of_an_answered_request_is_not_a_duplicate(self):
+        """The shape every live recording carries: the host answers a CLI request and the CLI
+        echoes that answer back. Counted as a second answer it read as a duplicate, and the
+        first real recording of the zero-cost census failed the gate on three of them."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "c9", "request": {"subtype": "mcp_message"}}})
+        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c9", "response": {"mcp_response": {}}}}})
+        append_frame(d, {"t": 97, "dir": "out", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c9", "response": {"mcp_response": {}}}}})
+        e = self.errors(d)
+        self.assertFalse(any("c9" in x for x in e), e)
+
+    def test_a_duplicate_response_fails(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}}})
+        self.assertTrue(any("duplicate response to c1" in e for e in self.errors(d)))
+
+    def test_a_response_to_an_unknown_request_fails(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "nope", "response": {}}}})
+        self.assertTrue(any("response to unknown request nope" in e for e in self.errors(d)))
+
+    def test_late_responses_licenses_one_answer_not_a_stream(self):
+        d = build_fixture(self.root, late_responses=["d1"])
+        late = {"t": 95, "dir": "in", "frame": {"type": "control_response", "response": {"subtype": "success", "request_id": "d1", "response": {}}}}
+        append_frame(d, late)
+        self.assertEqual(self.errors(d), [])
+        append_frame(d, dict(late, t=96))
+        self.assertTrue(any("duplicate response to d1" in e for e in self.errors(d)))
+
+    def test_end_session_may_go_unanswered_only_as_the_last_host_frame(self):
+        """The harness sends it and closes stdin in the same breath (§6.7).
+
+        That is the whole reason its response may be absent, so later host traffic means the
+        stream was still open and the missing response is a real gap.
+        """
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "end-1", "request": {"subtype": "end_session"}}})
+        # A CLI frame after it, so this isolates the end_session carve-out from the separate
+        # tolerance for one unwritten record sitting at the very tail.
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertEqual(self.errors(d), [])
+        append_frame(d, {"t": 97, "dir": "in", "frame": {"type": "user", "uuid": "u2", "message": {"role": "user", "content": "still open"}}})
+        self.assertTrue(any("unanswered request end-1" in e for e in self.errors(d)))
+
+    def test_only_the_unwritten_annotation_excuses_an_unanswered_host_request(self):
+        """`Session._send_locked` records then writes while holding one lock (§4.3), so a child
+        that exits between the two leaves a frame in the capture that never reached the wire.
+
+        That used to be inferred from position -- the last record being an inbound request was
+        read as proof it missed the wire -- which asserts nothing at all: a truncated or crashed
+        recording ending with a request the host really did send has exactly the same shape and
+        passed unremarked. The harness now catches the failing write and marks that record, and
+        the mark is the only thing honoured. The old positional case is the first assertion
+        here, and it is the one that changed.
+        """
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "w1", "request": {"subtype": "get_settings"}}})
+        self.assertTrue(any("unanswered request w1" in x for x in self.errors(d)))
+        mark_unwritten(d, "w1")
+        self.assertEqual(self.errors(d), [])
+        # The mark is evidence about one record rather than a property of the tail, so a frame
+        # after it changes nothing -- and an unmarked request beside it still fails.
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertEqual(self.errors(d), [])
+        append_frame(d, {"t": 97, "dir": "in", "frame": {"type": "control_request", "request_id": "w2", "request": {"subtype": "get_settings"}}})
+        e = self.errors(d)
+        self.assertTrue(any("unanswered request w2" in x for x in e))
+        self.assertFalse(any("unanswered request w1" in x for x in e))
+
+    def test_the_unwritten_mark_is_only_read_on_an_inbound_host_request(self):
+        """The harness can only fail writing a frame the host is sending, so the mark means an
+        inbound record and a host-originated request. `verify` read it anywhere, which let a
+        mark on an outbound record excuse a CLI-originated request the host never answered."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "o9",
+                                                          "request": {"subtype": "can_use_tool"}}})
+        mark_unwritten(d, "o9")
+        self.assertTrue(any("unanswered request o9" in x for x in self.errors(d)), self.errors(d))
+
+    def test_an_unanswered_host_request_before_the_tail_still_fails(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "w1", "request": {"subtype": "get_settings"}}})
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertTrue(any("unanswered request w1" in e for e in self.errors(d)))
+
+    def test_timestamps_must_not_go_backwards(self):
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 1, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertTrue(any("non-decreasing" in e for e in self.errors(d)))
+
+    def test_a_bad_timestamp_does_not_poison_the_records_after_it(self):
+        """One malformed value costs the reviewer one line, not every line that follows."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": "95", "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertEqual([e for e in self.errors(d) if "timestamp" in e],
+                         ["frames.ndjson line 12: timestamp not a non-decreasing int"])
+
+    def test_a_stream_offset_must_be_a_non_negative_integer(self):
+        d = build_fixture(self.root)
+        write(os.path.join(d, "streams.json"), json.dumps({"_slug_/%s.jsonl" % SID: -1}))
+        self.assertTrue(any("non-negative integer" in e for e in self.errors(d)))
+
+    def test_transcript_must_extend_initial(self):
+        d = build_fixture(self.root)
+        write(os.path.join(d, "initial", "_slug_", SID + ".jsonl"), json.dumps({"type": "assistant", "uuid": "prior"}) + "\n")
+        self.assertTrue(any("does not extend" in e for e in self.errors(d)))
+
+    def test_an_artifact_named_only_by_initial_is_required(self):
+        """A resume fixture's `initial/` is a prior session's records and names artifacts too."""
+        d = build_fixture(self.root)
+        write(os.path.join(d, "initial", "_slug_", SID + ".jsonl"),
+              json.dumps({"type": "assistant", "uuid": "prior",
+                          "output_file": "<artifacts>/_slug_/%s/tasks/prior.output" % SID}) + "\n")
+        self.assertTrue(any("tasks/prior.output" in e and "missing" in e for e in self.errors(d)))
+
+    def test_an_artifact_path_with_a_space_is_not_truncated(self):
+        """A false missing-artifact failure trains a reviewer to override the gate."""
+        d = build_fixture(self.root)
+        tasks = os.path.join(d, "artifacts", "_slug_", SID, "tasks")
+        os.rename(os.path.join(tasks, "t1.output"), os.path.join(tasks, "t 1.output"))
+
+        def retarget(f):
+            if f.get("subtype") == "task_notification":
+                f["output_file"] = "<artifacts>/_slug_/%s/tasks/t 1.output" % SID
+
+        rewrite_frames(d, retarget)
+        self.assertEqual(self.errors(d), [])
+
+    def test_the_mirror_check_rewrites_the_recorded_slug_from_meta_cwd(self):
+        """A recorded `transcript_mirror.filePath` names the recording slug, not the token."""
+        cwd = "/private/tmp/afleet-fixtures/demo"
+        d = build_fixture(self.root, cwd=cwd)
+
+        def relocate(f):
+            if f.get("type") == "transcript_mirror":
+                f["filePath"] = "~/.claude/projects/%s/%s.jsonl" % (fixture.slug_of(cwd), SID)
+
+        rewrite_frames(d, relocate)
+        self.assertEqual(self.errors(d), [])
+
+    def test_the_mirror_check_resolves_the_recorded_cwd_before_slugging_it(self):
+        """The CLI slugs the path it resolved to, not the one it was handed. Every recording
+        runs under `/tmp/afleet-fixtures/<name>`, which on macOS resolves into `/private/tmp`,
+        so the mirrored `filePath` carries a slug the unresolved cwd only partly matches --
+        rewriting its tail and leaving a `-private` stump that names no file under
+        `transcript/`. Built on a symlink of its own so it holds wherever the tests run."""
+        real = os.path.join(self.root, "resolved")
+        link = os.path.join(self.root, "link")
+        os.makedirs(real)
+        os.symlink(real, link)
+        cwd = os.path.join(link, "demo")
+        d = build_fixture(self.root, cwd=cwd)
+
+        def relocate(f):
+            if f.get("type") == "transcript_mirror":
+                f["filePath"] = "~/.claude/projects/%s/%s.jsonl" % (
+                    re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.join(real, "demo"))), SID)
+
+        rewrite_frames(d, relocate)
+        self.assertEqual(self.errors(d), [])
+
+    def test_malformed_transcript_is_reported_rather_than_crashing(self):
+        """A gate's input is by definition possibly-malformed, so a bad line is a finding.
+
+        The planted line is both unparseable and carries a bare `<artifacts>/` with nothing
+        after it, which is the other shape that reaches the verifier only when a fixture is
+        wrong: both the mirror comparison and the artifact-token scan have to survive it.
+        """
+        d = build_fixture(self.root)
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write("not json <artifacts>/\n")
+        self.assertTrue(any("not valid JSONL" in e for e in self.errors(d)))
+
+    def test_report_only_warning_for_author_name(self):
+        d = build_fixture(self.root)
+        write(os.path.join(d, "README.md"), "recorded by Probe Person\n")
+        restamp(d)
+        e, w = verify.verify_fixture(d, home="/Users/probe", author="Probe Person")
+        self.assertEqual(e, []); self.assertTrue(any("author" in x for x in w))
+
+    def test_the_review_signature_is_not_a_finding_but_a_second_mention_is(self):
+        """§4.5 asks the reviewer to sign; a warning that fires on every run is one nobody reads."""
+        signed = {"reviewer": "Probe Person", "date": "2026-09-04", "checklist_version": 1}
+        d = build_fixture(self.root, review=signed)
+        restamp(d)
+        e, w = verify.verify_fixture(d, home="/Users/probe", author="Probe Person")
+        self.assertEqual(e, []); self.assertEqual([x for x in w if "author" in x], [])
+        d2 = build_fixture(self.root, name="demo2", review=signed, purpose="asked for by Probe Person")
+        restamp(d2)
+        e2, w2 = verify.verify_fixture(d2, home="/Users/probe", author="Probe Person")
+        self.assertEqual(e2, []); self.assertTrue(any("author" in x for x in w2))
+
+
+if __name__ == "__main__":
+    unittest.main()
