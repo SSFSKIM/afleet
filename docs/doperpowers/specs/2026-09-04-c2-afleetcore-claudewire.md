@@ -1004,8 +1004,12 @@ Pending — written at finish.
   `control_response` completing the handshake — frame 2 before frame 4, at t=887/888/891 ms and
   t=770/770/773 ms respectively. So the engine will not answer `initialize` until the host has
   answered the server's JSON-RPC `initialize`, which is a **host constraint**: an inbound loop that
-  starts only after `spawn()` returns deadlocks. `notifications/initialized` follows immediately
-  after the handshake response, and `tools/list` arrives later still, with the first user message or
-  the first outbound request. What remains true is the practical warning: an `mcp_status` issued
-  immediately after `spawn()` was observed live to return an empty server list, so consumers must
-  wait for the server rather than assume it.
+  starts only after `spawn()` returns deadlocks. These are two facts about two different events and both hold.
+  The bring-up **starts** inside the handshake, which is the constraint above. The server is not
+  **connected** at frame 4: `notifications/initialized` is frame 7, after the engine's response, and
+  `tools/list` does not arrive until frame 11 — with the first user message or the first outbound
+  request (t=892 ms in `zero-cost`, t=774 ms in `plain-two-turn`). The live measurement is the
+  observable consequence of that tail: an `mcp_status` issued immediately after `spawn()` returned an
+  empty server list, with connected appearing about 0.9 s later. So the host must serve the bring-up
+  during the handshake, and the server reports connected only after the bring-up completes, which is
+  after `spawn()` returns. Consumers wait for the server rather than assume it.
