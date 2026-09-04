@@ -1048,3 +1048,34 @@ Pending — written at finish.
   `[parent-impact]` from the upgrade**: pinning removes the conflict rather than deferring it.
   `rate-limited-turn` is the one permanent exception, for reasons recorded in Surprises and in
   its README.
+- 2026-09-04: X8 states what `launch.env` is. **It is recorded evidence about one recording,
+  read from the fixture and never recomputed.** Every consumer — `verify`, `fake-claude`'s
+  materialise, and whatever C2 reads for X8 — takes the table from `fixture.json`;
+  `harness.DEFAULT_ENV_TABLE` is an input to `record` when building a *new* launch line and
+  has no other reader. The consequences are the point: a fixture recorded under a smaller
+  table stays valid forever, growing the constant invalidates nothing, and two waves
+  recording concurrently need not coordinate on it. `rate-limited-turn` is the standing
+  instance — it carries the four-variable table that predates S15 and can never be
+  re-recorded.
+
+  The property already held when it was written down; what it lacked was being stated and
+  tested, so it could have been broken tomorrow by someone reasonable. It is now pinned by
+  `test_a_committed_fixture_keeps_the_env_table_it_was_recorded_with`, which verifies a
+  fixture whose `launch.env` disagrees with the live constant in both directions — missing a
+  variable the constant has, and carrying one it never had — and which was checked against a
+  deliberate mutation that recomputes the table, to confirm it fails when it should. The one
+  place a fixture assertion is legitimately coupled to the constant is
+  `test_record_...`'s check that a *freshly recorded* fixture agrees with the table it was
+  just built from; that is true at the moment of recording only, and the assertion now says
+  so where a reader will see it.
+
+  This does not touch C2's acceptance. The parent asks C2 to assert "the launch line of §6.1
+  and the environment table byte for byte" of *ClaudeWire's own builder against the spec*,
+  which is a different assertion from anything about a fixture's recorded table, and both are
+  correct. C2 should not assert a committed fixture's `launch.env` against its own constant;
+  that is the reading this note exists to prevent.
+
+  The occasion: the table gained `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` between two recordings
+  of the same wave, leaving half the corpus on four variables and half on five. That was
+  repaired by re-recording, but the repair is not the lesson — the rule above is, because it
+  makes the situation a non-event rather than a discipline to remember.

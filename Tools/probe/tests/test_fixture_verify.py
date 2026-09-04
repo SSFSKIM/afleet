@@ -231,6 +231,33 @@ class VerifyTests(unittest.TestCase):
     def test_valid_fixture_passes(self):
         self.assertEqual(self.errors(build_fixture(self.root)), [])
 
+    def test_a_committed_fixture_keeps_the_env_table_it_was_recorded_with(self):
+        """`launch.env` is a recorded fact about one recording, never a live value.
+
+        Every consumer -- `verify` here, `fake-claude`'s materialise, and whatever C2 reads
+        for X8 -- must take it from the fixture and never recompute it from
+        `harness.DEFAULT_ENV_TABLE`. The constant is an input to `record` when making a *new*
+        fixture and nothing else. Under that rule a fixture recorded under a smaller table
+        stays valid forever and growing the constant invalidates nothing, which is what lets
+        two waves record concurrently without coordinating on it.
+
+        The occasion was live: the table gained `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` between
+        two recordings of the same wave, leaving half the corpus on four variables and half on
+        five. The property already held, but only by nobody having written the recomputation
+        yet. This is the test that makes writing it fail.
+
+        Both directions are checked, because a consumer recomputing would break on either: a
+        fixture missing a variable the constant now has, and one carrying a variable the
+        constant never had. `rate-limited-turn` is a real instance of the first -- it predates
+        S15 and can never be re-recorded.
+        """
+        import harness
+        live = set(harness.DEFAULT_ENV_TABLE)
+        for env in ({}, {"CLAUDE_CODE_FORK_SUBAGENT": "1"}, {"CLAUDE_CODE_RETIRED_LONG_AGO": "1"}):
+            d = build_fixture(self.root, name="envdemo", launch={"argv": ["claude", "-p"], "env": dict(env)})
+            self.assertNotEqual(set(env), live, "the case is only meaningful if it disagrees with the constant")
+            self.assertEqual(self.errors(d), [], "verify recomputed launch.env instead of reading it: %r" % (env,))
+
     def test_unsigned_review_fails(self):
         d = build_fixture(self.root, review={"reviewer": "", "date": "", "checklist_version": 1})
         self.assertTrue(any("review" in e for e in self.errors(d)))

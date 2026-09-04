@@ -243,7 +243,15 @@ class RecordAndDiffTests(unittest.TestCase):
         self.assertFalse(any(n.startswith(".tmp-") for n in os.listdir(self.fixtures)))
         meta = read_json(os.path.join(path, "fixture.json"))
         self.assertEqual(meta["cli_version"], "2.1.259")
-        self.assertEqual(sorted(meta["launch"]["env"]), sorted(probe.harness.DEFAULT_ENV_TABLE))
+        # True *at the moment of recording* and nowhere else. `record` builds the launch line
+        # from the live constant, so a fixture written right now must agree with it. This is
+        # not an invariant of a committed fixture: `launch.env` is recorded evidence about the
+        # run that produced it, and it keeps the table that was current then even after the
+        # constant grows. See
+        # `test_a_committed_fixture_keeps_the_env_table_it_was_recorded_with`, which is the
+        # one that fails if a consumer ever recomputes it.
+        self.assertEqual(sorted(meta["launch"]["env"]), sorted(probe.harness.DEFAULT_ENV_TABLE),
+                         "a freshly recorded fixture must agree with the constant it was just built from")
         self.assertIn("--permission-prompt-tool", meta["launch"]["argv"])
         self.assertEqual(meta["review"], {"reviewer": "", "date": "", "checklist_version": 1})
 
