@@ -37,7 +37,12 @@ and re-walking the fixtures whose signatures should still stand.
    you can inspect — so a stray `.DS_Store` dropped in by the Finder fails the
    gate, and deleting it is the fix.
 8. `README.md` (optional) says what the recording shows and which acceptance
-   items and spikes it serves.
+   items and spikes it serves — **and describes this recording, not a previous
+   one.** A re-recording carries the existing README across rather than losing
+   it, which is why every claim in it has to be read against the fixture in
+   front of you: the version, the session, the counts and the frame names all
+   move when a fixture is re-recorded, and only this reading catches a
+   paragraph that no longer applies.
 9. Empty `initial/`, `transcript/` and `artifacts/` hold a `.gitkeep` and nothing
    else, and `git ls-files` on the fixture lists it. Git tracks no empty
    directory, and `verify` requires `initial/` and `transcript/` to exist, so a

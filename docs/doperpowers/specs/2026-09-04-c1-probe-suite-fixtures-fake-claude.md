@@ -724,16 +724,39 @@ which `record` spills to its temporary file, set from the largest recorded scena
   separates it from a numeric account id (`user_id: 7` is identity and is an int), so the
   exemption is written as the single path it applies to, with the scanner exempted in step.
 
-- Observation: `Fixtures/` spans two CLI versions. Evidence: `zero-cost` and
-  `rate-limited-turn` carry `cli_version: 2.1.259`; `send-user-file`, `plain-two-turn` and
-  `resume-no-replay` carry `2.1.260`, the CLI having been upgraded between waves. Impact:
-  the set is still one baseline. `census.diff` never compares `version`, `verify` only holds
-  each fixture's `census.json` version against its own `cli_version`, and the flag set
-  `claude --help` declares is byte-identical across the two — `zero-cost`, recorded on
-  2.1.259, re-runs green against 2.1.260. Uniformity is unattainable in any case:
-  `rate-limited-turn`'s precondition is gone, so it can never be re-recorded on a later
-  binary. A child reading these fixtures should take `cli_version` per fixture rather than
-  assuming one number for the directory.
+- Observation: The recording baseline is a **binary path**, not "the installed CLI".
+  Evidence: `claude` auto-updated from 2.1.259 to 2.1.260 mid-wave and four fixtures silently
+  followed it. The recorded corpus is now pinned to
+  `~/.local/share/claude/versions/2.1.259`, which every fixture records in
+  `launch.argv[0]`. Impact: §4.6's isolation was never enough on its own — a scenario can be
+  isolated from the user's configuration and still be recorded against a binary nobody chose.
+  The pin is also fragile in a way the fixtures are not: `~/.local/share/claude/versions/`
+  is pruned by future upgrades, so the 2.1.259 file can vanish. That is the argument for the
+  fixtures being the durable evidence and the binary merely the instrument — a corpus that
+  can only be re-derived from a binary that may not exist is not a baseline. A child should
+  still read `cli_version` per fixture rather than assuming one number for the directory,
+  because of the exception below.
+
+- Observation: `rate-limited-turn` is permanently off the baseline, at 2.1.260 and with the
+  four-variable environment table that predates S15. Evidence: it was recorded in the window
+  between the upgrade and the pin, and its precondition — a seven-day usage window at 100 per
+  cent — is gone. Impact: it cannot be re-recorded on 2.1.259 or on anything else, ever.
+  Nothing rests on the difference: it is `census: false`, so it never takes part in a
+  comparison, and it is evidence about the shape of one rejected turn rather than about a
+  version's frame inventory. Recorded here and in its README so it does not read as an
+  oversight.
+
+- Observation: 2.1.259 and 2.1.260 are census-identical, which is the first drift measurement
+  the ritual has made between two real versions. Evidence: `make probe` against the installed
+  2.1.260, with the corpus pinned to 2.1.259, reports `ok` for all three census fixtures and
+  exits 0; a field-level comparison of the two versions' `zero-cost` censuses shows zero
+  differences across pairs, `keys`, `required_keys`, `payload_keys`, `required_payload_keys`,
+  `body_keys`, `required_body_keys`, `capabilities` and the 68 declared flags. Impact: the
+  patch bump changed nothing the census fingerprints, so the earlier worry that `zero-cost`
+  passed "by luck" is settled by measurement. Note what this does *not* establish: a run that
+  finds nothing cannot demonstrate that the ritual would find something. The ritual's
+  sensitivity is evidenced separately, by the `fake-claude` injections — an invented frame
+  type reported as exactly one added pair, and a stripped required key reported by name.
 
 - Observation: An SDK MCP tool listed in `system/init.tools` is not immediately invocable.
   Evidence: `send-user-file`. `mcp__afleet__send_user_file` appears in the tool list, and the
@@ -1015,3 +1038,13 @@ Pending — written at finish.
   wire at all, and it is the reason neither fixture is instead marked `deterministic: false`:
   §4.4 alarms on a removed pair in required mode as well as exact, deliberately, so the
   permissive comparison is not an escape from an unreproducible recording.
+- 2026-09-04: The recorded corpus is pinned to the binary at
+  `~/.local/share/claude/versions/2.1.259` rather than to whatever `claude` resolves to, and
+  every fixture records that path in `launch.argv[0]`. The parent declares 2.1.259 as the
+  protocol baseline and C2 pins `ProtocolBaseline.version` to it, so a corpus recorded against
+  2.1.260 would have put C1's evidence at odds with the baseline — repairable only by editing
+  binding parent prose, which §4.9 forbids this child. Re-recording four fixtures instead cost
+  cents and touched nothing outside this document's scope, and **there is accordingly no
+  `[parent-impact]` from the upgrade**: pinning removes the conflict rather than deferring it.
+  `rate-limited-turn` is the one permanent exception, for reasons recorded in Surprises and in
+  its README.
