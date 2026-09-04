@@ -7,6 +7,12 @@ final class RedactorTests: XCTestCase {
     private func redacted(_ s: String) throws -> JSONValue {
         try JSONDecoder().decode(JSONValue.self, from: try XCTUnwrap(Redactor.redact(line: Data(s.utf8))))
     }
+    /// The body of a control_response, which is where most of the interesting rules land.
+    private func responseBody(_ body: String) throws -> JSONValue {
+        let v = try redacted(#"{"type":"control_response","response":{"subtype":"success","request_id":"i","response":"# + body + #"}}"#)
+        return try XCTUnwrap(v["response"]?["response"])
+    }
+
     func testStringSecretsReplacedNumbersUntouched() throws {
         let v = try redacted(#"{"type":"result","usage":{"input_tokens":12,"output_tokens":3,"thinking_tokens":1},"max_tokens":8,"tokens":5,"access_token":"sk-ant-abc","nested":{"apiKey":"k","oauthState":"s","secret_value":"v","count_tokens":7}}"#)
         XCTAssertEqual(v["usage"]?["input_tokens"], .integer(12)); XCTAssertEqual(v["usage"]?["thinking_tokens"], .integer(1))
@@ -17,7 +23,7 @@ final class RedactorTests: XCTestCase {
     }
     func testAccountFieldsAndEnvironmentFramesDropped() throws {
         let v = try redacted(#"{"type":"control_response","response":{"subtype":"success","request_id":"i","response":{"account":{"email":"a@b.c","uuid":"u"},"pid":1}}}"#)
-        XCTAssertEqual(v["response"]?["response"]?["account"], .string("<redacted>")); XCTAssertEqual(v["response"]?["response"]?["pid"], .integer(1))
+        XCTAssertEqual(v["response"]?["response"]?["account"], .string("<account>")); XCTAssertEqual(v["response"]?["response"]?["pid"], .integer(1))
         XCTAssertNil(Redactor.redact(line: Data(#"{"type":"control_request","request_id":"e","request":{"subtype":"update_environment_variables","variables":{"A":"1"}}}"#.utf8)))
     }
     func testMCPBodiesTruncatedTo4KB() throws {
@@ -30,63 +36,144 @@ final class RedactorTests: XCTestCase {
     func testUnparseableLineIsNotCaptured() {
         XCTAssertNil(Redactor.redact(line: Data("garbage".utf8)))
     }
-    /// Parent §11 as revised at spec commit 22bc060: the identity rule is key-name based on
-    /// string values (not object-only), over C1's `Tools/probe/redact.py` IDENTITY_KEYS compared
-    /// after lowercase-and-separator normalisation, plus any email-shaped string anywhere, plus
-    /// the whole-object replacement under an identity name.
-    func testIdentityStringsAndEmailsRedacted() throws {
-        let v = try redacted(#"{"type":"control_response","response":{"subtype":"success","request_id":"i","response":{"accountUuid":"9f2","account_id":"7","organizationUuid":"org-1","organization_name":"Acme","userName":"alice","user_id":"u7","subscription_type":"max","fullName":"Alice Example","emailAddress":"a@b.co","note":"ping a@b.co or c@d.org","displayName":"Claude Haiku 4.5","user_message_uuid":"6d1d4b1e-0000-4000-8000-0000000000aa","tool_use_result":{"type":"text"},"hooks":{"UserPromptSubmit":["cmd"]},"user":{"id":1},"organizationId":42,"pid":1}}}"#)
-        let r = try XCTUnwrap(v["response"]?["response"])
-        for k in ["accountUuid", "account_id", "organizationUuid", "organization_name", "userName", "user_id", "subscription_type", "fullName", "emailAddress"] {
-            XCTAssertEqual(r[k], .string("<redacted>"), k)   // normalisation folds case, _ and -
+
+    // MARK: - Identity, parent §11 as revised at spec commits 22bc060 and ed87a22
+
+    /// The identity rule is key-name based, normalised and case-insensitive, over C1's IDENTITY_KEYS, plus
+    /// any email-shaped string anywhere. It replaces the value whatever its type, and names its placeholder
+    /// after the key so a reviewer reads a capture and a fixture with one checklist.
+    func testIdentityFieldsRedactedWithKeyDerivedPlaceholders() throws {
+        let r = try responseBody(#"{"accountUuid":"9f2","account_id":"7","organizationUuid":"org-1","organization_name":"Acme","userName":"alice","user_id":"u7","subscription_type":"max","fullName":"Alice Example","emailAddress":"a@b.co","note":"ping a@b.co or c@d.org","displayName":"Claude Haiku 4.5","user_message_uuid":"6d1d4b1e-0000-4000-8000-0000000000aa","tool_use_result":{"type":"text"},"hooks":{"UserPromptSubmit":["cmd"]},"user":{"id":1},"organizationId":42,"pid":1}"#)
+        for k in ["accountUuid", "account_id", "organizationUuid", "organization_name", "userName", "user_id", "subscription_type", "fullName"] {
+            XCTAssertEqual(r[k], .string("<\(k)>"), k)      // normalisation folds case, _ and -; the placeholder keeps the key
         }
-        XCTAssertEqual(r["user"], .string("<redacted>"))     // an identity name over an object goes whole
-        XCTAssertEqual(r["note"], .string("ping <email> or <email>"))   // email-shaped strings anywhere
-        // Exact match on the normalised key, never substring. All four of these normalise to something
-        // that *contains* an identity key, and all four are structural: `displayName` is a list_models row,
-        // a plugin catalogue entry and a slash-command field; `user_message_uuid` links an assistant frame
-        // to its user turn (Tests/Support/Samples/assistant.json); `tool_use_result` is the whole result
-        // body of a user frame (user.json); `UserPromptSubmit` is a hook-event name used as a dictionary key.
+        XCTAssertEqual(r["emailAddress"], .string("<email>"))   // the one substring match, and its own placeholder
+        XCTAssertEqual(r["user"], .string("<user>"))            // whatever the type: an object goes whole
+        XCTAssertEqual(r["organizationId"], .string("<organizationId>"))   // and so does a number
+        XCTAssertEqual(r["note"], .string("ping <email> or <email>"))      // email-shaped strings anywhere
+        // Exact match on the normalised key, never substring. All four normalise to something that
+        // *contains* an identity key and all four are structural: `displayName` is a list_models row, a
+        // plugin catalogue entry and a slash-command field; `user_message_uuid` links an assistant frame to
+        // its user turn (Tests/Support/Samples/assistant.json); `tool_use_result` is the whole result body
+        // of a user frame (user.json); `UserPromptSubmit` is a hook-event name used as a dictionary key.
         XCTAssertEqual(r["displayName"], .string("Claude Haiku 4.5"))
         XCTAssertEqual(r["user_message_uuid"], .string("6d1d4b1e-0000-4000-8000-0000000000aa"))
         XCTAssertEqual(r["tool_use_result"], .object(["type": .string("text")]))
         XCTAssertEqual(r["hooks"]?["UserPromptSubmit"], .array([.string("cmd")]))
-        // A number under an identity name stays a number. §11 as revised scopes the rule to string
-        // values and whole objects precisely so that a rewrite cannot change a declared Int into a
-        // String and make the frame undecodable — the failure C1 hit at `subagent_stats.killed.user`.
-        XCTAssertEqual(r["organizationId"], .integer(42))
         XCTAssertEqual(r["pid"], .integer(1))
     }
     /// Two exemptions that only a path can express, mirroring C1's IDENTITY_COUNTER_PATHS and
-    /// SECRET_ENUM_PATHS. A name alone cannot tell `killed.user` (a count) from an account id,
-    /// nor `behaviors[].key` (a behaviour enum) from a credential.
+    /// SECRET_ENUM_PATHS. A name alone cannot tell `killed.user` — a count of subagents the user killed,
+    /// present on every result frame — from an account id, nor `behaviors[].key` from a credential.
     func testPathScopedExemptions() throws {
-        // On the wire `killed.user` is an integer, which the identity rule leaves alone anyway. The string
-        // form is what binds the exemption: without it the rule would rewrite the count as "<redacted>".
-        let i = try redacted(#"{"type":"result","subagent_stats":{"killed":{"user":3,"parent":1}},"userName":"alice"}"#)
+        let i = try redacted(#"{"type":"result","subagent_stats":{"killed":{"user":3,"parent":1}},"userName":"alice","killed":{"user":9}}"#)
         XCTAssertEqual(i["subagent_stats"]?["killed"]?["user"], .integer(3))
         XCTAssertEqual(i["subagent_stats"]?["killed"]?["parent"], .integer(1))
-        XCTAssertEqual(i["userName"], .string("<redacted>"))   // same name, no exempting path
-        let t = try redacted(#"{"type":"result","subagent_stats":{"killed":{"user":"3"}},"killed":{"user":"3"}}"#)
-        XCTAssertEqual(t["subagent_stats"]?["killed"]?["user"], .string("3"))
-        XCTAssertEqual(t["killed"]?["user"], .string("<redacted>"))   // the same leaf name off the exempt path
-        let u = try redacted(#"{"type":"control_response","response":{"subtype":"success","request_id":"i","response":{"rate_limits":{"day":{"behaviors":[{"key":"cache_miss","used":1},{"key":"cron","used":2}]}},"behaviors":{"keyring":"sk-ant-x"},"api_key":"sk-ant-x"}}}"#)
-        let inner = try XCTUnwrap(u["response"]?["response"])
-        let b = try XCTUnwrap(inner["rate_limits"]?["day"]?["behaviors"])
-        XCTAssertEqual(b[0]?["key"], .string("cache_miss"))    // enum name, not a secret
-        XCTAssertEqual(b[1]?["key"], .string("cron"))
+        XCTAssertEqual(i["killed"]?["user"], .string("<user>"))   // the same leaf name off the exempt path
+        XCTAssertEqual(i["userName"], .string("<userName>"))
+        let b = try responseBody(#"{"rate_limits":{"day":{"behaviors":[{"key":"cache_miss","used":1},{"key":"cron","used":2}]}},"behaviors":{"keyring":"sk-x"},"api_key":"sk-x"}"#)
+        XCTAssertEqual(b["rate_limits"]?["day"]?["behaviors"]?[0]?["key"], .string("cache_miss"))
+        XCTAssertEqual(b["rate_limits"]?["day"]?["behaviors"]?[1]?["key"], .string("cron"))
         // The exemption is a trailing segment run, not a substring of the path: `behaviors.keyring`
         // contains "behaviors.key" and must still be redacted.
-        XCTAssertEqual(inner["behaviors"]?["keyring"], .string("<redacted>"))
-        XCTAssertEqual(inner["api_key"], .string("<redacted>"))
+        XCTAssertEqual(b["behaviors"]?["keyring"], .string("<redacted>"))
+        XCTAssertEqual(b["api_key"], .string("<redacted>"))
     }
-    /// The counter exemption on a live path: a counter that arrives as a *string* is the one
-    /// case where the secret rule would otherwise eat it, and the exemption is what stops that.
-    func testUsageCountersExemptFromTheSecretRuleEvenAsStrings() throws {
-        let v = try redacted(#"{"type":"result","max_tokens":"8","input_tokens":"12","cache_read_input_tokens":"0","access_token":"sk-ant-abc"}"#)
+
+    // MARK: - Secrets, mirroring redact.py rule 2 in full
+
+    /// The secret rule fires on any secret-named field whatever its type. Reading it as "any secret-named
+    /// *string*" is what left `{"authorization": {"value": "Bearer .."}}` on disk. `bearer` is a secret
+    /// word. `null` is never redacted — nothing there to leak, and a placeholder changes the field's type.
+    func testSecretRuleFiresOnContainersAndSkipsNull() throws {
+        let r = try responseBody(#"{"authorization":{"value":"Bearer x"},"cookies":[{"value":"c"}],"api_keys":{"primary":"p"},"bearer":"b","seven_day_oauth_apps":null,"usage":{"output_tokens_details":{"reasoning":3},"cacheReadInputTokens":9,"estimated_tokens_delta":1,"maxOutputTokens":4096,"progressToken":7}}"#)
+        for k in ["authorization", "cookies", "api_keys", "bearer"] { XCTAssertEqual(r[k], .string("<redacted>"), k) }
+        XCTAssertEqual(r["seven_day_oauth_apps"], .null)
+        // The token-counter test: `token` is the only secret word present and nothing under the value is a
+        // string, so each of these stays — including a whole dict of counters, without being listed anywhere.
+        XCTAssertEqual(r["usage"]?["output_tokens_details"], .object(["reasoning": .integer(3)]))
+        XCTAssertEqual(r["usage"]?["cacheReadInputTokens"], .integer(9))
+        XCTAssertEqual(r["usage"]?["estimated_tokens_delta"], .integer(1))
+        XCTAssertEqual(r["usage"]?["maxOutputTokens"], .integer(4096))
+        XCTAssertEqual(r["usage"]?["progressToken"], .integer(7))
+    }
+    /// C1's SECRET_EXEMPT: three structural names that happen to contain a secret word. `apiKeySource` has
+    /// its own rule on top — the literal value `none` is kept, anything else becomes a placeholder.
+    func testStructuralNamesExemptFromTheSecretRule() throws {
+        let r = try responseBody(#"{"projectKey":"-Users-alice-Developer","hookCallbackIds":["h1","h2"],"apiKeySource":"none","oauth_token":"t"}"#)
+        XCTAssertEqual(r["projectKey"], .string("-Users-alice-Developer"))   // names the directory a GUI reads to replay history
+        XCTAssertEqual(r["hookCallbackIds"], .array([.string("h1"), .string("h2")]))
+        XCTAssertEqual(r["apiKeySource"], .string("none"))
+        XCTAssertEqual(r["oauth_token"], .string("<redacted>"))            // `token` is not the only secret word here
+        let other = try responseBody(#"{"apiKeySource":"ANTHROPIC_API_KEY"}"#)
+        XCTAssertEqual(other["apiKeySource"], .string("<apiKeySource>"))
+    }
+    /// Usage counters are exempt by exact lowercased name whatever the value's type — the string form is
+    /// the one case where the secret rule would otherwise eat them.
+    func testUsageCountersExemptEvenAsStrings() throws {
+        let v = try redacted(#"{"type":"result","max_tokens":"8","input_tokens":"12","cache_read_input_tokens":"0","rawmaxtokens":"1","access_token":"x"}"#)
         XCTAssertEqual(v["max_tokens"], .string("8")); XCTAssertEqual(v["input_tokens"], .string("12"))
-        XCTAssertEqual(v["cache_read_input_tokens"], .string("0"))
+        XCTAssertEqual(v["cache_read_input_tokens"], .string("0")); XCTAssertEqual(v["rawmaxtokens"], .string("1"))
         XCTAssertEqual(v["access_token"], .string("<redacted>"))
+    }
+    /// Content patterns, which fire on a string wherever it sits and whatever its key is called. The
+    /// `ls -l` owner and group columns are matched by *position*: a directory listing carries the recording
+    /// machine's account name where no name-keyed rule looks.
+    func testContentPatternsInAnyString() throws {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        let long = String(repeating: "a", count: 40)
+        let r = try responseBody(#"{"text":"here is sk-ant-api03-XYZ and a jwt "# + jwt + #"","listing":"-rw-r--r--@  1 alice  staff  1024 Sep  5 10:00 notes.txt"}"#)
+        let text = try XCTUnwrap(r["text"]?.stringValue)
+        XCTAssertFalse(text.contains("sk-ant-api03")); XCTAssertFalse(text.contains("eyJhbGci"))
+        XCTAssertEqual(text, "here is <redacted> and a jwt <redacted>")
+        XCTAssertEqual(r["listing"], .string("-rw-r--r--@  1 <user>  <group>  1024 Sep  5 10:00 notes.txt"))
+        // A long random-looking query run is redacted wherever it sits, independently of rule 6, which only
+        // walks a control_response body.
+        let elsewhere = try redacted(#"{"type":"result","note":"see https://x/cb?state="# + long + #"&ok=1"}"#)
+        XCTAssertEqual(elsewhere["note"], .string("see https://x/cb?state=<redacted>&ok=1"))
+    }
+
+    // MARK: - Frame-scoped rules 5 and 6
+
+    /// A `get_settings` answer has its values dropped and replaced by the setting *names*. The keys that
+    /// produces all contain "key" and all carry lists of strings — exactly the shape the secret rule eats —
+    /// so C1 exempts them by path, and so does this.
+    func testGetSettingsBodyReducedToNamesWhichSurviveTheSecretRule() throws {
+        let r = try responseBody(#"{"effective":{"model":"haiku","apiKeyHelper":"/bin/x"},"sources":[{"source":"user","settings":{"theme":"dark","token":"t"}}]}"#)
+        XCTAssertNil(r["effective"]); XCTAssertNil(r["sources"])
+        XCTAssertEqual(r["effective_keys"], .array([.string("apiKeyHelper"), .string("model")]))
+        XCTAssertEqual(r["sources_keys"], .array([.object(["source": .string("user"), "keys": .array([.string("theme"), .string("token")])])]))
+    }
+    /// Rule 6 strips a URL query wholesale, and a callback URL is not always top-level.
+    func testOAuthCallbackURLQueriesStripped() throws {
+        let r = try responseBody(#"{"nested":{"url":"https://claude.ai/oauth/cb?code=abc&state=def"},"plain":"https://example.com/docs"}"#)
+        XCTAssertEqual(r["nested"]?["url"], .string("https://claude.ai/oauth/cb?<redacted>"))
+        XCTAssertEqual(r["plain"], .string("https://example.com/docs"))
+    }
+
+    // MARK: - Keys, idempotence, and the corpus
+
+    /// A key is data too: project maps are keyed by absolute path and contact maps by address. Two keys can
+    /// map onto one placeholder, and the second is disambiguated rather than silently overwriting the first.
+    func testKeysAreRedactedAndCollisionsDisambiguated() throws {
+        let r = try responseBody(#"{"contacts":{"a@b.co":1,"c@d.co":2,"plain":3}}"#)
+        let contacts = try XCTUnwrap(r["contacts"]?.objectValue)
+        XCTAssertEqual(contacts.count, 3)
+        XCTAssertEqual(Set(contacts.keys), ["<email>", "<email>#2", "plain"])
+        XCTAssertEqual(contacts["plain"], .integer(3))
+    }
+    /// Redaction is a fixed point: running it over its own output changes nothing. Every placeholder this
+    /// type emits has to be inert to the rule that produced it, which is what PLACEHOLDER_KEY_RE and the
+    /// "already a placeholder" checks exist for.
+    func testRedactionIsIdempotentOverTheCorpusAndTheVectors() throws {
+        for name in try TestPaths.sampleNames() { try assertIdempotent(try TestPaths.sample(name), name) }
+        let vector = #"{"type":"control_response","response":{"subtype":"success","request_id":"i","response":{"account":{"e":1},"emailAddress":"a@b.co","apiKeySource":"ANTHROPIC_API_KEY","token":"t","contacts":{"a@b.co":1,"c@d.co":2},"listing":"-rw-r--r--@  1 alice  staff  1 Sep  5 10:00 f","effective":{"m":1}}}}"#
+        try assertIdempotent(Data(vector.utf8), "vector")
+    }
+    private func assertIdempotent(_ raw: Data, _ label: String) throws {
+        guard let once = Redactor.redact(line: raw) else { return }
+        let twice = try XCTUnwrap(Redactor.redact(line: once), label)
+        XCTAssertEqual(String(decoding: twice, as: UTF8.self), String(decoding: once, as: UTF8.self), label)
     }
     func testTypedFramesStayTypedAfterRedaction() throws {
         for name in try TestPaths.sampleNames() {
