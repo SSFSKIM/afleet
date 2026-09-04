@@ -64,7 +64,20 @@ final class ImportGraphTests: XCTestCase {
         }
     }
 
-    /// The manifest's own edges obey X1: only AfleetCore comes from outside, and every edge points down.
+    /// X1's package-level half: `ClaudeWire` depends on `AfleetCore` and nothing else.
+    ///
+    /// The per-target check below cannot see this. A third-party product would be filtered out of a target's
+    /// derived dependency set before the rank comparison could fire, so the only place the "nothing but
+    /// AfleetCore leaves this package" half of X1 is observable is the manifest's own `dependencies:` list.
+    func testPackageDependsOnAfleetCoreAlone() throws {
+        let text = try String(contentsOf: packageRoot.appendingPathComponent("Package.swift"), encoding: .utf8)
+        let regex = try NSRegularExpression(pattern: #"\.package\(([^)]*)\)"#)
+        let declared = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            .map { String(text[Range($0.range(at: 1), in: text)!]).trimmingCharacters(in: .whitespaces) }
+        XCTAssertEqual(declared, [#"path: "../AfleetCore""#], "X1: ClaudeWire depends on AfleetCore alone")
+    }
+
+    /// The manifest's own edges obey X1: every edge points down, and none leaves this package's modules.
     func testManifestEdgesPointDownward() throws {
         let modules = Set(try moduleNames())
         for (target, deps) in try manifestDependencies(modules: modules) {
@@ -83,7 +96,7 @@ final class ImportGraphTests: XCTestCase {
     func testSourcesImportOnlyDeclaredDependencies() throws {
         let modules = try moduleNames()
         let declared = try manifestDependencies(modules: Set(modules))
-        let regex = try NSRegularExpression(pattern: #"^\s*(?:@_exported\s+)?import\s+(?:struct\s+|class\s+|enum\s+|func\s+|var\s+|typealias\s+)?([A-Za-z_][A-Za-z0-9_]*)"#,
+        let regex = try NSRegularExpression(pattern: #"^\s*(?:@_exported\s+)?(?:public\s+|package\s+|internal\s+|fileprivate\s+|private\s+)?import\s+(?:struct\s+|class\s+|enum\s+|func\s+|var\s+|typealias\s+)?([A-Za-z_][A-Za-z0-9_]*)"#,
                                             options: [.anchorsMatchLines])
         for module in modules {
             let dir = sourcesRoot.appendingPathComponent(module)
