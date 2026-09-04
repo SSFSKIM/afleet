@@ -62,11 +62,26 @@ final class ClaudeProcessTests: XCTestCase {
     func testHandshakeAndEcho() async throws {
         let h = try Harness(); let p = h.make(scenario: "")
         let hs = try await p.spawn()
-        XCTAssertEqual(hs.initialize.pid != nil, true); XCTAssertEqual(hs.systemInit.claudeCodeVersion, "2.1.259")
-        XCTAssertTrue(hs.systemInit.tools.contains("mcp__afleet__send_user_file"))
+        XCTAssertEqual(hs.initialize.pid != nil, true)
+        // The handshake carries no system/init, and — given time to arrive — none does: the engine opens each
+        // *turn* with that frame, and the stand-in models the engine.
+        //
+        // The settle is load-bearing. Reading the log the instant `spawn()` returns proves nothing: the reader
+        // pushes frames onto the channel and the collector drains it, both asynchronously, so the log is empty
+        // at that moment whatever the child emitted. Half a second is several orders of magnitude more than the
+        // stand-in needs to write the frame it used to write here.
+        try await Task.sleep(for: .milliseconds(500))
+        let systemFramesBeforeAnyTurn = await h.log.events.filter { if case .frame(.system, _) = $0 { return true }; return false }
+        XCTAssertEqual(systemFramesBeforeAnyTurn.count, 0, "a system frame arrived before any user message: \(systemFramesBeforeAnyTurn)")
         let running = await p.status; XCTAssertEqual(running, .running)
         _ = await h.expect({ if case .handshakeCompleted(_, let e) = $0 { return e == .first }; return false }, "handshakeCompleted with epoch")
         let uuid = try await p.send(UserInput(text: "ping"))
+        // The tool list, model and version reach a consumer here — off the event stream, with the turn.
+        guard case .frame(.system(.initialize(let sysInit)), .first)? = await h.expect({
+            if case .frame(.system(.initialize), _) = $0 { return true }; return false
+        }, "system/init opening the first turn") else { return }
+        XCTAssertEqual(sysInit.claudeCodeVersion, "2.1.259")
+        XCTAssertTrue(sysInit.tools.contains("mcp__afleet__send_user_file"))
         let reply = await h.expect({ if case .frame(.assistant(let a), _) = $0 { return a.userMessageUUID == uuid.uuidString.lowercased() }; return false }, "assistant echo bound by user_message_uuid")
         XCTAssertNotNil(reply)
         _ = await h.expect({ if case .frame(.result, .first) = $0 { return true }; return false }, "result frame tagged with epoch")

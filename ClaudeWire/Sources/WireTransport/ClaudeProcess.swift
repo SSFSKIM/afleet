@@ -33,13 +33,10 @@ public actor ClaudeProcess {
     private var pendingInbound: [RequestID: InboundRequest] = [:]
     private var seenInboundIDs: Set<RequestID> = []
     private var exitWaiters: [Waiter<ExitStatus>] = []
-    private let handshakeWaiter = Waiter<HandshakePair>()
-    private var handshakeInit: ControlSuccess?
-    private var handshakeSystemInit: SystemInit?
+    private let handshakeWaiter = Waiter<ControlSuccess>()
     private var handshakePending: [InboundRequest] = []
     private var terminating = false
     public private(set) var status: ProcessStatus = .launching
-    private struct HandshakePair: Sendable { let initialize: ControlSuccess; let systemInit: SystemInit }
 
     public init(epoch: ProcessEpoch, launch: LaunchConfiguration, environment: ResolvedEnvironment, configHome: ConfigHome,
                 initialize: InitializeConfiguration = .init(), policy: InboundPolicy? = nil, mcpServer: AfleetMCPServer,
@@ -90,11 +87,11 @@ public actor ClaudeProcess {
         let started = ContinuousClock.now
         let timer = handshakeWaiter.timeout(after: handshakeTimeout) { WireError.handshakeTimeout(stderrTail: "") }
         defer { timer.cancel() }
-        let pair: HandshakePair
+        let initializeResponse: ControlSuccess
         do {
             let line = try initialize.requestLine(requestID: RequestID(rawValue: "init-1"))
             try await writeLine(line, type: "control_request", subtype: "initialize", requestID: RequestID(rawValue: "init-1"))
-            pair = try await handshakeWaiter.value()
+            initializeResponse = try await handshakeWaiter.value()
         } catch {
             let tail = stderrTail()
             await terminate()
@@ -108,7 +105,7 @@ public actor ClaudeProcess {
         if !isExited { status = .running }
         diagnostics.record(.handshake(durationMs: Int((ContinuousClock.now - started) / .milliseconds(1)), epoch: epoch))
         let pending = handshakePending
-        let handshake = Handshake(initialize: InitializeResponse(raw: pair.initialize.response ?? .object([:])), systemInit: pair.systemInit, pending: pending)
+        let handshake = Handshake(initialize: InitializeResponse(raw: initializeResponse.response ?? .object([:])), pending: pending)
         // Nothing orders these against `processDidExit`'s terminal `.exited`: two continuations resuming on one
         // actor have no defined relative order, so a consumer could otherwise see a non-terminal event after
         // the terminal one, on a channel it may already have released. The handshake result is still returned
@@ -121,9 +118,6 @@ public actor ClaudeProcess {
             }
         }
         return handshake
-    }
-    private func handshakeProgress() {
-        if let i = handshakeInit, let s = handshakeSystemInit { handshakeWaiter.settle(.success(HandshakePair(initialize: i, systemInit: s))) }
     }
     /// Runs on the reader, synchronously, the moment the initialize response is decoded — before any suspension.
     /// The engine re-sends every pending request as a live `control_request` right after the handshake, so the
@@ -190,7 +184,7 @@ public actor ClaudeProcess {
         case .controlResponse(let resp):
             if resp.requestID.rawValue == "init-1" {
                 switch resp.body {
-                case .success(let s): handshakeInit = s; registerPending(s); handshakeProgress()
+                case .success(let s): registerPending(s); handshakeWaiter.settle(.success(s))
                 case .error(let e): handshakeWaiter.settle(.failure(WireError.handshakeRejected(e.error)))
                 }
                 return
@@ -211,9 +205,6 @@ public actor ClaudeProcess {
         case .controlCancelRequest(let cancel):
             if pendingInbound.removeValue(forKey: cancel.requestID) != nil { await channel.push(.requestCancelled(cancel.requestID, epoch)) }
             if let running = mcpTasks.removeValue(forKey: cancel.requestID) { running.cancel() }
-            await channel.push(.frame(frame, epoch))
-        case .system(.initialize(let sysInit)):
-            if handshakeSystemInit == nil { handshakeSystemInit = sysInit; handshakeProgress() }
             await channel.push(.frame(frame, epoch))
         default:
             await channel.push(.frame(frame, epoch))

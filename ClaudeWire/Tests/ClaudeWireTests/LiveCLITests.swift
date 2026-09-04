@@ -102,9 +102,14 @@ struct LiveBudgetReading: Equatable {
     }
 
     /// The second live signal: a `rate_limit_event` frame the engine emits when it refuses a turn outright.
-    /// `Fixtures/rate-limited-turn` records `status: "rejected"` alongside `rateLimitType: "seven_day"`.
+    ///
+    /// `status` alone decides it. `overageStatus` does **not**: a live run on 2026-09-05 observed
+    /// `{"status": "allowed", "overageStatus": "rejected", "overageDisabledReason": "org_level_disabled",
+    /// "rateLimitType": "five_hour"}` on a turn that ran to completion — overage means buying credits past the
+    /// plan, and an organisation that has switched that off refuses the overage, not the turn.
+    /// `Fixtures/rate-limited-turn` records a genuinely refused turn as `status: "rejected"`.
     static func rejects(rateLimitInfo info: JSONValue) -> Bool {
-        info["status"]?.stringValue == "rejected" || info["overageStatus"]?.stringValue == "rejected"
+        info["status"]?.stringValue == "rejected"
     }
 
     private static func number(_ v: JSONValue?) -> Double? {
@@ -212,13 +217,21 @@ final class LiveGateMachineryTests: XCTestCase {
         XCTAssertFalse(r.rateLimitsAvailable)
     }
 
-    /// `rate_limit_info` as recorded in `Fixtures/rate-limited-turn`.
-    func testRateLimitEventRejectionIsRecognised() {
-        let rejected = JSONValue.object(["status": .string("rejected"), "rateLimitType": .string("seven_day"),
-                                         "overageStatus": .string("rejected")])
-        let allowed = JSONValue.object(["status": .string("allowed"), "rateLimitType": .string("seven_day")])
-        XCTAssertTrue(LiveBudgetReading.rejects(rateLimitInfo: rejected))
-        XCTAssertFalse(LiveBudgetReading.rejects(rateLimitInfo: allowed))
+    /// Both real shapes: the refusal recorded in `Fixtures/rate-limited-turn`, and the allowed turn observed
+    /// live on 2026-09-05 whose `overageStatus` is `rejected` because the organisation disabled overage.
+    /// Reading the second as a refusal is what made a live run throw away a completed turn's evidence.
+    func testRateLimitEventRejectionIsRecognisedAndOverageStatusIsNot() {
+        let refusedTurn = JSONValue.object(["status": .string("rejected"), "rateLimitType": .string("seven_day"),
+                                            "overageStatus": .string("rejected"),
+                                            "overageDisabledReason": .string("out_of_credits")])
+        let allowedTurnWithOverageOff = JSONValue.object(["status": .string("allowed"), "rateLimitType": .string("five_hour"),
+                                                          "overageStatus": .string("rejected"),
+                                                          "overageDisabledReason": .string("org_level_disabled")])
+        let plainAllowed = JSONValue.object(["status": .string("allowed"), "rateLimitType": .string("seven_day")])
+        XCTAssertTrue(LiveBudgetReading.rejects(rateLimitInfo: refusedTurn))
+        XCTAssertFalse(LiveBudgetReading.rejects(rateLimitInfo: allowedTurnWithOverageOff),
+                       "overageStatus is about buying credits past the plan, not about whether the turn ran")
+        XCTAssertFalse(LiveBudgetReading.rejects(rateLimitInfo: plainAllowed))
     }
 }
 
@@ -290,27 +303,22 @@ final class LiveCLITests: XCTestCase {
 
     // MARK: the inference-free half
 
-    /// The finding G3 produced on its first live run, in the one place both spawning tests need it.
-    ///
-    /// The engine answers `control_request/initialize` at once but emits no `system/init` until a user message
-    /// is submitted: all sixteen of C1's recorded fixtures place `system/init` after the first `user` frame, and
-    /// the two that submit nothing — `zero-cost` and `resume-no-replay` — contain none at all. On the
-    /// stream-json output this app consumes that frame is built on the message-submission path (2.1.258
-    /// `cli.pretty.js`: `submitMessage`'s generator yields `qe` → `ku` → `Mxe`, line 146882), not at startup.
-    /// `ClaudeProcess.spawn()` waits for the initialize response *and* `system/init`, so against the real
-    /// engine it cannot return before the first turn.
-    private func spawnAgainstTheInstalledCLI(_ process: ClaudeProcess,
-                                             file: StaticString = #filePath, line: UInt = #line) async -> Handshake? {
-        do { return try await process.spawn(handshakeTimeout: .seconds(20)) }
-        catch {
-            await process.terminate()
-            XCTFail("""
-                spawn() did not complete the handshake against the installed CLI: \(error). \
-                The engine emits no system/init before the first user message and spawn() waits for one; \
-                see the comment on spawnAgainstTheInstalledCLI for the fixture and bundle evidence.
-                """, file: file, line: line)
-            return nil
+    /// Polls `mcp_status` until the named server is connected, and fails with the last reading if it never is.
+    /// Zero cost: `mcp_status` is a control request, not a turn.
+    private func awaitMCPServer(named name: String, on process: ClaudeProcess, within deadline: Duration,
+                                file: StaticString = #filePath, line: UInt = #line) async throws -> JSONValue {
+        let start = ContinuousClock.now
+        var last: JSONValue = .null
+        while ContinuousClock.now - start < deadline {
+            last = try await process.request(MCPStatus(), timeout: .seconds(30))
+            if let server = last["mcpServers"]?.arrayValue?.first(where: { $0["name"]?.stringValue == name }),
+               server["status"]?.stringValue == "connected" {
+                return server
+            }
+            try await Task.sleep(for: .milliseconds(100))
         }
+        XCTFail("the \(name) MCP server never reached connected within \(deadline); last mcp_status: \(last)", file: file, line: line)
+        throw XCTSkip("unreachable: XCTFail above ends the test")
     }
 
     /// The installed build is accepted and a fabricated older one is refused, both through the same gate.
@@ -410,15 +418,17 @@ final class LiveCLITests: XCTestCase {
         let log = LiveEventLog()
         Task { for await ev in process.events { await log.append(ev) } }
 
-        guard await spawnAgainstTheInstalledCLI(process) != nil else { return }
+        _ = try await process.spawn()
 
         // The engine's namespaced tool list lives only in `system/init`, which no session emits before its first
         // turn. `mcp_status` is the zero-cost equivalent for the claim this inference-free half makes: the
         // in-process server is connected and offers exactly the host tool. Shape from `Fixtures/zero-cost`.
-        let status = try await process.request(MCPStatus(), timeout: .seconds(30))
-        let afleet = try XCTUnwrap(status["mcpServers"]?.arrayValue?.first { $0["name"]?.stringValue == "afleet" },
-                                   "the in-process MCP server is absent from mcp_status: \(status)")
-        XCTAssertEqual(afleet["status"]?.stringValue, "connected")
+        //
+        // Polled, not asked once. The engine drives its own JSON-RPC handshake against this server after
+        // startup — `Fixtures/zero-cost` records `initialize`, `notifications/initialized` and `tools/list`
+        // arriving around 0.9 s in — and now that `spawn()` returns on the initialize response alone, a single
+        // immediate `mcp_status` beats it and comes back `{"mcpServers": []}`. That happened on a live run.
+        let afleet = try await awaitMCPServer(named: "afleet", on: process, within: .seconds(30))
         XCTAssertEqual(afleet["tools"]?.arrayValue?.compactMap { $0["name"]?.stringValue }, ["send_user_file"],
                        "mcp_status listed a different tool set for the afleet server: \(afleet)")
 
@@ -428,7 +438,10 @@ final class LiveCLITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(reported, ProtocolBaseline.baseline)
 
         await process.terminate()
-        let events = await log.events
+        // Waited for, not read at once: `terminate()` returns when the actor has observed the exit, but the
+        // `.exited` event travels the channel to the collector afterwards. Reading immediately observed an
+        // empty log on a live run.
+        let events = await log.wait(upTo: .seconds(10)) { $0.contains { if case .exited = $0 { return true }; return false } }
 
         // end_session ended it: had it not, `terminate()` would have escalated and the steps would include SIGTERM.
         XCTAssertEqual(diagnostics.steps, ["end_session", "stdin_closed"], "termination escalated past end_session")
@@ -463,7 +476,8 @@ final class LiveCLITests: XCTestCase {
         let bySetup = ConfigHomeWitness.difference(from: atStart, to: beforeSpawn)
         XCTAssertTrue(bySetup.isEmpty, "X9: the test's own setup touched the config home — \(bySetup.summary)")
 
-        var launch = LaunchConfiguration(binary: binary, cwd: cwd, session: .new(SessionID()), model: "haiku",
+        let sessionID = SessionID()
+        var launch = LaunchConfiguration(binary: binary, cwd: cwd, session: .new(sessionID), model: "haiku",
                                          permissionMode: .default, settingSources: [], strictMCPConfig: true)
         launch.configHomeOverride = Self.scratchHome
         let process = ClaudeProcess(epoch: .first, launch: launch, environment: env,
@@ -485,9 +499,13 @@ final class LiveCLITests: XCTestCase {
             }
         }
 
-        guard let handshake = await spawnAgainstTheInstalledCLI(process) else { return }
-        XCTAssertTrue(handshake.systemInit.tools.contains("mcp__afleet__send_user_file"),
-                      "no host tool to invoke: \(handshake.systemInit.tools)")
+        _ = try await process.spawn()
+        // Nothing asserts the tool list here: the handshake does not carry one. `system/init` opens the turn,
+        // and it is read off the event stream below — which is also the amended G3 acceptance text.
+        //
+        // The server must be connected before the prompt goes out, or the turn is spent on a session with no
+        // host tool to call. This is a wait, not an assertion about the engine's speed.
+        _ = try await awaitMCPServer(named: "afleet", on: process, within: .seconds(30))
 
         let usage = LiveBudgetReading.read(getUsage: try await process.request(GetUsage(), timeout: .seconds(30)))
         guard usage.rateLimitsAvailable, !usage.examined.isEmpty else {
@@ -509,6 +527,16 @@ final class LiveCLITests: XCTestCase {
             events.contains { if case .frame(.result, _) = $0 { return true }; if case .exited = $0 { return true }; return false }
         }
         await process.terminate()
+
+        // G3, amended: the first turn's system/init lists the host tool, observed on the event stream.
+        let inits = events.compactMap { if case .frame(.system(.initialize(let i)), _) = $0 { return i }; return nil }
+        XCTAssertEqual(inits.count, 1, "expected exactly one system/init for one turn, saw \(inits.count)")
+        if let systemInit = inits.first {
+            XCTAssertTrue(systemInit.tools.contains("mcp__afleet__send_user_file"),
+                          "system/init.tools does not list the host tool: \(systemInit.tools)")
+            XCTAssertEqual(systemInit.sessionID, sessionID.description)
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(SemanticVersion(parsing: systemInit.claudeCodeVersion)), ProtocolBaseline.baseline)
+        }
 
         // A refusal is a budget signal, not a defect: the reading above raced the engine's own accounting.
         let rejection = events.compactMap { event -> JSONValue? in
@@ -540,8 +568,8 @@ final class LiveCLITests: XCTestCase {
         // The transcript the engine wrote proves the override reached the child: this session's id, under the
         // scratch home, in a tree the test never touched.
         let byChild = ConfigHomeWitness.difference(from: beforeSpawn, to: witness.read())
-        let transcripts = byChild.created.filter { $0.hasPrefix("projects/") && $0.hasSuffix("/\(handshake.systemInit.sessionID).jsonl") }
-        XCTAssertEqual(transcripts.count, 1, "expected one transcript for session \(handshake.systemInit.sessionID) under projects/, created: \(byChild.created.sorted())")
+        let transcripts = byChild.created.filter { $0.hasPrefix("projects/") && $0.hasSuffix("/\(sessionID).jsonl") }
+        XCTAssertEqual(transcripts.count, 1, "expected one transcript for session \(sessionID) under projects/, created: \(byChild.created.sorted())")
     }
 }
 

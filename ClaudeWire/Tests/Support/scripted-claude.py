@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Protocol stand-in for ClaudeWire transport tests. Python 3.9+, stdlib only. See the plan's scenario table."""
+"""Protocol stand-in for ClaudeWire transport tests. Python 3.9+, stdlib only. See the plan's scenario table.
+
+This file models the *recorded* engine. Any behaviour it emits that no fixture in `Fixtures/` shows is a defect
+in this stand-in, not a licence for the code under test. It exists to reproduce what `claude` does, never to
+agree with what a specification assumed it does.
+
+The rule earned its place: this stand-in used to answer `control_request/initialize` and then emit `system/init`
+in the same breath, so eleven tasks of transport tests passed against a handshake the real engine never
+performs. The engine emits `system/init` at the start of each **turn** — every recorded fixture places it after
+the first `user` frame, and `zero-cost` and `resume-no-replay`, which submit nothing, contain none at all.
+"""
 import json, os, signal, sys, threading, time
 
 SCENARIOS = [s for s in os.environ.get("SCRIPTED_CLAUDE_SCENARIO", "").split(",") if s]
@@ -114,7 +124,6 @@ def handle(line):
                     {"type": "control_request", "request": {"subtype": "can_use_tool"}},   # no request_id: undecodable as a control request
                 ]
             emit({"type": "control_response", "response": body})
-            emit(dict(INIT_FRAME, uuid=uuid()))
             if has("pending"): can_use_tool("p1")
             threading.Thread(target=after_init, daemon=True).start()
         elif sub == "end_session":
@@ -150,6 +159,8 @@ def handle(line):
     elif t == "user":
         content = frame["message"]["content"]
         text = content if isinstance(content, str) else " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+        # system/init opens the turn, as it does in every recorded fixture — never at handshake.
+        emit(dict(INIT_FRAME, uuid=uuid()))
         emit({"type": "assistant", "message": {"id": "msg_echo", "type": "message", "role": "assistant", "model": "scripted", "content": [{"type": "text", "text": "echo: " + text}], "stop_reason": "end_turn", "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}}, "parent_tool_use_id": None, "uuid": uuid(), "session_id": SESSION, "user_message_uuid": frame.get("uuid")})
         emit({"type": "result", "subtype": "success", "duration_ms": 1, "duration_api_ms": 1, "is_error": False, "num_turns": 1, "result": "echo: " + text, "stop_reason": "end_turn", "total_cost_usd": 0, "usage": {"input_tokens": 1, "output_tokens": 1}, "modelUsage": {}, "permission_denials": [], "uuid": uuid(), "session_id": SESSION})
 
