@@ -50,6 +50,7 @@ transcript. No §4.5 rule looked there: an owner column is neither the home dire
 hostname nor an identity-named field. `LS_LONG_RE` now redacts the owner and group columns **by
 position**, so the rule needs no knowledge of the account name, and `make redact` was re-run
 over this fixture. The listing reads `<user>  <group>` and nothing else about the recording
-changed. `redaction.json` was rewritten by that run and therefore records what a re-run over
-already-redacted bytes finds rather than what the original recording redacted; the recording-time
-manifest is in the fixture's first commit.
+changed. `redaction.json` now records both the recording's own substitutions and the six the
+owner-column rule made — fifteen identity substitutions in all — because `redact` adds to the
+manifest already on disk rather than replacing it, and no longer counts a substitution that
+changes nothing. Re-running `make redact` on this fixture is a byte-for-byte no-op.

@@ -489,50 +489,77 @@ class VerifyTests(unittest.TestCase):
         streams[rel] = 0
         write(os.path.join(d, "streams.json"), json.dumps(streams))
 
-    def test_mirror_identity_only_licenses_a_field_difference_the_identities_survive(self):
-        """A subagent's sidecar and its mirror are two snapshots of one record; `usage` and
-        `stop_reason` can differ while the identity sequence is equal."""
+    def _declare(self, d, scopes):
+        meta = read_json(os.path.join(d, "fixture.json"))
+        meta["mirror_identity_only"] = scopes
+        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+
+    def test_mirror_identity_only_licenses_a_declared_field_the_identities_survive(self):
+        """A subagent's sidecar and its mirror are two snapshots of one record; `stop_reason` and
+        `usage` can differ while the identity sequence is equal."""
         d = build_fixture(self.root)
         self._with_subagent_stream(
             d,
             mirrored=[{"type": "assistant", "uuid": "s1", "message": {"stop_reason": "end_turn"}}],
             on_disk=[{"type": "assistant", "uuid": "s1", "message": {"stop_reason": None}}])
         self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
-        meta = read_json(os.path.join(d, "fixture.json"))
-        meta["mirror_identity_only"] = ["subagents/"]
-        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+        self._declare(d, {"subagents/": ["message.stop_reason", "message.usage"]})
         errors, notes = verify.verify_fixture(d, home=self.root)
         self.assertEqual(errors, [])
         self.assertTrue(any("message.stop_reason" in n for n in notes), notes)
 
+    def test_a_field_the_declaration_does_not_name_still_fails(self):
+        """*Whether* the two disagree is a race; *which fields* can is not, so it is declared."""
+        d = build_fixture(self.root)
+        self._with_subagent_stream(
+            d,
+            mirrored=[{"type": "assistant", "uuid": "s1", "message": {"content": "mirrored"}}],
+            on_disk=[{"type": "assistant", "uuid": "s1", "message": {"content": "on disk"}}])
+        self._declare(d, {"subagents/": ["message.stop_reason", "message.usage"]})
+        errors = self.errors(d)
+        self.assertTrue(any("does not declare: message.content" in e for e in errors), errors)
+
     def test_mirror_identity_only_still_fails_when_an_identity_is_missing(self):
-        """Count, order and identity stay strict; only the fields are relaxed."""
+        """Count, order and identity stay strict; only the declared fields are relaxed."""
         d = build_fixture(self.root)
         self._with_subagent_stream(
             d,
             mirrored=[{"type": "assistant", "uuid": "s1"}, {"type": "assistant", "uuid": "s2"}],
             on_disk=[{"type": "assistant", "uuid": "s1"}])
-        meta = read_json(os.path.join(d, "fixture.json"))
-        meta["mirror_identity_only"] = ["subagents/"]
-        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+        self._declare(d, {"subagents/": ["message.stop_reason"]})
         self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
 
-    def test_mirror_identity_only_does_not_reach_the_main_stream(self):
-        """The declaration names streams; a main transcript that drifts by field still fails."""
+    def test_a_scope_matching_a_stream_that_is_not_an_agent_sidecar_is_refused(self):
+        """The match is a substring test, so `.jsonl` or an empty scope would otherwise relax
+        every stream in the fixture -- the one thing this declaration must not be able to do."""
         d = build_fixture(self.root)
         write(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"),
               json.dumps({"type": "assistant", "uuid": "a2", "message": {"stop_reason": None}}) + "\n")
-        meta = read_json(os.path.join(d, "fixture.json"))
-        meta["mirror_identity_only"] = ["subagents/"]
-        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+        self._declare(d, {".jsonl": ["message.stop_reason"]})
+        errors = self.errors(d)
+        self.assertTrue(any("not an agent sidecar stream" in e for e in errors), errors)
+        self.assertTrue(any("mirror entries" in e for e in errors), errors)
+
+    def test_mirror_identity_only_does_not_reach_the_main_stream(self):
+        """A main transcript that drifts by field still fails even beside a valid declaration."""
+        d = build_fixture(self.root)
+        write(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"),
+              json.dumps({"type": "assistant", "uuid": "a2", "message": {"stop_reason": None}}) + "\n")
+        self._with_subagent_stream(d, mirrored=[{"type": "assistant", "uuid": "s1"}],
+                                   on_disk=[{"type": "assistant", "uuid": "s1"}])
+        self._declare(d, {"subagents/": ["message.stop_reason"]})
         errors = self.errors(d)
         self.assertTrue(any("mirror entries" in e for e in errors), errors)
 
+    def test_the_earlier_list_shape_of_the_declaration_is_reported_rather_than_crashing(self):
+        """`fixture.json` is data read off disk and this field used to be a bare list."""
+        d = build_fixture(self.root)
+        self._declare(d, ["subagents/"])
+        self.assertTrue(any("must map a stream scope" in e for e in self.errors(d)))
+
     def test_a_mirror_identity_only_declaration_nothing_matches_is_reported_as_stale(self):
         d = build_fixture(self.root)
-        meta = read_json(os.path.join(d, "fixture.json"))
-        meta["mirror_identity_only"] = ["subagents/"]
-        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+        self._declare(d, {"subagents/": ["message.stop_reason"]})
         self.assertTrue(any("mirror_identity_only" in e and "no mirrored stream" in e for e in self.errors(d)))
 
     def test_a_synthetic_fixture_that_declares_a_transcript_is_still_mirror_checked(self):

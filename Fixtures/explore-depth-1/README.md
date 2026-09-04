@@ -40,14 +40,16 @@ recording and neither true of the main stream:
   the `.meta.json` sidecar's content with a `type` added, emitted when the agent starts and
   again whenever an auto-turn re-engages it. `verify` holds each one against the sidecar it
   claims to be rather than against the stream's records.
-- `mirror_identity_only: ["subagents/"]`. The sidecar file and its mirror are two snapshots of
-  the same record taken at different moments: the record that closes an assistant message
-  reaches the file with `stop_reason: null` and a partial `usage` on some runs and finalised on
-  others, and the file is never rewritten. This recording agrees field for field; an earlier
-  recording of this scenario against the same binary diverged on two of eleven records in
-  `message.stop_reason` and `message.usage`. The declaration keeps count, order and record
-  identity strict — which is what the parent's §7.3 invariant states — and reports any field
-  difference as a note on every run.
+- `mirror_identity_only: {"subagents/": ["message.stop_reason", "message.usage"]}`. The sidecar
+  file and its mirror are two snapshots of the same record taken at different moments: the
+  record that closes an assistant message reaches the file with `stop_reason: null` and a
+  partial `usage` on some runs and finalised on others, and the file is never rewritten. This
+  recording agrees field for field; an earlier recording of this scenario against the same
+  binary diverged on two of eleven records in exactly the two fields named. The declaration
+  names them rather than licensing all fields, because *whether* the two disagree is timing but
+  *which* fields can is not. Count, order and record identity stay strict — that is the parent's
+  §7.3 comparison, logical stream plus record `uuid` or a stable hash — and every field outside
+  the two is still compared.
 
 The main transcript's 33 records are reproduced by its mirror exactly, as in every other
 recording in this corpus.

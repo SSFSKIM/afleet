@@ -348,6 +348,32 @@ class ManifestAndScanContractTests(unittest.TestCase):
     def setUp(self):
         self.r = redact.Redactor(home="/Users/probe", hostname="probe-mac")
 
+    def test_a_substitution_that_changes_nothing_is_not_counted(self):
+        """The owner column rule matches its own placeholders, so counting matches rather than
+        changes would inflate the manifest on every `redact` re-run of a committed fixture."""
+        once = self.r.redact_text("-rw-r--r--  1 someone  somegroup  4 x", path="p")
+        first = self.r.manifest()["rules"]["identity"]["count"]
+        self.assertEqual(first, 1)
+        self.r.redact_text(once, path="p")
+        self.assertEqual(self.r.manifest()["rules"]["identity"]["count"], first)
+
+    def test_a_manifest_adds_to_the_one_already_on_disk(self):
+        """`redact` re-runs over bytes the recording already redacted, so a fresh manifest records
+        what is left rather than what was done; it is summed onto the prior file, not replacing it."""
+        self.r.redact_text("-rw-r--r--  1 someone  somegroup  4 x", path="stdout")
+        prior = {"rules": {"identity": {"count": 9, "paths": {"attachment.userEmail": 1, "stdout": 2}},
+                           "secrets": {"count": 0, "paths": {}}}}
+        merged = self.r.manifest(prior)["rules"]
+        self.assertEqual(merged["identity"]["count"], 10)
+        self.assertEqual(merged["identity"]["paths"]["attachment.userEmail"], 1)
+        self.assertEqual(merged["identity"]["paths"]["stdout"], 3)
+        self.assertEqual(sorted(merged), sorted(self.r.manifest()["rules"]))
+
+    def test_merging_a_manifest_with_nothing_new_leaves_it_alone(self):
+        """Which is what makes the sum stable rather than merely additive."""
+        prior = {"rules": {"identity": {"count": 9, "paths": {"a": 9}}}}
+        self.assertEqual(redact.Redactor(home="/Users/probe").manifest(prior)["rules"]["identity"], prior["rules"]["identity"])
+
     def test_manifest_is_idempotent_across_runs(self):
         frame = {"type": "control_response", "response": {"request_id": "r3",
                  "response": {"manualUrl": "https://c.ai/o?a=b"}}}

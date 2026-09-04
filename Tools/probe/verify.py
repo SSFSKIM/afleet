@@ -373,6 +373,7 @@ def _check_artifacts(path, frames):
 
 
 SIDECAR_ENTRY_TYPE = "agent_metadata"
+SIDECAR_STREAM_MARKER = "subagents/"
 
 
 def _is_sidecar_entry(entry):
@@ -497,19 +498,33 @@ def _check_mirror(path, fx):
     # records -- `ai-title`, `atis-latch`, `file-history-snapshot`, `last-prompt`,
     # `queue-operation` -- carry no `uuid` and are written to the file like any other.
     #
-    # `mirror_identity_only` is the third declaration and the only one that is not a count,
+    # `mirror_identity_only` is the second declaration and the only one that is not a count,
     # because what it licenses does not have a stable one. A subagent's sidecar file and its
     # mirror are two snapshots of the same record taken at different moments: the record that
     # closes an assistant message reaches the file with `stop_reason: null` and a partial
     # `usage` on some runs and finalised on others, and the file is never rewritten, so the two
-    # disagree by field while agreeing by identity. Whether they disagree at all is a race, so
-    # a count would rot on the next recording. The parent's §7.3 invariant is stated as records
-    # equal "by record identity", which is exactly what stays checked here: the declaration
-    # names streams whose records are compared by `uuid` sequence, so count, order and identity
-    # are still strict, and every field difference is reported as a note on every run rather
-    # than passing in silence. Main streams are untouched and remain compared in full.
+    # disagree by field while agreeing by identity. *Whether* they disagree is a race and a
+    # count of diverging records would rot on the next recording -- but *which fields* can
+    # disagree is not a race, and is declared. So the declaration is a mapping from a stream
+    # scope to the field paths that may differ inside it: identity, order and count stay
+    # strict, every other field stays compared, and a genuinely corrupt agent mirror still
+    # fails. §7.3 defines record identity as the logical stream plus record `uuid` or a stable
+    # hash for uuid-less records, and its Decision Log rejects "whole-file equality as the
+    # invariant" outright, so comparing by identity is the spec's own comparison and the
+    # field-for-field equality this check used to apply was an addition on top of it.
+    #
+    # The scope is checked structurally as well as matched: a declaration is refused unless
+    # every stream it matches is an agent sidecar. The match is a substring test, so a scope of
+    # `.jsonl` or of the empty string would otherwise relax every stream in the fixture, which
+    # is the one thing this declaration must never be able to do.
     declared = int(meta.get("unmirrored_prefix") or 0)
-    identity_pats = list(meta.get("mirror_identity_only") or ())
+    identity_scopes = meta.get("mirror_identity_only") or {}
+    if not isinstance(identity_scopes, dict):
+        # A boundary check, not a defensive one: `fixture.json` is data read off disk, and the
+        # earlier shape of this field was a bare list. A list would otherwise reach `dict()` and
+        # fail the whole verification with a traceback naming neither the fixture nor the field.
+        return errors + ["fixture.json mirror_identity_only must map a stream scope to the field "
+                         "paths that may differ, not %s" % type(identity_scopes).__name__], notes
     used = set()
     skipped = 0
     for stream, entries in sorted(mirrored.items()):
@@ -524,8 +539,16 @@ def _check_mirror(path, fx):
         except ValueError:
             errors.append("transcript/%s is not valid JSONL and cannot be compared with the mirror" % stream)
             continue
-        hit = [pat for pat in identity_pats if pat in stream]
+        hit = [pat for pat in identity_scopes if pat in stream]
         used.update(hit)
+        if hit and SIDECAR_STREAM_MARKER not in stream:
+            errors.append("fixture.json declares mirror_identity_only %s, which matches %s -- not an agent "
+                          "sidecar stream, the only kind the declaration is for"
+                          % (", ".join(sorted(hit)), stream))
+            hit = []
+        allowed = set()
+        for pat in hit:
+            allowed.update(identity_scopes[pat] or ())
         keyed = [e for e in entries if not _is_sidecar_entry(e)]
         sidecars = [e for e in entries if _is_sidecar_entry(e)]
         if sidecars:
@@ -545,18 +568,24 @@ def _check_mirror(path, fx):
                 matched = True
                 break
         if not matched and hit and _identities(got) == _identities(head + keyed):
-            matched = True
-            notes.append("mirror content drift on %s: %d of %d records differ from the file by field "
-                         "(%s); the identity sequence is equal (mirror_identity_only)"
-                         % (stream, sum(1 for a, b in zip(got, head + keyed) if a != b), len(got),
-                            ", ".join(sorted(_drift_fields(got, head + keyed))) or "no top-level field"))
+            matched = True                                  # identity holds; the fields decide the verdict
+            drift = _drift_fields(got, head + keyed)
+            undeclared = drift - allowed
+            if undeclared:
+                errors.append("mirror content drift on %s in field(s) mirror_identity_only does not declare: %s"
+                              % (stream, ", ".join(sorted(undeclared))))
+            elif drift:
+                notes.append("mirror content drift on %s: %d of %d records differ from the file in %s; the "
+                             "identity sequence is equal and every field is declared (mirror_identity_only)"
+                             % (stream, sum(1 for a, b in zip(got, head + keyed) if a != b), len(got),
+                                ", ".join(sorted(drift))))
         if not matched:
             errors.append("mirror entries for %s do not reproduce transcript/%s (%d mirrored, %d of them "
                           "sidecar metadata, + %d initial vs %d records, unmirrored_prefix %d)"
                           % (stream, stream, len(entries), len(sidecars), len(head), len(got), declared))
     if declared and skipped != declared:
         errors.append("fixture.json declares unmirrored_prefix %d but the mirror check needed %d" % (declared, skipped))
-    for pat in sorted(set(identity_pats) - used):
+    for pat in sorted(set(identity_scopes) - used):
         errors.append("fixture.json declares mirror_identity_only %r but no mirrored stream matches it" % pat)
     return errors, notes
 

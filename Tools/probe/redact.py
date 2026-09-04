@@ -179,31 +179,57 @@ class Redactor:
         self.counts[rule]["count"] += 1
         self.counts[rule]["paths"][self.redact_text(path, record=False) or "$"] += 1
 
-    def manifest(self):
-        return {"rules": {r: {"count": v["count"], "paths": dict(v["paths"])} for r, v in self.counts.items()}}
+    def manifest(self, prior=None):
+        """What this redactor substituted, optionally added to what a `prior` manifest records.
+
+        `redact` re-runs the rules over a fixture whose bytes are already redacted, so a fresh
+        manifest records only what that pass found -- which, for everything the first pass
+        already caught, is nothing. Replacing the file would therefore turn the manifest from a
+        record of what was redacted into a record of what the last re-run happened to find, and
+        REVIEW item 4 asks a reviewer to read it as the former. Summing is stable rather than
+        merely additive: a rule with nothing left to substitute contributes zero, so re-running
+        twice changes nothing, and a rule added after the recording (the `ls -l` owner column)
+        shows up as the new substitutions it made on top of the old ones.
+        """
+        out = {r: {"count": v["count"], "paths": dict(v["paths"])} for r, v in self.counts.items()}
+        for rule, before in ((prior or {}).get("rules") or {}).items():
+            entry = out.setdefault(rule, {"count": 0, "paths": {}})
+            entry["count"] += before.get("count", 0)
+            for path, n in (before.get("paths") or {}).items():
+                entry["paths"][path] = entry["paths"].get(path, 0) + n
+        return {"rules": out}
 
     # ---- text
     def redact_text(self, s, path="", record=True):
         """Rules 1, 2 and 3 over a string. `record=False` suppresses bookkeeping, which is
-        what `_hit` needs to sanitise a manifest path without recursing into itself."""
+        what `_hit` needs to sanitise a manifest path without recursing into itself.
+
+        A rule is counted when it **changes** the string, never merely when it matches. Most
+        rules cannot match their own output, so the two are the same for them -- but the owner
+        column rule can: `<user>` and `<group>` sit where a name and a group sat, so it matches
+        its own placeholders and substitutes them to themselves. Counting the match would inflate
+        the manifest on every `redact` re-run of a committed fixture, which is the rot the
+        manifest merge exists to avoid, so the test is on the result rather than on the match.
+        """
+        def apply(text, rule, fn):
+            after = fn(text)
+            if after != text and record:
+                self._hit(rule, path)
+            return after
+
         out = s
-        out, k = EMAIL_RE.subn("<email>", out)
-        if k and record: self._hit("identity", path)
+        out = apply(out, "identity", lambda t: EMAIL_RE.sub("<email>", t))
         for rx in (SK_ANT_RE, JWT_RE):
-            out, k = rx.subn("<redacted>", out)
-            if k and record: self._hit("secrets", path)
-        out, k = QUERY_RUN_RE.subn(lambda m: m.group(1) + "<redacted>", out)
-        if k and record: self._hit("secrets", path)
-        out, k = LS_LONG_RE.subn(lambda m: m.group(1) + LS_USER + m.group(3) + LS_GROUP, out)
-        if k and record: self._hit("identity", path)
+            out = apply(out, "secrets", lambda t, rx=rx: rx.sub("<redacted>", t))
+        out = apply(out, "secrets", lambda t: QUERY_RUN_RE.sub(lambda m: m.group(1) + "<redacted>", t))
+        out = apply(out, "identity",
+                    lambda t: LS_LONG_RE.sub(lambda m: m.group(1) + LS_USER + m.group(3) + LS_GROUP, t))
         for h in (self.home, self.home_raw):
-            if h and h != "/" and h in out:
-                out = out.replace(h, "~")
-                if record: self._hit("paths_host", path)
+            if h and h != "/":
+                out = apply(out, "paths_host", lambda t, h=h: t.replace(h, "~"))
         for h in (self.hostname, self.short_host):
-            if h and len(h) > 2 and h in out:
-                out = out.replace(h, "<host>")
-                if record: self._hit("paths_host", path)
+            if h and len(h) > 2:
+                out = apply(out, "paths_host", lambda t, h=h: t.replace(h, "<host>"))
         return out
 
     # ---- structural

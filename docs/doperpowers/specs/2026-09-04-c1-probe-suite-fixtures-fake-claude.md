@@ -928,16 +928,27 @@ which `record` spills to its temporary file, set from the largest recorded scena
   `subagents/agent-<id>.jsonl` opens with an entry of type `agent_metadata`, and the `.jsonl`
   never receives it: it is the neighbouring `agent-<id>.meta.json` sidecar's content, field for
   field, with a `type` added. The engine emits one when the agent starts and another each time
-  an auto-turn re-engages it, so neither the count nor the position is fixed. Impact:
-  **[parent-impact]** on §7.3's invariant clause, "the records delivered in `transcript_mirror`
-  frames during the recording equal, by record identity, the file's records in the byte range
-  appended during that same recording". That is false for an agent stream by these entries,
-  which belong to a different file. The clause is binding prose and is not edited here. What
-  `verify` does instead is not an allowance but a second assertion: an `agent_metadata` entry is
-  held against the `.meta.json` the fixture carries, so a mirror announcing metadata no sidecar
-  holds fails. The route this opens for C3 is worth stating plainly -- a host reading the mirror
-  has `parentAgentId` and the agent's type before the sidecar file exists, which is what §8.8's
-  tree needs at spawn time.
+  an auto-turn re-engages it, so neither the count nor the position is fixed. Impact: **no
+  parent impact -- §7.3 already prescribes exactly this, and these recordings are the first
+  confirmation of it on the wire.** The invariant clause reads "the records delivered in
+  `transcript_mirror` frames during the recording equal, by record identity, the file's records
+  in the byte range appended during that same recording: not the whole file, because the mirror
+  never carries history, **and with `agent_metadata` entries compared against the paired
+  `.meta.json` instead**", and §7.3's source-arbitration paragraph already names "the
+  `agent_metadata` record the CLI mirrors into the transcript stream when it writes a
+  `.meta.json` (*SPEC 18.25.2*), which the reducer treats as its own record type rather than
+  expecting it in a JSONL". So `verify` holding the entry against the sidecar is compliance with
+  the clause and not a deviation from it, and the field-for-field equality this check used to
+  apply was `verify.py`'s own addition on top of the spec -- the Decision Log rejects "whole-file
+  equality as the invariant" in as many words. This entry was first written as a
+  `[parent-impact]` on a quotation that stopped one clause short of the sentence that disproves
+  it, which is the error worth recording: the clause was read second-hand from an earlier
+  Surprises entry in this document rather than from §7.3, and a truncated quotation removes
+  exactly the half that would have stopped it. What the recordings do add is the wire evidence
+  the clause never had, and one detail it does not state -- the entry arrives at the *head* of a
+  subagent stream's mirror and again on each re-engagement, so a host reading the mirror has
+  `parentAgentId` and the agent's type before the sidecar file exists, which is what §8.8's tree
+  needs at spawn time.
 
 - Observation: The mirror-fidelity check's premise -- that a mirrored record equals the record
   on disk -- is true of every main stream in the corpus and **not** of an agent stream.
@@ -948,12 +959,18 @@ which `record` spills to its temporary file, set from the largest recorded scena
   still in the partial state long after the process exited. The two are snapshots of one mutable
   record taken at different moments, the file is written once and never rewritten, and which
   snapshot each takes is timing. Impact: a count of diverging records would rot on the next
-  recording, so the escape is `mirror_identity_only`, a scenario-declared list of stream-path
-  substrings compared by `uuid` sequence rather than field for field -- which is exactly what
-  §7.3's "by record identity" states -- with every field difference reported as a note on every
-  run. Count, order and identity stay strict, and main streams are untouched. For C3 the
-  consequence is that neither side is authoritative for an agent run's usage numbers, and a
-  reducer that reconciles them must pick one deliberately.
+  recording -- but *which* fields can disagree is not a race and does not rot, so the escape
+  names them. `mirror_identity_only` maps a stream scope to the field paths that may differ:
+  `{"subagents/": ["message.stop_reason", "message.usage"]}` on both agent scenarios. Those
+  streams are compared by record identity, which is §7.3's own comparison -- "logical stream
+  ... plus record `uuid`, or a stable hash of the record for uuid-less records", with the
+  Decision Log rejecting whole-file equality outright -- and every field outside the declared
+  list is still compared, so a genuinely corrupt agent mirror fails. A declared scope that
+  matches a stream which is not an agent sidecar is refused, because the match is a substring
+  test and a scope of `.jsonl` would otherwise relax every stream in the fixture. Count, order
+  and identity stay strict and main streams are untouched. For C3 the consequence is that
+  neither side is authoritative for an agent run's usage numbers, and a reducer that reconciles
+  them must pick one deliberately.
 
 - Observation: `task_started` does not have one shape, and a task id is not seen once.
   Evidence: `background-shell` and `nested-depth-2`. A `local_bash` task's `task_started` carries
@@ -1391,7 +1408,8 @@ Pending — written at finish.
   none and are written to the file. It is superseded by holding an `agent_metadata` entry
   against the `.meta.json` it claims to be, which is an assertion rather than an escape. Only
   `mirror_identity_only` remains a declaration, because what it licenses -- a field-level
-  disagreement between an agent's sidecar file and its mirror -- has no stable count.
+  disagreement between an agent's sidecar file and its mirror -- has no stable count. It names
+  the fields rather than licensing all of them: the count is a race, the field set is not.
 - 2026-09-04: The drift ritual after wave C, and the one line it produced. `make probe` was run
   five times, all after the last fixture commit. The first found `nested-depth-2` clean and the
   second reported it as `removed pair control_request/can_use_tool` and its response: nothing in
@@ -1410,9 +1428,16 @@ Pending — written at finish.
   class-three risk (an outcome the model's turn count decides) showing up in the one fixture of
   this wave that has two agents to wait for, and `nested-depth-2` is the census member to watch:
   a second flap of the same pair is the evidence that would take it out of the census, alongside
-  `exit-plan-mode`, rather than something to declare optional -- `result/success` and
-  `result/error_during_execution` are mutually exclusive outcomes, and declaring both optional
-  would make the census blind to whether the recording completed at all.
+  `exit-plan-mode`, rather than something to declare optional. The reason is not that the two
+  `result` pairs are mutually exclusive -- within one recording they are not, since this wave's
+  own finding is that each forked agent brings up a `result` of its own and `nested-depth-2`
+  carries three. It is that declaring the error pair optional would leave the required
+  `result/success` passing while a genuinely failed sub-result went unreported, which is the one
+  thing the census exists to catch. **An outcome pair is never incidental to the outcome**, and
+  that is what separates it from `system/thinking_tokens` or an incidental permission ask, which
+  are frames the model may or may not produce along the way. The wave-B classification stands
+  with this refinement: class two is declarable because an absent frame changes nothing about
+  whether the run succeeded, and class three is not because that is precisely what it changes.
 
   The one-line qualification on wave B's G2 note still holds and is worth repeating with a
   second version pair behind it: a ritual run that finds nothing cannot demonstrate that the
@@ -1460,3 +1485,46 @@ Pending — written at finish.
   whatever the symlink points at rather than the pinned 2.1.259 baseline, and inherited the
   running agent's environment (Surprises). And S11 was to be run twice with a hand-edited
   `META`; the environment variable above replaces that.
+- 2026-09-04: X8 gains `mirror_identity_only` in `fixture.json`, beside `late_responses`,
+  `withdrawn_requests` and `unmirrored_prefix`, and like them it is declared by the scenario and
+  never inferred. It is a mapping from a stream-path substring to the field paths that may
+  differ between the mirror and the file on the streams it matches, and it is the only one of
+  the four that is not a count, for a reason the others do not have: an agent's sidecar file and
+  its mirror are two snapshots of one record taken at different moments, so *whether* they
+  disagree is timing and a count would rot on the next recording, while *which* fields can
+  disagree is a property of the engine and is stated. `verify` compares a matched stream by
+  record identity -- §7.3's own definition, logical stream plus record `uuid` or a stable hash
+  for uuid-less records -- and still compares every field the declaration does not name, so
+  count, order, identity and all other content stay strict. Two guards keep the escape from
+  widening: a scope that matches a stream which is not an agent sidecar is an error, because the
+  match is a substring test and `.jsonl` or an empty string would otherwise relax everything;
+  and a scope nothing matches is reported as stale. It is not in `REQUIRED_META`, defaults to
+  empty, and every fixture recorded before it is unaffected. The occasion is in Surprises.
+
+  A correction that belongs beside it, because it is the reason this note exists at all. Wave C
+  first recorded the `agent_metadata` entries as a `[parent-impact]` on §7.3. They are not one:
+  §7.3's invariant clause already ends "and with `agent_metadata` entries compared against the
+  paired `.meta.json` instead", and its source-arbitration paragraph already names the entry as
+  a record type of its own. The clause had been quoted from an earlier Surprises entry in this
+  document rather than read in §7.3, and the quotation stopped one clause short of the sentence
+  that disproves it. §4.9 flows these entries to the parent and G3 has this document name its
+  parent impacts, so a wrong one sends a later agent to fix a clause that is already correct.
+  The rule this leaves behind: quote a parent clause from the parent, and read to the end of the
+  sentence.
+- 2026-09-04: `redact` adds to the manifest on disk instead of replacing it, and a substitution
+  that changes nothing is not counted. The two are one fix. §4.4 has `redaction.json` record
+  "each rule applied, the field paths it touched and how many times", and REVIEW item 4 has a
+  reviewer read it as that -- but `redact` re-runs the rules over a fixture whose bytes are
+  already redacted, where everything the recording caught now matches nothing, so writing a
+  fresh manifest turned the file from a record of what was redacted into a record of what the
+  last re-run happened to find. `exit-plan-mode` lost the `userEmail`, tool-description and
+  `account` substitutions that way and kept only the listings; both affected fixtures were
+  re-derived from their pre-redaction bytes in one pass and now carry the full history, fifteen
+  and eighteen identity substitutions.
+  The second half is what makes the sum stable rather than merely additive. Most rules cannot
+  match their own output, so a re-run contributes zero and the merge is a no-op -- but the owner
+  column rule can, since `<user>` and `<group>` sit exactly where a name and a group sat, so
+  counting matches rather than *changes* would have inflated the manifest by six on every
+  re-run. Counting only a substitution that changed the string makes `make redact` a
+  byte-for-byte no-op on a committed fixture, manifest included, which is the property §4.5's
+  "idempotently" was always claiming.

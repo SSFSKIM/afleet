@@ -67,16 +67,20 @@ A scenario is a module under `scenarios/` exposing `META` (a dict) and `run(sess
                      the scenario, never inferred, and checked for exactness -- the same rule
                      `withdrawn_requests` follows and for the same reason. A resume appends one
                      unmirrored `ai-title` (`session-mirror-resume`).
-- `mirror_identity_only` stream-path substrings whose mirrored entries are compared with the
-                     file by record identity (`uuid` sequence) rather than field for field, with
-                     every field difference reported as a note. The third declared escape and the
-                     only one that is not a count: a subagent's sidecar and its mirror are two
-                     snapshots of one record taken at different moments, so the record closing an
-                     assistant message can reach the file with `stop_reason: null` and a partial
-                     `usage` while the mirror carries it finalised, and the file is never
-                     rewritten. Whether they disagree at all is a race, which is why a count would
-                     rot; identity, order and count stay strict. Declared as `["subagents/"]` by
-                     the agent scenarios, and reported as stale when nothing matches it.
+- `mirror_identity_only` a mapping from a stream-path substring to the field paths that may
+                     differ between the mirror and the file on the streams it matches. Those
+                     streams are compared by record identity (§7.3's own comparison: logical
+                     stream plus record `uuid`, or a stable hash for uuid-less records) and every
+                     field outside the declared list is still compared. The second declared escape
+                     and the only one that is not a count: a subagent's sidecar and its mirror are
+                     two snapshots of one record taken at different moments, so the record closing
+                     an assistant message can reach the file with `stop_reason: null` and a
+                     partial `usage` while the mirror carries it finalised, and the file is never
+                     rewritten. *Whether* they disagree is a race, which is why a count would rot;
+                     *which fields* can is not, which is why they are named. A scope matching a
+                     stream that is not an agent sidecar is refused, since the match is a
+                     substring test and `.jsonl` would otherwise relax everything; a scope nothing
+                     matches is reported as stale.
 
 `withdrawn_requests` is *not* a `META` key. It is written from the ids the scenario passed to
 `session.cancel()` and never inferred from the captured frames, which is what keeps it a
@@ -639,8 +643,13 @@ def _redact_in_place(path):
     # `write_fixture` computes it, from the files as they now stand.
     with open(os.path.join(path, "streams.json"), "w", encoding="utf-8") as fh:
         json.dump(fixture.stream_sizes(os.path.join(path, "initial")), fh, indent=1, sort_keys=True)
+    # Added to the manifest already on disk, never replacing it: this pass ran over bytes the
+    # recording had already redacted, so on its own it records what is left rather than what was
+    # done. See `Redactor.manifest`.
+    with open(os.path.join(path, "redaction.json"), encoding="utf-8") as fh:
+        prior = json.load(fh)
     with open(os.path.join(path, "redaction.json"), "w", encoding="utf-8") as fh:
-        json.dump(r.manifest(), fh, indent=1, sort_keys=True)
+        json.dump(r.manifest(prior), fh, indent=1, sort_keys=True)
 
 
 def main(argv=None):

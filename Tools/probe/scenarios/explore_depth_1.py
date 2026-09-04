@@ -18,7 +18,10 @@ META = {"name": "explore-depth-1", "purpose": "one Explore subagent searching sy
                             # stay strict.
                             "control_request/can_use_tool", "control_response/can_use_tool"],
         "deterministic": False, "isolation": "config-home", "launch": {"max_turns": 4},
-        "mirror_identity_only": ["subagents/"],
+        "mirror_identity_only": {"subagents/": ["message.stop_reason", "message.usage"]},
+        # Not every field: the race is confined to the two the recordings showed, and
+        # while *whether* the sidecar and its mirror disagree is timing, *which* fields
+        # can is not. A drift anywhere else is a corrupt mirror and still fails.
         "prompts": ["Use the Agent tool with subagent_type Explore to find which files in this directory "
                     "contain the word gamma. Do not search yourself and do not use any other tool. "
                     "Then reply with only the file names it reports, and nothing else."],

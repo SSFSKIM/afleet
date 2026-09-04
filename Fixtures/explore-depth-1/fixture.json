@@ -46,9 +46,12 @@
    "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
   }
  },
- "mirror_identity_only": [
-  "subagents/"
- ],
+ "mirror_identity_only": {
+  "subagents/": [
+   "message.stop_reason",
+   "message.usage"
+  ]
+ },
  "name": "explore-depth-1",
  "notes": [
   "task_started: 1, depths: [1], all settled: True, result: success",

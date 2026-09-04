@@ -23,7 +23,10 @@ META = {"name": "nested-depth-2", "purpose": "a depth-2 run: general-purpose spa
                             # stay strict.
                             "control_request/can_use_tool", "control_response/can_use_tool"],
         "deterministic": False, "isolation": "config-home", "launch": {"max_turns": 6},
-        "mirror_identity_only": ["subagents/"],
+        "mirror_identity_only": {"subagents/": ["message.stop_reason", "message.usage"]},
+        # Not every field: the race is confined to the two the recordings showed, and
+        # while *whether* the sidecar and its mirror disagree is timing, *which* fields
+        # can is not. A drift anywhere else is a corrupt mirror and still fails.
         "prompts": ["Use the Agent tool with subagent_type general-purpose. Instruct that agent to use the "
                     "Agent tool itself with subagent_type Explore to find which files in this directory "
                     "contain the word delta, and to report the file names back to you. You must delegate "

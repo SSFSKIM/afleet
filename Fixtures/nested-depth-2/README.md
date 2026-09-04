@@ -41,9 +41,11 @@ seconds into the re-engagement — `end_session` under a live agent, which ended
 and waits for ten quiet seconds, and this recording needed no such allowance. The behaviour is
 the engine's, not the scenario's: a host must expect `task_started` more than once per task id.
 
-**Declarations.** `mirror_identity_only: ["subagents/"]`, for the reason recorded in
-`explore-depth-1`'s README — a subagent's sidecar file and its mirror are two snapshots of one
-record and can disagree on `message.stop_reason` and `message.usage`. This recording agrees
-field for field on both streams. The `agent_metadata` entries the mirror carries are checked
-against the `.meta.json` sidecars they claim to be. The main stream's 38 records are reproduced
-by its mirror exactly.
+**Declarations.** `mirror_identity_only: {"subagents/": ["message.stop_reason",
+"message.usage"]}`, for the reason recorded in `explore-depth-1`'s README — a subagent's sidecar
+file and its mirror are two snapshots of one record and can disagree on those two fields, and on
+no others, which is why the declaration names them rather than licensing every field. This
+recording agrees field for field on both streams. The `agent_metadata` entries the mirror carries
+are checked against the `.meta.json` sidecars they claim to be, which is what §7.3's invariant
+clause already prescribes for them. The main stream's 38 records are reproduced by its mirror
+exactly.

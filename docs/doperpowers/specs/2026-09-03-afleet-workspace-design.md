@@ -3197,8 +3197,8 @@ Pending — written at finish.
 - 2026-09-04 C1/S16: A depth-2 run is captured (fixture `nested-depth-2`, 2.1.259). A
   `general-purpose` agent spawned an `Explore` agent, and `task_started` carried `spawn_depth`
   1 and 2 with `task_type: "local_agent"`, an agent id and no parent id — so §8.8's two-step
-  join is the only route while a run is live. Depth-2 text and thinking **were** forwarded
-  under `--forward-subagent-text`. Both runs wrote
+  join is **one** route to the parent link while a run is live, and the mirror below is the
+  other. Depth-2 text and thinking **were** forwarded under `--forward-subagent-text`. Both runs wrote
   `subagents/agent-<taskId>.jsonl` and `subagents/agent-<taskId>.meta.json`, and the depth-2
   sidecar carries `parentAgentId` naming the depth-1 task id while the depth-1 sidecar has no
   such field, which is the join's input once it lands. On 2.1.259 the sidecar holds only
@@ -3206,10 +3206,15 @@ Pending — written at finish.
   **`color`, `model`, `permissionMode` and `worktreePath` are not written**, so §8.8's node
   badges cannot come from it. Three further facts a panel has to hold. The engine mirrors the
   sidecar onto the agent transcript's own channel as an `agent_metadata` entry the `.jsonl`
-  never receives, so a host reading the mirror has `parentAgentId` before the file exists. It
-  re-emits `task_started` for the **same** `task_id` when an auto-turn re-engages a
-  backgrounded agent, so a tree keyed on first-seen ids must expect a repeat rather than a new
-  node. And a subagent's `.jsonl` and its mirror are two snapshots of one record: the record
+  never receives — arriving at the head of that stream's mirror and again on each re-engagement
+  — so a host reading the mirror has `parentAgentId` before the sidecar file exists, and the
+  two-step join is the fallback for a host that is not reading it rather than the only way in.
+  This is §7.3's prescribed handling confirmed on the wire, not a departure from it. It
+  re-emits `task_started` for the **same** `task_id` when an auto-turn re-engages a backgrounded
+  agent, so a tree keyed on first-seen ids must expect a repeat rather than a new node; the
+  evidence for that is a **discarded** `nested-depth-2` recording, not either committed
+  fixture, because the recording that showed it also closed under the re-engaged agent and was
+  replaced. And a subagent's `.jsonl` and its mirror are two snapshots of one record: the record
   closing an assistant message reaches the file with `stop_reason: null` and a partial `usage`
   on some runs and finalised on others, and the file is never rewritten — so for agent streams
   the two agree by record identity and can disagree by field, and the file is not the more
