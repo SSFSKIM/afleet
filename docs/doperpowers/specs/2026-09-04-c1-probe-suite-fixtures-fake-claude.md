@@ -923,6 +923,77 @@ which `record` spills to its temporary file, set from the largest recorded scena
   turns, which is what every other fixture in the corpus does and why eight of nine census
   members hold.
 
+- Observation: A subagent's mirror carries entries that are not records of the stream it names.
+  Evidence: `explore-depth-1` and `nested-depth-2`. Every `transcript_mirror` frame for
+  `subagents/agent-<id>.jsonl` opens with an entry of type `agent_metadata`, and the `.jsonl`
+  never receives it: it is the neighbouring `agent-<id>.meta.json` sidecar's content, field for
+  field, with a `type` added. The engine emits one when the agent starts and another each time
+  an auto-turn re-engages it, so neither the count nor the position is fixed. Impact:
+  **[parent-impact]** on §7.3's invariant clause, "the records delivered in `transcript_mirror`
+  frames during the recording equal, by record identity, the file's records in the byte range
+  appended during that same recording". That is false for an agent stream by these entries,
+  which belong to a different file. The clause is binding prose and is not edited here. What
+  `verify` does instead is not an allowance but a second assertion: an `agent_metadata` entry is
+  held against the `.meta.json` the fixture carries, so a mirror announcing metadata no sidecar
+  holds fails. The route this opens for C3 is worth stating plainly -- a host reading the mirror
+  has `parentAgentId` and the agent's type before the sidecar file exists, which is what §8.8's
+  tree needs at spawn time.
+
+- Observation: The mirror-fidelity check's premise -- that a mirrored record equals the record
+  on disk -- is true of every main stream in the corpus and **not** of an agent stream.
+  Evidence: `explore-depth-1`, recorded three times against the same binary. In one recording
+  two of eleven subagent records differed from their mirrored copies in `message.stop_reason`
+  (`null` against `end_turn`) and `message.usage` (a partial object against the finalised one);
+  in the others every record agreed. The divergence is permanent, not a flush race: the file was
+  still in the partial state long after the process exited. The two are snapshots of one mutable
+  record taken at different moments, the file is written once and never rewritten, and which
+  snapshot each takes is timing. Impact: a count of diverging records would rot on the next
+  recording, so the escape is `mirror_identity_only`, a scenario-declared list of stream-path
+  substrings compared by `uuid` sequence rather than field for field -- which is exactly what
+  §7.3's "by record identity" states -- with every field difference reported as a note on every
+  run. Count, order and identity stay strict, and main streams are untouched. For C3 the
+  consequence is that neither side is authoritative for an agent run's usage numbers, and a
+  reducer that reconciles them must pick one deliberately.
+
+- Observation: `task_started` does not have one shape, and a task id is not seen once.
+  Evidence: `background-shell` and `nested-depth-2`. A `local_bash` task's `task_started` carries
+  `task_id`, `tool_use_id`, `description`, `is_backgrounded`, `task_type`, `uuid` and
+  `session_id` and **no `spawn_depth` and no `subagent_type`**; a `local_agent` task's carries
+  both plus `prompt`. And in one `nested-depth-2` recording the engine emitted a second
+  `task_started` for the *same* `task_id` when an auto-turn re-engaged the backgrounded depth-1
+  agent. Impact: the census's per-pair required-key sets would have recorded the agent fields as
+  required had only agent scenarios been recorded, which is the same lesson `can_use_tool` taught
+  wave B; and the scenario helper that waits for tasks to settle compared started and ended ids
+  as **sets**, so the earlier notification read as settling the later start. That recording
+  closed two seconds into the re-engagement, sent `end_session` under a live agent -- the failure
+  the global constraint names -- and ended `result/error_during_execution`. The helper now counts
+  occurrences and waits for ten seconds with nothing outstanding.
+
+- Observation: A backgrounded agent brings up a `system/init` and a `result` of its own.
+  Evidence: `explore-depth-1` records two of each for one prompt, `nested-depth-2` three of each
+  for one prompt with two agents, `background-shell` two `result` frames for one prompt and one
+  shell. Impact: a host completing a turn on every `result` frame counts two turns for one
+  prompt, and one keying session identity off `system/init` sees a second handshake that is not
+  one. `CLAUDE_CODE_FORK_SUBAGENT=1` is on every launch line, so this is the normal case for
+  afleet and not an edge.
+
+- Observation: The `Notification` hook's idle threshold is about six seconds, not a minute.
+  Evidence: `notification-hook`. The `can_use_tool` arrives at t=3595 ms and the `hook_callback`
+  for `afleet.notification` at t=9601 ms. Impact: the plan budgeted 75 seconds and treated a
+  no-fire as the finding; the real threshold is an order of magnitude below that, so item 53
+  needed no provisional clause and the C5 setting question the plan anticipated does not arise.
+  The threshold is the binary's; afleet's §8.7 toggle governs whether a banner is shown, not when
+  the engine raises one.
+
+- Observation: A scenario's `notes` are written before `record` tokenises the capture.
+  Evidence: `background-shell`'s note quotes `output_file` as
+  `/private/tmp/claude-501/.../tasks/<id>.output` while the same value in `frames.ndjson` reads
+  `<artifacts>/...`. Impact: nothing under `frames.ndjson`, `transcript/` or `artifacts/` is
+  affected and the raw form is useful evidence about the real path, but `notes` is the one field
+  of `fixture.json` where a path is not in the token space, and a consumer reading it as
+  tokenised text would be wrong. Recorded rather than repaired: the notes are prose for a
+  reviewer, and redaction -- which is the rule that matters -- does run on them.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
@@ -1251,3 +1322,32 @@ Pending — written at finish.
   itself, which re-runs every census scenario against a live binary at roughly 0.13 USD for wave
   B's nine fixtures and grows with the catalogue. It stays on-demand rather than continuous, so
   the figure is a budgeting fact and not an argument for changing the ritual.
+- 2026-09-04: Wave C complete. `explore-depth-1`, `nested-depth-2`, `background-shell` and
+  `notification-hook` are recorded, reviewed, signed and committed against 2.1.259, and S16 and
+  S18 are settled on the parent -- S18 positively and with room to spare, which retires the
+  plan's contingency for it. Sixteen recorded fixtures and two synthetic ones; thirteen take
+  part in the census. All four of this wave's scenarios are `census: true`: the forecast that
+  `background-shell` and `nested-depth-2` would have to leave it over a model-chosen turn count
+  did not materialise, because each prompt names the tool, the delegation and the exact reply
+  and, for the two whose agents are backgrounded, says that the reply belongs to the turn after
+  the agent reports. Every recording ended `result/success`. The rule that a scenario is
+  reproducible exactly when nothing the model decides can change how many turns it takes held,
+  and pinning the prompt was the cheaper half of it -- no fixture needed `optional_pairs` beyond
+  the `system/thinking_tokens` every model-driven scenario declares.
+
+  The wave cost about 0.09 USD in eight recordings, five of them committed and three discarded
+  to defects the recording exposed, plus the drift ritual, whose measured outcome is the note
+  below this one -- the ritual is run after the last fixture commit, so recording its result is
+  necessarily a later commit than the tree it tested, and that commit touches this document
+  alone.
+
+  Three defects in the wave's own tooling, each found by a recording and each fixed at its
+  cause. The settle helper compared task ids as sets and so read a re-engaged agent as settled,
+  which sent `end_session` under a live agent. `unwritten_prefix`, added on this wave's first
+  observation, was wrong twice -- as a head-position count, because the engine re-emits
+  `agent_metadata` mid-stream, and then as a rule about entries with no `uuid`, because
+  `ai-title`, `atis-latch`, `file-history-snapshot`, `last-prompt` and `queue-operation` have
+  none and are written to the file. It is superseded by holding an `agent_metadata` entry
+  against the `.meta.json` it claims to be, which is an assertion rather than an escape. Only
+  `mirror_identity_only` remains a declaration, because what it licenses -- a field-level
+  disagreement between an agent's sidecar file and its mirror -- has no stable count.
