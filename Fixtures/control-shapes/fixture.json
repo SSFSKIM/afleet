@@ -1,0 +1,87 @@
+{
+ "census": true,
+ "cli_version": "2.1.259",
+ "cwd": "/tmp/afleet-fixtures/control-shapes",
+ "deterministic": false,
+ "exit_code": 0,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "~/.local/share/claude/versions/2.1.259",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--session-id",
+   "60fb7894-a52b-4c01-b069-8d063d46bf58",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "default",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "2"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
+  }
+ },
+ "name": "control-shapes",
+ "notes": [
+  "apply_flag_settings -> success None",
+  "get_settings -> success ['applied', 'effective_keys', 'sources_keys']",
+  "list_models -> success ['models']",
+  "get_workspace_diff -> success ['diff']",
+  "rewind_files dry_run -> success ['canRewind', 'deletions', 'filesChanged', 'insertions']",
+  "set_cwd sibling -> success ['directory', 'status']",
+  "set_cwd back -> success ['changed', 'cwd', 'status', 'transcript_relocated']",
+  "rewind_conversation -> success ['precedingAssistantUuid', 'prefillText', 'rewound', 'targetMessageUuid']",
+  "claude_authenticate -> success ['automaticUrl', 'manualUrl']",
+  "claude_oauth_callback (invalid code) -> error Request failed with status code 400",
+  "claude_oauth_wait_for_completion -> error No active claude_authenticate flow",
+  "generate_session_title -> success ['title']"
+ ],
+ "prompts": [
+  "Reply with exactly the word: shapes"
+ ],
+ "purpose": "apply_flag_settings with readback, rewind_conversation, set_cwd needing trust, the claude_authenticate family",
+ "recorded_at": "2026-09-04T11:09:47Z",
+ "review": {
+  "checklist_version": 2,
+  "date": "2026-09-04",
+  "reviewer": "Claude reviewer for kimmi"
+ },
+ "scenario": "control_shapes",
+ "serves": [
+  "item 11",
+  "item 13",
+  "C4.G4"
+ ],
+ "session_id": "60fb7894-a52b-4c01-b069-8d063d46bf58",
+ "spikes": [
+  "S8"
+ ],
+ "synthetic": false,
+ "unmirrored_prefix": 0,
+ "withdrawn_requests": []
+}
