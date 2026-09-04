@@ -264,15 +264,33 @@ Child environment, on top of the resolved login-shell environment (§6.9):
 | `AUTOMODE_DECISION_LOG=1` | per-decision classifier log for the auto-mode explain view (*A-26*) | Developer setting, default off |
 
 The child environment carries **no variable beginning with `CLAUDE`** from the resolved
-environment (§6.9); the table's own entries and, when an override is chosen,
-`CLAUDE_CONFIG_DIR` are added back on purpose. A prefix rule, not a list: every marker the
-CLI sets on its own children changes its behaviour somewhere — `CLAUDE_CODE_REMOTE`
+environment (§6.9); the table's own entries and `CLAUDE_CONFIG_DIR` — set to the resolved
+ConfigHome root on **every** spawn, not only when a test override is chosen, so the child's
+home equals afleet's view by construction — are added back on purpose, with
+`CLAUDE_CODE_PROJECT_DIR_NAME` passed through beside it when the capture carried it. A
+prefix rule, not a list: every marker the CLI sets on its own children changes its
+behaviour somewhere — `CLAUDE_CODE_REMOTE`
 disables auto-memory and changes compaction, `CLAUDE_CODE_CONTAINER_ID` auto-backgrounds
 every command, `CLAUDE_CODE_CHILD_SESSION` turns transcript saving off in the interactive
 CLI and hid a spike observation for a whole run (spike-contention) — a list needs extending
 each time the CLI gains one, and the markers reach afleet through the process-environment
 fallback of §6.9 whenever afleet itself was launched from inside a Claude Code session.
 None of them carries tool output anyway (*Parity F-23*).
+
+The 2.1.258 bundle sets forty-four distinct `CLAUDE*` names on its children and reads seven
+hundred more, so the marker set is neither small nor fixed and the prefix rule's stale
+direction is the safe one: a marker it fails to drop misrepresents the child silently, while
+a configuration variable it drops produces a visible difference. That visible loss is
+bought back by an explicit **pass-through set** of user configuration the engine only
+reads: provider selection (`CLAUDE_CODE_USE_BEDROCK`, `_USE_VERTEX`, `_USE_FOUNDRY`,
+`_USE_MANTLE`, `_USE_ANTHROPIC_AWS`, `_USE_ANTHROPIC_GOOGLE_CLOUD`), their auth-skip
+switches (`CLAUDE_CODE_SKIP_BEDROCK_AUTH`, `_SKIP_VERTEX_AUTH`, `_SKIP_FOUNDRY_AUTH`,
+`_SKIP_MANTLE_AUTH`, `_SKIP_ANTHROPIC_AWS_AUTH`) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS`. An
+allowlist is acceptable here and not for markers because *its* stale direction is also
+safe: a provider variable added later is dropped, and the user sees the wrong provider in
+the `apiKeySource` readback. `CLAUDE_CODE_OAUTH_TOKEN` is never passed through — the engine
+sets it on children as a credential handoff, and an owned channel authenticates from the
+config home. A test pins the set exactly, so an addition is deliberate.
 
 - `--permission-prompt-tool stdio` is the correctness fix and is sufficient on its own:
   the literal `stdio` installs the control-protocol answerer (*SPEC 45.23.1*); without it
@@ -339,6 +357,17 @@ arrives on a session that handshakes without sending one — `resume-no-replay` 
 event stream, not on the handshake value. Both payloads are kept on the channel's session
 object, each when it arrives; anything that needs `system/init` before the first turn does
 not have it and must not block on it.
+
+**A session's own id is observable right after the handshake, without a turn.** `auth_status`
+(on the launch line via `--enable-auth-status`) is frame 5 in every recorded fixture, directly
+after the `initialize` response, and carries `session_id`; in both resume fixtures that id
+equals the `--resume` target, so it is the process's own. For a fork (`--resume <id>
+--fork-session`) that is the *new* id. A fork's identity is therefore **pending** until the
+first frame carrying `session_id` arrives, and the wire layer says so in its type rather than
+filling in the source id; it emits an event when the identity resolves, FleetKit keys the
+channel on that event, and a capture opened before it is written under a provisional name
+and renamed. The fork id is never read off `system/init`, which would reintroduce the
+first-turn dependency the handshake rule removed.
 
 The in-process MCP server is likewise not connected at the moment the `initialize`
 response arrives: on 2.1.260 its bring-up completed about 0.9 s later, and an `mcp_status`
@@ -1412,6 +1441,16 @@ yet been checked at all. The single check before any merge to `main` is a grep o
 tree for the recording machine's account name, home directory and the author's handles,
 expected to match nothing outside `docs/`.
 
+Two gaps in `Tools/probe/redact.py` are on record from C2's pre-merge review and are
+corrected on `main` as a C1 follow-up rather than tolerated as divergences: URL-query
+stripping ran only over `control_response` bodies, so `mcp_oauth_callback_url.callbackUrl`
+and `mcp_authenticate.redirectUri` on the *request* side kept their `code` and `state`; and
+`claude_oauth_callback` carries a bare `state` that no rule reached (`authorizationCode` is
+caught by the `authorization` secret word). Both rules are gated on C1's `OAUTH_SUBTYPES`,
+never on scanning strings; a `can_use_tool` request carrying a URL stays untouched. C2's
+capture redactor already implements both; its differential vectors gain the cases once
+`redact.py` has them.
+
 Nothing under `<configHome>` is written by afleet.
 
 ## 12. Security and policy
@@ -2217,8 +2256,10 @@ SwiftPM package or target that builds and tests without the children above it, p
   policy of §6.3 as the default handler for unknown inbound requests. The
   `initialize` payload is §6.2's, and spawn returns when the `initialize` response
   arrives; the handshake value carries that response and nothing from `system/init`,
-  which is a first-turn frame on the event stream (§6.2). Owner: C2. Binds C3, C4 and
-  the fixtures of C1.
+  which is a first-turn frame on the event stream (§6.2). `sessionID` is known at
+  construction for `.new` and `.resume` and is pending for a fork until the first
+  `session_id`-bearing frame, `auth_status` in practice; the transport emits the
+  resolution as an event (§6.2). Owner: C2. Binds C3, C4 and the fixtures of C1.
 - **X4 Timeline model.** `TimelineItem` as §7.3; record identity is logical stream plus
   uuid or hash; the durable projection and overlay category lists and the wire exclusion
   list are named constants the differential test and the renderer both read; the
@@ -2256,7 +2297,9 @@ SwiftPM package or target that builds and tests without the children above it, p
   re-implements a mapping. Owner: C4. Binds C6.
 - **X11 Environment injection.** `ResolvedEnvironment` is captured once by ClaudeWire,
   carried as a Core value and handed to Workbench by the app; every git, gh, shell and
-  claude process inherits it. Owner: C2. Binds C2, C5, C7.
+  claude process inherits it. The claude child's environment is composed as §6.1 says:
+  prefix scrub, then `CLAUDE_CONFIG_DIR` set to the resolved ConfigHome root on every
+  spawn, then the table's entries and the pass-through set. Owner: C2. Binds C2, C5, C7.
 
 ### 17.6 Ordering and dependency map
 
@@ -3451,6 +3494,30 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   written and nobody re-read it against the new rule.
   Impact: §6.3 names the shape — a `String`-carrying event case — rather than the instance,
   and requires structured fields or a declared fixed message set.
+- Observation: The `CLAUDE*` prefix scrub was deleting the very variable ConfigHome is
+  derived from, so afleet could believe a session lived in one home while the child wrote to
+  another.
+  Evidence: C2's review panel (scalpel-4#1). `LaunchConfiguration` restored only the *test*
+  override after the scrub; §6.1's "when an override is chosen, `CLAUDE_CONFIG_DIR` is added
+  back" had been read as the test hook. The G3 live tests never saw it because they set the
+  override.
+  Impact: §6.1 and X11 set `CLAUDE_CONFIG_DIR` to the resolved root on every spawn.
+- Observation: The first ruling on that finding replaced the prefix rule with four marker
+  names, and was wrong; the reversal is the finding.
+  Evidence: the four came from a bundle scan that looked for four. A literal scan of 2.1.258
+  finds forty-four names the engine sets on children and seven hundred it reads. The
+  executor had already generalised a principle from the first ruling ("when the members are
+  fixed and knowable, name them") on a premise nobody had checked.
+  Impact: §6.1 records why the prefix rule stands — when a rule will be stale either way,
+  choose the one whose staleness announces itself — and why an allowlist is acceptable for
+  pass-through and not for markers. Process rule for every reconciling architect: never
+  generalise from a finding whose evidence you have not audited yourself.
+- Observation: A fork's true identity is on the wire before any turn.
+  Evidence: `auth_status` at frame 5 in all sixteen recorded fixtures carries `session_id`,
+  equal to the `--resume` target in both resume fixtures. Raised by scalpel-4#3, which found
+  the transport keeping the source id for a fork.
+  Impact: §6.2 and X3 make a fork's identity pending until that frame and forbid reading it
+  off `system/init`.
 
 ## Outcomes & Retrospective
 
@@ -3953,3 +4020,12 @@ Pending — written at finish.
   as the bypass shape after the exit path was found interpolating an `ExitStatus` with its
   stderr tail into the metadata log; C2's fix wave replaces it with structured fields.
   Flags C2 (in flight), C4 and C6 (the `apiKeySource` readback), and C7 (diagnostics).
+- 2026-09-05: §6.1 and X11 now set `CLAUDE_CONFIG_DIR` to the resolved ConfigHome root on
+  every spawn after the prefix scrub, pass `CLAUDE_CODE_PROJECT_DIR_NAME` through beside it,
+  and add a pinned pass-through set for provider configuration; the prefix rule itself
+  stands, with the bundle count as the reason a marker list was rejected a second time.
+  §6.2 and X3 make a fork's `sessionID` pending until the first `session_id`-bearing frame
+  (`auth_status`, frame 5) and forbid reading it off `system/init`. §11 records two
+  `redact.py` gaps as a C1 follow-up on `main`. Raised by C2's whole-branch review panel
+  (scalpel-4#1, scalpel-4#3, sweep#2) and its Wave A worker. Flags C2 (Wave B in flight),
+  C1 (follow-up), C4 (channel keying on the identity event; ConfigHome), C5 and C7 (X11).
