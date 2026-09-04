@@ -151,6 +151,23 @@ final class RedactorTests: XCTestCase {
         XCTAssertEqual(r["plain"], .string("https://example.com/docs"))
     }
 
+    /// Rule 6 on the **request** side. C1 runs it only over a control_response body, so an OAuth request's
+    /// own payload was the one place it could not reach: `mcp_oauth_callback_url` carries the whole grant in
+    /// `request.callbackUrl`, which is not a secret-named key, and a short `code`/`state` is far under the
+    /// query-run pattern's 32-character floor. Both went to disk verbatim.
+    ///
+    /// Gated on the subtype, from C1's own `OAUTH_SUBTYPES`, and not on scanning every string — which the
+    /// second half asserts: a `can_use_tool` request carrying a URL is untouched here, exactly as C1 has it.
+    func testOAuthCallbackRequestHasItsQueryStripped() throws {
+        let v = try redacted(#"{"type":"control_request","request_id":"o1","request":{"subtype":"mcp_oauth_callback_url","serverName":"github","callbackUrl":"http://localhost:51337/cb?code=abc123&state=xyz789"}}"#)
+        XCTAssertEqual(v["request"]?["callbackUrl"], .string("http://localhost:51337/cb?<redacted>"))
+        XCTAssertEqual(v["request"]?["serverName"], .string("github"))
+        let redirect = try redacted(#"{"type":"control_request","request_id":"o2","request":{"subtype":"mcp_authenticate","serverName":"github","redirectUri":"http://localhost:51337/cb?state=xyz789"}}"#)
+        XCTAssertEqual(redirect["request"]?["redirectUri"], .string("http://localhost:51337/cb?<redacted>"))
+        let other = try redacted(#"{"type":"control_request","request_id":"o3","request":{"subtype":"can_use_tool","tool_name":"WebFetch","input":{"url":"https://example.com/x?q=1"}}}"#)
+        XCTAssertEqual(other["request"]?["input"]?["url"], .string("https://example.com/x?q=1"))
+    }
+
     // MARK: - Keys, idempotence, and the corpus
 
     /// A key is data too: project maps are keyed by absolute path and contact maps by address. Two keys can

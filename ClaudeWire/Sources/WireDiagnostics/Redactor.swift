@@ -49,6 +49,10 @@ public enum Redactor {
     static let identityCounterPaths: Set<String> = ["subagent_stats.killed.user"]
     /// redact.py SECRET_ENUM_PATHS (line 190). `get_usage`'s `behaviors[].key` is an enum of behaviour names.
     static let secretEnumPaths: Set<String> = ["behaviors.key"]
+    /// redact.py `OAUTH_SUBTYPES` (line 97). C1 uses it to decide whether rule 6 fires on a *response* body;
+    /// this redactor uses the same list on the request side too — see `Rules.frame`.
+    static let oauthSubtypes: Set<String> = ["claude_authenticate", "claude_oauth_callback", "claude_oauth_wait_for_completion",
+                                             "mcp_authenticate", "mcp_oauth_callback_url"]
     public static let mcpBodyLimit = 4096
 
     // MARK: - Entry points
@@ -293,6 +297,25 @@ public enum Redactor {
                 if sub == "mcp_message", var req = f["request"]?.objectValue, var o = f.objectValue {
                     req["message"] = truncateMCP(req["message"]) ?? .null   // C1 assigns None rather than dropping the key
                     o["request"] = .object(req)
+                    f = .object(o)
+                }
+                // Rule 6 on the **request** side, gated on the subtype rather than on scanning every string.
+                //
+                // C1 runs rule 6 only over a control_response body, and decides by correlating that response
+                // back to its request's subtype — so an OAuth request's own payload is the one place the rule
+                // cannot reach. `mcp_oauth_callback_url` carries the whole callback in `request.callbackUrl`:
+                // that key is not secret-named, so rule 2 passes it, and a short `code` or `state` is under
+                // `QUERY_RUN_RE`'s 32-character floor, so rule 1 passes it too. The grant reached a capture
+                // verbatim. `mcp_authenticate.redirectUri` is the same shape one field over.
+                //
+                // **Divergence from `Tools/probe/redact.py`, deliberate.** redact.py does not strip the
+                // request side; the differential vectors and the sample corpus carry no OAuth request, so
+                // parity still holds over everything both sides are tested on. When C1 adopts the rule this
+                // note goes away. What is *not* covered here, on either side: `claude_oauth_callback` carries
+                // its grant as bare `authorizationCode` and `state` strings rather than as a URL, and rule 6
+                // is about URLs — `authorizationCode` is caught by the secret rule, `state` is not.
+                if Redactor.oauthSubtypes.contains(sub ?? ""), var o = f.objectValue, let req = f["request"] {
+                    o["request"] = urls(req)
                     f = .object(o)
                 }
                 return json(f, path: "")

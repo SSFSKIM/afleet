@@ -54,6 +54,20 @@ final class RawCaptureTests: XCTestCase {
         XCTAssertLessThanOrEqual(owned.reduce(0, +), 300, "the budget holds over the files the type owns")
     }
 
+    /// End to end: the grant must not be on disk. The capture is where a redaction miss actually costs
+    /// something, so this asserts against the file rather than against the redactor's return value.
+    func testAnOAuthCallbackGrantNeverReachesTheCapture() async throws {
+        let cap = RawCapture(root: root, configHome: home, budgetBytes: 1_000_000)
+        let s = SessionID()
+        await cap.write(line: Data(#"{"type":"control_request","request_id":"o1","request":{"subtype":"mcp_oauth_callback_url","serverName":"github","callbackUrl":"http://localhost:51337/cb?code=abc123&state=xyz789"}}"#.utf8), session: s)
+        let file = root.appendingPathComponent(RawCapture.configHomeHash(home)).appendingPathComponent("\(s.description).ndjson")
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertFalse(text.contains("abc123"), text)
+        XCTAssertFalse(text.contains("xyz789"), text)
+        XCTAssertTrue(text.contains("<redacted>"), text)
+        XCTAssertTrue(text.contains("mcp_oauth_callback_url"), "the frame is still captured; only the grant is gone")
+    }
+
     // MARK: - on-disk safety
 
     private func line(_ pad: Int = 100) -> Data {
