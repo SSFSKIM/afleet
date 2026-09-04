@@ -416,7 +416,13 @@ that is not fast-capable promotes the session model to Opus, so the header re-re
   engine frame, so a `send_user_file` error description carries the path the model named.
   Record the tool name, the error's Swift type and its `NSError` domain and code; never the
   description. When a value is diagnostic enough to be worth keeping and payload-derived,
-  its home is the opt-in capture, which is the redacted artefact.
+  its home is the opt-in capture, which is the redacted artefact. A diagnostic event case
+that carries a free-form `String` is the bypass shape: payload walked through one twice in
+C2 — an MCP tool error's description, then the process exit path interpolating an
+`ExitStatus` whose stderr tail is fifty raw lines from the CLI and its hooks. Event cases
+carry structured fields (an exit code, a signal, a tool name, an error type and domain); a
+message that must be text is drawn from a fixed set the type declares, never built at the
+call site.
 
 ### 6.4 Inbound and outbound requests
 
@@ -556,6 +562,16 @@ process-environment fallback, which returns afleet's own environment verbatim an
 arm active when the shell capture fails. C1's corpus was recorded with the driving agent's
 `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_CHILD_SESSION` present (§6.10), a
 fidelity caveat a differential test suspects before it suspects the engine.
+
+Credentials the user placed in that shell — `ANTHROPIC_API_KEY` above all — are inherited,
+deliberately. afleet presents every session on the machine, adopted terminal sessions
+included, and those authenticate however the user's shell says; an owned channel that
+silently authenticated differently from a terminal session of the same user would be the
+worse surprise. The `CLAUDE*` scrub exists because those variables are *session markers*
+that misrepresent the child as nested, not because they are secrets. What the design owes
+the user is visibility of the billing context, not a hidden override: `system/init.apiKeySource`
+(exempt from redaction for this reason) is a readback C4 keeps on the session and C6 shows
+in the channel header whenever it is anything but the OAuth login.
 
 **ConfigHome** is derived from the same capture: `CLAUDE_CONFIG_DIR` when set, else
 `~/.claude`; `CLAUDE_CODE_PROJECT_DIR_NAME` is honored only together with it
@@ -3427,6 +3443,14 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   Impact: §11 states the rule by the byte's origin — every engine byte that reaches a
   committed file is a publication — requires invented identifiers in redactor test inputs,
   and names the pre-merge grep as a fixed step.
+- Observation: The metadata-log contract was made binding in the morning and violated on a
+  different path by the evening, through the same door — a free-form string.
+  Evidence: the pre-merge Codex review of C2 found `diagnostics.record(.lifecycle("exited
+  \(final)"))` on the exit path, where `final` carries up to fifty lines of raw child
+  stderr. The Task 10 ruling had closed the MCP tool-error case; the exit path was already
+  written and nobody re-read it against the new rule.
+  Impact: §6.3 names the shape — a `String`-carrying event case — rather than the instance,
+  and requires structured fields or a declared fixed message set.
 
 ## Outcomes & Retrospective
 
@@ -3922,3 +3946,10 @@ Pending — written at finish.
   tree grep as a fixed step. Raised by the pre-merge leak sweep of C2's branch, which found
   a real `system/init` committed as a stand-in sample. Flags C2 (fix wave in flight) and
   every later child that commits engine output in any form.
+- 2026-09-05: §6.9 records that shell credentials, `ANTHROPIC_API_KEY` first, are inherited
+  by design and that the user's protection is the `apiKeySource` readback in the channel
+  header, not a hidden scrub; raised by the pre-merge Codex review of C2 and dismissed as
+  design intent with the reason written down. §6.3 names the free-form-string event case
+  as the bypass shape after the exit path was found interpolating an `ExitStatus` with its
+  stderr tail into the metadata log; C2's fix wave replaces it with structured fields.
+  Flags C2 (in flight), C4 and C6 (the `apiKeySource` readback), and C7 (diagnostics).
