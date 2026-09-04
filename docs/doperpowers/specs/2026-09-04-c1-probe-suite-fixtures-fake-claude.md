@@ -1222,9 +1222,11 @@ Pending — written at finish.
   bump, and the first evidence that a passing census means the binary held rather than that the
   census compared a binary with itself. The wave cost about 0.65 USD: 0.17 in the seven
   committed recordings, 0.05 in four discarded first attempts, and 0.43 in three full `make
-  probe` runs. The ritual is now the expensive half, at roughly 0.13 a run across nine census
-  fixtures and rising with every model-driven fixture added — worth stating plainly, since §4.7
-  budgeted the price of a baseline bump and not the price of the gate. Three scenarios needed a second recording, each for a defect the first recording
+  probe` runs. A second round after the first drift report added a discarded recording and three
+  more probe runs, bringing the wave to about 1.05 USD. The ritual is the expensive half, at
+  roughly 0.13 a run across nine census fixtures and rising with every model-driven fixture
+  added — worth stating plainly, since §4.7 budgeted the price of a baseline bump and not the
+  price of the gate, and since a flapping gate is paid for in whole re-runs. Three scenarios needed a second recording, each for a defect the first recording
   exposed rather than for flakiness: `exit-plan-mode`'s turn budget, `session-mirror-relocation`'s
   trust call and its two path comparisons, and `session-mirror-resume`'s unmirrored record.
 - 2026-09-04: §4.4 and X8 are amended: a census pair carries the same required-versus-optional
