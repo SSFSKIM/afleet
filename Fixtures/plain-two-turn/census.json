@@ -80,7 +80,7 @@
     "text",
     "thinking"
    ],
-   "count": 4,
+   "count": 8,
    "keys": [
     "message",
     "parent_tool_use_id",
@@ -127,7 +127,7 @@
    ]
   },
   "auth_status": {
-   "count": 1,
+   "count": 2,
    "keys": [
     "isAuthenticating",
     "output",
@@ -144,7 +144,7 @@
    ]
   },
   "command_lifecycle": {
-   "count": 6,
+   "count": 12,
    "keys": [
     "command_uuid",
     "session_id",
@@ -161,7 +161,7 @@
    ]
   },
   "control_request/end_session": {
-   "count": 1,
+   "count": 2,
    "keys": [
     "request",
     "request_id",
@@ -180,7 +180,7 @@
    ]
   },
   "control_request/initialize": {
-   "count": 1,
+   "count": 2,
    "keys": [
     "request",
     "request_id",
@@ -211,7 +211,7 @@
    ]
   },
   "control_request/mcp_message": {
-   "count": 3,
+   "count": 6,
    "keys": [
     "request",
     "request_id",
@@ -234,7 +234,7 @@
    ]
   },
   "control_response/end_session": {
-   "count": 1,
+   "count": 2,
    "keys": [
     "response",
     "type"
@@ -272,7 +272,7 @@
     "remote_control_available",
     "session_state"
    ],
-   "count": 1,
+   "count": 2,
    "keys": [
     "response",
     "type"
@@ -315,7 +315,7 @@
    "body_keys": [
     "mcp_response"
    ],
-   "count": 6,
+   "count": 12,
    "keys": [
     "response",
     "type"
@@ -339,7 +339,7 @@
    ]
   },
   "rate_limit_event": {
-   "count": 1,
+   "count": 2,
    "keys": [
     "rate_limit_info",
     "session_id",
@@ -354,7 +354,7 @@
    ]
   },
   "result/success": {
-   "count": 2,
+   "count": 4,
    "keys": [
     "api_error_status",
     "duration_api_ms",
@@ -417,7 +417,7 @@
    ]
   },
   "stream_event": {
-   "count": 20,
+   "count": 40,
    "keys": [
     "event",
     "parent_tool_use_id",
@@ -437,7 +437,7 @@
    ]
   },
   "system/init": {
-   "count": 2,
+   "count": 4,
    "keys": [
     "agents",
     "analytics_disabled",
@@ -492,7 +492,7 @@
    ]
   },
   "system/status": {
-   "count": 2,
+   "count": 4,
    "keys": [
     "session_id",
     "status",
@@ -509,7 +509,7 @@
    ]
   },
   "transcript_mirror": {
-   "count": 8,
+   "count": 16,
    "keys": [
     "entries",
     "filePath",
@@ -523,7 +523,7 @@
   },
   "user": {
    "block_types": [],
-   "count": 4,
+   "count": 8,
    "keys": [
     "isReplay",
     "message",

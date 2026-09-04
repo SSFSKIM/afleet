@@ -1,5 +1,5 @@
 {
- "census": true,
+ "census": false,
  "cli_version": "2.1.260",
  "cwd": "/tmp/afleet-fixtures/plain-two-turn",
  "deterministic": true,
@@ -25,7 +25,7 @@
    "--permission-prompts",
    "host",
    "--resume",
-   "9cc8b915-5e22-44a9-b5bd-8cb3ccc9dad7",
+   "58d2d905-3741-4a64-b8d9-56c9b3f32d16",
    "--model",
    "haiku",
    "--permission-mode",
@@ -51,7 +51,7 @@
  ],
  "prompts": [],
  "purpose": "--resume of plain-two-turn, initialize, six idle seconds, no history frames",
- "recorded_at": "2026-09-04T10:36:54Z",
+ "recorded_at": "2026-09-04T10:40:45Z",
  "review": {
   "checklist_version": 2,
   "date": "2026-09-04",
@@ -61,7 +61,7 @@
  "serves": [
   "item 1"
  ],
- "session_id": "9cc8b915-5e22-44a9-b5bd-8cb3ccc9dad7",
+ "session_id": "58d2d905-3741-4a64-b8d9-56c9b3f32d16",
  "spikes": [
   "S2"
  ],

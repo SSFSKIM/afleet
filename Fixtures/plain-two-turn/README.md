@@ -41,6 +41,10 @@ path the project slug is derived from. Nothing here comes from a real project. T
 cent — every time the drift ritual runs. That is the design §4.7 asks for; it is recorded
 here so the cost is not a surprise.
 
+**Re-recording this fixture invalidates `resume-no-replay`.** That fixture resumes this
+session by id, and its evidence depends on resuming a session that has never been resumed
+before (see its README). Re-record the pair together, in that order.
+
 Recorded on 2.1.260 rather than the 2.1.259 baseline the earlier fixtures carry, because the
 CLI was upgraded between waves. The flag set `claude --help` declares is identical across
 the two.
