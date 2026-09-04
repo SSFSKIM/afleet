@@ -22,7 +22,8 @@ final class BoundedChannelTests: XCTestCase {
         var got: [Int] = []
         for await x in WireEventStream(channel: ch) { got.append(x) }
         XCTAssertEqual(got, [7])
-        await ch.push(9)                                        // after finish: dropped, never blocks
+        let acceptedAfterFinish = await ch.push(9)              // after finish: dropped, never blocks
+        XCTAssertFalse(acceptedAfterFinish)
         let afterFinish = await ch.pop()
         XCTAssertNil(afterFinish)
     }
@@ -42,10 +43,15 @@ final class BoundedChannelTests: XCTestCase {
         XCTAssertNil(popResult)
         await ch.push(1)
         let live = await ch.pop()
+        // A steal is caught here, but as a CheckedContinuation misuse trap at push time rather than as this
+        // assertion's message: handing the element to a waiter that was already resumed traps in the runtime.
+        // A crash from this test is a real failure, not flakiness.
         XCTAssertEqual(live, 1, "the element must reach a live consumer, not the cancelled waiter")
         await ch.push(2)                                        // full
         let cancelledPush = Task { await ch.push(3) }
-        try await Task.sleep(for: .milliseconds(30)); cancelledPush.cancel(); await cancelledPush.value
+        try await Task.sleep(for: .milliseconds(30)); cancelledPush.cancel()
+        let cancelledPushAccepted = await cancelledPush.value
+        XCTAssertFalse(cancelledPushAccepted)
         let a = await ch.pop(), afterCancelled = await ch.count
         XCTAssertEqual(a, 2); XCTAssertEqual(afterCancelled, 0, "a cancelled push must not append later")
     }
@@ -62,5 +68,57 @@ final class BoundedChannelTests: XCTestCase {
         let t = Task { try await cancelled.value() }
         try await Task.sleep(for: .milliseconds(20)); t.cancel()
         do { _ = try await t.value; XCTFail() } catch { XCTAssertTrue(error is CancellationError) }
+    }
+
+    func testPushReportsWhetherTheElementWasAccepted() async throws {
+        let ch = BoundedChannel<Int>(capacity: 1)
+        let accepted = await ch.push(1)
+        XCTAssertTrue(accepted, "a push with room must report acceptance")
+        let blocked = Task { await ch.push(2) }              // capacity is 1: this parks
+        try await Task.sleep(for: .milliseconds(30)); blocked.cancel()
+        let acceptedWhileCancelled = await blocked.value
+        XCTAssertFalse(acceptedWhileCancelled, "a cancelled push is dropped and must say so")
+        await ch.finish()
+        let acceptedAfterFinish = await ch.push(3)
+        XCTAssertFalse(acceptedAfterFinish, "a push after finish is dropped and must say so")
+    }
+    func testSecondConcurrentValueThrowsAndTheIncumbentStillSettles() async throws {
+        let w = Waiter<Int>()
+        let incumbent = Task { try await w.value() }
+        try await Task.sleep(for: .milliseconds(30))         // incumbent is parked
+        do { _ = try await w.value(); XCTFail("a second awaiter must not be admitted") }
+        catch { XCTAssertTrue(error is Waiter<Int>.AlreadyAwaited, "got \(error)") }
+        XCTAssertTrue(w.settle(.success(42)))
+        let v = try await incumbent.value
+        XCTAssertEqual(v, 42, "the first awaiter must keep its place and receive the settlement")
+    }
+
+    /// The wakeup a pop() hands a producer must not die with that producer. Deliberately a loop: the
+    /// interleaving that loses it — the cancel landing after pop() woke the waiter but before the waiter
+    /// re-runs — is a race, not a schedule this test can dictate. Measured against the pre-fix
+    /// implementation it lost the wakeup on 49 of 50 iterations, so 50 makes the red essentially certain;
+    /// against the fixed one it is 0 of 50, repeatably.
+    func testCancelledPushHandsItsWakeupToAnotherWaitingProducer() async throws {
+        var wedged = 0
+        for _ in 0..<50 {
+            let ch = BoundedChannel<Int>(capacity: 1)
+            await ch.push(0)
+            let a = Task { await ch.push(1) }
+            try await Task.sleep(for: .milliseconds(3))
+            let b = Task { await ch.push(2) }
+            try await Task.sleep(for: .milliseconds(3))
+            _ = await ch.pop()                              // frees the slot and hands the wakeup to a
+            a.cancel()                                      // a bails; its wakeup must reach b
+            _ = await a.value
+            var appended = false
+            for _ in 0..<20 {
+                if await ch.count == 1 { appended = true; break }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+            if !appended { wedged += 1 }
+            await ch.finish()                               // releases b whether or not it was woken
+            _ = await b.value
+        }
+        XCTAssertEqual(wedged, 0, "a producer stayed parked while a slot was free")
     }
 }

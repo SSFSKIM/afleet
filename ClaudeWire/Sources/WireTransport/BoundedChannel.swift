@@ -1,7 +1,16 @@
 import Foundation
 
-/// A lossless bounded FIFO: push suspends when full, pop suspends when empty, both cancellation-aware.
-/// finish() lets consumers drain what is buffered, then ends iteration; pushes after finish are dropped.
+/// A lossless bounded FIFO: push suspends when full, pop suspends when empty.
+/// finish() lets consumers drain what is buffered, then ends iteration; pushes after finish are dropped,
+/// which is why `push` reports whether the element was accepted.
+///
+/// **Cancellation, precisely.** Neither operation can *lose* a cancellation: a waiter is registered
+/// synchronously between actor entry and suspension, with no intervening suspension point, so the
+/// cancellation handler always finds it. What the type does not promise is an atomic hand-off. The
+/// handler is not actor-isolated, so it must hop back through a `Task`, and inside that window a
+/// concurrent `push` can still hand its element to a waiter whose task is already cancelled. That
+/// consumer's `pop()` then returns the element normally rather than nil, and the element is not lost.
+/// A caller that needs "cancelled means definitely no value" must not rely on `pop()` alone.
 public actor BoundedChannel<Element: Sendable> {
     public let capacity: Int
     private var buffer: [Element] = []
@@ -15,7 +24,12 @@ public actor BoundedChannel<Element: Sendable> {
     public var count: Int { buffer.count - head }
     public var isFinished: Bool { finished }
 
-    public func push(_ element: Element) async {
+    /// Returns whether the element was accepted. `false` means it was dropped, which happens in exactly
+    /// two ways: the channel was already finished, or this push's own task was cancelled while it waited
+    /// for room. A producer that must know its element survived — a termination handler publishing the
+    /// exit status, say — reads the result rather than trusting ordering discipline elsewhere.
+    @discardableResult
+    public func push(_ element: Element) async -> Bool {
         while !finished && count >= capacity && popWaiters.isEmpty {
             let id = nextWaiterID; nextWaiterID += 1
             await withTaskCancellationHandler {
@@ -23,17 +37,24 @@ public actor BoundedChannel<Element: Sendable> {
             } onCancel: {
                 Task { await self.cancelPushWaiter(id) }
             }
-            if Task.isCancelled { return }                    // a cancelled push never appends
+            if Task.isCancelled {
+                // A cancelled push never appends. It may, however, have just consumed the wakeup a pop()
+                // handed it, so it passes that wakeup on rather than letting the freed slot sit idle until
+                // the next pop: with several producers on one channel another would otherwise stay parked.
+                wakeOneProducerIfRoom()
+                return false
+            }
         }
-        if finished { return }
-        if let w = popWaiters.first { popWaiters.removeFirst(); w.c.resume(returning: element); return }
+        if finished { return false }
+        if let w = popWaiters.first { popWaiters.removeFirst(); w.c.resume(returning: element); return true }
         buffer.append(element)
+        return true
     }
     public func pop() async -> Element? {
         if count > 0 {
             let e = buffer[head]; head += 1
             if head > 1024 { buffer.removeFirst(head); head = 0 }
-            if let w = pushWaiters.first { pushWaiters.removeFirst(); w.c.resume() }
+            wakeOneProducerIfRoom()
             return e
         }
         if finished { return nil }
@@ -48,6 +69,11 @@ public actor BoundedChannel<Element: Sendable> {
         finished = true
         for w in pushWaiters { w.c.resume() }; pushWaiters.removeAll()
         for w in popWaiters { w.c.resume(returning: nil) }; popWaiters.removeAll()
+    }
+    /// Hands one waiting producer the slot that just opened, if a slot is in fact open.
+    private func wakeOneProducerIfRoom() {
+        guard !finished, count < capacity, !pushWaiters.isEmpty else { return }
+        let w = pushWaiters.removeFirst(); w.c.resume()
     }
     private func cancelPushWaiter(_ id: UInt64) {
         if let i = pushWaiters.firstIndex(where: { $0.id == id }) { let w = pushWaiters.remove(at: i); w.c.resume() }

@@ -23,5 +23,5 @@ public actor StdinWriter {
         let handle = self.handle
         queue.async { try? handle.close() }
     }
-    public struct StdinClosed: Error {}
+    public struct StdinClosed: Error, Sendable {}
 }
