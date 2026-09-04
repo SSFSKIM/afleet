@@ -31,6 +31,11 @@ public struct SendUserFileTool: MCPTool {
     /// - Anything else resolves against the channel cwd, and a `..` may walk out of it. That is
     ///   intended rather than a hole: confining the relative form while accepting absolute paths
     ///   anywhere would be an inconsistency, not a boundary.
+    ///
+    /// The result is standardized, so on Darwin a path under `/private` can come back with that
+    /// prefix resolved away: `/private/etc/hosts` returns as `/etc/hosts`. The rewritten path is the
+    /// one that reaches the user-visible sent-file item. That is correct — the two name the same
+    /// file — but it is a property worth knowing rather than meeting by surprise.
     public static func resolve(_ path: String, against cwd: URL) -> URL {
         let expanded = (path as NSString).expandingTildeInPath
         let base = expanded.hasPrefix("/")

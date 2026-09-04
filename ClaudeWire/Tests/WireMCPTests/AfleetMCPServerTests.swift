@@ -29,6 +29,12 @@ final class AfleetMCPServerTests: XCTestCase {
         let (newer, _) = await s.handle(req(11, "initialize", .object(["protocolVersion": .string("2025-11-25")])))
         guard case .response(.response(let negotiated)) = newer else { return XCTFail("\(newer)") }
         XCTAssertEqual(negotiated.result["protocolVersion"], .string("2025-06-18"))
+        // A supported revision that is NOT the preferred one. This is the only case that proves the
+        // supported set is consulted at all: both assertions above expect preferredProtocolVersion,
+        // so a body of `return .string(Self.preferredProtocolVersion)` would satisfy them both.
+        let (older, _) = await s.handle(req(12, "initialize", .object(["protocolVersion": .string("2025-03-26")])))
+        guard case .response(.response(let olderResp)) = older else { return XCTFail("\(older)") }
+        XCTAssertEqual(olderResp.result["protocolVersion"], .string("2025-03-26"))
         let (r2, _) = await s.handle(.notification(.init(method: "notifications/initialized")))
         guard case .notificationAck = r2 else { return XCTFail("\(r2)") }
     }
@@ -122,9 +128,38 @@ final class AfleetMCPServerTests: XCTestCase {
         // A `..` walks out of the cwd. Pinned as intentional: this tool accepts any absolute path
         // the model can read, so confining the relative form would be an inconsistency rather than
         // a boundary. If this assertion ever fails, that is a deliberate policy change, not a bug fix.
+        // The escape itself is what this pins. The exact resulting string is deliberately not
+        // asserted: the walk lands on /private/etc/hosts and standardizedFileURL then rewrites it to
+        // /etc/hosts, which is Darwin resolving its /private symlink rather than anything this
+        // policy decides.
         let escaped = SendUserFileTool.resolve("../../etc/hosts", against: cwd)
-        XCTAssertEqual(escaped.path, "/etc/hosts")
         XCTAssertFalse(escaped.path.hasPrefix(cwd.path))
+        XCTAssertTrue(escaped.path.hasSuffix("etc/hosts"), escaped.path)
+    }
+    /// The server, not the tool, drops a host invocation from a failure result. `SendUserFileTool`
+    /// cannot exercise this: its failures go out through `.text(isError: true)`, whose invocation is
+    /// already nil, so an assertion against it holds with the guard present, absent or inverted.
+    /// Only a tool that sets both can tell the difference — which is exactly the future tool the
+    /// guard exists for.
+    func testAFailureResultNeverCarriesAHostInvocation() async throws {
+        struct LyingTool: MCPTool {
+            var name: String { "lies" }; var description: String { "fails while claiming it sent a file" }
+            var inputSchema: JSONValue { .object(["type": .string("object")]) }
+            func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
+                MCPToolResult(content: [.object(["type": .string("text"), "text": .string("upload failed")])],
+                              isError: true,
+                              hostInvocation: .sentFile(paths: [URL(fileURLWithPath: "/tmp/never-sent.pdf")],
+                                                        caption: nil, status: "normal", display: nil))
+            }
+        }
+        let s = AfleetMCPServer(serverVersion: "0.1.0", cwd: tmp, tools: [LyingTool()])
+        let (reply, invocation) = await s.handle(req(13, "tools/call", .object(["name": .string("lies"), "arguments": .object([:])])))
+        guard case .response(.response(let resp)) = reply else { return XCTFail("\(reply)") }
+        // The failure still reaches the model as a successful response carrying isError...
+        XCTAssertEqual(resp.result["isError"], .bool(true))
+        XCTAssertEqual(resp.result["content"]?[0]?["text"], .string("upload failed"))
+        // ...but the host is never told a file was sent, because it was not.
+        XCTAssertNil(invocation)
     }
     func testCancelledNotificationCancelsAnInFlightCall() async throws {
         struct SleepingTool: MCPTool {
