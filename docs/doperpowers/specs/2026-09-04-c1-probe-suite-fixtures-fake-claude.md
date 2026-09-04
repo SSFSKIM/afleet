@@ -1053,7 +1053,222 @@ which `record` spills to its temporary file, set from the largest recorded scena
 
 ## Outcomes & Retrospective
 
-Pending — written at finish.
+Measured on 2026-09-04 at `865e55a` on `child/c1-probes-fixtures`, against the declared
+baseline binary `~/.local/share/claude/versions/2.1.259`. Every figure below is an
+observed output, not a restatement of intent; where §5's wording no longer describes
+what was built, the adaptation is named rather than either side being bent to fit.
+
+### The gates
+
+**Tool tests — pass on both interpreters.** `PYTHON=/usr/bin/python3 make test-tools`
+(Python 3.9.6) and `PYTHON=/opt/homebrew/bin/python3 make test-tools` (Python 3.14.6)
+each exit 0, each printing `Ran 225 tests … OK` for `Tools/probe/tests` and
+`Ran 22 tests … OK` for `Tools/fake-claude/tests`.
+
+**G1 Fixtures — pass, against a catalogue larger than §5 describes.**
+`make verify-fixtures` prints `all fixtures pass` and exits 0 over all eighteen fixture
+directories. §5 says "the thirteen recorded fixtures and two synthetic ones of §4.7";
+`Fixtures/` holds **sixteen recorded and two synthetic**. The three beyond the original
+table are `rate-limited-turn` (Surprises: an unplanned zero-cost recording of a rejected
+turn), `session-mirror-resume` (Revision Notes: §4.7's relocation row is two processes
+and therefore two fixtures) and `notification-hook` (in §4.7's table but not in the
+count §5 inherited). Every fixture carries a signed `review` block, an `initial/`
+directory and a `streams.json`; every recorded fixture with a turn carries at least one
+`transcript_mirror` frame, `zero-cost` carrying none because it starts no turn.
+`resume-no-replay` carries exactly one, the `mode` record a first resume appends. Both
+dialog fixtures now read `hypothesis: false`, S6's extraction having closed. The four
+by-hand checks hold: `Fixtures/nested-depth-2/transcript/_slug_/*/subagents/` holds
+`agent-a4bd7d1f17a7e8011.jsonl`, `agent-a558f55cd34e3996f.jsonl` and both `.meta.json`
+sidecars; `Fixtures/background-shell/artifacts/` holds the task output file, and the
+`task_notification` names it as
+`<artifacts>/…/tasks/bcdsdgryt.output`; `Fixtures/send-user-file/frames.ndjson` carries
+the `tools/call` request with `{"files": ["a.txt", "b.txt"], "caption": "two files",
+"status": "normal"}` and the matching response. Verification emits 45 report-only
+warnings and no failures: 42 are the account-name check of §4.5's third report-only
+rule, which is by design a finding for a human rather than a failure, and three record
+that a subagent stream's `agent_metadata` entry was checked against its `.meta.json`
+sidecar rather than against the stream, which is §7.3's own prescription.
+
+**G2 Census — pass in both halves.** `make probe
+CLAUDE=$HOME/.local/share/claude/versions/2.1.259` exits 0: `ok` on all thirteen census
+fixtures (`ask-user-question`, `background-shell`, `control-shapes`, `explore-depth-1`,
+`nested-depth-2`, `notification-hook`, `permission-allow`, `permission-deny`,
+`plain-two-turn`, `send-user-file`, `session-mirror-relocation`,
+`session-mirror-resume`, `zero-cost`), with `exit-plan-mode`, `rate-limited-turn` and
+`resume-no-replay` skipped as `census: false` and the two dialog fixtures skipped as
+synthetic. G2's wording says "against the installed 2.1.259"; the installed `claude`
+is 2.1.260 and the corpus is pinned to the 2.1.259 binary path, so the gate is run
+against the pin, which is what the Revision Notes make the baseline.
+
+The two fake-claude injections both alarm and both exit 1. A script emitting
+`{"type": "afleet_invented", "x": 1}` after the third out frame produces
+`plain-two-turn: DRIFT (1 difference)` / `added pair afleet_invented` — exactly one
+added pair, as the gate asks. A script patching `system/init` with
+`"remove": ["capabilities"]` produces `plain-two-turn: DRIFT (2 differences)` /
+`system/init: removed required keys capabilities` and `capabilities: not captured in
+observed`. The second line is the same removal seen at the census's top level, where
+`capabilities` is lifted out of `system/init`, so one stripped key legitimately shows
+twice; the key is named, which is what the gate requires. Two notes on the commands.
+`plain-two-turn` is the fixture to use here because it is the first recording with a
+`system/init` frame at all — before it existed, G2's second half was not demonstrable.
+And run through `make`, both injections report `exit=2` rather than `exit=1`: that is
+`make`'s own status for a failed recipe. Run directly, `probe.py diff` exits 1.
+
+**G3 Findings — pass.** `grep -n 'C1/S\|C1/G' docs/doperpowers/specs/2026-09-03-afleet-workspace-design.md`
+returns fifteen dated notes on the parent in this branch: `C1/S2`, `C1/S5` (twice — the
+registration half and a later `completed` note for the `tools/call` half), `C1/S6`,
+`C1/S8`, `C1/S10`, `C1/S11`, `C1/S12`, `C1/S13`, `C1/S14`, `C1/S15`, `C1/S16`,
+`C1/S17`, `C1/S18` and `C1/G2`. That is all twelve §5 names plus S2 and the drift note.
+Each was read for the clause it settles, not merely for existing: fourteen of the
+fifteen cite a parent section by number (§6.1, §6.2, §6.4, §6.5, §6.8, §7.2, §7.3, §7.4, §7.7, §8.2, §8.4,
+§8.7, §8.8, §15), and `C1/S11` names its clause the way §4.9 asks instead — "settles how
+*Fork from here* is implemented", the parent's C1 wording. Two `[parent-impact]` entries
+are named in Surprises: §7.3's mirror-equality invariant, which is false of a resume by
+exactly one record at the head of the range, and §7.7's launch-settings table, whose
+Restart-required row still lists `--agent` that S17 showed is runtime-mutable. A third,
+on `agent_metadata`, was withdrawn during wave C after §7.3 was read to the end of the
+sentence; that withdrawal is itself recorded. One inaccuracy found and not repaired
+here: the `C1/S5, completed` and `C1/S2` notes were written during wave A and cite
+`2.1.260` for `send-user-file` and `resume-no-replay`, both of which were re-recorded at
+2.1.259 when the corpus was pinned. The findings are unaffected; the version tags on
+those two notes are stale and the parent's tending session should correct them at merge.
+
+**G4 Redaction — pass.** The five named tests, fully qualified so an empty selection
+cannot pass silently, print `Ran 5 tests … OK`:
+`test_record_no_unredacted_byte_reaches_disk_and_review_is_unsigned`,
+`test_unsigned_review_fails`, `test_planted_email_fails_in_any_file`,
+`test_orphaned_request_fails` and `test_collect_artifacts_and_tokenise`. `find Fixtures
+-type d -name raw` returns nothing. `Fixtures/REVIEW.md` exists at checklist version 2,
+and `verify` passes every committed fixture.
+
+### Spikes: what closed, and what closed only halfway
+
+All thirteen spikes the child owned produced a finding on the parent. Five settle a
+question completely — S2 (a resume replays nothing), S5 (the SDK server registers under
+`--strict-mcp-config`, so the scenario's fallback launch was never needed, and the
+`tools/call` round trip is recorded), S13, S14 and S18 (the `Notification` hook's idle
+threshold is about six seconds, an order of magnitude inside the budget, so item 53
+needed no provisional clause and the C5 setting question does not arise). S15's answer
+is a value: `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` is compared by equality against
+`"markdown"` and `"html"` and nothing else, and `markdown` is now on every launch line.
+
+Four settle one half and say so. S6 confirms both dialog kinds structurally on the
+2.1.259 binary, which is enough to clear `hypothesis` on the two fixtures and take item
+62 off provisional — but the decline legs' `result` subtype, the placeholder copy, the
+park deadline and whether an undeclared kind reaches a host at all still need a
+recording. S17 settles both of its halves positively while recording that no readback
+exists for a session-carried agent (`system/init.agent` is absent even under `--agent`),
+and that the companion flag `--resume-drops-turn` was read from the binary's option
+table and never exercised. S8's control-response reasoning is anchored on bundle strings
+and confirmed on the recording, but `withdrawn_requests`, the field S8's investigation
+motivated, remains an unexercised escape: `claude_oauth_wait_for_completion` answers in
+milliseconds and never needed withdrawing. S12 answers the contention question but only
+after the workspace-trust prompt, which is a terminal gate the wire never shows — so
+afleet's *Open in terminal* can hand a user a session that stops on a dialog afleet
+never sees.
+
+Two census members are worth watching rather than trusting. `exit-plan-mode` left the
+census because approving a plan hands the work back to the model and the turn count is
+the model's to choose. `nested-depth-2` produced `added pair
+result/error_during_execution` on one run against 2.1.260 and is the member most likely
+to flap again; a second flap of the same pair is the evidence that would take it out of
+the census rather than something to declare optional.
+
+### Live recordings and cost
+
+Sixteen recorded fixtures survive in the corpus, from at least twenty-four live
+recording runs — eight were discarded to defects the recording itself exposed rather
+than to flakiness. Nine short `haiku` turns went to the four live spikes;
+`spike-contention` spends nothing because it sends no prompt. `zero-cost` is the fixture
+that proves a whole session can be recorded for nothing: its own `get_session_cost`
+answer reads `Total cost: $0.0000 … Usage: 0 input, 0 output, 0 cache read, 0 cache
+write`.
+
+The measured spend across the child is **about 2.5 USD**: roughly 0.03 in wave A, 1.05
+in wave B, 1.4 in wave C, 0.04 in the spike wave, plus about 0.25 for the single
+verification run of the ritual made for this section.
+
+**The split matters more than the total, and it is the number whoever budgets a baseline
+bump needs.** §4.7 costed a full re-record of the catalogue and never costed the gate.
+`make probe` re-runs every census scenario against a live binary and now costs **roughly
+0.25 USD per run** across thirteen census fixtures — measured at 0.13 across wave B's
+nine, so it scales with the catalogue and with how many fixtures drive subagents. Wave C
+spent about 0.13 on seven recordings and about 1.25 on five ritual runs: the drift ritual
+is an order of magnitude more expensive than the recordings it guards. It stays an
+on-demand ritual (parent §6.10), never a per-commit gate.
+
+### What surprised
+
+The full list is in Surprises & Discoveries above; five of them change how a consumer
+must read this corpus.
+
+- **The baseline is a binary path, not "the installed CLI".** `claude` auto-updated from
+  2.1.259 to 2.1.260 mid-wave and four fixtures silently followed it. The corpus is now
+  pinned to `~/.local/share/claude/versions/2.1.259`, recorded in every fixture's
+  `launch.argv[0]`. That directory is pruned by future upgrades, which is the argument
+  for the fixtures being the durable evidence and the binary merely the instrument.
+- **A transcript holds far more than its exchanges.** `plain-two-turn`'s two prompts and
+  two replies produce thirty-one records across nine distinct `attachment` kinds plus
+  `queue-operation`, `file-history-snapshot`, `atis-latch`, `ai-title` and `last-prompt`.
+  A reducer modelling a transcript as user and assistant records drops most of the file.
+- **A backgrounded agent brings up a `system/init` and a `result` of its own.** With
+  `CLAUDE_CODE_FORK_SUBAGENT=1` on every launch line this is the normal case, so a host
+  completing a turn on every `result` counts two turns for one prompt.
+- **A mirrored record is not always the record on disk.** For agent sidecar streams the
+  mirror and the file are two snapshots of one mutable record; `message.stop_reason` and
+  `message.usage` can disagree permanently. Neither side is authoritative for an agent
+  run's usage numbers.
+- **A redaction rule that keys on *what* a value is only catches values it was told
+  about.** The account name sat in the owner column of every `ls -l` line and walked past
+  three rules; the fix is positional. On this machine the name is an innocuous English
+  word, which is exactly why it survived review twice and exactly why the fix must not
+  depend on that luck.
+
+### What the next owner should know
+
+- **The scratch config home is logged into a different account than the one this child
+  started on.** `/tmp/afleet-fixtures/config-home` now holds credentials issued on
+  2026-09-04 for a `claude_max` organisation on the `default_claude_max_20x` rate-limit
+  tier, with `hasExtraUsageEnabled: false`. Wave A ran on the earlier login, whose
+  seven-day window it exhausted.
+- **`rate-limited-turn` can never be re-recorded, and is not a stale fixture to
+  refresh.** Its precondition is a spent weekly window, and that window is gone with the
+  account. It is the one fixture at 2.1.260 and the one carrying the four-variable
+  `launch.env` that predates S15. Nothing rests on the difference: it is `census: false`,
+  it never takes part in a comparison, and it is evidence about the shape of one rejected
+  turn rather than about a version's frame inventory. Do not treat its version tag as a
+  defect to fix.
+- **The recording environment inherits the driving agent's `CLAUDE_CODE_*` markers, and
+  this is a fidelity caveat C2 and C3 must carry.** `harness.Launch.environment` drops
+  three variables (`CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_CONTAINER_ID`,
+  `CLAUDE_CODE_ENTRYPOINT`) and inherits the rest, so every recording in this corpus was
+  made with the recording agent's `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and
+  `CLAUDE_CODE_CHILD_SESSION` set. One of those markers turns transcript saving off in
+  the interactive CLI, and it hid S12's central observation for a full run — the run came
+  back empty and plausible. Nothing in the corpus is known to be wrong because of it; the
+  print-mode path wrote its transcripts and registered its sessions in every recording
+  and every spike. But **the app will spawn the CLI with no such parent**, so the
+  recording environment and the app environment differ, and a differential test that
+  finds a disagreement here should suspect the inheritance before it suspects the
+  engine. It is recorded rather than repaired because changing the environment table
+  changes the environment every future recording is made in, while this corpus was
+  recorded under the present one — a wave's decision, not a spike's.
+- **`launch.env` is recorded evidence about one recording, read from the fixture and
+  never recomputed.** C2 should assert ClaudeWire's own builder against the spec's §6.1
+  table, and must not assert a committed fixture's `launch.env` against its own constant.
+- **S5's fallback launch was never needed.** The SDK MCP server does register under
+  `--strict-mcp-config` on 2.1.259, so `send-user-file` records the flag present; the
+  scenario's conditional drop is untaken code kept for a future baseline.
+
+### Not verified here
+
+The `hypothesis` flags on the two dialog fixtures were cleared by a structural
+extraction from the 2.1.259 binary, not by a recording; how the engine reaches those
+shapes on the wire is still unobserved. `make probe` was run once for this section
+rather than repeatedly, so this verification adds one data point to the ritual's
+history and cannot speak to flapping. And a ritual run that finds nothing still cannot
+demonstrate that the ritual would find something — the sensitivity evidence is the two
+fake-claude injections above, not the clean live run.
 
 ## Revision Notes
 
@@ -1528,3 +1743,10 @@ Pending — written at finish.
   re-run. Counting only a substitution that changed the string makes `make redact` a
   byte-for-byte no-op on a committed fixture, manifest included, which is the property §4.5's
   "idempotently" was always claiming.
+- 2026-09-04: v3, execution complete; gates verified as listed in Outcomes. G1, G2, G3, G4
+  and the tool tests all pass, measured at `865e55a` against the pinned 2.1.259 binary. Two
+  adaptations are recorded there rather than resolved against §5's wording: G1's count says
+  thirteen recorded fixtures and the corpus holds sixteen, and G2 is run against the pinned
+  binary path rather than "the installed 2.1.259", which is 2.1.260. One inaccuracy is left
+  for the parent's tending session: the `C1/S5, completed` and `C1/S2` notes cite 2.1.260 for
+  two fixtures re-recorded at 2.1.259 when the corpus was pinned.
