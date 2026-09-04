@@ -4,7 +4,7 @@ import os
 import harness
 
 META = {"name": "send-user-file", "purpose": "in-process MCP round trip: two files, a caption, status normal",
-        "serves": ["item 29", "C2.G3"], "spikes": ["S5"], "census": True, "deterministic": False, "isolation": "config-home",
+        "serves": ["item 29", "C2.G3"], "spikes": ["S5"], "census": True, "optional_pairs": ["system/thinking_tokens"], "deterministic": False, "isolation": "config-home",
         "launch": {"max_turns": 4, "strict_mcp_config": True}, "fallback_launch": {"strict_mcp_config": False},
         "fallback_reason": "the SDK MCP server did not register under --strict-mcp-config",
         "prompts": ["Use the mcp__afleet__send_user_file tool to send the files a.txt and b.txt to me, "

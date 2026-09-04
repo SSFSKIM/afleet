@@ -57,6 +57,7 @@ def mirror_matches_file(session, config_home):
 META = {"name": "session-mirror-relocation",
         "purpose": "two turns, set_cwd to a sibling (trust accepted when asked), two more turns",
         "serves": ["item 56", "item 64", "C3.G3", "C3.G4"], "spikes": ["S13", "S14"], "census": True,
+        "optional_pairs": ["system/thinking_tokens"],
         "deterministic": False, "isolation": "config-home", "launch": {"max_turns": 4},
         "prompts": ["Reply with exactly: m1", "Reply with exactly: m2", "Reply with exactly: m3", "Reply with exactly: m4"],
         "resume_of": None, "setup": None}

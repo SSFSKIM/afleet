@@ -320,7 +320,11 @@ an `initialPrompt`, with the agent defined in the scratch cwd's `.claude/agents/
 Recording is a deliberate act: `make record SCENARIO=<name>` runs one scenario; the
 unit tests never touch a live binary. Everything records on `haiku` with `--max-turns`
 between 2 and 6; a full re-record of the catalogue is about twenty short sessions,
-which is the price of a baseline bump.
+which is the price of a baseline bump. The **ritual** has a price of its own, which this
+paragraph originally left out: `make probe` re-runs every census scenario against a live
+binary, measured at roughly 0.13 USD across the nine census fixtures of wave B and rising
+with each model-driven fixture added. It stays an on-demand ritual (§6.10 of the parent),
+not something run per commit, and the two figures should be budgeted separately.
 
 ### 4.8 fake-claude
 
@@ -880,6 +884,45 @@ which `record` spills to its temporary file, set from the largest recorded scena
   one of these shapes would record its optional fields as required; C2's model for the ask must
   make `permission_suggestions`, `description` and `requires_user_interaction` optional.
 
+- Observation: A pair's *presence* varies run to run for a model-driven scenario, and the
+  census had no way to say so. Evidence: `system/thinking_tokens` appears in five of the ten
+  recorded fixtures and not the other five, carries real content
+  (`estimated_tokens`, `estimated_tokens_delta`, sometimes `user_message_uuid`), and is emitted
+  only when the model actually produces thinking tokens — which is the model's choice, not the
+  binary's. `make probe` against the *same* 2.1.259 the fixtures were recorded on reported
+  `session-mirror-relocation: added pair system/thinking_tokens` on one operator's runs and
+  nothing on another's, from the same commit. Impact: the census modelled optionality at three
+  levels — `keys`/`required_keys`, and the same pairing for payload and body keys — and not at
+  the level of the pair, so a frame the model emits sometimes could only read as *added* or
+  *removed*, both of which alarm. That gap is the common cause behind more than one exclusion,
+  and an intermittently red gate is worse than a red one, because it is the kind people re-run
+  rather than read. §4.4 and X8 are amended (Revision Notes) to give a pair the same
+  required-versus-optional treatment its keys already had.
+
+- Observation: The census's coverage question, answered from eleven recordings. Of the pairs a
+  model-driven recording produces, three classes behave differently under re-run. **Stable
+  regardless of the model**: the handshake, the in-process server's bring-up, `auth_status`,
+  `rate_limit_event`, `system/init`, `transcript_mirror`, `user`, `stream_event`, and every
+  `control_request`/`control_response` pair the *scenario* sends — these are the wire contract
+  and they reproduce, which is why `control-shapes`, the fixture that pins §6.4, is the most
+  reliable census member in the corpus. **Emitted at the model's discretion**:
+  `system/thinking_tokens` and, by the same argument, anything else the engine emits only when
+  the model takes a particular path. These are handled by declaration or accumulation and stay
+  in the census with their key sets still checked. **Determined by how many turns the model
+  chooses to spend**: the `result` pair, which is `result/success` or `result/error_max_turns`
+  depending on whether the session fit inside `--max-turns`. This last class is the one that is
+  genuinely not reproducible, and it is not the same gap: the two `result` pairs are mutually
+  exclusive outcomes rather than one optional frame, and declaring both optional would make the
+  census blind to whether the recording completed at all — which is a distinction worth keeping.
+  So the pattern is not "model-driven recordings are unstable"; it is that a scenario is
+  reproducible exactly when nothing the *model* decides can change how many turns it takes.
+  `exit-plan-mode` fails that test because approving a plan hands the work back to the model,
+  and it stays outside the census after the pair-optionality fix, which removed one of its three
+  drift lines and neither of the two about `result`. A scenario that would otherwise fail it can
+  usually be repaired at the source, by giving the model no reason to spend a variable number of
+  turns, which is what every other fixture in the corpus does and why eight of nine census
+  members hold.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
@@ -1184,3 +1227,25 @@ Pending — written at finish.
   budgeted the price of a baseline bump and not the price of the gate. Three scenarios needed a second recording, each for a defect the first recording
   exposed rather than for flakiness: `exit-plan-mode`'s turn budget, `session-mirror-relocation`'s
   trust call and its two path comparisons, and `session-mirror-resume`'s unmirrored record.
+- 2026-09-04: §4.4 and X8 are amended: a census pair carries the same required-versus-optional
+  distinction its key sets already carried, at both levels the design has for keys. The
+  **accumulated** half is `merge_required`'s, and it needs nobody: a pair present in one
+  recording of a scenario and absent from another is marked `optional` in the merged census, the
+  flag is sticky so a later recording carrying the pair does not un-learn it, and required-mode
+  `diff` then stays silent about that pair in either direction. Without it, accumulation could
+  not converge — folding an intermittent pair into the baseline only moves the alarm from
+  "added" to "removed", so a re-recording flips which direction the gate is wrong in rather than
+  fixing it. The **declared** half is `optional_pairs` in a scenario's `META`, read by `diff`
+  and, like `resume_of`, never written into a fixture, because it is a property of the scenario
+  and not of any one recording — so declaring it costs no re-recording, which matters when the
+  evidence for it came from a live `diff` run that no recording reproduced. The two divide
+  cleanly: the flag is optionality the corpus has evidence for, the declaration is optionality
+  the operator has evidence for that the corpus does not. Exact mode is untouched in both
+  halves: a deterministic scenario replays identical frames, its census never accumulates, and
+  an optional pair there is real drift. `system/thinking_tokens` is declared on all eight
+  model-driven census scenarios, wave A's two included.
+- 2026-09-04: §4.7 gains the measured price of the drift ritual beside the price of a baseline
+  bump. The section costed a full re-record of the catalogue and never costed `make probe`
+  itself, which re-runs every census scenario against a live binary at roughly 0.13 USD for wave
+  B's nine fixtures and grows with the catalogue. It stays on-demand rather than continuous, so
+  the figure is a budgeting fact and not an argument for changing the ritual.

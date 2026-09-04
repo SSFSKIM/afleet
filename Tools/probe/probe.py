@@ -45,6 +45,14 @@ A scenario is a module under `scenarios/` exposing `META` (a dict) and `run(sess
                      this is how a scenario says so -- `background-shell` sets it.
 - `late_responses`   request ids `fixture.json` declares, licensing one response arriving
                      after the CLI cancelled its own request (§4.2).
+- `optional_pairs`   census pairs this scenario emits on some runs and not others, so `diff`
+                     alarms on neither their appearance nor their absence in required mode.
+                     Read from `META` and never written into the fixture, for the same reason
+                     `resume_of` is not: it is a property of the scenario, not of any one
+                     recording, so declaring it costs no re-recording. `system/thinking_tokens`
+                     is the one every model-driven scenario needs -- the engine emits it only
+                     when the model actually produces thinking tokens, which is the model's
+                     choice, and it appears in half the recorded corpus.
 - `spill_after`      the capture length past which the harness spills to a mode-0600 file in
                      a private directory outside the worktree (§4.2). A scenario expecting a
                      large volume sets it; the harness default applies otherwise.
@@ -535,7 +543,8 @@ def diff(claude, scenario_dir=None, fixtures_root=None, config_home=None, scratc
             # rather than defaulting, for exactly this reason -- an absent value would quietly
             # relax the strict comparison into the permissive one. The `except` below reports
             # the KeyError as the fixture defect it is.
-            lines = census.diff(recorded, observed, "exact" if meta["deterministic"] else "required")
+            lines = census.diff(recorded, observed, "exact" if meta["deterministic"] else "required",
+                                optional_pairs=mod.META.get("optional_pairs") or ())
             if census.UNPARSEABLE_PAIR in observed["pairs"]:
                 # The other half of the alarm-on-appearance rule. `census.diff` cannot raise
                 # this unconditionally: `verify` recounts a fixture's own frames through the

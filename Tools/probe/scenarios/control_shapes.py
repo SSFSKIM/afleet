@@ -23,7 +23,7 @@ import os
 META = {"name": "control-shapes",
         "purpose": "apply_flag_settings with readback, rewind_conversation, set_cwd needing trust, "
                    "the claude_authenticate family",
-        "serves": ["item 11", "item 13", "C4.G4"], "spikes": ["S8"], "census": True, "deterministic": False,
+        "serves": ["item 11", "item 13", "C4.G4"], "spikes": ["S8"], "census": True, "optional_pairs": ["system/thinking_tokens"], "deterministic": False,
         "isolation": "config-home", "launch": {"max_turns": 2},
         "prompts": ["Reply with exactly the word: shapes"], "resume_of": None, "setup": None}
 

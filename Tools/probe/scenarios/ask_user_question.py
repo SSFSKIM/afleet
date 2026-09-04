@@ -7,7 +7,7 @@ and the value chosen there is what appends the tool prompt's preview instruction
 """
 META = {"name": "ask-user-question",
         "purpose": "a question with two options and previews, answered through updatedInput.answers",
-        "serves": ["item 6", "item 57"], "spikes": ["S15"], "census": True, "deterministic": False,
+        "serves": ["item 6", "item 57"], "spikes": ["S15"], "census": True, "optional_pairs": ["system/thinking_tokens"], "deterministic": False,
         "isolation": "config-home", "launch": {"max_turns": 3},
         "prompts": ["Before answering, use the AskUserQuestion tool to ask me which colour I prefer, "
                     "offering exactly two options, red and blue, each with a short preview. "

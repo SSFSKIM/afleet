@@ -221,21 +221,37 @@ def _captured_set_diff(prefix, recorded, observed, lines):
     _set_diff(prefix, "", recorded, observed, lines)
 
 
-def diff(recorded, observed, mode):
+def diff(recorded, observed, mode, optional_pairs=()):
     """Human-readable drift lines; empty means no drift. mode: 'exact' | 'required'.
 
     An unknown mode raises rather than defaulting: the two modes are a strict and a
     permissive gate, and later callers derive this argument from fixture metadata, where
     a wrong value would silently downgrade the strict gate to the permissive one.
+
+    `optional_pairs` names pairs the *scenario* declares it emits on some runs and not
+    others, and it is honoured in required mode only. It is the other half of the
+    accumulated `optional` flag below, and the two divide cleanly: the flag is optionality
+    the corpus has evidence for, learned for free whenever two recordings of a scenario
+    differ, and the declaration is optionality the operator has evidence for that the
+    corpus does not -- an intermittent frame that every recording so far happened to agree
+    about, whose variability only a live re-run revealed. Without the declaration such a
+    pair can only be fixed by recording until it happens to appear, which is luck rather
+    than engineering; with it the gate is stable at no cost. Like `resume_of`, it is a
+    property of the scenario rather than of any one recording, so it lives in the
+    scenario's `META` and is read by `diff`, and no fixture has to be re-recorded to gain
+    it.
     """
     if mode not in ("exact", "required"):
         raise ValueError("unknown census diff mode %r; expected 'exact' or 'required'" % (mode,))
+    optional_pairs = set(optional_pairs or ())
     lines = []
     rp, op = recorded["pairs"], observed["pairs"]
     for pair in sorted(set(op) - set(rp)):
+        if mode == "required" and pair in optional_pairs:
+            continue
         lines.append("added pair %s" % pair)
     for pair in sorted(set(rp) - set(op)):
-        if mode == "required" and rp[pair].get("optional"):
+        if mode == "required" and (rp[pair].get("optional") or pair in optional_pairs):
             # Accumulated evidence that this scenario does not always produce the pair. Absence
             # is then not drift; appearance still is not either, because the pair is in the
             # baseline. Exact mode is untouched: a deterministic scenario's census never

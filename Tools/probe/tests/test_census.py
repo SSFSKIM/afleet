@@ -247,6 +247,29 @@ class DiffTests(unittest.TestCase):
         self.assertTrue(m["pairs"]["system/thinking_tokens"]["optional"])
         self.assertEqual(census.diff(m, without, "required"), [])
 
+    def test_a_declared_optional_pair_alarms_in_neither_direction(self):
+        """Optionality the operator has evidence for and the corpus does not: an intermittent
+        frame every recording so far happened to agree about."""
+        with_pair = census.census([frame("system", subtype="init"), frame("system", subtype="thinking_tokens")])
+        without = census.census([frame("system", subtype="init")])
+        declared = ["system/thinking_tokens"]
+        self.assertEqual(census.diff(with_pair, without, "required", optional_pairs=declared), [])
+        self.assertEqual(census.diff(without, with_pair, "required", optional_pairs=declared), [])
+        # Undeclared, the same pair still alarms in both directions.
+        self.assertEqual(census.diff(without, with_pair, "required"), ["added pair system/thinking_tokens"])
+
+    def test_a_declared_optional_pair_does_not_relax_exact_mode(self):
+        without = census.census([frame("system", subtype="init")])
+        with_pair = census.census([frame("system", subtype="init"), frame("system", subtype="thinking_tokens")])
+        self.assertEqual(census.diff(without, with_pair, "exact", optional_pairs=["system/thinking_tokens"]),
+                         ["added pair system/thinking_tokens"])
+
+    def test_a_declaration_does_not_hide_a_different_pair(self):
+        without = census.census([frame("system", subtype="init")])
+        other = census.census([frame("system", subtype="init"), frame("system", subtype="commands_changed")])
+        self.assertEqual(census.diff(without, other, "required", optional_pairs=["system/thinking_tokens"]),
+                         ["added pair system/commands_changed"])
+
     def test_exact_mode_still_alarms_on_an_optional_pair(self):
         """A deterministic scenario never accumulates, so its gate must stay strict."""
         a = census.census([frame("system", subtype="init"), frame("system", subtype="thinking_tokens")])

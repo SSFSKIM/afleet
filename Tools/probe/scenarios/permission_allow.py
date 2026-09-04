@@ -1,7 +1,7 @@
 """A Write in the scratch cwd asked through can_use_tool and answered allow (items 4, 5; C2.G2)."""
 META = {"name": "permission-allow", "purpose": "a Write asked through can_use_tool and answered allow",
         "serves": ["item 4", "item 5", "C2.G2"],
-        "spikes": [], "census": True, "deterministic": False, "isolation": "config-home",
+        "spikes": [], "census": True, "optional_pairs": ["system/thinking_tokens"], "deterministic": False, "isolation": "config-home",
         "launch": {"max_turns": 3},
         "prompts": ["Use the Write tool to create a file named probe.txt in the current directory "
                     "containing the text: afleet. Then reply with the single word: done"],

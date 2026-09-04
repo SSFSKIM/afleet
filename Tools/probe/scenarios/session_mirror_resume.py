@@ -13,7 +13,7 @@ from session_mirror_relocation import mirror_matches_file
 
 META = {"name": "session-mirror-resume",
         "purpose": "resume the relocated session and add one turn; mirror and file still agree",
-        "serves": ["item 64", "C3.G3"], "spikes": ["S14"], "census": True, "deterministic": False,
+        "serves": ["item 64", "C3.G3"], "spikes": ["S14"], "census": True, "optional_pairs": ["system/thinking_tokens"], "deterministic": False,
         "isolation": "config-home", "launch": {"max_turns": 2}, "unmirrored_prefix": 1,
         "prompts": ["Reply with exactly: m5"], "resume_of": "session-mirror-relocation", "setup": None}
 
