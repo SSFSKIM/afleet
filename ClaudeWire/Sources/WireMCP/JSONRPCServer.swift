@@ -1,5 +1,6 @@
 import Foundation
 import WireFrames
+import WireDiagnostics
 
 public struct MCPToolContext: Sendable { public var cwd: URL; public init(cwd: URL) { self.cwd = cwd } }
 
@@ -42,11 +43,13 @@ public actor AfleetMCPServer {
     public let serverVersion: String
     public let cwd: URL
     private let tools: [String: any MCPTool]
+    private let diagnostics: any DiagnosticsSink
     private var inFlight: [JSONRPCID: Task<MCPToolResult, any Error>] = [:]
 
-    public init(serverVersion: String, cwd: URL, tools: [any MCPTool]) {
+    public init(serverVersion: String, cwd: URL, tools: [any MCPTool], diagnostics: any DiagnosticsSink = NullDiagnostics()) {
         self.serverVersion = serverVersion; self.cwd = cwd
         self.tools = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0) })
+        self.diagnostics = diagnostics
     }
 
     public func handle(_ message: JSONRPCMessage) async -> (MCPReply, HostToolInvocation?) {
@@ -102,6 +105,7 @@ public actor AfleetMCPServer {
                     // An unexpected throw stays a runtime failure (isError), not a protocol error —
                     // but this text is model-visible, and a Foundation error's description carries the
                     // full filesystem path it failed on. Summarise instead of echoing it.
+                    diagnostics.record(.mcpToolFailure(tool: name, error: String(describing: error)))
                     let summary = "Tool \(name) failed unexpectedly (\(type(of: error)))"
                     return (.response(.response(.init(id: r.id, result: .object(["content": .array([.object(["type": .string("text"), "text": .string(summary)])]), "isError": .bool(true)])))), nil)
                 }

@@ -10,15 +10,17 @@ let package = Package(
     dependencies: [.package(path: "../AfleetCore")],
     targets: [
         .target(name: "WireFrames", dependencies: [.product(name: "AfleetCore", package: "AfleetCore")], swiftSettings: v6),
-        .target(name: "WireMCP", dependencies: ["WireFrames"], swiftSettings: v6),
         .target(name: "WireEnvironment", dependencies: ["WireFrames", .product(name: "AfleetCore", package: "AfleetCore")], swiftSettings: v6),
         .target(name: "WireDiagnostics", dependencies: ["WireFrames", .product(name: "AfleetCore", package: "AfleetCore")], swiftSettings: v6),
+        // WireMCP records tool failures, so it sits above WireDiagnostics; the edge is acyclic because
+        // WireDiagnostics knows only WireFrames and AfleetCore.
+        .target(name: "WireMCP", dependencies: ["WireFrames", "WireDiagnostics"], swiftSettings: v6),
         .target(name: "WireTransport", dependencies: ["WireFrames", "WireMCP", "WireEnvironment", "WireDiagnostics",
                                                      .product(name: "AfleetCore", package: "AfleetCore")], swiftSettings: v6),
         .target(name: "ClaudeWire", dependencies: ["WireFrames", "WireMCP", "WireEnvironment", "WireDiagnostics", "WireTransport"], swiftSettings: v6),
         .target(name: "WireTestSupport", dependencies: ["WireFrames"], path: "Sources/WireTestSupport", swiftSettings: v6),
         .testTarget(name: "WireFramesTests", dependencies: ["WireFrames", "WireTestSupport"], swiftSettings: v6),
-        .testTarget(name: "WireMCPTests", dependencies: ["WireMCP", "WireTestSupport"], swiftSettings: v6),
+        .testTarget(name: "WireMCPTests", dependencies: ["WireMCP", "WireDiagnostics", "WireTestSupport"], swiftSettings: v6),
         .testTarget(name: "WireEnvironmentTests", dependencies: ["WireEnvironment", "WireTestSupport"], swiftSettings: v6),
         .testTarget(name: "WireDiagnosticsTests", dependencies: ["WireDiagnostics", "WireTestSupport"], swiftSettings: v6),
         .testTarget(name: "WireTransportTests", dependencies: ["WireTransport", "WireTestSupport"], swiftSettings: v6),

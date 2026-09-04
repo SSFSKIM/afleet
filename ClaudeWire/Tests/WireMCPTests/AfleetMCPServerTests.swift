@@ -1,6 +1,7 @@
 import XCTest
 import WireFrames
 import WireMCP
+import WireDiagnostics
 
 final class AfleetMCPServerTests: XCTestCase {
     private var tmp: URL!
@@ -179,5 +180,38 @@ final class AfleetMCPServerTests: XCTestCase {
         let (r, _) = await call.value
         guard case .response(.error(let e)) = r else { return XCTFail("\(r)") }
         XCTAssertEqual(e.error.code, -32800)
+    }
+}
+
+/// An unexpected throw is summarised for the model — a Foundation error's description carries the path it
+/// failed on — but the text used to be lost entirely, because this actor had nowhere to write it. It goes to
+/// the diagnostics sink now: the local metadata log is where an operator can diagnose the failure.
+final class MCPToolFailureDiagnosticsTests: XCTestCase {
+    private final class Sink: DiagnosticsSink, @unchecked Sendable {
+        private let lock = NSLock(); private var stored: [DiagnosticEvent] = []
+        func record(_ event: DiagnosticEvent) { lock.lock(); stored.append(event); lock.unlock() }
+        var events: [DiagnosticEvent] { lock.lock(); defer { lock.unlock() }; return stored }
+    }
+    private struct ExplodingTool: MCPTool {
+        struct Boom: Error { let secretPath = "/Users/someone/private/ledger.csv" }
+        var name: String { "explode" }
+        var description: String { "throws" }
+        var inputSchema: JSONValue { .object([:]) }
+        func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult { throw Boom() }
+    }
+    func testUnexpectedToolErrorTextReachesDiagnosticsAndNotTheModel() async throws {
+        let sink = Sink()
+        let server = AfleetMCPServer(serverVersion: "0.1.0", cwd: URL(fileURLWithPath: "/tmp"), tools: [ExplodingTool()], diagnostics: sink)
+        let (reply, invocation) = await server.handle(.request(.init(id: .number(1), method: "tools/call", params: .object(["name": .string("explode"), "arguments": .object([:])]))))
+        XCTAssertNil(invocation)
+        guard case .response(.response(let r)) = reply else { return XCTFail("expected a response, got \(reply)") }
+        XCTAssertEqual(r.result["isError"], .bool(true))
+        let modelText = r.result["content"]?[0]?["text"]?.stringValue ?? ""
+        XCTAssertEqual(modelText, "Tool explode failed unexpectedly (Boom)")
+        XCTAssertFalse(modelText.contains("ledger.csv"), "the model must not see the error's own description")
+        let recorded = sink.events.compactMap { e -> (String, String)? in if case .mcpToolFailure(let t, let m) = e { return (t, m) }; return nil }
+        XCTAssertEqual(recorded.count, 1)
+        XCTAssertEqual(recorded.first?.0, "explode")
+        XCTAssertTrue(recorded.first?.1.contains("ledger.csv") == true, "the full error text must survive in diagnostics: \(recorded)")
     }
 }

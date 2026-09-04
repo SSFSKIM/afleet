@@ -10,6 +10,10 @@ public enum DiagnosticEvent: Sendable {
     case handshake(durationMs: Int, epoch: ProcessEpoch)
     case terminateEscalated(step: String, epoch: ProcessEpoch)
     case captureSkipped(reason: String)
+    /// An in-process MCP tool threw something unexpected. The text the model sees is summarised so a
+    /// Foundation error cannot leak the path it failed on into the conversation; the full description is
+    /// kept here, in the local metadata log, where an operator can actually diagnose it.
+    case mcpToolFailure(tool: String, error: String)
 
     /// Metadata only: names, sizes, identifiers and timings. No frame payload ever reaches this value.
     public var jsonValue: JSONValue {
@@ -26,6 +30,7 @@ public enum DiagnosticEvent: Sendable {
         case .handshake(let ms, let e): o["event"] = .string("handshake"); o["duration_ms"] = .integer(Int64(ms)); o["epoch"] = .integer(Int64(e.rawValue))
         case .terminateEscalated(let step, let e): o["event"] = .string("terminate_escalated"); o["step"] = .string(step); o["epoch"] = .integer(Int64(e.rawValue))
         case .captureSkipped(let reason): o["event"] = .string("capture_skipped"); o["reason"] = .string(reason)
+        case .mcpToolFailure(let tool, let error): o["event"] = .string("mcp_tool_failure"); o["tool"] = .string(tool); o["error"] = .string(error)
         }
         return .object(o)
     }
