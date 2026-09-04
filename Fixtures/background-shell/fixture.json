@@ -1,0 +1,76 @@
+{
+ "census": true,
+ "cli_version": "2.1.259",
+ "cwd": "/tmp/afleet-fixtures/background-shell",
+ "deterministic": false,
+ "exit_code": 0,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "~/.local/share/claude/versions/2.1.259",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--session-id",
+   "9563caff-2896-4050-8c6c-1ede14516b30",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "default",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "4"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
+  }
+ },
+ "mirror_identity_only": [],
+ "name": "background-shell",
+ "notes": [
+  "first result: success; task_notification: True; output_file: /private/tmp/claude-501/-private-tmp-afleet-fixtures-background-shell/9563caff-2896-4050-8c6c-1ede14516b30/tasks/bcdsdgryt.output; auto-turn result: success",
+  "background_tasks_changed frames: 2"
+ ],
+ "prompts": [
+  "Use the Bash tool with run_in_background=true to run exactly: sleep 6 && echo bg-done . Then immediately reply with the single word: started . When that background task finishes, reply with the single word: finished . Use no tool other than that one Bash call."
+ ],
+ "purpose": "background Bash, task_notification, auto-turn, task output file",
+ "recorded_at": "2026-09-04T11:56:29Z",
+ "review": {
+  "checklist_version": 2,
+  "date": "2026-09-04",
+  "reviewer": "Claude reviewer for kimmi"
+ },
+ "scenario": "background_shell",
+ "serves": [
+  "item 61",
+  "item 15",
+  "C3.G3"
+ ],
+ "session_id": "9563caff-2896-4050-8c6c-1ede14516b30",
+ "spikes": [],
+ "synthetic": false,
+ "unmirrored_prefix": 0,
+ "withdrawn_requests": []
+}
