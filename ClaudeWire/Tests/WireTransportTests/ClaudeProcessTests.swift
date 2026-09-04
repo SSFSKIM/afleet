@@ -378,3 +378,59 @@ final class ClaudeProcessTests: XCTestCase {
         XCTAssertTrue(text.contains("\"subtype\":\"initialize\"")); XCTAssertTrue(text.contains("\"type\":\"assistant\""))
     }
 }
+
+/// The engine's JSON-RPC handshake with the in-process MCP server, and the ordering constraint it places on
+/// this transport.
+///
+/// Every recorded fixture opens the same way: the engine sends `mcp_message`/`initialize` toward the server and
+/// **waits for the host's answer before answering `control_request/initialize`** (frame 2 before frame 4 in
+/// `zero-cost`, `plain-two-turn`, `send-user-file` and `resume-no-replay`). The stand-in now reproduces that,
+/// which turns a structural property of `ClaudeProcess` into something a test can hold: `spawn()` starts the
+/// stdout reader before it writes the initialize request, so the inbound `mcp_message` is answered while
+/// `spawn()` is still suspended. A transport that started reading after the handshake returned would deadlock
+/// against this stand-in rather than pass quietly.
+final class MCPStartupOrderingTests: XCTestCase {
+
+    func testTheEngineSInitializeResponseFollowsTheHostAnsweringTheServerHandshake() async throws {
+        let h = try Harness()
+        let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "", diagnostics: sink)
+        _ = try await p.spawn()
+        await p.terminate()
+
+        // Both directions are recorded, so the order is read off the log rather than inferred from timing.
+        let mcpIn = sink.entries.firstIndex { $0.contains("\"direction\":\"inbound\"") && $0.contains("\"subtype\":\"mcp_message\"") }
+        let answerOut = sink.entries.firstIndex { $0.contains("\"direction\":\"outbound\"") && $0.contains("\"subtype\":\"mcp_message\"") }
+        let initResponseIn = sink.entries.firstIndex { $0.contains("\"direction\":\"inbound\"") && $0.contains("\"type\":\"control_response\"") && $0.contains("\"request_id\":\"init-1\"") }
+        let inbound = try XCTUnwrap(mcpIn, "the engine never asked the in-process server to initialize")
+        let answered = try XCTUnwrap(answerOut, "the host never answered the server handshake")
+        let response = try XCTUnwrap(initResponseIn, "no initialize response was recorded")
+        XCTAssertLessThan(inbound, answered, "the host answered before it was asked")
+        XCTAssertLessThan(answered, response, "the initialize response arrived before the host answered the server handshake; the ordering the fixtures record was not exercised")
+    }
+
+    /// The window the corpus shows but never photographs: between the handshake completing and `tools/list`
+    /// being answered, the server is not yet connected and its tool list is empty. A host that reads
+    /// `mcp_status` the instant `spawn()` returns is inside it.
+    func testTheServerIsNotConnectedTheMomentTheHandshakeCompletes() async throws {
+        let h = try Harness()
+        let p = h.make(scenario: "mcp_slow_connect:0.6")
+        _ = try await p.spawn()
+
+        let immediate = try await p.request(MCPStatus(), timeout: .seconds(5))
+        let atOnce = try XCTUnwrap(immediate["mcpServers"]?.arrayValue?.first { $0["name"]?.stringValue == "afleet" })
+        XCTAssertEqual(atOnce["status"]?.stringValue, "connecting")
+        XCTAssertEqual(atOnce["tools"]?.arrayValue?.count, 0, "a tool list before tools/list was answered")
+
+        var connected: JSONValue?
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline, connected == nil {
+            let reading = try await p.request(MCPStatus(), timeout: .seconds(5))
+            connected = reading["mcpServers"]?.arrayValue?.first { $0["name"]?.stringValue == "afleet" && $0["status"]?.stringValue == "connected" }
+            if connected == nil { try await Task.sleep(for: .milliseconds(100)) }
+        }
+        let server = try XCTUnwrap(connected, "the server never reached connected")
+        XCTAssertEqual(server["tools"]?.arrayValue?.compactMap { $0["name"]?.stringValue }, ["send_user_file"])
+        await p.terminate()
+    }
+}

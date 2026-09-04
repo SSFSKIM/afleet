@@ -47,6 +47,28 @@ struct ConfigHomeWitness: Sendable {
         return out
     }
 
+    /// Top-level names the engine is known to write under a config home.
+    ///
+    /// Restored from the plan, which asserted every child-created path falls under a named prefix; an earlier
+    /// revision of this file replaced that with "the child wrote something" and a `print`, which is a weaker
+    /// claim and was a substitution made in a comment rather than as a decision. The set is the union of the
+    /// plan's list and the directories C1's scratch config home actually carries, and it is deliberately a
+    /// *top-level* rule: a path appearing under a name nobody has seen the engine write is the shape an
+    /// afleet-side write would take, and failing on it is the intended outcome, not a maintenance burden.
+    static let engineWrittenNames: Set<String> = [
+        "projects", "sessions", "todos", "statsig", "shell-snapshots", "debug", "plugins", "cache",
+        "backups", "daemon", "file-history", "jobs", "plans", "session-env", "ide", "logs", "history",
+        ".claude.json", ".credentials.json", ".last-cleanup", ".last-update-result.json",
+        "daemon.log", "history.jsonl", "settings.json",
+    ]
+
+    /// Every path in `difference` whose first component is not a name the engine writes.
+    static func unexplained(_ difference: Difference) -> [String] {
+        (difference.created.union(difference.modified).union(difference.deleted))
+            .filter { !engineWrittenNames.contains($0.split(separator: "/").first.map(String.init) ?? $0) }
+            .sorted()
+    }
+
     static func difference(from before: [String: Stamp], to after: [String: Stamp]) -> Difference {
         var d = Difference()
         d.created = Set(after.keys).subtracting(before.keys)
@@ -217,6 +239,82 @@ final class LiveGateMachineryTests: XCTestCase {
         XCTAssertFalse(r.rateLimitsAvailable)
     }
 
+    /// The allowlist: engine-written names pass, anything else is named. This is the assertion that stands in
+    /// for policing the window in which afleet and the child run concurrently, so it has to be able to fail.
+    func testTheAllowlistNamesPathsTheEngineIsNotKnownToWrite() {
+        let engineOnly = ConfigHomeWitness.Difference(
+            created: ["projects/-tmp-x/abc.jsonl", "session-env/x.json", "shell-snapshots/snapshot-zsh-1.sh"],
+            modified: [".claude.json", "history.jsonl"],
+            deleted: ["statsig/statsig.cached.evaluations.1"])
+        XCTAssertEqual(ConfigHomeWitness.unexplained(engineOnly), [])
+
+        let withAfleetWrites = ConfigHomeWitness.Difference(
+            created: ["projects/-tmp-x/abc.jsonl", "afleet/channels.json"],
+            modified: [".claude.json", "settings.local.json"],
+            deleted: ["fleet-state.db"])
+        XCTAssertEqual(ConfigHomeWitness.unexplained(withAfleetWrites),
+                       ["afleet/channels.json", "fleet-state.db", "settings.local.json"])
+    }
+
+    // MARK: the guard driven through a real ClaudeProcess, against the stand-in
+
+    /// Spawns the protocol stand-in — never the installed CLI — so the budget guard is exercised end to end
+    /// without an account. Zero live cost: the stand-in reaches no model.
+    private func standIn(scenario: String) throws -> (ClaudeProcess, URL) {
+        let cwd = FileManager.default.temporaryDirectory.appendingPathComponent("afleet-guard-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        var variables = ProcessInfo.processInfo.environment
+        variables["SCRIPTED_CLAUDE_SCENARIO"] = scenario
+        let env = ResolvedEnvironment(variables: variables, shell: "/bin/zsh", capturedAt: .init(), mode: .processFallback)
+        let launch = LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: cwd, session: .new(SessionID()))
+        return (ClaudeProcess(epoch: .first, launch: launch, environment: env,
+                              configHome: ConfigHome(root: cwd.appendingPathComponent("cfg"), source: .environment),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: cwd, tools: [SendUserFileTool()]),
+                              diagnostics: NullDiagnostics(), capture: nil), cwd)
+    }
+
+    /// The primary signal, read the way the live gate reads it: a `get_usage` control request over the wire,
+    /// decoded, handed to the reader. Both verdicts, so a reader that never reports "spent" fails.
+    func testTheBudgetReaderRunsOverTheWireAndReportsBothVerdicts() async throws {
+        for (percentage, expected) in [("11", [:] as [String: Double]),
+                                       ("100", ["seven_day": 100.0, "limits/weekly_all": 100.0])] {
+            let (process, cwd) = try standIn(scenario: "usage:\(percentage)")
+            defer { try? FileManager.default.removeItem(at: cwd) }
+            _ = try await process.spawn()
+            let reading = LiveBudgetReading.read(getUsage: try await process.request(GetUsage(), timeout: .seconds(10)))
+            await process.terminate()
+            XCTAssertTrue(reading.rateLimitsAvailable)
+            XCTAssertEqual(reading.examined, ["five_hour", "seven_day", "nimbus_quill", "limits/session", "limits/weekly_all"],
+                           "the reader examined a different set of windows over the wire than it does in memory")
+            XCTAssertEqual(reading.spent, expected, "seven_day at \(percentage)% read as \(reading.spent)")
+        }
+    }
+
+    /// The secondary signal, likewise: a `rate_limit_event` frame decoded off a real stream and handed to
+    /// `rejects(rateLimitInfo:)`. Both shapes the corpus carries, so the reading that cost a turn — an allowed
+    /// turn whose organisation has overage switched off — is caught here rather than live.
+    func testTheRateLimitEventReachesTheGuardThroughTheTransport() async throws {
+        for (scenario, refuses) in [("rate_limit:allowed", false), ("rate_limit:rejected", true)] {
+            let (process, cwd) = try standIn(scenario: scenario)
+            defer { try? FileManager.default.removeItem(at: cwd) }
+            let collector = LiveEventLog()
+            Task { for await event in process.events { await collector.append(event) } }
+            _ = try await process.spawn()
+            _ = try await process.send(UserInput(text: "go"))
+            let events = await collector.wait(upTo: .seconds(10)) { events in
+                events.contains { if case .frame(.result, _) = $0 { return true }; return false }
+            }
+            await process.terminate()
+
+            let infos = events.compactMap { if case .frame(.rateLimitEvent(let e), _) = $0 { return e.rateLimitInfo }; return nil }
+            XCTAssertEqual(infos.count, 1, "\(scenario): expected one rate_limit_event, saw \(infos.count)")
+            let info = try XCTUnwrap(infos.first)
+            XCTAssertEqual(info["overageStatus"]?.stringValue, "rejected",
+                           "\(scenario): both shapes carry overageStatus rejected; that is the point of the pair")
+            XCTAssertEqual(LiveBudgetReading.rejects(rateLimitInfo: info), refuses, "\(scenario): \(info)")
+        }
+    }
+
     /// Both real shapes: the refusal recorded in `Fixtures/rate-limited-turn`, and the allowed turn observed
     /// live on 2026-09-05 whose `overageStatus` is `rejected` because the organisation disabled overage.
     /// Reading the second as a refusal is what made a live run throw away a completed turn's evidence.
@@ -236,6 +334,12 @@ final class LiveGateMachineryTests: XCTestCase {
 }
 
 // MARK: - G3
+
+/// A live precondition that could not be met, reported as a failure rather than a skip.
+struct LiveGateFailure: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
+}
 
 /// Collects everything a live process emits so a test can wait on a predicate rather than shaping a task group
 /// around one event.
@@ -305,8 +409,7 @@ final class LiveCLITests: XCTestCase {
 
     /// Polls `mcp_status` until the named server is connected, and fails with the last reading if it never is.
     /// Zero cost: `mcp_status` is a control request, not a turn.
-    private func awaitMCPServer(named name: String, on process: ClaudeProcess, within deadline: Duration,
-                                file: StaticString = #filePath, line: UInt = #line) async throws -> JSONValue {
+    private func awaitMCPServer(named name: String, on process: ClaudeProcess, within deadline: Duration) async throws -> JSONValue {
         let start = ContinuousClock.now
         var last: JSONValue = .null
         while ContinuousClock.now - start < deadline {
@@ -317,8 +420,11 @@ final class LiveCLITests: XCTestCase {
             }
             try await Task.sleep(for: .milliseconds(100))
         }
-        XCTFail("the \(name) MCP server never reached connected within \(deadline); last mcp_status: \(last)", file: file, line: line)
-        throw XCTSkip("unreachable: XCTFail above ends the test")
+        // Thrown, not `XCTFail` followed by an `XCTSkip` to leave the function. `XCTFail` does not end a test,
+        // so that pairing recorded a failure *and* a skip, and XCTest's summary line reported the skip — which
+        // is the one distinction this gate exists to keep: a test that could not run must never look like a
+        // test that passed.
+        throw LiveGateFailure("the \(name) MCP server never reached connected within \(deadline); last mcp_status: \(last)")
     }
 
     /// The installed build is accepted and a fabricated older one is refused, both through the same gate.
@@ -449,11 +555,20 @@ final class LiveCLITests: XCTestCase {
         XCTAssertEqual(exits.count, 1, "expected exactly one exit event, saw \(exits)")
         XCTAssertEqual(exits.first?.isClean, true, "session did not exit cleanly: \(String(describing: exits.first))")
 
-        // What the child wrote is reported, not policed: the engine's own bookkeeping is its business. The
-        // claim under test is the one above — that nothing between `atStart` and `beforeSpawn` moved.
-        let byChild = ConfigHomeWitness.difference(from: beforeSpawn, to: witness.read())
+        let afterChild = witness.read()
+        let byChild = ConfigHomeWitness.difference(from: beforeSpawn, to: afterChild)
         print("[G3] the spawned claude touched \(byChild.created.count) new, \(byChild.modified.count) modified, \(byChild.deleted.count) deleted paths under the scratch config home")
         XCTAssertFalse(byChild.isEmpty, "the child wrote nothing under the scratch config home, so CLAUDE_CONFIG_DIR may not have reached it")
+        // The window from `spawn()` to the exit belongs to the child and to this test at the same time — they
+        // run concurrently, so no reading can separate them by time. The allowlist separates them by shape
+        // instead: everything that moved sits under a name the engine writes, and an afleet-side write would
+        // not.
+        XCTAssertEqual(ConfigHomeWitness.unexplained(byChild), [], "paths moved under names the engine is not known to write")
+
+        // The tail the allowlist cannot cover: everything this test does after the child is gone. Nothing here
+        // is concurrent with anything, so this window is attributable to afleet alone and must be empty.
+        XCTAssertTrue(ConfigHomeWitness.difference(from: afterChild, to: witness.read()).isEmpty,
+                      "X9: this test wrote under the config home after the child exited")
     }
 
     // MARK: the turn-dependent half
@@ -528,23 +643,29 @@ final class LiveCLITests: XCTestCase {
         }
         await process.terminate()
 
-        // G3, amended: the first turn's system/init lists the host tool, observed on the event stream.
-        let inits = events.compactMap { if case .frame(.system(.initialize(let i)), _) = $0 { return i }; return nil }
-        XCTAssertEqual(inits.count, 1, "expected exactly one system/init for one turn, saw \(inits.count)")
-        if let systemInit = inits.first {
-            XCTAssertTrue(systemInit.tools.contains("mcp__afleet__send_user_file"),
-                          "system/init.tools does not list the host tool: \(systemInit.tools)")
-            XCTAssertEqual(systemInit.sessionID, sessionID.description)
-            XCTAssertGreaterThanOrEqual(try XCTUnwrap(SemanticVersion(parsing: systemInit.claudeCodeVersion)), ProtocolBaseline.baseline)
-        }
-
-        // A refusal is a budget signal, not a defect: the reading above raced the engine's own accounting.
+        // Read before anything is asserted. A genuinely refused turn is a budget outcome, not a defect, and a
+        // test that asserts first and skips second records both — the failure the summary shows and the skip it
+        // reports are then in disagreement about what happened.
         let rejection = events.compactMap { event -> JSONValue? in
             guard case .frame(.rateLimitEvent(let e), _) = event, LiveBudgetReading.rejects(rateLimitInfo: e.rateLimitInfo) else { return nil }
             return e.rateLimitInfo
         }.first
         if let rejection {
             throw XCTSkip("live signal: the engine rejected the turn — rate_limit_event \(rejection)")
+        }
+
+        // G3, amended: the first turn's system/init lists the host tool, observed on the event stream.
+        // One, for *this* launch: one prompt, no subagent, no session relocation. `system/init` is not
+        // one-per-turn in general — `nested-depth-2` records three against one inbound user frame,
+        // `session-mirror-relocation` five against four, `explore-depth-1` and `background-shell` two against
+        // one. Subagents and relocation each add their own. Read the count as narrow, not as the rule.
+        let inits = events.compactMap { if case .frame(.system(.initialize(let i)), _) = $0 { return i }; return nil }
+        XCTAssertEqual(inits.count, 1, "expected exactly one system/init for this one-prompt, no-subagent turn, saw \(inits.count)")
+        if let systemInit = inits.first {
+            XCTAssertTrue(systemInit.tools.contains("mcp__afleet__send_user_file"),
+                          "system/init.tools does not list the host tool: \(systemInit.tools)")
+            XCTAssertEqual(systemInit.sessionID, sessionID.description)
+            XCTAssertGreaterThanOrEqual(try XCTUnwrap(SemanticVersion(parsing: systemInit.claudeCodeVersion)), ProtocolBaseline.baseline)
         }
 
         print("[G3] the turn asked permission for \(permissionsAsked.names.sorted())")
@@ -567,9 +688,13 @@ final class LiveCLITests: XCTestCase {
 
         // The transcript the engine wrote proves the override reached the child: this session's id, under the
         // scratch home, in a tree the test never touched.
-        let byChild = ConfigHomeWitness.difference(from: beforeSpawn, to: witness.read())
+        let afterChild = witness.read()
+        let byChild = ConfigHomeWitness.difference(from: beforeSpawn, to: afterChild)
         let transcripts = byChild.created.filter { $0.hasPrefix("projects/") && $0.hasSuffix("/\(sessionID).jsonl") }
         XCTAssertEqual(transcripts.count, 1, "expected one transcript for session \(sessionID) under projects/, created: \(byChild.created.sorted())")
+        XCTAssertEqual(ConfigHomeWitness.unexplained(byChild), [], "paths moved under names the engine is not known to write")
+        XCTAssertTrue(ConfigHomeWitness.difference(from: afterChild, to: witness.read()).isEmpty,
+                      "X9: this test wrote under the config home after the child exited")
     }
 }
 

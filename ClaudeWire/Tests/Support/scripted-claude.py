@@ -1,14 +1,37 @@
 #!/usr/bin/env python3
 """Protocol stand-in for ClaudeWire transport tests. Python 3.9+, stdlib only. See the plan's scenario table.
 
-This file models the *recorded* engine. Any behaviour it emits that no fixture in `Fixtures/` shows is a defect
-in this stand-in, not a licence for the code under test. It exists to reproduce what `claude` does, never to
-agree with what a specification assumed it does.
+The contract, in two halves:
 
-The rule earned its place: this stand-in used to answer `control_request/initialize` and then emit `system/init`
-in the same breath, so eleven tasks of transport tests passed against a handshake the real engine never
-performs. The engine emits `system/init` at the start of each **turn** — every recorded fixture places it after
-the first `user` frame, and `zero-cost` and `resume-no-replay`, which submit nothing, contain none at all.
+**The default scenario models the recorded engine.** Behaviour it emits that no fixture in `Fixtures/` shows is
+a defect in this stand-in, not a licence for the code under test. Its job is to reproduce what `claude` does,
+never to agree with what a specification assumed it does.
+
+**Named scenarios may be deliberately synthetic**, and each says so where it is handled. `keep_alive`,
+`unknown_request`, `malformed_can_use_tool`, `undeclared_dialog`, `mcp_tool_throws`, `flood`, `ignore_sigterm`
+and the rest exist to drive paths the engine reaches only under conditions nobody can record on demand. They
+are adversarial fixtures in code, and are not evidence about the engine.
+
+The split earned its place twice:
+
+- This stand-in used to answer `control_request/initialize` and then emit `system/init` in the same breath, so
+  eleven tasks of transport tests passed against a handshake the real engine never performs. The engine emits
+  `system/init` at the start of each **turn** — every recorded fixture places it after the first `user` frame,
+  and `zero-cost` and `resume-no-replay`, which submit nothing, contain none at all.
+- It also used to gate all MCP traffic behind `mcp_sequence`, so the default modelled a session whose host tool
+  was live the instant the handshake completed. It is not: see `mcp_handshake()` below.
+
+Two divergences from the corpus that are known and deliberately not modelled, recorded so the next reader does
+not mistake this file for complete:
+
+- **`auth_status`.** Every recorded fixture emits one at the same millisecond as the initialize response
+  (t=751/751 in `ask-user-question`, 891/891 in `zero-cost`, sixteen for sixteen). This stand-in never emits
+  one. Nothing under test reads it yet; when something does, this is the gap to close first.
+- **`system/init` is not strictly one per turn.** The corpus has `nested-depth-2` at one inbound `user` frame
+  and three `system/init`s, `session-mirror-relocation` at four and five — with one of those arriving *before*
+  its adjacent user frame — and `explore-depth-1` and `background-shell` at one and two. Subagents and session
+  relocation both produce extra ones. This file emits exactly one per user frame, which covers the plain case
+  and understates the engine.
 """
 import json, os, signal, sys, threading, time
 
@@ -36,11 +59,68 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "Samples", "s
     INIT_FRAME = json.load(f)
 INIT_FRAME.update({"tools": ["Read", "mcp__afleet__send_user_file"], "session_id": SESSION, "cwd": os.getcwd()})
 
+# MCP state, and the ordering constraint it enforces.
+#
+# The opening of every recorded fixture is identical (`zero-cost`, `plain-two-turn`, `send-user-file`,
+# `resume-no-replay`, verified frame by frame):
+#
+#   1 in   control_request  initialize
+#   2 out  control_request  mcp_message  (JSON-RPC initialize toward the in-process server)
+#   3 in   control_response              (the host answers it)
+#   4 out  control_response              (only now does the engine answer initialize)
+#   5 out  auth_status
+#   7 out  control_request  mcp_message  (notifications/initialized)
+#   later  control_request  mcp_message  (tools/list), with the first user message or outbound request
+#
+# Frame 2 before frame 4 is the load-bearing part: **the engine does not answer `initialize` until the host has
+# answered the server's JSON-RPC `initialize`.** That is a constraint on the host, not a detail of the engine —
+# a transport that starts reading inbound frames only after `spawn()` returns deadlocks here, and this file
+# reproducing the order is what makes that guarantee testable rather than assumed.
+#
+# `mcp_status` is answered out of this dictionary. The engine reports a server `connected` with its tools taken
+# from the `tools/list` reply (`Fixtures/zero-cost` records exactly that shape). No fixture photographs an
+# `mcp_status` taken mid-connection, so "connecting" below is this file's approximation of a window the corpus
+# shows exists: a host that asks for the tool list the instant `spawn()` returns is inside it.
+mcp = {"connected": False, "tools": [], "listing": False}
+# The initialize response body, held from the moment it is built until the host answers frame 2.
+held_initialize = {}
+
 n = [0]
 def uuid():
     n[0] += 1; return "5c81e7ed-0000-4000-8000-%012d" % n[0]
 def control_request(request_id, request):
     emit({"type": "control_request", "request_id": request_id, "request": request})
+def mcp_message(request_id, message):
+    control_request(request_id, {"subtype": "mcp_message", "server_name": "afleet", "message": message})
+
+def release_initialize_response():
+    """Frames 4, 5 and 7: answer `initialize`, then send `notifications/initialized`.
+
+    Reached only from the host's answer to frame 2, which is the whole point.
+    """
+    body = held_initialize.pop("body", None)
+    if body is None: return
+    emit({"type": "control_response", "response": body})
+    mcp_message("s1n", {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    if held_initialize.pop("pending", False): can_use_tool("p1")
+    threading.Thread(target=after_init, daemon=True).start()
+
+def request_tools_list():
+    """`tools/list`, sent once, on the first thing the host does after the handshake.
+
+    That is where the corpus puts it: with the first user frame in `plain-two-turn` and `send-user-file`, and
+    with the first outbound control request in `zero-cost`, which never submits one. `mcp_slow_connect:<s>`
+    stretches the gap so a test can observe the not-yet-connected window without racing it — the delay is
+    synthetic, the window it widens is not.
+    """
+    if mcp["listing"] or mcp["connected"] or "body" in held_initialize: return
+    mcp["listing"] = True
+    def go():
+        delay = float(scenario_value("mcp_slow_connect") or 0)
+        if delay: time.sleep(delay)
+        mcp_message("s2", {"jsonrpc": "2.0", "id": 91, "method": "tools/list"})
+    threading.Thread(target=go, daemon=True).start()
+
 def can_use_tool(request_id, **extra):
     req = {"subtype": "can_use_tool", "tool_name": "Write", "input": {"file_path": "out.txt", "content": "x"}, "tool_use_id": "toolu_" + request_id}
     req.update(extra); control_request(request_id, req)
@@ -107,6 +187,8 @@ def handle(line):
     try: frame = json.loads(line)
     except ValueError: log("BAD LINE " + line.strip()); return
     t = frame.get("type")
+    if t in ("user", "control_request") and (t == "user" or frame["request"].get("subtype") != "initialize"):
+        request_tools_list()
     if t == "control_request":
         rid = frame["request_id"]; sub = frame["request"].get("subtype")
         if sub == "initialize":
@@ -123,13 +205,36 @@ def handle(line):
                     {"type": "control_request", "request_id": "q1", "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": {"file_path": "q.txt", "content": "x"}, "tool_use_id": "toolu_q1"}},
                     {"type": "control_request", "request": {"subtype": "can_use_tool"}},   # no request_id: undecodable as a control request
                 ]
-            emit({"type": "control_response", "response": body})
-            if has("pending"): can_use_tool("p1")
-            threading.Thread(target=after_init, daemon=True).start()
+            # Frame 2 before frame 4: the response is held until the host answers the server's JSON-RPC
+            # initialize. A host whose inbound loop starts after `spawn()` returns never gets past here.
+            held_initialize["body"] = body
+            held_initialize["pending"] = has("pending")
+            mcp_message("s1", {"jsonrpc": "2.0", "id": 90, "method": "initialize",
+                               "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                                          "clientInfo": {"name": "scripted", "version": "0"}}})
         elif sub == "end_session":
             log("HOST end_session"); emit({"type": "control_response", "response": {"subtype": "success", "request_id": rid, "response": {}}})
             if not (has("ignore_end_session") or has("ignore_sigterm")):
                 time.sleep(0.05); sys.stdout.flush(); os._exit(0)
+        elif sub == "mcp_status":
+            server = {"name": "afleet", "status": "connected" if mcp["connected"] else "connecting",
+                      "serverInfo": {"name": "afleet", "version": "0.1"}, "scope": "dynamic",
+                      "tools": [{"name": name, "annotations": {}} for name in mcp["tools"]]}
+            emit({"type": "control_response", "response": {"subtype": "success", "request_id": rid,
+                                                           "response": {"mcpServers": [server]}}})
+        elif sub == "get_usage":
+            # Shape copied from the recorded response in `Fixtures/zero-cost`, trimmed to the windows a reader
+            # looks at. `usage:<n>` drives the seven-day percentage; the five-hour one stays low.
+            seven = float(scenario_value("usage") or 11)
+            usage = {"rate_limits_available": True,
+                     "rate_limits": {"five_hour": {"utilization": 15, "resets_at": "2026-09-05T00:59:59Z"},
+                                     "seven_day": {"utilization": seven, "resets_at": "2026-09-08T02:59:59Z"},
+                                     "seven_day_opus": None, "tangelo": None,
+                                     "nimbus_quill": {"utilization": 0, "resets_at": None},
+                                     "extra_usage": {"is_enabled": False, "utilization": None},
+                                     "limits": [{"kind": "session", "group": "session", "percent": 15, "severity": "normal"},
+                                                {"kind": "weekly_all", "group": "weekly", "percent": seven, "severity": "normal"}]}}
+            emit({"type": "control_response", "response": {"subtype": "success", "request_id": rid, "response": usage}})
         elif sub == "side_question" and has("side_question_late_error"):
             withheld[rid] = sub; log("HOST " + str(sub) + " WITHHELD")
         else:
@@ -154,6 +259,13 @@ def handle(line):
             log("LATE ERROR " + str(rid))
     elif t == "control_response":
         r = frame["response"]; rid = r.get("request_id"); answered.add(rid)
+        if rid == "s1":
+            release_initialize_response()
+        if rid == "s2":
+            result = ((r.get("response") or {}).get("mcp_response") or {}).get("result") or {}
+            mcp["tools"] = [tool.get("name") for tool in result.get("tools", [])]
+            mcp["connected"] = True; mcp["listing"] = False
+            log("MCP CONNECTED " + json.dumps(mcp["tools"]))
         tag = "MCP" if str(rid).startswith("m") else "ANSWER"
         log("%s %s %s" % (tag, rid, json.dumps(r, separators=(",", ":"), sort_keys=True)))
     elif t == "user":
@@ -161,6 +273,21 @@ def handle(line):
         text = content if isinstance(content, str) else " ".join(b.get("text", "") for b in content if isinstance(b, dict))
         # system/init opens the turn, as it does in every recorded fixture — never at handshake.
         emit(dict(INIT_FRAME, uuid=uuid()))
+        # `rate_limit:<status>` reproduces the two shapes the corpus actually carries. Thirteen recorded
+        # objects have status "allowed" beside overageStatus "rejected" and overageDisabledReason
+        # "org_level_disabled" on turns that completed; five, all in `rate-limited-turn`, have status
+        # "rejected" with "out_of_credits". Only `status` says whether the turn ran.
+        rate_limit = scenario_value("rate_limit")
+        if rate_limit:
+            rejected = rate_limit == "rejected"
+            emit({"type": "rate_limit_event", "uuid": uuid(), "session_id": SESSION,
+                  "rate_limit_info": {"status": "rejected" if rejected else "allowed",
+                                      "rateLimitType": "seven_day" if rejected else "five_hour",
+                                      "overageStatus": "rejected",
+                                      "overageDisabledReason": "out_of_credits" if rejected else "org_level_disabled",
+                                      "isUsingOverage": False, "resetsAt": 1788836400,
+                                      "unifiedWindows": {"five_hour": {"utilization": 0.55, "resetsAt": 1788570000},
+                                                         "seven_day": {"utilization": 1.0 if rejected else 0.11, "resetsAt": 1788836400}}}})
         emit({"type": "assistant", "message": {"id": "msg_echo", "type": "message", "role": "assistant", "model": "scripted", "content": [{"type": "text", "text": "echo: " + text}], "stop_reason": "end_turn", "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}}, "parent_tool_use_id": None, "uuid": uuid(), "session_id": SESSION, "user_message_uuid": frame.get("uuid")})
         emit({"type": "result", "subtype": "success", "duration_ms": 1, "duration_api_ms": 1, "is_error": False, "num_turns": 1, "result": "echo: " + text, "stop_reason": "end_turn", "total_cost_usd": 0, "usage": {"input_tokens": 1, "output_tokens": 1}, "modelUsage": {}, "permission_denials": [], "uuid": uuid(), "session_id": SESSION})
 
