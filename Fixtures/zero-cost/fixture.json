@@ -63,7 +63,7 @@
  "purpose": "initialize and the zero-cost control requests; the drift ritual's first line",
  "recorded_at": "2026-09-03T23:20:14Z",
  "review": {
-  "checklist_version": 1,
+  "checklist_version": 2,
   "date": "2026-09-04",
   "reviewer": "Claude reviewer for kimmi"
  },

@@ -51,5 +51,7 @@ and re-walking the fixtures whose signatures should still stand.
    simply wrong. Nothing but this reading can.
 
 Sign with `Tools/probe/probe.py sign Fixtures/<name> --reviewer "<your name>"`,
-which writes `{"reviewer", "date", "checklist_version": 1}`, then run
-`make verify-fixtures` and commit the fixture in its own commit.
+which writes `{"reviewer", "date", "checklist_version"}` and stamps the version
+from `verify.CHECKLIST_VERSION` — no number is written by hand here, so this line
+cannot fall behind the list above it. Then run `make verify-fixtures` and commit
+the fixture in its own commit.
