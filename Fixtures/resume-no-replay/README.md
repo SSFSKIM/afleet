@@ -78,6 +78,9 @@ to get a session that has never been resumed, and then this one.
 
 The recording spends no model tokens: no turn begins, so there is no `result` frame at all.
 
-Recorded on 2.1.260 rather than the 2.1.259 baseline the earlier fixtures carry, because the
-CLI was upgraded between waves. The flag set `claude --help` declares is identical across
-the two.
+Recorded against the **pinned** 2.1.259 binary at
+`~/.local/share/claude/versions/2.1.259`, which is the protocol baseline the parent declares
+and the version C2 pins `ProtocolBaseline.version` to. The installed `claude` is 2.1.260;
+the corpus stays at 2.1.259 deliberately, so that C1's evidence agrees with the declared
+baseline and so that `make probe` against the installed binary is a real drift measurement
+rather than a binary compared with itself. `launch.argv[0]` records the pinned path.

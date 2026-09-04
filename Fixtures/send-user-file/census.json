@@ -81,7 +81,7 @@
     "thinking",
     "tool_use"
    ],
-   "count": 7,
+   "count": 20,
    "keys": [
     "message",
     "parent_tool_use_id",
@@ -129,7 +129,7 @@
    ]
   },
   "auth_status": {
-   "count": 1,
+   "count": 3,
    "keys": [
     "isAuthenticating",
     "output",
@@ -146,7 +146,7 @@
    ]
   },
   "command_lifecycle": {
-   "count": 3,
+   "count": 9,
    "keys": [
     "command_uuid",
     "session_id",
@@ -163,7 +163,7 @@
    ]
   },
   "control_request/can_use_tool": {
-   "count": 1,
+   "count": 3,
    "keys": [
     "request",
     "request_id",
@@ -192,7 +192,7 @@
    ]
   },
   "control_request/end_session": {
-   "count": 1,
+   "count": 3,
    "keys": [
     "request",
     "request_id",
@@ -211,7 +211,7 @@
    ]
   },
   "control_request/initialize": {
-   "count": 1,
+   "count": 3,
    "keys": [
     "request",
     "request_id",
@@ -242,7 +242,7 @@
    ]
   },
   "control_request/mcp_message": {
-   "count": 4,
+   "count": 12,
    "keys": [
     "request",
     "request_id",
@@ -269,7 +269,7 @@
     "behavior",
     "updatedInput"
    ],
-   "count": 2,
+   "count": 6,
    "keys": [
     "response",
     "type"
@@ -294,7 +294,7 @@
    ]
   },
   "control_response/end_session": {
-   "count": 1,
+   "count": 3,
    "keys": [
     "response",
     "type"
@@ -332,7 +332,7 @@
     "remote_control_available",
     "session_state"
    ],
-   "count": 1,
+   "count": 3,
    "keys": [
     "response",
     "type"
@@ -375,7 +375,7 @@
    "body_keys": [
     "mcp_response"
    ],
-   "count": 8,
+   "count": 24,
    "keys": [
     "response",
     "type"
@@ -399,7 +399,7 @@
    ]
   },
   "rate_limit_event": {
-   "count": 1,
+   "count": 3,
    "keys": [
     "rate_limit_info",
     "session_id",
@@ -414,7 +414,7 @@
    ]
   },
   "result/success": {
-   "count": 1,
+   "count": 3,
    "keys": [
     "api_error_status",
     "duration_api_ms",
@@ -451,7 +451,6 @@
     "duration_ms",
     "fast_mode_disabled_reason",
     "fast_mode_state",
-    "first_content_frame_ms",
     "is_error",
     "modelUsage",
     "num_turns",
@@ -477,7 +476,7 @@
    ]
   },
   "stream_event": {
-   "count": 44,
+   "count": 135,
    "keys": [
     "event",
     "parent_tool_use_id",
@@ -497,7 +496,7 @@
    ]
   },
   "system/init": {
-   "count": 1,
+   "count": 3,
    "keys": [
     "agents",
     "analytics_disabled",
@@ -552,7 +551,7 @@
    ]
   },
   "system/status": {
-   "count": 3,
+   "count": 9,
    "keys": [
     "session_id",
     "status",
@@ -569,7 +568,7 @@
    ]
   },
   "system/thinking_tokens": {
-   "count": 4,
+   "count": 12,
    "keys": [
     "estimated_tokens",
     "estimated_tokens_delta",
@@ -585,12 +584,11 @@
     "session_id",
     "subtype",
     "type",
-    "user_message_uuid",
     "uuid"
    ]
   },
   "transcript_mirror": {
-   "count": 8,
+   "count": 24,
    "keys": [
     "entries",
     "filePath",
@@ -606,7 +604,7 @@
    "block_types": [
     "tool_result"
    ],
-   "count": 4,
+   "count": 12,
    "keys": [
     "isReplay",
     "message",
@@ -634,5 +632,5 @@
    ]
   }
  },
- "version": "2.1.260"
+ "version": "2.1.259"
 }

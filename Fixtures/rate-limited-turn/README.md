@@ -49,6 +49,21 @@ seventeenth, `last-prompt`, is written at close. `initial/` and `artifacts/` are
 carry only their `.gitkeep`, and `streams.json` is `{}`, because the scenario resumes
 nothing and no frame names an artifact.
 
+## The one fixture not on the 2.1.259 baseline
+
+Every other recorded fixture is pinned to `claude` 2.1.259, the protocol baseline the parent
+declares. **This one is 2.1.260 permanently**, and that is not an oversight. It was recorded
+in the window when the installed CLI had already been upgraded, and it cannot be re-recorded
+on 2.1.259 or on anything else, because its precondition — a seven-day usage window sitting
+at 100 per cent — is gone and is not something anyone can arrange. It also carries the
+four-variable environment table that predates S15 settling
+`CLAUDE_CODE_QUESTION_PREVIEW_FORMAT`, for the same reason.
+
+Nothing rests on the difference. The fixture is `census: false`, so it never takes part in a
+comparison against a binary, and it is evidence about one wire path — the shape of a rejected
+turn — rather than about a version's frame inventory. A consumer should read its
+`cli_version` and its `launch.env` as recorded rather than assuming the directory's.
+
 ## Why `census: false`
 
 The drift ritual re-runs every census-participating scenario against the live binary. Once

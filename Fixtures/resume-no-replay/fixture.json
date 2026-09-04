@@ -1,6 +1,6 @@
 {
  "census": false,
- "cli_version": "2.1.260",
+ "cli_version": "2.1.259",
  "cwd": "/tmp/afleet-fixtures/plain-two-turn",
  "deterministic": true,
  "exit_code": 0,
@@ -9,7 +9,7 @@
  "late_responses": [],
  "launch": {
   "argv": [
-   "claude",
+   "~/.local/share/claude/versions/2.1.259",
    "-p",
    "--input-format",
    "stream-json",
@@ -25,7 +25,7 @@
    "--permission-prompts",
    "host",
    "--resume",
-   "58d2d905-3741-4a64-b8d9-56c9b3f32d16",
+   "8cc24a21-6251-4783-b526-3957214d26a6",
    "--model",
    "haiku",
    "--permission-mode",
@@ -42,7 +42,8 @@
    "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
    "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
-   "CLAUDE_CODE_FORK_SUBAGENT": "1"
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
   }
  },
  "name": "resume-no-replay",
@@ -51,7 +52,7 @@
  ],
  "prompts": [],
  "purpose": "--resume of plain-two-turn, initialize, six idle seconds, no history frames",
- "recorded_at": "2026-09-04T10:40:45Z",
+ "recorded_at": "2026-09-04T10:52:14Z",
  "review": {
   "checklist_version": 2,
   "date": "2026-09-04",
@@ -61,7 +62,7 @@
  "serves": [
   "item 1"
  ],
- "session_id": "58d2d905-3741-4a64-b8d9-56c9b3f32d16",
+ "session_id": "8cc24a21-6251-4783-b526-3957214d26a6",
  "spikes": [
   "S2"
  ],
