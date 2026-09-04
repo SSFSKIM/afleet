@@ -394,7 +394,15 @@ that is not fast-capable promotes the session model to Opus, so the header re-re
 - **Diagnostics are metadata-only by default**: per frame, type, subtype, byte size, timing
   and request id, written to `~/Library/Logs/afleet/`. Raw frame capture is a Developer
   setting, off by default, and is the only source of fixtures; its redaction and retention
-  rules are in §11.
+  rules are in §11. *Metadata-only is a binding contract, not a default*: no value derived
+  from a frame's payload reaches the diagnostics log, whatever its diagnostic value, because
+  that log is unredacted by construction and §11's redactor cannot rescue it — the redactor
+  works structurally, by key name, so a free-form string passes through untouched. The
+  worked case is an MCP tool failure: an in-process tool's arguments come straight off an
+  engine frame, so a `send_user_file` error description carries the path the model named.
+  Record the tool name, the error's Swift type and its `NSError` domain and code; never the
+  description. When a value is diagnostic enough to be worth keeping and payload-derived,
+  its home is the opt-in capture, which is the redacted artefact.
 
 ### 6.4 Inbound and outbound requests
 
@@ -3261,6 +3269,20 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   and a `progressToken`.
   Impact: §6.8 records both; a host must tolerate the `_meta` and must not read the first
   turn as "listed, therefore called".
+- Observation: The safest-looking place to put an error string is the one place it must not
+  go, and a plausible instruction to "log the text rather than lose it" walks straight into
+  it.
+  Evidence: C2's Task 10. The executor asked its worker to log unexpected MCP tool-error
+  text so it would not be silently dropped; the review rejected the implementation, and the
+  executor then rejected the reviewer's alternative of widening the log's contract. Two
+  facts settled it: the error description is frame-derived payload, and the diagnostics log
+  is the one artefact §11's redactor never runs over. A second detail made the code inert
+  anyway — the sink the MCP server would have written to is a constructor argument the
+  transport never populates, so in shipped code the text was lost exactly as before while a
+  direct unit test made it look covered.
+  Impact: §6.3 states metadata-only as a binding contract with the payload-derivation test
+  attached, so the next agent reaching for the same convenience meets the rule before the
+  review does.
 
 ## Outcomes & Retrospective
 
@@ -3690,3 +3712,12 @@ Pending — written at finish.
   `main`; the child branch's early fixture commits carry the recording machine's account
   name in two `ls -l` owner columns, redacted before merge and never pushed before it.
   §17.9 updated. C2.G2 can now run against the complete corpus.
+- 2026-09-05: §6.3 promotes metadata-only diagnostics from a default to a binding contract
+  and states its test: no payload-derived value in the diagnostics log, because that log is
+  unredacted and §11's redactor is structural and would pass a free-form string through. The
+  MCP tool-failure case is written out with the substitute (tool name, error type, `NSError`
+  domain and code). Raised by C2's Task 10 review, where the executor declined the
+  reviewer's alternative of widening the contract and amending §11 — the correct call, since
+  the redaction design rests on the metadata log being safe by construction and the capture
+  being the redacted artefact. Flags C2 (in flight), C6 and C7, which both write
+  diagnostics.
