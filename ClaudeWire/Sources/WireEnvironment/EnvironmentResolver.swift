@@ -20,14 +20,16 @@ public struct EnvironmentResolver: Sendable {
         let base = ["TERM": "dumb", "HOME": ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
         for (mode, args) in [(ResolvedEnvironment.CaptureMode.interactiveLogin, ["-l", "-i", "-c", script]), (.login, ["-l", "-c", script])] {
             guard let out = try? await runner.run(URL(fileURLWithPath: shell), arguments: args, environment: base, timeout: timeout),
-                  !out.timedOut, out.exitCode == 0, let vars = Self.parse(out.stdout), !vars.isEmpty else { continue }
+                  !out.timedOut, out.exitCode == 0, let vars = Self.parse(out.stdout), vars["PATH"] != nil else { continue }
             return ResolvedEnvironment(variables: vars, shell: shell, capturedAt: Date(), mode: mode)
         }
         return ResolvedEnvironment(variables: ProcessInfo.processInfo.environment, shell: shell, capturedAt: Date(), mode: .processFallback)
     }
 
     /// Discards everything up to and including the NUL-terminated sentinel; nil when the sentinel is absent,
-    /// and an empty dictionary when nothing survives it — `resolve` treats both as a failed capture,
+    /// and an empty dictionary when nothing survives it. `resolve` accepts neither: it requires PATH, which
+    /// every real login shell exports, so a truncated read falls through the ladder instead of degrading
+    /// `BinaryLocator` to its `~/.local/bin` fallback while still claiming an `.interactiveLogin` capture,
     /// so a shell whose rc file swallowed or reordered the output falls through the ladder instead of
     /// reporting an empty success. Tokens are kept only when they match `^[A-Za-z_][A-Za-z0-9_]*=`.
     static func parse(_ data: Data) -> [String: String]? {

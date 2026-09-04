@@ -61,13 +61,21 @@ final class EnvironmentResolverTests: XCTestCase {
         XCTAssertEqual(r.mode, .login); XCTAssertEqual(r.variables["PATH"], "/login/bin")
     }
     func testOnlyAssignmentTokensAreKept() async throws {
-        let runner = ScriptedRunner(outputs: [.init(stdout: env(["GOOD=1", "not an assignment", "9BAD=2", "ALSO_GOOD=a=b"]), stderr: Data(), exitCode: 0, timedOut: false)], calls: .init())
+        let runner = ScriptedRunner(outputs: [.init(stdout: env(["GOOD=1", "not an assignment", "9BAD=2", "ALSO_GOOD=a=b", "PATH=/x"]), stderr: Data(), exitCode: 0, timedOut: false)], calls: .init())
         let r = await EnvironmentResolver(runner: runner).resolve(shell: "/bin/zsh", timeout: .seconds(5))
-        XCTAssertEqual(r.variables, ["GOOD": "1", "ALSO_GOOD": "a=b"])
+        XCTAssertEqual(r.variables, ["GOOD": "1", "ALSO_GOOD": "a=b", "PATH": "/x"])
     }
     func testSentinelWithNoAssignmentsFallsThrough() async throws {
         let rec = ScriptedRunner.Recorder()
         let runner = ScriptedRunner(outputs: [.init(stdout: env([], banner: "truncated"), stderr: Data(), exitCode: 0, timedOut: false)], calls: rec)
+        let r = await EnvironmentResolver(runner: runner).resolve(shell: "/bin/zsh", timeout: .seconds(5))
+        XCTAssertEqual(r.mode, .processFallback)
+        XCTAssertEqual(rec.invocations.count, 2)
+    }
+    /// A capture without PATH would silently degrade binary lookup while still claiming success.
+    func testCaptureWithoutPathFallsThrough() async throws {
+        let rec = ScriptedRunner.Recorder()
+        let runner = ScriptedRunner(outputs: [.init(stdout: env(["HOME=/Users/x", "SHELL=/bin/zsh"]), stderr: Data(), exitCode: 0, timedOut: false)], calls: rec)
         let r = await EnvironmentResolver(runner: runner).resolve(shell: "/bin/zsh", timeout: .seconds(5))
         XCTAssertEqual(r.mode, .processFallback)
         XCTAssertEqual(rec.invocations.count, 2)
