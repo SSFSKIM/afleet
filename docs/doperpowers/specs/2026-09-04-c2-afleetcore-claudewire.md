@@ -1013,3 +1013,92 @@ Pending — written at finish.
   empty server list, with connected appearing about 0.9 s later. So the host must serve the bring-up
   during the handshake, and the server reports connected only after the bring-up completes, which is
   after `spawn()` returns. Consumers wait for the server rather than assume it.
+- 2026-09-05: **Acceptance verified. G1, G2, G3 and G4 all pass.** Every run below was taken
+  from a deleted `.build` on both packages: an incremental green is not evidence here, because
+  removing a stored property once left a stale build that crashed with signal 11 while
+  `swift build` reported success on a tree that would not compile.
+  **G1 passes.** `AfleetCore` builds clean and runs 6 tests with 0 failures. `ClaudeWire`
+  builds clean with zero warnings and runs 186 tests with 0 failures. Every test the gate
+  names as its evidence was confirmed present and passing *by name*, not inferred from a
+  total: `LaunchConfigurationTests` (all five, covering the token-for-token argument vector,
+  every optional flag in order, the child environment table and the scrubbed `CLAUDE_*`
+  variables), `InitializeConfigurationTests.testDefaultPayloadIsByteEqualToParentSection62`,
+  `ClaudeProcessTests.testUnknownRequestAnsweredWithinOneSecondAndSurfacedAsPolicyEvent`,
+  `testDeclaredDialogSurfacesUndeclaredIsLeftUnanswered`,
+  `testMalformedKnownRequestNamesTheField`, `testMCPSequenceIsAnsweredInsideTheTransport`,
+  all seven of `ClaudeProcessTerminationTests`,
+  `ClaudeProcessFloodTests.testFloodWithSuspendedConsumerLosesNothingAndBoundsMemory`,
+  `RedactorTests.testTypedFramesStayTypedAfterRedaction`, and `ConsumerSmokeTests`. The
+  consumer package also builds and runs standalone, printing
+  `ConsumerSmoke: constructed every X2 and X3 value`. One qualification, recorded rather than
+  silenced: across five full non-live runs, `ProcessRunnerTests.testLargeOutputIsFullyRead`
+  failed once, reporting `exitCode == -1` with output complete and `timedOut == false` after
+  31 s against a 30 s timeout. The cause is `FoundationProcessRunner` observing child exit
+  through a blocking `waitUntilExit()` dispatched to `DispatchQueue.global()`: under
+  thread-pool starvation on a loaded machine the `exited` flag is never set and the call
+  settles on its timeout instead. Ten isolated runs of that test all passed. The runner still
+  returns within timeout plus grace with complete output, so the defect is bounded; it is
+  carried as debt, and it is not one of G1's named evidence tests.
+  **G2 passes, and is no longer pending.** C1 merged, so the gate is evaluable:
+  `FixtureCorpusTests.testEveryFixtureDecodesLosslessly` runs over 18 fixtures (16 recorded, 2
+  synthetic), 1353 frames, 152 in and 1201 out. 1343 round-tripped; the remaining 10 are named
+  findings confined to the two synthetic fixtures, every one of them a `result` frame omitting
+  `duration_ms`, which the bundle settles as constructor partiality rather than engine
+  behaviour. Zero frames in the whole corpus were opaque, and the sixteen recorded fixtures are
+  held to the strict rule that every line decodes typed and re-encodes with every key and value
+  intact. **The limit worth naming:** G2's clause that unmodelled types and subtypes decode to
+  `Frame.opaque` is, against this corpus, a zero-equals-zero shadow — no fixture contains an
+  unmodelled type or subtype, so the assertion compares an empty set against an empty set. That
+  clause is verified by the hand-written samples, not by the corpus, and it should not be
+  "fixed" by fabricating a fixture into a recorded corpus.
+  **G3 passes, in both halves, on one live pass.** The whole suite was run once with
+  `AFLEET_LIVE_CLI=1` from a clean build — one pass, deliberately, because the account is
+  shared with C1 — and returned `Executed 186 tests, with 0 failures`, zero skipped. The
+  inference-free half spawned `claude` under
+  `CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home` in a temporary working directory with
+  `--setting-sources ""`, saw `mcp_status` list exactly `["send_user_file"]` for the `afleet`
+  server, and terminated on `end_session` alone with one clean exit. The turn-dependent half
+  spent its single `haiku` turn: exactly one `system/init`, its `tools` carrying
+  `mcp__afleet__send_user_file`, the model asking permission for that tool, exactly one
+  `hostToolInvoked` naming `hello.txt`, and one non-error result. Neither budget guard fired.
+  Three spawns of the binary in total: one `claude --version` and two protocol sessions.
+  The installed CLI is **2.1.261** against a `ProtocolBaseline.version` of `2.1.259`; every
+  version assertion is at-or-above the baseline, never equality, so the gap is not a failure —
+  but nothing here was tested against 2.1.259 itself.
+  **The config-home allowlist held on its first real test.** `engineWrittenNames` had until now
+  been proven only against synthetic differences. In this pass it was exercised against real
+  engine writes and reported nothing unexplained. The exercise was uneven and that matters: the
+  handshake test's real difference was a single modified path, while the model-turn test's was
+  substantial — the engine's transcript under `projects/`, asserted by name for the launched
+  session. If the turn-dependent half is ever skipped for budget, the allowlist is effectively
+  unexercised that run, and a green G3 should not then be read as evidence about it. It is also
+  unproven against sessions using hooks, plugins, background shells, IDE integration, subagents
+  or session relocation, any of which could write under names nobody has watched the engine
+  write.
+  **G4 passes.** `Tools/fetch-typings.sh` was run from a deleted `.typings/` and fetched
+  `typings 0.3.259 at .typings/package/sdk.d.ts`. `git ls-files` matches nothing under
+  `.typings/`, `node_modules/` or any `*.d.ts`; `git status --porcelain` is silent with the
+  typings on disk; and `git add --all --dry-run .` over the whole tree stages none of them, so
+  they are not merely untracked but unstageable. `.gitignore:7` is `.typings/`. With the
+  directory parked, both `TypingsDriftTests` cases skip with a named reason rather than fail;
+  with it present, both pass.
+  **X9 holds.** Both live tests take a config-home reading before their own setup and assert
+  that window empty, and another after the child exits asserting that window empty too; both
+  passed, and the witness's own non-vacuity is proven by `LiveGateMachineryTests`. Every session
+  these tests launched wrote its transcript under the scratch home only — three
+  `afleet-live-*` project directories there, and no match for `afleet-live` or `afleet-c2`
+  anywhere under `~/.claude/projects`. The only references to a real home in either package are
+  three `NSHomeDirectory()` reads used to derive paths and one in a test comparison; none
+  writes. A bare `find ~/.claude -newer <marker>` does report activity, but it is not
+  attributable to these packages: this verification runs *inside* a Claude Code session whose
+  own config home is `~/.claude`, alongside its daemon, and neither can be separated from the
+  tests by timestamp — which is why the three readings above, which can, are the evidence.
+  **Carried, unresolved.** Beyond the two limits named above: the scripted stand-in remains a
+  minimal model rather than a replica — it emits no `system/status`, `command_lifecycle`,
+  `transcript_mirror`, `stream_event` or `system/thinking_tokens`, all of which every recording
+  contains, and `FixtureCorpusTests` covers those by reading the recordings directly. The
+  corpus is also silent about the marker-free launch mode, since its harness strips three named
+  `CLAUDE_*` variables only. Parent items 29, 33, 34, 36 and 48 stay open; their UI halves
+  belong to C5 and C6. Parent revisions to file at merge are unchanged. Full command-by-command
+  evidence:
+  `.doperpowers/sde/2026-09-04-c2-afleetcore-claudewire/task-14-report.md`.
