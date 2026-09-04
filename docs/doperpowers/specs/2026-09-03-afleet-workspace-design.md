@@ -2237,6 +2237,19 @@ directory, never under any config home.
 - **CLI drift mid-build.** A CLI upgrade changes a frame the children depend on.
   Mitigation: C1's census runs on every upgrade; the baseline stays pinned at 2.1.259
   until the census is clean and the fixtures are re-recorded in one commit.
+- **Tests that pass but cannot fail.** A test asserts an outcome the system's own structure
+  already guarantees, so it goes green against the defect it was written to catch. C2 alone
+  produced six instances by Task 11, across four different causes: an assertion enforced by
+  the data structure under test rather than by the code being tested; a timing window that
+  the child process's own write-then-exit ordering always satisfied; an error-bridging field
+  exercised only with a value type whose bridged form is constant; and a parser that silently
+  skips the one declaration the test exists to compare, while asserting nothing about having
+  parsed anything at all. Mitigation, binding on every child: a test written to prove a fix
+  is *demonstrated failing against the pre-fix code* before the fix is accepted, and where
+  the break cannot be executed — signalling a process group would destroy the test runner —
+  the substitute is a trace assertion that the dangerous path was never entered, stated as
+  such. A test that compares two things also asserts that it found them. Reviewers ask what
+  the assertion would have to see to fail, not whether it is true.
 - **Spike fallbacks fire.** S7 (native markdown), S1 (GhosttyKit) or S3 (Monaco) fail
   their criteria. Mitigation: each has a named fallback in §15 that keeps the child's
   contract; the fallback is a Revision Note, not a re-cut.
@@ -3289,6 +3302,18 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   Impact: §6.3 states metadata-only as a binding contract with the payload-derivation test
   attached, so the next agent reaching for the same convenience meets the rule before the
   review does.
+- Observation: The dominant defect class in wave 1 is not wrong code but tests that cannot
+  fail, and reviewers catch them far more reliably than authors do.
+  Evidence: six instances in C2 by Task 11. The most instructive is the flood test, the
+  single piece of evidence for the transport redesign's headline property — that a stalled
+  consumer makes the engine block on its own pipe rather than growing memory without bound.
+  One of its assertions was enforced by the bounded channel whatever fed it, and the other
+  held whether the child blocked or streamed six megabytes out unimpeded; a reader that
+  eagerly drained everything into memory passed it unchanged. Five of the six were found by
+  a reviewer; the sixth was found by its author only by running the demonstration rather
+  than by re-reading the test.
+  Impact: §17.7 carries the mitigation as a binding practice — prove the test fails against
+  the break, and assert that a comparison found something to compare.
 
 ## Outcomes & Retrospective
 
