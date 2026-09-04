@@ -411,7 +411,16 @@ def _check_mirror(path, fx):
                 if len(same_name) == 1:
                     stream = same_name[0]
             mirrored.setdefault(stream, []).extend(f.get("entries", []))
-    for stream, entries in mirrored.items():
+    # The declared escape of §4.4, in the shape `late_responses` and `withdrawn_requests`
+    # already have: a count the *scenario* states, never one the recorder infers, so it stays a
+    # claim about engine behaviour a reviewer signed for rather than an amnesty the tooling
+    # grants itself. The engine writes a record it does not mirror at the head of a resumed
+    # session's appended range -- `session-mirror-resume` records one `ai-title` -- and the
+    # count is checked for exactness in both directions: too few consumed still fails, and a
+    # declaration nothing needs is reported as stale rather than left to rot.
+    declared = int(meta.get("unmirrored_prefix") or 0)
+    skipped = 0
+    for stream, entries in sorted(mirrored.items()):
         init_path = os.path.join(path, "initial", stream)
         final_path = os.path.join(path, "transcript", stream)
         if not os.path.isfile(final_path):
@@ -423,10 +432,21 @@ def _check_mirror(path, fx):
         except ValueError:
             errors.append("transcript/%s is not valid JSONL and cannot be compared with the mirror" % stream)
             continue
-        want = head + entries
-        if got != want:
-            errors.append("mirror entries for %s do not reproduce transcript/%s (%d mirrored + %d initial vs %d records)"
-                          % (stream, stream, len(entries), len(head), len(got)))
+        if got == head + entries:
+            continue
+        # Only ever at the head of the appended range, and only as many records as remain
+        # undeclared: a gap anywhere later is a mirror that lost records mid-session, which is
+        # the failure this check exists for.
+        for n in range(1, declared - skipped + 1):
+            if got == head + got[len(head):len(head) + n] + entries:
+                skipped += n
+                break
+        else:
+            errors.append("mirror entries for %s do not reproduce transcript/%s (%d mirrored + %d initial vs %d "
+                          "records, unmirrored_prefix %d)"
+                          % (stream, stream, len(entries), len(head), len(got), declared))
+    if declared and skipped != declared:
+        errors.append("fixture.json declares unmirrored_prefix %d but the mirror check needed %d" % (declared, skipped))
     return errors
 
 

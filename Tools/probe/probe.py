@@ -48,6 +48,12 @@ A scenario is a module under `scenarios/` exposing `META` (a dict) and `run(sess
 - `spill_after`      the capture length past which the harness spills to a mode-0600 file in
                      a private directory outside the worktree (§4.2). A scenario expecting a
                      large volume sets it; the harness default applies otherwise.
+- `unmirrored_prefix` how many records the engine appends at the head of this recording's
+                     appended range without mirroring them, which `verify`'s mirror-fidelity
+                     check would otherwise report as a mirror that lost records. Declared by
+                     the scenario, never inferred, and checked for exactness -- the same rule
+                     `withdrawn_requests` follows and for the same reason. A resume appends one
+                     unmirrored `ai-title` (`session-mirror-resume`).
 
 `withdrawn_requests` is *not* a `META` key. It is written from the ids the scenario passed to
 `session.cancel()` and never inferred from the captured frames, which is what keeps it a
@@ -388,6 +394,7 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
             "prompts": meta.get("prompts", []), "census": bool(meta.get("census", True)), "deterministic": bool(meta.get("deterministic")),
             "isolation": meta.get("isolation", "config-home"), "synthetic": False, "hypothesis": False,
             "late_responses": list(meta.get("late_responses", [])),
+            "unmirrored_prefix": int(meta.get("unmirrored_prefix") or 0),
             # Read off the session's own cancel record, never inferred from the captured frames:
             # `verify` treats the list as the host declaring which of its requests it withdrew,
             # and a list read back out of the capture would be a blanket amnesty the recorder

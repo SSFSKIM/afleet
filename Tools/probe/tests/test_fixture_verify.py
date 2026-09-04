@@ -406,6 +406,30 @@ class VerifyTests(unittest.TestCase):
             fh.write(json.dumps({"type": "assistant", "uuid": "not-mirrored"}) + "\n")
         self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
 
+    def test_a_declared_unmirrored_prefix_licenses_records_at_the_head_of_the_range(self):
+        """Resuming a session appends one `ai-title` the mirror never carries."""
+        d = build_fixture(self.root)
+        path = os.path.join(d, "transcript", "_slug_", SID + ".jsonl")
+        with open(path, encoding="utf-8") as fh:
+            records = [json.loads(l) for l in fh if l.strip()]
+        mirrored = 1                                    # build_fixture mirrors one entry
+        head = records[:-mirrored]
+        write(path, "".join(json.dumps(r) + "\n" for r in
+                            head + [{"type": "ai-title", "aiTitle": "T"}] + records[-mirrored:]))
+        self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
+        meta = read_json(os.path.join(d, "fixture.json"))
+        meta["unmirrored_prefix"] = 1
+        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+        self.assertEqual(self.errors(d), [])
+
+    def test_an_unmirrored_prefix_nothing_needs_is_reported_as_stale(self):
+        """A declaration that stops being true must not rot: it is an exact count both ways."""
+        d = build_fixture(self.root)
+        meta = read_json(os.path.join(d, "fixture.json"))
+        meta["unmirrored_prefix"] = 1
+        write(os.path.join(d, "fixture.json"), json.dumps(meta))
+        self.assertTrue(any("declares unmirrored_prefix 1" in e for e in self.errors(d)))
+
     def test_a_synthetic_fixture_that_declares_a_transcript_is_still_mirror_checked(self):
         """`synthetic` was only ever a proxy for "has no transcript"; the transcript is the fact."""
         d = build_fixture(self.root, synthetic=True, hypothesis=True)

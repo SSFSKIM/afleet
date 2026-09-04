@@ -1,0 +1,75 @@
+{
+ "census": true,
+ "cli_version": "2.1.259",
+ "cwd": "/tmp/afleet-fixtures/session-mirror-relocation",
+ "deterministic": false,
+ "exit_code": 0,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "~/.local/share/claude/versions/2.1.259",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--resume",
+   "1ac7ebe5-0a49-4e73-91d9-9262d0fea008",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "default",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "2"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
+  }
+ },
+ "name": "session-mirror-resume",
+ "notes": [
+  "1ac7ebe5-0a49-4e73-91d9-9262d0fea008.jsonl: 7 mirrored, file has 72 records so far, tail identical by type and uuid: True"
+ ],
+ "prompts": [
+  "Reply with exactly: m5"
+ ],
+ "purpose": "resume the relocated session and add one turn; mirror and file still agree",
+ "recorded_at": "2026-09-04T11:09:04Z",
+ "review": {
+  "checklist_version": 2,
+  "date": "2026-09-04",
+  "reviewer": "Claude reviewer for kimmi"
+ },
+ "scenario": "session_mirror_resume",
+ "serves": [
+  "item 64",
+  "C3.G3"
+ ],
+ "session_id": "1ac7ebe5-0a49-4e73-91d9-9262d0fea008",
+ "spikes": [
+  "S14"
+ ],
+ "synthetic": false,
+ "unmirrored_prefix": 1,
+ "withdrawn_requests": []
+}
