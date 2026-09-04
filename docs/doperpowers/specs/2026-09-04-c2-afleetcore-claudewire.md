@@ -942,3 +942,22 @@ Pending — written at finish.
   mandatory would have been silently agreed to. The server now declares its own supported set and
   answers with the client's version only when it is in that set, falling back to `2025-06-18`
   otherwise. This is the same class of drift the version gate covers for the CLI itself.
+- 2026-09-04: G3 is split, because the scratch config home has no inference budget until
+  2026-09-06 15:00 UTC. C1's zero-cost `get_usage` capture at 23:20Z records seven-day
+  utilization at 100 with `resets_at` 2026-09-06T15:00Z, five-hour at 29, and extra usage
+  disabled. The home is logged in — this is a budget limit, not a credential one — which matters
+  because the acceptance text's skip condition tests for credentials and would therefore not
+  fire: left as written, the round-trip test would spawn, ask for a turn, receive a limit notice
+  and fail, which is both a false negative and a wasted spawn. The gate is therefore evaluated in
+  two halves. The half that needs no inference is evaluable now and permanently: spawning the
+  installed 2.1.259 binary under `CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home`, completing
+  the initialize handshake, seeing `mcp__afleet__send_user_file` in `system/init.tools`, the
+  before-and-after diff proving the test itself created nothing under the scratch home,
+  `VersionGate` accepting 2.1.259 and refusing a fabricated older string, `EnvironmentResolver`
+  returning the login shell's PATH, `CLAUDE_CONFIG_DIR` becoming `ConfigHome.root` with
+  `source == .environment`, and `end_session`. The half that needs a model turn — asking the
+  model to send a file and receiving the `hostToolInvoked` event with the turn completing
+  normally — skips before spawning, with a message naming the reset, and is recorded as pending
+  rather than passing. It becomes evaluable at the reset without any code change. C1's fixture
+  recordings for G2 are blocked by the same limit, so G2 remains pending C1.G1 as already
+  planned.
