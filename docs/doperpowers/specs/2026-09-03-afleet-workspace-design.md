@@ -1385,9 +1385,16 @@ account name, home directory, plugin inventory, socket path and identity fields 
 machine it came from, and each goes through the publication rules (identity keys, secrets,
 email, home directory and hostname) before it is committed. Test inputs that exist to prove
 the redactor works use invented identifiers, never the author's own; a value the redactor
-must scrub is still a disclosure when it is committed as the input. The single check before
-any merge to `main` is a grep of the whole tree for the recording machine's account name,
-home directory and the author's handles, expected to match nothing outside `docs/`.
+must scrub is still a disclosure when it is committed as the input. Two correct principles
+collide on exactly this file: *prefer real evidence*, because invented sample data is how a
+wrong model slips past review, and *publish nothing real*. The resolution is that fidelity
+is a property of the **shape** — keys, nesting, types, the fields a consumer reads by name —
+and is verified key-for-key against the capture, while every **value** that could identify
+a machine or a person is replaced before the file is committed; a reviewer who checks the
+first also checks the second, and a sample praised for being a faithful derivation has not
+yet been checked at all. The single check before any merge to `main` is a grep of the whole
+tree for the recording machine's account name, home directory and the author's handles,
+expected to match nothing outside `docs/`.
 
 Nothing under `<configHome>` is written by afleet.
 
