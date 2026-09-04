@@ -1335,11 +1335,12 @@ Pending — written at finish.
   and pinning the prompt was the cheaper half of it -- no fixture needed `optional_pairs` beyond
   the `system/thinking_tokens` every model-driven scenario declares.
 
-  The wave cost about 0.09 USD in eight recordings, five of them committed and three discarded
-  to defects the recording exposed, plus the drift ritual, whose measured outcome is the note
-  below this one -- the ritual is run after the last fixture commit, so recording its result is
-  necessarily a later commit than the tree it tested, and that commit touches this document
-  alone.
+  The wave cost roughly 1.4 USD, and the split matters more than the total: about 0.13 in seven
+  recordings -- four committed, three discarded to defects the recording exposed -- and the rest
+  in five runs of the drift ritual at about 0.25 each. §4.7's figure of 0.13 a run was measured
+  across wave B's nine census fixtures; thirteen, two of them driving subagents, is close to
+  double, and the ritual is now an order of magnitude more expensive than the recordings it
+  guards. It stays on-demand.
 
   Three defects in the wave's own tooling, each found by a recording and each fixed at its
   cause. The settle helper compared task ids as sets and so read a re-engaged agent as settled,
@@ -1351,3 +1352,30 @@ Pending — written at finish.
   against the `.meta.json` it claims to be, which is an assertion rather than an escape. Only
   `mirror_identity_only` remains a declaration, because what it licenses -- a field-level
   disagreement between an agent's sidecar file and its mirror -- has no stable count.
+- 2026-09-04: The drift ritual after wave C, and the one line it produced. `make probe` was run
+  five times, all after the last fixture commit. The first found `nested-depth-2` clean and the
+  second reported it as `removed pair control_request/can_use_tool` and its response: nothing in
+  that scenario's prompt drives a permission ask, the recording happened to produce one and the
+  re-run against the same binary did not. That is optionality the operator has evidence for and
+  the corpus does not, which is `optional_pairs`, and it was declared on `explore-depth-1` and
+  `background-shell` at the same time on the same argument rather than after each had flapped
+  once. **Runs three and four then exited 0 across all thirteen census fixtures, back to back.**
+
+  Run five, against the installed 2.1.260 with the corpus pinned to 2.1.259, exited 2 on one
+  line: `nested-depth-2: added pair result/error_during_execution`. It is recorded as drift data
+  rather than repaired, and honestly it is more likely to be about the scenario than about the
+  binary -- the same subtype came out of a discarded 2.1.259 recording of this scenario, where
+  the cause was the settle helper closing the session under a re-engaged agent, and the fix for
+  that waits a fixed ten seconds rather than proving anything. So this is the census's
+  class-three risk (an outcome the model's turn count decides) showing up in the one fixture of
+  this wave that has two agents to wait for, and `nested-depth-2` is the census member to watch:
+  a second flap of the same pair is the evidence that would take it out of the census, alongside
+  `exit-plan-mode`, rather than something to declare optional -- `result/success` and
+  `result/error_during_execution` are mutually exclusive outcomes, and declaring both optional
+  would make the census blind to whether the recording completed at all.
+
+  The one-line qualification on wave B's G2 note still holds and is worth repeating with a
+  second version pair behind it: a ritual run that finds nothing cannot demonstrate that the
+  ritual would find something. What this wave adds is the converse -- two of the five runs found
+  something, both times a property of a recording rather than of a binary, which is the failure
+  mode that erodes a gate fastest if it is waved through.
