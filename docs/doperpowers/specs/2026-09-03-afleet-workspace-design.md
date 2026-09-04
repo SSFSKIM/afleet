@@ -3799,4 +3799,7 @@ Pending — written at finish.
   required against a fixture that omits it. In `cli.pretty.js` every result frame is built by
   one helper that spreads `{type, duration_ms, uuid}` last, so those cannot be overridden by
   any caller, and the paths supplying `total_cost_usd` and `session_id` do so unconditionally;
-  no path emits a result frame missing any of the four. Verified first-hand at 2.1.258.
+  no *stream-json* path emits a result frame missing any of the four. The scope matters: one
+  `type: "result"` literal in the binary does omit `session_id`, but it goes to the worker
+  event channel, never to stdout, so the guarantee is about the wire this app reads and not
+  about every result-shaped object the engine constructs. Verified first-hand at 2.1.258.
