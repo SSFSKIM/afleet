@@ -372,9 +372,38 @@ def _check_artifacts(path, frames):
             for rel in sorted(needed) if not os.path.isfile(os.path.join(art_dir, rel))]
 
 
+def _identities(records):
+    """A stream's record identities, in order. `uuid` is what a transcript record is keyed by;
+    a record without one falls back to its own content, so a stream of unkeyed records is still
+    compared in full and the fallback cannot be used to wave anything through."""
+    return [r.get("uuid") if isinstance(r, dict) and r.get("uuid") else json.dumps(r, sort_keys=True)
+            for r in records]
+
+
+def _drift_fields(got, want):
+    """The field names that differ between two identity-equal record sequences.
+
+    One level of nesting is named, because the difference this reports lives inside `message`
+    and a note saying only `message` tells a reviewer nothing they can check.
+    """
+    out = set()
+    for a, b in zip(got, want):
+        if a == b or not (isinstance(a, dict) and isinstance(b, dict)):
+            continue
+        for k in set(a) | set(b):
+            if a.get(k) == b.get(k):
+                continue
+            va, vb = a.get(k), b.get(k)
+            if isinstance(va, dict) and isinstance(vb, dict):
+                out.update("%s.%s" % (k, sub) for sub in set(va) | set(vb) if va.get(sub) != vb.get(sub))
+            else:
+                out.add(k)
+    return out
+
+
 def _check_mirror(path, fx):
     """Mirrored entries reproduce the transcript: `initial/` records plus every mirrored
-    entry, in order, are the `transcript/` records.
+    entry, in order, are the `transcript/` records. Returns `(errors, notes)`.
 
     Gated on whether the fixture declares a transcript at all, which is what the check actually
     needs, rather than on `synthetic`, which was only ever a proxy for it. A fixture written
@@ -384,8 +413,8 @@ def _check_mirror(path, fx):
     meta, frames = fx["meta"], fx["frames"]
     final = fixture.stream_sizes(os.path.join(path, "transcript"))
     if not final:
-        return []
-    errors = []
+        return [], []
+    errors, notes = [], []
     rec_slug = fixture.slug_of(meta["cwd"]) if meta.get("cwd") else None
     # A session file can be named by more than one path over one recording. `set_cwd` with
     # trust answers `transcript_relocated: true` and *moves* the transcript into the new
@@ -418,8 +447,33 @@ def _check_mirror(path, fx):
     # session's appended range -- `session-mirror-resume` records one `ai-title` -- and the
     # count is checked for exactness in both directions: too few consumed still fails, and a
     # declaration nothing needs is reported as stale rather than left to rot.
+    #
+    # The same escape exists in the other direction, for a phenomenon the engine turned out to
+    # have both ways round. A subagent's mirror opens with an `agent_metadata` entry that is
+    # never written into `subagents/agent-<id>.jsonl` at all: it is the content of the
+    # neighbouring `.meta.json` sidecar, delivered through the mirror with a `type` added
+    # (`explore-depth-1`, `nested-depth-2`). The mirror therefore carries one record the stream
+    # does not, at the head of the range, which is `unmirrored_prefix` reflected.
+    # `unwritten_prefix` states how many, on exactly the same terms: declared by the scenario,
+    # consumed only at the head, exact in both directions.
+    #
+    # `mirror_identity_only` is the third declaration and the only one that is not a count,
+    # because what it licenses does not have a stable one. A subagent's sidecar file and its
+    # mirror are two snapshots of the same record taken at different moments: the record that
+    # closes an assistant message reaches the file with `stop_reason: null` and a partial
+    # `usage` on some runs and finalised on others, and the file is never rewritten, so the two
+    # disagree by field while agreeing by identity. Whether they disagree at all is a race, so
+    # a count would rot on the next recording. The parent's §7.3 invariant is stated as records
+    # equal "by record identity", which is exactly what stays checked here: the declaration
+    # names streams whose records are compared by `uuid` sequence, so count, order and identity
+    # are still strict, and every field difference is reported as a note on every run rather
+    # than passing in silence. Main streams are untouched and remain compared in full.
     declared = int(meta.get("unmirrored_prefix") or 0)
+    declared_unwritten = int(meta.get("unwritten_prefix") or 0)
+    identity_pats = list(meta.get("mirror_identity_only") or ())
+    used = set()
     skipped = 0
+    unwritten = 0
     for stream, entries in sorted(mirrored.items()):
         init_path = os.path.join(path, "initial", stream)
         final_path = os.path.join(path, "transcript", stream)
@@ -432,22 +486,45 @@ def _check_mirror(path, fx):
         except ValueError:
             errors.append("transcript/%s is not valid JSONL and cannot be compared with the mirror" % stream)
             continue
+        hit = [pat for pat in identity_pats if pat in stream]
+        used.update(hit)
         if got == head + entries:
             continue
         # Only ever at the head of the appended range, and only as many records as remain
         # undeclared: a gap anywhere later is a mirror that lost records mid-session, which is
         # the failure this check exists for.
+        matched = False
         for n in range(1, declared - skipped + 1):
             if got == head + got[len(head):len(head) + n] + entries:
                 skipped += n
+                matched = True
                 break
-        else:
+        for n in range(0, declared_unwritten - unwritten + 1):
+            if matched:
+                break
+            want = head + entries[n:]
+            if got == want:
+                unwritten += n
+                matched = True
+            elif hit and _identities(got) == _identities(want):
+                unwritten += n
+                matched = True
+                notes.append("mirror content drift on %s: %d of %d records differ from the file by field "
+                             "(%s); the identity sequence is equal (mirror_identity_only)"
+                             % (stream, sum(1 for a, b in zip(got, want) if a != b), len(got),
+                                ", ".join(sorted(_drift_fields(got, want))) or "no top-level field"))
+        if not matched:
             errors.append("mirror entries for %s do not reproduce transcript/%s (%d mirrored + %d initial vs %d "
-                          "records, unmirrored_prefix %d)"
-                          % (stream, stream, len(entries), len(head), len(got), declared))
+                          "records, unmirrored_prefix %d, unwritten_prefix %d)"
+                          % (stream, stream, len(entries), len(head), len(got), declared, declared_unwritten))
     if declared and skipped != declared:
         errors.append("fixture.json declares unmirrored_prefix %d but the mirror check needed %d" % (declared, skipped))
-    return errors
+    if declared_unwritten and unwritten != declared_unwritten:
+        errors.append("fixture.json declares unwritten_prefix %d but the mirror check needed %d"
+                      % (declared_unwritten, unwritten))
+    for pat in sorted(set(identity_pats) - used):
+        errors.append("fixture.json declares mirror_identity_only %r but no mirrored stream matches it" % pat)
+    return errors, notes
 
 
 def _check_streams(path, fx):
@@ -572,7 +649,8 @@ def verify_fixture(path, home=None, author=None, hostname=None):
                          set(fx["meta"].get("withdrawn_requests") or []))
     errors += _check_census(fx)
     errors += _check_artifacts(path, fx["frames"])
-    errors += _check_mirror(path, fx)
+    mirror_errors, mirror_notes = _check_mirror(path, fx)
+    errors += mirror_errors
     errors += _check_streams(path, fx)
     scan_errors, warnings = _scan_files(path, fx["meta"], home, author, hostname)
-    return errors + scan_errors, warnings
+    return errors + scan_errors, mirror_notes + warnings

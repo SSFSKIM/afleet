@@ -62,6 +62,22 @@ A scenario is a module under `scenarios/` exposing `META` (a dict) and `run(sess
                      the scenario, never inferred, and checked for exactness -- the same rule
                      `withdrawn_requests` follows and for the same reason. A resume appends one
                      unmirrored `ai-title` (`session-mirror-resume`).
+- `unwritten_prefix` the same declaration reflected: how many records the mirror delivers at the
+                     head of a stream that the engine never writes into that stream. A subagent's
+                     mirror opens with an `agent_metadata` entry carrying the content of the
+                     neighbouring `.meta.json` sidecar, which the `.jsonl` never receives, so an
+                     agent scenario declares one per subagent stream (`explore-depth-1` one,
+                     `nested-depth-2` two).
+- `mirror_identity_only` stream-path substrings whose mirrored entries are compared with the
+                     file by record identity (`uuid` sequence) rather than field for field, with
+                     every field difference reported as a note. The third declared escape and the
+                     only one that is not a count: a subagent's sidecar and its mirror are two
+                     snapshots of one record taken at different moments, so the record closing an
+                     assistant message can reach the file with `stop_reason: null` and a partial
+                     `usage` while the mirror carries it finalised, and the file is never
+                     rewritten. Whether they disagree at all is a race, which is why a count would
+                     rot; identity, order and count stay strict. Declared as `["subagents/"]` by
+                     the agent scenarios, and reported as stale when nothing matches it.
 
 `withdrawn_requests` is *not* a `META` key. It is written from the ids the scenario passed to
 `session.cancel()` and never inferred from the captured frames, which is what keeps it a
@@ -403,6 +419,8 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
             "isolation": meta.get("isolation", "config-home"), "synthetic": False, "hypothesis": False,
             "late_responses": list(meta.get("late_responses", [])),
             "unmirrored_prefix": int(meta.get("unmirrored_prefix") or 0),
+            "unwritten_prefix": int(meta.get("unwritten_prefix") or 0),
+            "mirror_identity_only": list(meta.get("mirror_identity_only") or ()),
             # Read off the session's own cancel record, never inferred from the captured frames:
             # `verify` treats the list as the host declaring which of its requests it withdrew,
             # and a list read back out of the capture would be a blanket amnesty the recorder
