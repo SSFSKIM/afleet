@@ -1341,7 +1341,7 @@ output committed), the SDK typings fetched on demand.
 |---|---|---|
 | `~/Library/Application Support/afleet/state.json` | the namespaced store (§7.8) | atomic writes, schema version |
 | `~/Library/Logs/afleet/diagnostics.log` | metadata-only diagnostics: frame type, subtype, size, timing, request id, control answer behavior and classification without payload, lifecycle and ownership events | rotated, 50 MB budget |
-| `~/Library/Logs/afleet/capture/<configHomeHash>/<session-id>.ndjson` | raw frame capture, **only while the Developer setting is on** | redacted before disk: account fields, `update_environment_variables` frames, any string-valued field whose name contains token, oauth, key or secret, excluding the usage counters (`input_tokens`, `output_tokens`, `max_tokens`, `thinking_tokens` and their kin), with an assertion after redaction that every frame typed before it stays typed; MCP JSON-RPC bodies truncated to 4 KB; directory 0700, files 0600; 200 MB total budget, oldest deleted first; a session's capture is deleted when its transcript disappears from `<configHome>/projects`; *Delete diagnostics* in Settings removes everything |
+| `~/Library/Logs/afleet/capture/<configHomeHash>/<session-id>.ndjson` | raw frame capture, **only while the Developer setting is on** | redacted before disk: identity fields by key name, normalised and case-insensitive, on string values — the set C1's redactor fixes (`account`, `accountUuid`, `accountId`, `accountName`, `organization`, `organizationUuid`, `organizationId`, `organizationName`, `user`, `userId`, `userUuid`, `userName`, `subscription`, `subscriptionType`, `fullName`) plus any email-shaped string anywhere, and an `account`, `organization` or `user` object replaced whole; `update_environment_variables` frames; any string-valued field whose name contains token, oauth, key or secret, excluding the usage counters (`input_tokens`, `output_tokens`, `max_tokens`, `thinking_tokens` and their kin), with an assertion after redaction that every frame typed before it stays typed; MCP JSON-RPC bodies truncated to 4 KB; directory 0700, files 0600; 200 MB total budget, oldest deleted first; a session's capture is deleted when its transcript disappears from `<configHome>/projects`; *Delete diagnostics* in Settings removes everything |
 
 Nothing under `<configHome>` is written by afleet.
 
@@ -3398,3 +3398,10 @@ Pending — written at finish.
   rather than at the login-shell capture, and cross-check its S8 request and response
   models against the `control-shapes` fixture at G2. Flags C3, C4 and C6 at their dispatch
   for §7.2, §7.3, §7.4, §7.7, §8.2, §8.7 and §8.8.
+- 2026-09-04: §11's capture-redaction row names the identity rule precisely instead of
+  "account fields": key-name match on the set C1's `Tools/probe/redact.py` fixes, normalised
+  and case-insensitive, on string values, plus the email pattern, plus whole-object
+  replacement under `account`, `organization` and `user`. Raised by C2's Task 8, whose
+  redactor fired only on objects and would have passed `emailAddress`, `accountUuid` and
+  `organizationUuid` as strings; the engine's account record carries exactly those. C1's
+  set is the canonical list and its fixtures the test. Flags C2 (in flight).
