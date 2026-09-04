@@ -23,54 +23,119 @@ public actor RawCapture {
     public func write(line: Data, session: SessionID) {
         guard var redacted = Redactor.redact(line: line) else { return }
         redacted.append(0x0A)
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: directory.path) {
-            try? fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        }
-        let file = directory.appendingPathComponent("\(session.description).ndjson")
-        if handles[session] == nil {
-            if !fm.fileExists(atPath: file.path) { fm.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600]) }
-            handles[session] = try? FileHandle(forWritingTo: file)
-            _ = try? handles[session]?.seekToEnd()
-        }
+        guard let dirFD = openDirectory() else { return }
+        defer { close(dirFD) }
+        // Before the append, not after it. Appending first left the directory over budget for the whole
+        // window between the two, and the budget is a statement about what is on disk.
+        guard admit(redacted.count, for: session) else { return }
+        let name = "\(session.description).ndjson"
+        if handles[session] == nil { handles[session] = openSessionFile(name, in: dirFD) }
         try? handles[session]?.write(contentsOf: redacted)
-        enforceBudget(protecting: session)
     }
     public func prune(keeping: Set<SessionID>) {
         for (session, handle) in handles where !keeping.contains(session) { try? handle.close(); handles[session] = nil }
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [] {
-            guard name.hasSuffix(".ndjson"), let id = SessionID(String(name.dropLast(7))), !keeping.contains(id) else { continue }
-            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        for entry in ownedEntries() where !keeping.contains(entry.session) {
+            try? FileManager.default.removeItem(at: entry.url)
         }
     }
-    private func enforceBudget(protecting current: SessionID) {
+
+    // MARK: opening
+
+    /// Opens the capture directory, creating it if needed, **without following a symlink**, and forces 0700
+    /// on what it opened whether it created it or found it there.
+    ///
+    /// The path-based `fileExists` / `createDirectory` pair this replaces was wrong twice over. It applied
+    /// the mode only on creation, so a directory that already existed kept whatever mode it had — including
+    /// a world-readable one. And a check on a path followed by an open of that path are two different
+    /// objects the moment anything else can write the parent: a symlink planted in between redirected every
+    /// captured frame to wherever it pointed. `O_NOFOLLOW` plus `fstat` on the descriptor actually opened
+    /// is what closes both.
+    private func openDirectory() -> Int32? {
         let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return }
-        // A plain loop rather than `compactMap`: under language mode 6 the closure would capture the
-        // non-Sendable `FileManager` out of actor isolation and the compiler rejects it.
-        //
-        // Only `.ndjson` files are counted or deleted, matching what `prune` owns. The two used to disagree,
-        // and a budget loop that deletes a file the type does not own is a worse bug than an exceeded budget.
-        var entries: [(URL, Date, Int)] = []
-        for n in names where n.hasSuffix(".ndjson") {
-            let u = directory.appendingPathComponent(n)
-            guard let a = try? fm.attributesOfItem(atPath: u.path) else { continue }
-            entries.append((u, (a[.modificationDate] as? Date) ?? .distantPast, (a[.size] as? Int) ?? 0))
+        // The root holds no capture data of its own; only the hashed directory below it does.
+        try? fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        _ = mkdir(directory.path, 0o700)      // EEXIST is expected; the descriptor below is what decides.
+        let fd = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { close(fd); return nil }
+        if info.st_mode & 0o777 != 0o700 { _ = fchmod(fd, 0o700) }
+        return fd
+    }
+    /// Opens one session file relative to the directory descriptor, refusing a symlink and anything that is
+    /// not a regular file, and forcing 0600 on an entry that was already there with a looser mode.
+    ///
+    /// `openat` rather than a path: the directory written into is the one just verified, not whatever the
+    /// path resolves to by the time a second syscall runs. A planted symlink is refused rather than
+    /// replaced — deleting something this type does not own is not a repair.
+    private func openSessionFile(_ name: String, in dirFD: Int32) -> FileHandle? {
+        let fd = openat(dirFD, name, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return nil }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else { close(fd); return nil }
+        if info.st_mode & 0o777 != 0o600 { _ = fchmod(fd, 0o600) }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    }
+
+    // MARK: budget
+
+    private struct Entry { let url: URL; let session: SessionID; let modified: Date; let size: Int }
+
+    /// The files this capture owns: a **regular file** whose name is `<session uuid>.ndjson`.
+    ///
+    /// Counting by suffix alone was a data-loss hazard, not merely an accounting one: a directory — or
+    /// anything else — named `x.ndjson` was counted against the budget and then handed to `removeItem`,
+    /// which deletes a whole tree. Losing something this type does not own is a far worse outcome than
+    /// exceeding a byte budget, so ownership is proven, and `prune` proves it the same way.
+    private func ownedEntries() -> [Entry] {
+        let fm = FileManager.default
+        var out: [Entry] = []
+        for name in (try? fm.contentsOfDirectory(atPath: directory.path)) ?? [] {
+            guard name.hasSuffix(".ndjson"), let session = SessionID(String(name.dropLast(7))) else { continue }
+            let url = directory.appendingPathComponent(name)
+            // `attributesOfItem` does not follow a symlink, so a symlinked `<uuid>.ndjson` reports
+            // `.typeSymbolicLink` here and is neither counted nor deleted.
+            guard let a = try? fm.attributesOfItem(atPath: url.path), (a[.type] as? FileAttributeType) == .typeRegular else { continue }
+            out.append(Entry(url: url, session: session,
+                             modified: (a[.modificationDate] as? Date) ?? .distantPast,
+                             size: (a[.size] as? Int) ?? 0))
         }
-        entries.sort { $0.1 < $1.1 }
-        var total = entries.reduce(0) { $0 + $1.2 }
-        // Oldest first, but *skipping* the session being written rather than stopping at it: stopping left
-        // the budget exceeded for as long as that session stayed the oldest file, which is the normal case
-        // for a long-lived session and would have made the budget a suggestion.
-        let protected = "\(current.description).ndjson"
+        return out
+    }
+
+    /// Whether `incoming` bytes may be appended, having first made room for them.
+    ///
+    /// Oldest first, *skipping* the session being written rather than stopping at it: stopping left the
+    /// budget exceeded for as long as that session stayed the oldest file, which is the normal case for a
+    /// long-lived session. But being skipped must not mean being unbounded — one long-lived session, or a
+    /// single line larger than the whole budget, used to sit over the limit forever with neither rotation
+    /// nor shutdown. So there are three steps, and the last two are what makes the budget real: evict what
+    /// can be evicted, rotate the active file away if it is what breaks the budget, and if even that is not
+    /// enough, drop the line. A gap in a capture is recoverable; a capture that quietly ignores its own
+    /// budget is not.
+    private func admit(_ incoming: Int, for current: SessionID) -> Bool {
+        let fm = FileManager.default
+        var entries = ownedEntries().sorted { $0.modified < $1.modified }
+        var total = entries.reduce(0) { $0 + $1.size }
         var i = 0
-        while total > budgetBytes, i < entries.count {
+        while total + incoming > budgetBytes, i < entries.count {
             let entry = entries[i]
-            guard entry.0.lastPathComponent != protected else { i += 1; continue }
-            if let id = SessionID(String(entry.0.lastPathComponent.dropLast(7))) { try? handles[id]?.close(); handles[id] = nil }
-            try? fm.removeItem(at: entry.0)
-            total -= entry.2
+            guard entry.session != current else { i += 1; continue }
+            guard (try? fm.removeItem(at: entry.url)) != nil else {
+                // Accounted only when it actually happened. Decrementing on a failed removal made
+                // enforcement conclude the budget held while every one of those bytes was still on disk.
+                i += 1
+                continue
+            }
+            try? handles[entry.session]?.close(); handles[entry.session] = nil
+            total -= entry.size
             entries.remove(at: i)
         }
+        if total + incoming > budgetBytes, let active = entries.first(where: { $0.session == current }),
+           (try? fm.removeItem(at: active.url)) != nil {
+            try? handles[current]?.close(); handles[current] = nil
+            total -= active.size
+        }
+        return total + incoming <= budgetBytes
     }
 }

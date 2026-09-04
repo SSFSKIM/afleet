@@ -53,6 +53,126 @@ final class RawCaptureTests: XCTestCase {
             .compactMap { try? FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent($0).path)[.size] as? Int }
         XCTAssertLessThanOrEqual(owned.reduce(0, +), 300, "the budget holds over the files the type owns")
     }
+
+    // MARK: - on-disk safety
+
+    private func line(_ pad: Int = 100) -> Data {
+        Data((#"{"type":"keep_alive","pad":""# + String(repeating: "x", count: pad) + #""}"#).utf8)
+    }
+    private var captureDirectory: URL { root.appendingPathComponent(RawCapture.configHomeHash(home)) }
+    /// The bytes actually on disk in the files the capture owns.
+    private func ownedBytes() throws -> Int {
+        let fm = FileManager.default
+        return try fm.contentsOfDirectory(atPath: captureDirectory.path)
+            .filter { $0.hasSuffix(".ndjson") }
+            .compactMap { try? fm.attributesOfItem(atPath: captureDirectory.appendingPathComponent($0).path) }
+            .filter { ($0[.type] as? FileAttributeType) == .typeRegular }
+            .reduce(0) { $0 + (($1[.size] as? Int) ?? 0) }
+    }
+
+    /// The modes used to be applied only at creation, so a directory or a file that was already there kept
+    /// whatever it had — and capture data sat in it world-readable. They are now enforced on the descriptor
+    /// that was actually opened, whether it was created or found.
+    func testExistingPermissiveDirectoryAndFileAreTightened() async throws {
+        let s = SessionID()
+        let fm = FileManager.default
+        try fm.createDirectory(at: captureDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o777])
+        let file = captureDirectory.appendingPathComponent("\(s.description).ndjson")
+        fm.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o666])
+        let cap = RawCapture(root: root, configHome: home, budgetBytes: 1_000_000)
+        await cap.write(line: line(), session: s)
+        XCTAssertEqual(try fm.attributesOfItem(atPath: captureDirectory.path)[.posixPermissions] as? Int, 0o700)
+        XCTAssertEqual(try fm.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int, 0o600)
+        XCTAssertGreaterThan(try Data(contentsOf: file).count, 0, "the write still happened")
+    }
+
+    /// A session file that is really a symlink must not be written through: the target is somewhere the
+    /// capture system does not own, and redirecting a session's frames there is how captured data leaves the
+    /// directory it was budgeted, permissioned and pruned in.
+    func testASymlinkedSessionFileIsRefusedAndItsTargetIsNeverWritten() async throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: captureDirectory, withIntermediateDirectories: true)
+        let target = root.appendingPathComponent("outside.txt")
+        try Data("original".utf8).write(to: target)
+        let s = SessionID()
+        try fm.createSymbolicLink(at: captureDirectory.appendingPathComponent("\(s.description).ndjson"), withDestinationURL: target)
+        let cap = RawCapture(root: root, configHome: home, budgetBytes: 1_000_000)
+        await cap.write(line: line(), session: s)
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "original")
+    }
+
+    /// The same for the directory itself, which the path-based `fileExists` check could not see.
+    func testASymlinkedCaptureDirectoryIsRefused() async throws {
+        let fm = FileManager.default
+        let elsewhere = root.appendingPathComponent("elsewhere")
+        try fm.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: captureDirectory, withDestinationURL: elsewhere)
+        let cap = RawCapture(root: root, configHome: home, budgetBytes: 1_000_000)
+        await cap.write(line: line(), session: SessionID())
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: elsewhere.path), [])
+    }
+
+    /// The budget is a statement about what is on disk. It used to append first and enforce second, and then
+    /// refuse to evict the file it had just appended to — so a single long-lived session, which is the
+    /// ordinary case, grew without limit and the 200 MB budget never applied to it at all.
+    func testASingleLongLivedSessionStaysInsideTheBudget() async throws {
+        let cap = RawCapture(root: root, configHome: home, budgetBytes: 400)
+        let s = SessionID()
+        for i in 0..<20 {
+            await cap.write(line: line(), session: s)
+            XCTAssertLessThanOrEqual(try ownedBytes(), 400, "over budget after write \(i)")
+        }
+        XCTAssertGreaterThan(try ownedBytes(), 0, "and it is still capturing, not merely empty")
+    }
+
+    /// The other end of the same rule: a line that cannot fit in the budget at all is dropped rather than
+    /// written and left there.
+    func testALineLargerThanTheWholeBudgetIsNeverWritten() async throws {
+        let cap = RawCapture(root: root, configHome: home, budgetBytes: 50)
+        await cap.write(line: line(), session: SessionID())
+        XCTAssertEqual(try ownedBytes(), 0)
+    }
+
+    /// Eviction counted every name ending in `.ndjson` and then handed it to `removeItem`, which on a
+    /// directory deletes the whole tree. Ownership is proven now, so a directory wearing the suffix is
+    /// neither counted against the budget nor deleted by it, nor by `prune`.
+    func testADirectoryWearingTheSuffixIsNeitherCountedNorDeleted() async throws {
+        let fm = FileManager.default
+        let cap = RawCapture(root: root, configHome: home, budgetBytes: 300)
+        let s = SessionID()
+        await cap.write(line: line(), session: s)
+        let impostor = captureDirectory.appendingPathComponent("\(SessionID().description).ndjson")
+        try fm.createDirectory(at: impostor, withIntermediateDirectories: true)
+        let inside = impostor.appendingPathComponent("payload.txt")
+        try Data("precious".utf8).write(to: inside)
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-7200)], ofItemAtPath: impostor.path)
+        for _ in 0..<4 { await cap.write(line: line(), session: s) }
+        await cap.prune(keeping: [])
+        XCTAssertEqual(try String(contentsOf: inside, encoding: .utf8), "precious")
+    }
+
+    /// A failed eviction used to be accounted as if it had succeeded, so enforcement concluded the budget
+    /// held while the bytes were still on disk and stopped before evicting anything that would have helped.
+    /// `UF_IMMUTABLE` makes `removeItem` fail for real rather than through a stub.
+    func testAFailedEvictionDoesNotStopEnforcement() async throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: captureDirectory, withIntermediateDirectories: true)
+        let stuck = SessionID(), evictable = SessionID()
+        let stuckURL = captureDirectory.appendingPathComponent("\(stuck.description).ndjson")
+        let evictableURL = captureDirectory.appendingPathComponent("\(evictable.description).ndjson")
+        try Data(repeating: 0x41, count: 200).write(to: stuckURL)
+        try Data(repeating: 0x42, count: 150).write(to: evictableURL)
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-7200)], ofItemAtPath: stuckURL.path)
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-3600)], ofItemAtPath: evictableURL.path)
+        XCTAssertEqual(chflags(stuckURL.path, UInt32(UF_IMMUTABLE)), 0, "the test needs a removal that really fails")
+        defer { _ = chflags(stuckURL.path, 0) }
+        let cap = RawCapture(root: root, configHome: home, budgetBytes: 300)
+        await cap.write(line: line(), session: SessionID())
+        XCTAssertTrue(fm.fileExists(atPath: stuckURL.path), "its removal failed, so it is still there")
+        XCTAssertFalse(fm.fileExists(atPath: evictableURL.path),
+                       "enforcement must go on to the next candidate rather than conclude on bytes it failed to remove")
+    }
+
     func testBudgetEvictsOldestAndPruneRemovesUnknownSessions() async throws {
         let cap = RawCapture(root: root, configHome: home, budgetBytes: 300)
         let a = SessionID(), b = SessionID(), c = SessionID()
