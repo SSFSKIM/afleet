@@ -1,0 +1,80 @@
+{
+ "census": true,
+ "cli_version": "2.1.259",
+ "cwd": "/tmp/afleet-fixtures/explore-depth-1",
+ "deterministic": false,
+ "exit_code": 0,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "~/.local/share/claude/versions/2.1.259",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--session-id",
+   "04f72661-7164-4bfa-9adc-196c573d83be",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "default",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "4"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
+  }
+ },
+ "mirror_identity_only": [
+  "subagents/"
+ ],
+ "name": "explore-depth-1",
+ "notes": [
+  "task_started: 1, depths: [1], all settled: True, result: success",
+  "frames with parent_tool_use_id: 5"
+ ],
+ "prompts": [
+  "Use the Agent tool with subagent_type Explore to find which files in this directory contain the word gamma. Do not search yourself and do not use any other tool. Then reply with only the file names it reports, and nothing else."
+ ],
+ "purpose": "one Explore subagent searching synthetic files",
+ "recorded_at": "2026-09-04T11:45:37Z",
+ "review": {
+  "checklist_version": 2,
+  "date": "2026-09-04",
+  "reviewer": "Claude reviewer for kimmi"
+ },
+ "scenario": "explore_depth_1",
+ "serves": [
+  "item 9",
+  "item 38",
+  "item 49",
+  "C3.G3"
+ ],
+ "session_id": "04f72661-7164-4bfa-9adc-196c573d83be",
+ "spikes": [],
+ "synthetic": false,
+ "unmirrored_prefix": 0,
+ "unwritten_prefix": 1,
+ "withdrawn_requests": []
+}
