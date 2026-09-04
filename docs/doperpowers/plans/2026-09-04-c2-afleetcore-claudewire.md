@@ -14,7 +14,7 @@
 
 - Two packages at the repository root: `AfleetCore/` and `ClaudeWire/`. `ClaudeWire` depends on `AfleetCore` only (parent X1). No module imports anything outside `AfleetCore` and Foundation.
 - Every manifest: `// swift-tools-version: 6.2`, `platforms: [.macOS(.v26)]`, every target `swiftSettings: [.swiftLanguageMode(.v6)]`. Strict concurrency is on from the first commit; no `@preconcurrency` imports.
-- Every public type is `Sendable`. Actors: `ClaudeProcess`, `AfleetMCPServer`, `StdinWriter`, `BoundedChannel`. Nothing is `@MainActor`. `@unchecked Sendable` is permitted only on the private single-owner boxes around `Foundation.Process` (`ProcessJob` in WireEnvironment, `ProcessBox` in WireTransport), on `FileDiagnostics` (serial queue) and on the small `Waiter` settlement box.
+- Every public type is `Sendable`; nothing is `@MainActor`. Actors: `ClaudeProcess`, `AfleetMCPServer`, `StdinWriter`, `BoundedChannel`. `@unchecked Sendable` is permitted only where a type is a single-owner box: its stored state is reachable from exactly one place, and that place serialises every access — a dedicated serial queue, a lock held across every read and write, or sole ownership by one task. Such a type must be `private` or `internal` unless it is a test double, must document which mechanism serialises it, and must not expose its state to a caller that could touch it off that mechanism. In these packages that covers the boxes around `Foundation.Process` (`ProcessJob` in WireEnvironment, `ProcessBox` in WireTransport), a reader owning a file descriptor and its buffer on a dedicated queue (`LineReader` in WireTransport), the serial-queue-backed `FileDiagnostics`, the `Waiter` settlement box, and test doubles whose storage is guarded by a lock. Anything else is an actor or a value type.
 - Public initialisers on every value a downstream package constructs (Swift's synthesized memberwise initialisers are internal).
 - `swift test --package-path AfleetCore` and `swift test --package-path ClaudeWire` must pass after every task.
 - The typings are never committed: `.typings/` is gitignored (already on `main`), `git ls-files` must show nothing under `.typings/`, `node_modules/`, or any `*.d.ts`.
@@ -5437,3 +5437,22 @@ Each was answered with the recommendation below and the plan proceeds on it; ove
 4. **`send_user_file` path domain.** The tool accepts any readable file, absolute or relative to the cwd, matching the built-in tool the model was trained on; the earlier "inside cwd only" restriction was dropped because the model can already Read any file with the user's privileges, so the fence bought nothing.
 5. **Redaction keys for `.claude.json`-style paths.** The redactor treats `account`, `oauthAccount`, `organization`, `user`, `email`, `emailAddress` objects as account data; if the census later shows another identity-bearing key, add it to `Redactor.accountKeys` and re-run `RedactorTests`.
 6. **Escalation timing in tests.** The two `terminate()` escalation tests take about five and ten seconds by design (they prove the waits). Keep them in the default suite rather than behind a flag; the whole `ClaudeWire` suite should still finish in under ninety seconds.
+
+## Revision Notes
+
+- 2026-09-05: Global Constraints, the `@unchecked Sendable` rule, rewritten to state a property
+  rather than enumerate blessed type names. The original listed four types by name. Task 10 then
+  legitimately needed a fifth (`LineReader`, which owns a file descriptor and its buffer on a
+  dedicated queue — the same single-owner pattern the rule already blessed for the process box) plus
+  two test doubles, and the review recorded that as a spec-compliance failure even though every use
+  was sound. The defect was in the constraint. An enumeration goes stale silently: nothing signals
+  when a legitimate case is missing, and a later reader cannot distinguish an omission from a
+  violation. The replacement states the property that makes the annotation safe and keeps the known
+  types as examples; the clause carrying the weight is "must document which mechanism serialises
+  it", which makes each use self-justifying at the site so a reviewer can judge a new one without
+  consulting a list. This is the third time this shape has bitten C2 — after the three-name
+  `CLAUDE_*` removal list, which missed every marker the engine might add and was replaced by a
+  prefix rule, and the two-member secret-exemption summary, which omitted a third member the
+  reference file actually had. The generalisation, now also filed on the parent at `f28271a` against
+  §17.7 so the children inheriting C2's conventions get it: when a constraint lists instances, ask
+  what property the list is standing in for, and state that instead.
