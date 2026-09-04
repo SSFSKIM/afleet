@@ -3320,6 +3320,23 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   than by re-reading the test.
   Impact: §17.7 carries the mitigation as a binding practice — prove the test fails against
   the break, and assert that a comparison found something to compare.
+- Observation: A fixture's silence about a field means different things depending on how the
+  fixture was made, and "the fixture is authoritative" is wrong without that distinction.
+  Evidence: C2's Task 12. Told to treat a fixture as right and the decoder as wrong until
+  proven otherwise, a worker faithfully made four `result` fields optional because ten result
+  lines omitted them. Every one of those lines came from the two *synthetic* fixtures; all
+  fifteen recorded fixtures carrying a result frame list all four as required. C1 had omitted
+  them deliberately and said so twice in `Tools/probe/synthetic/dialogs.py`: a frame "holds
+  the keys the bundle shows and no more", because "a fabricated zero would enter the census as
+  a shape nothing observed". Fixing the generator would therefore have inflicted the exact
+  harm C1 was guarding against, to make a decoder test more convenient.
+  Impact: the authority rule is stated with its premise attached — a *recorded* fixture is
+  authoritative about what the engine sends; a *synthetic* one is authoritative only about the
+  shape it was built to exercise, and its silence is evidence about its constructor, not about
+  the engine. `fixture.json`'s `synthetic` flag is what a gate keys on. C2's G2 asserts
+  losslessness and opaque counts over the whole corpus, asserts typed decoding against the
+  recorded fixtures only, and surfaces a synthetic decode failure as a named finding rather
+  than accepting it silently or failing on it.
 
 ## Outcomes & Retrospective
 
@@ -3767,3 +3784,12 @@ Pending — written at finish.
   enumeration-goes-stale failure has now appeared three times in C2 (the environment-variable
   list, the secret-exemption summary, this constraint), so the form is the finding, not the
   instance.
+- 2026-09-05: The rule that protocol facts come from C1's fixtures gains the distinction that
+  makes it safe: recorded fixtures are authoritative about engine behaviour, synthetic ones
+  only about the shapes they were constructed to exercise. A synthetic fixture's missing field
+  is not evidence the engine omits it. Raised by C2's Task 12, where the undifferentiated rule
+  drove four always-sent `result` fields optional in the decoder on the strength of two
+  synthetic fixtures, against fifteen unanimous recordings — which would have silently
+  disabled exactly the drift detection the two-stage decoder exists to provide. Reverted;
+  C1's generator is deliberately partial and stays as it is. Binds every child that reads
+  `Fixtures/`, and the root `CLAUDE.md` routing line should be read with this attached.
