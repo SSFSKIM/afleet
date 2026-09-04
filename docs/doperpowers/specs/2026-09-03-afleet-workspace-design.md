@@ -517,7 +517,15 @@ reap, respawn) lives in FleetKit (§7.4); ClaudeWire only executes it.
 served in-process over `mcp_message` frames carrying JSON-RPC (*SPEC 45.21*): the binary
 forwards requests, the host answers in a control response; a JSON-RPC notification carried
 in `mcp_message` is answered with `mcp_response {"jsonrpc": "2.0", "result": {}, "id": 0}`,
-as the SDK does. Tools appear to the model as `mcp__afleet__<tool>`. The first tool is
+as the SDK does. **The bring-up starts inside the handshake and the host must serve it
+there.** In every recorded fixture the server's JSON-RPC `initialize` arrives as an inbound
+`mcp_message` at frame 2, *before* the engine's own `initialize` control response at frame 4,
+and the engine does not answer `initialize` until the host has answered that JSON-RPC
+request; `notifications/initialized` follows the response, and `tools/list` arrives with the
+first turn or the first outbound request. A host whose inbound-request loop starts only after
+spawn returns therefore deadlocks its own handshake. The loop is live from the first byte,
+and a spawn's handshake wait runs concurrently with it. The server reports connected about
+0.9 s after the handshake (§6.2). Tools appear to the model as `mcp__afleet__<tool>`. The first tool is
 `send_user_file(files: [path], caption?: string, status: "normal" | "proactive",
 display?: "render" | "attach")`, mirroring the built-in tool's shape so the model's
 prompt-trained behaviour transfers (*Parity* area 13), because the built-in `SendUserFile`
@@ -3870,3 +3878,11 @@ Pending — written at finish.
   `overageDisabledReason: "org_level_disabled"` is the normal shape for an organisation
   with overage off. Both measured live by C2's G3 on 2.1.260. Flags C4 (post-handshake
   checks, §6.12) and C6 (banners).
+- 2026-09-05: §6.8 states the bring-up ordering as a host constraint: the in-process
+  server's JSON-RPC `initialize` arrives before the engine's `initialize` response in every
+  recorded fixture, so the inbound-request loop must be serving `mcp_message` while the
+  handshake is still pending. Raised by C2's Task 13 review, which found the scripted
+  stand-in modelling the bring-up *after* the handshake and only in one opt-in scenario —
+  the same class of unfaithfulness that hid the `system/init` defect. C2's transport already
+  behaves correctly (G3 passed live); the stand-in is being brought into line. Flags C2 (in
+  flight).
