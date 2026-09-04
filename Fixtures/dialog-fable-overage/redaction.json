@@ -1,0 +1,28 @@
+{
+ "rules": {
+  "identity": {
+   "count": 0,
+   "paths": {}
+  },
+  "mcp_bodies": {
+   "count": 0,
+   "paths": {}
+  },
+  "oauth_flow": {
+   "count": 0,
+   "paths": {}
+  },
+  "paths_host": {
+   "count": 0,
+   "paths": {}
+  },
+  "secrets": {
+   "count": 0,
+   "paths": {}
+  },
+  "settings_bodies": {
+   "count": 0,
+   "paths": {}
+  }
+ }
+}

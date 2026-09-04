@@ -1,0 +1,77 @@
+{
+ "census": true,
+ "cli_version": "2.1.259",
+ "cwd": "/tmp/afleet-fixtures/send-user-file",
+ "deterministic": false,
+ "exit_code": 0,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "~/.local/share/claude/versions/2.1.259",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--session-id",
+   "aa6f43d4-b9c0-4cbc-8a86-28016a4604a2",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "default",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "4"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
+  }
+ },
+ "name": "send-user-file",
+ "notes": [
+  "sdk server registered under strict-mcp-config: True",
+  "tools/call arguments seen by the harness: [{'files': ['a.txt', 'b.txt'], 'caption': 'two files', 'status': 'normal'}]",
+  "result: success"
+ ],
+ "prompts": [
+  "Use the mcp__afleet__send_user_file tool to send the files a.txt and b.txt to me, with the caption 'two files' and status 'normal'. Then reply with the single word: done"
+ ],
+ "purpose": "in-process MCP round trip: two files, a caption, status normal",
+ "recorded_at": "2026-09-04T10:53:20Z",
+ "review": {
+  "checklist_version": 3,
+  "date": "2026-09-05",
+  "reviewer": "Claude reviewer for kimmi",
+  "tree_sha256": "def206602b227d05caf7e58232ca52bffdc56cc0dd1e029c7372bfc7c11c7e11"
+ },
+ "scenario": "send_user_file",
+ "serves": [
+  "item 29",
+  "C2.G3"
+ ],
+ "session_id": "aa6f43d4-b9c0-4cbc-8a86-28016a4604a2",
+ "spikes": [
+  "S5"
+ ],
+ "synthetic": false,
+ "withdrawn_requests": []
+}

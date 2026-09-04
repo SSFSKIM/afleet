@@ -1,0 +1,46 @@
+{
+ "rules": {
+  "identity": {
+   "count": 18,
+   "paths": {
+    "$": 1,
+    "artifacts/-private-tmp-afleet-fixtures-explore-depth-1/c68633f3-68eb-4f49-bd22-e645fc21d67c/tasks/a8d2040715ad915fb.output": 1,
+    "attachment.context.userEmail": 2,
+    "attachment.tools[2].description": 1,
+    "attachment.tools[2].schema.description": 1,
+    "entries[11].attachment.context.userEmail": 1,
+    "entries[11].rendered[0].content": 1,
+    "entries[1].message.content[0].content": 1,
+    "entries[3].attachment.context.userEmail": 1,
+    "entries[3].attachment.tools[2].description": 1,
+    "entries[3].attachment.tools[2].schema.description": 1,
+    "entries[3].rendered[0].content": 1,
+    "message.content[0].content": 2,
+    "rendered[0].content": 2,
+    "response.response.account": 1
+   }
+  },
+  "mcp_bodies": {
+   "count": 0,
+   "paths": {}
+  },
+  "oauth_flow": {
+   "count": 0,
+   "paths": {}
+  },
+  "paths_host": {
+   "count": 1,
+   "paths": {
+    "launch.argv[0]": 1
+   }
+  },
+  "secrets": {
+   "count": 0,
+   "paths": {}
+  },
+  "settings_bodies": {
+   "count": 0,
+   "paths": {}
+  }
+ }
+}

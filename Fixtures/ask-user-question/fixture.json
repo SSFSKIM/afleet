@@ -1,0 +1,76 @@
+{
+ "census": true,
+ "cli_version": "2.1.259",
+ "cwd": "/tmp/afleet-fixtures/ask-user-question",
+ "deterministic": false,
+ "exit_code": 0,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "~/.local/share/claude/versions/2.1.259",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--session-id",
+   "b1a90923-b13b-4e39-ac97-61583cbdcab4",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "default",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "3"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
+  }
+ },
+ "name": "ask-user-question",
+ "notes": [
+  "AskUserQuestion asks: 1; previews present: True; requires_user_interaction: [True]; result: success",
+  "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT='markdown'"
+ ],
+ "prompts": [
+  "Before answering, use the AskUserQuestion tool to ask me which colour I prefer, offering exactly two options, red and blue, each with a short preview. After I answer, reply with only the colour I chose."
+ ],
+ "purpose": "a question with two options and previews, answered through updatedInput.answers",
+ "recorded_at": "2026-09-04T10:56:32Z",
+ "review": {
+  "checklist_version": 3,
+  "date": "2026-09-05",
+  "reviewer": "Claude reviewer for kimmi",
+  "tree_sha256": "81bdd2b51461929a75e691d5f73f1d499a2f2c233211d3c274423971b44d77b3"
+ },
+ "scenario": "ask_user_question",
+ "serves": [
+  "item 6",
+  "item 57"
+ ],
+ "session_id": "b1a90923-b13b-4e39-ac97-61583cbdcab4",
+ "spikes": [
+  "S15"
+ ],
+ "synthetic": false,
+ "withdrawn_requests": []
+}

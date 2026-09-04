@@ -4,3 +4,7 @@ DerivedData/
 *.app
 .DS_Store
 /Fixtures/**/*.secret*
+.typings/
+
+.doperpowers/
+__pycache__/

@@ -1,0 +1,249 @@
+{
+ "capabilities": null,
+ "flags": null,
+ "pairs": {
+  "assistant": {
+   "block_types": [
+    "text"
+   ],
+   "count": 7,
+   "keys": [
+    "message",
+    "parent_tool_use_id",
+    "session_id",
+    "supersedes",
+    "type",
+    "uuid"
+   ],
+   "payload_keys": [
+    "content",
+    "role"
+   ],
+   "required_keys": [
+    "message",
+    "parent_tool_use_id",
+    "session_id",
+    "type",
+    "uuid"
+   ],
+   "required_payload_keys": [
+    "content",
+    "role"
+   ]
+  },
+  "control_cancel_request": {
+   "count": 1,
+   "keys": [
+    "request_id",
+    "type"
+   ],
+   "required_keys": [
+    "request_id",
+    "type"
+   ]
+  },
+  "control_request/initialize": {
+   "count": 1,
+   "keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "payload_keys": [
+    "subtype",
+    "supportedDialogKinds"
+   ],
+   "required_keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "required_payload_keys": [
+    "subtype",
+    "supportedDialogKinds"
+   ]
+  },
+  "control_request/request_user_dialog": {
+   "count": 5,
+   "keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "payload_keys": [
+    "dialog_kind",
+    "payload",
+    "subtype"
+   ],
+   "required_keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "required_payload_keys": [
+    "dialog_kind",
+    "payload",
+    "subtype"
+   ]
+  },
+  "control_response/initialize": {
+   "body_keys": [
+    "commands",
+    "current_model",
+    "current_permission_mode",
+    "models"
+   ],
+   "count": 1,
+   "keys": [
+    "response",
+    "type"
+   ],
+   "payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ],
+   "required_body_keys": [
+    "commands",
+    "current_model",
+    "current_permission_mode",
+    "models"
+   ],
+   "required_keys": [
+    "response",
+    "type"
+   ],
+   "required_payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ]
+  },
+  "control_response/request_user_dialog": {
+   "body_keys": [
+    "behavior",
+    "result"
+   ],
+   "count": 4,
+   "keys": [
+    "response",
+    "type"
+   ],
+   "payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ],
+   "required_body_keys": [
+    "behavior"
+   ],
+   "required_keys": [
+    "response",
+    "type"
+   ],
+   "required_payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ]
+  },
+  "result/error_during_execution": {
+   "count": 3,
+   "keys": [
+    "is_error",
+    "num_turns",
+    "result",
+    "subtype",
+    "type"
+   ],
+   "required_keys": [
+    "is_error",
+    "num_turns",
+    "result",
+    "subtype",
+    "type"
+   ]
+  },
+  "result/success": {
+   "count": 2,
+   "keys": [
+    "is_error",
+    "num_turns",
+    "result",
+    "subtype",
+    "type"
+   ],
+   "required_keys": [
+    "is_error",
+    "num_turns",
+    "result",
+    "subtype",
+    "type"
+   ]
+  },
+  "system/model_refusal_fallback": {
+   "count": 1,
+   "keys": [
+    "api_refusal_category",
+    "api_refusal_explanation",
+    "content",
+    "direction",
+    "fallback_model",
+    "original_model",
+    "refused_user_message_uuid",
+    "request_id",
+    "retracted_message_uuids",
+    "scope",
+    "session_id",
+    "subtype",
+    "trigger",
+    "type",
+    "uuid"
+   ],
+   "required_keys": [
+    "api_refusal_category",
+    "api_refusal_explanation",
+    "content",
+    "direction",
+    "fallback_model",
+    "original_model",
+    "refused_user_message_uuid",
+    "request_id",
+    "retracted_message_uuids",
+    "scope",
+    "session_id",
+    "subtype",
+    "trigger",
+    "type",
+    "uuid"
+   ]
+  },
+  "user": {
+   "block_types": [],
+   "count": 5,
+   "keys": [
+    "message",
+    "origin",
+    "parent_tool_use_id",
+    "type",
+    "uuid"
+   ],
+   "payload_keys": [
+    "content",
+    "role"
+   ],
+   "required_keys": [
+    "message",
+    "origin",
+    "parent_tool_use_id",
+    "type",
+    "uuid"
+   ],
+   "required_payload_keys": [
+    "content",
+    "role"
+   ]
+  }
+ },
+ "version": "2.1.257-bundle"
+}

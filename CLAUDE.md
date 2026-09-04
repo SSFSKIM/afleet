@@ -7,7 +7,7 @@ re-implemented.
 
 Root spec and roadmap: `docs/doperpowers/specs/2026-09-03-afleet-workspace-design.md`.
 Design in §1 through §16, the roadmap in §17; every child spec cites `§17 C<n>` and
-records its parent-pin. Protocol evidence: `docs/tui-parity/` and `probes/`; the
+records its parent-pin. Protocol evidence: `Fixtures/` (golden recordings, verified by `make verify-fixtures` and drift-checked by `make probe`), `Tools/probe` and `Tools/fake-claude` (C1's suite), `docs/tui-parity/` and `probes/`; the
 extracted bundle spec at `~/claude-code-bundle/2.1.257/SPEC/` is the authority on engine
 behaviour.
 
