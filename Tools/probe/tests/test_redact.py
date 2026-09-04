@@ -192,6 +192,20 @@ class SecretKeyPredicateTests(unittest.TestCase):
                                "organizationId": "<organizationId>"})
         self.assertEqual(len(redact.scan({"subscriptionType": "max"}, home="/Users/probe")), 1)
 
+    def test_a_counter_that_happens_to_be_named_user_keeps_its_value(self):
+        """`result.subagent_stats.killed.user` counts subagents the user killed; it sits
+        beside `killed.parent` and `killed.system` and carries no identity. Name cannot tell
+        it from a numeric account id and neither can type, so the exemption is by path. The
+        same key elsewhere is still redacted, which is what keeps the exemption narrow."""
+        out = self.r.redact_json({"subagent_stats": {"killed": {"parent": 0, "user": 2, "system": 1}},
+                                  "killed": {"user": 5}, "user": 7})
+        self.assertEqual(out["subagent_stats"]["killed"], {"parent": 0, "user": 2, "system": 1})
+        self.assertEqual(out["killed"]["user"], "<user>")
+        self.assertEqual(out["user"], "<user>")
+        self.assertEqual(redact.scan({"subagent_stats": {"killed": {"user": 2}}}, home="/Users/probe"), [])
+        self.assertEqual(redact.scan({"killed": {"user": 5}}, home="/Users/probe"),
+                         ["killed.user: identity field not redacted"])
+
     def test_name_shaped_identity_keys_are_exact_never_substring(self):
         out = self.r.redact_json({"organizationName": "Acme", "userName": "pp", "accountName": "a",
                                   "fullName": "Probe Person", "toolName": "Bash", "serverName": "afleet",

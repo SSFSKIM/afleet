@@ -92,6 +92,27 @@ def _is_secret_key(k, value=None):
     return any(w in lk for w in SECRET_WORDS)
 
 
+# Fields whose *name* is in IDENTITY_KEYS but whose position makes them counters. The rules
+# key on names, and a name alone cannot tell `user: 7` -- a numeric account id, which is
+# identity -- from `killed.user`, the number of subagents the user killed, which is not.
+# Type cannot tell them apart either, since both are ints. Position can, so the exemption is
+# written as the path it applies to and nothing wider.
+#
+# `result.subagent_stats.killed.user` sits beside `killed.parent` and `killed.system`, both
+# plain counts, and appears in every `result` frame. Redacted it became the string `<user>`,
+# which destroys the count and changes the field's type -- not a cosmetic loss, because C2.G2
+# asks that every frame in every fixture decode and re-encode without loss, and a `Codable`
+# model typing it `Int` cannot read a string back. Found in the `rate-limited-turn` recording.
+#
+# The bar for adding a path here: the field must be incapable of carrying identity *in that
+# position*, demonstrably, from a recording or the bundle -- never because it looked harmless.
+IDENTITY_COUNTER_PATHS = frozenset(("subagent_stats.killed.user",))
+
+
+def _is_identity_counter(path):
+    return any(path == c or path.endswith("." + c) for c in IDENTITY_COUNTER_PATHS)
+
+
 def _is_identity_key(nk):
     if PLACEHOLDER_KEY_RE.match(nk):
         return False
@@ -161,7 +182,7 @@ class Redactor:
                     rk = "%s#%d" % (rk, n)
                 p = "%s.%s" % (path, rk) if path else rk
                 nk = _norm_key(k)
-                if _is_identity_key(nk):
+                if _is_identity_key(nk) and not _is_identity_counter(p):
                     placeholder = "<email>" if "email" in nk else "<%s>" % rk
                     if v is None or v == placeholder or v == "<email>":
                         out[rk] = v
@@ -307,7 +328,7 @@ def scan(obj_or_text, home, *, hostname=None):
                 p = "%s.%s" % (path, probe.redact_text(k, record=False)) if path else probe.redact_text(k, record=False)
                 hits.extend(_string_hits(k, p, probe, " in key"))
                 nk = _norm_key(k)
-                if _is_identity_key(nk):
+                if _is_identity_key(nk) and not _is_identity_counter(p):
                     if v not in (None, "<email>", "<%s>" % k):
                         hits.append("%s: identity field not redacted" % p)
                 elif nk == "apikeysource":
