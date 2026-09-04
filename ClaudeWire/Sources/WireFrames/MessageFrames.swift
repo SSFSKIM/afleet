@@ -192,19 +192,31 @@ public struct StreamEventFields: Codable, Hashable, Sendable, DeclaredKeys {
 }
 public typealias StreamEventFrame = Lossless<StreamEventFields>
 
-/// `duration_ms`, `total_cost_usd`, `uuid` and `session_id` are optional even though every one of
-/// the sixteen recorded fixtures carries all four on every `result` frame, and every one of their
-/// censuses lists them in `required_keys`. The two synthetic dialog fixtures emit a `result` made
-/// only of `type`, `subtype`, `result`, `is_error` and `num_turns` — `Fixtures/dialog-fable-overage`
-/// line 7 is `{"type":"result","subtype":"success","result":"answer","is_error":false,"num_turns":1}`
-/// — and G2 requires every recorded line to decode. Requiredness is stated by the census's
-/// per-fixture `required_keys`, which is externally verified; it is not stated by Swift optionality,
-/// which has to admit the whole corpus.
+/// `duration_ms`, `total_cost_usd`, `uuid` and `session_id` are required, and stay required.
+///
+/// The authority is the bundle, which says what the engine *guarantees*, not the census, which says
+/// only what was *observed*. In `~/claude-code-bundle/2.1.258/cli.pretty.js` every stream-json
+/// `result` frame is built by one helper, `$W` at line 35141, whose own object — `type`,
+/// `duration_ms`, `uuid` — is spread last and so cannot be overridden by any caller; all six of its
+/// call sites pass a `common` carrying `session_id` and `total_cost_usd` (line 36304's `Wr` and the
+/// five that spell the pair out), and the two literal `result` constructions that reach stdout, at
+/// lines 613083 and 759779, write all four. No path emits a stream-json `result` frame lacking any
+/// of them.
+///
+/// The two synthetic dialog fixtures omit them deliberately: `Tools/probe/synthetic/dialogs.py`
+/// writes only the fields "whose value is known from the branch that produced the frame", because
+/// "a fabricated zero would enter the census as a shape nothing observed". A recorded fixture is
+/// authoritative about what the engine sends; a synthetic one is authoritative only about the shape
+/// it was built to exercise, and its silence here is a fact about the constructor. Relaxing these to
+/// optional would give up a real alarm — a live `result` frame that lost one of them would decode
+/// silently instead of surfacing as a decode failure — against a guarantee the bundle states.
+/// `FixtureCorpusTests` holds "a modelled type decodes typed" against the recorded fixtures and
+/// reports the synthetic shortfall as a named finding.
 public struct ResultFields: Codable, Hashable, Sendable, DeclaredKeys {
-    public var type: String; public var subtype: String; public var durationMs: Int?; public var durationApiMs: Int?; public var isError: Bool
-    public var numTurns: Int; public var result: String?; public var stopReason: String?; public var totalCostUSD: Double?; public var usage: JSONValue?
+    public var type: String; public var subtype: String; public var durationMs: Int; public var durationApiMs: Int?; public var isError: Bool
+    public var numTurns: Int; public var result: String?; public var stopReason: String?; public var totalCostUSD: Double; public var usage: JSONValue?
     public var modelUsage: JSONValue?; public var permissionDenials: JSONValue?; public var queuedTurnCount: Int?; public var fastModeState: String?
-    public var fastModeDisabledReason: String?; public var terminalReason: String?; public var errors: [String]?; public var uuid: String?; public var sessionID: String?
+    public var fastModeDisabledReason: String?; public var terminalReason: String?; public var errors: [String]?; public var uuid: String; public var sessionID: String
     public enum CodingKeys: String, CodingKey, CaseIterable {
         case type, subtype, durationMs = "duration_ms", durationApiMs = "duration_api_ms", isError = "is_error", numTurns = "num_turns", result,
              stopReason = "stop_reason", totalCostUSD = "total_cost_usd", usage, modelUsage, permissionDenials = "permission_denials",

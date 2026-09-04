@@ -7,6 +7,15 @@ import WireTestSupport
 /// whose type or subtype is not modelled decodes to `.opaque` carrying the raw line and a parsed
 /// `JSONValue`; and the opaque count per fixture equals the census's count of unmodelled pairs.
 ///
+/// The gate is split three ways along `fixture.json`'s `synthetic` flag. Losslessness and the
+/// opaque counts are asserted over all eighteen fixtures, because both are meaningful for a
+/// constructed frame. "A modelled type decodes typed" is asserted over the recorded fixtures only:
+/// a recording is authoritative about what the engine sends, while a construction is authoritative
+/// only about the shape it was built to exercise, and its silence about a field says the
+/// constructor had nothing to put there rather than that the engine omits it. A synthetic frame
+/// that does not decode typed is reported as a named finding — fixture, line, field — so the case
+/// where the cause is *not* deliberate partiality is something we would learn rather than tolerate.
+///
 /// Both recorded directions are checked. An `in` frame is one afleet sends and a fixture recorded;
 /// it has to decode and round-trip exactly like an `out` frame, because the same models are used to
 /// write it.
@@ -28,6 +37,8 @@ final class FixtureCorpusTests: XCTestCase {
     /// `fixtureDirectories()`, the per-fixture line accounting and the census pair-set equality are
     /// four independent places a corpus that silently went missing fails instead of passing.
     private static let committedFixtureCount = 18
+    /// Of those eighteen, the ones `fixture.json` marks as recorded rather than synthetic.
+    private static let committedRecordedFixtureCount = 16
 
     /// Every subdirectory of `Fixtures/`, each required to carry both files. A directory missing
     /// one is a failure, not something to filter out: filtering is how a corpus disappears quietly.
@@ -49,8 +60,9 @@ final class FixtureCorpusTests: XCTestCase {
             }
             dirs.append(url)
         }
-        XCTAssertGreaterThanOrEqual(dirs.count, Self.committedFixtureCount,
-                                    "found \(dirs.count) fixtures under \(fixturesRoot.path); the committed corpus has \(Self.committedFixtureCount)")
+        // Equality, not a floor: with `>=`, deleting one fixture and adding another nets to green.
+        XCTAssertEqual(dirs.count, Self.committedFixtureCount,
+                       "found \(dirs.count) fixtures under \(fixturesRoot.path); the committed corpus has \(Self.committedFixtureCount)")
         return dirs
     }
 
@@ -96,14 +108,48 @@ final class FixtureCorpusTests: XCTestCase {
         return topLevel.contains(type)
     }
 
+    /// A frame in a synthetic fixture that does not decode typed, named so it is reported rather
+    /// than silently tolerated. Deliberate partiality is the expected cause; anything else is how
+    /// we would learn that a synthetic fixture broke.
+    private struct SyntheticFinding: CustomStringConvertible {
+        let fixture: String, line: Int, pair: String, field: String, why: String
+        var description: String { "\(fixture):\(line) \(pair) — no typed decode at '\(field)': \(why)" }
+    }
+
+    /// Why a finding is a finding and not a reason to relax the model. Printed with the findings so
+    /// the reader is not left to infer it from the fixture counts: what makes a field required is
+    /// the engine's guarantee in the bundle, not the number of recordings that happened to show it.
+    private static let findingsPreamble = """
+        A synthetic fixture is authoritative only about the shape it was built to exercise, so a \
+        field it omits says the constructor had nothing to put there — not that the engine omits it. \
+        For the `result` frames below the bundle settles it: 2.1.258 `cli.pretty.js` builds every \
+        stream-json result through `$W` (line 35141), which spreads `duration_ms` and `uuid` last, \
+        over a `common` carrying `session_id` and `total_cost_usd` at all six call sites.
+        """
+
+    /// `fixture.json`'s `synthetic` flag. A recorded fixture is authoritative about what the engine
+    /// sends; a synthetic one is authoritative only about the shape it was constructed to exercise,
+    /// and its silence about a field is a fact about the constructor, not about the engine. Absent
+    /// or unreadable reads as recorded, which is the strict side.
+    private func isSynthetic(_ dir: URL) -> Bool {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("fixture.json")),
+              let meta = try? JSONDecoder().decode(JSONValue.self, from: data) else { return false }
+        return meta["synthetic"]?.boolValue ?? false
+    }
+
     // MARK: - the gate
 
     func testEveryFixtureDecodesLosslessly() throws {
         let dirs = try fixtureDirectories()
         var corpusLines = 0, corpusRoundTrips = 0, corpusIn = 0, corpusOut = 0
+        var recordedFixtures = 0, syntheticFixtures = 0
+        var findings: [SyntheticFinding] = []
+        var singleRunCensusMissing: [String] = []
 
         for dir in dirs {
             let name = dir.lastPathComponent
+            let synthetic = isSynthetic(dir)
+            if synthetic { syntheticFixtures += 1 } else { recordedFixtures += 1 }
             let text = try String(contentsOf: dir.appendingPathComponent("frames.ndjson"), encoding: .utf8)
             let lines = text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             XCTAssertFalse(lines.isEmpty, "\(name)/frames.ndjson has no lines")
@@ -131,7 +177,7 @@ final class FixtureCorpusTests: XCTestCase {
             // Pass two: decode, round-trip, and count.
             let subtypes = Self.requestSubtypes(frameValues)
             var observedByPair: [String: Int] = [:], opaqueByPair: [String: Int] = [:]
-            var roundTrips = 0
+            var roundTrips = 0, partial = 0
             for (index, frameValue) in frameValues.enumerated() {
                 let pair = Self.pairName(frameValue, subtypes)
                 observedByPair[pair, default: 0] += 1
@@ -140,12 +186,31 @@ final class FixtureCorpusTests: XCTestCase {
                 switch decoded {
                 case .opaque(let o):
                     XCTAssertNotEqual(o.reason, .invalidJSON, "\(name):\(index + 1) recorded a frame that is not JSON")
-                    if case .decodeFailure(let field, let why) = o.reason {
-                        XCTFail("\(name):\(index + 1) modelled frame \(pair) failed to decode at '\(field)': \(why)")
-                    }
+                    // Losslessness holds for every fixture: an opaque frame re-emits its raw bytes
+                    // and keeps a parsed value, whether it is opaque because the type is unmodelled
+                    // or because a modelled type did not decode. The raw-bytes half is weak on
+                    // purpose here — the decoder is handed `canonicalData()` rather than the
+                    // recorded line's own bytes, so it only says the decoder echoes what it was
+                    // given. What a recorded line's bytes survive `FrameDecoder` unchanged is
+                    // asserted in `WireFramesTests`, against samples loaded byte for byte.
                     XCTAssertEqual(o.raw, raw, "\(name):\(index + 1) opaque frame did not keep its raw line")
                     XCTAssertTrue(o.value.numericallyEqual(frameValue), "\(name):\(index + 1) opaque frame did not keep a parsed value")
-                    opaqueByPair[pair, default: 0] += 1
+                    if case .decodeFailure(let field, let why) = o.reason {
+                        // "A modelled type decodes typed" is asserted against recorded fixtures only.
+                        // In a synthetic fixture the same shortfall is a named finding: reported, not
+                        // swallowed and not fatal, because a synthetic frame may be deliberately
+                        // partial — and if it is ever partial for some other reason, this is where
+                        // that shows up.
+                        if synthetic {
+                            findings.append(.init(fixture: name, line: index + 1, pair: pair, field: field, why: why))
+                            partial += 1
+                        } else {
+                            XCTFail("\(name):\(index + 1) modelled frame \(pair) failed to decode at '\(field)': \(why)")
+                            opaqueByPair[pair, default: 0] += 1
+                        }
+                    } else {
+                        opaqueByPair[pair, default: 0] += 1
+                    }
                 case .system(.opaque(let subtype, let value)):
                     XCTAssertTrue(value.numericallyEqual(frameValue), "\(name):\(index + 1) opaque system frame did not keep a parsed value")
                     opaqueByPair["system/\(subtype)", default: 0] += 1
@@ -157,10 +222,16 @@ final class FixtureCorpusTests: XCTestCase {
                     roundTrips += 1
                 }
             }
-            // Every line was accounted for exactly once: this is the floor on what was *compared*,
-            // not merely on whether the loop ran.
-            XCTAssertEqual(roundTrips + opaqueByPair.values.reduce(0, +), lines.count, "\(name): frames went uncounted")
+            // Every line was accounted for exactly once, findings included: this is the floor on
+            // what was *compared*, not merely on whether the loop ran, and it is what keeps a
+            // finding from being a free pass — a frame counted as a finding is a frame not counted
+            // as round-tripped.
+            XCTAssertEqual(roundTrips + opaqueByPair.values.reduce(0, +) + partial, lines.count, "\(name): frames went uncounted")
             XCTAssertGreaterThan(roundTrips, 0, "\(name): no frame was round-tripped")
+            if !synthetic {
+                XCTAssertEqual(partial, 0, "\(name) is recorded, so no frame may be excused as deliberately partial")
+                XCTAssertEqual(roundTrips, lines.count, "\(name): every recorded line must decode typed and round-trip")
+            }
 
             // The census names every pair it recorded. Requiring the sets to be equal means the
             // decoder was exercised on each one: a pass that skipped, say, every control_response
@@ -168,25 +239,62 @@ final class FixtureCorpusTests: XCTestCase {
             let census = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: dir.appendingPathComponent("census.json")))
             let pairs = try XCTUnwrap(census["pairs"]?.objectValue, "\(name)/census.json has no pairs object")
             XCTAssertFalse(pairs.isEmpty, "\(name)/census.json records no pairs")
-            // keep_alive is excluded from a census by construction (census.py), so it is excluded here.
-            XCTAssertEqual(Set(observedByPair.keys).subtracting(["keep_alive"]), Set(pairs.keys),
+            // `census.py` excludes keep_alive from a census by construction, so a keep_alive frame
+            // is the one pair allowed to be observed and absent from the census — and only when the
+            // census does in fact omit it. Excusing the pair unconditionally would let the exclusion
+            // stop being true without anything noticing.
+            let observedPairs = Set(observedByPair.keys)
+            if observedPairs.contains("keep_alive") {
+                XCTAssertFalse(pairs.keys.contains("keep_alive"), "\(name): census.py excludes keep_alive, but this census records it")
+            }
+            XCTAssertEqual(observedPairs.subtracting(["keep_alive"]), Set(pairs.keys),
                            "\(name): pairs decoded do not match the census's pairs")
 
-            // G2's count check. The census's `count` accumulates across re-recordings
-            // (`census.merge_required`), so it is a count of *evidence*, not of this file's lines;
-            // for an unmodelled pair the only value either side can hold is nothing at all, and
-            // that is what is asserted.
+            // G2's count check, split in two because only one half is unconditionally sound.
+            //
+            // `opaqueByPair` counts frames opaque because nothing models their type or subtype; a
+            // synthetic frame excused as a named finding is not one of those and is counted apart.
+            //
+            // The *set* comparison holds for every fixture. The *count* comparison does not: the
+            // census's `count` accumulates across re-recordings (`census.merge_required` sums them),
+            // so for a fixture recorded more than once it is a count of evidence, not of this file's
+            // lines, and the first unmodelled pair to appear in one of those would fail this
+            // assertion spuriously. The test decides for itself which censuses are single-run — the
+            // census's total equals the fixture's line count — and compares counts only there.
             var expected: [String: Int] = [:]
             for (pair, entry) in pairs where !Self.isModelled(pair: pair) {
                 expected[pair] = Int(entry["count"]?.intValue ?? 0)
             }
-            XCTAssertEqual(expected, opaqueByPair, "\(name): census unmodelled counts vs opaque counts")
+            XCTAssertEqual(Set(expected.keys), Set(opaqueByPair.keys), "\(name): census unmodelled pairs vs opaque pairs")
+            let censusTotal = pairs.values.reduce(0) { $0 + Int($1["count"]?.intValue ?? 0) }
+            if censusTotal == lines.count {
+                XCTAssertEqual(expected, opaqueByPair, "\(name): census unmodelled counts vs opaque counts")
+            } else {
+                singleRunCensusMissing.append("\(name) (census totals \(censusTotal) against \(lines.count) lines)")
+            }
 
             corpusLines += lines.count; corpusRoundTrips += roundTrips; corpusIn += inCount; corpusOut += outCount
         }
 
         XCTAssertGreaterThan(corpusRoundTrips, 0, "no frame in the whole corpus was round-tripped")
-        XCTAssertEqual(corpusRoundTrips, corpusLines, "every recorded frame is modelled today, so every line should have round-tripped")
-        print("G2: \(dirs.count) fixtures, \(corpusLines) frames (\(corpusIn) in, \(corpusOut) out), \(corpusRoundTrips) round-tripped")
+        XCTAssertEqual(corpusRoundTrips + findings.count, corpusLines, "every line is either round-tripped, opaque or a named finding")
+        // The floor on the split itself. Exempting synthetic fixtures from "decodes typed" is only
+        // safe while the exemption stays small and deliberate: a `fixture.json` that stopped parsing
+        // would read every fixture as synthetic and turn the strict gate off everywhere without
+        // failing anything.
+        XCTAssertEqual(recordedFixtures, Self.committedRecordedFixtureCount,
+                       "\(recordedFixtures) fixtures were treated as recorded; the corpus has \(Self.committedRecordedFixtureCount)")
+        XCTAssertEqual(recordedFixtures + syntheticFixtures, dirs.count)
+        if !singleRunCensusMissing.isEmpty {
+            print("G2: counts compared by set only for \(singleRunCensusMissing.count) fixtures whose census accumulates across re-recordings: \(singleRunCensusMissing.sorted().joined(separator: ", "))")
+        }
+
+        print("G2: \(dirs.count) fixtures (\(recordedFixtures) recorded, \(syntheticFixtures) synthetic), \(corpusLines) frames (\(corpusIn) in, \(corpusOut) out), \(corpusRoundTrips) round-tripped")
+        if findings.isEmpty {
+            print("G2 synthetic findings: none")
+        } else {
+            print("G2 synthetic findings (\(findings.count)):\n\(Self.findingsPreamble)")
+            for finding in findings { print("  - \(finding)") }
+        }
     }
 }

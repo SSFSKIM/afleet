@@ -123,11 +123,26 @@ final class TypingsDriftTests: XCTestCase {
     /// weaker witness — the same edit that made a key stale would ordinarily touch the sample too. A frame with
     /// neither falls back to the typings alone, which errs toward reporting more findings rather than fewer.
     private func witnessedKeys(for key: String) -> Set<String> {
+        assertCorpusIsAnchored()
         if let recorded = Self.corpusWitnessedKeys[key], !recorded.isEmpty { return recorded }
         let name = key.hasPrefix("system/") ? "system_" + key.dropFirst(7) : key
         guard let data = try? TestPaths.sample(name),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
         return Set(object.keys)
+    }
+
+    /// The floor on the re-anchoring itself.
+    ///
+    /// `corpusWitnessedKeys` is built out of `try?` and `continue`, and `witnessedKeys` falls through to the
+    /// hand-written samples when it yields nothing, so a corpus that moved, was renamed or stopped parsing
+    /// would leave this test green while silently reverting to the pre-corpus behaviour — the only key that
+    /// needs a witness at all is also present in a sample. Nothing would report that the anchor had been lost.
+    /// Asserting that the map is populated and carries a named pair is what makes the re-anchoring a claim
+    /// that can fail.
+    private func assertCorpusIsAnchored() {
+        XCTAssertFalse(Self.corpusWitnessedKeys.isEmpty, "no census under Fixtures/ was read; the corpus anchor is gone and this test silently fell back to hand-written samples")
+        XCTAssertTrue((Self.corpusWitnessedKeys["system/init"] ?? []).contains("session_id"),
+                      "the corpus was read but system/init is not in it; the anchor is not what it claims to be")
     }
 
     /// Drift key → every top-level key the corpus's censuses record for it, unioned over all fixtures.
