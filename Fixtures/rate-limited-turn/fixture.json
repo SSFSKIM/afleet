@@ -1,0 +1,75 @@
+{
+ "census": false,
+ "cli_version": "2.1.260",
+ "cwd": "/tmp/afleet-fixtures/rate-limited-turn",
+ "deterministic": false,
+ "exit_code": 1,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "claude",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--session-id",
+   "89c37153-a256-4823-be5a-9101ae6b160a",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "default",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "2"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1"
+  }
+ },
+ "name": "rate-limited-turn",
+ "notes": [
+  "prompt 1: result success is_error=True duration_api_ms=0 num_turns=1; rate_limit_event frames=1; assistant model(s)=['<synthetic>']",
+  "prompt 1 rate_limit_info: {'status': 'rejected', 'rateLimitType': 'seven_day', 'overageStatus': 'rejected', 'overageDisabledReason': 'out_of_credits', 'isUsingOverage': False}; unifiedWindows keys=['five_hour', 'seven_day']",
+  "prompt 2: result success is_error=True duration_api_ms=0 num_turns=1; rate_limit_event frames=0; assistant model(s)=['<synthetic>']",
+  "transcript_mirror frames: 4; mirrored entries: 16"
+ ],
+ "prompts": [
+  "Reply with exactly the word: alpha",
+  "Reply with exactly the word: beta"
+ ],
+ "purpose": "two prompts rejected by the weekly rate limit; rate_limit_event, the synthetic assistant reply and a zero-cost result",
+ "recorded_at": "2026-09-04T09:55:15Z",
+ "review": {
+  "checklist_version": 2,
+  "date": "2026-09-04",
+  "reviewer": "Claude reviewer for kimmi"
+ },
+ "scenario": "rate_limited_turn",
+ "serves": [
+  "item 21",
+  "C2.G2"
+ ],
+ "session_id": "89c37153-a256-4823-be5a-9101ae6b160a",
+ "spikes": [],
+ "synthetic": false,
+ "withdrawn_requests": []
+}
