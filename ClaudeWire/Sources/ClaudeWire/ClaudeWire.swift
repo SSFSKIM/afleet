@@ -1,3 +1,4 @@
+@_exported import AfleetCore
 @_exported import WireFrames
 @_exported import WireMCP
 @_exported import WireEnvironment
