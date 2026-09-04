@@ -43,7 +43,7 @@ DIGEST_KEY = "tree_sha256"
 # version says in as many words that its reviewer walked a shorter list than the repository
 # now holds, and a gate that accepts that statement is not asking the question the field
 # exists to ask; the repair is to re-walk and sign again, which costs nothing but reading.
-CHECKLIST_VERSION = 2
+CHECKLIST_VERSION = 3
 
 # §4.4's `fixture.json` enumeration, plus `deterministic`, which the same section's census
 # paragraph names in prose. Required by presence and not by value: a missing `deterministic`
@@ -96,7 +96,13 @@ def _lifecycle(frames, late_ok, withdrawn_ok=()):
     # record being an inbound `control_request` was taken as proof it missed the wire -- which
     # asserted nothing: a truncated or crashed recording ending with a request the host really
     # did send has the same shape and passed the lifecycle check unremarked.
-    unwritten = {(rec.get("frame") or {}).get("request_id") for rec in frames if rec.get("unwritten")}
+    # Collected only from records travelling `in`, and honoured below only for a request whose
+    # recorded origin is `host`. The harness sets the mark nowhere else -- it can only fail
+    # writing a frame the host is sending -- so both halves are what the annotation already
+    # means; stating them here is what stops a mark on an outbound record from excusing a
+    # CLI-originated request the host simply never answered.
+    unwritten = {(rec.get("frame") or {}).get("request_id")
+                 for rec in frames if rec.get("unwritten") and rec.get("dir") == "in"}
     unwritten.discard(None)
     for i, rec in enumerate(frames):
         if "dropped" in rec:
@@ -187,7 +193,7 @@ def _lifecycle(frames, late_ok, withdrawn_ok=()):
     for rid, (origin, status) in state.items():
         if status != "open":
             continue
-        if rid in unwritten:
+        if origin == "host" and rid in unwritten:
             continue
         # The other carve-out, and it too is about a mechanism rather than about a subtype: the
         # harness sends `end_session` and closes stdin in the same breath (§6.7), so that

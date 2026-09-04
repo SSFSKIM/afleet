@@ -377,8 +377,15 @@ class Replayer:
                 self.stderr.flush()
         elif not os.path.exists(dst):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with open(src, "rb") as a, _create_new(dst, "wb") as b:
-                b.write(a.read())
+            try:
+                with open(src, "rb") as a, _create_new(dst, "wb") as b:
+                    b.write(a.read())
+            except FileExistsError:
+                # The leaf appeared between the test and the create. Refusing is already the
+                # safe direction; this makes it the same clean refusal materialisation gives
+                # rather than a traceback out of a replay.
+                raise RuntimeError("refusing to write an artifact onto a file that appeared "
+                                   "under the fake home: tasks/%s" % rel)
 
     def _stream_start(self, stream):
         """Where this stream's recorded appends begin on disk. streams.json holds the recorded
@@ -397,8 +404,12 @@ class Replayer:
             self.started.add(path)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             if not os.path.exists(path):
-                with _create_new(path, "ab"):
-                    pass
+                try:
+                    with _create_new(path, "ab"):
+                        pass
+                except FileExistsError:
+                    raise RuntimeError("refusing to append to a stream that appeared under the "
+                                       "fake home: projects/%s" % rel)
             start = self._stream_start(stream)
             if start > os.path.getsize(path):
                 raise RuntimeError("stream %s holds %d bytes but its appends start at %d: materialize this fixture into the fake home first"

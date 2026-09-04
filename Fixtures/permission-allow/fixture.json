@@ -57,8 +57,8 @@
  "purpose": "a Write asked through can_use_tool and answered allow",
  "recorded_at": "2026-09-04T10:55:00Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "f02f1e311c9ece0a2e4990176c6df839927fb46104f3700e1b0d535479edd98f"
  },

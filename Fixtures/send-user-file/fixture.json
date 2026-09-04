@@ -58,10 +58,10 @@
  "purpose": "in-process MCP round trip: two files, a caption, status normal",
  "recorded_at": "2026-09-04T10:53:20Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
-  "tree_sha256": "25adad334edfbed73be9643d4884200ea0ed1250c6d8f32a6c84bb7cbc252342"
+  "tree_sha256": "def206602b227d05caf7e58232ca52bffdc56cc0dd1e029c7372bfc7c11c7e11"
  },
  "scenario": "send_user_file",
  "serves": [

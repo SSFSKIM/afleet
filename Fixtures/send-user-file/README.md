@@ -39,7 +39,7 @@ line. `--strict-mcp-config` stays on the launch line for every scenario.
 ## Reading it
 
 `initial/` and `artifacts/` are empty and hold only their `.gitkeep`; the scenario resumes
-nothing and no frame names an artifact. The transcript holds 34 records and every one of
+nothing and no frame names an artifact. The transcript holds 33 records and every one of
 them is reproduced by the fixture's `transcript_mirror` frames.
 
 The `environment` attachment records the working directory as

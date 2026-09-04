@@ -894,6 +894,16 @@ class VerifyTests(unittest.TestCase):
         self.assertTrue(any("unanswered request w2" in x for x in e))
         self.assertFalse(any("unanswered request w1" in x for x in e))
 
+    def test_the_unwritten_mark_is_only_read_on_an_inbound_host_request(self):
+        """The harness can only fail writing a frame the host is sending, so the mark means an
+        inbound record and a host-originated request. `verify` read it anywhere, which let a
+        mark on an outbound record excuse a CLI-originated request the host never answered."""
+        d = build_fixture(self.root)
+        append_frame(d, {"t": 95, "dir": "out", "frame": {"type": "control_request", "request_id": "o9",
+                                                          "request": {"subtype": "can_use_tool"}}})
+        mark_unwritten(d, "o9")
+        self.assertTrue(any("unanswered request o9" in x for x in self.errors(d)), self.errors(d))
+
     def test_an_unanswered_host_request_before_the_tail_still_fails(self):
         d = build_fixture(self.root)
         append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "w1", "request": {"subtype": "get_settings"}}})

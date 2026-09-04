@@ -29,8 +29,8 @@
  "purpose": "every fable_overage_consent_prompt outcome, overagesEnabled both ways, model_consent_fallback",
  "recorded_at": "2026-09-04T00:00:00Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "3cde6ff98d06c7bbc9efaaa8c58538c3206e171b68f49895a0f44d38dc591fbe"
  },

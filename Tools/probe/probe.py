@@ -360,7 +360,7 @@ def _staged_is_verifiable(staged):
 
 
 def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None,
-           scratch_root=SCRATCH_ROOT, reviewer=None, out=None):
+           scratch_root=SCRATCH_ROOT, out=None):
     fixtures_root = fixtures_root or FIXTURES_ROOT
     mod = load_scenario(name, scenario_dir)
     meta = dict(mod.META)
@@ -453,9 +453,14 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
             # granted itself. Sorted only so the file is stable; `verify` reads it as a set.
             "withdrawn_requests": sorted(session.withdrawn_requests),
             "notes": ctx["notes"], "exit_code": ctx["exit_code"],
-            # Always unsigned here. A signature now has to carry a digest of the finished tree,
-            # which does not exist until `write_fixture` has laid it down, so `--reviewer`
-            # stamps it below through the same `sign` a reviewer runs by hand.
+            # Always unsigned, and `record` has no way to write anything else. Signing is a
+            # deliberate second act by a person other than the recording run (`Fixtures/
+            # REVIEW.md`, line 3), and since `sign` now stamps a current checklist version and
+            # a valid tree digest, a `record --reviewer` would mint a block byte-identical to
+            # a reviewed one. That option existed before and was at least distinguishable --
+            # it hard-coded version 1, which the exact-version check would catch on sight --
+            # so keeping it would have hollowed out the gate in the same commit that hardened
+            # it. `make sign` is the way in.
             "review": {"reviewer": "", "date": "", "checklist_version": 1},
         }
         out_meta = redactor.redact_json(out_meta)          # fixture.json is a redaction target too (spec §4.5)
@@ -466,9 +471,6 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
         # resume it already holds the prior session's transcript -- redacted, but still a
         # copy of a recording nothing will ever come back for.
         shutil.rmtree(work, ignore_errors=True)
-    if reviewer:
-        # After the tree is in place, because the signature now covers its bytes.
-        sign(path, reviewer)
     errors, warnings = verify.verify_fixture(path)
     for w in warnings:
         log("warning: " + w)
@@ -487,12 +489,20 @@ def classify_errors(errors):
 def sign(path, reviewer):
     """Write the review block, including the digest of the bytes it attests to.
 
+    Refuses a tree holding a symlink before it hashes anything. `verify.tree_digest` reads
+    each walked entry with an ordinary `open()`, so signing a tree with a link would pull
+    whatever it points at into the hash -- and `sign` runs *before* `verify` in the
+    operator's workflow, so the link check living only in `verify` is one step too late.
+
     The digest is taken before the write and is still correct after it: `verify.tree_digest`
     hashes `fixture.json` as its metadata minus `review`, which is the one part of the file
     this function changes. So the signature covers the tree exactly as the reviewer walked it,
     and any later edit to any file in the fixture -- a re-redaction, a hand-fixed frame, a
     README rewrite -- makes `verify` ask for the walk again.
     """
+    links = verify._check_links(path)
+    if links:
+        raise RuntimeError("refusing to sign %s:\n  %s" % (path, "\n  ".join(links)))
     p = os.path.join(path, "fixture.json")
     with open(p, encoding="utf-8") as fh:
         meta = json.load(fh)
@@ -699,7 +709,7 @@ def main(argv=None):
         if name == "diff":
             sp.add_argument("--fixture", default=None); sp.add_argument("--script", default=None)
         if name == "record":
-            sp.add_argument("scenario"); sp.add_argument("--reviewer", default=None)
+            sp.add_argument("scenario")
             sp.add_argument("--out", default=None, help="the fixture directory to write (default Fixtures/<name>)")
         if name in ("snapshot", "redact"):
             sp.add_argument("fixture")
@@ -750,7 +760,7 @@ def main(argv=None):
         code, report = diff(args.claude, config_home=args.config_home, only=args.fixture, script=args.script)
         print(report); return code
     if args.cmd == "record":
-        path, errors = record(args.scenario, args.claude, config_home=args.config_home, reviewer=args.reviewer, out=args.out)
+        path, errors = record(args.scenario, args.claude, config_home=args.config_home, out=args.out)
         print("recorded %s" % path)
         blocking, advisory = classify_errors(errors)
         for e in blocking:

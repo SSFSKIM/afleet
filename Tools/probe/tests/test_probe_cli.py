@@ -1,4 +1,5 @@
 import glob
+import inspect
 import json
 import os
 import shutil
@@ -278,6 +279,32 @@ class RecordAndDiffTests(unittest.TestCase):
                          "a freshly recorded fixture must agree with the constant it was just built from")
         self.assertIn("--permission-prompt-tool", meta["launch"]["argv"])
         self.assertEqual(meta["review"], {"reviewer": "", "date": "", "checklist_version": 1})
+
+    def test_record_cannot_sign_what_it_records(self):
+        """`Fixtures/REVIEW.md` line 3 requires a person other than the recording run to walk
+        the list. `record --reviewer` produced a block byte-identical to a reviewed one once
+        `sign` began stamping a current checklist version and a valid digest -- so the option
+        is gone rather than merely discouraged, and signing stays the deliberate second act
+        `make sign` describes."""
+        with self.assertRaises(SystemExit):
+            probe.main(["record", "cli_demo", "--reviewer", "someone"])
+        self.assertNotIn("reviewer", inspect.signature(probe.record).parameters)
+        path, errors = self.record("cli_demo")
+        self.assertEqual(read_json(os.path.join(path, "fixture.json"))["review"]["reviewer"], "")
+        self.assertIn(probe.UNSIGNED_REVIEW, errors)
+
+    def test_sign_refuses_a_tree_holding_a_symlink_before_it_hashes(self):
+        """`verify.tree_digest` reads each walked entry with an ordinary `open()`, and `sign`
+        runs before `verify` in the operator's workflow, so the link check cannot live only in
+        the verifier."""
+        path, _ = self.record("cli_demo")
+        outside = os.path.join(self.tmp, "outside.txt")
+        write(outside, "not mine\n")
+        os.symlink(outside, os.path.join(path, "transcript", "linked.jsonl"))
+        with self.assertRaises(RuntimeError) as caught:
+            probe.sign(path, reviewer="tester")
+        self.assertIn("linked.jsonl", str(caught.exception))
+        self.assertEqual(read_json(os.path.join(path, "fixture.json"))["review"]["reviewer"], "")
 
     def test_record_redacts_the_transcript_it_copies_out_of_the_config_home(self):
         # The other half of §4.5: the rules run in memory on every frame *and* on every file

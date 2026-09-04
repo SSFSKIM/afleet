@@ -58,8 +58,8 @@
  "purpose": "background Bash, task_notification, auto-turn, task output file",
  "recorded_at": "2026-09-04T11:56:29Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "a9cf700ee61ac965f597694fa82509214135dc73d5f1620bf8f59e9767d5e556"
  },

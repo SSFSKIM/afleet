@@ -1071,6 +1071,30 @@ oversight.
   halves of §7.7 now disagree with each other. Binding prose is not edited here; the parent's
   tending session reconciles them.
 
+- Observation: The two name-based secret exemptions are tested before any value test, so they
+  now exempt containers as well as scalars. Evidence: `_is_secret_key` returns False on
+  `SECRET_EXEMPT` and `USAGE_COUNTERS` before it looks at the value, and since rule 2 was
+  widened to replace a container the same exemption reaches one. Impact: `{"projectKey": {...}}`
+  and `{"hookCallbackIds": {...}}` would now survive whole where before only their string forms
+  did. Recorded rather than narrowed: both names earned their exemption from a cited structural
+  role that a container form would serve as well as a scalar one, no corpus frame carries either
+  as a container, and narrowing them by type would put a type test back into a module whose
+  whole lesson is that names and types are the wrong instruments and position is the right one.
+  A reader meeting this should know it is the consequence of an ordering, not an oversight.
+
+- Observation: `SECRET_STRUCTURE_PATHS` matches as a trailing-segment suffix, so its entries
+  exempt `effective_keys`, `sources_keys` and `sources_keys.keys` at *any* depth, not only in
+  the `get_settings` response the comment justifies them from. Evidence: `_path_exempt` strips
+  list indices and tests `bare == c or bare.endswith("." + c)`, which is the same matching the
+  older `behaviors.key` and `subagent_stats.killed.user` entries use. Impact: a
+  `sources_keys` field appearing somewhere else in the protocol would be exempt without anyone
+  deciding it should be. It is left as it is because the suffix matching is the module's
+  existing convention and writing these three anchored to a full path would make them the only
+  entries that behave differently, which is a worse trap than the widening; and because the
+  names are rule 5's own output, so a field of that name in another position is far more likely
+  to be the redactor's own than the engine's. Worth knowing before adding a fourth entry: an
+  entry here is a claim about a *name at any depth*, not about the one place you found it.
+
 ## Outcomes & Retrospective
 
 Measured on 2026-09-04 at `865e55a` on `child/c1-probes-fixtures`, against the declared
@@ -1843,3 +1867,60 @@ fake-claude injections above, not the clean live run.
   already masks it so it does not warn on every run. The other half of that finding -- carrying
   a recording's identity inputs so rule 3 can be applied off-machine -- is §8's first Deferred
   entry.
+- 2026-09-05: The review of the leak wave, approved with one merge blocker, and what closing it
+  cost. **`record` can no longer sign what it records.** Wiring `--reviewer` into `sign` -- which
+  now stamps a current checklist version and a valid tree digest -- would have produced a review
+  block byte-identical to a reviewed one, hollowing out the gate fix 3 exists to harden in the
+  same commit that hardened it. The bypass predated the wave but was distinguishable while
+  `record` hard-coded `checklist_version: 1`, which the new exact-version check catches on sight;
+  the wiring threw that tell away. The option is gone from the subparser and from `record`'s
+  signature, so signing is the deliberate second act `Fixtures/REVIEW.md` line 3 and the `make
+  sign` target both describe. No fixture was ever signed that way.
+
+  Four smaller repairs travel with it. The `unwritten` annotation is read only off a record
+  travelling `in` and honours only a host-originated request, which is all the harness can ever
+  produce and is what stops a mark on an outbound record excusing a CLI request the host never
+  answered. `sign` refuses a tree holding a symlink *before* it hashes, because `tree_digest`
+  reads each entry with an ordinary `open()` and `sign` runs before `verify` in the operator's
+  workflow. The two `fake-claude` `_create_new` calls that sit inside a `not os.path.exists()`
+  guard now turn a lost race into the same clean refusal materialisation gives rather than a
+  traceback.
+
+  **The manifest now distinguishes a container replacement from a scalar one**, and this is the
+  one that matters. Rule 2 replaces a secret-named container whole, which can take a structural
+  field nested inside it -- a `projectKey` under a `key` container is the case that would hurt.
+  The wave's justification for that trade was that nothing in the corpus has the shape, and the
+  review was right that this is a fact about eighteen recordings against one engine version and
+  not a property of the protocol: if the case ever arrives, the loss is silent, because
+  `redaction.json` shows the secrets count rise by one and nothing says a subtree went with it.
+  `Redactor._hit` takes a `subtree` flag and the manifest carries a `subtrees` map per rule,
+  written only when non-empty, so REVIEW item 4 now sends a reviewer to the path by name. That
+  converts an invisible loss into a visible one, which is the property that actually matters; it
+  does not make the trade unnecessary.
+
+  The larger alternative is recorded here and deliberately not built: a recursive walk that
+  preserves a secret-named container's structure while redacting every leaf inside it. It is the
+  right answer *if the case arrives* -- it would keep a nested `projectKey` while still replacing
+  every credential under the container -- and it is wrong to build now, because `scan` would have
+  to mirror the walk exactly or the two halves of §4.5's one-predicate rule diverge, and there is
+  nothing in the corpus to test either half against. A recording that nests a structural field
+  under a secret-named container is the evidence that should trigger it, and `subtrees` in
+  `redaction.json` is how a reviewer will notice that recording.
+
+  `Fixtures/REVIEW.md` goes to **version 3** and every one of the eighteen fixtures was re-walked
+  and re-signed, because two items changed: item 4 gains the `subtrees` reading, and a new item
+  11 covers the `unwritten` annotation, which is new reviewable content a reviewer can hand-edit
+  rather than a restatement. That is the rule the file states about itself, and the wave declined
+  to bump for the digest precisely so that bumping would still mean something here.
+
+  **The re-walk found two stale README claims**, which is item 8 doing the job it exists for and
+  the first time this corpus has been walked end to end since the 2.1.259 re-recordings.
+  `send-user-file`'s README said its transcript holds 34 records; it holds 33. `resume-no-replay`'s
+  said `streams.json` records 171871 bytes; it records 173315, and the transcript is 173403 bytes
+  and 32 records against the initial 31. Both numbers date from before `79a02f7` and `0c03f6f`
+  re-recorded those fixtures, and both are corrected in the README rather than anywhere else --
+  the claims' *shape* was right in each case and only the figures had moved, which is exactly the
+  failure item 8 predicts of a README carried across a re-recording. Two Surprises entries in this
+  document quote the older figures as observations made at the time; they are left as the record
+  of what was seen then. The check that caught them is worth keeping: every integer in a README
+  held against the counts computed from the fixture, with the unmatched ones read by hand.

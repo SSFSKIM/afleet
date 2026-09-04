@@ -59,8 +59,8 @@
  "purpose": "two prompts rejected by the weekly rate limit; rate_limit_event, the synthetic assistant reply and a zero-cost result",
  "recorded_at": "2026-09-04T09:55:15Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "85bd4b5b669fbe66ba67682520285b74062c38d4314b690a3051f470402825cc"
  },

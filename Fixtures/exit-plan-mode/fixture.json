@@ -57,7 +57,7 @@
  "purpose": "--permission-mode plan, a plan presented through ExitPlanMode, approved with a setMode update",
  "recorded_at": "2026-09-04T11:13:02Z",
  "review": {
-  "checklist_version": 2,
+  "checklist_version": 3,
   "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "bffb49afcb7bb05e80ebeba949b8526073ed8d25699247a23f6da88b84aa7880"

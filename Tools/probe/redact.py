@@ -234,16 +234,29 @@ class Redactor:
         self.hostname = hostname or socket.gethostname()
         self.short_host = self.hostname.split(".")[0]
         self.author = author
-        self.counts = collections.OrderedDict((r, {"count": 0, "paths": collections.Counter()})
+        self.counts = collections.OrderedDict((r, {"count": 0, "paths": collections.Counter(),
+                                                   "subtrees": collections.Counter()})
                                               for r in ("identity", "secrets", "paths_host", "mcp_bodies", "settings_bodies", "oauth_flow"))
 
     # ---- bookkeeping
-    def _hit(self, rule, path):
+    def _hit(self, rule, path, subtree=False):
         # The manifest is written to `redaction.json`, which §4.4 commits, and its paths are
         # built from key names -- which are themselves data. Scrub here so the guarantee holds
         # at one chokepoint for every rule rather than at each call site.
+        #
+        # `subtree` says the substitution replaced a dict or a list rather than a scalar, so
+        # everything below that path went with it. It is recorded separately because the loss
+        # is different in kind: a scalar replacement trades one value for a placeholder, while
+        # a container replacement can take structure a consumer needed -- a `projectKey` nested
+        # under a secret-named container is the case that would hurt. Rule 2 is fail-closed and
+        # replaces the container deliberately; what it must not do is make that loss look like
+        # an anonymous increment to the count. REVIEW item 4 sends a reviewer here, so this is
+        # where a subtree replacement has to be visible by name.
         self.counts[rule]["count"] += 1
-        self.counts[rule]["paths"][self.redact_text(path, record=False) or "$"] += 1
+        scrubbed = self.redact_text(path, record=False) or "$"
+        self.counts[rule]["paths"][scrubbed] += 1
+        if subtree:
+            self.counts[rule]["subtrees"][scrubbed] += 1
 
     def manifest(self, prior=None):
         """What this redactor substituted, optionally added to what a `prior` manifest records.
@@ -258,11 +271,22 @@ class Redactor:
         shows up as the new substitutions it made on top of the old ones.
         """
         out = {r: {"count": v["count"], "paths": dict(v["paths"])} for r, v in self.counts.items()}
+        subtrees = {r: dict(v["subtrees"]) for r, v in self.counts.items()}
         for rule, before in ((prior or {}).get("rules") or {}).items():
             entry = out.setdefault(rule, {"count": 0, "paths": {}})
             entry["count"] += before.get("count", 0)
             for path, n in (before.get("paths") or {}).items():
                 entry["paths"][path] = entry["paths"].get(path, 0) + n
+            for path, n in (before.get("subtrees") or {}).items():
+                acc = subtrees.setdefault(rule, {})
+                acc[path] = acc.get(path, 0) + n
+        # Written only where there is something to report. A rule that replaced no container
+        # says so by the key's absence, which keeps `redaction.json` the same file it was for
+        # every fixture in the corpus and puts the key in front of a reviewer exactly when a
+        # subtree was in fact replaced.
+        for rule, paths in subtrees.items():
+            if paths:
+                out[rule]["subtrees"] = paths
         return {"rules": out}
 
     # ---- text
@@ -336,7 +360,7 @@ class Redactor:
                     continue
                 if _secret_field(k, v, p):
                     if v != "<redacted>":
-                        self._hit("secrets", p)
+                        self._hit("secrets", p, subtree=isinstance(v, (dict, list)))
                     out[rk] = "<redacted>"
                     continue
                 out[rk] = self.redact_json(v, request_subtype, p)

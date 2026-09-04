@@ -64,9 +64,10 @@ rate-limit window nobody could arrange; here it is consumed by the act of record
 ## Reading it
 
 This is the only fixture with a populated `initial/`, which makes it the one that exercises
-§4.4's stream-offset contract end to end. `streams.json` records `171871` for the stream,
+§4.4's stream-offset contract end to end. `streams.json` records `173315` for the stream,
 exactly the byte size of the file under `initial/`, and the file under `transcript/` is
-longer by the one `mode` record, its preceding bytes identical. `verify` checks that the
+longer by the one `mode` record — 173403 bytes and 32 records against 31 — its preceding
+bytes identical. `verify` checks that the
 final file extends the initial one from the recorded offset, and here it has something real
 to check. `artifacts/` is empty and holds only its `.gitkeep`; `initial/` has no placeholder
 because it has real content.

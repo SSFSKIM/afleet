@@ -59,8 +59,8 @@
  "purpose": "two short prompts, no tools",
  "recorded_at": "2026-09-04T10:52:06Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "0e33c375affba9d21e9d9bc02d0e3b587a77e4212845c28bbad93e8dce532123"
  },

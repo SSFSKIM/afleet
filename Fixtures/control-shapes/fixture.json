@@ -67,8 +67,8 @@
  "purpose": "apply_flag_settings with readback, rewind_conversation, set_cwd needing trust, the claude_authenticate family",
  "recorded_at": "2026-09-04T11:09:47Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "07edfc2bc40088f7d58ea261b383eb8b871e19af39ff3d769bea672e34ea0e5b"
  },

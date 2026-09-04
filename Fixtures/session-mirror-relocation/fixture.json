@@ -65,8 +65,8 @@
  "purpose": "two turns, set_cwd to a sibling (trust accepted when asked), two more turns",
  "recorded_at": "2026-09-04T11:04:16Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "c016f9460757d960b3a71e65de317d312abcf0f051de094cc76c83d861f35d95"
  },

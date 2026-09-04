@@ -59,8 +59,8 @@
  "purpose": "a permission ask left waiting past the idle threshold; the hook_callback for afleet.notification and its input shape",
  "recorded_at": "2026-09-04T11:57:30Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "d6ab44370102ba69b3b3cf1a29dc206fddae673e0e6cf3067bf9e62c3ba5cc67"
  },

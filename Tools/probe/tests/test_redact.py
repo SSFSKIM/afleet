@@ -148,6 +148,36 @@ class RedactJsonTests(unittest.TestCase):
         once = self.r.redact_json(obj)
         self.assertEqual(self.r.redact_json(once), once)
 
+    def test_the_manifest_names_a_replaced_subtree_rather_than_counting_it_anonymously(self):
+        """Rule 2 replaces a secret-named container whole, which can take structure a consumer
+        needed with it -- a nested `projectKey` is the case that would hurt. That the corpus has
+        no such shape is a fact about eighteen recordings against one engine version, not a
+        property of the protocol, so the loss has to be visible to the reviewer walking REVIEW
+        item 4 rather than showing up as an anonymous increment to `count`."""
+        self.r.redact_json({"authorization": {"value": "Bearer x"}, "api_key": "k",
+                            "nested": {"cookies": ["a", "b"]}})
+        secrets = self.r.manifest()["rules"]["secrets"]
+        self.assertEqual(secrets["count"], 3)
+        self.assertEqual(sorted(secrets["paths"]), ["api_key", "authorization", "nested.cookies"])
+        # Only the two containers, and the scalar is not among them.
+        self.assertEqual(secrets["subtrees"], {"authorization": 1, "nested.cookies": 1})
+        # A rule that replaced no container says so by the key's absence, which is what keeps
+        # `redaction.json` the file it already is for every fixture in the corpus.
+        self.assertNotIn("subtrees", self.r.manifest()["rules"]["identity"])
+        scalars_only = redact.Redactor(home="/Users/probe", hostname="probe-mac")
+        scalars_only.redact_json({"api_key": "k"})
+        self.assertNotIn("subtrees", scalars_only.manifest()["rules"]["secrets"])
+
+    def test_a_subtree_record_merges_with_the_one_already_on_disk(self):
+        """`redact` adds to the manifest rather than replacing it, and this half has to travel
+        the same way or a re-run drops the record of what the recording ate."""
+        prior = {"rules": {"secrets": {"count": 1, "paths": {"authorization": 1},
+                                       "subtrees": {"authorization": 1}}}}
+        self.r.redact_json({"nested": {"cookies": ["a"]}})
+        merged = self.r.manifest(prior)["rules"]["secrets"]
+        self.assertEqual(merged["subtrees"], {"authorization": 1, "nested.cookies": 1})
+        self.assertEqual(merged["count"], 2)
+
     def test_manifest_counts_rules_and_paths(self):
         self.r.redact_json({"account": {"email": "a@b.c"}, "token": "t", "nested": {"cookie": "c"}})
         m = self.r.manifest()

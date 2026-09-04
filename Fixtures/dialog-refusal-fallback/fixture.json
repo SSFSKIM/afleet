@@ -35,8 +35,8 @@
  "purpose": "every refusal_fallback_prompt result, the close path, supersedes on the retry leg and no wire retraction on the declines, an undeclared kind cancelled by the CLI",
  "recorded_at": "2026-09-04T00:00:00Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "d79529c1fde615f9fef64cabba595892353cf8f4fef94bb6027f5a4126c1ae99"
  },

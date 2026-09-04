@@ -56,8 +56,8 @@
  "purpose": "resume the relocated session and add one turn; mirror and file still agree",
  "recorded_at": "2026-09-04T11:09:04Z",
  "review": {
-  "checklist_version": 2,
-  "date": "2026-09-04",
+  "checklist_version": 3,
+  "date": "2026-09-05",
   "reviewer": "Claude reviewer for kimmi",
   "tree_sha256": "235d4ebb07a10e513177ab995202b0637dd8738a6739d4cbb8cbe1b656ff0b89"
  },
