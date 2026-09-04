@@ -1,0 +1,284 @@
+{
+ "capabilities": null,
+ "flags": [
+  "--add-dir",
+  "--agent",
+  "--agents",
+  "--allow-dangerously-skip-permissions",
+  "--allowed-tools",
+  "--allowedTools",
+  "--append-system-prompt",
+  "--autocompact",
+  "--ax-screen-reader",
+  "--background",
+  "--bare",
+  "--betas",
+  "--bg",
+  "--brief",
+  "--chrome",
+  "--cloud",
+  "--continue",
+  "--dangerously-skip-permissions",
+  "--debug",
+  "--debug-file",
+  "--disable-slash-commands",
+  "--disallowed-tools",
+  "--disallowedTools",
+  "--effort",
+  "--environment",
+  "--exclude-dynamic-system-prompt-sections",
+  "--fallback-model",
+  "--file",
+  "--fork-session",
+  "--forward-subagent-text",
+  "--from-pr",
+  "--help",
+  "--ide",
+  "--include-hook-events",
+  "--include-partial-messages",
+  "--input-format",
+  "--json-schema",
+  "--max-budget-usd",
+  "--mcp-config",
+  "--model",
+  "--name",
+  "--no-chrome",
+  "--no-session-persistence",
+  "--output-format",
+  "--permission-mode",
+  "--permission-prompts",
+  "--plugin-dir",
+  "--plugin-url",
+  "--print",
+  "--prompt-suggestions",
+  "--remote-control",
+  "--remote-control-session-name-prefix",
+  "--replay-user-messages",
+  "--restricted",
+  "--resume",
+  "--safe-mode",
+  "--session-id",
+  "--setting-sources",
+  "--settings",
+  "--strict-mcp-config",
+  "--system-prompt",
+  "--system-prompt-snapshot",
+  "--teleport",
+  "--tmux",
+  "--tools",
+  "--verbose",
+  "--version",
+  "--worktree"
+ ],
+ "pairs": {
+  "auth_status": {
+   "count": 1,
+   "keys": [
+    "isAuthenticating",
+    "output",
+    "session_id",
+    "type",
+    "uuid"
+   ],
+   "required_keys": [
+    "isAuthenticating",
+    "output",
+    "session_id",
+    "type",
+    "uuid"
+   ]
+  },
+  "control_request/end_session": {
+   "count": 1,
+   "keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "payload_keys": [
+    "subtype"
+   ],
+   "required_keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "required_payload_keys": [
+    "subtype"
+   ]
+  },
+  "control_request/initialize": {
+   "count": 1,
+   "keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "payload_keys": [
+    "agentProgressSummaries",
+    "hooks",
+    "perTaskStopAffordance",
+    "sdkMcpServerConfigs",
+    "sdkMcpServers",
+    "subtype",
+    "supportedDialogKinds"
+   ],
+   "required_keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "required_payload_keys": [
+    "agentProgressSummaries",
+    "hooks",
+    "perTaskStopAffordance",
+    "sdkMcpServerConfigs",
+    "sdkMcpServers",
+    "subtype",
+    "supportedDialogKinds"
+   ]
+  },
+  "control_request/mcp_message": {
+   "count": 3,
+   "keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "payload_keys": [
+    "message",
+    "server_name",
+    "subtype"
+   ],
+   "required_keys": [
+    "request",
+    "request_id",
+    "type"
+   ],
+   "required_payload_keys": [
+    "message",
+    "server_name",
+    "subtype"
+   ]
+  },
+  "control_response/end_session": {
+   "count": 1,
+   "keys": [
+    "response",
+    "type"
+   ],
+   "payload_keys": [
+    "request_id",
+    "subtype"
+   ],
+   "required_keys": [
+    "response",
+    "type"
+   ],
+   "required_payload_keys": [
+    "request_id",
+    "subtype"
+   ]
+  },
+  "control_response/initialize": {
+   "body_keys": [
+    "account",
+    "agents",
+    "analytics_disabled",
+    "available_output_styles",
+    "commands",
+    "current_permission_mode",
+    "fast_mode_disabled_reason",
+    "fast_mode_state",
+    "hooks_applied",
+    "ide_rc_auto_enable_gate",
+    "models",
+    "output_style",
+    "pid",
+    "remote_control_auto_enable",
+    "remote_control_auto_on_by_default",
+    "remote_control_available",
+    "session_state"
+   ],
+   "count": 1,
+   "keys": [
+    "response",
+    "type"
+   ],
+   "payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ],
+   "required_body_keys": [
+    "account",
+    "agents",
+    "analytics_disabled",
+    "available_output_styles",
+    "commands",
+    "current_permission_mode",
+    "fast_mode_disabled_reason",
+    "fast_mode_state",
+    "hooks_applied",
+    "ide_rc_auto_enable_gate",
+    "models",
+    "output_style",
+    "pid",
+    "remote_control_auto_enable",
+    "remote_control_auto_on_by_default",
+    "remote_control_available",
+    "session_state"
+   ],
+   "required_keys": [
+    "response",
+    "type"
+   ],
+   "required_payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ]
+  },
+  "control_response/mcp_message": {
+   "body_keys": [
+    "mcp_response"
+   ],
+   "count": 6,
+   "keys": [
+    "response",
+    "type"
+   ],
+   "payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ],
+   "required_body_keys": [
+    "mcp_response"
+   ],
+   "required_keys": [
+    "response",
+    "type"
+   ],
+   "required_payload_keys": [
+    "request_id",
+    "response",
+    "subtype"
+   ]
+  },
+  "transcript_mirror": {
+   "count": 1,
+   "keys": [
+    "entries",
+    "filePath",
+    "type"
+   ],
+   "required_keys": [
+    "entries",
+    "filePath",
+    "type"
+   ]
+  }
+ },
+ "version": "2.1.260"
+}
