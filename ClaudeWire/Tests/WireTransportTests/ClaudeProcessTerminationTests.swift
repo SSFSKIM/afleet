@@ -115,7 +115,7 @@ final class ClaudeProcessTerminationTests: XCTestCase {
                                                        "the terminal exit must be published though no EOF ever arrives",
                                                        within: .seconds(12)) else { return }
         XCTAssertTrue(s.isClean)
-        XCTAssertTrue(sink.entries.contains { $0.contains("reader drain hit its deadline") },
+        XCTAssertTrue(sink.entries.contains { $0.contains("\"what\":\"reader_drain_deadline_exceeded\"") },
                       "publication should have gone ahead on the deadline, not on EOF: \(sink.entries.suffix(4))")
         await p.terminate()
     }

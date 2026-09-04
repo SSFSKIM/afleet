@@ -184,7 +184,7 @@ final class ClaudeProcessTests: XCTestCase {
         let p = h.make(scenario: "pending_undecodable", diagnostics: sink)
         let hs = try await p.spawn()
         XCTAssertEqual(hs.pending.map(\.id.rawValue), ["q1"])
-        XCTAssertTrue(sink.entries.contains { $0.contains("handshake pending under-reported") && $0.contains("pending_permission_requests") },
+        XCTAssertTrue(sink.entries.contains { $0.contains("\"what\":\"handshake_pending_under_reported\"") && $0.contains("\"key\":\"pending_permission_requests\"") && $0.contains("\"decoded\":1") && $0.contains("\"on_wire\":2") },
                       "the skipped element must be recorded; entries: \(sink.entries)")
         await p.terminate()
     }
@@ -205,7 +205,7 @@ final class ClaudeProcessTests: XCTestCase {
         let events = await h.log.events
         let surfaced = events.contains { if case .frame(.controlResponse, _) = $0 { return true }; if case .frame(.opaque, _) = $0 { return true }; return false }
         XCTAssertFalse(surfaced, "an uncorrelated control_response must not reach the event stream")
-        XCTAssertTrue(sink.entries.contains { $0.contains("uncorrelated control_response") }, "it must still be recorded; entries: \(sink.entries)")
+        XCTAssertTrue(sink.entries.contains { $0.contains("\"what\":\"uncorrelated_control_response\"") }, "it must still be recorded; entries: \(sink.entries)")
         let status = await p.status; XCTAssertEqual(status, .running)
         await p.terminate()
     }
@@ -216,6 +216,31 @@ final class ClaudeProcessTests: XCTestCase {
         guard case .exited(.code(3, let tail), .first)? = await h.expect({ if case .exited = $0 { return true }; return false }, "exit code 3") else { return }
         XCTAssertTrue(tail.contains("boom"))
         do { _ = try await p.send(UserInput(text: "x")); XCTFail() } catch let e as WireError { XCTAssertEqual(e, .processExited) }
+    }
+    /// `diagnostics.log` says metadata only, and `ExitStatus` carries up to fifty lines of raw child stderr.
+    /// The exit used to be recorded by interpolating the whole status into a free-form `lifecycle(String)`,
+    /// which put that tail on disk. `LifecycleNotice` now has no arm that can hold one, so the assertion is
+    /// on the *whole* entry rather than on the absence of one string: its key set is exactly the five
+    /// metadata keys, which is a claim no future payload can slip past.
+    ///
+    /// The tail is still asserted present on the `.exited` event first. Without that, the absence below would
+    /// say only that the child never wrote anything.
+    func testChildStderrNeverReachesTheDiagnosticsLog() async throws {
+        let secret = "sk-ant-api03-NOTAREAL-9f2 /Users/someone/private/ledger.csv"
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "stderr:\(secret),exit:3", diagnostics: sink)
+        _ = try await p.spawn()
+        guard case .exited(.code(3, let tail), _)? = await h.expect({ if case .exited = $0 { return true }; return false }, "exit code 3") else { return }
+        XCTAssertTrue(tail.contains(secret), "the tail must still reach consumers: \(tail)")
+        for line in sink.entries {
+            XCTAssertFalse(line.contains("sk-ant-api03-NOTAREAL"), "child stderr reached the metadata log: \(line)")
+            XCTAssertFalse(line.contains("ledger.csv"), "child stderr reached the metadata log: \(line)")
+        }
+        let exits = sink.entries.filter { $0.contains("\"what\":\"exited\"") }
+        XCTAssertEqual(exits.count, 1, "\(sink.entries)")
+        let entry = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: Data(try XCTUnwrap(exits.first).utf8)).objectValue)
+        XCTAssertEqual(Set(entry.keys), ["at", "event", "epoch", "what", "code"])
+        XCTAssertEqual(entry["code"], .integer(3))
     }
     func testHandshakeTimeoutCarriesStderrTail() async throws {
         let h = try Harness(); let p = h.make(scenario: "no_init,stderr:warming")

@@ -6,7 +6,7 @@ public enum Direction: String, Sendable { case inbound, outbound }
 public enum DiagnosticEvent: Sendable {
     case frame(direction: Direction, type: String, subtype: String?, bytes: Int, epoch: ProcessEpoch, requestID: RequestID?)
     case answer(requestID: RequestID, subtype: String, behavior: String, classification: String?, epoch: ProcessEpoch)
-    case lifecycle(String, epoch: ProcessEpoch)
+    case lifecycle(LifecycleNotice, epoch: ProcessEpoch)
     case handshake(durationMs: Int, epoch: ProcessEpoch)
     case terminateEscalated(step: String, epoch: ProcessEpoch)
     case captureSkipped(reason: String)
@@ -28,7 +28,9 @@ public enum DiagnosticEvent: Sendable {
             o["event"] = .string("answer"); o["request_id"] = .string(r.rawValue); o["subtype"] = .string(s); o["behavior"] = .string(b)
             if let c { o["classification"] = .string(c) }
             o["epoch"] = .integer(Int64(e.rawValue))
-        case .lifecycle(let what, let e): o["event"] = .string("lifecycle"); o["what"] = .string(what); o["epoch"] = .integer(Int64(e.rawValue))
+        case .lifecycle(let notice, let e):
+            o["event"] = .string("lifecycle"); o["epoch"] = .integer(Int64(e.rawValue))
+            for (k, v) in notice.fields { o[k] = v }
         case .handshake(let ms, let e): o["event"] = .string("handshake"); o["duration_ms"] = .integer(Int64(ms)); o["epoch"] = .integer(Int64(e.rawValue))
         case .terminateEscalated(let step, let e): o["event"] = .string("terminate_escalated"); o["step"] = .string(step); o["epoch"] = .integer(Int64(e.rawValue))
         case .captureSkipped(let reason): o["event"] = .string("capture_skipped"); o["reason"] = .string(reason)
@@ -37,6 +39,50 @@ public enum DiagnosticEvent: Sendable {
             o["domain"] = .string(domain); o["code"] = .integer(Int64(code)); o["epoch"] = .integer(Int64(e.rawValue))
         }
         return .object(o)
+    }
+}
+
+/// Which of the three exit-publication sites found the event channel already finished.
+public enum ExitPublicationSite: String, Sendable { case launchFailure = "launch_failure", exit, neverLaunched = "never_launched" }
+
+/// The lifecycle notices, one case per thing that can be reported.
+///
+/// This used to be a free-form `String`, and a free-form String in a metadata log is an open door: the
+/// `exited` site interpolated an `ExitStatus`, whose associated value carries up to fifty lines of raw child
+/// stderr, straight into `diagnostics.log`. Fixing that one interpolation would have left the next one to be
+/// written. So the type is the fix — the same reasoning that gave `mcpToolFailure` separate typed fields.
+/// Every case below carries identifiers, counts or nothing at all, and there is no arm a payload can ride.
+///
+/// The exit's stderr tail still reaches consumers, on the `.exited` event and on `WireError.handshakeTimeout`.
+/// It is removed from the log, not from the API.
+public enum LifecycleNotice: Sendable {
+    case spawned(pid: Int32)
+    case exitEventDropped(site: ExitPublicationSite)
+    /// `ControlSuccess`'s typed views skip an element that does not decode; this is how many were lost.
+    case handshakePendingUnderReported(decoded: Int, onWire: Int, key: String)
+    case uncorrelatedControlResponse(requestID: RequestID)
+    case readerDrainDeadlineExceeded
+    case exited(code: Int32)
+    case exitedOnSignal(Int32)
+
+    var fields: [String: JSONValue] {
+        switch self {
+        case .spawned(let pid):
+            ["what": .string("spawned"), "pid": .integer(Int64(pid))]
+        case .exitEventDropped(let site):
+            ["what": .string("exit_event_dropped"), "site": .string(site.rawValue)]
+        case .handshakePendingUnderReported(let decoded, let onWire, let key):
+            ["what": .string("handshake_pending_under_reported"), "decoded": .integer(Int64(decoded)),
+             "on_wire": .integer(Int64(onWire)), "key": .string(key)]
+        case .uncorrelatedControlResponse(let requestID):
+            ["what": .string("uncorrelated_control_response"), "request_id": .string(requestID.rawValue)]
+        case .readerDrainDeadlineExceeded:
+            ["what": .string("reader_drain_deadline_exceeded")]
+        case .exited(let code):
+            ["what": .string("exited"), "code": .integer(Int64(code))]
+        case .exitedOnSignal(let signal):
+            ["what": .string("exited"), "signal": .integer(Int64(signal))]
+        }
     }
 }
 

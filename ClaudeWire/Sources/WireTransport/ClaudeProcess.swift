@@ -76,12 +76,12 @@ public actor ClaudeProcess {
             // was created in `init` and nothing has finished it — but all three exit-publication sites read it
             // the same way: the asymmetry is what made a reviewer ask about this once, and would again.
             if await channel.pushFinal(.exited(failure, epoch)) == false {
-                diagnostics.record(.lifecycle("launch-failure exit event dropped: channel already finished", epoch: epoch))
+                diagnostics.record(.lifecycle(.exitEventDropped(site: .launchFailure), epoch: epoch))
             }
             throw WireError.launchFailed(String(describing: error))
         }
         status = .handshaking
-        diagnostics.record(.lifecycle("spawned pid \(p.processIdentifier)", epoch: epoch))
+        diagnostics.record(.lifecycle(.spawned(pid: p.processIdentifier), epoch: epoch))
         writer = StdinWriter(handle: box.stdin.fileHandleForWriting)
         startReaders()
         let started = ContinuousClock.now
@@ -131,7 +131,7 @@ public actor ClaudeProcess {
         func take(_ raw: JSONValue?, _ typed: [ControlRequestFrame], _ key: String) {
             let onWire = raw?.arrayValue?.count ?? 0
             if typed.count < onWire {
-                diagnostics.record(.lifecycle("handshake pending under-reported: \(typed.count) of \(onWire) \(key) decoded as control requests", epoch: epoch))
+                diagnostics.record(.lifecycle(.handshakePendingUnderReported(decoded: typed.count, onWire: onWire, key: key), epoch: epoch))
             }
             for frame in typed {
                 let request = InboundRequest.parse(frame: frame, epoch: epoch, receivedAt: .now)
@@ -195,7 +195,7 @@ public actor ClaudeProcess {
                 // "Side question cancelled"), and its own schema says a requester ignores responses for ids
                 // it is not waiting on. Dropped with a diagnostic: never an error, never an event, never an
                 // opaque-census entry.
-                diagnostics.record(.lifecycle("uncorrelated control_response for \(resp.requestID) dropped", epoch: epoch))
+                diagnostics.record(.lifecycle(.uncorrelatedControlResponse(requestID: resp.requestID), epoch: epoch))
                 return
             }
             waiter.settle(.success(resp.body))
@@ -367,7 +367,7 @@ public actor ClaudeProcess {
 
         let inFlight = readers; readers.removeAll()
         if await drain(inFlight, upTo: Self.readerDrainLimit) == false {
-            diagnostics.record(.lifecycle("reader drain hit its deadline; publishing the exit anyway", epoch: epoch))
+            diagnostics.record(.lifecycle(.readerDrainDeadlineExceeded, epoch: epoch))
         }
         // Both settle after the drain, and both are safe there only because the drain is bounded: a response
         // or a handshake still in the pipe gets to arrive first, and `Waiter.settle` is first-wins, so this is
@@ -377,12 +377,12 @@ public actor ClaudeProcess {
         for (_, w) in pendingOutbound { w.settle(.failure(WireError.processExited)) }; pendingOutbound.removeAll()
         let final = raw.withTail(stderrTail())
         status = .exited(final)
-        diagnostics.record(.lifecycle("exited \(final)", epoch: epoch))
+        diagnostics.record(.lifecycle(final.notice, epoch: epoch))
         // `pushFinal` guarantees nothing interleaves between this element being enqueued and the stream
         // ending. Split into a `push` and a separate `finish()` there is a window in which another producer's
         // element lands *after* the terminal event.
         if await channel.pushFinal(.exited(final, epoch)) == false {
-            diagnostics.record(.lifecycle("exit event dropped: channel already finished", epoch: epoch))
+            diagnostics.record(.lifecycle(.exitEventDropped(site: .exit), epoch: epoch))
         }
     }
     /// How long publication will wait for the readers to reach EOF before going ahead without them.
@@ -427,7 +427,7 @@ public actor ClaudeProcess {
             for w in exitWaiters { w.settle(.success(never)) }; exitWaiters.removeAll()
             // As on the launch-failure path: cannot be refused on a channel nobody has finished, read anyway.
             if await channel.pushFinal(.exited(never, epoch)) == false {
-                diagnostics.record(.lifecycle("never-launched exit event dropped: channel already finished", epoch: epoch))
+                diagnostics.record(.lifecycle(.exitEventDropped(site: .neverLaunched), epoch: epoch))
             }
             return
         }
@@ -461,6 +461,11 @@ public actor ClaudeProcess {
 }
 
 private extension ExitStatus {
+    /// The log's view of an exit: the code or the signal number, and nothing else. The stderr tail this
+    /// status also carries is for consumers of `.exited`, not for `diagnostics.log`.
+    var notice: LifecycleNotice {
+        switch self { case .code(let c, _): .exited(code: c); case .signal(let sig, _): .exitedOnSignal(sig) }
+    }
     func withTail(_ tail: String) -> ExitStatus {
         switch self { case .code(let c, _): .code(c, stderrTail: tail); case .signal(let sig, _): .signal(sig, stderrTail: tail) }
     }
