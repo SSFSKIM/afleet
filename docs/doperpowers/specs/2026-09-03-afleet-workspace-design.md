@@ -3793,3 +3793,10 @@ Pending — written at finish.
   disabled exactly the drift detection the two-stage decoder exists to provide. Reverted;
   C1's generator is deliberately partial and stays as it is. Binds every child that reads
   `Fixtures/`, and the root `CLAUDE.md` routing line should be read with this attached.
+  The settling evidence is the bundle, not the corpus, and the distinction matters for how
+  this kind of question is answered in future: a census records what was *observed*, while
+  the engine source records what is *promised*, and only a promise justifies keeping a field
+  required against a fixture that omits it. In `cli.pretty.js` every result frame is built by
+  one helper that spreads `{type, duration_ms, uuid}` last, so those cannot be overridden by
+  any caller, and the paths supplying `total_cost_usd` and `session_id` do so unconditionally;
+  no path emits a result frame missing any of the four. Verified first-hand at 2.1.258.
