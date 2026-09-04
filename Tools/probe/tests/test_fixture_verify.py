@@ -160,7 +160,7 @@ def rewrite_frames(path, mutate):
 
 class SlugAndSnapshotTests(unittest.TestCase):
     def test_slug_of_replaces_every_non_alphanumeric(self):
-        self.assertEqual(fixture.slug_of("/Users/new/Developer/GitHub/afleet"), "-Users-new-Developer-GitHub-afleet")
+        self.assertEqual(fixture.slug_of("/Users/probe/Developer/GitHub/afleet"), "-Users-probe-Developer-GitHub-afleet")
         self.assertEqual(fixture.slug_of("/private/tmp/afleet-fixtures/x.y"), "-private-tmp-afleet-fixtures-x-y")
 
     def test_find_and_snapshot_redacts_and_rewrites_the_slug(self):
