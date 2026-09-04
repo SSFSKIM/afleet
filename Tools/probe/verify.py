@@ -382,10 +382,23 @@ def _check_mirror(path, fx):
     held to its mirror frames whether it was recorded or written by hand.
     """
     meta, frames = fx["meta"], fx["frames"]
-    if not fixture.stream_sizes(os.path.join(path, "transcript")):
+    final = fixture.stream_sizes(os.path.join(path, "transcript"))
+    if not final:
         return []
     errors = []
     rec_slug = fixture.slug_of(meta["cwd"]) if meta.get("cwd") else None
+    # A session file can be named by more than one path over one recording. `set_cwd` with
+    # trust answers `transcript_relocated: true` and *moves* the transcript into the new
+    # project slug, so the mirror names the old path before the relocation and the new one
+    # after it, while `snapshot` finds one file at whichever path it ended at. Keyed by path
+    # alone the entries split into two streams, one of which the fixture cannot hold. The file
+    # is what has an identity here, not the path, and within one session's transcript
+    # directory the file name carries it: the main stream is `<session>.jsonl` and each
+    # sidecar has a name of its own, so no two distinct streams collide. Ambiguity falls back
+    # to the path, which reports the missing stream exactly as before.
+    by_name = {}
+    for stream in final:
+        by_name.setdefault(os.path.basename(stream), []).append(stream)
     mirrored = {}
     for rec in frames:
         f = rec.get("frame") or {}
@@ -393,6 +406,10 @@ def _check_mirror(path, fx):
             stream = f["filePath"].split("/projects/", 1)[1]
             if rec_slug:
                 stream = stream.replace(rec_slug, fixture.SLUG_TOKEN, 1)
+            if stream not in final:
+                same_name = by_name.get(os.path.basename(stream)) or []
+                if len(same_name) == 1:
+                    stream = same_name[0]
             mirrored.setdefault(stream, []).extend(f.get("entries", []))
     for stream, entries in mirrored.items():
         init_path = os.path.join(path, "initial", stream)

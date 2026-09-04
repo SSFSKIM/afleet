@@ -17,8 +17,20 @@ import os
 
 def mirror_matches_file(session, config_home):
     """Concatenate `transcript_mirror` entries per `filePath` and compare with the file's
-    records, record for record. Reports per stream rather than asserting: what the scenario
-    exists to record is what the mirror did, and a mismatch is evidence, not a crash."""
+    records by record identity.
+
+    Identity and not equality, deliberately. `session.frames()` returns the capture *after*
+    redaction, and the file on disk is what the CLI wrote, so a whole-record comparison here
+    reports every record carrying a redacted field as a mismatch and says nothing about the
+    mirror. `type` and `uuid` survive every §4.5 rule, and their sequence is what "the same
+    records in the same order" means. The record-for-record equality S14 claims is checked by
+    `verify`'s mirror-fidelity check, which holds the mirror against the redacted
+    `transcript/` snapshot -- both sides through the same rules -- and that is the
+    authoritative instrument. This note says what the live run saw.
+
+    Reports per stream rather than asserting: what the scenario exists to record is what the
+    mirror did, and a mismatch is evidence, not a crash.
+    """
     per_file = {}
     for rec in session.frames():
         f = rec.get("frame") or {}
@@ -28,13 +40,17 @@ def mirror_matches_file(session, config_home):
     for path, entries in sorted(per_file.items()):
         real = os.path.expanduser(path.replace("~/.claude", config_home, 1)) if path.startswith("~/.claude") else path
         if not os.path.isfile(real):
-            report.append("%s: file missing" % path)
+            # A relocation moves the file, so the pre-relocation path is legitimately gone by
+            # the time this runs. Named as moved rather than as missing, because "missing"
+            # reads as a mirror naming a file the CLI never wrote.
+            report.append("%s: no file at this path now (a relocation moves the transcript)" % path)
             continue
         with open(real, encoding="utf-8") as fh:
             records = [json.loads(l) for l in fh if l.strip()]
+        ident = lambda rs: [(r.get("type"), r.get("uuid")) for r in rs]     # noqa: E731
         tail = records[-len(entries):] if entries else []
-        report.append("%s: %d mirrored, file has %d records, tail equal: %s"
-                      % (os.path.basename(path), len(entries), len(records), tail == entries))
+        report.append("%s: %d mirrored, file has %d records so far, tail identical by type and uuid: %s"
+                      % (os.path.basename(path), len(entries), len(records), ident(tail) == ident(entries)))
     return report
 
 
@@ -57,18 +73,40 @@ def run(session, ctx):
     body = r.get("response") or {}
     ctx["notes"].append("set_cwd sibling -> %s %s" % (r.get("subtype"), json.dumps(body)[:200]))
     if body.get("status") == "needs_trust" or body.get("needs_trust"):
-        r2 = session.request("set_cwd", path=sibling, trust_accepted=True)
-        ctx["notes"].append("set_cwd trust_accepted -> %s %s"
-                            % (r2.get("subtype"), json.dumps(r2.get("response") or r2.get("error"))[:200]))
+        # S13: `trust_accepted` alone is refused. The CLI answers `set_cwd: invalid request --
+        # trust_accepted requires trusted_directory (echo the directory from the needs_trust
+        # response)`, so the second call echoes the `directory` the first answer named. The
+        # echo is the point: it is what stops a host granting trust to a directory other than
+        # the one the CLI asked about.
+        r2 = session.request("set_cwd", path=sibling, trust_accepted=True,
+                             trusted_directory=body.get("directory", sibling))
+        ctx["notes"].append("set_cwd trust_accepted + trusted_directory -> %s %s"
+                            % (r2.get("subtype"), json.dumps(r2.get("response") or r2.get("error"))[:300]))
+    # A completed relocation emits a `result` frame of its own -- `subtype: "success"` with
+    # `num_turns: 0` and an empty `result` -- for a turn nobody sent. `wait_result` walks a
+    # cursor over the frames, so leaving it in the stream hands it to the next prompt's wait,
+    # every later wait returns the previous turn's result, and the last prompt is still
+    # running when `close()` sends `end_session`: the turn is cancelled, the transcript gains
+    # a `[Request interrupted by user]` record and the recording ends `error_during_execution`
+    # with exit code 1. Drained here, with a short timeout so a binary that stops emitting it
+    # costs the recording five seconds rather than a wrong reading.
+    drained = session.wait_for(lambda f: f.get("type") == "result", timeout=5)
+    ctx["notes"].append("result frame emitted by the relocation itself: %s"
+                        % (None if drained is None
+                           else "%s, num_turns %s" % (drained.get("subtype"), drained.get("num_turns"))))
     for p in META["prompts"][2:]:
         session.send_user(p)
         session.wait_result(timeout=120)
     errors = [f for f in session.frames() if f.get("frame", {}).get("subtype") == "mirror_error"]
     ctx["notes"].append("mirror_error frames: %d" % len(errors))
     ctx["notes"] += mirror_matches_file(session, ctx["config_home"])
-    cfg = os.path.join(ctx["config_home"], ".claude.json")
+    cfg, projects = os.path.join(ctx["config_home"], ".claude.json"), {}
     if os.path.isfile(cfg):
         with open(cfg, encoding="utf-8") as fh:
             projects = (json.load(fh).get("projects") or {})
-        ctx["notes"].append("scratch .claude.json trust for the sibling: %s"
-                            % (projects.get(sibling) or {}).get("hasTrustDialogAccepted"))
+    # Keyed by the *resolved* path, the same rule the project slug follows: `/tmp` is a
+    # symlink to `/private/tmp` on macOS, and looking the unresolved path up finds nothing
+    # and reads as "no trust was recorded" when trust was recorded.
+    record = projects.get(os.path.realpath(sibling)) or projects.get(sibling) or {}
+    ctx["notes"].append("scratch .claude.json trust for the sibling: hasTrustDialogAccepted=%s"
+                        % record.get("hasTrustDialogAccepted"))
