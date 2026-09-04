@@ -994,6 +994,46 @@ which `record` spills to its temporary file, set from the largest recorded scena
   tokenised text would be wrong. Recorded rather than repaired: the notes are prose for a
   reviewer, and redaction -- which is the rule that matters -- does run on them.
 
+- Observation: A spike run from inside a Claude Code session inherits that session's own
+  markers, and one of them turns transcript saving off in the interactive CLI. Evidence:
+  `spike-contention`. The interactive holder rendered the resumed session's history and never
+  registered, and its status line read `Transcript saving is off -- inherited
+  CLAUDE_CODE_CHILD_SESSION marker`. With every `CLAUDE*` variable dropped from the holder's
+  environment, the same run registered a second record under the same `sessionId` -- the
+  observation S12's whole finding rests on, and it was silently absent one run earlier.
+  Impact: `harness.Launch.environment` drops three variables (`CLAUDE_CODE_REMOTE`,
+  `CLAUDE_CODE_CONTAINER_ID`, `CLAUDE_CODE_ENTRYPOINT`) and inherits the rest, so every
+  recording in the corpus was made with the recording agent's `CLAUDECODE`,
+  `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_CHILD_SESSION` set. Nothing in the corpus is known
+  to be wrong because of it -- the print-mode path wrote its transcripts and registered its
+  sessions in every recording and in every spike here -- but it is inheritance nobody chose,
+  and the same class of marker is what made one spike observation come back empty and
+  plausible. The spike scenario builds its own terminal environment by dropping the whole
+  `CLAUDE` prefix rather than a list, since a list needs extending each time the hosting CLI
+  gains a marker. Recorded rather than repaired in the harness: that changes the environment
+  every future recording is made in while the corpus was recorded under the present one, which
+  is a wave's decision and not a spike's.
+
+- Observation: An interactive `claude --resume` never reaches the session it names until the
+  workspace-trust prompt is answered. Evidence: `spike-contention`'s first run opened on
+  "Quick safety check: Is this a project you created or one you trust?" for
+  `/private/tmp/afleet-fixtures/plain-two-turn` and exited 1 on the default choice, "No,
+  exit", without registering anything -- although eleven headless recordings had already run
+  in that directory under the same config home. Impact: trust is a *terminal* gate rather than
+  a session gate. Print mode resumes an untrusted directory without a word, and S13's
+  wire-side `needs_trust` belongs to `set_cwd` alone, so afleet's *Open in terminal* can hand
+  a user a session that stops on a dialog afleet never saw and never will. The spike had to
+  answer the prompt before the contention question underneath it could be asked at all.
+
+- Observation: S17 makes `--agent` runtime-mutable and one parent table still calls it
+  restart-required. Evidence: `apply_flag_settings {settings: {agent}}` changed the next
+  turn's system prompt (parent Revision Note `C1/S17`). Impact: **[parent-impact]** on §7.7's
+  launch-settings table, whose Restart-required row lists `--agent` beside `--worktree` and
+  the stream flags. The `/agent` row in the same section already said the question was open
+  "until spike S17 shows it takes effect", so the design anticipated the move and the two
+  halves of §7.7 now disagree with each other. Binding prose is not edited here; the parent's
+  tending session reconciles them.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
@@ -1402,3 +1442,21 @@ Pending — written at finish.
   general lesson, which is what belongs in the rules rather than this incident: a redaction rule
   that keys on *what* a value is can only catch values it was told about, and one that keys on
   *where* a value sits catches the ones nobody thought of.
+- 2026-09-04: The `spike` subcommand lands and the four live spikes run. §4.2 gains a ninth
+  subcommand and the scenario contract a `fixture` key: `probe.py spike <name>` runs a
+  scenario the ordinary way and prints its `notes`, writing nothing under `Fixtures/`, and
+  `record` now refuses a scenario declaring `fixture: False` rather than spending real turns
+  on a directory no reviewer will ever walk. S10, S11, S12 and S17 are settled on the parent,
+  and S6's parent note is written there from the extraction already committed, so all twelve
+  of G3's findings now sit on the parent. The wave cost about 0.04 USD in nine short `haiku`
+  turns; `spike-contention` sends no prompt at all and spends nothing. Two scenarios take
+  their variable from the environment rather than from an edit to their own source --
+  `AFLEET_SPIKE_RESUME_AT` on S11, `AFLEET_SPIKE_TUI_KEYS` and `AFLEET_SPIKE_TUI_FIRST` on
+  S12 -- because each needs two runs differing by one input, and a shared worktree is the
+  wrong place to leave a file half-edited between them. Three corrections to the plan the
+  scenarios came from, each found by running them. S12 read the registry only after its
+  interactive holder had exited, which answers a different question than the one asked; it
+  now samples from inside the hold. S12 also spawned a bare `claude`, which resolves to
+  whatever the symlink points at rather than the pinned 2.1.259 baseline, and inherited the
+  running agent's environment (Surprises). And S11 was to be run twice with a hand-edited
+  `META`; the environment variable above replaces that.

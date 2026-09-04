@@ -5,7 +5,7 @@ SCENARIO ?=
 SCRIPT ?=
 REVIEWER ?=
 
-.PHONY: test-tools probe census record redact verify-fixtures synthetic sign
+.PHONY: test-tools probe census record redact verify-fixtures synthetic sign spike
 
 # The fake-claude suite is empty until its task lands; exit 5 is 3.12+'s "no tests ran",
 # which is not a failure here. A missing start directory still fails (ImportError).
@@ -22,6 +22,12 @@ census:
 record:
 	@test -n "$(SCENARIO)" || (echo "usage: make record SCENARIO=<name>" && exit 2)
 	$(PYTHON) Tools/probe/probe.py record "$(SCENARIO)" --claude "$(CLAUDE)"
+
+# The spikes of §4.7 whose answer is a finding rather than a recording. Runs the scenario and
+# prints its notes; nothing under Fixtures/ is touched.
+spike:
+	@test -n "$(SCENARIO)" || (echo "usage: make spike SCENARIO=<name>" && exit 2)
+	$(PYTHON) Tools/probe/probe.py spike "$(SCENARIO)" --claude "$(CLAUDE)"
 
 # Re-runs the §4.5 rules over a committed fixture, in place and idempotently, and rewrites
 # the manifest. FIXTURE is the fixture directory, not its name.

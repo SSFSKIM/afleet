@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""probe: census | diff | record | snapshot | redact | verify | sign | synthetic (spec §4.2).
+"""probe: census | diff | record | snapshot | redact | verify | sign | synthetic | spike (spec §4.2).
 
 The one composition point. `census.py`, `redact.py`, `harness.py`, `fixture.py` and
-`verify.py` never import one another; this module wires them into the eight subcommands and
+`verify.py` never import one another; this module wires them into the nine subcommands and
 into the scenario contract below. `sign` and `synthetic` are the two that need no binary:
 `sign` writes the review block §4.5 requires and `verify` refuses a fixture without, and
 `synthetic` rebuilds the two hand-written dialog fixtures of §4.7 from their schemas.
+`spike` is the one that produces no fixture: §4.7's last paragraph names the spikes whose
+answer is a finding rather than a recording, and it runs such a scenario and prints its
+`notes` for the operator who writes that finding up.
 
 ## The scenario contract
 
@@ -19,6 +22,8 @@ A scenario is a module under `scenarios/` exposing `META` (a dict) and `run(sess
 - `serves`           the acceptance items and spikes the recording is evidence for.
 - `spikes`           the spike ids it informs, so a finding walks back to its evidence.
 - `census`           whether `diff` re-runs it against a binary. False excludes it.
+- `fixture`          False marks a scenario whose product is a finding, not a recording. It
+                     is run by `spike`, which writes nothing, and `record` refuses it.
 - `deterministic`    True compares pair sets, key sets, capabilities and flags exactly;
                      False compares required shapes and accumulates across re-recordings.
 - `isolation`        `"config-home"` (§4.6's default) or `"setting"`.
@@ -340,6 +345,11 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
     fixtures_root = fixtures_root or FIXTURES_ROOT
     mod = load_scenario(name, scenario_dir)
     meta = dict(mod.META)
+    if meta.get("fixture") is False:
+        # A spike scenario declares that it has no fixture to write. Recording one anyway
+        # spends real turns and lands a directory in `Fixtures/` that nothing reviews, so the
+        # declaration is enforced here rather than left as a comment. `spike` runs these.
+        raise RuntimeError("%s declares fixture: False; run it with `probe.py spike %s`" % (name, name))
     redactor = redact.Redactor()
     argv = tool_argv(claude, meta)
     version, help_text = claude_version(argv), claude_help(argv)
@@ -636,7 +646,7 @@ def _redact_in_place(path):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="probe")
     sub = ap.add_subparsers(dest="cmd")
-    for name in ("census", "diff", "record", "snapshot", "redact", "verify", "sign", "synthetic"):
+    for name in ("census", "diff", "record", "snapshot", "redact", "verify", "sign", "synthetic", "spike"):
         sp = sub.add_parser(name)
         sp.add_argument("--claude", default=None)
         sp.add_argument("--config-home", default=None)
@@ -657,6 +667,8 @@ def main(argv=None):
             sp.add_argument("--hostname", default=None, help="the hostname the fixture was recorded on")
         if name == "sign":
             sp.add_argument("fixture"); sp.add_argument("--reviewer", required=True)
+        if name == "spike":
+            sp.add_argument("scenario")
     args = ap.parse_args(argv)
     if not args.cmd:
         ap.print_usage(); return 2
@@ -673,6 +685,23 @@ def main(argv=None):
             session, ctx = run_scenario(mod, args.claude, args.config_home, SCRATCH_ROOT, redact.Redactor(), resume=resolve_resume(mod.META, FIXTURES_ROOT))
             out[mod.META["name"]] = census.census([r["frame"] for r in session.frames() if "frame" in r], help_text=help_text, version=version)
         print(json.dumps(out, indent=1, sort_keys=True)); return 0
+    if args.cmd == "spike":
+        # A spike answers a question; it writes nothing. No `fixture.json`, no census, no
+        # redaction manifest -- the scenario's `notes` are the whole output, printed as lines
+        # for the operator who then writes the finding. Everything before that is the ordinary
+        # scenario path, so a spike drives the same launch line the corpus was recorded with.
+        mod = load_scenario(args.scenario)
+        session, ctx = run_scenario(mod, args.claude, args.config_home, SCRATCH_ROOT, redact.Redactor(),
+                                    resume=resolve_resume(mod.META, FIXTURES_ROOT))
+        for n in ctx["notes"]:
+            print(n)
+        # Every spike spends real tokens on the same account the agents working here bill to,
+        # and the engine already reports what each turn cost. Printing it makes a wave's price
+        # a measurement rather than an estimate reconstructed afterwards.
+        spent = sum(r["frame"].get("total_cost_usd") or 0 for r in session.frames()
+                    if "frame" in r and r["frame"].get("type") == "result")
+        print("cost %.4f USD; exit code %s" % (spent, ctx["exit_code"]))
+        return 0
     if args.cmd == "diff":
         code, report = diff(args.claude, config_home=args.config_home, only=args.fixture, script=args.script)
         print(report); return code

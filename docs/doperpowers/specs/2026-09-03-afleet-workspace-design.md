@@ -3225,3 +3225,112 @@ Pending — written at finish.
   Settles §6.2's route and acceptance item 53, which is no longer provisional. The six-second
   threshold is the binary's and afleet does not set it; §8.7's toggle governs whether the
   banner is shown, not when the engine raises it.
+- 2026-09-04 C1/S6: Both dialog kinds are structurally confirmed on the installed 2.1.259
+  binary (`Tools/probe/spikes/extract_dialog_enums.py`, 200,225,968 bytes with the JavaScript
+  embedded uncompressed). The test is not a string search: each shape is located at its own
+  definition site and every payload key, enum value and default must fall inside a bounded
+  window after it, so a hit ties the fields to that definition rather than to a 200 MB file
+  that happens to contain them. Four sites, each found exactly once, every needle in window.
+  `kind:"refusal_fallback_prompt"` carries `payload {originalModel, fallbackModel,
+  apiRefusalCategory?, guidanceText?, retractedMessageUuids?}`, `result: retry_fallback |
+  edit_prompt | cancelled` and `default: "cancelled"`; `kind:"fable_overage_consent_prompt"`
+  carries `payload {overagesEnabled, modelName?, balanceCents?, currency?}`, `result: consent
+  | switch_default | cancelled` and the same default -- identical to the 2.1.257 reading §8.4
+  was written from, and identical to the payloads the two synthetic fixtures send. The frames
+  those answers produce are confirmed at their own definitions too:
+  `system/model_consent_fallback` with `choice` on the same three values plus
+  `original_model`, `original_model_name`, `fallback_model` and `persisted_as_default`, and
+  `system/model_refusal_fallback` with `trigger: "refusal"`, `direction: retry | revert |
+  sticky`, `scope: session | local`, `request_id`, `api_refusal_category`,
+  `api_refusal_explanation`, `retracted_message_uuids` and `refused_user_message_uuid`. Both
+  fixtures therefore leave `hypothesis` and acceptance item 62 is no longer provisional.
+  `synthetic: true` stays, and with it the census exclusion, because how the engine *reaches*
+  these shapes is still unrecorded and a synthetic fixture is never baseline evidence for
+  that. What no extraction could settle stays open and needs a live dialog: the decline legs'
+  `result` subtype, the two placeholder `content` strings, the dialog park deadline, and
+  whether an undeclared kind reaches a host at all. Anchored on the quoted strings rather than
+  on byte offsets, which do not survive a build.
+- 2026-09-04 C1/S10: `-p -w probe-wt` works headless and settles all three of §15's conditions
+  in one launch (spike `spike-worktree`, 2.1.259). The CLI created the worktree at
+  `<repo>/.claude/worktrees/probe-wt` on a new branch `worktree-probe-wt`; `system/init.cwd`
+  was that directory; the model's own `pwd` through the Bash tool printed it; and the
+  transcript landed under the worktree's slug,
+  `-private-tmp-afleet-fixtures-spike-worktree--claude-worktrees-probe-wt`, not the launch
+  directory's. *New isolated session* is therefore promoted: afleet passes `-w <name>` on the
+  launch line (§6.1 already carries the flag) and does not run `git worktree add` itself.
+  Three details a host has to hold. The worktree is created **inside** the repository, under
+  `.claude/worktrees/`, rather than as a sibling directory, so it sits in the tree the user is
+  looking at. `git worktree list` reports it `locked` with the reason `claude session
+  <name> (pid <pid> start <time>)`, and **the lock outlives the session** -- after the
+  print-mode process exited 0 the lock naming a now-dead pid was still there, so any afleet
+  affordance that removes a worktree has to unlock first and must not read a lock as proof of
+  a live holder. And because the slug follows the cwd, a worktree channel is a different
+  project directory to the CLI, which is the distinction §8.2's worktree grouping rests on.
+- 2026-09-04 C1/S11: `--resume-session-at <uuid>` is **inclusive** of the entry it names, and
+  that settles how *Fork from here* is implemented (spike `spike-resume-at`, 2.1.259, forking
+  the `plain-two-turn` session). Two runs differing by exactly one flag. The control,
+  `--resume <id> --fork-session`, produced a fork holding all six of the source's user and
+  assistant records. Adding `--resume-session-at <uuid>` naming the first assistant *text*
+  record produced a fork that holds that record and nothing after it -- the trailing
+  attachment, the second prompt and the second reply are all absent -- with the new turn
+  chained directly onto the target. So *Fork from here* on a message keeps the clicked message
+  and drops everything after it, which is what clicking a reply means. Four facts beside the
+  answer. The flag is hidden (`hideHelp()`; it is not in `claude --help`), it is refused
+  without `--resume`, and its own description reads "only messages up to and including the
+  chain entry with `<message.id>` -- any chain-entry UUID, typically the kept turn's last
+  entry". A fork **preserves the source's record uuids**, so afleet can map the clicked
+  timeline item onto its copy in the fork without re-keying. The source session is untouched
+  -- 32 records before and after both runs -- so a truncating fork is non-destructive and
+  needs no warning on that ground. And there is a companion flag, `--resume-drops-turn
+  <message id>`, which declares the prompt uuid of the turn the truncation means to discard
+  and makes the CLI refuse the resume when the discarded range holds anything not attributable
+  to that turn -- absorbed queued messages, task notifications, content from other turns. It
+  is the CLI's own guard against a fork point that swallows more than the user pointed at, and
+  it is available to *Fork from here*; it was read from the binary's option table and not
+  exercised here.
+- 2026-09-04 C1/S12: The CLI does **not** refuse a second holder on the interactive path, so
+  §7.2's Contended state is reachable exactly as the rules assume, and afleet cannot delegate
+  the refusal (spike `spike-contention`, 2.1.259; no model turn is spent by any holder). With
+  a headless `--resume` live and registered, an interactive `claude --resume <id>` on a
+  pseudo-terminal opened the same session, rendered its history, warned about nothing, and
+  **registered a second record under the same `sessionId`**: the headless one as `{kind:
+  "interactive", entrypoint: "sdk-cli"}` with no `status`, the terminal one as `{kind:
+  "interactive", entrypoint: "cli", status: "idle"}`. The reverse order gives the same answer
+  -- with the terminal holder up first, the headless `--resume` completed its `initialize`
+  handshake with no error and an empty stderr, and both records sat side by side. So `kind`
+  does not separate the two holders and `entrypoint` does; and rules 3, 4 and 6 -- check
+  before spawn, check after handshake and yield, never resume a held session -- are
+  load-bearing rather than belt-and-braces, because nothing below afleet stops two writers
+  appending to one transcript. Both records disappeared when their processes exited, so the
+  registry is a live holder set and not a stale one.
+
+  `--bg --resume` is the exception the section guessed at, and it behaves as its help text
+  claims. Against the same live session it exits 0 and prints on stderr `note: session
+  8cc24a21 is open in another Claude Code process, so this started a copy as 93ff9119. The
+  original conversation is unchanged.` It starts a **new session id**, registers it as `{kind:
+  "bg", entrypoint: "cli", status: "idle"}`, and leaves the original alone. `claude agents
+  --json` reports the same process as `kind: "background"` with `state: "blocked"`, so the
+  registry file and the roster call one holder by two different words and rule 3's two reads
+  need reconciling rather than unioning. The Contended banner therefore cannot say the CLI
+  refused anything; the honest wording is that another process has the session open and afleet
+  has released it, with *Fork* offered -- which is what rules 4 and 6 already prescribe.
+- 2026-09-04 C1/S17: Both halves settle positively, and both of the clauses waiting on them
+  get simpler (spike `spike-agent-switch`, 2.1.259). **The runtime switch takes effect.**
+  `apply_flag_settings {settings: {agent: "probe-agent"}}` answers `success` with no
+  `response` key -- the shape S8 records -- and the very next turn's reply carried the agent's
+  marker word where the turn before it did not, with no restart. The readback is
+  `get_settings`, which reported `effective_keys: ["agent"]` with `source: "flagSettings"`;
+  `system/init.agent` was absent throughout, including on a session launched with `--agent`,
+  so it is not the field to verify against. §7.7's `/agent` row can therefore use
+  `apply_flag_settings` with the snapshot caveat instead of a quiescent restart. **And the
+  agent survives a resume.** A session launched with `--agent probe-agent`, whose definition
+  carries a non-empty `initialPrompt`, auto-submitted that prompt as a user turn ahead of
+  stdin -- the prepend §7.4 describes, observed as a `user` frame and a `result` arriving
+  before the host had written anything. Resumed with `--resume <id>` and **no** `--agent`, the
+  same session prepended nothing and its reply still carried the marker: it kept the agent. So
+  a restart need not re-pass `--agent`, re-passing it is precisely what fires the prepend, and
+  a channel whose agent has a non-empty `initialPrompt` **is** transparently restartable --
+  the interim notice-and-confirm §7.4 installed "until S17 establishes" is no longer needed.
+  One half this does not settle: no readback was found for an agent the *session* carries
+  rather than the flag settings, so a restart that wants to verify the agent survived has only
+  the system prompt's behaviour to go on.
