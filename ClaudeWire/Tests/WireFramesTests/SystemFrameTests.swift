@@ -10,9 +10,15 @@ final class SystemFrameTests: XCTestCase {
     func testInitCarriesToolsCapabilitiesAndVersion() throws {
         guard case .initialize(let i) = try system("system_init") else { return XCTFail() }
         XCTAssertEqual(i.claudeCodeVersion, "2.1.259")
-        XCTAssertTrue(i.tools.count >= 5)
+        // The sample is publication-redacted, so its lists are ours to state exactly rather than to floor:
+        // asserting the whole set is what notices a decoder that drops, reorders or invents a member.
+        XCTAssertEqual(i.tools, ["Task", "AskUserQuestion", "Bash", "Read", "Write"])
         XCTAssertEqual(i.mcpServers.first?.name, "afleet")
-        XCTAssertNotNil(i.capabilities)
+        XCTAssertEqual(i.capabilities, ["interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"])
+        XCTAssertEqual(i.fastModeState, "off")
+        XCTAssertEqual(i.agents, ["general-purpose", "Explore"])
+        XCTAssertEqual(i.skills, ["sample-plugin:sample-skill", "local-skill"])
+        XCTAssertEqual(i.plugins.count, 2)
         XCTAssertEqual(i.permissionMode, "default")
     }
     func testTaskFramesAreTyped() throws {

@@ -43,7 +43,7 @@ final class RedactorDifferentialTests: XCTestCase {
     /// Vectors chosen one per rule, on top of the whole sample corpus.
     private static let vectors: [String] = [
         // identity: key set, normalisation, the email substring, whole values of every type, placeholders
-        #"{"type":"control_response","response":{"subtype":"success","request_id":"i","response":{"accountUuid":"9f2","account_id":"7","organizationUuid":"o","organization_name":"Acme","userName":"m","user_id":"u","subscription_type":"max","fullName":"A E","emailAddress":"a@b.co","user":{"id":1},"organizationId":42,"account":null,"displayName":"Haiku","user_message_uuid":"x","hooks":{"UserPromptSubmit":["c"]},"pid":1}}}"#,
+        #"{"type":"control_response","response":{"subtype":"success","request_id":"i","response":{"accountUuid":"9f2","account_id":"7","organizationUuid":"o","organization_name":"Acme","userName":"m","user_id":"u","subscription_type":"max","fullName":"Alice Example","emailAddress":"a@b.co","user":{"id":1},"organizationId":42,"account":null,"displayName":"Haiku","user_message_uuid":"x","hooks":{"UserPromptSubmit":["c"]},"pid":1}}}"#,
         // identity: the counter path, and the same leaf name off it
         #"{"type":"result","subagent_stats":{"killed":{"user":3,"parent":1,"system":0}},"killed":{"user":9},"userName":"m"}"#,
         // secrets: containers of every type, null, bearer, and the token-counter test
