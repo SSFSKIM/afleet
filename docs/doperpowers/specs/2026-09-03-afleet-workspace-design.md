@@ -328,10 +328,17 @@ The first stdin line is `initialize`:
 
 Its response carries `commands`, `agents`, `models`, `output_style`,
 `available_output_styles`, `account`, `current_model`, `current_permission_mode`,
-`session_state`, `pid` (*SPEC 45.18.4*). The first `system/init` frame adds `tools`,
-`skills`, `plugins`, `agents`, `slash_commands` with its `terminal_slash_commands`
-subset, `mcp_servers`, `capabilities`, `claude_code_version`, `apiKeySource` and
-`messaging_socket_path` (*SPEC 45.10.4*). Both are kept on the channel's session object.
+`session_state`, `pid` (*SPEC 45.18.4*). **The handshake is complete when that response
+arrives.** The first `system/init` frame is not part of it: the engine emits `system/init`
+at the start of every turn (§7.3), so it arrives only after the first user message and never
+arrives on a session that handshakes without sending one — `resume-no-replay` and
+`zero-cost` contain no `system/init` at all, and in every other fixture it follows the first
+`user` frame. It adds `tools`, `skills`, `plugins`, `agents`, `slash_commands` with its
+`terminal_slash_commands` subset, `mcp_servers`, `capabilities`, `claude_code_version`,
+`apiKeySource` and `messaging_socket_path` (*SPEC 45.10.4*), and it reaches consumers on the
+event stream, not on the handshake value. Both payloads are kept on the channel's session
+object, each when it arrives; anything that needs `system/init` before the first turn does
+not have it and must not block on it.
 
 `supportedDialogKinds` names exactly the two families the headless dialog dispatcher ever
 forwards, `refusal_fallback_prompt` and `fable_overage_consent_prompt`; MCP elicitation
@@ -1935,8 +1942,9 @@ SwiftPM package or target that builds and tests without the children above it, p
   5 s wait, SIGTERM order. G2 (required, blocked-by C1.G1): every frame in every fixture
   decodes and re-encodes without loss of known fields, unknown frames become opaque
   values (item 36's ClaudeWire part). G3 (required): against the installed CLI, a
-  handshake completes, `mcp__afleet__send_user_file` appears in `system/init.tools` and
-  a round trip returns the file (S5's mechanism, item 29's wire half); `claude
+  handshake completes on the `initialize` response, the first turn's `system/init` lists
+  `mcp__afleet__send_user_file` in `tools` as observed on the event stream, and a round
+  trip returns the file (S5's mechanism, item 29's wire half); `claude
   --version` older than the baseline is refused (item 33's logic); the environment
   resolver yields the login shell's PATH and a `CLAUDE_CONFIG_DIR` set in `~/.zshrc` is
   honoured (items 34 and 48's wire half). G4 (required): `Tools/fetch-typings.sh`
@@ -2153,7 +2161,10 @@ SwiftPM package or target that builds and tests without the children above it, p
   environment table, `send(frame)`, `request(subtype, payload) async -> response`, an
   inbound stream of epoch-tagged frames and requests, `terminate()`, and the answer
   policy of §6.3 as the default handler for unknown inbound requests. The
-  `initialize` payload is §6.2's. Owner: C2. Binds C3, C4 and the fixtures of C1.
+  `initialize` payload is §6.2's, and spawn returns when the `initialize` response
+  arrives; the handshake value carries that response and nothing from `system/init`,
+  which is a first-turn frame on the event stream (§6.2). Owner: C2. Binds C3, C4 and
+  the fixtures of C1.
 - **X4 Timeline model.** `TimelineItem` as §7.3; record identity is logical stream plus
   uuid or hash; the durable projection and overlay category lists and the wire exclusion
   list are named constants the differential test and the renderer both read; the
@@ -3337,6 +3348,21 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   losslessness and opaque counts over the whole corpus, asserts typed decoding against the
   recorded fixtures only, and surfaces a synthetic decode failure as a named finding rather
   than accepting it silently or failing on it.
+- Observation: The engine's `system/init` is a first-turn frame, not a handshake frame, and a
+  transport written to wait for it at spawn hangs for its full timeout on every real launch.
+  Evidence: C2's live gate G3. Across all sixteen recorded fixtures the `initialize` response
+  is the first frame out; `system/init` follows the first `user` frame in fourteen and is
+  absent in the two that never send one. Six zero-cost live launches reproduced the timeout.
+  The bundle builds the frame inside the per-turn query path. Eleven tasks of review missed
+  it because the scripted stand-in every transport test ran against emitted `system/init`
+  right after `initialize`, having been written to the specification's assumption — every
+  test agreed with a wrong model and passed. C1's fake-claude was never wrong, because it
+  replays recorded frames.
+  Impact: §6.2 and X3 state that the handshake completes on the `initialize` response and
+  that `system/init` is an event-stream frame; C2's G3 is amended to observe it there. The
+  stand-in's contract becomes "models the recorded engine; behaviour no fixture shows is a
+  stand-in defect". G1 could not have caught this by construction — it is defined as provable
+  without the real CLI — which is the case for G3's existence in one line.
 
 ## Outcomes & Retrospective
 
@@ -3803,3 +3829,12 @@ Pending — written at finish.
   `type: "result"` literal in the binary does omit `session_id`, but it goes to the worker
   event channel, never to stdout, so the guarantee is about the wire this app reads and not
   about every result-shaped object the engine constructs. Verified first-hand at 2.1.258.
+- 2026-09-05: §6.2 and X3 now say the handshake completes on the `initialize` response and
+  that `system/init` is a first-turn frame delivered on the event stream, never on the
+  handshake value; C2's G3 acceptance observes it there. Raised by C2's live gate, whose
+  first real launch timed out because `spawn()` waited for a frame the engine does not send
+  until a message is submitted. §7.3's "`system/init` is expected at the start of every
+  turn" was already correct; §6.2's "both are kept on the session object" had been read as
+  "both arrive with the handshake". Flags C2 (in flight, fix wave dispatched), C3 and C4
+  (both consume `Handshake`; anything written to read `tools`, `capabilities` or
+  `mcp_servers` off it must read them off the first `system/init` on the stream instead).
