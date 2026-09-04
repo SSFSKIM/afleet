@@ -50,6 +50,9 @@ public enum WireError: Error, Sendable, Equatable {
     case controlError(String)
     case unknownRequest(RequestID)
     case notInRunningState(ProcessStatus)
+    /// A caller-supplied value cannot be handed to the CLI as the value of `option`. Thrown before anything
+    /// is spawned, so the configuration is rejected rather than partially applied.
+    case invalidArgument(option: String, reason: String)
 }
 
 public enum WireEvent: Sendable {

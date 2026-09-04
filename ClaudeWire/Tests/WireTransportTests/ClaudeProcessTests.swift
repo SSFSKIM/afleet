@@ -29,6 +29,15 @@ final class RecordingDiagnostics: DiagnosticsSink, @unchecked Sendable {
         lock.lock(); stored.append(line); lock.unlock()
     }
     var entries: [String] { lock.lock(); defer { lock.unlock() }; return stored }
+    /// The escalation trace, in order. `terminate()` records a step immediately before each signalling call
+    /// and nowhere else, so this is the record of what was actually signalled.
+    var terminateSteps: [String] {
+        entries.compactMap { line in
+            guard line.contains("\"event\":\"terminate_escalated\""),
+                  let o = (try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8)))?.objectValue else { return nil }
+            return o["step"]?.stringValue
+        }
+    }
 }
 
 final class Harness {

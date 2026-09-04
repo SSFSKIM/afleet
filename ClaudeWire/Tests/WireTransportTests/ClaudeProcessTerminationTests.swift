@@ -29,7 +29,8 @@ final class ClaudeProcessTerminationTests: XCTestCase {
         XCTAssertEqual(sig, SIGTERM)
     }
     func testIgnoredSIGTERMEscalatesToSIGKILLAndStatusIsTruthful() async throws {
-        let h = try Harness(); let p = h.make(scenario: "ignore_sigterm")
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "ignore_sigterm", diagnostics: sink)
         _ = try await p.spawn()
         let probe = Task { () -> [ProcessStatus] in
             var seen: [ProcessStatus] = []
@@ -42,6 +43,10 @@ final class ClaudeProcessTerminationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(elapsed, .seconds(10)); XCTAssertLessThan(elapsed, .seconds(14))
         guard case .exited(.signal(let sig, _), _)? = await h.expect({ if case .exited = $0 { return true }; return false }, "exited by SIGKILL") else { return }
         XCTAssertEqual(sig, SIGKILL)
+        // The whole escalation trace, as a sequence rather than a membership check. SIGKILL re-establishes
+        // liveness immediately before it signals, so a recheck that got the sense wrong would put
+        // `no_live_child_to_signal` here instead of `SIGKILL` and the child would outlive `terminate()`.
+        XCTAssertEqual(sink.terminateSteps, ["end_session", "stdin_closed", "SIGTERM", "SIGKILL"])
         let statuses = await probe.value
         XCTAssertTrue(statuses.contains(.terminating))
         // never .exited before the real exit: every .exited sample must come after all .terminating samples

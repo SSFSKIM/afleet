@@ -61,7 +61,7 @@ public actor ClaudeProcess {
     public func spawn(handshakeTimeout: Duration = .seconds(30)) async throws -> Handshake {
         guard status == .launching else { throw WireError.notInRunningState(status) }
         let p = box.process
-        p.executableURL = launch.binary; p.arguments = launch.arguments(); p.currentDirectoryURL = launch.cwd
+        p.executableURL = launch.binary; p.arguments = try launch.arguments(); p.currentDirectoryURL = launch.cwd
         p.environment = launch.childEnvironment(over: environment)
         p.standardInput = box.stdin; p.standardOutput = box.stdout; p.standardError = box.stderr
         p.terminationHandler = { [weak self] proc in
@@ -454,6 +454,16 @@ public actor ClaudeProcess {
         diagnostics.record(.terminateEscalated(step: "SIGTERM", epoch: epoch))
         box.process.terminate()
         if await waitForExit(upTo: .seconds(5)) != nil { return }
+        // Liveness is re-established here rather than carried over from the guard above: five seconds have
+        // passed, and in that window Foundation may have reaped the child and the kernel may have handed its
+        // pid to an unrelated process. The recheck narrows the window to the one SIGTERM already has — between
+        // `isRunning` reading true and the signal entering the kernel — but cannot close it, because user
+        // space has no way to signal a pid atomically with the check that it is still the pid it meant.
+        guard box.process.isRunning else {
+            diagnostics.record(.terminateEscalated(step: "no_live_child_to_signal", epoch: epoch))
+            _ = await waitForExit(upTo: .seconds(30))
+            return
+        }
         diagnostics.record(.terminateEscalated(step: "SIGKILL", epoch: epoch))
         kill(pid, SIGKILL)
         _ = await waitForExit(upTo: .seconds(30))

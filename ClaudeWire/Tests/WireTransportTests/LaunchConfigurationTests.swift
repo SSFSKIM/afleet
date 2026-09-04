@@ -8,9 +8,9 @@ final class LaunchConfigurationTests: XCTestCase {
     private let cwd = URL(fileURLWithPath: "/tmp/scratch")
     private let sid = SessionID("0f3a6e2c-9b1d-4e5f-8a7b-1c2d3e4f5a6b")!
 
-    func testNewChannelMinimalLineTokenForToken() {
+    func testNewChannelMinimalLineTokenForToken() throws {
         let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid))
-        XCTAssertEqual(c.arguments(), [
+        XCTAssertEqual(try c.arguments(), [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
             "--include-partial-messages", "--replay-user-messages", "--forward-subagent-text", "--include-hook-events",
             "--permission-prompt-tool", "stdio", "--permission-prompts", "host",
@@ -18,11 +18,11 @@ final class LaunchConfigurationTests: XCTestCase {
             "--enable-auth-status", "--session-mirror",
         ])
     }
-    func testEveryOptionalFlagInOrder() {
+    func testEveryOptionalFlagInOrder() throws {
         let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .resume(sid, fork: true), model: "opus", permissionMode: .plan, agent: "reviewer",
                                     effort: "high", name: "fix-auth", addDirectories: [URL(fileURLWithPath: "/tmp/a"), URL(fileURLWithPath: "/tmp/b")],
                                     worktree: .named("wt1"), allowBypass: true, promptSuggestions: true, settingSources: [], strictMCPConfig: true)
-        XCTAssertEqual(c.arguments(), [
+        XCTAssertEqual(try c.arguments(), [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
             "--include-partial-messages", "--replay-user-messages", "--forward-subagent-text", "--include-hook-events",
             "--permission-prompt-tool", "stdio", "--permission-prompts", "host",
@@ -32,9 +32,53 @@ final class LaunchConfigurationTests: XCTestCase {
             "--allow-dangerously-skip-permissions", "--enable-auth-status", "--session-mirror",
             "--prompt-suggestions", "true", "--setting-sources", "", "--strict-mcp-config",
         ])
-        XCTAssertEqual(LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid), worktree: .unnamed, settingSources: [.user, .project]).arguments().suffix(5),
+        XCTAssertEqual(try LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid), worktree: .unnamed, settingSources: [.user, .project]).arguments().suffix(5),
                        ["-w", "--enable-auth-status", "--session-mirror", "--setting-sources", "user,project"])
     }
+
+    /// The options whose value the caller writes, and which therefore reach the child as caller-chosen argv
+    /// text. `testEveryCallerSuppliedArgvTokenIsAValidatedOne` asserts this set is complete; the test below
+    /// asserts every member of it rejects an option-shaped value. Neither is worth much without the other.
+    private static let optionsCarryingCallerText: Set<String> = ["--model", "--agent", "--effort", "-n", "--add-dir", "-w"]
+
+    /// `-w` declares an optional value, so `worktree: .named("--allow-dangerously-skip-permissions")` used to
+    /// put a real permission-bypass flag on the command line with `allowBypass` false and never consulted.
+    /// The other five carry the same defect with a different name, so all six are pinned here.
+    func testOptionShapedValuesAreRejectedOnEveryOptionThatCarriesCallerText() {
+        let evil = "--allow-dangerously-skip-permissions"
+        var configs: [String: LaunchConfiguration] = [:]
+        var m = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)); m.model = evil; configs["--model"] = m
+        var a = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)); a.agent = evil; configs["--agent"] = a
+        var e = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)); e.effort = evil; configs["--effort"] = e
+        var n = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)); n.name = evil; configs["-n"] = n
+        var d = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)); d.addDirectories = [URL(fileURLWithPath: "/tmp/a")]; configs["--add-dir"] = d
+        var w = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)); w.worktree = .named(evil); configs["-w"] = w
+        XCTAssertEqual(Set(configs.keys), Self.optionsCarryingCallerText)
+        for (option, config) in configs where option != "--add-dir" {
+            XCTAssertThrowsError(try config.arguments(), option) { error in
+                guard case .invalidArgument(let o, _)? = error as? WireError else { return XCTFail("\(option): \(error)") }
+                XCTAssertEqual(o, option)
+            }
+        }
+        // `--add-dir` takes a URL, and `URL(fileURLWithPath:)` cannot produce a relative path, so its guard is
+        // unreachable from the public type today. It is checked all the same and asserted benign here rather
+        // than left out, because the guard is what keeps it unreachable if the field ever takes a String.
+        XCTAssertEqual(try d.arguments().contains("/tmp/a"), true)
+    }
+
+    /// The completeness half: give every caller-supplied field a distinct marker, then assert that the set of
+    /// options preceding a marker in the produced argv is exactly the set the rejection test covers. A field
+    /// added later that forwards caller text without a guard fails here.
+    func testEveryCallerSuppliedArgvTokenIsAValidatedOne() throws {
+        let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid), model: "MARKmodel", permissionMode: .plan,
+                                    agent: "MARKagent", effort: "MARKeffort", name: "MARKname",
+                                    addDirectories: [URL(fileURLWithPath: "/MARKdir")], worktree: .named("MARKworktree"),
+                                    allowBypass: true, promptSuggestions: true, settingSources: [.user], strictMCPConfig: true)
+        let argv = try c.arguments()
+        let carrying = Set(argv.indices.filter { argv[$0].contains("MARK") }.map { argv[$0 - 1] })
+        XCTAssertEqual(carrying, Self.optionsCarryingCallerText)
+    }
+
     func testChildEnvironmentTableAndForbiddenVariables() {
         let base = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "HOME": "/Users/x", "CLAUDE_CODE_REMOTE": "1", "CLAUDE_CODE_CONTAINER_ID": "c", "CLAUDE_CODE_ENTRYPOINT": "cli"],
                                        shell: "/bin/zsh", capturedAt: .init(), mode: .login)

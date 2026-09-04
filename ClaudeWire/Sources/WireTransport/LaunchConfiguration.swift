@@ -46,8 +46,23 @@ public struct LaunchConfiguration: Hashable, Sendable {
         self.environment = environment; self.configHomeOverride = configHomeOverride
     }
 
-    /// Parent §6.1, fixed order.
-    public func arguments() -> [String] {
+    /// A caller-supplied string reaches the child as one argv token, and a token beginning with `-` is read
+    /// by the CLI's parser as a further option rather than as the value it was meant to be.
+    ///
+    /// The hazard is not cosmetic. `-w` declares an **optional** value, so a worktree named
+    /// `--allow-dangerously-skip-permissions` does not become the worktree's name — it becomes a real
+    /// permission-bypass flag, with the `allowBypass` gate never consulted. Every option whose value the
+    /// caller chooses goes through here, not only that one: the defect is the class, and `--model`,
+    /// `--agent`, `--effort`, `-n` and `--add-dir` are the same mistake waiting for a different name.
+    private static func token(_ value: String, for option: String) throws -> String {
+        guard !value.hasPrefix("-") else {
+            throw WireError.invalidArgument(option: option, reason: "a value beginning with '-' is parsed as an option: \(value)")
+        }
+        return value
+    }
+
+    /// Parent §6.1, fixed order. Throws rather than emitting a line the CLI would misparse.
+    public func arguments() throws -> [String] {
         var a = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                  "--include-partial-messages", "--replay-user-messages", "--forward-subagent-text", "--include-hook-events",
                  "--permission-prompt-tool", "stdio", "--permission-prompts", "host"]
@@ -55,13 +70,13 @@ public struct LaunchConfiguration: Hashable, Sendable {
         case .new(let id): a += ["--session-id", id.description]
         case .resume(let id, let fork): a += ["--resume", id.description]; if fork { a.append("--fork-session") }
         }
-        if let model { a += ["--model", model] }
+        if let model { a += ["--model", try Self.token(model, for: "--model")] }
         if let permissionMode { a += ["--permission-mode", permissionMode.rawValue] }
-        if let agent { a += ["--agent", agent] }
-        if let effort { a += ["--effort", effort] }
-        if let name { a += ["-n", name] }
-        for d in addDirectories { a += ["--add-dir", d.path] }
-        switch worktree { case .unnamed?: a.append("-w"); case .named(let n)?: a += ["-w", n]; case nil: break }
+        if let agent { a += ["--agent", try Self.token(agent, for: "--agent")] }
+        if let effort { a += ["--effort", try Self.token(effort, for: "--effort")] }
+        if let name { a += ["-n", try Self.token(name, for: "-n")] }
+        for d in addDirectories { a += ["--add-dir", try Self.token(d.path, for: "--add-dir")] }
+        switch worktree { case .unnamed?: a.append("-w"); case .named(let n)?: a += ["-w", try Self.token(n, for: "-w")]; case nil: break }
         if allowBypass { a.append("--allow-dangerously-skip-permissions") }
         a += ["--enable-auth-status", "--session-mirror"]
         if promptSuggestions { a += ["--prompt-suggestions", "true"] }
@@ -85,6 +100,11 @@ public struct LaunchConfiguration: Hashable, Sendable {
     public func childEnvironment(over base: ResolvedEnvironment) -> [String: String] {
         var env = base.variables
         for key in Array(env.keys) where key.hasPrefix("CLAUDE") { env[key] = nil }
+        // `ANTHROPIC_API_KEY` deliberately survives, per the parent Decision Log. afleet resolves the login
+        // shell once and its sessions authenticate exactly as the user's terminal sessions do; scrubbing it
+        // would split authentication so that owned channels used OAuth while adopted ones used the key, which
+        // is the worse outcome. Whether a session is billing against a key at all is a separate question, and
+        // it is answered separately, by `system/init.apiKeySource`.
         env["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"] = "1"
         env["CLAUDE_AUTO_BACKGROUND_TASKS"] = "1"
         env["CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK"] = "1"
