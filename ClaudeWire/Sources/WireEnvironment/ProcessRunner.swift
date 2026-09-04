@@ -19,12 +19,15 @@ public struct FoundationProcessRunner: ProcessRunner {
     }
 }
 
-/// Single owner of a Process, its pipes and the accumulated output. Every mutation of this object's state,
-/// and every `isRunning` / `terminate()` / `terminationStatus` access, happens on `queue`; the one exception
-/// is the thread that blocks in `waitUntilExit()`, which touches nothing else and hops back to `queue` to
-/// report. Reads are event-driven `DispatchSourceRead`s rather than blocking `readDataToEndOfFile` calls, so
-/// settlement never waits on a pipe: a grandchild that inherited stdout and outlives the child (a `.zshrc`
-/// that backgrounds a daemon) cannot hold `run` open past the timeout.
+/// Single owner of a Process, its pipes and the accumulated output.
+///
+/// The invariant: every mutation of this object's state, and every `isRunning`, `terminate()` and
+/// `terminationStatus` access, happens on `queue`. The sole exception is the thread that blocks in
+/// `waitUntilExit()`; it touches nothing else and hops back to `queue` to report the exit.
+///
+/// Reads are event-driven, non-blocking `DispatchSourceRead`s rather than blocking `readDataToEndOfFile`
+/// calls, because settlement must never wait on a pipe: a grandchild that inherited stdout and outlives the
+/// child — a `.zshrc` that backgrounds a daemon — would otherwise hold `run` open long past the timeout.
 private final class ProcessJob: @unchecked Sendable {
     /// After `terminate()`, how long the child gets to exit before SIGKILL, and then before we settle anyway.
     private static let grace = DispatchTimeInterval.milliseconds(500)
@@ -47,7 +50,9 @@ private final class ProcessJob: @unchecked Sendable {
     func start() throws { try queue.sync { try process.run() } }
 
     func finish(timeout: Duration, completion: @escaping @Sendable (ProcessOutput) -> Void) {
-        queue.async { [self] in
+        // Synchronously, so that no timeout — however small — can latch `settled` before there is a
+        // continuation to resume.
+        queue.sync { [self] in
             self.completion = completion
             drain(out.fileHandleForReading) { [self] in stdoutData.append($0) }
             drain(err.fileHandleForReading) { [self] in stderrData.append($0) }
@@ -73,6 +78,9 @@ private final class ProcessJob: @unchecked Sendable {
     /// even when the writer never went away.
     private func drain(_ handle: FileHandle, into append: @escaping (Data) -> Void) {
         let fd = handle.fileDescriptor
+        // The handlers and the settlement timers share `queue`: a read that blocked would stall the very
+        // timers meant to bound this call, and the EAGAIN arm below could never be reached.
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         openDrains += 1
         source.setEventHandler {
