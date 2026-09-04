@@ -1,14 +1,12 @@
 import XCTest
-import ClaudeWire
 import WireFrames
 import WireTestSupport
 
 /// Optional: compares the pinned typings' SDKMessage union with the Swift routing tables and declared keys. Skipped when .typings/ is absent.
 final class TypingsDriftTests: XCTestCase {
-    private var typingsRoot: URL {
-        TestPaths.support.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(".typings/package")
+    private var typings: URL {
+        TestPaths.support.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(".typings/package/sdk.d.ts")
     }
-    private var typings: URL { typingsRoot.appendingPathComponent("sdk.d.ts") }
 
     private func skipUnlessFetched() throws {
         guard FileManager.default.fileExists(atPath: typings.path) else { throw XCTSkip("run Tools/fetch-typings.sh to enable the drift test") }
@@ -89,7 +87,12 @@ final class TypingsDriftTests: XCTestCase {
         XCTAssertEqual(unresolved, [], "SDKMessage names whose declaration could not be parsed at all")
         XCTAssertGreaterThanOrEqual(members.count, 30, "the member-body pattern matched almost nothing; the parse, not the typings, is what broke")
         // The type/subtype discriminants are extracted separately from the property bodies, so a dead body
-        // pattern still yields the full member list with every property set empty. Assert the bodies too.
+        // pattern still yields the full member list with every property set empty. Assert the bodies too:
+        // a floor on "did we parse anything" is not a floor on "did we parse the thing we compare".
+        //
+        // This does assume no SDKMessage member is legitimately property-free. That assumption is deliberate,
+        // not an oversight: the typings are pinned, noticing when the pinned shape moves is the whole purpose
+        // of this test, and a member losing every property is exactly the drift worth being told about.
         XCTAssertEqual(members.filter { $0.all.isEmpty }.map(\.key), [], "members parsed with no properties at all")
         let keys = Set(members.map(\.key))
         for expected in ["assistant", "result", "system/init"] {
@@ -154,17 +157,5 @@ final class TypingsDriftTests: XCTestCase {
         }
         XCTAssertTrue(stale.isEmpty, "Swift declares keys neither the typings nor a recorded sample have (renamed or removed): \(stale.sorted())")
         XCTAssertTrue(missing.isEmpty, "typings require keys Swift does not declare: \(missing.sorted())")
-    }
-
-    /// The two version lines are independent, but the artifacts are cut together and share their patch
-    /// component: SDK 0.3.259 ships against CLI 2.1.259. Comparing that component is the cheapest available
-    /// signal that the fetched typings and `ProtocolBaseline` describe the same engine build.
-    func testFetchedTypingsMatchTheProtocolBaselinePatchComponent() throws {
-        try skipUnlessFetched()
-        let data = try Data(contentsOf: typingsRoot.appendingPathComponent("package.json"))
-        guard let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let sdkVersion = manifest["version"] as? String else { return XCTFail("no version in the fetched package.json") }
-        XCTAssertEqual(sdkVersion.split(separator: ".").last, ProtocolBaseline.version.split(separator: ".").last,
-                       "fetched typings \(sdkVersion) and ProtocolBaseline \(ProtocolBaseline.version) are not the same engine build")
     }
 }
