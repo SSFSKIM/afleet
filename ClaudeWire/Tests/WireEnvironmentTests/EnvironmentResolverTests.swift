@@ -1,23 +1,8 @@
 import XCTest
 import AfleetCore
 import WireEnvironment
+import WireTestSupport
 
-/// A runner that replays scripted outputs per invocation, in order.
-struct ScriptedRunner: ProcessRunner {
-    let outputs: [ProcessOutput]
-    let calls: Recorder
-    final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var storage: [[String]] = []
-        var invocations: [[String]] { lock.lock(); defer { lock.unlock() }; return storage }
-        /// Records one invocation and returns its index, so a caller never reads `invocations` unlocked.
-        @discardableResult func add(_ a: [String]) -> Int { lock.lock(); defer { lock.unlock() }; storage.append(a); return storage.count - 1 }
-    }
-    func run(_ executable: URL, arguments: [String], environment: [String: String], timeout: Duration) async throws -> ProcessOutput {
-        let i = calls.add(arguments)
-        return outputs[min(i, outputs.count - 1)]
-    }
-}
 private func env(_ pairs: [String], banner: String = "", sentinel: Bool = true) -> Data {
     var d = Data(banner.utf8)
     if sentinel { d += Data("__AFLEET_ENV__\0".utf8) }

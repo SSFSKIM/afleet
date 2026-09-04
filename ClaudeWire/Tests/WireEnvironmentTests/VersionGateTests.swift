@@ -1,5 +1,6 @@
 import XCTest
 import WireEnvironment
+import WireTestSupport
 
 final class VersionGateTests: XCTestCase {
     private func gate(_ stdout: String, exit: Int32 = 0) -> VersionGate {

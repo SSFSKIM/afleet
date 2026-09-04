@@ -17,7 +17,7 @@ let package = Package(
                                                      .product(name: "AfleetCore", package: "AfleetCore")], swiftSettings: v6),
         .target(name: "ClaudeWire", dependencies: ["WireFrames", "WireMCP", "WireEnvironment", "WireDiagnostics", "WireTransport",
                                                    .product(name: "AfleetCore", package: "AfleetCore")], swiftSettings: v6),
-        .target(name: "WireTestSupport", dependencies: ["WireFrames"], path: "Sources/WireTestSupport", swiftSettings: v6),
+        .target(name: "WireTestSupport", dependencies: ["WireFrames", "WireEnvironment"], path: "Sources/WireTestSupport", swiftSettings: v6),
         .testTarget(name: "WireFramesTests", dependencies: ["WireFrames", "WireTestSupport"], swiftSettings: v6),
         .testTarget(name: "WireMCPTests", dependencies: ["WireMCP", "WireTestSupport"], swiftSettings: v6),
         .testTarget(name: "WireEnvironmentTests", dependencies: ["WireEnvironment", "WireTestSupport"], swiftSettings: v6),

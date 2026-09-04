@@ -16,12 +16,19 @@ final class ImportGraphTests: XCTestCase {
     private let alwaysAllowed: Set<String> = ["Foundation", "CryptoKit"]
 
     /// X1's layering. A target may depend only on strictly lower ranks.
+    ///
+    /// `WireTestSupport` sits above everything rather than beside the rank-2 modules. It is scaffolding for
+    /// the test targets, not part of the shipped product graph, so it may legitimately reach any module it
+    /// helps exercise — it already needs `WireEnvironment` for `ScriptedRunner`. Putting it at the top keeps
+    /// the direction that matters enforceable: no product module may depend on it, because no rank below 5
+    /// may point at 5.
     private let rank: [String: Int] = [
         "AfleetCore": 0,
         "WireFrames": 1,
-        "WireMCP": 2, "WireEnvironment": 2, "WireDiagnostics": 2, "WireTestSupport": 2,
+        "WireMCP": 2, "WireEnvironment": 2, "WireDiagnostics": 2,
         "WireTransport": 3,
         "ClaudeWire": 4,
+        "WireTestSupport": 5,
     ]
 
     private func moduleNames() throws -> [String] {
