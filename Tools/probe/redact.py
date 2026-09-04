@@ -35,6 +35,20 @@ SK_ANT_RE = re.compile(r"sk-ant-[A-Za-z0-9_\-]+")
 JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}")
 QUERY_RUN_RE = re.compile(r"([?&][A-Za-z0-9_\-]+=)([A-Fa-f0-9]{32,}|[A-Za-z0-9+/=_\-]{32,})")
 QUERY_RE = re.compile(r"\?.*$")
+# The owner and group columns of an `ls -l` line, matched by **position** rather than by
+# name. A directory listing carries the recording machine's account name in a place no other
+# rule looks: it is not the home directory, not the hostname and not an identity-named field,
+# so rules 1 to 3 walk straight past it. Substituting the account name wherever it appears
+# would be the wrong instrument -- this machine's is `new`, and a blanket substitution would
+# corrupt every fixture containing the word, which is the same reason the hostname rule
+# carries a length guard. Position makes it certain instead: a ten-character mode string and
+# a link count are together a strong enough anchor that nothing in prose reaches this, and the
+# rule holds on a machine whose account name is a person's name, which is the case it exists
+# for. The unstructured occurrences are handed to the reviewer by `scan_report_only`, which is
+# §4.5's existing division of labour. Idempotent: `<user>` and `<group>` match the same groups
+# on a second pass and substitute to themselves.
+LS_LONG_RE = re.compile(r"([-dlbcps][-rwxSsTtLl]{9}[@+.]?\s+\d+\s+)(\S+)(\s+)(\S+)")
+LS_USER, LS_GROUP = "<user>", "<group>"
 # A key that redaction already replaced. `redact` re-runs on a committed fixture, and
 # without this a `<email>` key would re-trigger the `email` substring test below and
 # overwrite its own value on the second pass.
@@ -180,6 +194,8 @@ class Redactor:
             if k and record: self._hit("secrets", path)
         out, k = QUERY_RUN_RE.subn(lambda m: m.group(1) + "<redacted>", out)
         if k and record: self._hit("secrets", path)
+        out, k = LS_LONG_RE.subn(lambda m: m.group(1) + LS_USER + m.group(3) + LS_GROUP, out)
+        if k and record: self._hit("identity", path)
         for h in (self.home, self.home_raw):
             if h and h != "/" and h in out:
                 out = out.replace(h, "~")
@@ -323,6 +339,8 @@ def _string_hits(s, path, probe, where=""):
         hits.append("%s: email%s" % (path, where))
     if SK_ANT_RE.search(s) or JWT_RE.search(s) or QUERY_RUN_RE.search(s):
         hits.append("%s: secret pattern%s" % (path, where))
+    if any(m.group(2) != LS_USER or m.group(4) != LS_GROUP for m in LS_LONG_RE.finditer(s)):
+        hits.append("%s: ls -l owner column%s" % (path, where))
     if probe.home in s or probe.home_raw in s:
         hits.append("%s: home directory%s" % (path, where))
     for h in (probe.hostname, probe.short_host):
@@ -384,14 +402,36 @@ def _line_of(text, index):
 
 
 def scan_report_only(text, author, home):
-    """The two findings only a human can judge in context: reported, never failed.
+    """The findings only a human can judge in context: reported, never failed.
 
     These name what matched and where, and never echo it. The material is exactly what the
     redactor leaves alone -- that is why a human has to judge it -- so it cannot be made safe
     by redacting the finding, and §4.5 sends the reviewer to the file anyway. One finding per
     line keeps a name that recurs on every transcript line from burying the rest.
+
+    The account name -- the last segment of the home directory -- joins the author's name and a
+    foreign `/Users/` path here rather than among the substitutions, and for the same reason
+    they are here. Where its position makes it certain it is redacted outright (`LS_LONG_RE`);
+    everywhere else it is an ordinary word that may or may not be an identifier, which is a
+    judgement, and substituting it blindly would corrupt any fixture whose prose contains it.
+    Matched on word boundaries so a name inside a longer word does not report.
+
+    It reports **once per file** with a line count, where the author's name reports once per
+    line, and the difference is the point. An author's name is rare enough that each occurrence
+    is worth a look. An account name may be an ordinary English word -- on the machine this was
+    written on it is `new`, which occurs 120 times across the corpus, every one of them prose --
+    so a per-line finding would bury the two checks that already live here under a hundred lines
+    nobody reads. A count and a first line send the reviewer to the same place without costing
+    them the rest of the report.
     """
     hits = []
+    account = os.path.basename(os.path.normpath(home)) if home else ""
+    if account:
+        lines = sorted({_line_of(text, m.start())
+                        for m in re.finditer(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(account), text)})
+        if lines:
+            hits.append("the account name appears on %d line(s), first at line %d; judge whether any of them "
+                        "identifies anyone" % (len(lines), lines[0]))
     if author:
         seen = set()
         start = text.find(author)

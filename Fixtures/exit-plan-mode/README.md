@@ -41,3 +41,15 @@ Recorded on 2.1.259 under the scratch config home, model `haiku`, `--max-turns 5
 ends `result/error_max_turns` with exit code 1, which is where this scenario ends by
 nature. Everything item 7 needs is recorded before the cap. `initial/` and `artifacts/`
 are empty.
+
+## 2026-09-04: re-redacted in place
+
+The plan-mode session ran `ls -l` in the scratch cwd, and the resulting listing carried the
+recording machine's OS account name in its owner column, in `frames.ndjson` and in the session
+transcript. No §4.5 rule looked there: an owner column is neither the home directory nor the
+hostname nor an identity-named field. `LS_LONG_RE` now redacts the owner and group columns **by
+position**, so the rule needs no knowledge of the account name, and `make redact` was re-run
+over this fixture. The listing reads `<user>  <group>` and nothing else about the recording
+changed. `redaction.json` was rewritten by that run and therefore records what a re-run over
+already-redacted bytes finds rather than what the original recording redacted; the recording-time
+manifest is in the fixture's first commit.

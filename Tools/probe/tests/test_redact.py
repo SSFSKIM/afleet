@@ -33,6 +33,38 @@ class RedactTextTests(unittest.TestCase):
         self.assertEqual(self.r.redact_text("0123456789abcdef0123456789abcdef"), "0123456789abcdef0123456789abcdef")
 
 
+    def test_an_ls_long_listing_loses_its_owner_and_group_columns(self):
+        """A directory listing carries the account name where no other rule looks: not the home
+        path, not the hostname, not an identity-named field."""
+        listing = ("total 24\n"
+        "drwxr-xr-x@  5 probeuser  wheel   160  9 4 20:54 .\n"
+        "-rw-r--r--@  1 probeuser  staff    11  9 4 20:54 one.txt\n"
+        "lrwxr-xr-x   1 probeuser  staff     3  9 4 20:54 link -> one.txt\n")
+        out = self.r.redact_text(listing)
+        self.assertNotIn("probeuser", out)
+        self.assertNotIn("wheel", out)
+        self.assertNotIn("staff", out)
+        self.assertEqual(out.count("<user>"), 3)
+        self.assertEqual(out.count("<group>"), 3)
+        self.assertIn("one.txt", out)          # the rest of the line is evidence and stays
+        self.assertIn("total 24", out)
+
+    def test_the_owner_column_rule_is_positional_and_idempotent(self):
+        """It cannot know the account name, and `redact` re-runs on committed fixtures."""
+        once = self.r.redact_text("-rw-r--r--  1 someone  somegroup  4 x")
+        self.assertEqual(once, "-rw-r--r--  1 <user>  <group>  4 x")
+        self.assertEqual(self.r.redact_text(once), once)
+
+    def test_the_owner_column_rule_does_not_reach_prose(self):
+        """A mode string needs a link count after it, which prose does not supply. This is why
+        the account name is not substituted wherever it appears: it is an ordinary word."""
+        for s in ("the new wheel is round",
+                  "-rw-r--r-- means owner-writable",
+                  "5 probeuser wheel spokes",
+                  "chmod to drwxr-xr-x when done"):
+            self.assertEqual(self.r.redact_text(s), s)
+
+
 class RedactJsonTests(unittest.TestCase):
     def setUp(self):
         self.r = redact.Redactor(home="/Users/probe", hostname="probe-mac")
@@ -126,6 +158,22 @@ class ScanTests(unittest.TestCase):
     def test_report_only(self):
         hits = redact.scan_report_only("by Probe Person in /Users/someone/x", author="Probe Person", home="/Users/probe")
         self.assertEqual(len(hits), 2)
+
+    def test_an_unredacted_owner_column_is_a_hard_failure_and_a_redacted_one_is_not(self):
+        dirty = {"out": "-rw-r--r--@  1 probe  staff  11  9 4 20:54 one.txt"}
+        self.assertTrue(any("ls -l owner column" in h for h in redact.scan(dirty, home="/Users/probe")))
+        clean = redact.Redactor(home="/Users/probe").redact_text(dirty["out"])
+        self.assertEqual(redact.scan({"out": clean}, home="/Users/probe"), [])
+
+    def test_the_account_name_is_reported_where_position_cannot_settle_it(self):
+        """Hard redaction where position makes it certain, a reviewer where judgement is needed.
+        Word boundaries keep a name inside a longer word from reporting."""
+        hits = redact.scan_report_only("ask probe about it\nprober is someone else\nfine\nprobe again\n",
+                                       author=None, home="/Users/probe")
+        self.assertEqual([h for h in hits if "account name" in h],
+                         ["the account name appears on 2 line(s), first at line 1; judge whether any of them "
+                          "identifies anyone"])
+        self.assertEqual(redact.scan_report_only("prober only\n", author=None, home="/Users/probe"), [])
 
 
 class RedactKeyTests(unittest.TestCase):

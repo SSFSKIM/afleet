@@ -52,7 +52,11 @@ recording and neither true of the main stream:
 The main transcript's 33 records are reproduced by its mirror exactly, as in every other
 recording in this corpus.
 
-**One review note.** The Explore agent ran `ls -l` in the scratch cwd, so a `tool_result` in
-this fixture carries the recording machine's OS account short name in the listing's owner
-column. §4.5's rules substitute the home directory and the hostname but say nothing about a
-bare account name, which no earlier scenario put on the wire.
+**One review note, since closed.** The Explore agent ran `ls -l` in the scratch cwd, and until
+`LS_LONG_RE` landed the resulting `tool_result` carried the recording machine's OS account name
+in the listing's owner column — in `frames.ndjson`, in the subagent's transcript and in the
+`.output` artifact alike, three file kinds none of §4.5's rules looked at, since an owner column
+is neither the home directory nor the hostname nor an identity-named field. The owner and group
+columns are now redacted **by position**, so the rule needs no knowledge of the account name and
+holds on a machine where that name is a person's. This fixture was re-redacted in place
+afterwards; the listing reads `<user>  <group>` and everything else about the line is intact.

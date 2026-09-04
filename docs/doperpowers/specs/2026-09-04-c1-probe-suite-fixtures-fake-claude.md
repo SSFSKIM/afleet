@@ -1379,3 +1379,26 @@ Pending — written at finish.
   ritual would find something. What this wave adds is the converse -- two of the five runs found
   something, both times a property of a recording rather than of a binary, which is the failure
   mode that erodes a gate fastest if it is waved through.
+- 2026-09-04: §4.5 gains a seventh substitution and a third report-only check, both about the
+  account name, and the split between them is the point. A directory listing carries the
+  recording user's account name in the owner column of every line, which is not the home
+  directory, not the hostname and not an identity-named field, so rules 1 to 3 walked past it;
+  `exit-plan-mode` and `explore-depth-1` carried it in `frames.ndjson`, in a session transcript,
+  in a **subagent** transcript and in an `artifacts/` file. On this machine the name is `new`,
+  an innocuous English word, which is exactly why it survived review twice and exactly why the
+  fix must not depend on that luck -- on another machine it is a person's name. So the rule is
+  **positional**: a ten-character mode string followed by a link count is a strong enough anchor
+  that the owner and group columns can be replaced with `<user>` and `<group>` without knowing
+  what account name to look for, which is what makes it hold on any machine. A blanket
+  substitution of the account string would have been the wrong instrument for the same reason
+  the hostname rule carries a length guard -- substituting `new` everywhere would corrupt every
+  fixture whose prose contains the word. The unstructured occurrences go to `scan_report_only`,
+  beside the author's name and a foreign `/Users/` path, which is the module's existing division
+  of labour: hard redaction where position makes it certain, a human where judgement is needed.
+  That check reports **once per file with a line count**, not once per line as the author's name
+  does, because `new` occurs 120 times across the corpus and a per-line finding would bury the
+  two checks already living there under a hundred lines nobody reads. Both fixtures were
+  re-redacted in place; `verify` now fails an unredacted owner column as a hard finding. The
+  general lesson, which is what belongs in the rules rather than this incident: a redaction rule
+  that keys on *what* a value is can only catch values it was told about, and one that keys on
+  *where* a value sits catches the ones nobody thought of.
