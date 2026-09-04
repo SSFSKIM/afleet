@@ -19,6 +19,9 @@ final class VersionGateTests: XCTestCase {
         guard case .unparseable(let out) = await gate("command not found", exit: 127).check(binary: URL(fileURLWithPath: "/x")) else { return XCTFail() }
         XCTAssertEqual(out, "command not found")
     }
+    func testAfleetVersionIsPinned() {
+        XCTAssertEqual(ProtocolBaseline.afleetVersion, "0.1.0")
+    }
     func testSemanticVersionOrdering() {
         XCTAssertLessThan(SemanticVersion(parsing: "2.1.9")!, SemanticVersion(parsing: "2.1.10")!)
         XCTAssertEqual(ProtocolBaseline.version, "2.1.259")

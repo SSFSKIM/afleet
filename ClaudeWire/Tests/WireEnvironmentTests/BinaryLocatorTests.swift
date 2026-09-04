@@ -24,6 +24,10 @@ final class BinaryLocatorTests: XCTestCase {
         let local = try exe("home/.local/bin/claude")
         XCTAssertEqual(BinaryLocator.locate(in: env(path: [tmp.appendingPathComponent("a").path]), override: nil), local)
     }
+    func testDirectoryNamedClaudeIsSkipped() throws {
+        try FileManager.default.createDirectory(at: tmp.appendingPathComponent("a/claude"), withIntermediateDirectories: true)
+        XCTAssertNil(BinaryLocator.locate(in: env(path: [tmp.appendingPathComponent("a").path]), override: nil))
+    }
     func testNonExecutableIsSkipped() throws {
         let u = tmp.appendingPathComponent("a/claude"); try Data().write(to: u)   // not executable
         XCTAssertNil(BinaryLocator.locate(in: env(path: [tmp.appendingPathComponent("a").path]), override: nil))

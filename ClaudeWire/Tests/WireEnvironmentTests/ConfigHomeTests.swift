@@ -16,6 +16,11 @@ final class ConfigHomeTests: XCTestCase {
         let h = ConfigHome.derive(from: env(["HOME": "/Users/x", "CLAUDE_CODE_PROJECT_DIR_NAME": "proj"]))
         XCTAssertNil(h.projectDirName)
     }
+    func testOtherUsersTildeIsNotExpanded() {
+        let h = ConfigHome.derive(from: env(["HOME": "/Users/x", "CLAUDE_CONFIG_DIR": "~bob/cfg"]))
+        XCTAssertTrue(h.root.path.hasSuffix("~bob/cfg"), h.root.path)
+        XCTAssertFalse(h.root.path.contains("/Users/xbob"), h.root.path)
+    }
     func testEmptyConfigDirCountsAsUnset() {
         XCTAssertEqual(ConfigHome.derive(from: env(["HOME": "/Users/x", "CLAUDE_CONFIG_DIR": ""])).source, .default)
     }

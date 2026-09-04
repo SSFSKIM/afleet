@@ -6,12 +6,16 @@ import WireEnvironment
 struct ScriptedRunner: ProcessRunner {
     let outputs: [ProcessOutput]
     let calls: Recorder
-    final class Recorder: @unchecked Sendable { var invocations: [[String]] = []; let lock = NSLock()
-        func add(_ a: [String]) { lock.lock(); invocations.append(a); lock.unlock() } }
+    final class Recorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [[String]] = []
+        var invocations: [[String]] { lock.lock(); defer { lock.unlock() }; return storage }
+        /// Records one invocation and returns its index, so a caller never reads `invocations` unlocked.
+        @discardableResult func add(_ a: [String]) -> Int { lock.lock(); defer { lock.unlock() }; storage.append(a); return storage.count - 1 }
+    }
     func run(_ executable: URL, arguments: [String], environment: [String: String], timeout: Duration) async throws -> ProcessOutput {
-        calls.add(arguments)
-        let i = min(calls.invocations.count - 1, outputs.count - 1)
-        return outputs[i]
+        let i = calls.add(arguments)
+        return outputs[min(i, outputs.count - 1)]
     }
 }
 private func env(_ pairs: [String], banner: String = "", sentinel: Bool = true) -> Data {
@@ -60,6 +64,13 @@ final class EnvironmentResolverTests: XCTestCase {
         let runner = ScriptedRunner(outputs: [.init(stdout: env(["GOOD=1", "not an assignment", "9BAD=2", "ALSO_GOOD=a=b"]), stderr: Data(), exitCode: 0, timedOut: false)], calls: .init())
         let r = await EnvironmentResolver(runner: runner).resolve(shell: "/bin/zsh", timeout: .seconds(5))
         XCTAssertEqual(r.variables, ["GOOD": "1", "ALSO_GOOD": "a=b"])
+    }
+    func testSentinelWithNoAssignmentsFallsThrough() async throws {
+        let rec = ScriptedRunner.Recorder()
+        let runner = ScriptedRunner(outputs: [.init(stdout: env([], banner: "truncated"), stderr: Data(), exitCode: 0, timedOut: false)], calls: rec)
+        let r = await EnvironmentResolver(runner: runner).resolve(shell: "/bin/zsh", timeout: .seconds(5))
+        XCTAssertEqual(r.mode, .processFallback)
+        XCTAssertEqual(rec.invocations.count, 2)
     }
     /// The rule is `^[A-Za-z_][A-Za-z0-9_]*=`: Unicode letters and Unicode digits are not variable names.
     func testNonASCIINamesAreRejected() async throws {
