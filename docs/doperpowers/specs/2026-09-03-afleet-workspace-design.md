@@ -2242,7 +2242,13 @@ directory, never under any config home.
   contract; the fallback is a Revision Note, not a re-cut.
 - **Swift 6.3 strict concurrency friction** in the actor-based process layer and the
   SwiftUI shell. Mitigation: C2 sets the concurrency conventions (actors for processes,
-  `Sendable` frames, `@MainActor` view models) that later children inherit.
+  `Sendable` frames, `@MainActor` view models) that later children inherit. Those
+  conventions state a *property*, not an allowlist: an escape from checked concurrency is
+  permitted where a type is a single-owner box whose state is reachable from one place that
+  serialises every access, and each use documents which mechanism serialises it. An
+  enumeration of blessed type names goes stale silently the first time a legitimate new case
+  appears, and an inheriting child cannot tell a missing entry from a violation; a stated
+  property lets a reviewer judge a new case at the site.
 - **Live-CLI acceptance costs tokens and time.** Mitigation: every UI item that can be
   driven by `fake-claude` is, and the installed-CLI items are batched into one
   walkthrough session per child.
@@ -3721,3 +3727,12 @@ Pending — written at finish.
   the redaction design rests on the metadata log being safe by construction and the capture
   being the redacted artefact. Flags C2 (in flight), C6 and C7, which both write
   diagnostics.
+- 2026-09-05: §17.7's concurrency-convention mitigation now requires the conventions C2
+  hands down to be stated as a property with a documented serialisation mechanism, rather
+  than as an enumerated list of permitted types. Raised by C2's Task 10, whose review found
+  three sound uses outside the enumerated set — the defect was in the constraint, not the
+  code. C2 amends its own plan's Global Constraints, which is where that wording lives; this
+  note binds the *form* for C3 through C7, which inherit the convention. The same
+  enumeration-goes-stale failure has now appeared three times in C2 (the environment-variable
+  list, the secret-exemption summary, this constraint), so the form is the finding, not the
+  instance.
