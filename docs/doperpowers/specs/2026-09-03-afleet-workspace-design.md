@@ -2147,8 +2147,8 @@ notarized distribution, and any write under `<configHome>` (X9).
 
 | Child | Spec | Status |
 |---|---|---|
-| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md` on `child/c1-probes-fixtures`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks) | in-flight (wave 1); tooling complete 2026-09-04 (193 probe and 22 fake-claude tests, fixture gate green in a fresh export); 3 of 16 fixtures recorded, S5 and S6's extraction half settled; the thirteen recordings, seven spikes and G1 wait on the scratch config home's weekly budget, which resets 2026-09-06 15:00 UTC |
-| C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md` on `child/c2-core-wire`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks) | in-flight (wave 1); Tasks 1–6 landed 2026-09-04 (ClaudeWire 65 tests, AfleetCore 6); G2 pending C1.G1; G3's live round trip waits on the same budget reset |
+| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md` on `child/c1-probes-fixtures`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks) | in-flight (wave 1); tooling complete 2026-09-04 (193 probe and 22 fake-claude tests, fixture gate green in a fresh export); 3 of 16 fixtures recorded, S5 and S6's extraction half settled; a fourth fixture (`rate-limited-turn`) recorded from the spent budget at no cost; the scratch config home was re-logged into an account with capacity on 2026-09-04 and the thirteen recordings, seven spikes and G1 are running |
+| C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md` on `child/c2-core-wire`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks) | in-flight (wave 1); Tasks 1–6 landed 2026-09-04 (ClaudeWire 65 tests, AfleetCore 6); G2 pending C1.G1; G3 split into its inference-free half (provable now) and the live round trip (runnable again since the re-login) |
 | C3 FleetKit timeline | — | blocked-by C2 |
 | C4 FleetKit sessions and fleet | — | blocked-by C2 |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
@@ -3233,3 +3233,8 @@ Pending — written at finish.
   recordings are blocked until the scratch config home's weekly budget resets on
   2026-09-06 15:00 UTC, as its own `zero-cost` fixture's `get_usage` capture shows. C2 has
   Tasks 1–6 of 14 landed. §17.9 records both; G1, G2 and G3 remain pending as stated there.
+- 2026-09-04: The recording block lifted the same day: the scratch config home was re-logged
+  into an account with capacity, verified by a real two-turn haiku recording. C1 gained a
+  fourth fixture, `rate-limited-turn`, captured from the rejection itself, which also exposed
+  and fixed an identity-rule redaction of the `subagent_stats.killed.user` counter. §17.9
+  updated for C1 and C2.
