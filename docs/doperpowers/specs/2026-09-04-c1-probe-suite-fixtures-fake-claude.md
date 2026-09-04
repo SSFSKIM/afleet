@@ -1127,11 +1127,22 @@ are named in Surprises: §7.3's mirror-equality invariant, which is false of a r
 exactly one record at the head of the range, and §7.7's launch-settings table, whose
 Restart-required row still lists `--agent` that S17 showed is runtime-mutable. A third,
 on `agent_metadata`, was withdrawn during wave C after §7.3 was read to the end of the
-sentence; that withdrawal is itself recorded. One inaccuracy found and not repaired
-here: the `C1/S5, completed` and `C1/S2` notes were written during wave A and cite
-`2.1.260` for `send-user-file` and `resume-no-replay`, both of which were re-recorded at
-2.1.259 when the corpus was pinned. The findings are unaffected; the version tags on
-those two notes are stale and the parent's tending session should correct them at merge.
+sentence; that withdrawal is itself recorded.
+
+One inaccuracy was found and fixed here rather than handed on. The `C1/S5, completed`
+and `C1/S2` notes were written before the pin and cited `2.1.260` for `send-user-file`
+and `resume-no-replay`, both of which were re-recorded at 2.1.259 when the corpus was
+pinned; both now name 2.1.259. The findings themselves were never affected, but a wrong
+version inside a protocol finding is the kind of error that survives, because it looks
+like evidence — and the point of pinning the corpus was that a later reader can take a
+version at face value. This is a factual slip in C1's own note about C1's own fixture,
+which needs none of the parent's judgement; the parent's tending session reconciles
+conflicts between a child's findings and binding prose, which this is not. **The other
+thirteen notes were checked the same way and needed no correction**: every fixture a note
+names carries the version the note claims, and the only two remaining mentions of 2.1.260
+are deliberate — `C1/G2` *is* the 2.1.259-against-2.1.260 drift measurement, and `C1/S15`
+records that the `setQuestionPreviewFormat` branch is present verbatim in both installed
+versions while citing its own fixture at 2.1.259.
 
 **G4 Redaction — pass.** The five named tests, fully qualified so an empty selection
 cannot pass silently, print `Ran 5 tests … OK`:
@@ -1747,6 +1758,9 @@ fake-claude injections above, not the clean live run.
   and the tool tests all pass, measured at `865e55a` against the pinned 2.1.259 binary. Two
   adaptations are recorded there rather than resolved against §5's wording: G1's count says
   thirteen recorded fixtures and the corpus holds sixteen, and G2 is run against the pinned
-  binary path rather than "the installed 2.1.259", which is 2.1.260. One inaccuracy is left
-  for the parent's tending session: the `C1/S5, completed` and `C1/S2` notes cite 2.1.260 for
-  two fixtures re-recorded at 2.1.259 when the corpus was pinned.
+  binary path rather than "the installed 2.1.259", which is 2.1.260. One inaccuracy was
+  found and fixed rather than handed to the parent's tending session: the `C1/S5, completed`
+  and `C1/S2` notes cited 2.1.260 for two fixtures re-recorded at 2.1.259 when the corpus was
+  pinned, and both now name 2.1.259. The other thirteen C1 notes were checked the same way
+  and needed no correction. Nothing binding on the parent is edited by this: a version tag in
+  a C1 note is C1's own record of C1's own fixture.

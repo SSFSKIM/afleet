@@ -3086,7 +3086,7 @@ Pending — written at finish.
   `send-user-file` fixture is therefore not in `Fixtures/`, and that half of S5 is open
   until a recording is made after the cap resets (2026-09-06T15:00Z).
 - 2026-09-04 C1/S5, completed: the `tools/call` half is now recorded (fixture
-  `send-user-file`, 2.1.260), and S5 is closed. The model calls the tool with exactly
+  `send-user-file`, 2.1.259), and S5 is closed. The model calls the tool with exactly
   `{"files": ["a.txt", "b.txt"], "caption": "two files", "status": "normal"}`; the round trip
   is `control_request/mcp_message` carrying a JSON-RPC `tools/call` and the host's
   `mcp_response` returning `{"content": [{"type": "text", "text": …}]}`; the reply then
@@ -3101,7 +3101,7 @@ Pending — written at finish.
   `system/init.tools` is therefore not the same as immediate invocability, and a host
   modelling the first turn as "listed, therefore called" will mis-read it.
 - 2026-09-04 C1/S2: `--resume` plus `initialize` and six idle seconds emitted no assistant
-  and no user frames at all (fixture `resume-no-replay`, 2.1.260), though the resumed
+  and no user frames at all (fixture `resume-no-replay`, 2.1.259), though the resumed
   session's transcript held thirty-one records and two complete exchanges. The whole capture
   is the handshake, the in-process server's bring-up, one `auth_status`, the `end_session`
   exchange and a single `transcript_mirror`. History comes only from the transcript, which
