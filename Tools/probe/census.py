@@ -160,7 +160,15 @@ def merge_required(previous, current):
     for n in names:
         a, b = previous["pairs"].get(n), current["pairs"].get(n)
         if a is None or b is None:
-            out["pairs"][n] = dict(a or b)
+            # One recording produced this pair and another did not, so the evidence says the
+            # pair is *optional*: a wire path the binary takes on some runs of this scenario
+            # and not others. `system/thinking_tokens` is the one that taught this. Recorded
+            # here rather than left implicit because a pair's presence has exactly the
+            # required-versus-optional structure §4.4 already gives a key set, and without it
+            # accumulation cannot converge -- fold an optional pair into the baseline and the
+            # next run that lacks it alarms as a removed pair, so a re-recording only ever
+            # flips which direction the gate is wrong in.
+            out["pairs"][n] = dict(a or b, optional=True)
             continue
         rec = {"count": a["count"] + b["count"],
                "keys": sorted(set(a["keys"]) | set(b["keys"])),
@@ -178,6 +186,11 @@ def merge_required(previous, current):
             rec["required_body_keys"] = sorted(set.intersection(*[set(s["required_body_keys"]) for s in with_body]))
         if "block_types" in a or "block_types" in b:
             rec["block_types"] = sorted(set(a.get("block_types", [])) | set(b.get("block_types", [])))
+        if a.get("optional") or b.get("optional"):
+            # Sticky. A run that once lacked the pair is evidence that stands; a later run
+            # carrying it does not turn the pair back into one every run must produce, and a
+            # baseline that could forget would oscillate exactly as before.
+            rec["optional"] = True
         out["pairs"][n] = rec
     return out
 
@@ -222,6 +235,12 @@ def diff(recorded, observed, mode):
     for pair in sorted(set(op) - set(rp)):
         lines.append("added pair %s" % pair)
     for pair in sorted(set(rp) - set(op)):
+        if mode == "required" and rp[pair].get("optional"):
+            # Accumulated evidence that this scenario does not always produce the pair. Absence
+            # is then not drift; appearance still is not either, because the pair is in the
+            # baseline. Exact mode is untouched: a deterministic scenario's census never
+            # accumulates, so it never carries the flag, and its gate stays strict.
+            continue
         if pair == UNPARSEABLE_PAIR:
             # Alarm on appearance, never on absence, in both modes. The pair belongs in a
             # census -- a binary that starts emitting malformed lines is real drift and the

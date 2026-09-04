@@ -225,6 +225,35 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(census.diff(rec, obs, "exact"), ["removed pair assistant"])
         self.assertEqual(census.diff(rec, obs, "required"), ["removed pair assistant"])
 
+    def test_a_pair_only_one_recording_produced_is_marked_optional_and_stops_alarming(self):
+        """The accumulation §4.4 mandates has to converge, not oscillate."""
+        a = census.census([frame("system", subtype="init"), frame("system", subtype="thinking_tokens")])
+        b = census.census([frame("system", subtype="init")])
+        m = census.merge_required(a, b)
+        self.assertTrue(m["pairs"]["system/thinking_tokens"]["optional"])
+        self.assertNotIn("optional", m["pairs"]["system/init"])
+        # Neither direction alarms now: absent is licensed, present is in the baseline.
+        self.assertEqual(census.diff(m, b, "required"), [])
+        self.assertEqual(census.diff(m, a, "required"), [])
+        # Without the accumulation the same pair alarms whichever run came first.
+        self.assertEqual(census.diff(a, b, "required"), ["removed pair system/thinking_tokens"])
+        self.assertEqual(census.diff(b, a, "required"), ["added pair system/thinking_tokens"])
+
+    def test_optional_is_sticky_across_a_later_recording_that_carries_the_pair(self):
+        """A run that once lacked the pair is evidence that stands."""
+        with_pair = census.census([frame("system", subtype="init"), frame("system", subtype="thinking_tokens")])
+        without = census.census([frame("system", subtype="init")])
+        m = census.merge_required(census.merge_required(with_pair, without), with_pair)
+        self.assertTrue(m["pairs"]["system/thinking_tokens"]["optional"])
+        self.assertEqual(census.diff(m, without, "required"), [])
+
+    def test_exact_mode_still_alarms_on_an_optional_pair(self):
+        """A deterministic scenario never accumulates, so its gate must stay strict."""
+        a = census.census([frame("system", subtype="init"), frame("system", subtype="thinking_tokens")])
+        b = census.census([frame("system", subtype="init")])
+        m = census.merge_required(a, b)
+        self.assertEqual(census.diff(m, b, "exact"), ["removed pair system/thinking_tokens"])
+
     def test_required_mode_alarms_on_a_removed_top_level_key(self):
         rec = census.census([frame("system", subtype="init", capabilities=["a"], tools=[])])
         obs = census.census([frame("system", subtype="init", capabilities=["a"])])
