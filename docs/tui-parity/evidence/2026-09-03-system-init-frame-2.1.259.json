@@ -1,7 +1,7 @@
 {
  "type": "system",
  "subtype": "init",
- "cwd": "/Users/new/Developer/GitHub/afleet",
+ "cwd": "/Users/probe/Developer/GitHub/afleet",
  "session_id": "<redacted>",
  "tools": [
   "Task",
@@ -257,82 +257,82 @@
  "plugins": [
   {
    "name": "code-review",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/code-review/0120fb83da5d",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/code-review/0120fb83da5d",
    "source": "code-review@claude-plugins-official"
   },
   {
    "name": "code-simplifier",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/code-simplifier/1.0.0",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/code-simplifier/1.0.0",
    "source": "code-simplifier@claude-plugins-official",
    "version": "1.0.0"
   },
   {
    "name": "claude-md-management",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0",
    "source": "claude-md-management@claude-plugins-official",
    "version": "1.0.0"
   },
   {
    "name": "security-guidance",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/security-guidance/2.0.7",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/security-guidance/2.0.7",
    "source": "security-guidance@claude-plugins-official",
    "version": "2.0.7"
   },
   {
    "name": "skill-creator",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/skill-creator/0120fb83da5d",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/skill-creator/0120fb83da5d",
    "source": "skill-creator@claude-plugins-official"
   },
   {
    "name": "explanatory-output-style",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/explanatory-output-style/1.0.0",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/explanatory-output-style/1.0.0",
    "source": "explanatory-output-style@claude-plugins-official",
    "version": "1.0.0"
   },
   {
    "name": "plugin-dev",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/plugin-dev/0120fb83da5d",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/plugin-dev/0120fb83da5d",
    "source": "plugin-dev@claude-plugins-official"
   },
   {
    "name": "typescript-lsp",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0",
    "source": "typescript-lsp@claude-plugins-official",
    "version": "1.0.0"
   },
   {
    "name": "doperpowers",
-   "path": "/Users/new/.claude/plugins/cache/doperpowers/doperpowers/7.69.0",
+   "path": "/Users/probe/.claude/plugins/cache/doperpowers/doperpowers/7.69.0",
    "source": "doperpowers@doperpowers",
    "version": "7.69.0"
   },
   {
    "name": "pyright-lsp",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/pyright-lsp/1.0.0",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/pyright-lsp/1.0.0",
    "source": "pyright-lsp@claude-plugins-official",
    "version": "1.0.0"
   },
   {
    "name": "supabase",
-   "path": "/Users/new/.claude/plugins/cache/claude-plugins-official/supabase/0.1.15",
+   "path": "/Users/probe/.claude/plugins/cache/claude-plugins-official/supabase/0.1.15",
    "source": "supabase@claude-plugins-official",
    "version": "0.1.15"
   },
   {
    "name": "designer",
-   "path": "/Users/new/.claude/plugins/cache/designer/designer/1.0.1",
+   "path": "/Users/probe/.claude/plugins/cache/designer/designer/1.0.1",
    "source": "designer@designer",
    "version": "1.0.1"
   },
   {
    "name": "eli5",
-   "path": "/Users/new/.claude/plugins/cache/claude-community/eli5/1.0.0",
+   "path": "/Users/probe/.claude/plugins/cache/claude-community/eli5/1.0.0",
    "source": "eli5@claude-community",
    "version": "1.0.0"
   },
   {
    "name": "chatgpt-advisor",
-   "path": "/Users/new/.claude/skills/chatgpt-advisor",
+   "path": "/Users/probe/.claude/skills/chatgpt-advisor",
    "source": "chatgpt-advisor@skills-dir",
    "version": "0.1.0"
   }
