@@ -996,8 +996,16 @@ Pending — written at finish.
   defect G1 cannot catch by construction, since G1 is defined as provable without the real CLI. G3
   found it on its first live run.
   A consequence worth stating separately, because it bears on §6.12 and on anything reading
-  `mcp_servers`: the in-process MCP server is **not** connected when the handshake completes. The
-  engine drives its JSON-RPC handshake against it about 0.9 s later — `Fixtures/zero-cost` records
-  `initialize` at t=887 ms, `notifications/initialized` at 891 ms and `tools/list` at 892 ms — so an
-  `mcp_status` issued immediately after `spawn()` returns an empty server list. Consumers must wait
-  for the server rather than assume it.
+  `mcp_servers` — and stated more precisely than this note first had it, which mis-scoped the
+  timing. The engine drives its JSON-RPC handshake against the in-process server **before** it
+  answers our control `initialize`, not after. `Fixtures/zero-cost` and `plain-two-turn` both record
+  the same opening: our `initialize` control request, then the engine's `mcp_message` carrying a
+  JSON-RPC `initialize` toward our server, then our answer, and only then the engine's
+  `control_response` completing the handshake — frame 2 before frame 4, at t=887/888/891 ms and
+  t=770/770/773 ms respectively. So the engine will not answer `initialize` until the host has
+  answered the server's JSON-RPC `initialize`, which is a **host constraint**: an inbound loop that
+  starts only after `spawn()` returns deadlocks. `notifications/initialized` follows immediately
+  after the handshake response, and `tools/list` arrives later still, with the first user message or
+  the first outbound request. What remains true is the practical warning: an `mcp_status` issued
+  immediately after `spawn()` was observed live to return an empty server list, so consumers must
+  wait for the server rather than assume it.
