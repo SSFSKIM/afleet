@@ -101,6 +101,24 @@ final class ClaudeProcessTerminationTests: XCTestCase {
         let status = await p.status
         guard case .exited(.code(0, _)) = status else { return XCTFail("\(status)") }
     }
+    /// Fix A. EOF is not guaranteed by the child's death: it needs *every* holder of the write end to close
+    /// it, and a grandchild that inherited the descriptor at fork keeps it open. The stand-in constructs
+    /// exactly that — it starts a `/bin/sleep` that inherits stdout and stderr, then exits — so the readers
+    /// never finish. The terminal event must be published anyway; an unbounded wait here would mean no
+    /// `.exited`, no `finish()`, and a channel FleetKit never releases.
+    func testExitIsPublishedWhenAGrandchildHoldsTheDescriptorOpen() async throws {
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "leak_stdout,exit:0", diagnostics: sink)
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr("GRANDCHILD HOLDS STDOUT", _) = $0 { return true }; return false }, "the grandchild was started")
+        guard case .exited(let s, _)? = await h.expect({ if case .exited = $0 { return true }; return false },
+                                                       "the terminal exit must be published though no EOF ever arrives",
+                                                       within: .seconds(12)) else { return }
+        XCTAssertTrue(s.isClean)
+        XCTAssertTrue(sink.entries.contains { $0.contains("reader drain hit its deadline") },
+                      "publication should have gone ahead on the deadline, not on EOF: \(sink.entries.suffix(4))")
+        await p.terminate()
+    }
     func testTerminateIsIdempotentAndEventsStreamEnds() async throws {
         let h = try Harness(); let p = h.make(scenario: "")
         _ = try await p.spawn()

@@ -208,6 +208,30 @@ final class MCPToolFailureTests: XCTestCase {
         XCTAssertFalse(failed.domain.contains("ledger.csv"))
         XCTAssertTrue(failed.domain.contains("Boom"), "the bridged NSError domain names the error type: \(failed.domain)")
     }
+    /// `domain` and `code` exist for exactly one job — diagnosing a Foundation failure — and a plain Swift
+    /// struct cannot test them: its bridged domain is just the mangled type name and its code is always 1, so
+    /// an assertion on those fields holds whatever the implementation does. This throws a real Cocoa error.
+    func testACocoaErrorContributesItsDomainAndCode() async throws {
+        struct CocoaThrower: MCPTool {
+            var name: String { "cocoa" }
+            var description: String { "throws a Foundation error" }
+            var inputSchema: JSONValue { .object([:]) }
+            func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
+                throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError,
+                              userInfo: [NSFilePathErrorKey: "/Users/someone/private/ledger.csv"])
+            }
+        }
+        let server = AfleetMCPServer(serverVersion: "0.1.0", cwd: URL(fileURLWithPath: "/tmp"), tools: [CocoaThrower()])
+        let (reply, _, failure) = await server.handle(.request(.init(id: .number(1), method: "tools/call", params: .object(["name": .string("cocoa"), "arguments": .object([:])]))))
+        let failed = try XCTUnwrap(failure)
+        XCTAssertEqual(failed.tool, "cocoa")
+        XCTAssertEqual(failed.domain, NSCocoaErrorDomain)
+        XCTAssertEqual(failed.code, NSFileReadNoSuchFileError)
+        XCTAssertFalse(failed.domain.contains("ledger.csv"))
+        guard case .response(.response(let r)) = reply else { return XCTFail("expected a response, got \(reply)") }
+        let modelText = r.result["content"]?[0]?["text"]?.stringValue ?? ""
+        XCTAssertFalse(modelText.contains("ledger.csv"), "NSError's description carries NSFilePathErrorKey; the model must not get it")
+    }
     /// A call that does not throw carries no failure, so the transport cannot record one for a healthy tool.
     func testASuccessfulCallCarriesNoFailure() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mcp-\(UUID().uuidString)")

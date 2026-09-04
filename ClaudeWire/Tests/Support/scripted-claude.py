@@ -79,6 +79,13 @@ def after_init():
             emit({"type": "assistant", "message": {"id": "msg_%d" % i, "type": "message", "role": "assistant", "model": "scripted", "content": [{"type": "text", "text": "x" * 200}], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}}, "parent_tool_use_id": None, "uuid": uuid(), "session_id": SESSION})
         emit({"type": "result", "subtype": "success", "duration_ms": 1, "duration_api_ms": 1, "is_error": False, "num_turns": 1, "result": "flooded", "stop_reason": "end_turn", "total_cost_usd": 0, "usage": {"input_tokens": 1, "output_tokens": 1}, "modelUsage": {}, "permission_denials": [], "uuid": uuid(), "session_id": SESSION})
         log("FLOOD DONE")
+    if has("leak_stdout"):
+        # A grandchild that inherits this process's stdout and stderr write ends and outlives it. When the
+        # child then exits, the reader never sees EOF: EOF needs *every* holder of the write end to close it.
+        # Popen inherits both descriptors by default, which is precisely the case that matters.
+        import subprocess
+        subprocess.Popen(["/bin/sleep", "20"])
+        log("GRANDCHILD HOLDS STDOUT")
     if scenario_value("stderr"): log(scenario_value("stderr"))
     if scenario_value("exit") is not None:
         sys.stdout.flush(); os._exit(int(scenario_value("exit")))
@@ -117,7 +124,16 @@ def handle(line):
         elif sub == "side_question" and has("side_question_late_error"):
             withheld[rid] = sub; log("HOST " + str(sub) + " WITHHELD")
         else:
-            log("HOST " + str(sub)); emit({"type": "control_response", "response": {"subtype": "success", "request_id": rid, "response": {}}})
+            log("HOST " + str(sub))
+            if has("exit_after_answer"):
+                # A backlog in front of the answer, sized to fit one pipe buffer so this process can still
+                # exit without blocking. The host is left holding an answer it has not read yet at the moment
+                # the child dies — which is the only arrangement under which the correlation is actually tested.
+                for i in range(60):
+                    emit({"type": "assistant", "message": {"id": "pre_%d" % i, "type": "message", "role": "assistant", "model": "scripted", "content": [{"type": "text", "text": "y" * 100}], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}}, "parent_tool_use_id": None, "uuid": uuid(), "session_id": SESSION})
+            emit({"type": "control_response", "response": {"subtype": "success", "request_id": rid, "response": {}}})
+            if has("exit_after_answer"):
+                sys.stdout.flush(); os._exit(0)
     elif t == "control_cancel_request":
         rid = frame["request_id"]
         log("HOST CANCEL " + str(rid))

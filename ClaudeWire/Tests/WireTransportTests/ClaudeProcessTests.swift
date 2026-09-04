@@ -299,6 +299,57 @@ final class ClaudeProcessTests: XCTestCase {
         XCTAssertTrue(sawResult, "the result frame is the one that matters most")
         XCTAssertTrue(sawExit, "the exit must still be published after the drain")
     }
+    /// Fix C. The child answers the request and exits in the same breath, so the response is sitting in the
+    /// pipe when the termination handler fires. Failing outbound waiters before the drain — which is what an
+    /// earlier revision did — turns a delivered answer into `processExited`. They settle after the bounded
+    /// drain now, which is safe for exactly the reason the handshake waiter is: `Waiter.settle` is first-wins,
+    /// so the arriving response gets there first, and callers keep their own `timeout:` for the case where
+    /// nothing arrives at all.
+    func testAResponseAlreadyInThePipeIsCorrelatedThoughTheChildHasExited() async throws {
+        let h = try Harness()
+        var e = h.env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = "exit_after_answer"
+        // A four-element channel and a consumer that paces itself: the reader is parked in `push` with the
+        // answer still unread when the child dies. Without the back-pressure the reader simply wins the race
+        // and the correlation is never exercised — an earlier version of this test passed against the break
+        // for exactly that reason.
+        let p = ClaudeProcess(epoch: .first, launch: LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: h.cwd, session: .new(SessionID())),
+                              environment: e, configHome: ConfigHome(root: h.cwd, source: .environment),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: h.cwd, tools: []),
+                              diagnostics: NullDiagnostics(), capture: nil, eventBufferCapacity: 4)
+        let sawExit = Waiter<Void>()
+        let consumer = Task {
+            for await ev in p.events {
+                if case .exited = ev { sawExit.settle(.success(())) }
+                try? await Task.sleep(for: .milliseconds(2))
+            }
+        }
+        defer { consumer.cancel() }
+        _ = try await p.spawn()
+        let r: JSONValue = try await p.request(GetSettings())
+        XCTAssertEqual(r, .object([:]), "the answer was on the wire before the exit and must be correlated")
+        let timer = sawExit.timeout(after: .seconds(12)) { WireError.processExited }
+        defer { timer.cancel() }
+        do { try await sawExit.value() } catch { XCTFail("the exit was never published") }
+    }
+    /// Fix B. A child that answers the handshake *with a pending request* and exits in the same breath leaves
+    /// `spawn` on its success path with events still to publish, while `processDidExit` is already publishing
+    /// the terminal one. Nothing orders two continuations resuming on one actor, so this is a race; it is run
+    /// repeatedly because a race observed once is luck, and the invariant it checks is absolute — `.exited` is
+    /// the last event on the stream, always.
+    func testNoEventIsPublishedAfterTheTerminalExit() async throws {
+        for attempt in 0..<20 {
+            let h = try Harness(); let p = h.make(scenario: "pending,exit:0")
+            _ = try? await p.spawn()
+            guard await h.expect({ if case .exited = $0 { return true }; return false }, "exited (attempt \(attempt))", within: .seconds(12)) != nil else { return }
+            try await Task.sleep(for: .milliseconds(50))     // give a late publisher every chance to land
+            let events = await h.log.events
+            guard let terminal = events.firstIndex(where: { if case .exited = $0 { return true }; return false }) else {
+                return XCTFail("no exit on attempt \(attempt)")
+            }
+            let after = events[(terminal + 1)...]
+            XCTAssertTrue(after.isEmpty, "attempt \(attempt): \(after.count) event(s) published after the terminal exit: \(after.map { "\($0)" })")
+        }
+    }
     func testCaptureReceivesRedactedLinesForBothDirections() async throws {
         let h = try Harness()
         let root = h.cwd.appendingPathComponent("capture")

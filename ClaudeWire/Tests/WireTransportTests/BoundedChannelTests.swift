@@ -121,4 +121,31 @@ final class BoundedChannelTests: XCTestCase {
         }
         XCTAssertEqual(wedged, 0, "a producer stayed parked while a slot was free")
     }
+
+    /// `pushFinal` exists because the `push`-then-`finish()` pair a caller would write is not equivalent:
+    /// between the two calls another producer's element can land, and it is then delivered after the terminal
+    /// one. This pins the atomicity, not just the finishing.
+    func testPushFinalPublishesTheTerminalElementAndEndsTheStream() async throws {
+        let c = BoundedChannel<Int>(capacity: 8)
+        await c.push(1)
+        let accepted = await c.pushFinal(99)
+        XCTAssertTrue(accepted)
+        let finished = await c.isFinished; XCTAssertTrue(finished)
+        let late = await c.push(2); XCTAssertFalse(late, "no element may be accepted after the terminal one")
+        var seen: [Int] = []
+        while let v = await c.pop() { seen.append(v) }
+        XCTAssertEqual(seen, [1, 99], "the terminal element is last and nothing follows it")
+
+        // The contrast, which is the whole reason the method exists: spelled as a push and a separate
+        // finish(), an element pushed between the two is accepted and delivered *after* the terminal one.
+        let split = BoundedChannel<Int>(capacity: 8)
+        await split.push(1)
+        await split.push(99)                      // "terminal", published by itself
+        let inWindow = await split.push(2)        // ... and here is the window
+        await split.finish()
+        XCTAssertTrue(inWindow, "a split push/finish accepts a late element — this is what pushFinal closes")
+        var splitSeen: [Int] = []
+        while let v = await split.pop() { splitSeen.append(v) }
+        XCTAssertEqual(splitSeen, [1, 99, 2], "and delivers it after the terminal element")
+    }
 }

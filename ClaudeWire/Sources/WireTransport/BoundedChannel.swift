@@ -65,6 +65,17 @@ public actor BoundedChannel<Element: Sendable> {
             Task { await self.cancelPopWaiter(id) }
         }
     }
+    /// Publishes a final element and ends the stream in one actor step. The `push`/`finish()` pair spelled out
+    /// by a caller is not equivalent: between the two there is a suspension point, and an element another
+    /// producer pushes inside that window is delivered *after* the terminal one. Callers that guard themselves
+    /// with "don't push once the terminal event is out" still race, because their check and their push are
+    /// themselves two steps; making the terminal publish atomic is what actually closes it.
+    @discardableResult
+    public func pushFinal(_ element: Element) async -> Bool {
+        let accepted = await push(element)
+        finish()
+        return accepted
+    }
     public func finish() {
         finished = true
         for w in pushWaiters { w.c.resume() }; pushWaiters.removeAll()

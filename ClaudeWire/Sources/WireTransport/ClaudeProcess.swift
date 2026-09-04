@@ -74,10 +74,13 @@ public actor ClaudeProcess {
         do { try p.run() } catch {
             let failure = ExitStatus.code(-1, stderrTail: String(describing: error))
             status = .exited(failure)
-            // The exit goes out *before* the finish: `BoundedChannel.push` drops anything pushed after
-            // finish(), and FleetKit releases ownership of a channel on `.exited`, not on stream end.
-            await channel.push(.exited(failure, epoch))
-            await channel.finish()
+            // FleetKit releases ownership of a channel on `.exited`, not on stream end, so the exit is
+            // published rather than the stream merely closed. The result cannot be `false` here — this channel
+            // was created in `init` and nothing has finished it — but all three exit-publication sites read it
+            // the same way: the asymmetry is what made a reviewer ask about this once, and would again.
+            if await channel.pushFinal(.exited(failure, epoch)) == false {
+                diagnostics.record(.lifecycle("launch-failure exit event dropped: channel already finished", epoch: epoch))
+            }
             throw WireError.launchFailed(String(describing: error))
         }
         status = .handshaking
@@ -106,8 +109,17 @@ public actor ClaudeProcess {
         diagnostics.record(.handshake(durationMs: Int((ContinuousClock.now - started) / .milliseconds(1)), epoch: epoch))
         let pending = handshakePending
         let handshake = Handshake(initialize: InitializeResponse(raw: pair.initialize.response ?? .object([:])), systemInit: pair.systemInit, pending: pending)
-        await channel.push(.handshakeCompleted(handshake, epoch))
-        for r in pending { await channel.push(.request(r)) }
+        // Nothing orders these against `processDidExit`'s terminal `.exited`: two continuations resuming on one
+        // actor have no defined relative order, so a consumer could otherwise see a non-terminal event after
+        // the terminal one, on a channel it may already have released. The handshake result is still returned
+        // — the caller asked whether the handshake succeeded, and it did.
+        if !isExited {
+            await channel.push(.handshakeCompleted(handshake, epoch))
+            for r in pending {
+                if isExited { break }
+                await channel.push(.request(r))
+            }
+        }
         return handshake
     }
     private func handshakeProgress() {
@@ -338,36 +350,62 @@ public actor ClaudeProcess {
     /// consumer could make that wait time out and send the escalation on to signal a pid Foundation has
     /// already reaped. Exit observation must not be hostage to consumer liveness.
     ///
-    /// **Then publication, gated on the readers rather than on a clock.** The readers end at EOF, and EOF is
-    /// guaranteed once the child is gone; awaiting them is an actual completion condition where the old fixed
-    /// 50 ms sleep was a guess. Any line still in flight was pushed after `finish()`, where `push` drops it —
-    /// so the last frames before exit, plausibly the `result`, were being lost on a timer.
+    /// **Then publication, gated on the readers but bounded.** Draining the readers is the right completion
+    /// condition — it is what stops `finish()` from dropping the last frames before exit — but it must not be
+    /// the *only* condition. EOF arrives when every holder of the write end closes it, and a grandchild that
+    /// inherited the descriptor at fork keeps it open after the child dies; the parent spec allows a channel
+    /// to have running background shells, so that is inside this system's domain. An unbounded wait there
+    /// would mean no `.exited`, no `finish()`, and a channel FleetKit never releases — the exact failure this
+    /// method exists to prevent. So the drain is raced against a deadline and publication happens either way.
     private func processDidExit(_ raw: ExitStatus) async {
+        // **Contract for the stderr tail.** This status is assigned before the drain, so its tail is whatever
+        // stderr had produced by now — provisional, and not marked as such. For the whole drain window a
+        // caller polling `status`, and anything settled from it (the exit waiters just below), sees a terminal
+        // status carrying a *truncated* tail. The `.exited` event published after the drain is the
+        // authoritative one; `status` is the provisional view.
+        //
+        // Settling early is deliberate and must stay — it is what keeps exit observation off the consumer's
+        // liveness — so this is designed rather than fixed. Bounding the drain also bounds this window, which
+        // is a second and independent reason `readerDrainLimit` is short rather than generous.
         let interim = raw.withTail(stderrTail())
         status = .exited(interim)
-        // Deliberately asymmetric. Outbound waiters fail now, because a `request()` with no timeout that hangs
-        // on a dead child is worse than a late answer lost — and callers who care have `timeout:`. The
-        // handshake waiter is the opposite case and settles below instead: a child that writes its handshake
-        // and exits in the same breath has answered, and failing it here would call that a protocol failure
-        // purely because the termination handler beat the reader to the actor.
-        for (_, w) in pendingOutbound { w.settle(.failure(WireError.processExited)) }; pendingOutbound.removeAll()
         pendingInbound.removeAll()
         for (_, t) in mcpTasks { t.cancel() }; mcpTasks.removeAll()
         for w in exitWaiters { w.settle(.success(interim)) }; exitWaiters.removeAll()
         await writer?.close()
 
         let inFlight = readers; readers.removeAll()
-        for r in inFlight { await r.value }
-        // First settle wins, so this is a no-op when the frames in the pipe completed the handshake.
+        if await drain(inFlight, upTo: Self.readerDrainLimit) == false {
+            diagnostics.record(.lifecycle("reader drain hit its deadline; publishing the exit anyway", epoch: epoch))
+        }
+        // Both settle after the drain, and both are safe there only because the drain is bounded: a response
+        // or a handshake still in the pipe gets to arrive first, and `Waiter.settle` is first-wins, so this is
+        // a no-op whenever it did. Callers are additionally protected by their own timers — `spawn` arms one
+        // on the handshake and `request(_:timeout:)` takes one — which is what makes settling late safe at all.
         handshakeWaiter.settle(.failure(WireError.processExited))
+        for (_, w) in pendingOutbound { w.settle(.failure(WireError.processExited)) }; pendingOutbound.removeAll()
         let final = raw.withTail(stderrTail())
         status = .exited(final)
         diagnostics.record(.lifecycle("exited \(final)", epoch: epoch))
-        // Read the result rather than trusting ordering: a dropped `.exited` is a channel FleetKit never releases.
-        if await channel.push(.exited(final, epoch)) == false {
+        // `pushFinal` publishes and ends the stream in one actor step. Split into a `push` and a separate
+        // `finish()` there is a window in which another producer's element lands *after* the terminal event.
+        if await channel.pushFinal(.exited(final, epoch)) == false {
             diagnostics.record(.lifecycle("exit event dropped: channel already finished", epoch: epoch))
         }
-        await channel.finish()
+    }
+    /// How long publication will wait for the readers to reach EOF before going ahead without them.
+    private static let readerDrainLimit: Duration = .seconds(2)
+    /// Awaits every task, or gives up at `limit`. Returns whether they all finished.
+    private func drain(_ tasks: [Task<Void, Never>], upTo limit: Duration) async -> Bool {
+        guard !tasks.isEmpty else { return true }
+        let done = Waiter<Void>()
+        // `await task.value` on a non-throwing Task ignores cancellation, so the deadline cannot be expressed
+        // by cancelling the awaiting task; it has to be a separate settlement that races it.
+        let awaiter = Task { for t in tasks { await t.value }; done.settle(.success(())) }
+        struct DrainDeadline: Error {}
+        let timer = done.timeout(after: limit) { DrainDeadline() }
+        defer { timer.cancel(); awaiter.cancel() }
+        do { try await done.value(); return true } catch { return false }
     }
     /// nil on timeout; the caller escalates. Never deadlocks: the timeout settles the waiter itself.
     private func waitForExit(upTo timeout: Duration) async -> ExitStatus? {
@@ -395,8 +433,10 @@ public actor ClaudeProcess {
             status = .exited(never)
             diagnostics.record(.terminateEscalated(step: "never_launched", epoch: epoch))
             for w in exitWaiters { w.settle(.success(never)) }; exitWaiters.removeAll()
-            await channel.push(.exited(never, epoch))
-            await channel.finish()
+            // As on the launch-failure path: cannot be refused on a channel nobody has finished, read anyway.
+            if await channel.pushFinal(.exited(never, epoch)) == false {
+                diagnostics.record(.lifecycle("never-launched exit event dropped: channel already finished", epoch: epoch))
+            }
             return
         }
         if terminating { _ = await waitForExit(upTo: .seconds(60)); return }
