@@ -15,5 +15,11 @@ final class FileDiagnosticsTests: XCTestCase {
         let first = try JSONDecoder().decode(JSONValue.self, from: Data(lines[0].utf8))
         XCTAssertEqual(first["event"], .string("frame")); XCTAssertEqual(first["type"], .string("assistant")); XCTAssertNotNil(first["at"])
         XCTAssertNil(first["payload"])
+        // The log holds metadata about every frame on the machine, so its modes are asserted here for the
+        // same reason the capture tests assert theirs.
+        let dirPerm = try FileManager.default.attributesOfItem(atPath: dir.path)[.posixPermissions] as? Int
+        let logPerm = try FileManager.default.attributesOfItem(atPath: log.path)[.posixPermissions] as? Int
+        let oldPerm = try FileManager.default.attributesOfItem(atPath: old.path)[.posixPermissions] as? Int
+        XCTAssertEqual(dirPerm, 0o700); XCTAssertEqual(logPerm, 0o600); XCTAssertEqual(oldPerm, 0o600)
     }
 }

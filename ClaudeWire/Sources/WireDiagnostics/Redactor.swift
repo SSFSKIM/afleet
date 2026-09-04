@@ -8,8 +8,8 @@ import WireFrames
 /// redaction rule as C1's key set plus the email pattern") and `ed87a22` ("§11 makes C1's full redaction
 /// rule set canonical for the capture redactor"). Both redactors feed the same human review, so a byte one
 /// lets through is invisible to the other's tests; keep them together, and when you change one, change both.
-/// `RedactorDifferentialTests` runs C1's redactor against this one over shared vectors whenever the sibling
-/// worktree is present, and skips when it is not.
+/// `RedactorDifferentialTests` runs `Tools/probe/redact.py` against this one over shared vectors and the
+/// whole sample corpus whenever that file and `python3` are present, and skips when they are not.
 ///
 /// The one rule deliberately not mirrored is C1's rule 3, the home-directory and hostname substitution.
 /// It needs the recording machine's home path and hostname, which this redactor is not given, and a capture
@@ -49,9 +49,6 @@ public enum Redactor {
     static let identityCounterPaths: Set<String> = ["subagent_stats.killed.user"]
     /// redact.py SECRET_ENUM_PATHS (line 190). `get_usage`'s `behaviors[].key` is an enum of behaviour names.
     static let secretEnumPaths: Set<String> = ["behaviors.key"]
-    /// redact.py OAUTH_SUBTYPES (line 97).
-    static let oauthSubtypes: Set<String> = ["claude_authenticate", "claude_oauth_callback", "claude_oauth_wait_for_completion",
-                                             "mcp_authenticate", "mcp_oauth_callback_url"]
     public static let mcpBodyLimit = 4096
 
     // MARK: - Entry points
@@ -74,14 +71,68 @@ public enum Redactor {
     /// the shape of the path; matching is on a full trailing segment run so a suffix cannot straddle a
     /// partial segment name.
     static func isExempt(path: String, by paths: Set<String>) -> Bool {
-        var bare = ""
-        var depth = 0
-        for ch in path {
-            if ch == "[" { depth += 1; continue }
-            if ch == "]" { depth -= 1; continue }
-            if depth == 0 { bare.append(ch) }
-        }
+        let bare = strippingIndices(path)
         return paths.contains { bare == $0 || bare.hasSuffix("." + $0) }
+    }
+    /// redact.py `_PATH_INDEX_RE` (line 192): only a complete `[digits]` run is removed. Keys are data and
+    /// may themselves contain brackets, so counting bracket depth instead would let an unbalanced bracket
+    /// in a key silently truncate the path.
+    static func strippingIndices(_ path: String) -> String {
+        var out = ""
+        var rest = Substring(path)
+        while let open = rest.firstIndex(of: "[") {
+            let after = rest.index(after: open)
+            let digits = rest[after...].prefix { $0.isASCII && $0.isNumber }
+            let close = rest.index(after, offsetBy: digits.count)
+            if !digits.isEmpty, close < rest.endIndex, rest[close] == "]" {
+                out += rest[..<open]
+                rest = rest[rest.index(after: close)...]
+            } else {
+                out += rest[...open]
+                rest = rest[after...]
+            }
+        }
+        return out + rest
+    }
+    /// The length of `json.dumps(value)` with CPython's defaults, which is how redact.py sizes an MCP body
+    /// (line 352). Three defaults matter and none of them is the compact form: `separators=(", ", ": ")`
+    /// adds a space after every comma and colon, `ensure_ascii=True` escapes every non-ASCII scalar to
+    /// `\uXXXX`, and `sort_keys=False` — which does not affect the length, so key order is irrelevant here.
+    ///
+    /// Only the length is reproduced, never the bytes: this exists to put the truncation boundary in the
+    /// same place as C1's, and `RedactorDifferentialTests` checks it against the real `json.dumps` rather
+    /// than trusting this comment.
+    public static func pythonDumpsLength(_ v: JSONValue) -> Int {
+        switch v {
+        case .null: return 4
+        case .bool(let b): return b ? 4 : 5
+        case .integer(let i): return String(i).utf8.count
+        case .number(let d): return String(d).utf8.count
+        case .string(let s): return pythonStringLength(s)
+        case .array(let a):
+            return a.isEmpty ? 2 : 2 + a.reduce(0) { $0 + pythonDumpsLength($1) } + 2 * (a.count - 1)
+        case .object(let o):
+            guard !o.isEmpty else { return 2 }
+            // Each item is `"key": value`; the two extra bytes are the colon and its space.
+            let items = o.reduce(0) { $0 + pythonStringLength($1.key) + 2 + pythonDumpsLength($1.value) }
+            return 2 + items + 2 * (o.count - 1)
+        }
+    }
+    /// CPython escapes `\` and `"`, the five short control escapes, every other scalar below 0x20 as
+    /// `\u00xx`, and — because `ensure_ascii` defaults to true — everything from 0x7F upward as one
+    /// `\uXXXX` per UTF-16 code unit, so an astral scalar costs twelve.
+    static func pythonStringLength(_ s: String) -> Int {
+        var n = 2
+        for u in s.unicodeScalars {
+            switch u {
+            case "\\", "\"": n += 2
+            case "\n", "\r", "\t", "\u{08}", "\u{0C}": n += 2
+            case let c where c.value < 0x20: n += 6
+            case let c where c.value < 0x7F: n += 1
+            case let c: n += c.value > 0xFFFF ? 12 : 6
+            }
+        }
+        return n
     }
     /// redact.py `_contains_string` (line 108): keys are not leaves, only values are.
     static func containsString(_ v: JSONValue) -> Bool {
@@ -128,7 +179,10 @@ public enum Redactor {
         let queryRun = #/([?&][A-Za-z0-9_\-]+=)([A-Fa-f0-9]{32,}|[A-Za-z0-9+/=_\-]{32,})/#
         let lsLong = #/([-dlbcps][-rwxSsTtLl]{9}[@+.]?\s+\d+\s+)(\S+)(\s+)(\S+)/#
         let placeholderKey = #/^<[^<>]*>(#\d+)?$/#
-        let query = #/\?[\s\S]*$/#
+        // redact.py QUERY_RE (line 37) is `\?.*$` compiled without DOTALL, so `.` stops at a newline and
+        // Python's `$` also matches just before a trailing one. `[\s\S]*` would cross a newline and strip
+        // more than C1 does — over-redaction rather than a leak, but a divergence all the same.
+        let query = #/\?.*(?=\n?$)/#
 
         /// redact.py `redact_text` (line 269), less rule 3. The `ls -l` owner and group columns are matched
         /// by *position*: a directory listing carries the recording machine's account name where no
@@ -198,12 +252,18 @@ public enum Redactor {
             return nil
         }
 
-        /// redact.py `_truncate_mcp` (line 351).
+        /// redact.py `_truncate_mcp` (line 351). The size is measured with `Redactor.pythonDumpsLength`,
+        /// not with canonical bytes: C1 measures `len(json.dumps(msg))`, whose default separators put a
+        /// space after every comma and colon, so canonical bytes would put the decision boundary in a
+        /// different place — a body under the limit compactly but over it with separators is truncated by
+        /// C1 and would be kept whole here. The `truncated` count reported to the reader is the same number.
         func truncateMCP(_ msg: JSONValue?) -> JSONValue? {
-            guard let msg, case .object(let o) = msg, let bytes = try? msg.canonicalData(), bytes.count > Redactor.mcpBodyLimit else { return msg }
+            guard let msg, case .object(let o) = msg else { return msg }
+            let size = Redactor.pythonDumpsLength(msg)
+            guard size > Redactor.mcpBodyLimit else { return msg }
             var kept: [String: JSONValue] = [:]
             for k in ["jsonrpc", "id", "method"] where o[k] != nil { kept[k] = o[k] }
-            kept["truncated"] = .integer(Int64(bytes.count))
+            kept["truncated"] = .integer(Int64(size))
             return .object(kept)
         }
 

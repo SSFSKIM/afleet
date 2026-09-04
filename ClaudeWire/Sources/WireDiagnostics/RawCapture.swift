@@ -48,19 +48,29 @@ public actor RawCapture {
         guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return }
         // A plain loop rather than `compactMap`: under language mode 6 the closure would capture the
         // non-Sendable `FileManager` out of actor isolation and the compiler rejects it.
+        //
+        // Only `.ndjson` files are counted or deleted, matching what `prune` owns. The two used to disagree,
+        // and a budget loop that deletes a file the type does not own is a worse bug than an exceeded budget.
         var entries: [(URL, Date, Int)] = []
-        for n in names {
+        for n in names where n.hasSuffix(".ndjson") {
             let u = directory.appendingPathComponent(n)
             guard let a = try? fm.attributesOfItem(atPath: u.path) else { continue }
             entries.append((u, (a[.modificationDate] as? Date) ?? .distantPast, (a[.size] as? Int) ?? 0))
         }
         entries.sort { $0.1 < $1.1 }
         var total = entries.reduce(0) { $0 + $1.2 }
-        while total > budgetBytes, let oldest = entries.first, oldest.0.lastPathComponent != "\(current.description).ndjson" {
-            if let id = SessionID(String(oldest.0.lastPathComponent.dropLast(7))) { try? handles[id]?.close(); handles[id] = nil }
-            try? fm.removeItem(at: oldest.0)
-            total -= oldest.2
-            entries.removeFirst()
+        // Oldest first, but *skipping* the session being written rather than stopping at it: stopping left
+        // the budget exceeded for as long as that session stayed the oldest file, which is the normal case
+        // for a long-lived session and would have made the budget a suggestion.
+        let protected = "\(current.description).ndjson"
+        var i = 0
+        while total > budgetBytes, i < entries.count {
+            let entry = entries[i]
+            guard entry.0.lastPathComponent != protected else { i += 1; continue }
+            if let id = SessionID(String(entry.0.lastPathComponent.dropLast(7))) { try? handles[id]?.close(); handles[id] = nil }
+            try? fm.removeItem(at: entry.0)
+            total -= entry.2
+            entries.remove(at: i)
         }
     }
 }

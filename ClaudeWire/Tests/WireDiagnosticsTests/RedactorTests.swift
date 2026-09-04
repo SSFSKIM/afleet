@@ -171,7 +171,9 @@ final class RedactorTests: XCTestCase {
         try assertIdempotent(Data(vector.utf8), "vector")
     }
     private func assertIdempotent(_ raw: Data, _ label: String) throws {
-        guard let once = Redactor.redact(line: raw) else { return }
+        // Explicitly, not silently: a regression that made `redact` return nil broadly would otherwise
+        // leave this test passing because there was nothing left to compare.
+        guard let once = Redactor.redact(line: raw) else { return XCTFail("\(label) was dropped; nothing was compared") }
         let twice = try XCTUnwrap(Redactor.redact(line: once), label)
         XCTAssertEqual(String(decoding: twice, as: UTF8.self), String(decoding: once, as: UTF8.self), label)
     }
