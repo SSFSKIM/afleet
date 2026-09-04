@@ -83,6 +83,37 @@ def build_fixture(root, name="demo", **overrides):
     return d
 
 
+def restamp(path):
+    """Bring a hand-built fixture's review block up to date with the bytes it now covers.
+
+    `build_fixture` writes the files itself and most tests then mutate the result in place to
+    isolate one check, so for them the review block is scaffolding rather than the subject:
+    without this every such test would report the digest mismatch instead of the thing it
+    names. The signature binding has tests of its own, which call `verify` directly and so are
+    not re-stamped -- see `VerifyTests.raw_errors`.
+    """
+    p = os.path.join(path, "fixture.json")
+    with open(p, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    review = meta.get("review") or {}
+    if not review.get("reviewer"):
+        return                                  # deliberately unsigned; leave it that way
+    meta["review"] = dict(review, checklist_version=verify.CHECKLIST_VERSION,
+                          **{verify.DIGEST_KEY: verify.tree_digest(path)})
+    write(p, json.dumps(meta, indent=1))
+
+
+def mark_unwritten(path, request_id):
+    """Annotate the capture record for `request_id` as one the harness recorded and never wrote."""
+    frames = fixture.load(path)["frames"]
+    for rec in frames:
+        if (rec.get("frame") or {}).get("request_id") == request_id:
+            rec["unwritten"] = True
+    with open(os.path.join(path, "frames.ndjson"), "w") as fh:
+        for rec in frames:
+            fh.write(json.dumps(rec) + "\n")
+
+
 def append_frame(path, rec):
     """Append one record to frames.ndjson and re-derive census.json from the result.
 
@@ -169,7 +200,53 @@ class SlugAndSnapshotTests(unittest.TestCase):
         self.assertEqual(fixture.tokenise(frames, mapping)[0]["output_file"], "<artifacts>/-slug/%s/tasks/t9.output" % SID)
 
 
+class RedactTreeTests(unittest.TestCase):
+    def test_redact_tree_refuses_a_symlink_rather_than_writing_through_it(self):
+        """`_redact_file` reads and truncates with an ordinary `open()`, so a link inside a
+        fixture made `make redact` rewrite whatever it pointed at -- a repository file or a
+        real Claude configuration file reachable by a relative link."""
+        root = tempfile.mkdtemp()
+        outside = os.path.join(root, "outside.jsonl")
+        write(outside, json.dumps({"type": "user", "note": "reach me at someone@example.invalid"}) + "\n")
+        before = read(outside)
+        tree = os.path.join(root, "tree", "transcript")
+        write(os.path.join(tree, "real.jsonl"), json.dumps({"type": "user"}) + "\n")
+        os.symlink(outside, os.path.join(tree, "linked.jsonl"))
+        with self.assertRaises(ValueError) as caught:
+            fixture.redact_tree(os.path.join(root, "tree"), redact.Redactor(home="/Users/probe", hostname="probe-mac"))
+        self.assertIn("linked.jsonl", str(caught.exception))
+        self.assertEqual(read(outside), before, "redact_tree wrote through the link")
+
+    def test_redact_tree_refuses_a_linked_directory_before_it_walks_into_it(self):
+        root = tempfile.mkdtemp()
+        write(os.path.join(root, "elsewhere", "x.jsonl"), "{}\n")
+        tree = os.path.join(root, "tree")
+        os.makedirs(os.path.join(tree, "transcript"))
+        os.symlink(os.path.join(root, "elsewhere"), os.path.join(tree, "transcript", "linked_dir"))
+        with self.assertRaises(ValueError):
+            fixture.redact_tree(tree, redact.Redactor(home="/Users/probe", hostname="probe-mac"))
+
+
 class WriteAndLoadTests(unittest.TestCase):
+    def test_a_fixture_the_validator_refuses_never_replaces_the_one_in_place(self):
+        """`record` removed the previous fixture and verified afterwards, so a recorder defect
+        destroyed a valid recording that costs real tokens to make again."""
+        root = tempfile.mkdtemp(); src = build_fixture(tempfile.mkdtemp())
+        loaded = fixture.load(src)
+        args = (loaded["meta"], loaded["frames"], loaded["census"], {"rules": {}},
+                os.path.join(src, "initial"), os.path.join(src, "transcript"), os.path.join(src, "artifacts"))
+        path = fixture.write_fixture(root, "keepme", *args)
+        write(os.path.join(path, "README.md"), "the recording worth keeping\n")
+        seen = {}
+        def refuse(staged):
+            seen["name"] = read_json(os.path.join(staged, "fixture.json"))["name"]
+            raise RuntimeError("no")
+        with self.assertRaises(RuntimeError):
+            fixture.write_fixture(root, "keepme", *args, validate=refuse)
+        self.assertEqual(seen["name"], "keepme", "the validator saw a directory named for the fixture")
+        self.assertEqual(read(os.path.join(path, "README.md")), "the recording worth keeping\n")
+        self.assertEqual(sorted(os.listdir(root)), ["keepme"])   # and no staging directory left behind
+
     def test_write_is_atomic_and_load_round_trips(self):
         root = tempfile.mkdtemp(); src = build_fixture(tempfile.mkdtemp())
         loaded = fixture.load(src)
@@ -225,11 +302,71 @@ class VerifyTests(unittest.TestCase):
         self.root = tempfile.mkdtemp(prefix="afleet-fx-")
 
     def errors(self, path):
+        restamp(path)
+        return self.raw_errors(path)
+
+    def raw_errors(self, path):
+        """`verify` on the fixture exactly as it stands, signature included. What the tests
+        about the signature itself use."""
         e, w = verify.verify_fixture(path, home="/Users/probe", author="Probe Person")
         return e
 
     def test_valid_fixture_passes(self):
         self.assertEqual(self.errors(build_fixture(self.root)), [])
+
+    def test_a_symlink_anywhere_in_the_tree_fails_the_gate(self):
+        """A tracked link makes every tool that walks the fixture read -- and `redact` write --
+        whatever it points at, and makes the reviewer sign for bytes that are not in front of
+        them. The link is refused wherever it sits and whatever it points at."""
+        import probe
+        for where, target in (("transcript/_slug_/linked.jsonl", os.path.join(self.root, "outside.jsonl")),
+                              ("artifacts/linked.output", "../../../../etc/hosts"),
+                              ("initial/linked_dir", "..")):
+            write(os.path.join(self.root, "outside.jsonl"), "{}\n")
+            d = build_fixture(self.root, name="link-" + where.split("/")[0])
+            probe.sign(d, reviewer="Reviewer")
+            os.symlink(target, os.path.join(d, where))
+            e = self.raw_errors(d)
+            self.assertTrue(any("symlink" in x for x in e), (where, e))
+            self.assertTrue(any(os.path.basename(where) in x for x in e), (where, e))
+
+    def test_a_signature_does_not_survive_an_edit_to_the_bytes_it_covers(self):
+        """The review block used to attest three truthy strings and nothing else, so any frame,
+        record, artifact or census could be edited after signing while the block went on
+        passing. It now carries a digest of the tree and `verify` recomputes it."""
+        import probe
+        d = build_fixture(self.root, name="signed")
+        probe.sign(d, reviewer="Reviewer")
+        self.assertEqual(self.raw_errors(d), [])
+        with open(os.path.join(d, "transcript", "_slug_", SID + ".jsonl"), "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "uuid": "a9"}) + "\n")
+        self.assertTrue(any(verify.DIGEST_KEY in x for x in self.raw_errors(d)), self.raw_errors(d))
+        # Every file counts, README and placeholder included -- the checklist has the reviewer
+        # read both -- and so does a rename that leaves the bytes alone.
+        d2 = build_fixture(self.root, name="signed2")
+        probe.sign(d2, reviewer="Reviewer")
+        write(os.path.join(d2, "README.md"), "# signed2\n")
+        self.assertTrue(any(verify.DIGEST_KEY in x for x in self.raw_errors(d2)))
+        d3 = build_fixture(self.root, name="signed3")
+        probe.sign(d3, reviewer="Reviewer")
+        art = os.path.join(d3, "artifacts", "_slug_", SID, "tasks")
+        write(os.path.join(art, "t1.output"), "x")
+        probe.sign(d3, reviewer="Reviewer")
+        os.rename(os.path.join(art, "t1.output"), os.path.join(art, "t2.output"))
+        self.assertTrue(any(verify.DIGEST_KEY in x for x in self.raw_errors(d3)))
+
+    def test_a_signature_at_an_older_checklist_version_is_refused(self):
+        """The field says which list the reviewer walked. Accepting anything truthy asked no
+        question at all."""
+        import probe
+        d = build_fixture(self.root, name="oldversion")
+        probe.sign(d, reviewer="Reviewer")
+        p = os.path.join(d, "fixture.json")
+        meta = read_json(p)
+        meta["review"]["checklist_version"] = verify.CHECKLIST_VERSION - 1
+        write(p, json.dumps(meta, indent=1))
+        e = self.raw_errors(d)
+        self.assertTrue(any("checklist version" in x for x in e), e)
 
     def test_a_committed_fixture_keeps_the_env_table_it_was_recorded_with(self):
         """`launch.env` is a recorded fact about one recording, never a live value.
@@ -449,6 +586,7 @@ class VerifyTests(unittest.TestCase):
         self._with_subagent_stream(d, mirrored=[{"type": "assistant", "uuid": "s1"}],
                                    on_disk=[{"type": "assistant", "uuid": "s1"}], sidecar={"agentType": "Explore"})
         self._mirror_a_sidecar_entry(d, "subagents/", {"type": "agent_metadata", "agentType": "Explore"}, times=2)
+        restamp(d)
         errors, notes = verify.verify_fixture(d, home=self.root)
         self.assertEqual(errors, [])
         self.assertTrue(any("agent_metadata" in n and "sidecar" in n for n in notes), notes)
@@ -504,6 +642,7 @@ class VerifyTests(unittest.TestCase):
             on_disk=[{"type": "assistant", "uuid": "s1", "message": {"stop_reason": None}}])
         self.assertTrue(any("mirror entries" in e for e in self.errors(d)))
         self._declare(d, {"subagents/": ["message.stop_reason", "message.usage"]})
+        restamp(d)
         errors, notes = verify.verify_fixture(d, home=self.root)
         self.assertEqual(errors, [])
         self.assertTrue(any("message.stop_reason" in n for n in notes), notes)
@@ -730,21 +869,30 @@ class VerifyTests(unittest.TestCase):
         append_frame(d, {"t": 97, "dir": "in", "frame": {"type": "user", "uuid": "u2", "message": {"role": "user", "content": "still open"}}})
         self.assertTrue(any("unanswered request end-1" in e for e in self.errors(d)))
 
-    def test_one_unwritten_trailing_host_request_is_tolerated_but_only_one(self):
-        """`Session._send_locked` records then writes while holding one lock (§4.3).
+    def test_only_the_unwritten_annotation_excuses_an_unanswered_host_request(self):
+        """`Session._send_locked` records then writes while holding one lock (§4.3), so a child
+        that exits between the two leaves a frame in the capture that never reached the wire.
 
-        A child that exits between the two leaves exactly one frame in the capture that never
-        reached the wire, which is a legitimate recording. It can only sit at the tail: the
-        failing write raises, so nothing the host sent follows it. A second trailing request
-        is something other than one failed final write.
+        That used to be inferred from position -- the last record being an inbound request was
+        read as proof it missed the wire -- which asserts nothing at all: a truncated or crashed
+        recording ending with a request the host really did send has exactly the same shape and
+        passed unremarked. The harness now catches the failing write and marks that record, and
+        the mark is the only thing honoured. The old positional case is the first assertion
+        here, and it is the one that changed.
         """
         d = build_fixture(self.root)
         append_frame(d, {"t": 95, "dir": "in", "frame": {"type": "control_request", "request_id": "w1", "request": {"subtype": "get_settings"}}})
+        self.assertTrue(any("unanswered request w1" in x for x in self.errors(d)))
+        mark_unwritten(d, "w1")
         self.assertEqual(self.errors(d), [])
-        append_frame(d, {"t": 96, "dir": "in", "frame": {"type": "control_request", "request_id": "w2", "request": {"subtype": "get_settings"}}})
+        # The mark is evidence about one record rather than a property of the tail, so a frame
+        # after it changes nothing -- and an unmarked request beside it still fails.
+        append_frame(d, {"t": 96, "dir": "out", "frame": {"type": "result", "subtype": "success", "result": "done"}})
+        self.assertEqual(self.errors(d), [])
+        append_frame(d, {"t": 97, "dir": "in", "frame": {"type": "control_request", "request_id": "w2", "request": {"subtype": "get_settings"}}})
         e = self.errors(d)
-        self.assertTrue(any("unanswered request w1" in x for x in e))
-        self.assertFalse(any("unanswered request w2" in x for x in e))
+        self.assertTrue(any("unanswered request w2" in x for x in e))
+        self.assertFalse(any("unanswered request w1" in x for x in e))
 
     def test_an_unanswered_host_request_before_the_tail_still_fails(self):
         d = build_fixture(self.root)
@@ -844,6 +992,7 @@ class VerifyTests(unittest.TestCase):
     def test_report_only_warning_for_author_name(self):
         d = build_fixture(self.root)
         write(os.path.join(d, "README.md"), "recorded by Probe Person\n")
+        restamp(d)
         e, w = verify.verify_fixture(d, home="/Users/probe", author="Probe Person")
         self.assertEqual(e, []); self.assertTrue(any("author" in x for x in w))
 
@@ -851,9 +1000,11 @@ class VerifyTests(unittest.TestCase):
         """§4.5 asks the reviewer to sign; a warning that fires on every run is one nobody reads."""
         signed = {"reviewer": "Probe Person", "date": "2026-09-04", "checklist_version": 1}
         d = build_fixture(self.root, review=signed)
+        restamp(d)
         e, w = verify.verify_fixture(d, home="/Users/probe", author="Probe Person")
         self.assertEqual(e, []); self.assertEqual([x for x in w if "author" in x], [])
         d2 = build_fixture(self.root, name="demo2", review=signed, purpose="asked for by Probe Person")
+        restamp(d2)
         e2, w2 = verify.verify_fixture(d2, home="/Users/probe", author="Probe Person")
         self.assertEqual(e2, []); self.assertTrue(any("author" in x for x in w2))
 

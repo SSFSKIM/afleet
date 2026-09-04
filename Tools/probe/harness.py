@@ -276,14 +276,17 @@ class Session:
                     self._dropped_ids.add(rid)
                 rec = {"t": t, "dir": direction, "dropped": (frame.get("request") or {}).get("subtype"), "request_id": rid}
             elif frame.get("type") == "control_response" and (frame.get("response") or {}).get("request_id") in self._dropped_ids:
-                return None
+                return None, None
             else:
                 rec = {"t": t, "dir": direction, "frame": red}
             self._capture.append(rec)
             if len(self._capture) > self.spill_after:
                 self._spill_locked()
             self._lock.notify_all()
-        return red
+        # The record as well as the redacted frame: `_send_locked` needs the object it just
+        # appended so a write that fails can annotate that exact record, rather than leaving
+        # the verifier to guess which frame missed the wire from where it sits.
+        return red, rec
 
     def _spill_locked(self):
         if self._spool is None:
@@ -328,8 +331,15 @@ class Session:
 
     # ---- process
     def start(self, timeout=30):
+        # `start_new_session=True` puts the CLI in a process group of its own, which is what
+        # makes the escalation below reach its descendants. Without it SIGTERM and then SIGKILL
+        # go to the CLI alone, and a background Bash or task child it did not clean up first --
+        # which is exactly what the `background-shell` scenario records -- keeps running after
+        # the harness reports the session closed, writing task output into a directory the
+        # recorder is about to walk.
         self.proc = subprocess.Popen(self.launch.argv(), cwd=self.launch.cwd, env=self.launch.environment(),
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+                                     start_new_session=True)
         for target in (self._reader, self._stderr_reader):
             t = threading.Thread(target=target, daemon=True)
             self._threads.append(t)
@@ -370,9 +380,25 @@ class Session:
         if rid and subtype:
             with self._lock:
                 self._pending[rid] = subtype
-        self._record("in", frame)
-        self.proc.stdin.write(json.dumps(frame) + "\n")
-        self.proc.stdin.flush()
+        _, rec = self._record("in", frame)
+        try:
+            self.proc.stdin.write(json.dumps(frame) + "\n")
+            self.proc.stdin.flush()
+        except Exception:
+            # The frame is in the capture and never reached the wire. `verify` needs to know
+            # that as a fact rather than infer it from the record's position, so the record
+            # says so about itself: a truncated recording that ends with a request the host
+            # really did send no longer passes the lifecycle check by sitting in the same
+            # place. The annotation is the evidence and the position is not.
+            #
+            # The record is annotated rather than dropped. It is what the host attempted, which
+            # is evidence about the harness and the shutdown as much as about the wire, and a
+            # capture that silently loses a frame is the failure mode the tombstone for a
+            # redactor-dropped frame already exists to avoid.
+            if rec is not None:
+                with self._lock:
+                    rec["unwritten"] = True
+            raise
 
     def _stderr_reader(self):
         for line in self.proc.stderr:
@@ -393,7 +419,7 @@ class Session:
             if frame.get("type") == "control_request":
                 with self._lock:
                     self._inbound_subtypes[frame.get("request_id")] = (frame.get("request") or {}).get("subtype")
-            red = self._record("out", frame)
+            red, _ = self._record("out", frame)
             if red is not None:
                 with self._lock:
                     self._raw_frames.append(red)
@@ -640,7 +666,7 @@ class Session:
         escalation = (None, signal.SIGTERM, signal.SIGKILL) if took_write_lock else (signal.SIGTERM, signal.SIGKILL)
         for sig in escalation:
             if sig is not None and self.proc.poll() is None:
-                self.proc.send_signal(sig)
+                self._signal_group(sig)
             try:
                 self.proc.wait(timeout=5)
                 break
@@ -648,6 +674,22 @@ class Session:
                 continue
         self._release()
         return self.proc.returncode
+
+    def _signal_group(self, sig):
+        """Signal the whole process group the CLI leads, falling back to the CLI alone.
+
+        The group is the unit §6.7's escalation is really about: the CLI's own descendants hold
+        the resources the shutdown is trying to release. The fallback matters because the group
+        can legitimately be gone -- the leader has exited and been reaped between the poll and
+        this call -- and because a group id is not available at all if the session split failed.
+        """
+        try:
+            os.killpg(os.getpgid(self.proc.pid), sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                self.proc.send_signal(sig)
+            except (ProcessLookupError, OSError):
+                pass
 
     def _release(self):
         """Let go of every handle the session opened. The reader threads end at EOF, which

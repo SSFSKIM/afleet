@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 
 SLUG_TOKEN = "_slug_"
@@ -109,7 +110,21 @@ def redact_tree(root, redactor):
     shape this module exports, rather than leaving the caller to reach across the boundary
     for a private name and re-implement the walk beside it.
     """
-    for dirpath, _, files in os.walk(root):
+    for dirpath, dirs, files in os.walk(root):
+        for name in dirs + files:
+            p = os.path.join(dirpath, name)
+            # `_redact_file` reads and truncates through an ordinary `open()`, which follows a
+            # symlink at both ends: a link under `transcript/` or `artifacts/` would make
+            # `make redact` rewrite whatever it points at, a repository file or a real Claude
+            # configuration file included. `lstat` is the test that does not follow, and it is
+            # asked of directories too, since a linked directory carries the whole walk
+            # outside the fixture. A fixture holds regular files and real directories; anything
+            # else is refused rather than skipped, because skipping leaves the operator with a
+            # fixture that looks redacted and is not.
+            mode = os.lstat(p).st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                raise ValueError("refusing to redact %s: a fixture holds only regular files and directories"
+                                 % os.path.relpath(p, root))
         for name in files:
             p = os.path.join(dirpath, name)
             _redact_file(p, p, redactor)
@@ -218,12 +233,26 @@ def tokenise(obj, mapping):
     return obj
 
 
-def write_fixture(fixtures_root, name, meta, frames, census_obj, manifest, initial_dir, transcript_dir, artifacts_dir):
+def write_fixture(fixtures_root, name, meta, frames, census_obj, manifest, initial_dir, transcript_dir, artifacts_dir,
+                  validate=None):
+    """Assemble a fixture and swap it into place; `validate` sees it first.
+
+    `validate` is called with the staged fixture directory before anything replaces the
+    previous one, and may raise to abort. That ordering is the whole point: `record` used to
+    remove the old directory and *then* verify, so a recorder defect that produced an invalid
+    fixture destroyed the valid one it was replacing -- and the recording behind it costs real
+    tokens to make again. Staging is a directory named exactly `name` inside a scratch parent,
+    not the scratch parent itself, because `verify` requires `fixture.json`'s name to equal the
+    directory it sits in and a validator run against `.tmp-<name>-xxxx` would fail on that
+    alone.
+    """
     os.makedirs(fixtures_root, exist_ok=True)
     # `verify` requires fixture.json's name to equal the directory it sits in. Establishing
     # it here makes that invariant hold by construction rather than by the caller's care.
     meta = dict(meta, name=name)
-    tmp = tempfile.mkdtemp(prefix=".tmp-%s-" % name, dir=fixtures_root)
+    stage = tempfile.mkdtemp(prefix=".tmp-%s-" % name, dir=fixtures_root)
+    tmp = os.path.join(stage, name)
+    os.makedirs(tmp)
     try:
         with open(os.path.join(tmp, "fixture.json"), "w", encoding="utf-8") as fh:
             json.dump(meta, fh, indent=1, sort_keys=True)
@@ -253,6 +282,10 @@ def write_fixture(fixtures_root, name, meta, frames, census_obj, manifest, initi
         carried = os.path.join(dest, DOC_FILE)
         if os.path.isfile(carried):
             shutil.copy2(carried, os.path.join(tmp, DOC_FILE))
+        # Before, not after: whatever the validator refuses, the fixture already in place is
+        # still the one on disk when this raises.
+        if validate is not None:
+            validate(tmp)
         old = None
         if os.path.exists(dest):
             old = tempfile.mkdtemp(prefix=".old-%s-" % name, dir=fixtures_root)
@@ -261,9 +294,10 @@ def write_fixture(fixtures_root, name, meta, frames, census_obj, manifest, initi
         os.rename(tmp, dest)
         if old:
             shutil.rmtree(old)
+        shutil.rmtree(stage, ignore_errors=True)
         return dest
     except Exception:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(stage, ignore_errors=True)
         raise
 
 

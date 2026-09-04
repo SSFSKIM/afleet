@@ -491,6 +491,26 @@ budget or needs a setting (S18); whether `os.openpty` is enough for the interact
 `claude --resume` in S12 or the scenario must drive `script(1)`; and the memory budget at
 which `record` spills to its temporary file, set from the largest recorded scenario.
 
+## 8. Deferred
+
+Work this child scoped out deliberately, recorded so it is a decision rather than an
+oversight.
+
+- **The recording's identity inputs are not carried in the fixture.** `verify`'s rule 3
+  checks the home directory and hostname of the machine *performing the verification*,
+  defaulting the hostname to the local one, so off the recording machine the check holds
+  only if a reviewer passes `--hostname` by hand and not at all for the home path. A
+  fixture could instead persist the identity inputs its recording ran under -- OS account,
+  the configured Git author name, e-mail and local part, and the recording hostname -- and
+  `verify` could then apply rule 3 in full on any machine, which is what a public
+  repository's reviewers will actually be doing. It is deferred rather than dismissed
+  because the shape needs thought this wave did not have: the inputs are themselves the
+  identifiers being protected, so storing them means storing a hash or a length rather than
+  the strings, and a fixture that names what to look for is a fixture that says what the
+  author's name is. The present arrangement is stated and tested (Revision Note,
+  2026-09-04): enforced at record time, held at verify time on the recording machine, and
+  opportunistic elsewhere.
+
 ## Decision Log
 
 - Decision: Python 3 standard library, compatible with the system 3.9, for `Tools/probe`
@@ -1764,3 +1784,62 @@ fake-claude injections above, not the clean live run.
   pinned, and both now name 2.1.259. The other thirteen C1 notes were checked the same way
   and needed no correction. Nothing binding on the parent is edited by this: a version tag in
   a C1 note is C1's own record of C1's own fixture.
+- 2026-09-05: A leak-lens review of the branch, and seven fixes with a regression test each.
+  Five are about a rule that was narrower than the property it claimed. **Rule 2 replaces a
+  secret-named field whatever its value's type**: it replaced strings only, so
+  `{"authorization": {"value": "Bearer .."}}`, `{"cookies": [{"value": ..}]}` and
+  `{"api_keys": {...}}` reached disk and, because `scan` shares the predicate, passed the gate
+  as well. The widening needed three exemptions to keep protocol structure, and each is written
+  where the thing it protects actually lives rather than as a type test: a null value is left
+  alone, as the identity rule has always left one alone; rule 5's own `effective_keys` and
+  `sources_keys` output and `Redactor.manifest`'s own `rules.secrets` key are exempt **by
+  path**, beside the existing `behaviors.key`; and the `*_tokens`-and-int counter exemption
+  becomes "the only secret word in the name is `token` and no leaf of the value is a string",
+  which is what actually separates a counter from a credential and which the corpus needed in
+  four name shapes the old rule missed (`cacheReadInputTokens`, `estimated_tokens_delta`,
+  `progressToken`, and `usage.output_tokens_details`, a dict of counters). `verify`'s
+  names-only reshaping of `census.json` and `redaction.json` now goes all the way down, because
+  a pair record holds protocol key sets one level below the pair name. One preservation
+  assertion moved: a dict of strings under a bare `key` is now redacted whole, which costs a
+  nested `projectKey` its exemption in that one position and is the only place the widening
+  chooses redaction over structure. Nothing in the corpus has that shape.
+  **`redact_tree` refuses a symlink or any irregular file by `lstat`, and `verify` fails a
+  fixture holding one anywhere** -- `_redact_file` reads and truncates through an ordinary
+  `open()`, so a tracked link made `make redact` rewrite whatever it pointed at, and a link is
+  content the reviewer signs for without having seen. **`sign` records a SHA-256 of the fixture
+  tree and `verify` recomputes it**, and requires `checklist_version` to equal the current
+  constant exactly; the block previously attested three truthy strings bound to nothing, so any
+  file could be edited after review while the signature went on passing. **The
+  last-record-is-unwritten exemption is replaced by evidence**: the harness catches the failing
+  write and annotates that capture record, and `verify` honours only the annotation, so a
+  truncated recording ending with a request the host really did send no longer passes by
+  sitting in the same place. **`fake-claude` creates materialised inodes with `O_EXCL` and
+  refuses an append to a file whose link count is not one** -- `safe_path` rejects a symlink,
+  but a hard link is a second name for an inode and every canonical-path check still sees a
+  file under the fake root. **The harness launches the CLI with `start_new_session=True` and
+  escalates with `killpg`**, so §6.7's SIGTERM and SIGKILL reach the background descendants
+  `background-shell` records rather than the CLI alone. **`record` keeps
+  `mirror_identity_only` a mapping** -- `list(...)` kept only its keys, so re-recording either
+  agent scenario wrote a shape `verify` refuses -- **and validates the new fixture in a staging
+  directory before it replaces the previous one**, which is the half that mattered: validation
+  used to run after the old directory was already gone.
+
+  On the corpus: fifteen fixtures are stamped with the digest of trees unchanged since their
+  attestations, and three -- `exit-plan-mode`, `explore-depth-1` and `nested-depth-2` -- were
+  re-walked against `Fixtures/REVIEW.md` and signed afresh, because `f6e3bad` re-redacted two
+  of them and `865e55a` then edited all three's READMEs, two `redaction.json` manifests and two
+  `fixture.json` declarations, after each had been signed. Stamping those would have bound a
+  signature to bytes nobody walked, on the day the mechanism was introduced. The walk found
+  nothing wrong: every countable claim in the three READMEs -- frame counts, per-subtype counts,
+  transcript record counts, sidecar field sets, substitution totals -- matches the fixture in
+  front of it. `Fixtures/REVIEW.md` gains a paragraph on what the digest binds and does not move
+  its version, because neither the digest nor the exact-version check asks the reviewer for
+  anything the ten items did not already ask.
+
+  One finding from the review is dismissed rather than fixed: the `"Claude reviewer for kimmi"`
+  signature is not an identity disclosure to redact. `kimmi` is the author's own public handle
+  and appears in every Decision Log entry of the committed specs; §4.5's identity rules protect
+  a recording's incidental identity data, not a reviewer's deliberate signature, and `verify`
+  already masks it so it does not warn on every run. The other half of that finding -- carrying
+  a recording's identity inputs so rule 3 can be applied off-machine -- is §8's first Deferred
+  entry.

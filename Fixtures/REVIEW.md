@@ -56,7 +56,17 @@ and re-walking the fixtures whose signatures should still stand.
    simply wrong. Nothing but this reading can.
 
 Sign with `Tools/probe/probe.py sign Fixtures/<name> --reviewer "<your name>"`,
-which writes `{"reviewer", "date", "checklist_version"}` and stamps the version
-from `verify.CHECKLIST_VERSION` — no number is written by hand here, so this line
-cannot fall behind the list above it. Then run `make verify-fixtures` and commit
-the fixture in its own commit.
+which writes `{"reviewer", "date", "checklist_version", "tree_sha256"}` and stamps
+the version from `verify.CHECKLIST_VERSION` — no number is written by hand here, so
+this line cannot fall behind the list above it. Then run `make verify-fixtures` and
+commit the fixture in its own commit.
+
+`tree_sha256` is a digest of the whole fixture — every relative path and the bytes
+at it, with the review block itself excluded — and `verify` recomputes it. So a
+signature covers the bytes you walked and nothing else: any later edit to any file
+in the fixture, `make redact` and a hand-fixed frame alike, re-opens this list
+rather than passing on the strength of a walk that happened before the edit. The
+repair is to walk the list again and sign again, which costs nothing but reading.
+`verify` also refuses a `checklist_version` that is not the current one, for the
+same reason. Neither of these adds anything to the ten items above, which is why
+the version does not move for them.

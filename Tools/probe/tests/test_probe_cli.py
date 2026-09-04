@@ -72,6 +72,20 @@ def run(session, ctx):
                              "account": {"email": "leak@example.com"}, "apiKey": "s3cret",
                              "message": {"role": "user", "content": "my key is sk-ant-api03-LEAKLEAK"}}) + "\\n")
 '''
+# The two agent scenarios' shape: a `mirror_identity_only` declaration, which is a *mapping*
+# from a stream scope to the field paths that may differ. `%(declaration)r` is the real
+# scenario's own declaration, read out of `Tools/probe/scenarios/` by the test.
+AGENT_SCENARIO_SRC = '''
+META = {"name": "%(name)s", "purpose": "cli test: an agent scenario's mirror declaration",
+        "serves": ["test"], "census": True, "deterministic": True, "isolation": "config-home",
+        "launch": {"binary_args": [%(stand_in)r], "max_turns": 2},
+        "prompts": ["hello"], "resume_of": None, "setup": None, "spikes": [],
+        "mirror_identity_only": %(declaration)r}
+
+def run(session, ctx):
+    session.send_user("hello")
+    session.wait_result(20)
+'''
 RESUME_SCENARIO_SRC = '''
 import json
 import os
@@ -166,6 +180,16 @@ META = {"name": "cli-garbage", "purpose": "cli test: a binary emitting an undeco
 def run(session, ctx):
     session.wait_result(20)
 '''
+
+
+def read(path):
+    with open(path) as fh:
+        return fh.read()
+
+
+def write(path, text):
+    with open(path, "w") as fh:
+        fh.write(text)
 
 
 def read_bytes(path):
@@ -296,6 +320,50 @@ class RecordAndDiffTests(unittest.TestCase):
         probe.sign(path, reviewer="tester")
         self.assertEqual(probe.verify_paths([path])[0], 0, probe.verify_paths([path])[1])
 
+    def test_record_writes_the_agent_scenarios_mirror_declaration_as_the_mapping_it_is(self):
+        """`record` serialised this field with `list(...)`, which keeps only the mapping's keys.
+
+        Re-recording either agent scenario therefore wrote a bare list, which
+        `verify._check_mirror` refuses -- and it refused after the previous fixture had already
+        been replaced. Both real declarations are exercised; no model turn is needed, since the
+        defect is in the recorder's own serialisation.
+        """
+        real_scenarios = os.path.join(os.path.dirname(probe.__file__), "scenarios")
+        for scenario in ("explore-depth-1", "nested-depth-2"):
+            declared = probe.load_scenario(scenario, real_scenarios).META.get("mirror_identity_only")
+            self.assertIsInstance(declared, dict, scenario)
+            self.assertTrue(all(isinstance(v, list) and v for v in declared.values()), declared)
+            name = scenario.replace("-", "_")
+            with open(os.path.join(self.scenarios, name + ".py"), "w") as fh:
+                fh.write(AGENT_SCENARIO_SRC % {"name": scenario, "stand_in": STAND_IN, "declaration": declared})
+            path, errors = self.record(name)
+            self.assertEqual(errors, [probe.UNSIGNED_REVIEW], errors)
+            written = read_json(os.path.join(path, "fixture.json"))["mirror_identity_only"]
+            self.assertEqual(written, declared, scenario)
+
+    def test_a_recording_that_does_not_verify_leaves_the_previous_fixture_in_place(self):
+        """`record` removed the fixture directory and verified afterwards, so a recorder defect
+        destroyed the recording it was replacing -- which for a real scenario costs money and a
+        model turn to make again. Validation now happens in a staging directory."""
+        with open(os.path.join(self.scenarios, "cli_transcript.py"), "w") as fh:
+            fh.write(TRANSCRIPT_SCENARIO_SRC % {"stand_in": STAND_IN})
+        path, errors = self.record("cli_transcript")
+        self.assertEqual(errors, [probe.UNSIGNED_REVIEW], errors)
+        write(os.path.join(path, "README.md"), "the recording worth keeping\n")
+        kept = read_bytes(os.path.join(path, "frames.ndjson"))
+        # The same scenario with a declaration no stream in the recording can match, which is
+        # a fixture `verify` refuses.
+        stale = TRANSCRIPT_SCENARIO_SRC % {"stand_in": STAND_IN}
+        stale = stale.replace('"spikes": []}', '"spikes": [], "mirror_identity_only": {"subagents/": ["message.usage"]}}')
+        with open(os.path.join(self.scenarios, "cli_stale.py"), "w") as fh:
+            fh.write(stale)
+        with self.assertRaises(RuntimeError) as caught:
+            self.record("cli_stale", out=path)
+        self.assertIn("does not verify", str(caught.exception))
+        self.assertEqual(read(os.path.join(path, "README.md")), "the recording worth keeping\n")
+        self.assertEqual(read_bytes(os.path.join(path, "frames.ndjson")), kept)
+        self.assertFalse(any(n.startswith(".tmp-") for n in os.listdir(self.fixtures)))
+
     def test_record_passes_a_declared_spill_threshold_through_to_the_harness(self):
         path, _ = self.record("cli_spill")
         meta = read_json(os.path.join(path, "fixture.json"))
@@ -346,7 +414,6 @@ class RecordAndDiffTests(unittest.TestCase):
         # `streams.json` holds the byte sizes of the files under `initial/`, so a rule that
         # shortens one leaves every offset in it pointing at the wrong place.
         path, _ = self.record("cli_demo")
-        probe.sign(path, reviewer="tester")
         planted = os.path.join(path, "initial", "_slug_", "x.jsonl")
         os.makedirs(os.path.dirname(planted))
         with open(planted, "w") as fh:
@@ -354,6 +421,11 @@ class RecordAndDiffTests(unittest.TestCase):
         before = os.path.getsize(planted)
         write_json(os.path.join(path, "streams.json"), {"_slug_/x.jsonl": before})
         probe._redact_in_place(path)
+        # Signed after the redaction, not before it: a review signature now covers the bytes
+        # of the tree, and this test deliberately edits them. Signing first would make the
+        # fixture report the mismatch the signature is meant to report instead of the offset
+        # question the test asks. The assertions are unchanged.
+        probe.sign(path, reviewer="tester")
         after = os.path.getsize(planted)
         self.assertNotEqual(after, before)      # the address became a shorter placeholder
         self.assertEqual(read_json(os.path.join(path, "streams.json")), {"_slug_/x.jsonl": after})

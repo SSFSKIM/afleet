@@ -37,7 +37,8 @@
  "review": {
   "checklist_version": 2,
   "date": "2026-09-04",
-  "reviewer": "Claude reviewer for kimmi"
+  "reviewer": "Claude reviewer for kimmi",
+  "tree_sha256": "d79529c1fde615f9fef64cabba595892353cf8f4fef94bb6027f5a4126c1ae99"
  },
  "scenario": null,
  "serves": [

@@ -79,6 +79,21 @@ USAGE_COUNTERS = {"input_tokens", "output_tokens", "cache_read_input_tokens", "c
 # search of docs/tui-parity and probes turned up no record of it, against bundle
 # occurrences in credential-shaped positions, so it is redacted like any other key.
 SECRET_EXEMPT = frozenset(("apikeysource", "hookcallbackids", "projectkey"))
+# Rule 5's own output, and the one structure the widened secrets rule below would otherwise eat
+# on its way past. A `get_settings` answer has its values dropped and replaced by
+# `effective_keys` (the setting *names*) and `sources_keys` (`[{"source": .., "keys": [names]}]`),
+# so all three of those keys contain "key" and all three carry lists of strings -- exactly the
+# shape the widened rule redacts. Replacing them would leave a settings response that says
+# nothing whatever, the values having already gone. Written as paths, like the two exemptions
+# further down and for the same reason: it is the position that makes them safe, so a `keys`
+# field anywhere else is redacted like any other.
+# `rules.secrets` and `rules.oauth_flow` are the same case one file over: `Redactor.manifest`
+# keys its own record by *rule name*, two of which contain a secret word, and the value is a
+# count and a set of field paths. A manifest is a legitimate thing to hand `scan` -- §4.4
+# commits it and REVIEW item 4 has a reviewer read it -- so the exemption belongs here and not
+# only in `verify`'s names-only reshaping of the file.
+SECRET_STRUCTURE_PATHS = frozenset(("effective_keys", "sources_keys", "sources_keys.keys",
+                                    "rules.secrets", "rules.oauth_flow"))
 OAUTH_SUBTYPES = ("claude_authenticate", "claude_oauth_callback", "claude_oauth_wait_for_completion",
                   "mcp_authenticate", "mcp_oauth_callback_url")
 MCP_LIMIT = 4096
@@ -90,20 +105,62 @@ def _norm_key(k):
     return k.lower().replace("_", "").replace("-", "")
 
 
-def _is_secret_key(k, value=None):
-    """Rule 2's name test, which needs the value for one exemption.
+def _contains_string(value):
+    """Whether any leaf *value* under `value` is a string. Keys are not leaves: what a
+    credential container leaks is its values, and reading its keys as content would make every
+    numeric map with string keys -- which is every JSON object -- look like a secret."""
+    if isinstance(value, str):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_string(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_string(v) for v in value)
+    return False
 
-    `*_tokens` names are exempted only when the value is an integer. The suffix earns its
-    exemption because `ephemeral_5m_input_tokens` is a counter that is not in the explicit
-    set, but the distinguishing property is the value, not the name: `access_tokens` is a
-    secret with a plural name and must not ride the same exemption.
+
+def _is_token_counter(lk, value):
+    """The one secret word that also names a counter, and the test that separates the two.
+
+    `token` is unlike the other eight: the protocol counts tokens everywhere, so it names
+    credentials *and* arithmetic. Both halves of the test are needed. The name half requires
+    that `token` is the **only** secret word present, so `oauth_token` and `api_key_token` are
+    never counters. The value half requires that nothing under the value is a string, which is
+    what actually distinguishes them: a credential is ultimately a string, a counter is
+    numbers. That covers the shapes the corpus carries -- `cacheReadInputTokens`,
+    `estimated_tokens_delta`, `maxOutputTokens`, `progressToken`, and
+    `usage.output_tokens_details`, a *dict* of counters -- without any of them needing to be
+    listed, which matters because the name of the next one is not knowable from here.
+
+    This supersedes the narrower `*_tokens`-and-int rule, which the corpus outgrew in every
+    direction: the suffix missed `cacheReadInputTokens`, and the int test missed a dict of
+    counters. Nothing it exempted stops being exempt.
+    """
+    if any(w in lk for w in SECRET_WORDS if w != "token"):
+        return False
+    return not _contains_string(value)
+
+
+def _is_secret_key(k, value):
+    """Rule 2's name test. §4.5 replaces *any* secret-named field, and the value decides only
+    which of three exemptions applies -- never whether the rule fires at all.
+
+    Reading §4.5 as "any secret-named **string**" is what left `{"authorization": {"value":
+    "Bearer .."}}`, `{"cookies": [{"value": ..}]}` and `{"api_keys": {"primary": ..}}` on disk
+    and, because `scan` shares this predicate, invisible to the gate as well. The whole subtree
+    goes now, whatever its type.
+
+    `None` is the one value that is never redacted, for the reason the identity rule has always
+    left it alone: there is nothing there to leak, and substituting a placeholder changes the
+    field's type for no gain. `rate_limits.seven_day_oauth_apps` is the corpus instance.
     """
     lk = k.lower()
     if _norm_key(k) in SECRET_EXEMPT or lk in USAGE_COUNTERS:
         return False
-    if lk.endswith("_tokens") and isinstance(value, int):
+    if value is None:
         return False
-    return any(w in lk for w in SECRET_WORDS)
+    if not any(w in lk for w in SECRET_WORDS):
+        return False
+    return not _is_token_counter(lk, value)
 
 
 # Fields whose *name* is in IDENTITY_KEYS but whose position makes them counters. The rules
@@ -153,6 +210,15 @@ def _is_identity_counter(path):
 
 def _is_secret_enum(path):
     return _path_exempt(path, SECRET_ENUM_PATHS)
+
+
+def _is_secret_structure(path):
+    return _path_exempt(path, SECRET_STRUCTURE_PATHS)
+
+
+def _secret_field(k, value, path):
+    """The whole of rule 2 in one place, so `redact_json` and `scan` cannot drift apart."""
+    return _is_secret_key(k, value) and not _is_secret_enum(path) and not _is_secret_structure(path)
 
 
 def _is_identity_key(nk):
@@ -268,7 +334,7 @@ class Redactor:
                         out[rk] = placeholder
                         self._hit("identity", p)
                     continue
-                if _is_secret_key(k, v) and not _is_secret_enum(p) and (isinstance(v, str) or (isinstance(v, (dict, list)) and nk in ("oauth", "credentials", "credential"))):
+                if _secret_field(k, v, p):
                     if v != "<redacted>":
                         self._hit("secrets", p)
                     out[rk] = "<redacted>"
@@ -406,8 +472,13 @@ def scan(obj_or_text, home, *, hostname=None):
                 elif nk == "apikeysource":
                     if v not in (None, "none", "<%s>" % k):
                         hits.append("%s: identity field not redacted" % p)
-                elif _is_secret_key(k, v) and not _is_secret_enum(p) and isinstance(v, str) and v != "<redacted>":
-                    hits.append("%s: secret-named field not redacted" % p)
+                elif _secret_field(k, v, p):
+                    # Whatever the type: a dict or a list under a secret-named key is the
+                    # container case the redactor now replaces, so anything that is not the
+                    # placeholder is a finding here too. The value is never walked into and
+                    # never quoted -- the finding names the position and the rule only.
+                    if v != "<redacted>":
+                        hits.append("%s: secret-named field not redacted" % p)
                 else:
                     walk(v, p)
         elif isinstance(o, list):

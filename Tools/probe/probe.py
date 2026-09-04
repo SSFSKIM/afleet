@@ -344,6 +344,21 @@ def session_id_of(session, launch):
     return launch.resume or launch.session_id
 
 
+def _staged_is_verifiable(staged):
+    """Refuse to replace a fixture with one `verify` rejects.
+
+    Run against the staged directory, before the previous fixture is touched. Only the unsigned
+    review block is tolerated, which is exactly what a fresh recording carries; everything else
+    -- a mis-serialised declaration, a redaction finding, a lifecycle gap -- means the recorder
+    produced something no reviewer could sign, and the recording it would have overwritten is
+    worth more than the one in hand.
+    """
+    blocking, _ = classify_errors(verify.verify_fixture(staged)[0])
+    if blocking:
+        raise RuntimeError("the recorded fixture does not verify, so the previous one is kept:\n  %s"
+                           % "\n  ".join(blocking))
+
+
 def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None,
            scratch_root=SCRATCH_ROOT, reviewer=None, out=None):
     fixtures_root = fixtures_root or FIXTURES_ROOT
@@ -427,22 +442,33 @@ def record(name, claude, scenario_dir=None, fixtures_root=None, config_home=None
             "isolation": meta.get("isolation", "config-home"), "synthetic": False, "hypothesis": False,
             "late_responses": list(meta.get("late_responses", [])),
             "unmirrored_prefix": int(meta.get("unmirrored_prefix") or 0),
-            "mirror_identity_only": list(meta.get("mirror_identity_only") or ()),
+            # A mapping, copied field lists and all. `list(...)` kept only the mapping's keys,
+            # so re-recording either agent scenario wrote a shape `verify._check_mirror`
+            # refuses -- and the refusal arrived after the previous fixture had been replaced.
+            "mirror_identity_only": {scope: list(fields or ())
+                                     for scope, fields in (meta.get("mirror_identity_only") or {}).items()},
             # Read off the session's own cancel record, never inferred from the captured frames:
             # `verify` treats the list as the host declaring which of its requests it withdrew,
             # and a list read back out of the capture would be a blanket amnesty the recorder
             # granted itself. Sorted only so the file is stable; `verify` reads it as a set.
             "withdrawn_requests": sorted(session.withdrawn_requests),
             "notes": ctx["notes"], "exit_code": ctx["exit_code"],
-            "review": {"reviewer": reviewer or "", "date": datetime.date.today().isoformat() if reviewer else "", "checklist_version": 1},
+            # Always unsigned here. A signature now has to carry a digest of the finished tree,
+            # which does not exist until `write_fixture` has laid it down, so `--reviewer`
+            # stamps it below through the same `sign` a reviewer runs by hand.
+            "review": {"reviewer": "", "date": "", "checklist_version": 1},
         }
         out_meta = redactor.redact_json(out_meta)          # fixture.json is a redaction target too (spec §4.5)
-        path = fixture.write_fixture(out_root, out_name, out_meta, frames, c, redactor.manifest(), initial_dir, transcript_dir, artifacts_dir)
+        path = fixture.write_fixture(out_root, out_name, out_meta, frames, c, redactor.manifest(),
+                                     initial_dir, transcript_dir, artifacts_dir, validate=_staged_is_verifiable)
     finally:
         # A run that dies mid-recording must not leave the staging directory behind. For a
         # resume it already holds the prior session's transcript -- redacted, but still a
         # copy of a recording nothing will ever come back for.
         shutil.rmtree(work, ignore_errors=True)
+    if reviewer:
+        # After the tree is in place, because the signature now covers its bytes.
+        sign(path, reviewer)
     errors, warnings = verify.verify_fixture(path)
     for w in warnings:
         log("warning: " + w)
@@ -459,11 +485,20 @@ def classify_errors(errors):
 
 
 def sign(path, reviewer):
+    """Write the review block, including the digest of the bytes it attests to.
+
+    The digest is taken before the write and is still correct after it: `verify.tree_digest`
+    hashes `fixture.json` as its metadata minus `review`, which is the one part of the file
+    this function changes. So the signature covers the tree exactly as the reviewer walked it,
+    and any later edit to any file in the fixture -- a re-redaction, a hand-fixed frame, a
+    README rewrite -- makes `verify` ask for the walk again.
+    """
     p = os.path.join(path, "fixture.json")
     with open(p, encoding="utf-8") as fh:
         meta = json.load(fh)
     meta["review"] = {"reviewer": reviewer, "date": datetime.date.today().isoformat(),
-                      "checklist_version": verify.CHECKLIST_VERSION}
+                      "checklist_version": verify.CHECKLIST_VERSION,
+                      verify.DIGEST_KEY: verify.tree_digest(path)}
     with open(p, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=1, sort_keys=True)
 

@@ -67,7 +67,8 @@
  "review": {
   "checklist_version": 2,
   "date": "2026-09-04",
-  "reviewer": "Claude reviewer for kimmi"
+  "reviewer": "Claude reviewer for kimmi",
+  "tree_sha256": "c016f9460757d960b3a71e65de317d312abcf0f051de094cc76c83d861f35d95"
  },
  "scenario": "session_mirror_relocation",
  "serves": [

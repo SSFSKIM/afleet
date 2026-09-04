@@ -141,6 +141,15 @@ def main():
             rid = control_request("hook_callback", callback_id="afleet.notification", input={"message": "hello", "notification_type": "idle"})
             r = response_to(rid)
             emit({"type": "system", "subtype": "stand_in_saw", "what": "hook", "response": ((r or {}).get("response") or {}).get("response")})
+        elif feature == "background_child":
+            # A descendant that outlives the CLI, which is what the SIGTERM/SIGKILL escalation
+            # has to reach. It writes its pid where the test can watch for it and detaches its
+            # streams, so the harness's readers still see EOF when the CLI itself goes.
+            import subprocess
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(os.environ["STAND_IN_CHILD_PIDFILE"], "w") as fh:
+                fh.write(str(child.pid))
         elif feature == "ignore_end_session":
             pass
         elif feature == "leak":

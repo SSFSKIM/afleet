@@ -20,6 +20,11 @@ def write(path, text):
         fh.write(text)
 
 
+def read(path):
+    with open(path) as fh:
+        return fh.read()
+
+
 def tiny_fixture(root, name="tiny", mirror_root="~/.claude", init_id="init-1"):
     """Two turns: initialize, user -> system/init + assistant + mirror + result; host get_usage; user -> result; end_session.
     `mirror_root` is the config home the recording ran under and `init_id` the id it gave its
@@ -379,6 +384,46 @@ class MaterializeTests(ToolTest):
         h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
         h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
         self.assertEqual(h.finish(timeout=10), 2); self.assertEqual(os.listdir(elsewhere), [])
+
+    def test_a_pre_existing_hard_link_in_the_fake_home_is_refused_by_materialize(self):
+        """`safe_path` rejects a symlink, but a hard link is a second name for an inode and
+        every canonical-path check still sees a file under the fake root, so `_open_new`'s
+        `O_TRUNC` wrote straight through to whatever else shared it. A sidecar destination is
+        the case that matters, because it slips past the existing main-session filename check."""
+        sidecar = os.path.join("_slug_", SID, "subagents", "agent-x.jsonl")
+        write(os.path.join(self.fx, "initial", sidecar), json.dumps({"type": "agent"}) + "\n")
+        streams = json.loads(read(os.path.join(self.fx, "streams.json")))
+        streams[sidecar] = os.path.getsize(os.path.join(self.fx, "initial", sidecar))
+        write(os.path.join(self.fx, "streams.json"), json.dumps(streams))
+        dest = os.path.realpath(os.path.join(self.root, "fake-home"))
+        os.makedirs(dest); write(os.path.join(dest, fake_claude.MARKER), "")
+        victim = os.path.join(self.fake_real_home, "history.jsonl")
+        write(victim, "the real file\n" * 40)
+        before = read(victim)
+        slug = fake_claude.slug_of(REC_CWD)
+        planted = os.path.join(dest, "projects", sidecar.replace("_slug_", slug))
+        os.makedirs(os.path.dirname(planted))
+        os.link(victim, planted)
+        r = self.run_materialize(dest)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(read(victim), before, "materialize wrote through a hard link")
+
+    def test_replay_refuses_to_append_through_a_hard_linked_stream(self):
+        """Replay opened an existing stream `r+b` and truncated it before appending. Same inode,
+        same problem, and no `O_EXCL` to lean on because the leaf legitimately exists."""
+        dest = os.path.realpath(os.path.join(self.root, "fake-home")); cwd = "/private/tmp/afleet-fixtures/other-cwd"
+        self.assertEqual(self.run_materialize(dest, cwd=cwd).returncode, 0)
+        victim = os.path.join(self.fake_real_home, "history.jsonl")
+        write(victim, "the real file\n" * 40)
+        before = read(victim)
+        stream = os.path.join(dest, "projects", fake_claude.slug_of(cwd), SID + ".jsonl")
+        os.unlink(stream); os.link(victim, stream)
+        h = Host(self.fx, self.tmp(), env={"FAKE_CLAUDE_CONFIG_HOME": dest, "FAKE_CLAUDE_CWD": cwd})
+        h.send({"type": "control_request", "request_id": "i", "request": {"subtype": "initialize"}}); h.wait(lambda f: f.get("type") == "control_response")
+        h.send({"type": "user", "uuid": "x", "message": {"role": "user", "content": "one"}})
+        h.send({"type": "control_response", "response": {"subtype": "success", "request_id": "c1", "response": {"behavior": "allow"}}})
+        self.assertNotEqual(h.finish(timeout=10), 0)
+        self.assertEqual(read(victim), before, "replay truncated or appended through a hard link")
 
     def test_replay_refuses_a_marked_home_planted_inside_the_real_config_home(self):
         planted = os.path.join(self.fake_real_home, "planted"); os.makedirs(planted)

@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import signal
 import sys
 import threading
 import tempfile
@@ -338,6 +339,43 @@ class SessionTests(unittest.TestCase):
         # twice, once on the lock and again on a graceful wait for a child nobody asked to go.
         self.assertGreaterEqual(outcome["dt"], 4.9)
         self.assertLess(outcome["dt"], 8.0)
+
+    def test_a_frame_the_write_never_reached_the_wire_says_so_in_the_capture(self):
+        """`_send_locked` records and writes as one step; when the write raises, the frame is in
+        the capture and was never on the wire. `verify` used to infer that from the record's
+        position, which asserts nothing -- so the record now carries the fact itself."""
+        s = self.run_session([])
+        s.proc.stdin.close()                      # the write raises on the next send
+        with self.assertRaises((ValueError, OSError)):
+            s.request_async("get_usage")
+        last = s.frames()[-1]
+        self.assertTrue(last.get("unwritten"), last)
+        self.assertEqual(last["frame"]["request"]["subtype"], "get_usage")
+        self.assertFalse(any(r.get("unwritten") for r in s.frames()[:-1]))
+
+    def test_forced_shutdown_reaches_the_cli_s_background_descendants(self):
+        """The escalation signalled the CLI alone, so a background Bash or task child it had not
+        cleaned up survived SIGKILL and went on holding resources after the harness reported the
+        session closed. The CLI now leads a process group and the group is what is signalled."""
+        pidfile = os.path.join(self.tmp, "child.pid")
+        os.environ["STAND_IN_CHILD_PIDFILE"] = pidfile
+        self.addCleanup(os.environ.pop, "STAND_IN_CHILD_PIDFILE", None)
+        s = self.run_session(["background_child", "ignore_end_session"])
+        s.send_user("go"); s.wait_result(10)
+        with open(pidfile) as fh:
+            child = int(fh.read())
+        os.kill(child, 0)                       # alive while the session is
+        s.close()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                os.kill(child, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(child, signal.SIGKILL)      # do not leave it behind whatever the verdict
+            self.fail("the CLI's background descendant outlived the forced shutdown")
 
     def test_request_round_trip_and_close_sequence_with_a_stubborn_child(self):
         s = self.run_session(["ignore_end_session"])

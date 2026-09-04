@@ -65,8 +65,9 @@
  "recorded_at": "2026-09-04T11:51:47Z",
  "review": {
   "checklist_version": 2,
-  "date": "2026-09-04",
-  "reviewer": "Claude reviewer for kimmi"
+  "date": "2026-09-05",
+  "reviewer": "Claude reviewer for kimmi",
+  "tree_sha256": "6695509937fd863f3917ed1f8eddf65f3849b18c66b1cd07df88db5659259acc"
  },
  "scenario": "nested_depth_2",
  "serves": [

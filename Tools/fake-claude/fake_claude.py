@@ -128,6 +128,38 @@ def _open_new(path, mode):
     return os.fdopen(os.open(path, flags, 0o600), mode)
 
 
+def _create_new(path, mode):
+    """Create the leaf, or refuse. The other half of the containment `safe_path` starts.
+
+    `safe_path` rejects a symlink, but a *hard* link is not a path -- it is a second name for
+    an inode, and every canonical-path check still sees a file under the fake root. A
+    pre-existing leaf inside a marked home can therefore be a second name for a file in a real
+    `~/.claude`, and opening it `O_TRUNC` writes straight through to it. `O_EXCL` is the test
+    that cannot be fooled by a name: a new inode or nothing.
+    """
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), mode)
+
+
+def _open_existing(path, mode):
+    """Open a leaf that must already exist, without following a symlink and without truncating."""
+    flags = (os.O_RDWR if "+" in mode else os.O_WRONLY) | os.O_NOFOLLOW | (os.O_APPEND if "a" in mode else 0)
+    return os.fdopen(os.open(path, flags), mode)
+
+
+def _refuse_shared_inode(fh, what):
+    """Refuse a file that has more than one name, once it is already open.
+
+    For the appends, where the leaf legitimately exists and `O_EXCL` cannot be used. The check
+    is on the open descriptor rather than on the path, so nothing can be swapped underneath it
+    between the test and the write.
+    """
+    if os.fstat(fh.fileno()).st_nlink != 1:
+        fh.close()
+        raise RuntimeError("refusing to write %s: the file has more than one link, so it may be a second "
+                           "name for an inode outside the fake home" % what)
+    return fh
+
+
 def _rewrite_text(text, meta, cwd, real_home):
     slug = slug_of(cwd)
     text = text.replace(SLUG_TOKEN, slug)
@@ -170,8 +202,8 @@ def materialize(fixture_dir, config_home, cwd, env=None, stderr=sys.stderr):
         return EXIT_REFUSED
     real = _real(config_home)
     os.makedirs(real, exist_ok=True)
-    with _open_new(os.path.join(real, MARKER), "a"):
-        pass
+    with _open_new(os.path.join(real, MARKER), "a") as marker:
+        _refuse_shared_inode(marker, MARKER)
     initial = os.path.join(fixture_dir, "initial")
     for root, _, files in os.walk(initial):
         for f in files:
@@ -184,8 +216,13 @@ def materialize(fixture_dir, config_home, cwd, env=None, stderr=sys.stderr):
                 stderr.write("fake-claude: refusing to write through a symlink or outside the fake home: projects/%s\n" % rel)
                 return EXIT_REFUSED
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with _open_new(dst, "wb") as b:
-                b.write(initial_bytes(fixture_dir, stream, meta, cwd, real))
+            try:
+                with _create_new(dst, "wb") as b:
+                    b.write(initial_bytes(fixture_dir, stream, meta, cwd, real))
+            except FileExistsError:
+                stderr.write("fake-claude: refusing to materialize onto an existing file, which may be a "
+                             "hard link out of the fake home: projects/%s\n" % rel)
+                return EXIT_REFUSED
     return 0
 
 
@@ -340,7 +377,7 @@ class Replayer:
                 self.stderr.flush()
         elif not os.path.exists(dst):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with open(src, "rb") as a, _open_new(dst, "wb") as b:
+            with open(src, "rb") as a, _create_new(dst, "wb") as b:
                 b.write(a.read())
 
     def _stream_start(self, stream):
@@ -360,15 +397,18 @@ class Replayer:
             self.started.add(path)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             if not os.path.exists(path):
-                with _open_new(path, "ab"):
+                with _create_new(path, "ab"):
                     pass
             start = self._stream_start(stream)
             if start > os.path.getsize(path):
                 raise RuntimeError("stream %s holds %d bytes but its appends start at %d: materialize this fixture into the fake home first"
                                    % (stream, os.path.getsize(path), start))
-            with open(path, "r+b") as fh:
+            # `open(path, "r+b")` followed a symlink and truncated whatever it found; the
+            # no-follow open and the link count together keep the truncation inside the fake
+            # home even when the leaf was laid down by something other than materialize.
+            with _refuse_shared_inode(_open_existing(path, "r+b"), "projects/" + rel) as fh:
                 fh.truncate(start)
-        with _open_new(path, "ab") as fh:
+        with _refuse_shared_inode(_open_existing(path, "ab"), "projects/" + rel) as fh:
             for entry in frame.get("entries", []):
                 fh.write((dumps(entry) + "\n").encode("utf-8"))
 

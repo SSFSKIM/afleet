@@ -20,21 +20,29 @@ Findings are safe to print and to store: `redact.scan` and `redact.scan_report_o
 the rule and the position they fired at and never the material, and everything this module
 adds around them is composed from fixture-relative paths, request ids and counts.
 """
+import hashlib
 import json
 import os
 import socket
+import stat
 
 import census
 import fixture
 import redact
 
 REVIEW_KEYS = ("reviewer", "date", "checklist_version")
+# The fourth field of a signed review block, checked separately from the three above so the
+# "not signed" finding keeps its exact wording -- `probe.record` matches that string by
+# equality to tell a fresh recording's missing signature from every other error.
+DIGEST_KEY = "tree_sha256"
 
 # The version of `Fixtures/REVIEW.md` a signature attests to. Bump it whenever that file gains
 # or changes an item, because a block recording an older version says the reviewer walked a
 # shorter list than the one now in the repository -- which is the one thing the field is for.
-# `verify` checks the key is present and truthy, not that it is current: an old fixture is not
-# invalid, it is one whose signature a re-review can be judged against.
+# `verify` requires the recorded version to equal this one exactly. A block claiming an older
+# version says in as many words that its reviewer walked a shorter list than the repository
+# now holds, and a gate that accepts that statement is not asking the question the field
+# exists to ask; the repair is to re-walk and sign again, which costs nothing but reading.
 CHECKLIST_VERSION = 2
 
 # §4.4's `fixture.json` enumeration, plus `deterministic`, which the same section's census
@@ -78,19 +86,18 @@ def _lifecycle(frames, late_ok, withdrawn_ok=()):
     # Once the host closes stdin nothing more can travel host to CLI, so the index of the
     # last inbound record is the point past which an unanswered host request is explicable.
     last_inbound = max((i for i, rec in enumerate(frames) if rec.get("dir") == "in"), default=-1)
-    # The very last record, when it is a host request, may be one the harness recorded but
-    # never managed to write. `Session._send_locked` records and writes as one step while
-    # holding the write lock -- which is what keeps capture order and wire order the same --
-    # so a child that exits between the two leaves exactly one frame in the capture that
-    # never reached the wire. That is a legitimate recording, and the tail is the only place
-    # it can sit, because the failing write raises and nothing the host sent follows it. A gap
-    # anywhere earlier means the recording is wrong, and a second unmatched trailing request
-    # means something other than one failed final write.
-    unwritten = None
-    if frames and frames[-1].get("dir") == "in":
-        tail = frames[-1].get("frame") or {}
-        if tail.get("type") == "control_request":
-            unwritten = tail.get("request_id")
+    # A host request the harness recorded and never managed to write. `Session._send_locked`
+    # records and writes as one step while holding the write lock -- which is what keeps
+    # capture order and wire order the same -- so a child that exits between the two leaves a
+    # frame in the capture that never reached the wire, and the harness catches that write
+    # failure and marks that exact record `unwritten`.
+    #
+    # Only the annotation is honoured. This used to be inferred from position -- the last
+    # record being an inbound `control_request` was taken as proof it missed the wire -- which
+    # asserted nothing: a truncated or crashed recording ending with a request the host really
+    # did send has the same shape and passed the lifecycle check unremarked.
+    unwritten = {(rec.get("frame") or {}).get("request_id") for rec in frames if rec.get("unwritten")}
+    unwritten.discard(None)
     for i, rec in enumerate(frames):
         if "dropped" in rec:
             if rec.get("request_id"):
@@ -180,7 +187,7 @@ def _lifecycle(frames, late_ok, withdrawn_ok=()):
     for rid, (origin, status) in state.items():
         if status != "open":
             continue
-        if rid is not None and rid == unwritten:
+        if rid in unwritten:
             continue
         # The other carve-out, and it too is about a mechanism rather than about a subtype: the
         # harness sends `end_session` and closes stdin in the same breath (§6.7), so that
@@ -224,6 +231,68 @@ def _check_present(path):
     return errors
 
 
+def tree_digest(path):
+    """SHA-256 over the whole fixture tree: sorted relative paths and the bytes at them.
+
+    What binds a signature to what it signs. Without it the review block asserted three truthy
+    strings about nothing: any frame, transcript record, artifact, census or manifest could be
+    edited after review and the old block went on passing -- which is worse than no gate,
+    because it reads as a reviewer having seen the bytes in front of you.
+
+    Three properties it needs and one it must not have. The path goes into the hash beside the
+    bytes, so moving or renaming a file is a change; the length goes in too, so no pair of
+    files can be concatenated into another pair; and the walk is the whole tree, README and
+    `.gitkeep` included, because REVIEW item 8 has the reviewer read the README against the
+    recording and item 9 has them look for the placeholder. What it must not cover is the
+    review block itself, which would otherwise have to contain its own digest: `fixture.json`
+    is hashed as its metadata *minus* `review`, re-serialised canonically so the hash does not
+    move with indentation.
+    """
+    h = hashlib.sha256()
+    for rel in sorted(os.path.relpath(p, path) for p in _walk_files(path)):
+        full = os.path.join(path, rel)
+        if rel == "fixture.json":
+            try:
+                with open(full, encoding="utf-8") as fh:
+                    meta = json.load(fh)
+                body = json.dumps({k: v for k, v in meta.items() if k != "review"},
+                                  sort_keys=True, separators=(",", ":")).encode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                # Unparseable metadata is somebody else's finding; hashing the raw bytes keeps
+                # this function total rather than making a malformed fixture a traceback.
+                with open(full, "rb") as fh:
+                    body = fh.read()
+        else:
+            with open(full, "rb") as fh:
+                body = fh.read()
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0%d\0" % len(body))
+        h.update(body)
+    return h.hexdigest()
+
+
+def _check_links(path):
+    """No entry anywhere in a fixture tree may be a symlink or any other irregular file.
+
+    The absolute half of the config-home rule read from the verifier's side. A tracked link
+    beneath `transcript/` or `artifacts/` makes every tool that walks the fixture -- `redact`
+    in place, `fake-claude`'s materialiser, a reviewer's own `grep -R` -- read and in one case
+    write whatever it points at, which may be a repository file or a logged-in Claude
+    configuration. It is also content the reviewer signs for without having seen, since what
+    the link resolves to is not in the fixture. Findings are the relative path and the reason,
+    which is fixture-relative by construction and safe to print.
+    """
+    out = []
+    for root, dirs, files in os.walk(path):
+        for name in sorted(dirs) + sorted(files):
+            p = os.path.join(root, name)
+            mode = os.lstat(p).st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                out.append("%s is a symlink or other irregular file; a fixture holds only regular files"
+                           % os.path.relpath(p, path))
+    return out
+
+
 def _check_meta(path, meta):
     errors = ["fixture.json is missing %s (spec §4.4)" % k for k in REQUIRED_META if k not in meta]
     errors += ["fixture.json %s must be true or false (spec §4.4)" % k
@@ -233,6 +302,16 @@ def _check_meta(path, meta):
     review = meta.get("review") or {}
     if not all(review.get(k) for k in REVIEW_KEYS):
         errors.append("review block is not signed (needs reviewer, date, checklist_version)")
+    else:
+        # Only once the block claims to be signed, so a freshly recorded fixture still reports
+        # exactly one review error and `record` can go on treating it as advice.
+        if review.get("checklist_version") != CHECKLIST_VERSION:
+            errors.append("review block records checklist version %r, and Fixtures/REVIEW.md is at %d; "
+                          "the fixture needs re-walking and re-signing"
+                          % (review.get("checklist_version"), CHECKLIST_VERSION))
+        if review.get(DIGEST_KEY) != tree_digest(path):
+            errors.append("review block does not cover the fixture's current bytes (%s mismatch); "
+                          "re-walk Fixtures/REVIEW.md and sign again" % DIGEST_KEY)
     if meta.get("hypothesis") and not meta.get("synthetic"):
         errors.append("hypothesis: true requires synthetic: true")
     return errors
@@ -609,6 +688,28 @@ def _check_streams(path, fx):
 
 # ---- the §4.5 scanners over every file
 
+def _names_moved(obj):
+    """Every key of a subtree moved into value position, recursively, values kept.
+
+    The reshaping goes all the way down rather than one level, because the names these two
+    files carry sit at more than one depth: a census pair record holds its protocol key sets
+    under `keys`, `payload_keys` and `body_keys`, and a manifest holds a rule's field paths
+    under the rule's own name -- `rules.secrets`. Both are names in key position, both match
+    the secrets predicate, and neither is content. One level of reshaping moved the pair name
+    and left the key sets underneath it, which the widened rule 2 then read as unredacted
+    secret containers.
+
+    Values survive intact and are still scanned; only the structural predicates, which ask
+    "must this field's value be a placeholder?", are taken off a question that has no answer
+    for a name.
+    """
+    if isinstance(obj, dict):
+        return list(obj.keys()) + [_names_moved(v) for v in obj.values()]
+    if isinstance(obj, list):
+        return [_names_moved(v) for v in obj]
+    return obj
+
+
 def _names_only(rel, obj):
     """A names-only file reshaped so its name-bearing keys sit in value position.
 
@@ -624,18 +725,12 @@ def _names_only(rel, obj):
             return None
         # `capabilities`, `flags` and `version` stay exactly where they are: they hold values
         # copied off the wire, which is what the structural predicates are for.
-        return dict(obj, pairs=list(pairs.values()) + list(pairs.keys()))
+        return dict(obj, pairs=_names_moved(pairs))
     if rel == "redaction.json":
         rules = obj.get("rules")
         if not isinstance(rules, dict):
             return None
-        reshaped = {}
-        for rule, rec in rules.items():
-            if not isinstance(rec, dict):
-                return None
-            paths = rec.get("paths")
-            reshaped[rule] = dict(rec, paths=list(paths.keys()) + list(paths.values())) if isinstance(paths, dict) else rec
-        return dict(obj, rules=reshaped)
+        return dict(obj, rules=_names_moved(rules))
     return None
 
 
@@ -705,6 +800,12 @@ def verify_fixture(path, home=None, author=None, hostname=None):
     missing = _check_present(path)
     if missing:
         return missing, []
+    links = _check_links(path)
+    if links:
+        # Returned alone rather than added to the rest: every check below this line opens the
+        # files of the tree, and following a link out of the fixture is the thing the finding
+        # says must not happen.
+        return links, []
     fx = fixture.load(path)
     errors = _check_meta(path, fx["meta"])
     errors += _check_frames(fx["frames"])

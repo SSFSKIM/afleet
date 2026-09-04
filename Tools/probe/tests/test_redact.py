@@ -77,7 +77,13 @@ class RedactJsonTests(unittest.TestCase):
                                "organization": "<organization>", "user": "<user>", "contact_email": "<email>", "other": "keep"})
         self.assertEqual(self.r.redact_json({"apiKeySource": "none"}), {"apiKeySource": "none"})
 
-    def test_secret_named_string_fields_only(self):
+    def test_secret_named_fields_are_replaced_whatever_their_value_type(self):
+        """Was `..._string_fields_only`. The name recorded the blind spot rather than the rule:
+        §4.5 replaces any secret-named field, and restricting that to strings let a container
+        under the same key reach disk. `key` is the one assertion that moves -- a dict of
+        strings under a bare `key` is now redacted whole, which costs the nested `projectKey`
+        its exemption in that one position. Nothing in the corpus has that shape, and the
+        alternative is leaving every secret-named container unredacted."""
         obj = {"accessToken": "abc", "oauth": {"x": 1}, "api_key": "k", "clientSecret": "s", "credentials": "c",
                "Authorization": "Bearer t", "cookie": "c=1",
                "input_tokens": 12, "output_tokens": 3, "max_tokens": 4, "thinking_tokens": 0, "cache_read_input_tokens": 9,
@@ -92,8 +98,50 @@ class RedactJsonTests(unittest.TestCase):
         self.assertEqual(out["cookie"], "<redacted>")
         for k in ("input_tokens", "output_tokens", "max_tokens", "thinking_tokens", "cache_read_input_tokens"):
             self.assertEqual(out[k], obj[k])
-        self.assertEqual(out["key"], {"projectKey": "p", "sessionId": "s"})
+        self.assertEqual(out["key"], "<redacted>")
         self.assertEqual(out["hookCallbackIds"], ["afleet.notification"])
+
+    def test_a_secret_named_container_is_redacted_whole_and_scan_says_so(self):
+        """The leak this closes. A secret-named key whose value was a dict, a list or a number
+        was left alone unless the key was exactly `oauth`, `credentials` or `credential`, and
+        `scan` shared the blind spot, so each of these reached disk *and* passed the gate."""
+        for obj, expected in (({"authorization": {"value": "Bearer abc123"}}, {"authorization": "<redacted>"}),
+                              ({"cookies": [{"value": "session-secret"}]}, {"cookies": "<redacted>"}),
+                              ({"api_keys": {"primary": "opaque-secret"}}, {"api_keys": "<redacted>"}),
+                              ({"secret": 1234567890}, {"secret": "<redacted>"}),
+                              ({"nested": {"clientSecret": ["a", "b"]}}, {"nested": {"clientSecret": "<redacted>"}})):
+            out = self.r.redact_json(obj)
+            self.assertEqual(out, expected)
+            self.assertEqual(redact.scan(out, home="/Users/probe", hostname="probe-mac"), [], obj)
+            hits = redact.scan(obj, home="/Users/probe", hostname="probe-mac")
+            self.assertTrue(any("secret-named field not redacted" in h for h in hits), (obj, hits))
+            # And the finding still names only the rule and the position, never the container.
+            for h in hits:
+                self.assertNotIn("Bearer", h); self.assertNotIn("opaque", h); self.assertNotIn("1234567890", h)
+
+    def test_the_protocol_structure_under_secret_named_keys_survives_the_container_rule(self):
+        """The three things that sit under keys the predicate matches and must not be redacted:
+        rule 5's own `effective_keys`/`sources_keys` output, the token counters the engine
+        reports in several name shapes, and a null under a secret-named key."""
+        body = {"effective_keys": ["env", "model"],
+                "sources_keys": [{"source": "userSettings", "keys": ["a", "b"]}],
+                "rate_limits": {"seven_day_oauth_apps": None}}
+        resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r2", "response": body}}
+        out = self.r.redact_frame(resp, "in", {"r2": "get_settings"})["response"]["response"]
+        self.assertEqual(out["effective_keys"], ["env", "model"])
+        self.assertEqual(out["sources_keys"], [{"source": "userSettings", "keys": ["a", "b"]}])
+        self.assertIsNone(out["rate_limits"]["seven_day_oauth_apps"])
+        counters = {"usage": {"output_tokens_details": {"thinking_tokens": 101}, "input_tokens": 5},
+                    "estimated_tokens_delta": 35, "estimated_tokens": None,
+                    "modelUsage": {"claude-haiku-4-5": {"cacheReadInputTokens": 7, "maxOutputTokens": 64}},
+                    "messageBreakdown": {"toolResultTokens": 12},
+                    "_meta": {"progressToken": 3}}
+        self.assertEqual(self.r.redact_json(counters), counters)
+        self.assertEqual(redact.scan(counters, home="/Users/probe", hostname="probe-mac"), [])
+        # The counter exemption is the value's doing, not the name's: the same names carrying
+        # a string are credentials again.
+        self.assertEqual(self.r.redact_json({"cacheReadInputTokens": "sk-ant-x"}), {"cacheReadInputTokens": "<redacted>"})
+        self.assertEqual(self.r.redact_json({"oauth_tokens": 12}), {"oauth_tokens": "<redacted>"})
 
     def test_idempotent(self):
         obj = {"account": {"email": "a@b.c"}, "token": "t", "text": "/Users/probe/x a@b.c"}
