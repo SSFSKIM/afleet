@@ -2248,8 +2248,14 @@ directory, never under any config home.
   is *demonstrated failing against the pre-fix code* before the fix is accepted, and where
   the break cannot be executed — signalling a process group would destroy the test runner —
   the substitute is a trace assertion that the dangerous path was never entered, stated as
-  such. A test that compares two things also asserts that it found them. Reviewers ask what
-  the assertion would have to see to fail, not whether it is true.
+  such. A test that compares two things also asserts that it found them, and a floor on
+  *did we parse anything* is not a floor on *did we parse the thing we compare*: C2's seventh
+  instance passed a count floor and three key checks while the property bodies it exists to
+  compare had stopped parsing entirely, because the discriminants and the bodies are read by
+  different patterns. The rule binds prescriptions as well as code — that seventh instance
+  was a remedy an owner specified for an earlier non-discriminating test, and it inherited
+  the same defect. Reviewers ask what the assertion would have to see in order to fail, not
+  whether it happens to be true.
 - **Spike fallbacks fire.** S7 (native markdown), S1 (GhosttyKit) or S3 (Monaco) fail
   their criteria. Mitigation: each has a named fallback in §15 that keeps the child's
   contract; the fallback is a Revision Note, not a re-cut.
