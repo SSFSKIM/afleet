@@ -93,7 +93,6 @@ final class TranscriptIndexTests: XCTestCase {
         var expectedPaths: Set<URL> = []
         for (name, url) in tree.mains where !Self.shadowed.contains(name) { expectedPaths.insert(url) }
         XCTAssertEqual(Set(snapshot.entries.values.map(\.path)), expectedPaths)
-        for name in Self.shadowed { XCTAssertFalse(expectedPaths.contains(try XCTUnwrap(tree.mains[name]))) }
 
         let plain = try XCTUnwrap(tree.fixtures["plain-two-turn"])
         let relocation = try XCTUnwrap(tree.fixtures["session-mirror-relocation"])
@@ -108,6 +107,34 @@ final class TranscriptIndexTests: XCTestCase {
 
         XCTAssertTrue(notices.notices.contains { if case .indexBuilt(let files, _) = $0 { return files == 17 } else { return false } },
                       "one indexBuilt notice naming the seventeen files read: \(notices.notices)")
+    }
+
+    // MARK: - The two title fallbacks no fixture reaches
+
+    /// Both terminal branches of `getLogDisplayTitle` are pure functions of five optional strings and an id, so this
+    /// needs no fixture, no config home and no file — only invented identifiers.
+    func testTitleFallsBackToAutonomousSessionAndThenToTheSessionId() throws {
+        let id = try XCTUnwrap(SessionID("3f2a91c4-77bd-4e0a-9c51-6b0e2d8a4f13"))
+
+        // A first prompt that opens with `<tick>` is the engine's mark of a session no user prompted.
+        let autonomous = TitlePrecedence.title(agentName: nil, customTitle: nil, aiTitle: nil, summary: nil,
+                                               firstPrompt: "<tick>\nwhatever the tick carried</tick>", sessionID: id)
+        XCTAssertEqual(autonomous.0, TitlePrecedence.autonomousSession)
+        XCTAssertEqual(autonomous.1, .fallback)
+
+        // Nothing at all: eight characters of the id, lowercased as `SessionID.description` gives them.
+        let anonymous = TitlePrecedence.title(agentName: nil, customTitle: nil, aiTitle: nil, summary: nil,
+                                              firstPrompt: nil, sessionID: id)
+        XCTAssertEqual(anonymous.0, "3f2a91c4")
+        XCTAssertEqual(anonymous.1, .fallback)
+        XCTAssertEqual(anonymous.0.count, 8)
+
+        // A present-but-empty source falls through exactly as JavaScript's `||` makes it, and so does a first prompt
+        // that is nothing but an XML-ish block.
+        let empty = TitlePrecedence.title(agentName: "", customTitle: "", aiTitle: "", summary: "",
+                                          firstPrompt: "<note>ignored</note>", sessionID: id)
+        XCTAssertEqual(empty.0, "3f2a91c4")
+        XCTAssertEqual(empty.1, .fallback)
     }
 
     // MARK: - Titles
