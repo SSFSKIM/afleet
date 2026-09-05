@@ -244,6 +244,7 @@ public actor StreamIngestion {
     private func readWhole(into stream: LogicalStream) throws {
         guard var st = streams[stream] else { return }
         let result = try WindowedTranscript.read(TranscriptReader(url: st.path), policy: policy(for: stream))
+        report(result, for: stream)
         var applied: [RecordKey] = []
         var duplicates = 0
         st.readStart = result.ranges.first?.offset ?? 0
@@ -254,6 +255,14 @@ public actor StreamIngestion {
         st.window = result.window
         refreshAnchor(&st, ranges: result.ranges)
         streams[stream] = st
+    }
+
+    /// One notice when a windowed read gave up on closure because it had held its budget's worth of bytes.
+    private func report(_ result: WindowedTranscript.Result, for stream: LogicalStream) {
+        guard result.closureBudgetExhausted else { return }
+        diagnostics.record(.windowClosureBudgetExhausted(session: session, stream: stream.name,
+                                                         extensions: result.extensions,
+                                                         records: result.records.count))
     }
 
     /// `<slug>/<sessionId>/subagents/agent-*.jsonl` beside the main file, each opened whole, plus every `.meta.json`.
@@ -603,6 +612,7 @@ public actor StreamIngestion {
                          effect: inout Effect) {
         guard let result = try? WindowedTranscript.read(TranscriptReader(url: st.path), policy: policy(for: stream))
         else { return }
+        report(result, for: stream)
         let previousLength = st.offset
         st.records = []; st.applied = []; st.locators = [:]; st.ordinals = [:]
         st.fileUnclaimed = [:]; st.mirrorUnclaimed = [:]; st.pendingFromFile = [:]
@@ -812,6 +822,7 @@ public actor StreamIngestion {
         }
         let result = try WindowedTranscript.readEarlier(TranscriptReader(url: st.path), held: st.records.map(\.record),
                                                         window: marker, policy: policy)
+        report(result, for: main)
         for (record, range) in zip(result.records, result.ranges) {
             let locator = RecordLocator(stream: main, range: range)
             let key: RecordKey
@@ -902,14 +913,14 @@ public actor StreamIngestion {
             let records = st.records.map(\.record)
             var options = RecordReducer.Options()
             options.window = st.window
-            // The reducer numbers occurrences in the order of the array it is handed; this actor numbers them in
-            // application order, and the two part after a `loadEarlier` prepend. The locators are therefore mapped
-            // positionally onto the reducer's own keys rather than by this actor's.
-            let keys = RecordKey.keys(for: records, in: stream)
+            // The keys this actor assigned, not keys re-derived from the array's order. The two part after a
+            // `loadEarlier` prepend — the actor numbers a hash occurrence when it applies it, the array is in file
+            // order — and a published key that means one record in `Effect.applied` and another in the projection is
+            // not a key at all (child spec: keys never renumber once published; the one exception is the rewrite
+            // rebuild, which reassigns them everywhere at once).
+            options.keys = st.records.map(\.key)
             var locators: [RecordKey: RecordLocator] = [:]
-            for (index, key) in keys.enumerated() {
-                if let locator = st.records[index].locator { locators[key] = locator }
-            }
+            for entry in st.records { if let locator = entry.locator { locators[entry.key] = locator } }
             options.locators = locators
             // A stream whose file this actor has never seen — the main stream under `.mirrorOnly`, an agent stream a
             // mirror frame named before the transcript appeared — learned every record it holds from a mirror entry.

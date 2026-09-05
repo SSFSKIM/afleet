@@ -79,6 +79,40 @@ final class WindowedTranscriptTests: XCTestCase {
         XCTAssertEqual(result.records, Array(try reader.readAll().records[expected.firstIndex...]))
     }
 
+    /// A window that can never close *inside its budget* stops on the budget, not at offset 0. The leaf here is turn
+    /// 1 of forty — a leaf near the file head, which is the shape a stale `last-prompt` leaves behind — so the closure
+    /// rule fails at every extension and, unbudgeted, the loop walks a twelve-megabyte file to its start and defeats
+    /// the memory bound the window exists to enforce. The same read with the budget removed is the control, and it is
+    /// what this test would have shown before the budget existed.
+    func testClosureStopsOnItsByteBudget() throws {
+        let file = SyntheticTranscript.linear(turns: 40, paddingBytes: 300_000, leafTurn: 1)
+        XCTAssertGreaterThan(file.data.count, 8 * 1024 * 1024, "the test needs a file above the whole-file threshold")
+        let tree = try TempTree()
+        let url = try tree.write(file.data, session: XCTUnwrap(SessionID(SyntheticTranscript.sessionID)), slug: "-invented-slug")
+        let reader = TranscriptReader(url: url)
+
+        let budget = 2 * 1024 * 1024
+        let bounded = WindowPolicy(wholeFileUpTo: 0, initialTail: 500_000, earlierStep: 500_000, closureBudget: budget)
+        let result = try WindowedTranscript.read(reader, policy: bounded)
+
+        XCTAssertTrue(result.closureBudgetExhausted, "the read gave up on closure, and says so")
+        XCTAssertNotNil(WindowedTranscript.openReason(result.records), "which is to say the window is not closed")
+        let span = try XCTUnwrap(result.ranges.last).offset + XCTUnwrap(result.ranges.last).length
+            - XCTUnwrap(result.ranges.first).offset
+        XCTAssertLessThan(span, budget + bounded.earlierStep, "it stopped within one step of the budget")
+        XCTAssertTrue(result.window.earlierAvailable, "and the rest of the file is still reachable")
+        XCTAssertGreaterThan(result.window.continueBefore, 0)
+        XCTAssertLessThan(result.records.count, file.ranges.count, "the whole file was not read")
+
+        // The control: the same file, the same steps, no budget. This is the unbounded walk the budget replaced.
+        let unbounded = WindowPolicy(wholeFileUpTo: 0, initialTail: 500_000, earlierStep: 500_000, closureBudget: .max)
+        let whole = try WindowedTranscript.read(reader, policy: unbounded)
+        XCTAssertFalse(whole.closureBudgetExhausted)
+        XCTAssertEqual(whole.records.count, file.ranges.count, "unbudgeted, opening the channel reads the whole file")
+        XCTAssertGreaterThan(whole.extensions, result.extensions,
+                             "and it takes many more extensions to get there: \(whole.extensions) against \(result.extensions)")
+    }
+
     /// A window that can never close still stops: it reaches offset 0 and becomes the whole file.
     func testClosureStopsAtOffsetZero() throws {
         let fixture = try FixtureCorpus.named("plain-two-turn")

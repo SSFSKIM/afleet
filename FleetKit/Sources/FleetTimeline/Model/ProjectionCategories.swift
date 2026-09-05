@@ -52,11 +52,13 @@ public struct ItemFieldSet: Hashable, Sendable, ExpressibleByArrayLiteral {
 public enum ProjectionCategories {
     public static let durable: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .compactBoundary, .taskRun]
     public static let overlay: Set<TimelineCategory> = [.cluster, .decision, .hookRun, .notification, .turnSummary]
-    public static let comparedWireToFile: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun]
-    /// `compact_boundary` is deliberately absent: the parent amended §7.3's exclusion list on
-    /// 2026-09-05 after the `compact-boundary` recording showed the engine emitting the boundary
-    /// on the wire as a `system` frame of that subtype and mirroring the record, so it is compared
-    /// like any other record rather than file-to-file only.
+    /// `.compactBoundary` is included, and that is the parent's 2026-09-05 amendment of §7.3's exclusion list
+    /// carried through: the `compact-boundary` recording showed the engine emitting the boundary on the wire as a
+    /// `system` frame of that subtype *and* mirroring the record, so it is compared like any other record rather
+    /// than file-to-file only. Leaving it out left `ItemBuilder.addCompactBoundary`'s history truncation as
+    /// common-mode code with no differential oracle. The comparison is vacuous on this branch's corpus, which
+    /// carries no compaction, and becomes live when the branch merges onto a `main` that has the fixture.
+    public static let comparedWireToFile: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun, .compactBoundary]
     /// `.userOrigin("task-notification")` and `.userWhere(.sidechainRoot)` were added on 2026-09-05 after check two
     /// found them (parent revisions 7 and 8). Both name a record the engine writes to the transcript and mirrors,
     /// and that no `user` frame ever carries: an engine-injected task notification, and the prompt the `Task` tool

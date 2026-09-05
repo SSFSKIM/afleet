@@ -5,8 +5,11 @@ import ClaudeWire
 /// (a) the leaf the file names (`last-prompt.leafUuid`, else the last conversation record) lies inside the window, and
 /// (b) the earliest record of the leaf's chain inside the window is a turn start — a `user` record that is neither a tool
 /// result nor `isMeta` — or the file's first record. A chain record whose parent lies before a still-open window is a window
-/// root, not an orphan; the reducer receives the marker and emits no orphan warning for it. Closure is bounded: every
-/// extension is one `earlierStep`, and it stops at offset 0.
+/// root, not an orphan; the reducer receives the marker and emits no orphan warning for it. Closure is bounded twice:
+/// every extension is one `earlierStep` and it stops at offset 0, and the window may not grow past
+/// `policy.closureBudget` bytes in the search — a leaf the window cannot reach must not turn opening a channel into a
+/// whole-file read. A read that stops on the budget says so in `closureBudgetExhausted` and leaves a marker that
+/// still points earlier, so the rest is reachable through `loadEarlier()`.
 public enum WindowedTranscript {
     public struct Result: Sendable {
         public var records: [TranscriptRecord]
@@ -14,8 +17,14 @@ public enum WindowedTranscript {
         public var length: Int
         public var window: WindowMarker
         public var extensions: Int
-        public init(records: [TranscriptRecord], ranges: [ByteRange], length: Int, window: WindowMarker, extensions: Int) {
+        /// The closure loop stopped on `policy.closureBudget` rather than on the rule or on offset 0. The window is
+        /// usable — it is a suffix of the file, with a marker that points earlier — but the leaf's chain does not
+        /// start on a turn start inside it, so the first rows may open mid-turn.
+        public var closureBudgetExhausted: Bool
+        public init(records: [TranscriptRecord], ranges: [ByteRange], length: Int, window: WindowMarker,
+                    extensions: Int, closureBudgetExhausted: Bool = false) {
             self.records = records; self.ranges = ranges; self.length = length; self.window = window; self.extensions = extensions
+            self.closureBudgetExhausted = closureBudgetExhausted
         }
     }
 
@@ -25,14 +34,17 @@ public enum WindowedTranscript {
         var ranges = first.ranges
         var window = first.window ?? closed
         var extensions = 0
+        var exhausted = false
         while window.earlierAvailable, openReason(records) != nil {
+            if held(ranges) >= policy.closureBudget { exhausted = true; break }
             let step = try reader.readEarlier(before: window.continueBefore, policy: policy)
             records = step.records + records
             ranges = step.ranges + ranges
             window = step.window ?? closed
             extensions += 1
         }
-        return Result(records: records, ranges: ranges, length: first.length, window: window, extensions: extensions)
+        return Result(records: records, ranges: ranges, length: first.length, window: window, extensions: extensions,
+                      closureBudgetExhausted: exhausted)
     }
 
     /// *Load earlier* (`StreamIngestion.loadEarlier`, Task 10): one `earlierStep` back from `window.continueBefore`, then the same
@@ -48,17 +60,29 @@ public enum WindowedTranscript {
         var ranges: [ByteRange] = []
         var marker = window
         var extensions = 0
+        var exhausted = false
         repeat {
             let step = try reader.readEarlier(before: marker.continueBefore, policy: policy)
             records = step.records + records
             ranges = step.ranges + ranges
             marker = step.window ?? closed
             extensions += 1
+            // The same budget, over what this call prepends: one `loadEarlier` is one operator gesture and must not
+            // become the whole-file read the initial window refused.
+            if self.held(ranges) >= policy.closureBudget { exhausted = true; break }
         } while marker.earlierAvailable && openReason(records + held) != nil
-        return Result(records: records, ranges: ranges, length: 0, window: marker, extensions: extensions)
+        return Result(records: records, ranges: ranges, length: 0, window: marker, extensions: extensions,
+                      closureBudgetExhausted: exhausted)
     }
 
     private static let closed = WindowMarker(earlierAvailable: false, continueBefore: 0)
+
+    /// The bytes a window spans: the last record's end less the first record's start. The span, not the sum of the
+    /// lengths, because that is what the read has to hold.
+    private static func held(_ ranges: [ByteRange]) -> Int {
+        guard let first = ranges.first, let last = ranges.last else { return 0 }
+        return (last.offset + last.length) - first.offset
+    }
 
     // MARK: - The rule
 

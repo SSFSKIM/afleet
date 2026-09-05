@@ -20,6 +20,10 @@ public enum TimelineNotice: Sendable, Hashable {
     case relocationFollowed(session: SessionID)
     case tapAligned(session: SessionID, stream: StreamName, claimed: Int, unclaimed: Int)
     case fileRewritten(session: SessionID, stream: StreamName, previousLength: Int, newLength: Int)
+    /// The channel-open read stopped extending its window on `WindowPolicy.closureBudget` rather than on the closure
+    /// rule or on offset 0: the leaf's chain does not start on a turn start within the budget, so the first rows may
+    /// open mid-turn. Counts only — how many extensions were made and how many records the window holds.
+    case windowClosureBudgetExhausted(session: SessionID, stream: StreamName, extensions: Int, records: Int)
     /// `symlinkedProjectsSkipped` counts the slug entries under `projects/` that are symlinks. The build skips them
     /// because the engine's own lookup does, and reports how many so the app can surface the difference.
     case indexBuilt(files: Int, symlinkedProjectsSkipped: Int, durationMs: Int)

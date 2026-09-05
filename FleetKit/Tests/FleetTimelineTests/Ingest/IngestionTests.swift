@@ -1445,6 +1445,73 @@ final class IngestionTests: XCTestCase {
         await ingestion.close()
     }
 
+    /// The stable-key contract, across the one operation that can break it. This actor numbers a uuid-less record's
+    /// occurrence when it *applies* it and publishes that key in `Effect.applied`, in `locator(of:)` and in
+    /// `rawRecord(for:)`; the projection is reduced from an array in *file* order. `loadEarlier` prepends older
+    /// records, so the two orders part — and a projection that re-derived its own ordinals would hand `h#0` to the
+    /// newly prepended occurrence while the actor still called the suffix record `h#0`. One public `RecordKey` would
+    /// then name two different physical records depending on which surface was asked.
+    func testLoadEarlierNeverRenumbersAPublishedKey() async throws {
+        let file = SyntheticTranscript.rewound(turns: 30, paddingBytes: 300_000, rewindAfterTurn: 12, thenTurns: 10)
+        let session = try XCTUnwrap(SessionID(SyntheticTranscript.sessionID))
+        let tree = try TempTree()
+        let path = try tree.write(file.data, session: session, slug: "synthetic")
+        let main = stream(tree, session)
+
+        let ingestion = StreamIngestion(session: session, configHome: tree.root, mode: .filePrimary)
+        _ = EffectLog(ingestion)
+        let tap = SyntheticTap()
+        try await ingestion.open(file: path, events: tap.events)
+
+        // What the projection publishes about a record: the hidden half carries the key and the locator together,
+        // which is the one place a renumbering is visible without going through the actor.
+        func publishedLocators(_ p: DurableProjection) -> [RecordKey: RecordLocator?] {
+            var out: [RecordKey: RecordLocator?] = [:]
+            for hidden in p.hidden { out[hidden.key] = hidden.locator }
+            return out
+        }
+
+        var before = publishedLocators(await ingestion.projection)
+        XCTAssertFalse(before.isEmpty, "the synthetic file's repeated state records are hidden with locators")
+        var pages = 0
+        while true {
+            let effect = try await ingestion.loadEarlier()
+            if effect.applied.isEmpty { break }
+            pages += 1
+            XCTAssertLessThan(pages, 20, "the pagination must terminate")
+            let after = publishedLocators(await ingestion.projection)
+
+            for (key, locator) in before {
+                guard let now = after[key] else {
+                    return XCTFail("page \(pages): a published key left the projection: \(labels([key]))")
+                }
+                XCTAssertEqual(now, locator, "page \(pages): a published key moved to other bytes")
+            }
+            // And what this page published resolves the same way from the actor as from the projection.
+            for key in effect.applied where after[key] != nil {
+                let fromActor = await ingestion.locator(of: key)
+                XCTAssertEqual(fromActor, after[key] ?? nil,
+                               "page \(pages): the actor and the projection disagree about a key's bytes")
+            }
+            before = after
+        }
+        XCTAssertGreaterThan(pages, 0, "the file is larger than one window")
+
+        // Every key the actor holds is a key the projection knows, with the same locator, once the walk is over.
+        let held = await ingestion.applied(main)
+        let final = publishedLocators(await ingestion.projection)
+        var checked = 0
+        for (key, locator) in held {
+            guard let published = final[key] else { continue }        // an item's record, not a hidden one
+            XCTAssertEqual(published, locator, "the actor and the projection name different bytes for one key")
+            checked += 1
+        }
+        XCTAssertGreaterThan(checked, 0, "at least one key was compared across both surfaces")
+        XCTAssertEqual(Set(final.keys).subtracting(held.map(\.key)), [],
+                       "the projection published no key this actor never assigned")
+        await ingestion.close()
+    }
+
     private func hiddenHashes(_ projection: DurableProjection) -> [String: Int] {
         var out: [String: Int] = [:]
         for hidden in projection.hidden {

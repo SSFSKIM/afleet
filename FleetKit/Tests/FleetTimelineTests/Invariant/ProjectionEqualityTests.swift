@@ -37,13 +37,16 @@ enum ProjectionComparison {
     /// is the other kind — a background shell's completion, which `system/task_notification` reports and the
     /// transcript never records anywhere. It exists only while a process runs, so there is no file half for it to
     /// equal. This is what the brief means by "subagent task runs keyed by agent id".
+    static func comparedOrdered(_ p: DurableProjection, fileOnly: Set<String> = []) -> [TimelineItem] {
+        p.items(in: ProjectionCategories.comparedWireToFile).filter { item in
+            if case .taskRun(let run) = item, run.synthesised { return false }
+            return !fileOnly.contains(item.id.key)
+        }
+    }
+
     static func compared(_ p: DurableProjection, fileOnly: Set<String> = []) -> [ItemID: TimelineItem] {
         var out: [ItemID: TimelineItem] = [:]
-        for item in p.items(in: ProjectionCategories.comparedWireToFile) {
-            if case .taskRun(let run) = item, run.synthesised { continue }
-            if fileOnly.contains(item.id.key) { continue }
-            out[item.id] = item
-        }
+        for item in comparedOrdered(p, fileOnly: fileOnly) { out[item.id] = item }
         return out
     }
 
@@ -67,9 +70,25 @@ enum ProjectionComparison {
         return out
     }
 
+    /// The check is *ordered*. A channel that looks the same from disk and from the wire is not one whose rows are
+    /// the same set: it is one whose rows are the same sequence. Nothing upstream of the shared `ItemBuilder`
+    /// constrains that — the wire reducer folds in arrival order, the record reducer derives tree and leaf order
+    /// first — so a comparison keyed by id alone would pass while a reopened timeline visibly reordered messages.
+    /// The order is compared over the ids both sides hold, so a presence difference is reported once, as itself,
+    /// rather than again as every position after it.
     static func compare(wire: DurableProjection, file: DurableProjection, fileOnly: Set<String> = []) -> [Difference] {
         let left = compared(wire, fileOnly: fileOnly), right = compared(file, fileOnly: fileOnly)
         var out: [Difference] = []
+
+        let common = Set(left.keys).intersection(right.keys)
+        let leftOrder = comparedOrdered(wire, fileOnly: fileOnly).map(\.id).filter(common.contains)
+        let rightOrder = comparedOrdered(file, fileOnly: fileOnly).map(\.id).filter(common.contains)
+        if let position = zip(leftOrder, rightOrder).enumerated().first(where: { $0.element.0 != $0.element.1 })?.offset {
+            let id = leftOrder[position]
+            out.append(Difference(itemID: id, category: left[id]?.category ?? .opaque,
+                                  field: "<order:\(position) wire has this where the file has "
+                                       + "\(rightOrder[position].key)>"))
+        }
         for id in Set(left.keys).union(right.keys).sorted(by: precedes) {
             switch (left[id], right[id]) {
             case (nil, nil):
@@ -420,6 +439,43 @@ final class ProjectionEqualityTests: XCTestCase {
     ]
 
     // MARK: Check two
+
+    /// The discrimination for the ordering clause. Two items on the file side are swapped with their ids, categories
+    /// and every compared field left exactly as they were, so nothing an id-keyed comparison reads has changed: only
+    /// their positions have. A check that keyed by id and sorted would call this equal, which is the whole point —
+    /// a reopened channel showing the same rows in a different order is a channel that does not match the live one.
+    func testCheckTwoCatchesAReorderingThatChangesNoItem() throws {
+        let fx = try FixtureCorpus.named("explore-depth-1")
+        let wire = try FixtureWireReplay.replay(fx)
+        let file = try Self.fileProjection(fx)
+        let fileOnly = try ProjectionComparison.fileOnlyRecordUUIDs(fx)
+        XCTAssertTrue(ProjectionComparison.compare(wire: wire.durable, file: file, fileOnly: fileOnly).isEmpty,
+                      "the unswapped fixture is the baseline this test perturbs")
+
+        // Two *compared* items, adjacent in the file's own order, so the swap is visible to the comparison.
+        let compared = ProjectionComparison.comparedOrdered(file, fileOnly: fileOnly)
+        XCTAssertGreaterThan(compared.count, 1)
+        let a = compared[0].id, b = compared[1].id
+        var items = file.items
+        let i = try XCTUnwrap(items.firstIndex { $0.id == a }), j = try XCTUnwrap(items.firstIndex { $0.id == b })
+        items.swapAt(i, j)
+        var swapped = file
+        swapped.items = items
+
+        // Nothing but the order: the same ids, the same categories, the same compared shapes.
+        let before = ProjectionComparison.compared(file, fileOnly: fileOnly)
+        let after = ProjectionComparison.compared(swapped, fileOnly: fileOnly)
+        XCTAssertEqual(Set(before.keys), Set(after.keys))
+        XCTAssertEqual(before.mapValues(ProjectionComparison.shape), after.mapValues(ProjectionComparison.shape))
+
+        let diffs = ProjectionComparison.compare(wire: wire.durable, file: swapped, fileOnly: fileOnly)
+        XCTAssertEqual(diffs.count, 1, "one finding, and it is the order: \(diffs.map(\.description))")
+        let finding = try XCTUnwrap(diffs.first)
+        XCTAssertEqual(finding.itemID, a, "the finding names the row the wire has where the file now has another")
+        XCTAssertTrue(finding.field.hasPrefix("<order:0 "), "reported at its position: \(finding.field)")
+        XCTAssertTrue(finding.field.contains(b.key), "and it names what the file put there instead")
+    }
+
 
     func testWireAndRecordProjectionsAgreeOnEveryFixture() throws {
         var findings: Set<String> = []

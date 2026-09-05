@@ -12,8 +12,15 @@ public struct RecordReducer: Sendable {
         /// line 432604): five seconds, in milliseconds there and in seconds here. Parity §35.13 states the same value.
         public var healWindow: TimeInterval = 5
         public var window: WindowMarker? = nil
-        /// From the reader, keyed as `RecordKey.keys(for:in:)` keys them; a mirror-delivered record has none yet.
+        /// From the reader, keyed as this reduction keys its records; a mirror-delivered record has none yet.
         public var locators: [RecordKey: RecordLocator] = [:]
+        /// The key for each record, positionally, when the caller has already assigned them. `StreamIngestion` has:
+        /// it numbers occurrences in *application* order and publishes those keys in `Effect.applied`, in
+        /// `rawRecord(for:)` and in every locator it hands out. Re-deriving them here from the array's own order
+        /// would silently renumber a hash occurrence the moment `loadEarlier` prepended an older one, so one public
+        /// `RecordKey` would name a different record depending on which surface was asked. Nil — the offline path,
+        /// where the array *is* the file — falls back to `RecordKey.keys(for:in:)`.
+        public var keys: [RecordKey]?
         public init() {}
     }
 
@@ -21,7 +28,8 @@ public struct RecordReducer: Sendable {
 
     public static func reduce(_ records: [TranscriptRecord], stream: LogicalStream, sourceFile: URL? = nil,
                               origin: Provenance.Origin = .file, options: Options = .init()) -> StreamProjection {
-        let keys = RecordKey.keys(for: records, in: stream)
+        let keys = options.keys ?? RecordKey.keys(for: records, in: stream)
+        precondition(keys.count == records.count, "RecordReducer.Options.keys must be one key per record")
         let clock = TimestampParser()
 
         // 1. Partition. Conversation records go to the tree; the rest fold, hide or warn where they stand.

@@ -22,8 +22,8 @@ final class TimelineModelTests: XCTestCase {
                        [.cluster, .decision, .hookRun, .notification, .turnSummary],
                        "overlay is exactly the spec's five categories")
         XCTAssertEqual(ProjectionCategories.comparedWireToFile,
-                       [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun],
-                       "check one compares exactly the spec's six categories")
+                       [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun, .compactBoundary],
+                       "check one compares exactly the spec's seven categories")
         XCTAssertTrue(durable.isDisjoint(with: overlay),
                       "a category is durable or overlay, never both: \(durable.intersection(overlay).map(\.rawValue).sorted())")
         XCTAssertEqual(durable.union(overlay).union([.opaque]), Set(TimelineCategory.allCases),
@@ -31,9 +31,10 @@ final class TimelineModelTests: XCTestCase {
         XCTAssertEqual(TimelineCategory.allCases.count, 13)
         XCTAssertTrue(ProjectionCategories.comparedWireToFile.isSubset(of: durable),
                       "check one only compares durable categories: \(ProjectionCategories.comparedWireToFile.subtracting(durable).map(\.rawValue).sorted())")
-        // The 2026-09-05 parent amendment: the boundary is on the wire, so it is durable but not file-only.
+        // The 2026-09-05 parent amendment carried through: the boundary is on the wire, so it is durable, it is not
+        // file-only, and it is compared like any other record. Vacuous on this branch's corpus, live at merge.
         XCTAssertTrue(durable.contains(.compactBoundary))
-        XCTAssertFalse(ProjectionCategories.comparedWireToFile.contains(.compactBoundary))
+        XCTAssertTrue(ProjectionCategories.comparedWireToFile.contains(.compactBoundary))
         XCTAssertFalse(ProjectionCategories.fileOnlyRecordKinds.contains(.system("compact_boundary")))
         XCTAssertEqual(ProjectionCategories.excludedItemFields, ["stop_reason", "usage", "signature", "timestamp"])
         // Set equality against the full literal, every `contentBlocks` flag spelled out: a count alone would

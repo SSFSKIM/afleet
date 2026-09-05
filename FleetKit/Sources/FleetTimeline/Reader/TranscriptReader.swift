@@ -25,10 +25,21 @@ public struct WindowPolicy: Sendable, Hashable {
     public var wholeFileUpTo: Int          // above the local p99 (spec Grounding)
     public var initialTail: Int
     public var earlierStep: Int
+    /// The most bytes the closure loop may hold. The window exists to bound what opening a channel reads, and the
+    /// closure rule can ask for more without limit: a stale `leafUuid`, a parent cycle or a leaf near the file head
+    /// makes every extension fail the rule, and the loop then walks a multi-hundred-megabyte transcript to offset 0.
+    /// At the budget the read stops and says so — `Result.closureBudgetExhausted`, and a marker that still points
+    /// earlier, so `loadEarlier()` can continue on the operator's word rather than on the file's shape. Four steps
+    /// past the tail at the defaults, which is 20 MiB.
+    public var closureBudget: Int
     /// Declared memberwise with defaults: a declared `init()` suppresses the synthesised memberwise initialiser, and `.whole`
     /// and the tests' policies would not compile. `.init()` still means the defaults.
-    public init(wholeFileUpTo: Int = 8 * 1024 * 1024, initialTail: Int = 4 * 1024 * 1024, earlierStep: Int = 4 * 1024 * 1024) { self.wholeFileUpTo = wholeFileUpTo; self.initialTail = initialTail; self.earlierStep = earlierStep }
-    public static let whole = WindowPolicy(wholeFileUpTo: .max, initialTail: .max, earlierStep: .max)
+    public init(wholeFileUpTo: Int = 8 * 1024 * 1024, initialTail: Int = 4 * 1024 * 1024, earlierStep: Int = 4 * 1024 * 1024,
+                closureBudget: Int = 20 * 1024 * 1024) {
+        self.wholeFileUpTo = wholeFileUpTo; self.initialTail = initialTail; self.earlierStep = earlierStep
+        self.closureBudget = closureBudget
+    }
+    public static let whole = WindowPolicy(wholeFileUpTo: .max, initialTail: .max, earlierStep: .max, closureBudget: .max)
 }
 
 /// One transcript file, opened `O_RDONLY | O_NOFOLLOW` on every call; a symlink or a non-regular file is refused.
