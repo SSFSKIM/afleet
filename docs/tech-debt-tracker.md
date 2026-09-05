@@ -50,3 +50,16 @@ durable index.
     counts and G2's count clause is weaker than it reads. The field name promises a tally.
     Owner: C1 follow-up. Closer: rename the field or document the semantic, and restate the
     G2 clause as set equality over kinds.
+11. **`AgentRunTree.link` drops a self-parent answer without trace.** The guard rejects
+    `parentID == id` before `parentAnswers` is written, so a source claiming a node is its own
+    parent leaves no record at all — the one case where the conflict/answers structure goes
+    quiet. Owner: C3 (whole-branch review). Closer: record the rejected answer instead of
+    returning early.
+12. **`AgentRunTree.resolveJoins` is O(n²) in agent runs, once per observation.** It walks every
+    node and calls `node(withToolUse:)`, itself a linear scan; Task 8's wire reducer calls
+    `observe` once per frame. Fine at corpus scale. Owner: C3 (whole-branch review). Closer: a
+    `toolUseID → nodeID` index.
+13. **`AgentRunTree.roots` is `parent == nil`, not "depth-1 nodes".** Documented in the source
+    and identical on the corpus; they diverge only for a depth-2 node no source answered for,
+    which surfaces as a root instead of vanishing. C6 reads `roots` and must be told at
+    recomposition. Owner: C3 (whole-branch review). Closer: decide which reading C6 needs.
