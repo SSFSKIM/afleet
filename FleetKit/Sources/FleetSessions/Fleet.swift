@@ -180,7 +180,9 @@ public actor Fleet: LifecycleAPI {
         let supervisor = ChannelSupervisor(
             key: key, launchTemplate: launch, factory: factory, ownership: ownership, observer: observer,
             clock: clock,
-            // C3's mirror is Task 11's; until it lands the fleet reports no tasks, which blocks nothing.
+            // C3's mirror has landed and `RegistryEntry` conforms to `TaskMirrorReading` (Task 11), but nothing
+            // folds one per channel yet: `mirror` and `lastTaskFrameAge` are the two inputs still unwired, and both
+            // the thirty-minute reap and `liveTaskIDs()` — `/logout`'s census and its *Stop* — read this closure.
             eligibilityInputs: { DormantEligibility.Input(turnRunning: false, pendingDecisions: 0, queuedInput: 0,
                                                           mirror: [], lastTaskFrameAge: nil,
                                                           heartbeatInterval: .seconds(30), wedged: false) },

@@ -48,13 +48,18 @@ public enum DormantEligibility {
 /// C3's registry-mirror row, read as eligibility reads one (X4). This is the conformance G2 swaps in for
 /// `MirrorEntryStandIn`: the protocol was written so replacing the stand-in would be a swap rather than a rewrite.
 ///
-/// Armed and running are separate facts, and `notified` is what separates both from finished: C3's mirror calls a row
-/// live until the `task_notification` hands its result back, "even once the status is terminal", so a terminal row
-/// the host has not been told about is still work in flight. Before the first `task_started` the row is only
-/// announced — a `background_tasks_changed` listing, or the Bash tool's own sentence — and that is armed.
+/// Armed and running are separate facts, and C3's own live set is what separates both from finished: its mirror calls
+/// a row live until the `task_notification` hands its result back, "even once the status is terminal", so a terminal
+/// row the host has not been told about is still work in flight — and a row the host *has* been told about that the
+/// engine still calls running is live too. Before the first `task_started` the row is only announced — a
+/// `background_tasks_changed` listing, or the Bash tool's own sentence — and that is armed.
 extension RegistryEntry: TaskMirrorReading {
     public var taskID: String { id }
-    public var isRunning: Bool { startedCount > 0 && !notified }
-    public var isArmed: Bool { startedCount == 0 && !notified }
+    /// C3's own live set, `liveWork(asOf:)`'s predicate exactly: still running, *or* not yet notified. The two
+    /// disagree on one row shape — notified and still `.running` — and C3 calls that row live, so C4 must too; the
+    /// other reading would reap a channel whose background shell is still working.
+    private var isLive: Bool { !notified || status == .running }
+    public var isRunning: Bool { isLive && startedCount > 0 }
+    public var isArmed: Bool { isLive && startedCount == 0 }
     public var isBackground: Bool { placement == .background }
 }
