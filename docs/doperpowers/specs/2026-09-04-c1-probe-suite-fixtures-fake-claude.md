@@ -298,6 +298,17 @@ parent's launch line with `--session-mirror` present:
 | `resume-no-replay` | `--resume` of `plain-two-turn`, `initialize`, six idle seconds | item 1; S2's record |
 | `dialog-refusal-fallback` and `dialog-fable-overage` | **synthetic, `hypothesis: true` until confirmed** (S6): every result value, the close path, the tombstones after a refusal, `model_consent_fallback`, `overagesEnabled` both ways, an undeclared kind left to `control_cancel_request` | item 62 (provisional until S6 closes) |
 | `notification-hook` | `Notification` registered through `initialize.hooks`, a permission ask left waiting past the idle threshold (S18) | item 53 |
+| `rewind-turn` | a resume of `plain-two-turn`, `rewind_conversation` at the resumed transcript's first user record (refused, `rewound: false`, `error: "stale target"`), one turn, then the same request at that turn's own user record (honoured): a `last-prompt.leafUuid` that is not the file's last record, and the abandoned branch below it | item 13; C3.G1 |
+| `compact-boundary` | a resume of `plain-two-turn` and `/compact` sent as a user message: the `system/compact_boundary` frame with its `compact_metadata`, the record on disk with its `compactMetadata`, the `isCompactSummary` user record and the mirror entries carrying them | C3.G1, C3.G3 |
+
+The last two rows are the 2026-09-05 follow-up wave, added after C1's own close at C3's
+request, and they take the catalogue to **twenty fixtures: eighteen recorded and two
+synthetic**. Neither takes part in the census (`census: false`): each consumes its own
+precondition the way `resume-no-replay` does -- a rewind and a compaction both change the
+session they were recorded against, so re-running either against the transcript it left
+cannot reproduce what was recorded. The retrospective figures further down this document say
+sixteen recorded and eighteen in total; those are the record of what was true at C1's close
+and are left standing, in the same way §4.7's earlier cost figures were.
 
 S6 closes only on baseline evidence: the dialog payload shapes and result enums are
 extracted from the installed 2.1.259 binary's embedded source under
@@ -519,6 +530,22 @@ oversight.
   author's name is. The present arrangement is stated and tested (Revision Note,
   2026-09-04): enforced at record time, held at verify time on the recording machine, and
   opportunistic elsewhere.
+
+- **A twelfth checklist item, recommended and not taken: read every field whose *name*
+  suggests an identity or a tenant and confirm its value is a placeholder.** Raised by the
+  reviewer of `rewind-turn` on 2026-09-05, from the case that produced it: `ownerAccountUuid`
+  and `ownerOrganizationUuid` reached two fixtures unredacted, and neither half of the gate
+  saw them. `verify`'s scanners re-run the redactor's own rules, so they inherited its blind
+  spot exactly; item 2 greps for a fixed list of known literals and an opaque uuid matches
+  none of them; item 4 pointed nowhere because no container had been replaced. What found it
+  was a name-shaped search nobody was asked to run. The redactor fix closes this one pair of
+  names, and the reviewer's point is the general one: a fail-open scanner plus a checklist
+  that greps for known literals leaves opaque identifiers invisible to both halves.
+  Not taken here because REVIEW.md's own rule makes it a corpus-wide act — adding an item
+  means bumping `verify.CHECKLIST_VERSION` to 4, which refuses every one of the twenty
+  fixtures signed at version 3 until each is re-walked, including the two this wave signed.
+  That is the gate owner's decision, not a follow-up wave's, and it is recorded here with the
+  reasoning intact so whoever takes it does not have to rediscover why.
 
 ## Decision Log
 
@@ -1103,6 +1130,40 @@ oversight.
   names are rule 5's own output, so a field of that name in another position is far more likely
   to be the redactor's own than the engine's. Worth knowing before adding a fourth entry: an
   entry here is a claim about a *name at any depth*, not about the one place you found it.
+
+- 2026-09-05, from the follow-up wave's `compact-boundary`: **the engine puts
+  `compact_boundary` on the wire.** §7.3 lists it among the `system` records that reach the
+  file and never the wire, and therefore among the kinds C3's differential invariant compares
+  file-to-file only. The recording carries a `system` frame with `subtype: "compact_boundary"`,
+  keys `type, subtype, session_id, uuid, logical_parent_uuid, compact_metadata`, and the same
+  record arrives in a `transcript_mirror`. Impact: **[parent-impact]** on §7.3's exclusion
+  list, which should lose `compact_boundary`; while it stands, the differential test never
+  compares a record the wire does deliver. The list was written before any compaction had been
+  recorded, which is exactly the case it could not have been checked against.
+
+- 2026-09-05, from the same recording: **a compaction is a paid turn that reports itself as no
+  turn at all.** The `result` after `/compact` is `subtype: "success"`, `is_error: false`,
+  `num_turns: 0`, `result: ""`, with an all-zero `usage` block and `total_cost_usd` about
+  0.0059. A host that counts turns from `num_turns` or sums tokens from `usage` sees nothing;
+  only the cost field shows the summary was generated. And the boundary record on disk carries
+  `parentUuid: null` with the link back in `logicalParentUuid`, so a reducer following
+  `parentUuid` alone reads one file as two disjoint trees.
+
+- 2026-09-05, from the same wave: **an exact-match key set cannot deliver rule 1's
+  "anywhere".** `bridge-session` transcript records carry `ownerAccountUuid` and
+  `ownerOrganizationUuid`, and `IDENTITY_KEYS` -- which matched the normalised key exactly, by
+  deliberate design, because `user` as a substring would swallow the `UserPromptSubmit` hook
+  key -- walked past both. Two fixtures were written with a live account uuid and a live
+  organization uuid in them and `verify` passed both, because `verify` re-scans for the same
+  rules and inherited the same blind spot. The fix widens `account` and `organization` to
+  substring matches alongside `email`, in a new `IDENTITY_SUBSTRINGS`, with a regression test on
+  the `bridge-session` shape. It changed no other fixture: a scan of the whole corpus found
+  those two key names and no other non-exact `account`- or `organization`-containing key
+  anywhere, so no signature was invalidated beyond the two fixtures being recorded. The general
+  lesson is the one the account-name surprise already taught in a different key: a rule keyed on
+  a name catches the names it was told about, and every prefix a future record invents is a new
+  silent hole. Whether the remaining `bridgeSessionId` should also go is left as a reviewer's
+  judgement and recorded in the fixture's README rather than settled here.
 
 ## Outcomes & Retrospective
 
@@ -1941,3 +2002,8 @@ fake-claude injections above, not the clean live run.
   five-hour window read 98 per cent utilisation at the wave's usage check, which is the
   condition this wave was dispatched to stop on, so the two model turns were not spent. Each
   scenario is one `make record` away once the window resets.
+- 2026-09-05: the follow-up wave's two recordings landed after the scratch account's five-hour
+  window reset. `rewind-turn` and `compact-boundary` are in the catalogue at §4.7, taking it to
+  twenty, and both were reviewed and signed by agents other than the recording run. The wave
+  also found and fixed a redaction hole (`IDENTITY_SUBSTRINGS`, Surprises) and recorded a
+  `[parent-impact]` on §7.3's file-only exclusion list, which should lose `compact_boundary`.

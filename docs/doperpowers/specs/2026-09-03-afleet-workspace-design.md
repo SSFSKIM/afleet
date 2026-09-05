@@ -886,7 +886,9 @@ produced by the record reducer for the categories the wire carries, item for ite
 agent id and source file). The test holds an explicit exclusion list of record kinds that
 never reach the wire and are therefore compared file-to-file only: attachment records
 (*A-11*), the `system` records `turn_duration`, `stop_hook_summary`,
-`local_command`, `informational` and `compact_boundary`, and `user` records carrying `isMeta`
+`local_command` and `informational` (`compact_boundary` left this list 2026-09-05: the
+`compact-boundary` fixture shows the engine emits it as a `system` frame and mirrors it, so it
+is compared like any other record), and `user` records carrying `isMeta`
 (on disk with no wire counterpart across C1's corpus; added 2026-09-05 from C3's grounding).
 The overlay is tested separately
 against wire fixtures only. Both lists are explicit in the test and are reviewed whenever
@@ -1004,7 +1006,11 @@ work finishes". `/logout` (§7.7) applies the
 same dormant-eligibility rule before it terminates an owned channel.
 
 Compaction is the `/compact` text command and renders as a divider from
-`compact_boundary`. File rewind uses `rewind_files` with `dry_run: true` first and shows the
+`compact_boundary`. The boundary reaches the wire as a `system` frame (`subtype:
+"compact_boundary"`) and is mirrored; the compaction's `result` reports `num_turns: 0` and
+zero `usage` with a non-zero `total_cost_usd`; on disk the boundary record's `parentUuid` is
+null and `logicalParentUuid` carries the only link back, and the summary is a `user` record
+flagged `isCompactSummary` (fixture `compact-boundary`, 2026-09-05). File rewind uses `rewind_files` with `dry_run: true` first and shows the
 counts before applying. Forking a channel spawns `--resume <id> --fork-session` as a new
 channel. *Fork from here* on a message adds `--resume-session-at <uuid>` naming that
 message's record: the flag is **inclusive**, so the fork keeps the clicked message and
@@ -1248,7 +1254,11 @@ router; `@` completes files via `file_suggestions`; `!` runs the command host-si
 posts the hardened, wrapped user frame of §6.6; image paste and file drop attach. Pickers for permission mode, model and effort on the right. Sending
 while a turn runs queues; `command_lifecycle` drives a "queued" chip with cancel via
 `cancel_async_message`. Editing a past user message calls `rewind_conversation` and
-prefills the returned text. When *Prompt suggestions* is on, the `prompt_suggestion`
+prefills the returned `prefillText`. The engine honours the rewind only for a message the
+running process itself sent; any older target, which after a reopen is every earlier message,
+is refused with `rewound: false` and `error: "stale target"` inside a `success` envelope
+(fixture `rewind-turn`, 2026-09-05), so the host reads the body, not the envelope, and on
+refusal falls back to *Fork from here* (item 13). When *Prompt suggestions* is on, the `prompt_suggestion`
 frame after each turn renders as ghost text in the composer that Tab accepts; it is off by
 default.
 
@@ -1570,7 +1580,11 @@ Behavior a person can observe. Commands assume the app is built with
     message wrapped in the bash tags; asking `What did my last shell command print?`
     gets the directory back, proving the model saw it. Typing `@src` lists matching files.
 13. **Edit and resend.** *Edit* on a past user message prefills the composer and rewinds
-    the conversation to that point when sent.
+    the conversation to that point when sent. When the engine refuses the rewind as a
+    `stale target` (the message predates the channel's current process), the host instead
+    forks a new channel at the message's preceding assistant record (*Fork from here*,
+    §7.3) with the composer prefilled from the transcript, and says so in the composer; it
+    never reports a refused rewind as done.
 14. **Foreign live.** Start `claude` in Terminal.app in a project. Within five seconds the
     sidebar shows that session with a terminal glyph and status `idle`; typing in the
     terminal changes it to `busy`; the channel opens read-only and mirrors new messages as
@@ -2464,10 +2478,10 @@ notarized distribution, and any write under `<configHome>` (X9).
 
 | Child | Spec | Status |
 |---|---|---|
-| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `2515b04` from `child/c1-probes-fixtures` `13226e6` (89 commits); G1–G4 green: 18 fixtures (16 recorded on the pinned 2.1.259 binary, 2 synthetic with shapes confirmed on the installed binary), 242 probe and 24 fake-claude tests on Python 3.9 and 3.14, drift ritual clean 2.1.259→2.1.260, one independent Codex leak-risk review closed; fifteen `C1/…` notes filed and reconciled. Follow-up wave **merged** 2026-09-05 at `66fd4a5`: `spike-mcp-decline-files` settled at zero cost (§6.12 confirmed; note filed), `rewind-turn` and `compact-boundary` scenarios written and offline-verified; their recordings wait on the scratch account's five-hour window (resets 2026-09-05T06:00Z), then redact, verify, independent sign-off, catalogue 18→20 |
+| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `2515b04` from `child/c1-probes-fixtures` `13226e6` (89 commits); G1–G4 green: 18 fixtures (16 recorded on the pinned 2.1.259 binary, 2 synthetic with shapes confirmed on the installed binary), 242 probe and 24 fake-claude tests on Python 3.9 and 3.14, drift ritual clean 2.1.259→2.1.260, one independent Codex leak-risk review closed; fifteen `C1/…` notes filed and reconciled. Follow-up wave **merged** 2026-09-05 at `66fd4a5`: `spike-mcp-decline-files` settled at zero cost (§6.12 confirmed; note filed), `rewind-turn` and `compact-boundary` scenarios written and offline-verified; both recorded 2026-09-05 after the window reset, redacted, verified and independently signed (checklist v3), **merged** 2026-09-05 from `worktree-agent-aaf78bf28064267d9` `c380ee7` (5 commits); catalogue 20 (18 recorded, 2 synthetic); redactor now matches `account`/`organization` anywhere in a key name after two live tenant uuids passed the gate (regression test; 245 probe tests); two `C1/…` parent-impact notes reconciled (§7.3 exclusion list, compaction facts, item 13's stale-target fallback) |
 | C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `b38e1f2` from `child/c2-core-wire` `9ab116a` (72 commits; history rewritten before merge so no engine byte from the recording workstation reaches the repository); G1–G4 green at the tip: ClaudeWire 225 tests, four of them live and run once from a clean build against the installed CLI under the scratch config home with no failures, AfleetCore 6; G2 over 18 fixtures and 1353 frames with the ten synthetic findings pinned as an exact set; one independent Codex leak-risk review (5 findings) and a six-lens review panel (32 findings) both closed by four sequential fix waves; the C2 reconciliations of 2026-09-04 and 2026-09-05 are in the Revision Notes; deferred debt indexed in `docs/tech-debt-tracker.md`; spend: three model turns on the child's own live gates and one in the orchestrator's final live pass |
-| C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` on `child/c3-timeline` (v1 `916ce02`, parent-pin `ee94449`); plan in progress | in-flight (wave 2): spec v1 reviewed 2026-09-05, four questions ruled (leaf path; rewind and compact recordings as a C1 follow-up; opt-in local index measurement; listing policy is C4's), six grounding facts filed on this parent; adds targets only inside the C3 region of `FleetKit/Package.swift` |
-| C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md` on `child/c4-sessions-fleet` (v1 `2b77140`, X5/X6 amendments folded at `847ad41`, parent-pin `ee94449`); plan in progress | in-flight (wave 2): spec v1 reviewed 2026-09-05, three questions ruled (store protocol stays in FleetKit with C3's `IndexStorage` implemented in `FleetSessions`; one composed haiku turn to widen the write allowlist; one store document per namespace) plus four rulings on `agents --json` cadence, wedged exclusion from eligibility and eviction, MCP consent read from both locations, and the listing policy; owns `FleetKit/Package.swift`; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
+| C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` on `child/c3-timeline` (v1 `916ce02`, parent-pin `ee94449`; spec v2.5 `121ab5b`); plan `plans/2026-09-05-c3-fleetkit-timeline.md` (v5 `f9f0f2c`, 12 tasks) | **executing** (wave 2): spec v1 reviewed 2026-09-05, four questions ruled (leaf path; rewind and compact recordings as a C1 follow-up; opt-in local index measurement; listing policy is C4's), six grounding facts filed on this parent; three independent adversarial passes over spec and plan folded (v2.2/v2, v2.4/v4, v2.5/v5), the third pass declared final; executor dispatched 2026-09-05 from `29a7c86` (branch carries `main` `6994ff8`); edits nothing in `FleetKit/Package.swift` (targets already declared in the C3 region) |
+| C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md` on `child/c4-sessions-fleet` (v1 `2b77140`, X5/X6 amendments folded at `847ad41`, parent-pin `ee94449`; spec v2.4 `22edc0f`); plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4 `598fb4e`, 12 tasks) | **executing** (wave 2): three independent adversarial passes over spec and plan folded (v2.2/v2, v2.3/v3, v2.4/v4), the third pass declared final; executor dispatched 2026-09-05 from `c7bcdb5` (branch carries `main` `e30a4a7`: `maxTurns`, twenty fixtures); Task 11 (G2, `IndexStorage`) waits for C3 to merge; spec v1 reviewed 2026-09-05, three questions ruled (store protocol stays in FleetKit with C3's `IndexStorage` implemented in `FleetSessions`; one composed haiku turn to widen the write allowlist; one store document per namespace) plus four rulings on `agents --json` cadence, wedged exclusion from eligibility and eviction, MCP consent read from both locations, and the listing policy; owns `FleetKit/Package.swift`; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
 | C6 Conversation surface and Agents panel | — | composite; blocked-by C3, C4, C5 |
 | C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core dispatchable now, held for the human's approval of the cut; C7.4–C7.7 blocked-by C5.G4 (C7.4 also by C4's X5, C7.6 by C4's store) |
@@ -4192,3 +4206,62 @@ Pending — written at finish.
   turns inside one prompt and ends the turn with a `result` of subtype `error_max_turns` at
   the limit; it is not a prompt count. `claude --bg` forwards it. C4's live gate (G5) bounds
   every installed-CLI scenario with it and checks the field's presence in its Task 10 preflight.
+- 2026-09-05 C1/rewind-turn: `rewind_conversation` has two behaviours and §7.3's edit-via-rewind
+  clause and §10 item 13 rest on the one this recording refuses. A target uuid read out of a
+  **resumed** transcript is declined: the answer is a `control_response {subtype: "success"}`
+  whose body is `{rewound: false, prefillText: null, precedingAssistantUuid: null, error:
+  "stale target"}` — a body-level `error` string inside a success envelope, so a host that
+  reads success from the envelope alone treats a refused rewind as a completed one, and the
+  body has no `targetMessageUuid` at all. A target the same process sent is honoured, answering
+  `{rewound: true, targetMessageUuid, prefillText, precedingAssistantUuid}`, where `prefillText`
+  is the composer prefill item 13 describes, returned by the engine rather than reconstructed.
+  Afleet's *Edit* on a past user message is exactly the refused case whenever the channel has
+  been reopened since that message was sent, and needs a state of its own rather than an error
+  banner. The honoured rewind's only effect outside its response is one appended `last-prompt`
+  naming `precedingAssistantUuid`, which leaves the turn just recorded in the file, below the
+  leaf and unreachable from it — the abandoned branch §7.3's source arbitration has to survive.
+  Also observed and unexplained: the turn's own closing `last-prompt` was not on disk three
+  settled seconds after its `result`, so a `result` frame does not mean the turn's records have
+  all landed. Fixture `rewind-turn`.
+- 2026-09-05 C1/compact-boundary: **§7.3's file-only exclusion list is wrong about
+  `compact_boundary`** and should lose it. `/compact` sent as a user message is honoured
+  headless — there is no control request for a compaction, so that is the only way a host can
+  ask — and the engine puts a `system` frame with `subtype: "compact_boundary"` on the wire,
+  keys `type, subtype, session_id, uuid, logical_parent_uuid, compact_metadata`, and mirrors the
+  same record. While the exclusion stands, the differential invariant never compares a record
+  the wire does deliver. Three more facts for §7.3's compaction paragraph: the `result` after a
+  compaction reads `success`, `num_turns: 0`, empty `result` and an all-zero `usage` with a
+  non-zero `total_cost_usd`, so a paid turn reports itself as no turn; the boundary record on
+  disk carries `parentUuid: null` with the only link back in `logicalParentUuid`, so a reducer
+  following `parentUuid` alone reads one file as two disjoint trees; and the summary is a
+  `user` record carrying `isCompactSummary` and `isVisibleInTranscriptOnly`, not a `system` or
+  `assistant` one. This compaction preserved a segment (`preservedSegment` names a head, an
+  anchor and a tail) and nothing before the boundary was dropped, so §7.3's hard-truncation
+  sentence is still unexercised. Fixture `compact-boundary`.
+- 2026-09-05 C1/compact-boundary, second reading: two facts the fixture's reviewer found that
+  the recording's own notes did not, both about *when* the engine writes rather than what.
+  **A turn's trailing `last-prompt` is written during shutdown**, after the `end_session`
+  exchange, and arrives in a `transcript_mirror` of its own after the response — seen in both
+  of this wave's recordings, so it is not particular to a compaction. A consumer that treats a
+  `result` as "the turn's records have landed" is a record short, and a scenario that reads the
+  file at `result` reports the newest turn as an abandoned branch; §7.3's source arbitration
+  already reads the file on open and on resume, which closes the gap, but the timing is worth
+  stating rather than rediscovering. **A compaction's `system/init` is displaced, not
+  duplicated**: the recording carries exactly one, the ordinary count, but it arrives late —
+  after the pre-compaction mirrors and immediately before the boundary frame — rather than at
+  the start of the turn where every other fixture puts it. Anything keyed on "init means a turn
+  is starting" fires at the moment the context is replaced instead, most of the way through the
+  prompt it belongs to.
+
+- 2026-09-05 reconciliation of the C1 follow-up (merge `01b9e15`, twenty fixtures): the two
+  `C1/…` notes above are folded. §7.3's file-only exclusion list loses `compact_boundary` and
+  its compaction paragraph gains the wire, cost and parent-link facts; item 13 and the composer
+  paragraph gain the stale-target fallback: a rewind the engine refuses becomes *Fork from here*
+  at the message's preceding assistant record with the composer prefilled from the transcript,
+  and the host never reads a refused rewind as done. C2 corrective in the same landing:
+  `FixtureCorpusTests` pins move from 18 to 20 fixtures and from 16 to 18 recorded; the
+  twenty-fixture corpus decodes losslessly (1435 frames, 1425 round-tripped, the rest opaque or
+  named findings). C3's Task 3 exclusion set follows by executor amendment; the C3 branch's
+  corpus holds no `compact_boundary` record, so none of its pins move until it merges `main`.
+  The rewind reviewer's proposed twelfth checklist item (identity-shaped key names) stays with
+  the gate owner as C1's spec records, since adding it re-opens all twenty signatures.
