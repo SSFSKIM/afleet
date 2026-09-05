@@ -63,9 +63,15 @@ final class RecordModelTests: XCTestCase {
         XCTAssertEqual(title.key(in: stream, ordinal: 3).identity, .hash(hash, ordinal: 3))
         XCTAssertEqual(title.key(in: stream, ordinal: 3).stream, stream)
 
-        // Two equal lines are one hash; one edited field is another. The edit is made in memory on the recorded record.
-        let twin = try Self.firstRecordedRecord(ofKind: "ai-title")
-        XCTAssertEqual(twin.contentHash, hash)
+        // Two *distinct* byte-identical lines of the same file — different byte offsets, so a hash that took
+        // position or record identity into account would separate them — are one content hash.
+        let (first, second) = try Self.twoByteEqualLines(ofKind: "ai-title")
+        XCTAssertNotEqual(first.offset, second.offset, "the two lines must be distinct occurrences, not one line read twice")
+        XCTAssertEqual(first.line, second.line, "the two lines must be byte-identical for this to be a hash test")
+        let firstHash = RecordDecoder.decode(line: first.line, byteOffset: first.offset).contentHash
+        let secondHash = RecordDecoder.decode(line: second.line, byteOffset: second.offset).contentHash
+        XCTAssertNotNil(firstHash)
+        XCTAssertEqual(firstHash, secondHash, "two byte-identical uuid-less lines must share one content hash")
         let edited = RecordDecoder.decode(entry: try Self.editing(title, key: "aiTitle", to: .string("a title this recording does not carry")))
         XCTAssertEqual(edited.kind, "ai-title")
         XCTAssertNotEqual(edited.contentHash, hash, "one differing field must hash differently")
@@ -213,6 +219,20 @@ final class RecordModelTests: XCTestCase {
             return XCTFail("last-prompt must decode as a session-state record")
         }
         XCTAssertTrue(bare.leafUuid == nil, "an absent key reads as nil, never as a clear")
+
+        let carried = #"{"type":"last-prompt","leafUuid":"55555555-5555-4555-8555-555555555555"}"#
+        guard case .sessionState(let held, _) = RecordDecoder.decode(line: Data(carried.utf8)) else {
+            return XCTFail("last-prompt must decode as a session-state record")
+        }
+        XCTAssertEqual(held.leafUuid, .some("55555555-5555-4555-8555-555555555555"))
+
+        // A key present with a non-string, non-null value is malformed; it must not be mistaken for a clear.
+        for malformed in [#"{"type":"last-prompt","leafUuid":7}"#, #"{"type":"last-prompt","leafUuid":{"a":1}}"#] {
+            guard case .sessionState(let odd, _) = RecordDecoder.decode(line: Data(malformed.utf8)) else {
+                return XCTFail("last-prompt must decode as a session-state record")
+            }
+            XCTAssertTrue(odd.leafUuid == nil, "a non-string, non-null leafUuid is not an explicit clear")
+        }
     }
 
     func testAKnownKindWithABrokenShapeIsUndecodableNotUnknown() throws {
@@ -349,6 +369,30 @@ final class RecordModelTests: XCTestCase {
             }
         }
         throw FixtureCorpus.Failure("no \(kind) record in the corpus")
+    }
+
+    struct RecordedLine { let line: Data; let offset: Int }
+
+    /// The first two byte-identical occurrences of a kind within one corpus transcript file, with the byte offset
+    /// each was read at. The census of 2026-09-05 pins thirty such groups across fourteen files.
+    private static func twoByteEqualLines(ofKind kind: String) throws -> (RecordedLine, RecordedLine) {
+        for fx in try FixtureCorpus.all() {
+            for (_, _, url) in try fx.transcriptFiles() {
+                var seen: [Data: Int] = [:]
+                var offset = 0
+                for line in try Data(contentsOf: url).split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false) {
+                    defer { offset += line.count + 1 }
+                    guard !line.isEmpty else { continue }
+                    let bytes = Data(line)
+                    guard RecordDecoder.decode(line: bytes).kind == kind else { continue }
+                    if let earlier = seen[bytes] {
+                        return (RecordedLine(line: bytes, offset: earlier), RecordedLine(line: bytes, offset: offset))
+                    }
+                    seen[bytes] = offset
+                }
+            }
+        }
+        throw FixtureCorpus.Failure("no two byte-identical \(kind) lines in one corpus file")
     }
 
     /// A recorded record with one field replaced, in memory: the mutation the discriminating tests need without inventing a recording.

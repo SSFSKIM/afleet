@@ -139,13 +139,18 @@ public struct SessionStateFields: Codable, Hashable, Sendable, DeclaredKeys {
 public typealias SessionStateRecord = Lossless<SessionStateFields>
 public extension Lossless where Fields == SessionStateFields {
     var lastPrompt: String? { additional["lastPrompt"]?.stringValue }
-    /// `nil` when the key is absent; `.some(nil)` when it was an explicit null (cleared to empty, parity §35.4).
-    /// `leafUuid` is not a declared key, so an explicit null arrives as `additional["leafUuid"] == .null`, whose
-    /// `stringValue` is nil; the `explicitNulls` check is here for the day it becomes declared.
+    /// `nil` when the key is absent; `.some(nil)` when it was an explicit null (cleared to empty, parity §35.4);
+    /// `.some(id)` when it carried a string. `leafUuid` is not a declared key, so an explicit null arrives as
+    /// `additional["leafUuid"] == .null`; the `explicitNulls` check is here for the day it becomes declared.
+    /// A key present with any other JSON type (a number, an object) is malformed — it is neither a leaf uuid nor
+    /// a recorded clear, and this engine has never written one — so it reads as absent rather than as a clear,
+    /// which is the reading that cannot silently erase a leaf.
     var leafUuid: String?? {
         if explicitNulls.contains("leafUuid") { return .some(nil) }
         guard let value = additional["leafUuid"] else { return nil }
-        return .some(value.stringValue)
+        if case .null = value { return .some(nil) }
+        guard let text = value.stringValue else { return nil }
+        return .some(text)
     }
     var explicit: Bool { additional["explicit"]?.boolValue ?? false }
     var rewound: Bool { additional["rewound"]?.boolValue ?? false }

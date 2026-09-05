@@ -37,7 +37,9 @@ enum FixtureCorpus {
         var framesURL: URL { dir.appendingPathComponent("frames.ndjson") }
         var transcriptRoot: URL { dir.appendingPathComponent("transcript") }
         var initialRoot: URL { dir.appendingPathComponent("initial") }
-        var hasInitial: Bool { !((try? initialFiles()) ?? []).isEmpty }
+        /// Throwing on purpose: `initialFiles()` throws when the layout drifts, and swallowing that into a
+        /// silent `false` would hide the very drift the loader exists to make loud.
+        var hasInitial: Bool { get throws { !(try initialFiles()).isEmpty } }
 
         /// Every JSONL under transcript/, resolved to its stream; `_slug_` is a slug like any other.
         func transcriptFiles() throws -> [(LogicalStream, TranscriptPath, URL)] {
@@ -58,23 +60,26 @@ enum FixtureCorpus {
             for (key, offset) in streamOffsets where p.hasSuffix("/" + key) || p == key { return offset }
             return 0
         }
-        /// The recording's frames in order, each with its envelope index, `t`, `dir` and the decoded `Frame`.
+        /// The recording's frames in order. `index` is the envelope's position among the file's non-empty lines,
+        /// and every non-empty line yields exactly one `RecordedFrame`: a line whose `frame` is missing or is not an
+        /// object throws rather than being skipped, so `index` stays a position later tasks can index by.
         func frames() throws -> [RecordedFrame] {
             let text = try String(contentsOf: framesURL, encoding: .utf8)
             var out: [RecordedFrame] = []
-            var index = 0
             for line in text.split(separator: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard !trimmed.isEmpty else { continue }
+                let index = out.count
                 let envelope = try JSONDecoder().decode(JSONValue.self, from: Data(trimmed.utf8))
-                guard let frameValue = envelope["frame"], frameValue.objectValue != nil else { continue }
+                guard let frameValue = envelope["frame"], frameValue.objectValue != nil else {
+                    throw Failure("fixture \(name): frames.ndjson line \(index) carries no frame object")
+                }
                 let raw = try frameValue.canonicalData()
                 out.append(RecordedFrame(index: index,
                                          t: Int(envelope["t"]?.intValue ?? 0),
                                          direction: envelope["dir"]?.stringValue ?? "?",
                                          value: frameValue,
                                          frame: FrameDecoder.decode(line: raw)))
-                index += 1
             }
             return out
         }
