@@ -257,10 +257,9 @@ final class LiveFleetTests: XCTestCase {
 
     /// *Adopt* stops the job, resumes the same session owned, and *Send to background* hands it back.
     ///
-    /// The job is a **promptless** `claude --bg`, so nothing here reaches a model: the two turns are insurance and
-    /// the scenario asserts on the way out that it really cost nothing. A "conversation" job is one that carries a
-    /// session id, as against an exec job that carries none, and none of the assertions below depends on the
-    /// transcript having content.
+    /// The job is a one-turn, uncapped `claude --bg`. The turn buys the transcript that adopt's own print-mode
+    /// resume requires; the second reserved turn is insurance for a resumed job that runs one, and the scenario
+    /// asserts that the adopted channel itself produced no result frame.
     ///
     /// Deliberate break: drop `verbs.stop` from `ChannelSupervisor.adopt` → the worker never leaves and the
     /// release wait times out into Contended.
@@ -277,26 +276,35 @@ final class LiveFleetTests: XCTestCase {
         // confirmation, and `agents --json`), and the stop-and-remove tail.
         try await Self.budget.run(turns: 2, wallTime: .seconds(570)) {
             let directory = try Self.trustedDirectory(0)
-            // A bare `claude --bg`, with no prompt and no `--resume`. It reaches no model, it returns in under a
-            // second, and it leaves a resident conversation job that mints and carries its own session id —
-            // measured at zero turn cost on 2026-09-06: `state: working, tempo: blocked, firstTerminalAt: null`
-            // from t+15 s to t+90 s, settling only when it was stopped. The id it minted is the one `jobs()`
-            // reports and the one adopt resumes; `--session-id` is refused on this line by the CLI itself
-            // ("--bg manages the session id"), which is why the scenario reads the id back rather than choosing it.
+            // One turn, and no `--max-turns`. Both halves are the settled shape and both were paid for.
             //
-            // Not the spec's `--bg --resume <id>` after a handshake-only open, for two reasons found while
-            // preparing this run. A handshake-only session leaves nothing under `projects/`, so there is no
-            // transcript to reap into being — resume works on such a session anyway, by full uuid, but the
-            // premise was false. And opening through the fleet first sets `desired == .owned`, so when the job
-            // holder appears the dormant channel takes rule 1 into Contended, from which the table has no `adopt`
-            // row: the scenario would have failed silently at `perform(.adopt)`.
-            _ = try await rig.runner.run(rig.binary, arguments: ["--bg"],
+            // The cap had to go: `--max-turns 1` ends the session the moment it answers, and the live run of
+            // 2026-09-05 recorded the job terminal 3.5 s after creation, before `Fleet.jobs()` — which filters
+            // terminal records — could list it.
+            //
+            // The prompt has to stay, and this is the expensive lesson. A promptless job was tried: a bare
+            // `claude --bg` does mint and carry its own session id, reaches no model, and stays resident
+            // (`state: working, tempo: blocked, firstTerminalAt: null` from t+15 s to t+90 s), and `jobs()` listed
+            // it in the live run. But such a session writes nothing under `projects/`, and *adopt* resumes it
+            // through afleet's own print-mode launch, which refuses a session with no transcript. Measured
+            // directly, at zero cost, against a session a bare `--bg` had created:
+            //
+            //     claude -p --input-format stream-json … --resume <uuid>
+            //     → "No conversation found with session ID: <uuid>", result error_during_execution,
+            //       total_cost_usd 0, exit 1
+            //
+            // which is the `processExited` the adopt spawn threw. The two resume paths differ: `--bg --resume`
+            // accepted the very same uuid and kept its id. So the job's session must carry a transcript, and a
+            // transcript costs one turn. `--bg` is a CLI verb rather than a `ClaudeProcess`, so the "every launch
+            // carries an explicit cap" rule is untouched, and the one-word prompt bounds the spend by itself.
+            _ = try await rig.runner.run(rig.binary,
+                                         arguments: ["--bg", "--model", Self.haiku, "Reply with exactly: pong"],
                                          environment: rig.childEnvironment, cwd: directory, timeout: .seconds(120))
 
             let started = try await Self.poll(upTo: .seconds(60)) { () -> JobEntry? in
                 await rig.fleet.jobs().first { $0.sessionID != nil && $0.cwd?.lastPathComponent == directory.lastPathComponent }
             }
-            let job = try XCTUnwrap(started, "the promptless --bg conversation job never appeared in jobs()")
+            let job = try XCTUnwrap(started, "the --bg conversation job never appeared in jobs()")
             let session = try XCTUnwrap(job.sessionID)
             let key = ChannelKey(configHome: LiveGate.scratchHome, session: session)
             await rig.fleet.register(key, cwd: directory, recent: true)
@@ -346,10 +354,11 @@ final class LiveFleetTests: XCTestCase {
                                   "a turn ended at the --max-turns cap: result subtype error_max_turns")
                 await Self.budget.add(cost: result.totalCostUSD)
             }
-            // Nothing here sends a prompt, so the two reserved turns are insurance and this says so out loud: a
-            // recipe that quietly started costing turns again would fail here rather than on the invoice.
+            // The channel afleet owns after the adopt is sent no prompt, so *its* launches must produce no result
+            // frame: the one turn this scenario spends belongs to the `--bg` job, which is not this channel. A
+            // resume that quietly started running turns of its own would fail here rather than on the invoice.
             XCTAssertEqual(Self.results(in: observed).count, 0,
-                           "the promptless adoption scenario produced a result frame, so a turn was spent")
+                           "the adopted channel produced a result frame, so the resume spent a turn of its own")
             Self.budget.assertEveryLaunchWasDecorated()
         }
     }
