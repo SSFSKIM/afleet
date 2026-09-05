@@ -851,7 +851,145 @@ sub-states as enumerated above; `.typings/` in `.gitignore`.
 
 ## Outcomes & Retrospective
 
-Pending — written at finish.
+Measured on 2026-09-05 at `821a259` on `child/c2-core-wire`, seventy-one commits above
+`main`. That tip is a history rewrite of the pre-rewrite tip with an identical tree; every
+hash quoted in the working ledger before the rewrite is historical and no longer resolves.
+Every figure below is an observed output. Where a claim could not be demonstrated by
+running something, it says so rather than borrowing the authority of the ones that could.
+
+### The gates
+
+**G1 — passes.** `swift test --package-path ClaudeWire` reports
+`Executed 225 tests, with 4 tests skipped and 0 failures (0 unexpected)`, and
+`swift test --package-path AfleetCore` reports `Executed 6 tests, with 0 failures
+(0 unexpected)`. The four skips are the live tests, which skip without the opt-in
+variable. A clean-build run with both build directories deleted was taken two commits
+earlier, at the equivalent of `6a370bf`, and reported 224 with the same four skips and no
+failures; the single added test is the guard described under G2's neighbour below. The
+external consumer package that imports only `ClaudeWire` builds as part of the suite.
+
+One caveat, stated because the number above is a single observation of a suite that is not
+perfectly deterministic. Across four consecutive runs at the tip, two were clean, one hit
+`ProcessRunnerTests` failing with an exit code of `-1` after an eleven-second stall, and
+one aborted with the test bundle missing under `dlopen`. The second is a known flake
+already carried as debt with its mechanism diagnosed — a starved `waitUntilExit()` on the
+global queue, which returns `-1` — and it is not a test any gate names. The third is not a
+test result at all: a clean build was deleting and rebuilding the build directory in the
+same worktree while the run was in progress. Neither is a defect in the shipped code, and
+neither was discovered by this run: the flake was recorded during the task sequence.
+
+**G2 — passes, and two independent assertions agree on the same ten frames.** The corpus
+test reports `18 fixtures (16 recorded, 2 synthetic), 1353 frames (152 in, 1201 out), 1343
+round-tripped`. Three fixtures have their counts compared as sets rather than as totals
+because their census accumulates across re-recordings. The ten frames that do not
+round-trip are exactly the ten in the pinned synthetic-findings set, which is asserted as
+an exact set rather than as a count — so a regression in a frame that only a synthetic
+fixture represents now fails the build instead of printing to a console. That pinning was
+demonstrated by mutating a synthetic fixture in a way that moved a finding from one missing
+key to another while the total stayed at ten: a threshold assertion would have passed, and
+the set comparison went red naming both keys.
+
+**G3 — passed when run, and its most important limitation is unverified rather than
+verified.** The live pass ran under the scratch config home with the opt-in variable set,
+completed the handshake, observed the in-process tool in the first turn's tool list, asked
+the model to send a file and received the host-invocation event, exercised the version gate
+against fabricated and real version strings, and diffed the config home before and after,
+finding only files the spawned engine wrote. Nothing was created under the user's own
+config home. The limitation: the handshake test's real difference was a single modified
+path, so the write allowlist rests almost entirely on one turn's writes and is untested
+against hooks, plugins, background shells, editor integration, subagents and session
+relocation. That is the most consequential thing this child did not establish.
+
+**G4 — passes.** `git ls-files` matches nothing under the typings directory, nothing under
+`node_modules/`, and no `*.d.ts`. The drift test that reads the typings skips rather than
+fails when the directory is absent, which was verified by parking the directory.
+
+### What the review rounds and waves changed
+
+The fourteen planned tasks were each executed, reviewed by an independent reviewer, fixed
+and re-reviewed. That sequence found roughly twenty-one defects in the plan and spec
+themselves, including several that would have shipped: a JSON-RPC identifier that could not
+be mapped being classified as a notification, producing a silent hang; a timeout that did
+not bound the operation it named; a termination path that, called before launch, would have
+signalled the whole process group; and five wrong wire key names taken from a schema rather
+than from a recording.
+
+Because the finished diff ran to 142 files, the branch then went to a six-lens review panel
+rather than a single reviewer. It returned thirty-two findings — sixteen at the top
+priority — and independently rediscovered both findings an earlier adversarial pass had
+found by hand. **Every one of the thirty-two held at the code; none was dismissed as
+mistaken.** They were cleared in four sequential waves, never in parallel, so that exactly
+one worker owned the tree at a time:
+
+- **Wave A** — the two publication blockers, plus payload reaching the metadata log, a
+  process identifier reused across a wait before a kill, a caller-supplied string that
+  could become a command-line flag, and four capture-to-disk defects including one that
+  could hand a directory to a recursive delete.
+- **Wave B1** — the two rulings this child escalated, plus redaction parity and the
+  synthetic-findings pinning.
+- **Wave B2** — thirteen process-lifecycle and tool-server defects: a termination path that
+  could wait forever before escalating, a terminal exit event that could never be
+  published, pending requests bypassing the inbound policy, and delivery events that could
+  claim a file was sent when the write had failed.
+- **Closing batch** — the width of the unknown-suggestion fallback, a diagnostic step
+  renamed to describe a state the system is actually in, and the spec text.
+
+### What the child taught the parent
+
+The details are in the parent's own Revision Notes and are not restated here. In outline:
+the environment scrub is a property about nesting markers and not a list of names, and the
+pass-through set is the opposite case for a reason that is written down; always injecting
+the config home changes the engine's own gate on the project directory name, so the
+resolved record and not the environment must be the source; a session's identity comes from
+the frame the engine sends before the first user turn, and a forked session's identity is
+genuinely unknown until then, which the type now says rather than guessing; the metadata log
+carries no payload, enforced by the type rather than by call-site discipline; and a test
+assertion that dumps a value on failure is a disclosure whenever that value is an
+environment or a configuration blob. Two gaps in the sibling workstream's redactor were
+found here and fixed there.
+
+### What surprised us
+
+- **A test can agree with a wrong model for eleven tasks.** The scripted stand-in was
+  written to the spec's assumption that the engine announces itself at startup. It does
+  not; it waits for the first user turn. Every transport test passed against a model that
+  would have timed out on every real launch, and only the live gate could catch it.
+- **A parity test that could not fail.** The test written to detect divergence between two
+  redactors passed an empty correlation map, so it could not observe the divergence it
+  existed to detect. Removing the fix and running it printed `Executed 1 test, with 0
+  failures` with the defect fully present.
+- **Decoding and round-tripping have different answers.** A modelled permission variant
+  carrying an unmodelled key decoded into its typed case, because the decoder ignores keys
+  it was not asked for — and silently dropped that key on re-encode, because the encoder
+  writes only what it models. The half everyone would test held; the half nobody would test
+  did not.
+- **Observing a deadlock can dissolve it.** The first test for a terminal event parked on a
+  full channel read the event stream to look for it — and a reader that arrives to look is a
+  reader that drains, which frees the slot and releases the parked write.
+
+### What we would do differently
+
+Audit the evidence under a ruling before generalising from it: this controller took a
+ruling's conclusion, built a principle on top, and had to reverse both when the premise
+turned out to be an artefact of a search that looked for four names. Treat a build as a
+mutation in a shared worktree, not just an edit. When two test harnesses write to one
+stream, select the summary line by name instead of by position. And search the working
+ledger before escalating anything as new — one item here was raised as an open question
+when the ledger already held its diagnosis.
+
+### Debt deferred, and where it is logged
+
+Eight findings from the review panel were judged real but not worth acting on in this
+child, together with the `ProcessRunner` flake and its diagnosis. All are recorded in the
+execution ledger under this plan, each with the finding identifier, the site and the reason
+for deferring. None sits on a path any gate names.
+
+### Spend
+
+The working ledger records two model turns across the whole child alongside nine zero-cost
+process spawns, but its own parenthetical enumerates three occasions. That discrepancy is
+reported rather than resolved by picking a number; the true figure is two or three, and no
+turn was spent outside the live gate and its one wasted retry.
 
 ## Revision Notes
 
