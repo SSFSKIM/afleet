@@ -1835,6 +1835,14 @@ Each was answered with the recommendation below and the plan proceeds on it; ove
 
 ## Revision Notes
 
+- 2026-09-05: controller ruling during Task 8, recorded so the departure is not read as an omission.
+  Step 2's routing table lists `.system(.status)` among the subtypes that become banners. The
+  implementation narrows it: a `status` frame raises a banner only when it carries `compact_error`.
+  Upheld, because `Banner.Kind` has no `status` case and the engine emits the frame several times a
+  turn, so a banner per status frame would be interface noise rather than information. The narrowing
+  is pinned in both directions by `testStatusBannersOnlyWhenACompactionFailed` and stated in a source
+  comment at the `.status` arm.
+
 - 2026-09-05: parent amendment applied mid-execution, before Task 4 was dispatched.
   `ProjectionCategories.fileOnlyRecordKinds` (Task 4, Step 2) drops `.system("compact_boundary")`:
   the engine emits the boundary on the wire as a `system` frame of that subtype and mirrors the
