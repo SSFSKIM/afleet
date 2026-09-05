@@ -677,8 +677,8 @@ final class WireReducerTests: XCTestCase {
                                "fixture \(fixture.name): the echo of \(id) produced an event")
             }
         }
-        XCTAssertEqual(totalEchoed, 57, "the recorded corpus writes 57 control_responses, every one of them echoed")
-        XCTAssertEqual(totalCorrelated, 39, "and the engine answers 39 host requests other than the handshake")
+        XCTAssertEqual(totalEchoed, 63, "the recorded corpus writes 63 control_responses, every one of them echoed")
+        XCTAssertEqual(totalCorrelated, 43, "and the engine answers 43 host requests other than the handshake")
         XCTAssertEqual(errorBodies, 2,
                        "control-shapes records two correlated error bodies, so no error response is constructed here")
     }

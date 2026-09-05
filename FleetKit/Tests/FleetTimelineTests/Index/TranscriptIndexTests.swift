@@ -17,8 +17,10 @@ final class TranscriptIndexTests: XCTestCase {
     private static let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
     private static let laterDate = baseDate.addingTimeInterval(1)
     private static let laterSnapshots: Set<String> = ["resume-no-replay", "session-mirror-resume"]
-    /// The two fixtures whose session id a later snapshot also carries, so their file wins no entry.
-    private static let shadowed: Set<String> = ["plain-two-turn", "session-mirror-relocation"]
+    /// The fixtures whose session id a later snapshot also carries, so their file wins no entry. `rewind-turn` and
+    /// `compact-boundary` are two further recordings of `plain-two-turn`'s session, so four fixtures share that id and
+    /// only `resume-no-replay`, dated a second later than the rest, wins its entry.
+    private static let shadowed: Set<String> = ["plain-two-turn", "session-mirror-relocation", "rewind-turn", "compact-boundary"]
     /// The two synthetic fixtures: invented bytes with no `entrypoint` line.
     private static let syntheticNames = ["dialog-fable-overage", "dialog-refusal-fallback"]
 
@@ -82,11 +84,12 @@ final class TranscriptIndexTests: XCTestCase {
         let index = makeIndex(tree.temp, diagnostics: notices)
         let snapshot = try await index.build()
 
-        XCTAssertEqual(tree.mains.count, 17, "the corpus places seventeen main transcripts")
+        XCTAssertEqual(tree.mains.count, 19, "the corpus places nineteen main transcripts")
         XCTAssertEqual(Set(snapshot.entries.keys), Set(tree.fixtures.values.map(\.sessionID)),
                        "entry ids must be exactly the corpus's main-file session ids")
         XCTAssertEqual(snapshot.entries.count, 15,
-                       "fifteen logical sessions: plain-two-turn/resume-no-replay and session-mirror-relocation/-resume each share one id")
+                       "fifteen logical sessions across nineteen files: plain-two-turn, resume-no-replay, rewind-turn and "
+                       + "compact-boundary share one id, and session-mirror-relocation/-resume share another")
 
         // Nothing but a `<slug>/<uuid>.jsonl` won an entry: no memory file, no stray text file, no agent transcript,
         // no `.meta.json` — and each shared id carries the later snapshot's path.
@@ -105,8 +108,8 @@ final class TranscriptIndexTests: XCTestCase {
         let expectedSubagents = Set(try ["explore-depth-1", "nested-depth-2"].map { try XCTUnwrap(tree.fixtures[$0]).sessionID })
         XCTAssertEqual(withSubagents, expectedSubagents)
 
-        XCTAssertTrue(notices.notices.contains { if case .indexBuilt(let files, _, _) = $0 { return files == 17 } else { return false } },
-                      "one indexBuilt notice naming the seventeen files read: \(notices.notices)")
+        XCTAssertTrue(notices.notices.contains { if case .indexBuilt(let files, _, _) = $0 { return files == 19 } else { return false } },
+                      "one indexBuilt notice naming the nineteen files read: \(notices.notices)")
     }
 
     // MARK: - Cancellation
@@ -117,7 +120,7 @@ final class TranscriptIndexTests: XCTestCase {
     /// `Task.isCancelled` once per item, and `build()` checks after each phase. The `Task` here is unstructured and
     /// started from a `nonisolated` async context, so it is scheduled on the global executor and may well begin
     /// before `cancel()` returns — the test does not depend on it not having. What it depends on is that the build
-    /// cannot get through seventeen files before the cancellation lands, and a build that *had* finished is rejected
+    /// cannot get through nineteen files before the cancellation lands, and a build that *had* finished is rejected
     /// by the assertions rather than passing quietly: the `.success` arm fails, and an empty `entries` with a
     /// `.distantPast` `builtAt` is exactly what a build that published nothing looks like.
     func testACancelledBuildThrowsAndPublishesNothing() async throws {
@@ -258,7 +261,7 @@ final class TranscriptIndexTests: XCTestCase {
         let reader = CountingReader()
         let index = makeIndex(tree.temp, reader: reader)
         _ = try await index.build()
-        XCTAssertEqual(reader.reads.count, 17, "the cold build reads every main file once")
+        XCTAssertEqual(reader.reads.count, 19, "the cold build reads every main file once")
 
         // A changed file among two unchanged ones: one read, of that URL.
         reader.forget()

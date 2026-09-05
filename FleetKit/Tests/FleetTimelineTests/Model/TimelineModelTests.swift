@@ -141,18 +141,18 @@ final class TimelineModelTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(records, 611)                                    // the corpus census of 2026-09-05
-        XCTAssertEqual(attachments, 200)
+        XCTAssertEqual(records, 760)                                    // the corpus census of 2026-09-06
+        XCTAssertEqual(attachments, 228)
         XCTAssertEqual(matchedAttachments, attachments, "every attachment record must match .kind(\"attachment\")")
-        XCTAssertEqual(metaUsers, 2)
+        XCTAssertEqual(metaUsers, 3)
         XCTAssertEqual(taskNotifications, 4)
         XCTAssertEqual(byFixture, ["background-shell": 1, "explore-depth-1": 1, "nested-depth-2": 2],
                        "the four task notifications are these fixtures' and no others'")
         XCTAssertEqual(sidechainRoots, 3, "one opening prompt per agent transcript: explore-depth-1 has one, nested-depth-2 two")
-        XCTAssertEqual(plainUsers, 62)
+        XCTAssertEqual(plainUsers, 75)
         XCTAssertGreaterThan(mainRoots, 0, "the .sidechainRoot negative would be vacuous with no main-stream root")
-        XCTAssertEqual(matched, 209,
-                       "the file-only matchers must select exactly the 200 attachments, 2 isMeta users, 4 task notifications and 3 sidechain roots")
+        XCTAssertEqual(matched, 238,
+                       "the file-only matchers must select exactly the 228 attachments, 3 isMeta users, 4 task notifications and 3 sidechain roots")
         XCTAssertEqual(matchedKinds, ["attachment", "user"], "no other kind on disk is file-only in this corpus")
     }
 

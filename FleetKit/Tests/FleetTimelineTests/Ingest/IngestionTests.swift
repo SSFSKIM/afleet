@@ -425,7 +425,11 @@ final class IngestionTests: XCTestCase {
     // MARK: - G4: the mirror alone
 
     func testMirrorAloneDrivesTheReducer() async throws {
-        let names = FixtureCorpus.mirrored.subtracting(["session-mirror-resume", "resume-no-replay"]).sorted()
+        // The four resumes are excluded because their mirror carries only what the recording appended: the file the
+        // reducer is held against also holds everything the session wrote before the spawn, which no frame of that
+        // recording ever delivered.
+        let names = FixtureCorpus.mirrored
+            .subtracting(["session-mirror-resume", "resume-no-replay", "rewind-turn", "compact-boundary"]).sorted()
         XCTAssertEqual(names.count, 13, "the fully mirrored fixtures")
         for name in names {
             let fx = try FixtureCorpus.named(name)

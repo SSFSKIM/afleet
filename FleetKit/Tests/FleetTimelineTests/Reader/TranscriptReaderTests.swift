@@ -21,7 +21,7 @@ final class TranscriptReaderTests: XCTestCase {
                 total += result.records.count
             }
         }
-        XCTAssertEqual(total, 611, "the corpus census of 2026-09-05: records across the 20 transcript files")
+        XCTAssertEqual(total, 760, "the corpus census of 2026-09-06: records across the 22 transcript files")
     }
 
     /// A record delivered in two appends is never decoded half-written: the first append advances nothing, the second

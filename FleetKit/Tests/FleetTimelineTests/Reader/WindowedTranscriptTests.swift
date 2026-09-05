@@ -20,7 +20,7 @@ final class WindowedTranscriptTests: XCTestCase {
                 files += 1
             }
         }
-        XCTAssertEqual(files, 20, "the corpus census of 2026-09-05: 20 transcript files")
+        XCTAssertEqual(files, 22, "the corpus census of 2026-09-06: 22 transcript files")
     }
 
     /// A window that begins mid-turn is extended until its earliest chain record is a turn start.
@@ -140,7 +140,7 @@ final class WindowedTranscriptTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(checked, 611, "the corpus census of 2026-09-05: every record addressed by its range")
+        XCTAssertEqual(checked, 760, "the corpus census of 2026-09-06: every record addressed by its range")
     }
 
     /// *Load earlier*, step by step, from a rewound file: every step prepends the records that lie before the window,

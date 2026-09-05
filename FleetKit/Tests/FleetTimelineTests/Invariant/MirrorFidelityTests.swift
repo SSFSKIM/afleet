@@ -68,11 +68,12 @@ final class MirrorFidelityTests: XCTestCase {
             XCTAssertEqual(prefixSkipped, fx.unmirroredPrefix, "\(fx.name): unmirrored_prefix \(fx.unmirroredPrefix) declared, \(prefixSkipped) used")
         }
         XCTAssertEqual(mirroredNames, FixtureCorpus.mirrored)
-        // 15 main streams, plus one agent stream in explore-depth-1 and two in nested-depth-2; the relocation's one stream
+        // 17 main streams, plus one agent stream in explore-depth-1 and two in nested-depth-2; the relocation's one stream
         // under two `filePath` values is counted once and adds nothing, which is what makes a path an alias and not an identity.
-        XCTAssertEqual(streamsCompared, 18)
-        // The census of 2026-09-05: 496 mirrored entries, of which 3 are `agent_metadata`, leaves 493 compared against file records.
-        XCTAssertEqual(recordsCompared, 493)
+        XCTAssertEqual(streamsCompared, 20)
+        // The census of 2026-09-06 (twenty fixtures): 521 mirrored entries, of which 3 are `agent_metadata`, leaves 518
+        // compared against file records.
+        XCTAssertEqual(recordsCompared, 518)
         XCTAssertEqual(metadataCompared, 3)
     }
 }

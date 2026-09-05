@@ -31,7 +31,7 @@ final class HeadTailReaderTests: XCTestCase {
                                "\(fixture.name)/\(url.lastPathComponent): mtime is the file's")
             }
         }
-        XCTAssertEqual(small + large, 20, "the corpus census of 2026-09-05: 20 transcript files")
+        XCTAssertEqual(small + large, 22, "the corpus census of 2026-09-06: 22 transcript files")
         XCTAssertGreaterThan(small, 0, "the corpus carries files under one chunk")
         XCTAssertGreaterThan(large, 0, "and files over it")
         XCTAssertNil(try reader.read(FixtureCorpus.root), "a directory is not a file the picker reads")

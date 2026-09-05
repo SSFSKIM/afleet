@@ -14,13 +14,13 @@ enum FixtureCorpus {
         .appendingPathComponent("Fixtures")
     /// The config home every recording used; mirror `filePath` values resolve under it.
     static let recordedConfigHome = URL(fileURLWithPath: "/tmp/afleet-fixtures/config-home")
-    static let committedCount = 18
-    static let committedRecordedCount = 16
+    static let committedCount = 20
+    static let committedRecordedCount = 18
     /// Fixtures with at least one mirrored stream, pinned as names so a silent loss fails (spec G1).
     static let mirrored: Set<String> = [
-        "ask-user-question", "background-shell", "control-shapes", "exit-plan-mode", "explore-depth-1", "nested-depth-2",
-        "notification-hook", "permission-allow", "permission-deny", "plain-two-turn", "rate-limited-turn", "resume-no-replay",
-        "send-user-file", "session-mirror-relocation", "session-mirror-resume",
+        "ask-user-question", "background-shell", "compact-boundary", "control-shapes", "exit-plan-mode", "explore-depth-1",
+        "nested-depth-2", "notification-hook", "permission-allow", "permission-deny", "plain-two-turn", "rate-limited-turn",
+        "resume-no-replay", "rewind-turn", "send-user-file", "session-mirror-relocation", "session-mirror-resume",
     ]
 
     struct Fixture {

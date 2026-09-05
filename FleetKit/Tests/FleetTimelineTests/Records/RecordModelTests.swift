@@ -40,10 +40,13 @@ final class RecordModelTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(fileRecords, 611)      // the corpus census of 2026-09-05 (spec Grounding); re-pin when C1 re-records
-        XCTAssertEqual(mirrorEntries, 496)
-        XCTAssertEqual(kinds, ["user", "assistant", "attachment", "queue-operation", "file-history-snapshot", "file-history-delta",
-                               "atis-latch", "last-prompt", "ai-title", "mode", "relocated", "agent_metadata"])
+        XCTAssertEqual(fileRecords, 760)      // the corpus census of 2026-09-06 (twenty fixtures); re-pin when C1 re-records
+        XCTAssertEqual(mirrorEntries, 521)
+        // `system`, `bridge-session`, `cost-state` and `permission-mode` joined the census with `rewind-turn` and
+        // `compact-boundary`; the boundary is the corpus's first `system` record of any subtype.
+        XCTAssertEqual(kinds, ["user", "assistant", "attachment", "system", "queue-operation", "file-history-snapshot",
+                               "file-history-delta", "atis-latch", "bridge-session", "cost-state", "last-prompt",
+                               "ai-title", "mode", "permission-mode", "relocated", "agent_metadata"])
     }
 
     // MARK: - Keys
@@ -120,7 +123,7 @@ final class RecordModelTests: XCTestCase {
             }
         }
         XCTAssertEqual(missing, [], "a mirrored uuid-less entry hashed unlike every line of the file it mirrors")
-        XCTAssertEqual(checked, 175, "the census of 2026-09-05: uuid-less mirror entries other than agent_metadata")
+        XCTAssertEqual(checked, 188, "the census of 2026-09-06: uuid-less mirror entries other than agent_metadata")
 
         // The one mirrored kind whose file form differs: the sidecar plus `type`, and the mirror agree by hash.
         var sidecars = 0
@@ -175,10 +178,11 @@ final class RecordModelTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(repeats, 48)
-        XCTAssertEqual(groups, 30)
-        XCTAssertEqual(filesWithRepeats, 14)
-        XCTAssertEqual(repeatedKinds, ["atis-latch", "ai-title", "relocated"])
+        XCTAssertEqual(repeats, 65)
+        XCTAssertEqual(groups, 41)
+        XCTAssertEqual(filesWithRepeats, 16)
+        XCTAssertEqual(repeatedKinds, ["atis-latch", "ai-title", "bridge-session", "last-prompt", "mode",
+                                       "permission-mode", "relocated"])
     }
 
     // MARK: - Accessors and decode policy
