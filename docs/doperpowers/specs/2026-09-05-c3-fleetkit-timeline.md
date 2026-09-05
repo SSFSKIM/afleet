@@ -4,8 +4,9 @@
 > **Parent-pin:** that path at commit `ee94449` ("FleetKit: manifest skeleton with the C3 and
 > C4 target groups; X1 records the split"). **Level name:** child, wave 2 of the v1 roadmap.
 > **Track:** controlled. **Branch:** `child/c3-timeline`, worktree `../afleet-c3`; merges to
-> `main` when G1 through G4 pass. C1 has merged, so G1's blocker (C1.G1) is discharged and
-> every gate is evaluable now; where a gate names a recording the corpus does not hold, this
+> `main` when G1 through G4 pass. C1 has merged, so G1's blocker (C1.G1) is discharged, and
+> C2's `WireEventPolicy` corrective is on `main` at merge `ca68f2e`, so every gate is
+> evaluable against that pin; where a gate names a recording the corpus does not hold, this
 > document says so and the gate is stated against the corpus that exists (parent §17.6's
 > pending-gate rule applies to the missing recording, never to a substitute). This document
 > treats the parent's §17 C3 section and its binding inheritance (§7.3 in full, §8.8's tree
@@ -53,8 +54,8 @@ proves it. All of them run under `swift test --package-path FleetKit`; C3's test
   fixtures that carry at least one mirrored stream equals a pinned set of fifteen names, so
   a fixture that silently loses its mirror fails rather than passing vacuously. *Check
   two* — the durable projection the wire reducer produces from the fixture's frames,
-  delivered as the transport delivers them (control requests through C2's `WireEventPolicy`,
-  never as bare frames) and seeded from `initial/` on a resume, equals, item for item, the durable projection the record reducer produces from the
+  delivered as the transport delivers them (control requests through C2's `WireEventPolicy`
+  at `ca68f2e`, never as bare frames) and seeded from `initial/` on a resume, equals, item for item, the durable projection the record reducer produces from the
   fixture's transcript files, for the categories the wire carries
   (`ProjectionCategories.comparedWireToFile`), with identity by record uuid, subagent items
   by agent id and source file, streaming collapsed, and timestamps compared within one
@@ -72,7 +73,8 @@ proves it. All of them run under `swift test --package-path FleetKit`; C3's test
   parent's numbers are about the author's machine and the default suite must not read it.
   *Default suite*: `TranscriptIndexTests` assembles the corpus's transcript snapshots into a
   config-home-shaped tree under the system temporary directory and asserts the index's
-  correctness — one entry per session file, the title precedence of §35.19.7, the relocated
+  correctness — one entry per logical session (fifteen across the corpus's seventeen main
+  files), the title precedence of §35.19.7, the relocated
   cwd overriding the recorded one, subagent files counted but not listed, `.meta.json`
   ignored, a `memory/` directory ignored — and that `update(changed:)` after touching one
   file re-reads that file alone (asserted by a counting file reader, not by timing).
@@ -88,7 +90,7 @@ proves it. All of them run under `swift test --package-path FleetKit`; C3's test
 - **G3 (required) — the three fixtures the data half is named for replay correctly.**
   `session-mirror-relocation` and `session-mirror-resume` fold through `StreamIngestion`
   with no duplicate and no missing record (asserted as the record-key sequence of the final
-  file), with the stream's path rebound at `transcript_relocated` and the byte offset
+  file, repeated `atis-latch`, `ai-title` and `relocated` lines included), with the stream's path rebound at `transcript_relocated` and the byte offset
   carried across the resume (item 64's reducer half). `nested-depth-2` yields a two-level
   `AgentRunTree` whose depth-2 node's parent is the depth-1 task id, with the parent read
   from the `agent_metadata` mirror entry before the sidecar exists and again from the
@@ -121,14 +123,19 @@ Measured 2026-09-05 in the worktree, against C1's corpus at `ee94449`, the local
 (read only, counts only) and the extracted 2.1.258 bundle (`~/claude-code-bundle/2.1.258/cli.pretty.js`).
 
 **The corpus.** Eighteen fixtures, sixteen recorded, two synthetic. Seventeen carry a
-transcript snapshot; `zero-cost` carries none. Fifteen carry at least one mirrored stream
+transcript snapshot of fifteen logical sessions (`plain-two-turn` and `resume-no-replay` are
+two snapshots of one session, as are `session-mirror-relocation` and
+`session-mirror-resume`); `zero-cost` carries none. Fifteen carry at least one mirrored stream
 (the two synthetic dialogs and `zero-cost` carry none); `explore-depth-1` mirrors two
 streams and `nested-depth-2` three; `session-mirror-relocation` mirrors one stream under two
 paths. Across the twenty JSONL files (seventeen main, three subagent) there are 611 records
 of eleven kinds — `user` 71, `assistant` 119, `attachment` 200, `queue-operation` 64,
 `file-history-snapshot` 26, `file-history-delta` 4, `atis-latch` 46, `last-prompt` 46,
 `ai-title` 29, `mode` 2, `relocated` 4 — and 496 mirrored entries of those eleven plus
-`agent_metadata` (3), which the mirror carries and no JSONL receives. **No `system` record
+`agent_metadata` (3), which the mirror carries and no JSONL receives. Among the uuid-less
+records, thirty canonical-hash groups across fourteen files repeat: forty-eight later lines
+are byte-identical to an earlier line of the same file (`atis-latch`, `ai-title`,
+`relocated`), written by the engine and kept by it. **No `system` record
 of any subtype appears in the corpus**, so the five system kinds the parent's §7.3 names
 (`turn_duration`, `stop_hook_summary`, `local_command`, `informational`, `compact_boundary`)
 are promised by the bundle and by the author's local transcripts, not witnessed here.
@@ -188,9 +195,12 @@ aiTitle → summary → firstPrompt → "Autonomous session" → sessionId.slice
 §35.19.7). The loader keeps as conversation only records whose type is in
 `Vr = {user, assistant, attachment, system, progress}` and which carry a string `uuid`
 (`Qr`/`os`, line 250499); every other kind is session state, folded by the policy tables at
-lines 428922 (`transcript`, `boundary-cleared`, `accumulate`, `last-wins`) and 429460
-(`dedup-transcript`, `always`, `route-by-agent`), which together enumerate the engine's full
-record vocabulary of forty-one kinds. The picker's drop rules hide sessions whose
+lines 428922 (`dts`: `transcript`, `boundary-cleared`, `accumulate`, `last-wins`) and 429460
+(`vbr`: `dedup-transcript`, `always`, `route-by-agent`), which together enumerate the engine's
+full record vocabulary of thirty-eight kinds: the five conversation kinds and thirty-three
+state kinds. `dts` folds `progress` as `boundary-cleared`, not `transcript`; `vbr` marks every
+state kind `always` and only the five conversation kinds `dedup-transcript`, so the engine
+never content-deduplicates a state record — the fact the record key below is built on. The picker's drop rules hide sessions whose
 `entrypoint` is `sdk-cli`, `sdk-ts` or `sdk-py` (`ckt`, line 13317) — which is every session
 afleet itself spawns.
 
@@ -226,8 +236,11 @@ names the mechanism.
   `agent-<taskId>`). The path of the file is an alias of the stream and changes under
   relocation; the slug is derived from a cwd and is not identity.
 - **Record key**: logical stream plus record identity — the record's `uuid`, or, for a kind
-  that carries none, the SHA-256 of its canonical JSON. One key is applied once, whatever
-  delivered it and however many times.
+  that carries none, the SHA-256 of its canonical JSON together with an occurrence ordinal:
+  the number of records with that hash already applied in the stream when this one is
+  applied. Two byte-identical `atis-latch` lines are two records with two keys, as the
+  engine's own dedup table treats them. One key is applied once, whatever delivered it and
+  however many times.
 - **Conversation record**: a record whose kind is `user`, `assistant`, `attachment`,
   `system` or `progress` and which carries a `uuid` — the engine's own definition.
   Everything else is a **session-state record**.
@@ -253,7 +266,7 @@ public enum TranscriptRecord: Sendable, Hashable {
   case system(SystemRecord)                   // subtype-modelled where the reducer reads it, else lossless generic
   case progress(ProgressRecord)               // never stored as a message by the engine; kept, never rendered
   case agentMetadata(AgentMetadataRecord, canonicalHash: String)   // mirror-only: the .meta.json body plus `type`
-  case sessionState(SessionStateRecord, canonicalHash: String)     // the engine's forty-one-kind vocabulary minus the five above
+  case sessionState(SessionStateRecord, canonicalHash: String)     // the engine's thirty-three state kinds: its thirty-eight-kind vocabulary minus the five above
   // the uuid-less kinds carry the SHA-256 of the line's canonical JSON (`JSONValue.canonicalData`: sorted keys, normalised
   // numbers), computed by the decoder from the stage-one value; a key is never derived from a re-encoding, whose key order is per-process
   case unknown(kind: String, JSONValue)       // a kind outside the vocabulary: kept, counted, a finding
@@ -281,7 +294,10 @@ content, level, durationMs, toolUseID, preventContinuation, compactMetadata, isM
 `SessionStateRecord` is `Lossless<SessionStateFields>` with `type, sessionId` declared and
 typed accessors for the fields the reducer and the index read: `lastPrompt`, `leafUuid`,
 `explicit`, `rewound` (kind `last-prompt`); `aiTitle`, `customTitle`, `summary`; `relocatedCwd`;
-`mode`; `atis`; `continuedIn`; `agentName`; `tag`; `messageId` and `snapshot` (the two
+`mode`; `atis`; `continuedInSessionId` (kind `continued-in`, whose writer emits `{type,
+timestamp, sessionId: <source>, continuedInSessionId: <destination>}` — 2.1.258 lines 246346
+and 246351 — so its `sessionId` is this file's own id, never the destination); `agentName`;
+`tag`; `messageId` and `snapshot` (the two
 `file-history-*` kinds); `operation` (`queue-operation`); the `cost-state` body as
 `JSONValue`. `SessionStateVocabulary.kinds` is the engine's list from the two bundle tables,
 pinned as a constant with the line numbers in its doc comment, and a kind absent from it
@@ -313,7 +329,13 @@ public enum TranscriptPath: Sendable, Hashable {
 public struct RecordKey: Hashable, Sendable, Codable {
   public let stream: LogicalStream
   public let identity: Identity
-  public enum Identity: Hashable, Sendable, Codable { case uuid(String), hash(String) }
+  /// `hash(_:ordinal:)`: the canonical-JSON hash and the count of records with that hash already applied in the stream.
+  /// A record cannot know its ordinal; whoever applies records in stream order assigns it (`keys(for:in:)` for a sequence
+  /// read whole, `StreamIngestion` incrementally as deliveries arrive).
+  public enum Identity: Hashable, Sendable, Codable { case uuid(String), hash(String, ordinal: Int) }
+  /// Keys for records applied in this order: a uuid-less record's ordinal is the number of earlier records in the sequence
+  /// with the same hash. What the reducer's callers and the tests use for a whole-file read.
+  public static func keys(for records: [TranscriptRecord], in stream: LogicalStream) -> [RecordKey]
 }
 ```
 
@@ -326,6 +348,18 @@ changes nothing about identity: `StreamIngestion.relocated(to:)` rebinds the ali
 carries the byte offset, and the two `filePath` values `session-mirror-relocation` records
 resolve to one stream.
 
+**Occurrence identity.** The engine writes byte-identical state records repeatedly — thirty
+duplicate groups and forty-eight later occurrences across fourteen corpus files — and never
+deduplicates them (`vbr`, line 429460, maps every state kind to `always`), so a uuid-less
+record's key is its canonical hash *and* its ordinal, assigned by the applier in application
+order: `RecordKey.keys(for:in:)` numbers a whole-file read, and `StreamIngestion` numbers
+incrementally as deliveries arrive. Keys never renumber once published; the one exception is
+the rewrite rebuild below, which replaces a stream's keys wholesale. Two deliveries of one
+append are matched by hash and per-source occurrence index beyond the open offset: the k-th
+mirror delivery of a content is the k-th file line of that content past the offset, whichever
+arrives first assigns the ordinal, and the other is a counted duplicate (the file's binds the
+locator). Records `loadEarlier` prepends take fresh ordinals and move no published key.
+
 ### The transcript reader (`Reader/`)
 
 `TranscriptReader` is a value type over one file URL with five entry points. `readAll()`
@@ -336,7 +370,8 @@ final line without a terminator is held back and re-read on the next call, and a
 bounded window from the end, aligned back to a record boundary and then extended
 backwards until the leaf path is closed, with `earlierAvailable: true` and the offset the
 next `readEarlier(before:)` continues from; `read(at:length:)` returns one record's bytes,
-and every read returns one `RecordLocator` (byte offset, length) per record. A window is
+and every read returns `ranges: [ByteRange]` (`offset`, `length`) parallel to its records; the
+reader is stream-less, and `RecordLocator` is a stream plus one of these ranges. A window is
 *closed* when the leaf the file names lies inside it and the earliest record of the leaf's
 chain inside it is a turn start — a `user` record that is neither a tool result nor
 `isMeta` — or the file's first record; not when the chain reaches its root, which for a
@@ -346,10 +381,15 @@ owns that loop and is what `StreamIngestion.open` calls; the reader itself deals
 lines. Files are opened `O_RDONLY | O_NOFOLLOW`; a
 symlink or a non-regular file is refused with a typed error. Lines are scanned for `\n` in
 the raw bytes and decoded individually, so one corrupt line costs one `.undecodable` record.
-The window rule for a channel open: a file up to 8 MiB (above the local p99) is read whole;
-beyond that the initial window is the last 4 MiB, and the item list carries an
-`earlierAvailable` marker the renderer turns into *Load earlier*. The differential test
-always reads whole files.
+The window rule for a channel open (`WindowPolicy(wholeFileUpTo:initialTail:earlierStep:)`,
+defaults 8 MiB, 4 MiB, 4 MiB): a file up to 8 MiB (above the local p99) is read whole; beyond
+that the initial window is the last 4 MiB, and the projection carries an `earlierAvailable`
+marker the renderer turns into *Load earlier*. The contract behind that affordance is
+`StreamIngestion.loadEarlier()`: it continues from the marker through
+`WindowedTranscript.readEarlier`, the same closure rule one step further back, prepends the
+records with fresh keys and locators, moves the marker, and returns the prepended keys in
+`Effect.applied`; C6 calls it and reads nothing itself, and at offset 0 it returns an empty
+effect. The differential test always reads whole files.
 
 `HeadTailReader` is the picker's read, exactly: the first and last 64 KiB, `{mtime, size,
 head, tail}`, fields by substring search with the engine's helper semantics (`G1` first
@@ -368,7 +408,8 @@ public struct RecordReducer: Sendable {
   public static func reduce(_ records: [TranscriptRecord], stream: LogicalStream, options: Options = .init()) -> StreamProjection
   public static func merge(_ streams: [StreamProjection], main: LogicalStream) -> DurableProjection   // agent items ordered by timestamp among main items
 }
-public struct RecordLocator: Sendable, Hashable, Codable { public var stream: LogicalStream; public var byteOffset: Int; public var length: Int }
+public struct ByteRange: Sendable, Hashable, Codable { public var offset: Int; public var length: Int }              // the reader's (Reader/), stream-less
+public struct RecordLocator: Sendable, Hashable, Codable { public var stream: LogicalStream; public var range: ByteRange }  // a range plus the stream that owns it
 public struct HiddenRecord: Sendable, Hashable, Codable {   // the payload stays on disk; `StreamIngestion.rawRecord(for:)` reads it on demand
   public var key: RecordKey; public var kind: String; public var timestamp: Date?; public var reason: Reason
   public var locator: RecordLocator?                        // nil: delivered by the mirror before the file held it; the ingestion serves it meanwhile
@@ -491,7 +532,9 @@ public actor StreamIngestion {
   public func mirrorError(_ error: MirrorError, epoch: ProcessEpoch) -> Effect
   public func relocated(mainPath: URL) async
   public func processExited(_ epoch: ProcessEpoch) async -> Effect     // re-read each stream, reconcile by key
-  public func rawRecord(for key: RecordKey) async throws -> JSONValue  // the raw view's read: the hidden record's bytes at its locator, decoded
+  public func loadEarlier() async throws -> Effect                      // *Load earlier* (C6's contract): the next window back, prepended; `applied` lists the prepended keys
+  public func rawRecord(for key: RecordKey) async throws -> JSONValue  // the raw view's read: the bytes at the key's locator, decoded and verified against the key
+  public enum RawRecordError: Error, Sendable, Equatable { case unknownKey, staleLocator }
   public var offsets: [LogicalStream: Int] { get }
   public var paths: [LogicalStream: URL] { get }                        // the current aliases
   public var projection: DurableProjection { get }
@@ -500,15 +543,18 @@ public actor StreamIngestion {
 ```
 
 One ingestion per channel holds every stream of the session, a set of applied record keys
-per stream and a byte offset per file. The arbitration table:
+per stream, a byte offset per file, and each file's `(st_dev, st_ino)` and length as captured
+at open. The arbitration table:
 
 | Delivery | Applied when | Not applied when |
 |---|---|---|
-| file record, on open | always; sets the stream's offset to the file length | — |
+| file record, on open | always; sets the stream's offset to the file length and captures the file's `(st_dev, st_ino)` and length | — |
 | mirror entry | its key is not yet applied and the resolved stream is this session's | key already applied (a duplicate, counted); path resolves to another session (a routing fault, a notice); state is `fileOnly` for this epoch |
-| file record, on watcher change | its key is not yet applied | key already applied by the mirror |
+| file record, on watcher change | its key is not yet applied — for a uuid-less record, no mirror delivery of that hash beyond the open offset is still unmatched | key already applied by the mirror (the locator is bound to that key) |
 | `agent_metadata` entry | always, as the stream's metadata (not a timeline record) | — |
 | mirror entry naming a stream with no open file | opens the stream lazily (an agent starting) | — |
+| file rewritten: a shorter length, or a changed `(st_dev, st_ino)` | the stream is rebuilt whole through `WindowedTranscript`: records, applied set, locators and ordinals replaced; one `TimelineNotice.fileRewritten` | — (nothing is read from the stale offset) |
+| `loadEarlier` | the next window back, prepended with fresh keys and locators; the marker moves | `earlierAvailable == false` (an empty effect) |
 
 On open the file is read first and mirror entries apply past that read, because a resumed
 mirror carries only later appends. The one record a resume writes and never mirrors is
@@ -521,12 +567,31 @@ advisory), switches the ingestion to `fileOnly(since:)` for the process epoch an
 stream's file is re-read from its offset and reconciled by key; a record the file has and
 the projection lacks is applied, a record the projection has and the file lacks is kept and
 counted in a notice, never dropped. `relocated(mainPath:)` rebinds the main stream's path
-and the sidecar directory, keeps every offset, and reopens nothing. `rawRecord(for:)` is
+and the sidecar directory, keeps every offset, and reopens nothing; a rename keeps the
+inode, so the identity captured at open still matches. `rawRecord(for:)` is
 how the raw view sees a hidden record: the projection carries only the `HiddenRecord`'s
 locator, the actor reads those bytes on demand through its own reader (`read(at:length:)`),
-and a record the mirror delivered before the file held it is served from the record the
-actor retained until `fileChanged` sees it on disk. Memory stays bounded and no consumer
-touches JSONL.
+decodes them and verifies that the record's `uuid`, or its canonical hash, is the key's — a
+mismatch is a locator left over from a rewrite the actor has not yet seen and throws
+`RawRecordError.staleLocator` rather than returning another record's bytes — and a record
+the mirror delivered before the file held it is served from the record the actor retained
+until `fileChanged` sees it on disk. Memory stays bounded and no consumer touches JSONL.
+
+**The rewrite arm.** Parent §7.3: a compact boundary without a preserved segment is a hard
+truncation point and local garbage collection rewrites the file to drop what precedes it
+(SPEC 35.8, 35.5.13). Every `fileChanged` therefore `fstat`s before it reads: a length
+shorter than the stream's offset, or a `(st_dev, st_ino)` other than the one captured at
+open, means the bytes behind the offset are not the bytes that were applied, and the stream
+is rebuilt whole through `WindowedTranscript` — records, applied set, locators and
+occurrence ordinals replaced, the new identity and length captured, one payload-free
+`TimelineNotice.fileRewritten` emitted, `State` unchanged. This is the only event that
+renumbers a published key. A same-inode rewrite that ends longer than the old offset
+escapes both checks; `rawRecord`'s verification is the backstop for it, and that is accepted.
+
+**Stream order.** `records[stream]` is held in file order by locator offset, with records
+the mirror delivered and the file has not yet shown after the last located one, in delivery
+order; prepending by `loadEarlier` is therefore ordinary insertion, and the reducer's
+last-wins folds see the file's order once the file has caught up.
 
 ### The timeline model and its constants (`Model/`, contract X4)
 
@@ -656,6 +721,12 @@ fan-out by cwd, because afleet lists every project and because a relocated sessi
 lives under a slug that its cwd no longer produces. The stamps kept per entry are `mtime`
 and `size`; `update(changed:)` stats the named files and re-reads only those whose stamp
 moved, adds files that appeared and removes files that vanished; it never re-reads the rest.
+Entries are keyed by session id, and two files can carry one id — a later snapshot of the
+session, or the same session at a new slug after a relocation with the old file not yet
+gone — so `update(changed:)` resolves its URLs first and decides per id: any surviving file
+keeps the entry (`updated`, with the path of the file whose `mtime` is later, whichever
+order `changed` named them), and only an id with no file left is `removed`; a session is
+never `removed` and `added` in one update.
 `turnCount` is nil until the channel is opened and a full read has counted it, because the
 picker itself shows bytes, not a message count, and a count would cost the full parse the
 budget forbids. The snapshot persists through `IndexStorage`, a two-function protocol C4
@@ -664,7 +735,8 @@ writes a file itself. The watcher is a separate unit the app starts, and a Devel
 that leaves it stopped is what item 56 turns off; the index and the ingestion take changes
 through `update(changed:)` and `fileChanged(_:)` alone, so every test drives them without
 FSEvents. The engine's picker drop rules are **not** applied here: the entry carries
-`entrypoint`, `sessionKind`, `isSidechain`, `teamName` and `continuedIn`, and the sidebar
+`entrypoint`, `sessionKind`, `isSidechain`, `teamName` and `continuedIn` (the tail's last
+`continued-in` line's `continuedInSessionId`), and the sidebar
 policy (C4, X5) decides what to list — afleet's own sessions are `entrypoint: sdk-cli`, which
 the terminal's picker hides and afleet must show.
 
@@ -766,6 +838,7 @@ public enum TimelineNotice: Sendable, Hashable {
   case unknownRecordKind(session: SessionID, kind: String)
   case orphanHealed(session: SessionID, stream: LogicalStream.StreamName)
   case relocationFollowed(session: SessionID)
+  case fileRewritten(session: SessionID, stream: LogicalStream.StreamName, previousLength: Int, newLength: Int)
   case indexBuilt(files: Int, durationMs: Int)
   case indexUpdated(changed: Int, durationMs: Int)
   public enum SkipReason: String, Sendable { case invalidJSON, tornTail, notAnObject }
@@ -796,8 +869,13 @@ as a set, not a count.
 
 *Check two* replays each fixture as the transport would have delivered it: out-direction
 frames go through C2's `WireEventPolicy` — `ClaudeProcess`'s frame-to-event policy,
-extracted as a pure function by a C2 corrective so the transport and this test call the
-same code — so a control request arrives as `.request`, `.policyAnswered` or
+extracted as a pure function by the C2 corrective on `main` at merge `ca68f2e`, so the
+transport and this test call the same code (the replay threads its own
+`WireEventPolicy.Context`, drives `effects(for:in:receivedAt:)` and keeps only the
+`.publish(event)` effects, so the engine's echo of every host-written `control_response` is
+`dropUncorrelated` and no event, a correlated error-body response settles as any other, and
+every cancel frame yields `cancelMCPTask`; the five `WireEventPolicyFixtureTests` on `main`
+are the parity witness between the actor and the function) — so a control request arrives as `.request`, `.policyAnswered` or
 `.unansweredDialog` and never as a `.frame`; in-direction frames are what the host did and
 become `HostSignal`s (`promptSent` for a `user` frame, `decisionAnswered` for a
 `control_response`). A fixture with an `initial/` snapshot seeds the `WireReducer` with the
@@ -827,19 +905,29 @@ cannot pass and no fixture is excluded.
 
 `ReaderTests` (torn tail held back and re-read; sealed tail skipped; window alignment on the
 largest fixture; the window closes at a turn start on `nested-depth-2`, extends until a
-named leaf is inside on a synthetic transcript above 8 MiB, and every locator reads back
-its record; symlink refused; one corrupt line yields one `.undecodable`),
+named leaf is inside on a synthetic transcript above 8 MiB, `readEarlier` paginates a
+rewound synthetic transcript to offset 0 and reassembles `readAll`, and every byte range
+reads back its record; symlink refused; one corrupt line yields one `.undecodable`),
 `RecordModelTests` (every record in the corpus round-trips key for key through `Lossless`;
-the vocabulary constant equals the bundle's two tables, transcribed), `RecordReducerTests`
+the vocabulary constant equals, as an exact dictionary, the test's own transcription of
+`dts` — thirty-three state kinds, `progress` folded `boundary-cleared` — and is disjoint from
+`vbr`'s five `dedup-transcript` kinds; repeated uuid-less lines keep their multiplicity under
+`RecordKey.keys(for:in:)` on every corpus file; `continuedInSessionId` is read from an
+invented `continued-in` line and its `sessionId` is not), `RecordReducerTests`
 (leaf selection on a file with a `last-prompt`; `clearedToEmpty`; orphan healing by deleting
 a parent record from a recorded stream; `supersedes`; merge by `message.id`; tool join by
 block id and by `sourceToolAssistantUUID`; `isMeta` hidden), `WireReducerTests` (streaming
 preview assembled and collapsed; result attribution for the relocation's `num_turns: 0` and
 for `nested-depth-2`'s three results; decision lifecycle through request, policy answer and
 host answer; `processReplaced`), `IngestionTests` (the arbitration table row by row, using
-`session-mirror-relocation` for the rebind, `session-mirror-resume` for the offset and the
-unmirrored record, `nested-depth-2` for lazy agent streams, and the `mirror_error` sample for
-the switch), `IndexTests` and `LocalHomeIndexTests` as G2 states, `AgentRunTreeTests`
+`session-mirror-relocation` for the rebind, `session-mirror-resume` for the offset, the
+unmirrored record and the multiplicity of repeated uuid-less lines, `nested-depth-2` for lazy
+agent streams, the `mirror_error` sample for the switch, a copy rewritten without its first
+lines for the rewrite arm and `rawRecord`'s stale-locator check, and the rewound synthetic
+transcript for `loadEarlier` paginated to the root), `IndexTests` (as G2 states, over fifteen
+logical sessions: a later snapshot updates its entry, a relocation to a new slug updates the
+path and never removes and re-adds, and the later `mtime` wins when two files carry one id
+in either `changed` order) and `LocalHomeIndexTests`, `AgentRunTreeTests`
 (depth-2 parent from each of the three sources and the same answer from all; the repeated
 `task_started`; a shell creates no node), `RegistryMirrorTests` (`background-shell` row by
 row; `killed` normalised; `liveWork` before and after notification; the tailer on the
@@ -885,7 +973,8 @@ a candidate for a C1 corrective recording rather than for a synthetic frame (a r
 compaction are dispatched to C1 as a follow-up; C3 does not wait, and a later fixture
 converts the test, never the code): a rewind (leaf
 path, branches, `HostSignal.rewound`); a compaction (`compact_boundary` on disk and on the
-wire, the hard truncation); the five system record kinds; `tool_progress` heartbeats; a
+wire, the hard truncation, and the file rewrite that follows it, modelled by rewriting a
+copy without its first lines); the five system record kinds; `tool_progress` heartbeats; a
 `user` frame with `isSynthetic`; a `mirror_error`; a `tool-results/` spill; a `cost-state`
 record; a `progress` record. The exact orphan-healing constant is read from the bundle at
 plan time (parity §35.13 states five seconds; the constant was not located in this
@@ -909,7 +998,7 @@ contradicts binding content; (1) extends a binding list and was filed as such.
 ## Questions for the human gate
 
 The first four were ruled on 2026-09-05; the rulings are in the Revision Note for v2 and
-the questions stand as the record of what was asked. The fifth was added at v2.2 and is open.
+the questions stand as the record of what was asked. The fifth was added at v2.2 and is open; v2.3 added none.
 
 1. **Leaf path or file order.** The record reducer renders the leaf path the engine's own
    loader renders and keeps abandoned branches in `DurableProjection.branches` unrendered.
@@ -1001,11 +1090,41 @@ the questions stand as the record of what was asked. The fifth was added at v2.2
   (the raw view had nothing to show); payloads in the projection (unbounded memory).
 - Decision: Check two replays a fixture through C2's `WireEventPolicy` and seeds resume
   fixtures from `initial/`, and C3 duplicates none of the transport's frame-to-event policy.
-  Rationale: the policy is inlined in `ClaudeProcess` on `main`; a copy in C3's tests would
-  drift from it silently. Extracting it as a pure function the transport calls is a small
-  C2 corrective the coordinator dispatches; until it lands the plan's Task 8 stops rather
-  than copying. Rejected: feeding control requests as `.frame`s (the transport never does);
-  excluding the resume fixtures (the seed is exactly what `StreamIngestion.open` provides).
+  Rationale: a copy in C3's tests would drift from the transport silently. The corrective
+  landed on `main` at merge `ca68f2e` (branch commit `f187499`):
+  `ClaudeWire/Sources/WireTransport/WireEventPolicy.swift` — `init(policy:handshakeRequestID:)`,
+  `Context {pendingOutbound, pendingInbound, seenInbound, epoch}`, `Effect` with a
+  payload-free `.kind`, `effects(for:in:receivedAt:)`, `effects(deciding:)` — with
+  `WireEvent.kind` and `ClaudeProcess.wireEvents`. The actor performs the effects the function
+  returns, so the two agree by construction; the five `WireEventPolicyFixtureTests` are the
+  parity witness, and since no fake-claude Swift harness exists there is no separate parity
+  test. The plan's Task 8 preflights the pin with `git merge-base --is-ancestor ca68f2e HEAD`.
+  Rejected: feeding control requests as `.frame`s (the transport never does); excluding the
+  resume fixtures (the seed is exactly what `StreamIngestion.open` provides).
+- Decision: A uuid-less record's key is its canonical hash plus an occurrence ordinal,
+  assigned by the applier in application order; two deliveries of one append are matched by
+  hash and per-source occurrence index beyond the open offset. Rationale: the engine writes
+  byte-identical state records repeatedly (forty-eight later occurrences in the corpus) and
+  its own dedup table never collapses them; a content-only key drops them under mirror-only
+  ingestion and makes G3's exact key sequence unreachable. Application order, not file
+  order, is what keeps a published key stable when `loadEarlier` prepends. Rejected:
+  content-only keys (loses records); file-order ordinals (renumber on every prepend); a
+  counter inside `TranscriptRecord` (a record cannot know its own ordinal).
+- Decision: `fileChanged` detects a rewrite — a shorter length or a changed `(st_dev,
+  st_ino)` — and rebuilds the stream whole, emitting `fileRewritten`; `rawRecord` verifies
+  the decoded record against its key and throws `staleLocator` on a mismatch. Rationale:
+  parent §7.3's garbage collection shortens the file behind the offset; an appended read
+  from a stale offset misses records or lands mid-line, and a stale locator would hand the
+  raw view another record's bytes. Rejected: keeping old records and locators across a
+  rewrite (they name bytes that no longer exist); a live-compaction policy that preserves
+  pre-boundary records (the engine's own loader drops them; the raw view is not a history
+  feature).
+- Decision: `StreamIngestion.loadEarlier()` is the C6 contract behind *Load earlier*, and
+  `WindowedTranscript.readEarlier` is the closure rule it continues through. Rationale: C6
+  never reads JSONL, so without an ingestion entry point a transcript above 8 MiB would be
+  a permanent suffix, against the parent's binding leaf path. Rejected: letting the renderer
+  call the reader (breaks X4's no-JSONL rule); reading such files whole (the 109 MB local
+  maximum).
 
 ## Surprises & Discoveries
 
@@ -1027,6 +1146,20 @@ the questions stand as the record of what was asked. The fifth was added at v2.2
 - Observation: The local set is 2,967 session files, 1.39 GB, with a 109 MB maximum.
   Impact: the reader's bounded window and the index's head-and-tail read are both
   load-bearing, not optimisations.
+- Observation: Thirty duplicate canonical-hash groups among uuid-less records across
+  fourteen corpus files, forty-eight later occurrences (`atis-latch`, `ai-title`,
+  `relocated`); the engine's `vbr` table deduplicates conversation kinds only. Impact: record
+  keys carry an occurrence ordinal (v2.3).
+- Observation: The seventeen main transcript files are fifteen logical sessions; the two
+  resume fixtures are later snapshots of two other fixtures' sessions. Impact: the index test
+  pins fifteen entries and gains the snapshot and relocation update cases.
+- Observation: The `dts` and `vbr` tables hold thirty-eight kinds (five conversation,
+  thirty-three state), not the forty-one v2.2 stated, and `dts` folds `progress` as
+  `boundary-cleared`. Impact: the count corrected; the vocabulary test asserts the exact
+  dictionary.
+- Observation: The `continued-in` record's destination field is `continuedInSessionId`; its
+  `sessionId` is the source. Impact: the accessor, `SessionState` and the index read that
+  field; a mutation test with invented ids guards it, since no fixture carries the kind.
 
 ## Outcomes & Retrospective
 
@@ -1034,6 +1167,27 @@ Pending — written at finish.
 
 ## Revision Notes
 
+- 2026-09-05: v2.3, after the Codex adversarial review of plan v2 (eight findings, all
+  verified real and accepted, each shaped by a coordinator ruling) and a merge of `main` at
+  `ca68f2e` (C2's `WireEventPolicy` corrective; the corpus unchanged). Record keys: a
+  uuid-less record's identity is its canonical hash plus an occurrence ordinal assigned in
+  application order (`Identity.hash(_:ordinal:)`, `RecordKey.keys(for:in:)`), grounded in the
+  engine's `vbr` table, which never deduplicates state records; the arbitration table
+  matches deliveries by per-source occurrence index. Ingestion: a file-rewrite arm on
+  `fileChanged` (parent §7.3's garbage collection) keyed on a shorter length or a changed
+  `(st_dev, st_ino)`, rebuilding the stream whole with a new `TimelineNotice.fileRewritten`;
+  `rawRecord` verifies the record against its key and throws `RawRecordError.staleLocator`;
+  `loadEarlier()` is the C6 contract behind *Load earlier*, through
+  `WindowedTranscript.readEarlier`; `records[stream]` is held in file order. Reader:
+  `ByteRange` and `ReadResult.ranges` are the reader's, `RecordLocator` wraps a range with
+  its stream, and `WindowPolicy` has a memberwise initialiser. Check two names the
+  `WireEventPolicy` pin, the three behaviours the replay models and the five fixture tests
+  as the parity witness; the "every gate is evaluable" sentence names the pin.
+  `continued-in` reads `continuedInSessionId`. The record vocabulary is thirty-eight kinds
+  (thirty-three state; `dts` folds `progress` as `boundary-cleared`), not forty-one. The
+  index holds one entry per logical session, fifteen across seventeen files, and
+  `update(changed:)` decides per id. Four decisions and four surprises added; no new
+  question.
 - 2026-09-05: v2.2, after the Codex adversarial review of plan v1 (eight findings, all
   accepted, two shaped by the coordinator) and a merge of `main` at `7a51d56` (C2's
   `SessionStart.forkFrom(SessionID, at: ForkPoint)`, X5's `PaneRequest.id`, C1's rewind-turn
