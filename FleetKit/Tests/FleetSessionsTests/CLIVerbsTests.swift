@@ -100,7 +100,9 @@ final class CLIVerbsTests: XCTestCase {
         let wanted = SessionID()
         let cwd = home.url
         let call = Task { try await waiting.backgroundResume(wanted, cwd: cwd) }
-        for _ in 0..<2000 where clock.sleeperCount == 0 { await Task.yield() }
+        // A genuine synchronisation point on the clock's own state — see `TestClock.waitForSleeperCount` — rather
+        // than a bounded guess at how many yields the first roster miss takes to register.
+        await clock.waitForSleeperCount(atLeast: 1)
         XCTAssertEqual(clock.sleeperCount, 1, "the first roster read missed and the verb is waiting on the clock")
 
         try files.addRosterWorker(short: short, pid: ScriptedHolderFiles.livePID)
