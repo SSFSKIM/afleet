@@ -40,6 +40,31 @@ final class RecordingDiagnostics: DiagnosticsSink, @unchecked Sendable {
     }
 }
 
+/// Runs `work` and returns its value, or `nil` if it had not finished by `limit`.
+///
+/// For the tests whose subject is *liveness*: a fix that is missing makes the work hang rather than return a
+/// wrong answer, so the failure has to be a deadline expiring, not an assertion on a value that never arrived.
+/// The work is deliberately not stopped when the deadline passes — a `terminate()` parked inside a blocking
+/// pipe write cannot be cancelled — so this bounds the test, not the work. A `TaskGroup` would not do: it
+/// awaits its remaining children at scope exit and would hang on the very task it is meant to outlive.
+func completes<T: Sendable>(within limit: Duration, _ work: @escaping @Sendable () async -> T) async -> T? {
+    let box = ResultBox<T>()
+    let runner = Task { box.set(await work()) }
+    let deadline = ContinuousClock.now + limit
+    while ContinuousClock.now < deadline {
+        if let v = box.value { return v }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    runner.cancel()
+    return nil
+}
+final class ResultBox<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: T?
+    func set(_ v: T) { lock.lock(); stored = v; lock.unlock() }
+    var value: T? { lock.lock(); defer { lock.unlock() }; return stored }
+}
+
 final class Harness {
     let cwd: URL; let env: ResolvedEnvironment; let log = EventLog()
     init() throws {

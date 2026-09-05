@@ -65,25 +65,27 @@ public actor BoundedChannel<Element: Sendable> {
             Task { await self.cancelPopWaiter(id) }
         }
     }
-    /// Publishes a final element and ends the stream, guaranteeing that **nothing interleaves between the
-    /// terminal element being enqueued and the stream ending**.
+    /// Publishes a final element and ends the stream, in one step that never suspends: **nothing interleaves
+    /// between the terminal element being enqueued and the stream ending**, and no consumer can delay either.
     ///
-    /// Note what that does *not* claim. The pair is not a single step: `push` is `async` and suspends while the
-    /// channel is full, so this call can take arbitrarily long. The guarantee is narrower and is about the far
-    /// side of that suspension — once `push` resumes and enqueues, `finish()` is synchronous and follows with
-    /// no suspension point between them, so no other producer can be scheduled in between. A producer already
-    /// parked on a full channel is resumed by that `finish()`, observes the finished state and is refused with
-    /// `false`, which is both correct and observable to it.
+    /// The terminal element is the one element that must never be dropped or delayed, so it is exempt from
+    /// capacity. Routed through the ordinary `push` it inherits that method's back-pressure, and a full channel
+    /// whose consumer has stopped reading parks the terminating producer forever — no terminal element, no
+    /// `finish()`, and a stream that never ends. Back-pressure exists to stall the producer at the far end of
+    /// the pipe; applying it to that producer's own death inverts it. So this appends past `capacity` by
+    /// exactly one, and returns `false` in exactly one case: the channel was already finished.
     ///
-    /// The `push`/`finish()` pair spelled out by a caller does not have this property: between the two there is
-    /// a suspension point, and an element another producer pushes inside that window is delivered *after* the
+    /// The `push`/`finish()` pair spelled out by a caller has neither property. Between the two there is a
+    /// suspension point, and an element another producer pushes inside that window is delivered *after* the
     /// terminal one. Nor does a caller guarding itself with "don't push once the terminal event is out" — its
     /// check and its push are themselves two steps, so it still races.
     @discardableResult
-    public func pushFinal(_ element: Element) async -> Bool {
-        let accepted = await push(element)
+    public func pushFinal(_ element: Element) -> Bool {
+        guard !finished else { return false }
+        if let w = popWaiters.first { popWaiters.removeFirst(); w.c.resume(returning: element) }
+        else { buffer.append(element) }
         finish()
-        return accepted
+        return true
     }
     public func finish() {
         finished = true

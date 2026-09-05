@@ -420,14 +420,20 @@ public actor ClaudeProcess {
     /// Awaits every task, or gives up at `limit`. Returns whether they all finished.
     private func drain(_ tasks: [Task<Void, Never>], upTo limit: Duration) async -> Bool {
         guard !tasks.isEmpty else { return true }
-        let done = Waiter<Void>()
-        // `await task.value` on a non-throwing Task ignores cancellation, so the deadline cannot be expressed
-        // by cancelling the awaiting task; it has to be a separate settlement that races it.
-        let awaiter = Task { for t in tasks { await t.value }; done.settle(.success(())) }
-        struct DrainDeadline: Error {}
-        let timer = done.timeout(after: limit) { DrainDeadline() }
-        defer { timer.cancel(); awaiter.cancel() }
-        do { try await done.value(); return true } catch { return false }
+        return await within(limit) { () -> Bool in for t in tasks { await t.value }; return true } != nil
+    }
+    /// Runs `work` and returns its value, or `nil` if it had not finished by `limit`.
+    ///
+    /// The work is *not* stopped when the deadline expires, and cannot be: `await task.value` on a
+    /// non-throwing Task ignores cancellation, and a `StdinWriter` parked on a pipe the child has stopped
+    /// reading is resumed by a blocking write on its own queue that no cancellation reaches. So the deadline
+    /// bounds the caller, never the work — which is exactly what a caller that must go on to escalate needs.
+    private func within<T: Sendable>(_ limit: Duration, _ work: @escaping @Sendable () async -> T) async -> T? {
+        let done = Waiter<T>()
+        let worker = Task { done.settle(.success(await work())) }
+        let timer = done.timeout(after: limit) { DeadlineExceeded() }
+        defer { timer.cancel(); worker.cancel() }
+        return try? await done.value()
     }
     /// nil on timeout; the caller escalates. Never deadlocks: the timeout settles the waiter itself.
     private func waitForExit(upTo timeout: Duration) async -> ExitStatus? {
@@ -438,9 +444,16 @@ public actor ClaudeProcess {
         defer { timer.cancel() }
         return try? await w.value()
     }
-    /// §6.7 as amended: end_session, close stdin, wait 5 s, SIGTERM, wait 5 s, SIGKILL; returns only after the exit is observed.
-    public func terminate() async {
-        if isExited { return }
+    /// §6.7 as amended: end_session, close stdin, wait 5 s, SIGTERM, wait 5 s, SIGKILL.
+    ///
+    /// Returns **the exit that was observed**, or `nil` when none was — which is the whole of what the caller
+    /// can act on. `nil` means the escalation ran out: the child was signalled and did not die inside the final
+    /// wait, so `status` is still `.terminating`, no `.exited` has been published, and the pid may still be
+    /// live. Reporting that as if it were an ordinary return would have this method contradict its own
+    /// contract, which is that completion follows an observed exit.
+    @discardableResult
+    public func terminate() async -> ExitStatus? {
+        if case .exited(let s) = status { return s }
         // Never launched. There is no child to end, no stdin to close, and above all nothing to signal:
         // `Process.terminate()` raises `NSInvalidArgumentException` on an unlaunched process — an uncatchable
         // crash of the host app — and `Process.processIdentifier` is 0 until `run()` succeeds, so
@@ -459,31 +472,46 @@ public actor ClaudeProcess {
             if await channel.pushFinal(.exited(never, epoch)) == false {
                 diagnostics.record(.lifecycle(.exitEventDropped(site: .neverLaunched), epoch: epoch))
             }
-            return
+            return never
         }
-        if terminating { _ = await waitForExit(upTo: .seconds(60)); return }
+        if terminating { return await waitForExit(upTo: .seconds(60)) }
         terminating = true
         let wasRunning = status == .running
         status = .terminating
-        if wasRunning, let writer, let line = try? OutboundEnvelope.encode(spec: EndSession(), requestID: RequestID(rawValue: "end-\(UUID().uuidString.lowercased())")) {
-            try? await writer.write(line)
-            diagnostics.record(.terminateEscalated(step: "end_session", epoch: epoch))
+        // §6.7's first five seconds are a budget for the **whole** graceful phase, not for the wait alone.
+        //
+        // `StdinWriter` serialises every write on one queue, so an earlier write parked on a pipe the child has
+        // stopped reading holds the queue and the `end_session` write behind it never completes. Awaiting it
+        // before arming any timeout — as this did — means SIGTERM and SIGKILL are never reached at all, and the
+        // one method whose job is to guarantee the child dies hangs instead. So the write and the stdin close
+        // are raced against the same deadline the graceful wait comes out of, and the escalation goes on either
+        // way. The bytes may still land afterwards; nothing downstream depends on their not having.
+        let graceEnds = ContinuousClock.now + Self.gracefulLimit
+        let endLine = wasRunning ? try? OutboundEnvelope.encode(spec: EndSession(), requestID: RequestID(rawValue: "end-\(UUID().uuidString.lowercased())")) : nil
+        let stdin = writer
+        let graceful = await within(Self.gracefulLimit) { () -> Bool in
+            if let stdin, let endLine { try? await stdin.write(endLine) }
+            await stdin?.close()
+            return true
         }
-        await writer?.close()
-        diagnostics.record(.terminateEscalated(step: "stdin_closed", epoch: epoch))
-        if await waitForExit(upTo: .seconds(5)) != nil { return }
+        if graceful == nil {
+            diagnostics.record(.terminateEscalated(step: "graceful_phase_deadline_exceeded", epoch: epoch))
+        } else {
+            if stdin != nil, endLine != nil { diagnostics.record(.terminateEscalated(step: "end_session", epoch: epoch)) }
+            diagnostics.record(.terminateEscalated(step: "stdin_closed", epoch: epoch))
+        }
+        if let s = await waitForExit(upTo: max(graceEnds - ContinuousClock.now, .zero)) { return s }
         // The backstop for any path that reaches the escalation with no live child. `processIdentifier` is 0
         // before a successful `run()` and stays set afterwards; `isRunning` goes false once Foundation has
         // reaped the child, and signalling a reaped pid can land on an unrelated process after pid reuse.
         let pid = box.process.processIdentifier
         guard pid > 0, box.process.isRunning else {
             diagnostics.record(.terminateEscalated(step: "no_live_child_to_signal", epoch: epoch))
-            _ = await waitForExit(upTo: .seconds(30))
-            return
+            return await observedExit(upTo: .seconds(30))
         }
         diagnostics.record(.terminateEscalated(step: "SIGTERM", epoch: epoch))
         box.process.terminate()
-        if await waitForExit(upTo: .seconds(5)) != nil { return }
+        if let s = await waitForExit(upTo: .seconds(5)) { return s }
         // Liveness is re-established here rather than carried over from the guard above: five seconds have
         // passed, and in that window Foundation may have reaped the child and the kernel may have handed its
         // pid to an unrelated process. The recheck narrows the window to the one SIGTERM already has — between
@@ -491,14 +519,26 @@ public actor ClaudeProcess {
         // space has no way to signal a pid atomically with the check that it is still the pid it meant.
         guard box.process.isRunning else {
             diagnostics.record(.terminateEscalated(step: "no_live_child_to_signal", epoch: epoch))
-            _ = await waitForExit(upTo: .seconds(30))
-            return
+            return await observedExit(upTo: .seconds(30))
         }
         diagnostics.record(.terminateEscalated(step: "SIGKILL", epoch: epoch))
         kill(pid, SIGKILL)
-        _ = await waitForExit(upTo: .seconds(30))
+        return await observedExit(upTo: .seconds(30))
+    }
+    /// The graceful phase's whole budget: the `end_session` write, the stdin close and the wait that follows
+    /// them, together.
+    private static let gracefulLimit: Duration = .seconds(5)
+    /// The last wait of the escalation. An unobserved exit is reported to the caller as `nil` and recorded
+    /// here, because at that point the contract — completion follows observed exit — has not been met.
+    private func observedExit(upTo limit: Duration) async -> ExitStatus? {
+        if let s = await waitForExit(upTo: limit) { return s }
+        diagnostics.record(.terminateEscalated(step: "exit_not_observed", epoch: epoch))
+        return nil
     }
 }
+
+/// The deadline of `within(_:_:)` expiring. Never surfaces to a caller: `within` maps it to `nil`.
+private struct DeadlineExceeded: Error {}
 
 private extension ExitStatus {
     /// The log's view of an exit: the code or the signal number, and nothing else. The stderr tail this

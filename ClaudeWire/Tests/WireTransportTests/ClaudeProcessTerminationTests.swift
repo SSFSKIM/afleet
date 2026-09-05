@@ -124,6 +124,100 @@ final class ClaudeProcessTerminationTests: XCTestCase {
                       "publication should have gone ahead on the deadline, not on EOF: \(sink.entries.suffix(4))")
         await p.terminate()
     }
+    /// Group 1a. `terminate()` awaited the `end_session` write and the stdin close before arming any timeout.
+    /// `StdinWriter` serialises writes on one queue, so an earlier write parked on a pipe the child has stopped
+    /// reading holds that queue and the `end_session` write behind it never returns — and the escalation that
+    /// exists to guarantee the child dies is never reached at all.
+    ///
+    /// The failure mode is a hang, so the assertion is a deadline: pre-fix this test does not fail on a value,
+    /// it fails by `completes(within:)` running out at twenty-five seconds. Post-fix the escalation costs about
+    /// ten (five graceful, five to SIGTERM, then SIGKILL), and the child dies of SIGKILL because the stand-in
+    /// ignores SIGTERM.
+    ///
+    /// The step trace is asserted as the whole sequence rather than as a membership check: it is the record of
+    /// what was actually signalled, and it must show the graceful phase *timing out* and the escalation
+    /// continuing past it.
+    func testAStuckStdinWriteCannotPreventSIGTERMAndSIGKILL() async throws {
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "deaf_stdin,ignore_sigterm,stay_alive", diagnostics: sink)
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr("DEAF", _) = $0 { return true }; return false }, "the child stopped reading stdin")
+        // 512 KB against a 64 KB pipe buffer, so the writer's queue is parked inside this one write and every
+        // later write is behind it. The send never returns; that is the premise, not a defect.
+        let stuck = Task { try await p.send(raw: .object(["type": .string("user"), "filler": .string(String(repeating: "x", count: 512 * 1024))])) }
+        try await Task.sleep(for: .milliseconds(500))
+
+        let outcome = await completes(within: .seconds(25)) { await p.terminate() }
+        stuck.cancel()
+        guard let reported = outcome else {
+            kill(await p.childProcessIdentifier, SIGKILL)      // the escalation never ran; do not leak the child
+            return XCTFail("terminate() never returned: a blocked stdin write prevented SIGTERM and SIGKILL")
+        }
+        XCTAssertEqual(sink.terminateSteps, ["graceful_phase_deadline_exceeded", "SIGTERM", "SIGKILL"])
+        guard case .signal(SIGKILL, _)? = reported else { return XCTFail("terminate reported \(String(describing: reported))") }
+        guard case .exited(.signal(let sig, _), _)? = await h.expect({ if case .exited = $0 { return true }; return false }, "exited by SIGKILL") else { return }
+        XCTAssertEqual(sig, SIGKILL)
+    }
+    /// Group 1b, end to end. Nothing iterates `events`, the channel holds four elements and the child floods
+    /// it, so the terminal `.exited` is pushed onto a channel that is full and has no consumer. It used to be
+    /// pushed with an ordinary suspending push, which parked `processDidExit` forever: no terminal event, no
+    /// `finish()`, and a stream FleetKit never sees end.
+    ///
+    /// The observable is `bufferedEventCount` crossing the capacity, and it has to be: a consumer that arrives
+    /// to *look* at the stream is a consumer that drains it, which frees the slots and lets even the parked
+    /// pre-fix push through. So the claim is checked while nothing has consumed anything — the terminal element
+    /// is the only one exempt from capacity, so a fifth element in a four-element channel is the exit itself.
+    /// Only afterwards does a consumer appear, to confirm the element is the exit and that it is last.
+    func testTheTerminalExitIsPublishedOnAFullChannelNobodyIsDraining() async throws {
+        let h = try Harness()
+        var e = h.env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = "flood:100,exit:0"
+        let p = ClaudeProcess(epoch: .first, launch: LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: h.cwd, session: .new(SessionID())),
+                              environment: e, configHome: ConfigHome(root: h.cwd, source: .environment),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: h.cwd, tools: []),
+                              diagnostics: NullDiagnostics(), capture: nil, eventBufferCapacity: 4)
+        _ = try await p.spawn()
+        // The child exits on its own. `status` flips at the top of `processDidExit`, before publication, so
+        // this waits for the child to be gone without waiting for the event that says so.
+        guard await completes(within: .seconds(15), { () -> Bool in
+            while true {
+                if case .exited = await p.status { return true }
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+        }) == true else { return XCTFail("the child never exited") }
+        guard await completes(within: .seconds(10), { () -> Bool in
+            while true {
+                if await p.bufferedEventCount > 4 { return true }
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+        }) == true else {
+            return XCTFail("the terminal exit was never enqueued: it is parked on a full channel with no consumer")
+        }
+        // Only now does a consumer appear.
+        guard let events = await completes(within: .seconds(20), { () -> [WireEvent] in
+            var all: [WireEvent] = []
+            for await ev in p.events { all.append(ev) }
+            return all
+        }) else { return XCTFail("the event stream never ended: the terminal exit is parked on a full channel") }
+        guard case .exited(let s, _)? = events.last else {
+            return XCTFail("the last event was \(String(describing: events.last)), not the exit")
+        }
+        XCTAssertTrue(s.isClean)
+        XCTAssertEqual(events.filter { if case .exited = $0 { return true }; return false }.count, 1,
+                       "exactly one terminal event, and it is last")
+    }
+    /// Group 1c. `terminate()` returned `Void`, so a caller could not tell an observed exit from an escalation
+    /// that ran out with the child still alive and `status` still `.terminating`. The outcome is now the return
+    /// value, and it is the same exit the actor recorded.
+    func testTerminateReportsTheExitItObserved() async throws {
+        let h = try Harness(); let p = h.make(scenario: "")
+        _ = try await p.spawn()
+        guard let observed = await p.terminate() else { return XCTFail("no exit reported for a child that exited cleanly") }
+        XCTAssertTrue(observed.isClean)
+        let status = await p.status
+        XCTAssertEqual(status, .exited(observed), "the reported exit must be the one the actor recorded")
+        let again = await p.terminate()
+        XCTAssertEqual(again, observed, "an idempotent second call reports the same exit")
+    }
     func testTerminateIsIdempotentAndEventsStreamEnds() async throws {
         let h = try Harness(); let p = h.make(scenario: "")
         _ = try await p.spawn()

@@ -37,7 +37,16 @@ public final class Waiter<Value: Sendable>: @unchecked Sendable {
     /// Thrown to the *second* concurrent `value()`; the first caller keeps its place and its settlement.
     public struct AlreadyAwaited: Error, Sendable {}
     /// Convenience: settle with `failure` after `timeout` unless settled first. Returns the timer task so the caller can cancel it.
+    ///
+    /// **Cancelling the timer disables it; it never fires it.** The sleep's cancellation error is caught and
+    /// returned on rather than swallowed with `try?` — a swallowed one falls straight through to
+    /// `settle(.failure(...))`, so `timer.cancel()`, which every call site writes in a `defer` to *stop* the
+    /// timeout, would instead deliver it. That inversion is invisible wherever the waiter happens to be settled
+    /// already, which is a property of each call site rather than a guarantee of this type.
     public func timeout(after timeout: Duration, failure: @escaping @Sendable () -> any Error) -> Task<Void, Never> {
-        Task { try? await Task.sleep(for: timeout); settle(.failure(failure())) }
+        Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            settle(.failure(failure()))
+        }
     }
 }

@@ -122,6 +122,43 @@ final class BoundedChannelTests: XCTestCase {
         XCTAssertEqual(wedged, 0, "a producer stayed parked while a slot was free")
     }
 
+    /// Group 1b. The terminal element is the one element that must never be dropped or delayed, so `pushFinal`
+    /// is exempt from capacity. Routed through the ordinary suspending `push` — as it was — a full channel
+    /// whose consumer has stopped parks the terminating producer forever, and the stream never ends.
+    ///
+    /// Nothing consumes here at all, so the deadline is the assertion: pre-fix this test fails by
+    /// `completes(within:)` running out, not by a comparison.
+    func testPushFinalIsNotBoundedByCapacity() async throws {
+        let c = BoundedChannel<Int>(capacity: 2)
+        await c.push(1); await c.push(2)                  // full, and no consumer will ever arrive
+        guard let accepted = await completes(within: .seconds(2), { await c.pushFinal(99) }) else {
+            return XCTFail("pushFinal parked on a full channel: the terminal element cannot be capacity-bound")
+        }
+        XCTAssertTrue(accepted)
+        let finished = await c.isFinished; XCTAssertTrue(finished)
+        var seen: [Int] = []
+        while let v = await c.pop() { seen.append(v) }
+        XCTAssertEqual(seen, [1, 2, 99], "the terminal element is delivered after the buffered ones, and last")
+    }
+    /// And a producer already parked on that full channel is released by the `finish()` and refused, rather
+    /// than left holding a continuation nobody will ever resume.
+    func testAParkedProducerIsReleasedAndRefusedByPushFinal() async throws {
+        let c = BoundedChannel<Int>(capacity: 1)
+        await c.push(1)
+        let parked = Task { await c.push(2) }
+        try await Task.sleep(for: .milliseconds(50))
+        guard await completes(within: .seconds(2), { await c.pushFinal(99) }) == true else {
+            return XCTFail("pushFinal parked behind the producer it is supposed to release")
+        }
+        guard let refused = await completes(within: .seconds(2), { await parked.value }) else {
+            return XCTFail("the parked producer was never released")
+        }
+        XCTAssertFalse(refused, "an element pushed after the terminal one must be refused")
+        var seen: [Int] = []
+        while let v = await c.pop() { seen.append(v) }
+        XCTAssertEqual(seen, [1, 99])
+    }
+
     /// `pushFinal` exists because the `push`-then-`finish()` pair a caller would write is not equivalent:
     /// between the two calls another producer's element can land, and it is then delivered after the terminal
     /// one. This pins the atomicity, not just the finishing.

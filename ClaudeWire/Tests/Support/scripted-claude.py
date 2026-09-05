@@ -189,6 +189,7 @@ def after_init():
         sys.stdout.flush(); os._exit(int(scenario_value("exit")))
 
 answered = set()
+deaf = [False]
 # side_question_late_error: request ids the host asked and we deliberately left hanging until it cancels.
 withheld = {}
 def handle(line):
@@ -269,6 +270,10 @@ def handle(line):
         r = frame["response"]; rid = r.get("request_id"); answered.add(rid)
         if rid == "s1":
             release_initialize_response()
+            # Synthetic, and the only way to produce a stdin write that never completes: this process stops
+            # reading, the 64 KB pipe fills behind the host's next write, and `StdinWriter`'s serial queue —
+            # and everything queued behind it, `end_session` included — is stuck there.
+            if has("deaf_stdin"): deaf[0] = True
         if rid == "s2":
             result = ((r.get("response") or {}).get("mcp_response") or {}).get("result") or {}
             mcp["tools"] = [tool.get("name") for tool in result.get("tools", [])]
@@ -301,7 +306,10 @@ def handle(line):
 
 for line in sys.stdin:
     if line.strip(): handle(line)
+    if deaf[0]:
+        log("DEAF")
+        while True: time.sleep(1)
 # stdin closed
-if has("ignore_end_session") or has("ignore_sigterm"):
+if has("stay_alive") or has("ignore_end_session") or has("ignore_sigterm"):
     while True: time.sleep(1)
 sys.exit(0)
