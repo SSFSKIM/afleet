@@ -168,6 +168,28 @@ final class RedactorTests: XCTestCase {
         XCTAssertEqual(other["request"]?["input"]?["url"], .string("https://example.com/x?q=1"))
     }
 
+    /// Rule 6's other half, request-side and subtype-gated like the first. `claude_oauth_callback` returns
+    /// the grant as two bare strings; `authorizationCode` is caught by the `authorization` secret word and
+    /// `state` by nothing at all. A generic key name is exactly what a secret-word scanner cannot see, which
+    /// is why the gate is the subtype and not the name.
+    ///
+    /// The values are deliberately short. A grant long enough to trip the 32-character query-run pattern
+    /// would be redacted by that older rule whatever this one does, and the assertion would hold with the
+    /// rule removed — which is no assertion at all.
+    func testBareOAuthStateIsRedactedUnderTheOAuthSubtypesAndNowhereElse() throws {
+        let v = try redacted(#"{"type":"control_request","request_id":"o4","request":{"subtype":"claude_oauth_callback","authorizationCode":"grant-1","state":"nonce-1"}}"#)
+        XCTAssertEqual(v["request"]?["state"], .string("<redacted>"))
+        XCTAssertEqual(v["request"]?["authorizationCode"], .string("<redacted>"))
+        // Nested, and under every OAuth subtype rather than only the one that motivated the rule.
+        let nested = try redacted(#"{"type":"control_request","request_id":"o5","request":{"subtype":"mcp_authenticate","serverName":"github","callback":{"state":"nonce-2"}}}"#)
+        XCTAssertEqual(nested["request"]?["callback"]?["state"], .string("<redacted>"))
+        // An ordinary `state` outside the gate keeps its value; so does one on a frame that is not a request.
+        let ordinary = try redacted(#"{"type":"control_request","request_id":"o6","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"state":"expanded"}}}"#)
+        XCTAssertEqual(ordinary["request"]?["input"]?["state"], .string("expanded"))
+        let body = try responseBody(#"{"session_state":{"state":"idle"}}"#)
+        XCTAssertEqual(body["session_state"]?["state"], .string("idle"))
+    }
+
     // MARK: - Keys, idempotence, and the corpus
 
     /// A key is data too: project maps are keyed by absolute path and contact maps by address. Two keys can

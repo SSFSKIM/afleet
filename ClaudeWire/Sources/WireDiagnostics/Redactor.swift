@@ -271,6 +271,28 @@ public enum Redactor {
             return .object(kept)
         }
 
+        /// redact.py `_redact_oauth_state` (line 400), rule 6's other half. `claude_oauth_callback` hands its
+        /// grant back as two bare strings: `authorizationCode`, which the `authorization` secret word already
+        /// catches, and `state`, which no name rule reaches — it is too ordinary a field name to add to
+        /// `secretWords` without swallowing `session_state` and every dialog's state with it. So the OAuth
+        /// subtype is the gate, exactly as it is for the URL half: a generic key name is precisely what a
+        /// secret-word scanner cannot see, and the subtype is what tells us to look.
+        ///
+        /// Idempotent, and `null` is left alone, for the reasons `isSecretKey` gives.
+        func oauthState(_ node: JSONValue) -> JSONValue {
+            switch node {
+            case .object(let o):
+                var out: [String: JSONValue] = [:]
+                for (k, v) in o {
+                    if k.lowercased() == "state", v != .null, v != .string("<redacted>") { out[k] = .string("<redacted>") }
+                    else { out[k] = oauthState(v) }
+                }
+                return .object(out)
+            case .array(let a): return .array(a.map(oauthState))
+            default: return node
+            }
+        }
+
         /// redact.py `_redact_urls` (line 359), rule 6: a callback URL is not always top-level.
         func urls(_ node: JSONValue) -> JSONValue {
             switch node {
@@ -299,23 +321,20 @@ public enum Redactor {
                     o["request"] = .object(req)
                     f = .object(o)
                 }
-                // Rule 6 on the **request** side, gated on the subtype rather than on scanning every string.
+                // Rule 6 on the **request** side, both halves, gated on the subtype rather than on scanning
+                // every string. `mcp_oauth_callback_url` carries the whole callback in `request.callbackUrl`
+                // and `mcp_authenticate` the same shape in `redirectUri`: neither key is secret-named, so
+                // rule 2 passes them, and a short `code` or `state` is under `QUERY_RUN_RE`'s 32-character
+                // floor, so rule 1 passes them too. `claude_oauth_callback` carries its grant as bare strings
+                // instead, where `state` is the half no name rule reaches.
                 //
-                // C1 runs rule 6 only over a control_response body, and decides by correlating that response
-                // back to its request's subtype — so an OAuth request's own payload is the one place the rule
-                // cannot reach. `mcp_oauth_callback_url` carries the whole callback in `request.callbackUrl`:
-                // that key is not secret-named, so rule 2 passes it, and a short `code` or `state` is under
-                // `QUERY_RUN_RE`'s 32-character floor, so rule 1 passes it too. The grant reached a capture
-                // verbatim. `mcp_authenticate.redirectUri` is the same shape one field over.
-                //
-                // **Divergence from `Tools/probe/redact.py`, deliberate.** redact.py does not strip the
-                // request side; the differential vectors and the sample corpus carry no OAuth request, so
-                // parity still holds over everything both sides are tested on. When C1 adopts the rule this
-                // note goes away. What is *not* covered here, on either side: `claude_oauth_callback` carries
-                // its grant as bare `authorizationCode` and `state` strings rather than as a URL, and rule 6
-                // is about URLs — `authorizationCode` is caught by the secret rule, `state` is not.
+                // **The gate here is the subtype and nothing else, while the response side below also fires
+                // on an unknown subtype. That asymmetry is deliberate on both sides** — see the response
+                // branch for why. A request states its own subtype, so there is nothing to lose and no
+                // fail-open case to cover; scanning every string instead would rewrite a `can_use_tool`
+                // argument that merely happens to be a URL.
                 if Redactor.oauthSubtypes.contains(sub ?? ""), var o = f.objectValue, let req = f["request"] {
-                    o["request"] = urls(req)
+                    o["request"] = oauthState(urls(req))
                     f = .object(o)
                 }
                 return json(f, path: "")
