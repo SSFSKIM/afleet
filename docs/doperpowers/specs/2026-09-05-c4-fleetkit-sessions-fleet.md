@@ -56,7 +56,7 @@ fails the build:
 - dormant to ready on send, same session id, one connecting glyph;
 - respawn on non-zero exit with backoff 1 s, 2 s, 4 s, three attempts, each behind the ownership check, then the system item with exit code, stderr tail and *Reopen* (item 20);
 - the cap of six: the seventh spawn reaps the least recently used dormant-eligible channel; with none eligible, no eviction and the header state carries the live count and *Send to background* (item 19);
-- wedged when `terminate()` returns `nil`: no respawn under that session id, the escalation trace on a system item, *Reopen* spawning only after the ownership check finds no holder;
+- wedged when `terminate()` returns `nil`: no respawn under that session id, the escalation trace on a system item, *Reopen* spawning only after the ownership check finds no holder. No real child can produce this row, because SIGKILL cannot be refused (C2 recorded the same limit); the supervisor therefore drives its process through a `ProcessHandle` protocol that `ClaudeProcess` conforms to, and this one row runs against a scripted handle whose `terminate()` returns `nil`, stated as such in the test;
 - adopt: `claude stop <short>`, wait for exit and roster removal, spawn `--resume`;
 - send to background: `terminate()`, wait for exit and registry removal, `claude --bg --resume <id>`, the new job found in the roster by its `resumeSessionId` (item 16);
 - open in terminal: `terminate()`, wait, return a `PaneRequest` whose purpose is `.hatch(id)`, whose arguments are the interactive `--resume <id>` line and whose environment is composed through ClaudeWire's launch configuration so the hatch resumes under the same config home; keep mirroring; re-adopt when the panel reports the `PaneExit` and the record is gone (the test plays the panel: it takes the request and reports the exit);
@@ -685,12 +685,17 @@ turns in total. (3) One document per namespace, filed on the parent's §7.8.
   would then contend for one module).
   Date/Author: 2026-09-05 / C4 dispatch.
 - Decision: `ChannelSupervisor` is an actor per channel driven by a constant `LifecycleTable`
-  and an injected `Clock`.
+  and an injected `Clock`, and it reaches its process through a `ProcessHandle` protocol that
+  `ClaudeProcess` conforms to.
   Rationale: the parent's table is the specification; making it the code's data lets G1
-  assert coverage by set equality and lets every timer be advanced by a test. Rejected: a
-  single fleet actor with a state map (one hot actor for six processes' frames); wall-clock
-  tests with shortened constants (the constants are the behaviour).
-  Date/Author: 2026-09-05 / C4 dispatch.
+  assert coverage by set equality and lets every timer be advanced by a test. The seam exists
+  for one row: a wedged channel needs `terminate()` to return `nil`, which no real child can
+  cause, so that row runs against a scripted handle; every other row runs against a real
+  stand-in process. Rejected: a single fleet actor with a state map (one hot actor for six
+  processes' frames); wall-clock tests with shortened constants (the constants are the
+  behaviour); skipping the wedged row (the one row whose bug would leave a ghost holding a
+  transcript).
+  Date/Author: 2026-09-05 / C4 dispatch; seam added at planning.
 - Decision: holder liveness is pid liveness plus process start time within sixty seconds of
   the record's `startedAt`.
   Rationale: the CLI validates with `procStart`, whose format the corpus has not recorded,
@@ -789,3 +794,9 @@ Pending — written at finish.
   both the local-settings store and the project entry in `.claude.json`, written only
   through §6.12; a C1 probe will record the precedence. The sidebar listing policy is C4's
   under X5, over the fields C3's index exposes, and is added to the Design.
+- 2026-09-05: v2.1 at planning. Planning's hostile read found one overclaim in this
+  document: "every row of §7.4 including wedged reachable from a scripted `fake-claude`
+  scenario". The wedged row is not, because SIGKILL cannot be refused; G1 and the Decision
+  Log now say the supervisor drives its process through a `ProcessHandle` seam and that one
+  row runs against a scripted handle. Plan:
+  `docs/doperpowers/plans/2026-09-05-c4-fleetkit-sessions-fleet.md`.
