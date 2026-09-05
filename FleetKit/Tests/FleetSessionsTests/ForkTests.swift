@@ -159,9 +159,15 @@ final class ForkTests: XCTestCase {
         let occupiedBefore = await rig.fleet.occupancy
 
         try await rig.waitForSleeper(due: Self.handshakeTimeout)
+        let published = await fork.publishedCount
         await rig.clock.advance(by: Self.handshakeTimeout)
 
         try await rig.waitFor("the identity deadline to fire") { forkHandle.terminateCount == 1 }
+        // `terminateCount` rises *inside* `terminateOrWedge`, which is before the reservation goes back, so it is
+        // not a synchronisation point for anything the handler does afterwards. The expiry publishes once, after
+        // the whole decision, and that is the point to wait on — reading the occupancy off the terminate count
+        // alone is a race that happens to pass most of the time.
+        try await rig.waitForPublish(fork, above: published)
         let occupiedAfter = await rig.fleet.occupancy
         XCTAssertEqual(occupiedAfter, occupiedBefore - 1, "the provisional reservation went back")
         let stillProvisional = await rig.fleet.isLive(provisional)
