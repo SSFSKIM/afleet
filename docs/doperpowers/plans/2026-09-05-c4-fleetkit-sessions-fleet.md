@@ -8,7 +8,9 @@
 
 **Tech Stack:** Swift 6.3.3, Swift Package Manager (`swift-tools-version: 6.2`, language mode 6, `platforms: [.macOS(.v26)]`), Foundation (`Process`, `FileManager`, `DispatchSource` vnode sources, `JSONDecoder`/`JSONEncoder`), Darwin (`kill`, `proc_pidinfo`, `open` with `O_NOFOLLOW`, `fsync`, `rename`, `openpty`), XCTest, `Tools/fake-claude/fake-claude` (Python 3) with the fixtures under `Fixtures/`, and the installed `claude` for the live gate under `/tmp/afleet-fixtures/config-home`.
 
-**Spec:** `docs/doperpowers/specs/2026-09-05-c4-fleetkit-sessions-fleet.md` v2.1 (child of `docs/doperpowers/specs/2026-09-03-afleet-workspace-design.md §17 C4`, parent-pin `ee94449`; the parent's §6.11, §6.12, §7.1, §7.2, §7.4, §7.6, §7.7, §7.8 and §17.5 X1, X2, X3, X5, X6, X9, X10 bind this work, X5 and X6 as amended on 2026-09-05). Conflicts found during execution resolve against the spec; a wrong binding clause flows back to the parent as `[parent-impact]`, never a local override.
+**Spec:** `docs/doperpowers/specs/2026-09-05-c4-fleetkit-sessions-fleet.md` v2.2 (child of `docs/doperpowers/specs/2026-09-03-afleet-workspace-design.md §17 C4`, parent-pin `ee94449`; the parent's §6.11, §6.12, §7.1, §7.2, §7.4, §7.6, §7.7, §7.8 and §17.5 X1, X2, X3, X5, X6, X9, X10 bind this work, X5 and X6 as amended on 2026-09-05). Conflicts found during execution resolve against the spec; a wrong binding clause flows back to the parent as `[parent-impact]`, never a local override.
+
+**Plan revision:** v2 (2026-09-05), after the plan's adversarial review (eleven findings, all folded into spec v2.2) and the merge of `main` at `71a9999` (the parent's X5 `PaneRequest.id`, C1's §6.12 spike, C2's `SessionStart.forkFrom`). Against v1: the store's constructor is validated-only, its namespace a closed enum, its atomicity tested through an injected file-ops seam and its schema handling per case (Task 1); the lifecycle table enumerates `(row, from, event, to)` scenarios with the disagreement transition as its own event, and mirror entries carry armed and running (Task 2); the pre-spawn check refuses every live holder, the post-handshake check excludes exactly the new pid, and pane exits match by `request.id` (Tasks 4, 5); cap slots are reservations with observed eviction outcomes, and `terminate() == nil` is injected through every terminating action (Tasks 5, 6, 8); the restart snapshots an actor-owned `SessionRuntimeState` and forking uses `forkFrom` with no skip (Task 6); consent reads the merged settings only, the §6.12 writer is descriptor-relative with six named symlink and mode tests, and the engine-side proof of a decline moves to the live suite (Tasks 7, 10); router entries carry typed strategies with fixture-backed multi-step tests (Task 8); G5 runs behind one serialised live budget and one suite-level config-home witness (Task 10); G2 asserts the same boundary cases as Task 2 (Task 11).
 
 ## Global Constraints
 
@@ -19,8 +21,13 @@
 - `swift test --package-path FleetKit` passes after every task; `swift test --package-path ClaudeWire` and `--package-path AfleetCore` are untouched by this work and must still pass at the end.
 - Nothing in `FleetSessions` or its tests writes under any Claude Code config home (`~/.claude`, `$CLAUDE_CONFIG_DIR`, `/tmp/afleet-fixtures/config-home`); the spawned `claude` may. The one project write is `LocalSettingsStore.decline` under the parent's §6.12 policy, exercised only under a temporary directory in tests (parent X9).
 - Tests touch only processes they start themselves; never a session in the user's terminal; adoption is exercised only on jobs the test started (root `CLAUDE.md`).
-- Live tests run only with `AFLEET_LIVE_CLI=1` and skip with a named reason otherwise; the two turn-spending scenarios also need `AFLEET_LIVE_CLI_TURNS=1`; every live scenario runs C2's budget check first and skips when a window is spent.
-- The lifecycle table is data (`LifecycleTable.Row`, one case per parent §7.4 row) and G1's coverage is asserted by set equality over the rows, never by a count.
+- Live tests run only with `AFLEET_LIVE_CLI=1` and skip with a named reason otherwise; the two turn-spending scenarios also need `AFLEET_LIVE_CLI_TURNS=1`. Every live scenario runs through the suite's one `LiveBudget` (Task 10): scenarios are serialised; the model is pinned to `claude-haiku-4-5-20251001` on every turn-spending launch; every `ClaudeProcess` the suite launches carries `--max-turns` (1 handshake-only, 2 for the composed turn); the ceilings are two model turns and ten minutes of wall time for the whole suite; C2's usage reading is taken before the first scenario and before each turn-spending one, and a spent window skips with its reason; every `result` frame's `total_cost_usd` is summed and reported; a zero-cost scenario asks `get_session_cost` before ending its process and asserts `total_cost_usd == 0`, because a zero-turn launch emits no `result` frame.
+- One config-home witness spans the whole live suite (class `setUp` to class `tearDown`) and a second brackets each scenario; any unexplained path in either fails the gate with the path named.
+- The lifecycle table is data: `LifecycleTable.scenarios`, one `(row, from, event, to)` per from-state a parent §7.4 row admits and per outcome it can reach. Each row test declares the scenarios it drives and asserts, from the diagnostics sink, that exactly those transitions were observed; G1's coverage is set equality between the union of the declared sets and the table, never a count.
+- Pane exits are matched to the pending hatch by `PaneRequest.id`, never by value equality of the request.
+- Every action that terminates a process calls `ChannelSupervisor.terminateOrWedge()` and stops at a `nil`; nothing else calls `process.terminate()`.
+- `LocalSettingsStore` never opens a path by name after resolving it: every open, create and rename after the resolution is relative to a directory descriptor it holds open.
+- `FileStateStore` has one initialiser and it validates the base directory against the config homes it is given; tests construct it the way production does.
 - Every timer is driven by the injected `any Clock<Duration>`; no test sleeps on wall time to move the lifecycle; no instant comparisons in `FleetSessions` (durations are slept, recency is a sequence counter).
 - The discriminating-test rule of parent §17.7 applies to every gate test: each test in this plan names the deliberate break that demonstrates it red, and the executor performs that break once before accepting the test green.
 - Assertions and diagnostics print identifiers, counts and shapes: a session id, a pid, a row name, a set of key names or relative paths. Never a filesystem path under a config home, an environment, a record's contents or a process table (parent §6.3).
@@ -35,19 +42,19 @@
 FleetKit/
   Package.swift                                  (on main; C4 edits only outside C3's region; no change planned)
   Sources/FleetSessions/
-    Store/StateStore.swift                       StateStore, StoreNamespace, StoreError
+    Store/StateStore.swift                       StateStore, StoreNamespace (closed enum), StoreError, SchemaStatus, StoreDiagnostic, StoreFileOperations
     Store/FileStateStore.swift                   the per-namespace JSON document store
     Store/FleetKitState.swift                    the fleetKit namespace's Codable values and keys
-    Types/ChannelState.swift                     ChannelKey, ChannelState, Presence, ChannelBanner, HeaderNote, EscalationTrace, DesiredOwnership
-    Types/Actions.swift                          LifecycleAction, SpawnPrecondition, ProjectMCPServer, RestartRequest, RestartSnapshot, LifecycleError
-    Types/Panes.swift                            PanePurpose, PaneRequest, PaneExit, JobShort
+    Types/ChannelState.swift                     ChannelKey, ChannelState, Presence, ChannelBanner, HeaderNote, EscalationTrace, DesiredOwnership, SessionRuntimeState
+    Types/Actions.swift                          LifecycleAction (fork(at: ForkPoint?)), SpawnPrecondition, ProjectMCPServer, RestartRequest, RestartSnapshot (typealias), LifecycleError
+    Types/Panes.swift                            PanePurpose, PaneRequest (with id), PaneExit, JobShort
     Types/LifecycleAPI.swift                     the X5 protocol
-    Lifecycle/LifecycleTable.swift               Row (CaseIterable), the transition table, TransitionEvent
+    Lifecycle/LifecycleTable.swift               Row, Event, TerminatingAction, Transition, the (row, from, event, to) scenarios
     Lifecycle/DormantEligibility.swift           the pure function, TaskMirrorReading, MirrorEntryStandIn
     Lifecycle/ListingPolicy.swift                the sidebar listing rules over C3's index fields
     Lifecycle/ProcessHandle.swift                ProcessHandle protocol, ProcessFactory, ClaudeProcess conformance
     Lifecycle/ChannelSupervisor.swift            the actor
-    Lifecycle/RestartSnapshot.swift              snapshot and Readback
+    Lifecycle/RuntimeState.swift                 RuntimeStateUpdater and Readback
     Fleet/Records.swift                          RegistryRecord, RosterRecord, JobRecord, AgentsRow
     Fleet/HolderReader.swift                     HolderReader protocol, FileHolderReader, ProcessLiveness
     Fleet/FleetObserver.swift                    the actor: watcher, poll, reconciliation, HolderSet publication
@@ -56,11 +63,11 @@ FleetKit/
     Verbs/CLIVerbs.swift                         over ProcessRunner
     Preconditions/TrustReader.swift
     Preconditions/ProjectMCPConsent.swift
-    Preconditions/LocalSettingsStore.swift       the §6.12 write
+    Preconditions/LocalSettingsStore.swift       the §6.12 write, descriptor-relative
     Preconditions/ManagedSettingsReader.swift
     Preconditions/SpawnPreconditions.swift
-    Router/RouterTable.swift                     LocalCommand, the §7.7 table as data, LaunchSettingMatrix
-    Router/CommandRouter.swift                   route(), RefusalInterceptor
+    Router/RouterTable.swift                     LocalCommand, RouteStrategy, the §7.7 table as data, LaunchSettingMatrix
+    Router/CommandRouter.swift                   route(), StrategyExecutor, RefusalInterceptor
     Router/LogoutPlan.swift
     Activity/ActivityQuery.swift
     Diagnostics/FleetDiagnostics.swift           FleetDiagnosticEvent, FleetDiagnosticsSink, FileFleetDiagnostics
@@ -70,6 +77,8 @@ FleetKit/
     Support/ScriptedHolderFiles.swift            writes registry, roster and job records
     Support/ScriptedProcessRunner.swift          argv-pattern -> (stdout, exit), with file mutations
     Support/TestClock.swift                      a manual Clock
+    Support/FaultingFileOperations.swift         the store's fault injector, LockedBox
+    Support/LiveGate.swift                       LiveBudget, the usage reading, ConfigHomeWitness
     Support/FakeClaudeLaunch.swift               LaunchConfiguration + ResolvedEnvironment for a fixture replay
     Support/ScriptedProcessHandle.swift          the handle for the wedged row
     Support/RecordingHolderReader.swift          records beforeSpawn/afterHandshake calls
@@ -95,6 +104,7 @@ Dependency order: Task 1 (store) → Task 2 (types, table, eligibility, listing)
 - Create: `FleetKit/Sources/FleetSessions/Store/FleetKitState.swift`
 - Delete: `FleetKit/Sources/FleetSessions/FleetSessions.swift` (the placeholder; the target now has real sources)
 - Delete: `FleetKit/Tests/FleetSessionsTests/Placeholder.swift`
+- Create: `FleetKit/Tests/FleetSessionsTests/Support/FaultingFileOperations.swift` (the fault injector for the atomicity test, and `LockedBox`)
 - Test: `FleetKit/Tests/FleetSessionsTests/StoreTests.swift`
 
 **Interfaces:**
@@ -118,9 +128,14 @@ final class StoreTests: XCTestCase {
         return u
     }
     struct Pins: Codable, Equatable, Sendable { var sessions: [SessionID] }
+    /// Every store in this file is built the way production builds one: through the single validating initialiser.
+    func makeStore(_ dir: URL, ops: any StoreFileOperations = DarwinStoreFileOperations(),
+                   diagnostics: @escaping @Sendable (StoreDiagnostic) -> Void = { _ in }) throws -> FileStateStore {
+        try FileStateStore(baseDirectory: dir, configHomes: [], fileOperations: ops, onDiagnostic: diagnostics)
+    }
 
     func testWriteThenReadRoundTripsAndDottedKeysAreOrdinary() async throws {
-        let store = FileStateStore(baseDirectory: try tempDir())
+        let store = try makeStore(try tempDir())
         let pins = Pins(sessions: [SessionID(), SessionID()])
         try await store.write(pins, namespace: .fleetKit, key: "pins")
         try await store.write("tabs", namespace: .workbench, key: "workbench.browser")
@@ -134,7 +149,7 @@ final class StoreTests: XCTestCase {
         // Deliberate break: split keys on "." into a hierarchy -> the two workbench keys collide or nest and the count or the prefix check fails.
     }
     func testEachNamespaceIsItsOwnDocumentWithASchemaVersion() async throws {
-        let dir = try tempDir(); let store = FileStateStore(baseDirectory: dir)
+        let dir = try tempDir(); let store = try makeStore(dir)
         try await store.write(1, namespace: .fleetKit, key: "a")
         try await store.write(2, namespace: .afleet, key: "b")
         let names = try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
@@ -144,36 +159,72 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(Set((doc?["values"] as? [String: Any])?.keys ?? []), ["a"])
         // Deliberate break: write one document for all namespaces -> the file set is wrong.
     }
-    func testAWriteIsAtomicNoPartialDocumentIsEverVisible() async throws {
-        let dir = try tempDir(); let store = FileStateStore(baseDirectory: dir)
-        try await store.write(Array(repeating: "x", count: 10_000), namespace: .fleetKit, key: "big")
-        // The temporary file is written beside the document and renamed; after the write nothing but the document remains.
-        let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
-        XCTAssertEqual(Set(names), ["state.fleetKit.json"])
-        // Deliberate break: write the document in place with `Data.write(to:)` and leave the staging name -> a second entry appears.
+    func testAFailureAtWriteFsyncOrRenameLeavesTheOldOrTheNewDocumentNeverAPartialOne() async throws {
+        let new = Array(repeating: "new", count: 5_000)
+        for point in FaultingFileOperations.Point.allCases {          // .write, .fsync, .rename, .fsyncDirectory
+            let dir = try tempDir()
+            let ops = FaultingFileOperations(failAt: point)            // passes every call through to Darwin until armed
+            let store = try makeStore(dir, ops: ops)
+            try await store.write(["old"], namespace: .fleetKit, key: "k")
+            ops.arm()
+            do { try await store.write(new, namespace: .fleetKit, key: "k"); XCTFail("\(point): the write did not fail") }
+            catch let e as StoreError { guard case .io = e else { return XCTFail("\(point): \(e)") } }
+            // A reader opened fresh on the directory sees a whole document: the old one when the rename never happened,
+            // the new one when the fault came after it. Never a partial file, never nothing.
+            let seen = try await makeStore(dir).read([String].self, namespace: .fleetKit, key: "k")
+            XCTAssertTrue(seen == ["old"] || seen == new, "\(point): partial or missing document")
+            XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: dir.path)), ["state.fleetKit.json"], "\(point): a staging file survived")
+            // Deliberate break: write the document in place with `Data.write(to:)` -> the `.write` fault leaves a truncated file and the read throws.
+        }
     }
-    func testANewerSchemaVersionIsRefusedNotRewritten() async throws {
+    func testANewerSchemaVersionIsReadForUnderstoodKeysRefusesWritesAndRaisesTheBanner() async throws {
         let dir = try tempDir()
-        let newer = #"{"schemaVersion": 999, "values": {"k": 1}}"#
+        let newer = #"{"schemaVersion": 999, "values": {"k": 1, "fromTheFuture": {"x": 1}}}"#
         try Data(newer.utf8).write(to: dir.appendingPathComponent("state.fleetKit.json"))
-        let store = FileStateStore(baseDirectory: dir)
-        do { _ = try await store.read(Int.self, namespace: .fleetKit, key: "k"); XCTFail("read a document from the future") }
-        catch let e as StoreError { guard case .schemaTooNew(found: 999, supported: FileStateStore.schemaVersion) = e else { return XCTFail("\(e)") } }
+        let store = try makeStore(dir)
+        XCTAssertEqual(try await store.read(Int.self, namespace: .fleetKit, key: "k"), 1)   // the keys this build understands are readable
         do { try await store.write(2, namespace: .fleetKit, key: "k"); XCTFail("rewrote a document from the future") }
-        catch let e as StoreError { guard case .schemaTooNew = e else { return XCTFail("\(e)") } }
+        catch let e as StoreError { guard case .schemaTooNew(found: 999, supported: FileStateStore.schemaVersion) = e else { return XCTFail("\(e)") } }
+        XCTAssertEqual(await store.schemaStatus(of: .fleetKit), .newer(found: 999))       // the banner's source
         XCTAssertEqual(try String(contentsOf: dir.appendingPathComponent("state.fleetKit.json"), encoding: .utf8), newer)
-        // Deliberate break: ignore schemaVersion on read -> the first `do` block does not throw.
+        // Deliberate break: refuse the read as well -> the first assertion throws; ignore schemaVersion on write -> the file changes.
     }
-    func testABaseDirectoryInsideAConfigHomeIsRejectedAtConstruction() throws {
+    func testAMalformedDocumentIsMovedAsideWithADiagnosticAndTheNamespaceStartsEmpty() async throws {
+        let dir = try tempDir()
+        try Data("{ not json".utf8).write(to: dir.appendingPathComponent("state.fleetKit.json"))
+        let seen = LockedBox<[StoreDiagnostic]>([])
+        let store = try makeStore(dir, diagnostics: { seen.append($0) })
+        XCTAssertEqual(try await store.keys(in: .fleetKit), [])
+        try await store.write(1, namespace: .fleetKit, key: "k")
+        let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        XCTAssertEqual(names.count, 2)
+        XCTAssertTrue(names.contains("state.fleetKit.json"))
+        XCTAssertTrue(names.contains { $0.hasPrefix("state.fleetKit.json.malformed-") })
+        XCTAssertEqual(seen.value, [.malformedMovedAside(namespace: .fleetKit)])
+        // Deliberate break: overwrite the malformed file in place -> one entry in the listing and no diagnostic.
+    }
+    func testAnOlderSchemaVersionIsMigratedPerNamespaceOnRead() async throws {
+        let dir = try tempDir()
+        // Version 0 is the reserved pre-release version whose migration to 1 is the identity; it exists so the chain is real.
+        try Data(#"{"schemaVersion": 0, "values": {"k": 1}}"#.utf8).write(to: dir.appendingPathComponent("state.fleetKit.json"))
+        let store = try makeStore(dir)
+        XCTAssertEqual(try await store.read(Int.self, namespace: .fleetKit, key: "k"), 1)
+        XCTAssertEqual(await store.schemaStatus(of: .fleetKit), .migrated(from: 0))
+        try await store.write(2, namespace: .fleetKit, key: "k")
+        let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: dir.appendingPathComponent("state.fleetKit.json"))) as? [String: Any]
+        XCTAssertEqual(doc?["schemaVersion"] as? Int, FileStateStore.schemaVersion)
+        // Deliberate break: skip the migration table for version 0 -> the status is `.current` and a later real migration never runs.
+    }
+    func testABaseDirectoryInsideAConfigHomeIsRejectedByTheOnlyInitialiser() throws {
         let home = try tempDir()
-        XCTAssertThrowsError(try FileStateStore.validated(baseDirectory: home.appendingPathComponent("afleet"), configHomes: [home])) { e in
+        XCTAssertThrowsError(try FileStateStore(baseDirectory: home.appendingPathComponent("afleet"), configHomes: [home])) { e in
             guard case StoreError.insideConfigHome = e as? StoreError ?? .io("") else { return XCTFail("\(e)") }
         }
-        XCTAssertNoThrow(try FileStateStore.validated(baseDirectory: try tempDir(), configHomes: [home]))
+        XCTAssertNoThrow(try FileStateStore(baseDirectory: try tempDir(), configHomes: [home]))
         // Deliberate break: compare paths without resolving symlinks and pass a /tmp vs /private/tmp pair -> the first assertion fails to throw.
     }
     func testRemoveDeletesOneKeyAndLeavesTheRest() async throws {
-        let store = FileStateStore(baseDirectory: try tempDir())
+        let store = try makeStore(try tempDir())
         try await store.write(1, namespace: .fleetKit, key: "a"); try await store.write(2, namespace: .fleetKit, key: "b")
         try await store.remove(namespace: .fleetKit, key: "a")
         XCTAssertEqual(try await store.keys(in: .fleetKit), ["b"])
@@ -181,6 +232,8 @@ final class StoreTests: XCTestCase {
     }
 }
 ```
+
+`Support/FaultingFileOperations.swift`: `final class FaultingFileOperations: StoreFileOperations, @unchecked Sendable` (lock-serialised) wrapping `DarwinStoreFileOperations`; `enum Point: CaseIterable { case write, fsync, rename, fsyncDirectory }`; `arm()` makes the next call at `failAt` throw `POSIXError(.EIO)` once and pass everything else through. `LockedBox<T>` is a lock-guarded value with `append` for arrays.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -194,13 +247,8 @@ Expected: build error `cannot find 'FileStateStore' in scope`.
 ```swift
 import Foundation
 
-public struct StoreNamespace: RawRepresentable, Hashable, Codable, Sendable {
-    public let rawValue: String
-    public init(rawValue: String) { self.rawValue = rawValue }
-    public static let fleetKit = StoreNamespace(rawValue: "fleetKit")
-    public static let workbench = StoreNamespace(rawValue: "workbench")
-    public static let afleet = StoreNamespace(rawValue: "afleet")
-}
+/// Closed: a namespace is a package, and there are three (X6). A fourth is a spec change, not a call site.
+public enum StoreNamespace: String, CaseIterable, Hashable, Codable, Sendable { case fleetKit, workbench, afleet }
 
 public enum StoreError: Error, Equatable, Sendable {
     case schemaTooNew(found: Int, supported: Int)
@@ -208,6 +256,26 @@ public enum StoreError: Error, Equatable, Sendable {
     case emptyKey
     case io(String)                      // the underlying error's description; never a path
 }
+
+/// What the store reports about a namespace's document; the app turns `.newer` into the banner.
+public enum SchemaStatus: Hashable, Sendable { case current, migrated(from: Int), newer(found: Int), absent }
+
+public enum StoreDiagnostic: Hashable, Sendable {
+    case malformedMovedAside(namespace: StoreNamespace)
+    case migrated(namespace: StoreNamespace, from: Int)
+    case newerSchema(namespace: StoreNamespace, found: Int)
+}
+
+/// The seam every byte the store writes goes through. Production is Darwin's calls; the atomicity test injects faults.
+public protocol StoreFileOperations: Sendable {
+    /// Creates `directory/name` with `O_CREAT|O_EXCL|O_WRONLY`, mode 0o600, writes `data` whole and returns the URL.
+    func writeTemporary(_ data: Data, in directory: URL, named name: String) throws -> URL
+    func fsync(_ file: URL) throws
+    func rename(_ from: URL, to: URL) throws
+    func fsyncDirectory(_ directory: URL) throws
+    func remove(_ file: URL) throws
+}
+public struct DarwinStoreFileOperations: StoreFileOperations { public init() {} /* open/write/fsync/rename/close as named */ }
 
 /// X6. Keys are non-empty strings; a dot is an ordinary character and implies no hierarchy.
 /// One schema version per namespace; nothing else is versioned.
@@ -221,11 +289,11 @@ public protocol StateStore: Sendable {
 
 `FleetKit/Sources/FleetSessions/Store/FileStateStore.swift` — decisions the executor implements:
 
-- `public actor FileStateStore: StateStore` with `public init(baseDirectory: URL)` (creates the directory with mode 0o700 if absent) and `public static func validated(baseDirectory: URL, configHomes: [URL]) throws -> FileStateStore`, which resolves every path with `URL.resolvingSymlinksInPath()` and throws `StoreError.insideConfigHome` when the base equals or lies under any config home.
+- `public actor FileStateStore: StateStore` with exactly one initialiser, `public init(baseDirectory: URL, configHomes: [URL], fileOperations: any StoreFileOperations = DarwinStoreFileOperations(), onDiagnostic: @escaping @Sendable (StoreDiagnostic) -> Void = { _ in }) throws`: it resolves every path with `URL.resolvingSymlinksInPath()`, throws `StoreError.insideConfigHome` when the base equals or lies under any config home, and creates the directory with mode 0o700 if absent. There is no unvalidated constructor and no `static validated(...)`; tests and the app construct it the same way. `public func schemaStatus(of: StoreNamespace) -> SchemaStatus`.
 - `public static let schemaVersion = 1`. Document path `<base>/state.<namespace>.json`; envelope `{"schemaVersion": 1, "values": {"<key>": <json>}}` encoded with `JSONEncoder` using `.sortedKeys` so a rewrite of unchanged state is byte-identical.
 - Values are stored as `JSONValue`-agnostic raw JSON: encode `T` with `JSONEncoder`, decode with `JSONSerialization` into `Any`, and keep the namespace document as `[String: Any]` in memory per namespace; on `read`, re-serialise the value and decode `T`. (No dependency on `WireFrames.JSONValue` here; the store is below the wire.)
-- A document whose `schemaVersion` is greater than `schemaVersion` throws `.schemaTooNew` from every operation and is never rewritten. A missing document is an empty namespace.
-- Every write: serialise the whole namespace document, write it to `<base>/.state.<namespace>.json.tmp-<uuid>`, `fsync` the descriptor, `rename` over the document, then `fsync` the directory. Any failure removes the temporary file and throws `.io(description)`.
+- Schema handling per case, decided on the first touch of a namespace: **missing** → an empty namespace, status `.absent`. **Malformed** (does not parse, or parses without `schemaVersion` and `values`) → the file is renamed to `state.<namespace>.json.malformed-<yyyyMMdd-HHmmss>` through the seam, `onDiagnostic(.malformedMovedAside)`, and the namespace starts empty. **Older** → `Migrations.chain(for: namespace)` is applied step by step from the found version to `schemaVersion` on read (version 0 → 1 is the identity and is the one entry the table starts with), status `.migrated(from:)`, `onDiagnostic(.migrated)`, and the next write persists the current version. **Newer** → reads return the keys this build understands, every write and remove throws `.schemaTooNew`, status `.newer(found:)`, `onDiagnostic(.newerSchema)`; the file is never rewritten.
+- Every write goes through `fileOperations` and nothing else: serialise the whole namespace document, `writeTemporary` to `<base>/.state.<namespace>.json.tmp-<uuid>`, `fsync` it, `rename` over the document, `fsyncDirectory`. Any failure at any step removes the temporary file (best effort, through the seam) and throws `.io(description)`; the in-memory document is refreshed from disk on the next operation so the actor never believes a write that did not land.
 - An empty key throws `.emptyKey`.
 
 `FleetKit/Sources/FleetSessions/Store/FleetKitState.swift`:
@@ -263,7 +331,7 @@ public struct CensusSummary: Codable, Hashable, Sendable {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `swift test --package-path FleetKit 2>&1 | grep -E "Executed|error:"`
-Expected: `Executed 6 tests, with 0 failures`.
+Expected: `Executed 8 tests, with 0 failures`.
 
 - [ ] **Step 5: Commit**
 
@@ -288,7 +356,7 @@ git commit -m "FleetSessions: the namespaced store, one document per namespace"
 
 **Interfaces:**
 - Consumes: from Task 1, nothing yet; from `ClaudeWire`: `ProcessEpoch`, `UserInput`, `PermissionMode`, `SettingSource`, `Worktree`, `ChildEnvironmentOptions`; from `AfleetCore`: `ChannelOrigin`, `SessionID`.
-- Produces: every X5 value type exactly as the spec's *Types* block, `LifecycleTable.Row` and `LifecycleTable.rows`, `DormantEligibility.evaluate`, `TaskMirrorReading`, `MirrorEntryStandIn`, `ListingPolicy.include`; Tasks 4–9 build on them.
+- Produces: every X5 value type exactly as the spec's *Types* block (including `PaneRequest.id`, `SessionRuntimeState`, `LifecycleAction.fork(at: ForkPoint?)`), `LifecycleTable.Row`, `LifecycleTable.Event`, `LifecycleTable.Transition`, `LifecycleTable.scenarios`, `DormantEligibility.evaluate`, `TaskMirrorReading` (with `isArmed`), `MirrorEntryStandIn`, `ListingPolicy.include`; Tasks 4–9 build on them.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -299,24 +367,36 @@ import XCTest
 @testable import FleetSessions
 
 final class LifecycleTableTests: XCTestCase {
-    func testTheTableHasOneRowPerParentRowAndEveryRowIsReachable() {
-        // The parent's §7.4 table, in its order. Set equality over names, not a count.
+    func testTheTableHasOneRowPerParentRowAndEveryRowHasAScenario() {
+        // The parent's §7.4 table, in its order; its combined "handoff wait exceeds 10 s, or desired and observed disagree"
+        // row is two rows here because the two are raised from different places and G1 must see both fire.
         let expected: Set<LifecycleTable.Row> = [
             .archivedRecentOpened, .archivedOlderOpened, .archivedOlderSent,
             .connectingClean, .connectingFoundHolder,
             .readyDormantEligible, .dormantSent, .dormantHolderAppeared,
             .terminateExhausted, .exitedNonZero, .capReached,
             .jobAdopt, .ownedSendToBackground, .ownedOpenInTerminal, .ownTabExited,
-            .foreignRecordGone, .foreignSendRefused, .handoffTimedOutOrDisagree, .contendedSettled,
+            .foreignRecordGone, .foreignSendRefused, .handoffTimedOut, .desiredObservedDisagree, .contendedSettled,
         ]
         XCTAssertEqual(Set(LifecycleTable.Row.allCases), expected)
-        XCTAssertEqual(Set(LifecycleTable.rows.map(\.row)), expected)
-        // Deliberate break: drop `.terminateExhausted` from `rows` -> the second assertion names it.
+        XCTAssertEqual(Set(LifecycleTable.scenarios.map(\.row)), expected)
+        // Deliberate break: drop every `.terminateExhausted` scenario -> the second assertion names it.
     }
-    func testEveryRowNamesAFromStateAnEventAndAToState() {
-        for r in LifecycleTable.rows {
-            XCTAssertFalse(r.from.isEmpty, "\(r.row)"); XCTAssertFalse(r.to.isEmpty, "\(r.row)")
-        }
+    func testScenariosAreConcreteAndDistinct() {
+        XCTAssertEqual(Set(LifecycleTable.scenarios).count, LifecycleTable.scenarios.count, "a duplicated scenario")
+        // No `.any`: every scenario names the from-state it applies to, so coverage can demand each one.
+    }
+    func testTheTwoContendedEventsAndEveryTerminatingActionAreInTheTable() {
+        XCTAssertTrue(LifecycleTable.scenarios.contains { $0.event == .handoffTimedOut })
+        XCTAssertTrue(LifecycleTable.scenarios.contains { $0.event == .desiredObservedDisagree })
+        let actions = Set(LifecycleTable.scenarios.compactMap { if case .terminateReturnedNil(let a) = $0.event { a } else { nil } })
+        XCTAssertEqual(actions, Set(LifecycleTable.TerminatingAction.allCases))
+        // Deliberate break: fold the disagreement into `.handoffTimedOut` -> the second assertion fails.
+    }
+    func testLookupReturnsEveryCandidateForAFromStateAndEvent() {
+        let c = LifecycleTable.transitions(for: .holderAppeared, from: .dormant)
+        XCTAssertEqual(Set(c.map(\.to)), [.foreignUsersTerminal, .backgroundJob])
+        XCTAssertTrue(LifecycleTable.transitions(for: .opened, from: .ready).isEmpty)
     }
 }
 ```
@@ -332,17 +412,28 @@ final class DormantEligibilityTests: XCTestCase {
     func base() -> DormantEligibility.Input {
         .init(turnRunning: false, pendingDecisions: 0, queuedInput: 0, mirror: [], lastTaskFrameAge: nil, heartbeatInterval: .seconds(30), wedged: false)
     }
+    func entry(_ id: String, running: Bool, armed: Bool = false) -> MirrorEntryStandIn { .init(taskID: id, isRunning: running, isArmed: armed, isBackground: true) }
     func testAllFiveConditionsClearMeansEligible() { XCTAssertTrue(DormantEligibility.evaluate(base()).isEligible) }
     func testEachConditionAloneBlocks() {
         var i = base(); i.turnRunning = true; XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.turnRunning))
         i = base(); i.pendingDecisions = 1; XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.pendingDecision))
         i = base(); i.queuedInput = 1; XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.queuedInput))
-        i = base(); i.mirror = [MirrorEntryStandIn(taskID: "t1", isRunning: true, isBackground: true)]; XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.taskRunning("t1")))
-        i = base(); i.lastTaskFrameAge = .seconds(31); XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.taskStateUncertain))
-        // Deliberate break for the last: compare age < interval instead of > -> `.blocked(.taskStateUncertain)` is not produced.
+        i = base(); i.mirror = [entry("t1", running: true)]; XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.taskRunning("t1")))
     }
-    func testAnOldTaskFrameWithinTheHeartbeatIsNotUncertain() {
-        var i = base(); i.lastTaskFrameAge = .seconds(29); XCTAssertTrue(DormantEligibility.evaluate(i).isEligible)
+    /// The boundary cases Task 11 repeats over C3's real mirror; the two tests must agree case for case.
+    func testTheMirrorBoundaryCases() {
+        var i = base(); i.mirror = [entry("t1", running: false, armed: true)]
+        XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.taskArmed("t1")))                       // armed blocks
+        i = base(); i.mirror = [entry("t1", running: true)]; i.lastTaskFrameAge = .seconds(31)
+        XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.taskStateUncertain("t1")))              // running and stale is uncertainty
+        i = base(); i.mirror = [entry("t1", running: true)]; i.lastTaskFrameAge = .seconds(29)
+        XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.taskRunning("t1")))                     // running and fresh is a running task
+        i = base(); i.mirror = []; i.lastTaskFrameAge = .seconds(3_600)
+        XCTAssertTrue(DormantEligibility.evaluate(i).isEligible)                                          // an old frame with nothing running or armed is history
+        i = base(); i.mirror = [entry("t0", running: false)]; i.lastTaskFrameAge = .seconds(3_600)
+        XCTAssertTrue(DormantEligibility.evaluate(i).isEligible)                                          // a completed entry is history too
+        // Deliberate break: make any stale frame uncertain regardless of the mirror -> the fourth case blocks and a channel
+        // that finished a task an hour ago never reaps.
     }
     func testAWedgedChannelIsNeverEligible() {
         var i = base(); i.wedged = true; XCTAssertEqual(DormantEligibility.evaluate(i), .blocked(.wedged))
@@ -403,7 +494,7 @@ public enum LifecycleError: Error, Hashable, Sendable {
 }
 ```
 
-`RestartRequest` uses double optionals as the spec shows; document on each: outer `nil` = keep the current value, inner `nil` = the CLI default.
+`RestartRequest` uses double optionals as the spec shows; document on each: outer `nil` = keep the current value, inner `nil` = the CLI default. `PaneRequest.init` takes `id: UUID = UUID()` first, so every request the supervisor builds is fresh; `PaneExit` carries the request whole and the lifecycle compares `exit.request.id` only. `LifecycleAction.fork(at: ForkPoint?)` uses ClaudeWire's `ForkPoint`. `SessionRuntimeState` lives in `Types/ChannelState.swift` beside `RestartRequest`; `RestartSnapshot` is its typealias.
 
 - [ ] **Step 4: Implement the table, eligibility and listing policy**
 
@@ -412,7 +503,8 @@ public enum LifecycleError: Error, Hashable, Sendable {
 ```swift
 import Foundation
 
-/// The parent's §7.4 table as data. `Row` is the coverage key G1 asserts over; `rows` is what the supervisor
+/// The parent's §7.4 table as data. `scenarios` enumerates every `(row, from, event, to)` the supervisor may take, one per
+/// from-state a row admits and per outcome it can reach; it is what G1's coverage asserts over and what the supervisor
 /// consults before every transition, so a transition not in the table is a diagnostic, never a silent change.
 public enum LifecycleTable {
     public enum Row: String, CaseIterable, Hashable, Sendable {
@@ -421,48 +513,70 @@ public enum LifecycleTable {
         case readyDormantEligible, dormantSent, dormantHolderAppeared
         case terminateExhausted, exitedNonZero, capReached
         case jobAdopt, ownedSendToBackground, ownedOpenInTerminal, ownTabExited
-        case foreignRecordGone, foreignSendRefused, handoffTimedOutOrDisagree, contendedSettled
+        case foreignRecordGone, foreignSendRefused, handoffTimedOut, desiredObservedDisagree, contendedSettled
     }
+    /// Every path that calls `terminateOrWedge()`; the wedged row has one scenario per action so G1 injects the `nil` through each.
+    public enum TerminatingAction: String, CaseIterable, Hashable, Sendable { case reap, sendToBackground, openInTerminal, restart, logout, capEviction }
     public enum Event: Hashable, Sendable {
         case opened, userSent, handshakeClean, handshakeFoundHolder, dormantTimerFired, holderAppeared
-        case terminateReturnedNil, exitedNonZero(code: Int32), seventhSpawnNeeded, adopt, sendToBackground, openInTerminal
+        case terminateReturnedNil(during: TerminatingAction), exitedNonZero, seventhSpawnNeeded, adopt, sendToBackground, openInTerminal
         case paneExitedAndRecordGone, recordDisappeared, sendRefused, handoffTimedOut, desiredObservedDisagree, holdersSettled
     }
-    public struct Transition: Hashable, Sendable {
-        public let row: Row; public let from: Set<StateName>; public let event: Event; public let to: Set<StateName>
-        public init(row: Row, from: Set<StateName>, event: Event, to: Set<StateName>) { self.row = row; self.from = from; self.event = event; self.to = to }
-    }
-    /// The names the table speaks in; `ChannelState.name` maps a state to one of these.
+    /// The names the table speaks in; `ChannelState.name` maps a state to one of these. No wildcard: every scenario is concrete.
     public enum StateName: String, Hashable, Sendable {
-        case archivedRecent, archivedOlder, connecting, ready, dormant, wedged, backgroundJob, foreignUsersTerminal, foreignOwnTab, contended, any
+        case archivedRecent, archivedOlder, connecting, ready, dormant, wedged, backgroundJob, foreignUsersTerminal, foreignOwnTab, contended
     }
-    public static let rows: [Transition] = [
-        .init(row: .archivedRecentOpened, from: [.archivedRecent], event: .opened, to: [.connecting]),
-        .init(row: .archivedOlderOpened, from: [.archivedOlder], event: .opened, to: [.archivedOlder]),
-        .init(row: .archivedOlderSent, from: [.archivedOlder], event: .userSent, to: [.connecting]),
-        .init(row: .connectingClean, from: [.connecting], event: .handshakeClean, to: [.ready]),
-        .init(row: .connectingFoundHolder, from: [.connecting], event: .handshakeFoundHolder, to: [.foreignUsersTerminal]),
-        .init(row: .readyDormantEligible, from: [.ready], event: .dormantTimerFired, to: [.dormant]),
-        .init(row: .dormantSent, from: [.dormant], event: .userSent, to: [.ready]),
-        .init(row: .dormantHolderAppeared, from: [.dormant], event: .holderAppeared, to: [.foreignUsersTerminal, .backgroundJob]),
-        .init(row: .terminateExhausted, from: [.connecting, .ready, .dormant], event: .terminateReturnedNil, to: [.wedged]),
-        .init(row: .exitedNonZero, from: [.connecting, .ready, .dormant], event: .exitedNonZero(code: -1), to: [.ready, .archivedOlder]),
-        .init(row: .capReached, from: [.ready], event: .seventhSpawnNeeded, to: [.dormant]),
-        .init(row: .jobAdopt, from: [.backgroundJob], event: .adopt, to: [.connecting]),
-        .init(row: .ownedSendToBackground, from: [.ready, .dormant], event: .sendToBackground, to: [.backgroundJob]),
-        .init(row: .ownedOpenInTerminal, from: [.ready, .dormant], event: .openInTerminal, to: [.foreignOwnTab]),
-        .init(row: .ownTabExited, from: [.foreignOwnTab], event: .paneExitedAndRecordGone, to: [.connecting]),
-        .init(row: .foreignRecordGone, from: [.foreignUsersTerminal], event: .recordDisappeared, to: [.archivedRecent]),
-        .init(row: .foreignSendRefused, from: [.foreignUsersTerminal], event: .sendRefused, to: [.foreignUsersTerminal]),
-        .init(row: .handoffTimedOutOrDisagree, from: [.any], event: .handoffTimedOut, to: [.contended]),
-        .init(row: .contendedSettled, from: [.contended], event: .holdersSettled, to: [.archivedRecent, .ready, .dormant, .foreignUsersTerminal, .backgroundJob]),
+    public struct Transition: Hashable, Sendable {
+        public let row: Row; public let from: StateName; public let event: Event; public let to: StateName
+        public init(_ row: Row, _ from: StateName, _ event: Event, _ to: StateName) { self.row = row; self.from = from; self.event = event; self.to = to }
+    }
+    public static let scenarios: [Transition] = [
+        .init(.archivedRecentOpened, .archivedRecent, .opened, .connecting),
+        .init(.archivedOlderOpened, .archivedOlder, .opened, .archivedOlder),
+        .init(.archivedOlderSent, .archivedOlder, .userSent, .connecting),
+        .init(.connectingClean, .connecting, .handshakeClean, .ready),
+        .init(.connectingFoundHolder, .connecting, .handshakeFoundHolder, .foreignUsersTerminal),   // a foreign holder: yield, released notice
+        .init(.connectingFoundHolder, .connecting, .handshakeFoundHolder, .contended),              // one of our own pids: yield, contended
+        .init(.readyDormantEligible, .ready, .dormantTimerFired, .dormant),
+        .init(.dormantSent, .dormant, .userSent, .connecting),
+        .init(.dormantHolderAppeared, .dormant, .holderAppeared, .foreignUsersTerminal),
+        .init(.dormantHolderAppeared, .dormant, .holderAppeared, .backgroundJob),
+    ] + TerminatingAction.allCases.flatMap { action in
+        // A dormant channel holds no process; the actions that terminate run from ready (all six) or connecting (a restart or logout can catch a handshake).
+        [Transition(.terminateExhausted, .ready, .terminateReturnedNil(during: action), .wedged)]
+        + (action == .restart || action == .logout ? [Transition(.terminateExhausted, .connecting, .terminateReturnedNil(during: action), .wedged)] : [])
+    } + [
+        .init(.exitedNonZero, .ready, .exitedNonZero, .connecting),          // crash after ready: respawn with backoff
+        .init(.exitedNonZero, .connecting, .exitedNonZero, .connecting),     // crash during the handshake: respawn with backoff
+        .init(.exitedNonZero, .ready, .exitedNonZero, .ready),               // fourth crash of a channel that had been ready: item with Reopen
+        .init(.exitedNonZero, .connecting, .exitedNonZero, .archivedOlder),  // fourth crash of a channel never ready in this series
+        .init(.capReached, .ready, .seventhSpawnNeeded, .dormant),           // the victim; a refusal is no transition (header note only)
+        .init(.capReached, .dormant, .seventhSpawnNeeded, .dormant),         // an already-dormant LRU victim: no process to reap, slot freed by release
+        .init(.jobAdopt, .backgroundJob, .adopt, .connecting),
+        .init(.ownedSendToBackground, .ready, .sendToBackground, .backgroundJob),
+        .init(.ownedSendToBackground, .dormant, .sendToBackground, .backgroundJob),
+        .init(.ownedOpenInTerminal, .ready, .openInTerminal, .foreignOwnTab),
+        .init(.ownedOpenInTerminal, .dormant, .openInTerminal, .foreignOwnTab),
+        .init(.ownTabExited, .foreignOwnTab, .paneExitedAndRecordGone, .connecting),
+        .init(.foreignRecordGone, .foreignUsersTerminal, .recordDisappeared, .archivedRecent),
+        .init(.foreignSendRefused, .foreignUsersTerminal, .sendRefused, .foreignUsersTerminal),
+        .init(.handoffTimedOut, .backgroundJob, .handoffTimedOut, .contended),        // adopt: the job did not leave
+        .init(.handoffTimedOut, .ready, .handoffTimedOut, .contended),                // send to background / open in terminal: our record did not leave
+        .init(.handoffTimedOut, .dormant, .handoffTimedOut, .contended),
+        .init(.handoffTimedOut, .foreignOwnTab, .handoffTimedOut, .contended),        // pane exit: the tab's record did not leave
+        .init(.desiredObservedDisagree, .connecting, .desiredObservedDisagree, .contended),
+        .init(.desiredObservedDisagree, .ready, .desiredObservedDisagree, .contended),
+        .init(.desiredObservedDisagree, .dormant, .desiredObservedDisagree, .contended),
+        .init(.contendedSettled, .contended, .holdersSettled, .archivedRecent),
+        .init(.contendedSettled, .contended, .holdersSettled, .ready),
+        .init(.contendedSettled, .contended, .holdersSettled, .dormant),
+        .init(.contendedSettled, .contended, .holdersSettled, .foreignUsersTerminal),
+        .init(.contendedSettled, .contended, .holdersSettled, .backgroundJob),
     ]
-    /// The exit event's code is not part of the row's identity; the table stores a placeholder and matching ignores the payload.
-    public static func transition(for event: Event, from state: StateName) -> Transition? {
-        rows.first { t in (t.from.contains(state) || t.from.contains(.any)) && sameKind(t.event, event) }
-    }
-    static func sameKind(_ a: Event, _ b: Event) -> Bool {
-        switch (a, b) { case (.exitedNonZero, .exitedNonZero): return true; default: return a == b }
+    /// Every candidate for a from-state and event; the supervisor picks the one whose `to` is the outcome it resolved
+    /// and records it, and an empty answer is `.transitionNotInTable`.
+    public static func transitions(for event: Event, from state: StateName) -> [Transition] {
+        scenarios.filter { $0.from == state && $0.event == event }
     }
 }
 ```
@@ -474,14 +588,17 @@ import Foundation
 
 /// C3's registry-mirror entry, as much of X4 as eligibility reads. C3's real type conforms in Task 11; until then
 /// `MirrorEntryStandIn` does. Reading a protocol, not a concrete type, is what makes G2 a swap rather than a rewrite.
+/// `isArmed` and `isRunning` are separate facts: an armed task has been announced and not started; a running one has
+/// started or updated and not yet been notified complete.
 public protocol TaskMirrorReading: Sendable {
     var taskID: String { get }
-    var isRunning: Bool { get }          // started or updated and not yet notified complete
+    var isRunning: Bool { get }
+    var isArmed: Bool { get }
     var isBackground: Bool { get }
 }
 public struct MirrorEntryStandIn: TaskMirrorReading, Hashable, Sendable {
-    public var taskID: String; public var isRunning: Bool; public var isBackground: Bool
-    public init(taskID: String, isRunning: Bool, isBackground: Bool) { self.taskID = taskID; self.isRunning = isRunning; self.isBackground = isBackground }
+    public var taskID: String; public var isRunning: Bool; public var isArmed: Bool; public var isBackground: Bool
+    public init(taskID: String, isRunning: Bool, isArmed: Bool = false, isBackground: Bool) { self.taskID = taskID; self.isRunning = isRunning; self.isArmed = isArmed; self.isBackground = isBackground }
 }
 
 public enum DormantEligibility {
@@ -493,16 +610,21 @@ public enum DormantEligibility {
             self.lastTaskFrameAge = lastTaskFrameAge; self.heartbeatInterval = heartbeatInterval; self.wedged = wedged
         }
     }
-    public enum Blocker: Hashable, Sendable { case wedged, turnRunning, pendingDecision, queuedInput, taskRunning(String), taskStateUncertain }
+    public enum Blocker: Hashable, Sendable { case wedged, turnRunning, pendingDecision, queuedInput, taskRunning(String), taskArmed(String), taskStateUncertain(String) }
     public enum Verdict: Hashable, Sendable { case eligible, blocked(Blocker); public var isEligible: Bool { self == .eligible } }
     /// The parent's five conditions plus the wedged exclusion (ruling of 2026-09-05), in this order; the first blocker wins.
+    /// Uncertainty is a property of a *running* task whose last frame is older than its heartbeat: the mirror may have
+    /// missed the completion. With nothing running or armed, an old frame is history and blocks nothing.
     public static func evaluate(_ i: Input) -> Verdict {
         if i.wedged { return .blocked(.wedged) }
         if i.turnRunning { return .blocked(.turnRunning) }
         if i.pendingDecisions > 0 { return .blocked(.pendingDecision) }
         if i.queuedInput > 0 { return .blocked(.queuedInput) }
-        if let running = i.mirror.first(where: { $0.isRunning }) { return .blocked(.taskRunning(running.taskID)) }
-        if let age = i.lastTaskFrameAge, age > i.heartbeatInterval { return .blocked(.taskStateUncertain) }
+        if let running = i.mirror.first(where: { $0.isRunning }) {
+            if let age = i.lastTaskFrameAge, age > i.heartbeatInterval { return .blocked(.taskStateUncertain(running.taskID)) }
+            return .blocked(.taskRunning(running.taskID))
+        }
+        if let armed = i.mirror.first(where: { $0.isArmed }) { return .blocked(.taskArmed(armed.taskID)) }
         return .eligible
     }
 }
@@ -513,7 +635,7 @@ public enum DormantEligibility {
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `swift test --package-path FleetKit 2>&1 | grep -E "Executed|error:"`
-Expected: `Executed 18 tests, with 0 failures`.
+Expected: `Executed 22 tests, with 0 failures` (8 from Task 1 plus 14 here).
 
 - [ ] **Step 6: Commit**
 
@@ -697,7 +819,7 @@ Reconciliation in `FileHolderReader.read`: build holders from the registry (live
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `swift test --package-path FleetKit 2>&1 | grep -E "Executed|error:"`
-Expected: `Executed 36 tests, with 0 failures` (18 from before plus 18 here; adjust the number to the count actually written and quote it in the commit body).
+Expected: `Executed 40 tests, with 0 failures` (22 from before plus 18 here; adjust the number to the count actually written and quote it in the commit body).
 
 - [ ] **Step 7: Commit**
 
@@ -768,39 +890,56 @@ import AfleetCore
 import ClaudeWire
 @testable import FleetSessions
 
-/// One test per parent §7.4 row. `coverage` maps every row to the method that proves it; `testCoverageIsTotal`
-/// asserts set equality over the rows and that each named method exists, so a row without a test fails the build.
+/// One test per parent §7.4 row, and one declared scenario set per test. `coverage` maps every test method to the
+/// `(row, from, event, to)` scenarios it drives; each test ends with `rig.assertObserved(Self.coverage[#function]!)`,
+/// which compares the transitions the supervisor recorded on the diagnostics sink with the declared set (extra
+/// transitions fail too). `testCoverageIsTotal` asserts that the union of the declared sets equals
+/// `LifecycleTable.scenarios`, so a row, a from-state or an outcome added to the table without a test that drives it
+/// fails the build.
 final class LifecycleRowTests: XCTestCase {
-    static let coverage: [LifecycleTable.Row: String] = [
-        .archivedRecentOpened: "testArchivedRecentOpenedSpawnsEagerly",
-        .archivedOlderOpened: "testArchivedOlderOpenedRendersHistoryOnly",
-        .archivedOlderSent: "testArchivedOlderSentSpawnsThenSends",
-        .connectingClean: "testConnectingBecomesReadyWhenThePostHandshakeCheckIsClean",
-        .connectingFoundHolder: "testConnectingYieldsWhenThePostHandshakeCheckFindsAHolder",
-        .readyDormantEligible: "testReadyReapsAfterThirtyMinutesEligibleAndNotWhileATaskRuns",
-        .dormantSent: "testDormantSendResumesUnderTheSameSessionID",
-        .dormantHolderAppeared: "testDormantBecomesForeignOrJobWhenAHolderAppears",
-        .exitedNonZero: "testNonZeroExitRespawnsWithBackoffThenOffersReopen",
-        // Task 5 adds: terminateExhausted, capReached, jobAdopt, ownedSendToBackground, ownedOpenInTerminal, ownTabExited,
-        //              foreignRecordGone, foreignSendRefused, handoffTimedOutOrDisagree, contendedSettled
+    typealias T = LifecycleTable.Transition
+    static let coverage: [String: Set<T>] = [
+        "testArchivedRecentOpenedSpawnsEagerly": [T(.archivedRecentOpened, .archivedRecent, .opened, .connecting), T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        "testArchivedOlderOpenedRendersHistoryOnly": [T(.archivedOlderOpened, .archivedOlder, .opened, .archivedOlder)],
+        "testArchivedOlderSentSpawnsThenSends": [T(.archivedOlderSent, .archivedOlder, .userSent, .connecting), T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        "testConnectingBecomesReadyWhenThePostHandshakeCheckIsClean": [T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        "testConnectingYieldsWhenThePostHandshakeCheckFindsAForeignHolder": [T(.connectingFoundHolder, .connecting, .handshakeFoundHolder, .foreignUsersTerminal)],
+        "testTwoOwnProcessesOnOneSessionRefuseBeforeSpawnAndYieldAfterHandshake": [T(.connectingFoundHolder, .connecting, .handshakeFoundHolder, .contended)],
+        "testReadyReapsAfterThirtyMinutesEligibleAndNotWhileATaskRuns": [T(.readyDormantEligible, .ready, .dormantTimerFired, .dormant)],
+        "testDormantSendResumesUnderTheSameSessionID": [T(.dormantSent, .dormant, .userSent, .connecting), T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        "testDormantBecomesForeignOrJobWhenAHolderAppears": [T(.dormantHolderAppeared, .dormant, .holderAppeared, .foreignUsersTerminal), T(.dormantHolderAppeared, .dormant, .holderAppeared, .backgroundJob)],
+        "testNonZeroExitRespawnsWithBackoffThenOffersReopen": [
+            T(.exitedNonZero, .ready, .exitedNonZero, .connecting), T(.exitedNonZero, .connecting, .exitedNonZero, .connecting),
+            T(.exitedNonZero, .ready, .exitedNonZero, .ready), T(.exitedNonZero, .connecting, .exitedNonZero, .archivedOlder),
+            T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        // Task 5 adds: terminateExhausted for reap, sendToBackground, openInTerminal and capEviction; capReached (both);
+        // jobAdopt; ownedSendToBackground (both); ownedOpenInTerminal (both); ownTabExited; foreignRecordGone;
+        // foreignSendRefused; handoffTimedOut (four); desiredObservedDisagree (three); contendedSettled (five).
+        // Task 6 adds terminateExhausted during restart (two); Task 8 adds terminateExhausted during logout (two).
     ]
     func testCoverageIsTotal() {
-        XCTAssertEqual(Set(Self.coverage.keys), Set(LifecycleTable.Row.allCases), "rows without a test")
-        for (row, name) in Self.coverage {
-            XCTAssertTrue(LifecycleRowTests.instancesRespond(to: Selector(name)), "\(row) names a test that does not exist: \(name)")
+        let declared = Self.coverage.values.reduce(into: Set<T>()) { $0.formUnion($1) }
+        let table = Set(LifecycleTable.scenarios)
+        XCTAssertEqual(table.subtracting(declared), [], "scenarios in the table no test drives")
+        XCTAssertEqual(declared.subtracting(table), [], "declared scenarios the table does not contain")
+        for name in Self.coverage.keys {
+            XCTAssertTrue(LifecycleRowTests.instancesRespond(to: Selector(name)), "coverage names a test that does not exist: \(name)")
         }
-        // Deliberate break: remove one entry from `coverage` -> the first assertion names the row.
+        // Deliberate break: remove one scenario from a declared set -> the first assertion names it by (row, from, event, to).
     }
-    // Until Task 5 lands, `testCoverageIsTotal` is expected red and the task's commit message says so; Task 5 turns it green.
+    // `testCoverageIsTotal` is red from this task until Task 8 lands the last terminating action; each commit message names
+    // the scenarios still open. Tasks 5, 6 and 8 add their test methods (Task 5 here, Tasks 6 and 8 in extension files) and
+    // add their entries to this literal; nothing is registered at runtime.
 }
 ```
 
-The harness (`struct Rig`) each row test builds: a `ScratchConfigHome`, `ScriptedHolderFiles`, a `TestClock`, a `RecordingHolderReader` over a `FileHolderReader(verbs: CLIVerbs(runner: ScriptedProcessRunner(...)))`, a `FleetObserver`, a `ProcessFactory` that builds a real `ClaudeProcess` from `FakeClaudeLaunch` (default fixture `resume-no-replay`, session `.resume(fixtureSessionID, fork: false)`), and the `ChannelSupervisor` for `ChannelKey(configHome: scratch.url, session: fixtureSessionID)` with `recentActivityCutoff` satisfied or not per test (a `Bool` the rig passes: whether the channel counts as recent, since C3's index is not here). The behaviours each row test asserts:
+The harness (`struct Rig`) each row test builds: a `ScratchConfigHome`, `ScriptedHolderFiles`, a `TestClock`, a `RecordingHolderReader` over a `FileHolderReader(verbs: CLIVerbs(runner: ScriptedProcessRunner(...)))`, a `FleetObserver`, a `ProcessFactory` that builds a real `ClaudeProcess` from `FakeClaudeLaunch` (default fixture `resume-no-replay`, session `.resume(fixtureSessionID, fork: false)`), and the `ChannelSupervisor` for `ChannelKey(configHome: scratch.url, session: fixtureSessionID)` with `recentActivityCutoff` satisfied or not per test (a `Bool` the rig passes: whether the channel counts as recent, since C3's index is not here); a `RecordingDiagnostics` sink whose `transitions` are the `(row, from, event, to)` tuples the supervisor recorded, with `assertObserved(_ expected: Set<T>)` comparing them as a set (an unexpected extra transition fails as surely as a missing one); and `rig.useScriptedHandle(terminateReturns: nil)`, which swaps the factory for one that returns a `ScriptedProcessHandle` replaying the same fixture but refusing to die. The behaviours each row test asserts:
 
 - `archivedRecentOpened`: `open()` → the reader recorded `beforeSpawn`; a process was spawned (factory called once); state `.owned(.connecting)` then `.owned(.ready)`. Deliberate break: skip the pre-spawn check → the reader's labels lack `beforeSpawn`.
 - `archivedOlderOpened`: `open()` on a non-recent channel → factory never called; state `.archived`.
 - `archivedOlderSent`: `send("hi")` on a non-recent channel → spawn, then the send goes after `.ready` (the fixture `plain-two-turn` replays a turn; assert a `.frame(.user)` or the `result` frame was observed after the handshake and that the `send` returned a uuid).
-- `connectingClean`: after the handshake, the reader recorded `afterHandshake` and the state is `.owned(.ready)`. Deliberate break: skip the post-handshake read → labels lack it.
+- `connectingClean`: after the handshake, the reader recorded `afterHandshake` with `ownPID == childPID` and the state is `.owned(.ready)`. Deliberate break: skip the post-handshake read → labels lack it.
+- `testTwoOwnProcessesOnOneSessionRefuseBeforeSpawnAndYieldAfterHandshake` (row `connectingFoundHolder`, the own-pid scenario): two supervisors in one rig on one session id and one config home. First half: A is ready; B's `open()` → B's `beforeSpawn` sees A's pid (ours, `entrypoint: "sdk-cli"`) → no spawn (factory called once in total), B is `.owned(.contended)` with `banner == .contended(set)` naming A's pid; A untouched. Second half (the race): the recording reader's `onLabel("beforeSpawn")` hook hides A's record from B's pre-check once, so B spawns; B's `afterHandshake(session:, ownPID: B's child, epoch:)` sees A's pid, which is not the pid it excludes → B's process is terminated, B is `.owned(.contended)`; A's process is alive and A's state unchanged (assert A's `updates` published nothing). Deliberate break: exclude every own pid in `afterHandshake` → B keeps the session and two of our processes own one transcript.
 - `connectingFoundHolder`: the scripted files gain a foreign registry record for the session (test pid, `entrypoint: "cli"`) *between* `beforeSpawn` and `afterHandshake` (the recording reader exposes a hook `onLabel("beforeSpawn") { files.writeRegistry(...) }`); the supervisor terminates its own process (an `.exited` event arrives), state becomes `.foreignLive(.usersTerminal)` with `banner == .releasedToTerminal` and `desired == .owned`. Deliberate break: ignore the post-handshake result → state stays ready and the process is still running (assert `childProcessIdentifier` is dead via `kill(pid, 0) != 0`).
 - `readyDormantEligible`: ready channel, eligible; advance the clock 29 min → still ready; 1 more min → `terminate()` ran and the state is `.owned(.dormant)`; second half: with the eligibility input carrying a running `MirrorEntryStandIn`, advance 30 min → still ready and no `terminate`. Deliberate break: do not reset/check eligibility at the timer → the second half reaps.
 - `dormantSent`: from dormant, `send("hi")` → `beforeSpawn` recorded, a new process with the *next* epoch, same session id (`.resume(sameID)` in the launch the factory received), state passes through `.connecting` once and the send is delivered after the handshake. Deliberate break: reuse the old epoch → the epoch assertion fails.
@@ -839,31 +978,31 @@ extension ClaudeProcess: ProcessHandle {}
 public typealias ProcessFactory = @Sendable (ProcessEpoch, LaunchConfiguration) -> any ProcessHandle
 ```
 
-`Ownership/OwnershipCheck.swift`: `struct OwnershipCheck` with `beforeSpawn(session:) async -> [Holder]` (calls `observer.reconcileNow(label: "beforeSpawn")` and returns `foreign` holders naming the session), `afterHandshake(session:, ownPID:) async -> [Holder]` (label `afterHandshake`; validates each holder through `ProcessLiveness` again), `awaitRelease(previous: Holder, upTo: Duration) async -> ReleaseOutcome` (`.released` when the pid is dead *and* its registry or roster record is gone, polling the reader every 500 ms on the clock; `.timedOut` after `upTo`).
+`Ownership/OwnershipCheck.swift`: `struct OwnershipCheck` with `beforeSpawn(session:) async -> [Holder]` (calls `observer.reconcileNow(label: "beforeSpawn")` and returns **every** live holder naming the session, foreign or ours: before a spawn the supervisor holds no process, so there is no pid to excuse; a holder that is one of our own children, from a second supervisor or an older epoch, is returned too and the caller treats it as Contended rather than foreign live), `afterHandshake(session:, ownPID: Int32, epoch: ProcessEpoch) async -> [Holder]` (label `afterHandshake`; validates each holder through `ProcessLiveness` again and excludes exactly one pid, `ownPID`, the child this spawn started; every other pid, foreign or ours, is returned), `awaitRelease(previous: Holder, upTo: Duration) async -> ReleaseOutcome` (`.released` when the pid is dead *and* its registry or roster record is gone, polling the reader every 500 ms on the clock; `.timedOut` after `upTo`). `Holder.isOwnChild` stays informational for the sidebar; neither check reads it to excuse a holder.
 
 `Lifecycle/ChannelSupervisor.swift` — decisions:
 
 - `public actor ChannelSupervisor` with `init(key:, launchTemplate: LaunchConfiguration, factory: ProcessFactory, ownership: OwnershipCheck, observer: FleetObserver, clock: any Clock<Duration>, eligibilityInputs: @Sendable () async -> DormantEligibility.Input, fleet: FleetCapCounter, diagnostics: any FleetDiagnosticsSink, isRecent: Bool)`.
 - State: `state: ChannelState`, `epoch: ProcessEpoch` (starts `.first`, `.next()` on every spawn), `process: (any ProcessHandle)?`, `activitySequence: UInt64` (the LRU key; incremented on every send, frame and decision), `turnRunning`, `pendingDecisions: Set<RequestID>`, `queuedInput: [UserInput]`, `pendingHatch: PaneRequest?`, `crashCount`, `dormantTimer: Task<Void, Never>?`.
-- `updates: AsyncStream<ChannelState>` publishes after every transition; every transition goes through `apply(row:to:)`, which asserts `LifecycleTable.transition(for:from:)` exists for the current `StateName` and records `.transition(row, fromName, toName)` on the diagnostics; a missing row records `.transitionNotInTable(event, fromName)` and does nothing else.
-- `spawn(reason:)`: `ownership.beforeSpawn`; any holder → `apply(.connectingFoundHolder...)` is *not* used here — a pre-spawn holder means no spawn and the origin becomes foreign or job by `OriginResolver`; otherwise `epoch = epoch.next()`, `process = factory(epoch, launch)`, start the event pump task (`for await ev in process.events`, discarding events whose epoch is older than `epoch`), `spawn(handshakeTimeout: 30 s)`, then `ownership.afterHandshake`; a holder → `terminate()` own process, `apply(.connectingFoundHolder)` with `banner = .releasedToTerminal`; clean → `apply(.connectingClean)` and `armDormantTimer()`.
+- `updates: AsyncStream<ChannelState>` publishes after every transition; every transition goes through `apply(_ event: Event, to: StateName)`, which looks up `LifecycleTable.transitions(for: event, from: currentName)`, picks the candidate whose `to` matches, records `.transition(row, from, event, to)` on the diagnostics and mutates the state; no candidate records `.transitionNotInTable(event, fromName, toName)` and does nothing else.
+- `spawn(reason:)`: `fleet.acquire(for: key)` first: `.refused(live:)` → `throw LifecycleError.capReached`; `.evict(victim, reservation)` → Task 5's eviction with its reported outcome; `.granted(reservation)` → continue. Then `ownership.beforeSpawn`; any holder → `fleet.rollback(reservation)`, no spawn, and the origin becomes foreign, job or contended (a holder that is ours) by `OriginResolver`; otherwise `epoch = epoch.next()`, `process = factory(epoch, launch)`, start the event pump task (`for await ev in process.events`, discarding events whose epoch is older than `epoch`), `spawn(handshakeTimeout: 30 s)`, then `ownership.afterHandshake(session:, ownPID: await process.childProcessIdentifier, epoch:)`; a holder → `terminateOrWedge()`, `fleet.rollback(reservation)`, `apply(.handshakeFoundHolder, to: .foreignUsersTerminal)` with `banner = .releasedToTerminal` for a foreign holder or `apply(.handshakeFoundHolder, to: .contended)` with `banner = .contended(set)` for one of ours; clean → `fleet.confirm(reservation)`, `apply(.handshakeClean, to: .ready)` and `armDormantTimer()`.
 - The event pump: `.frame(.result)` → `turnRunning = false`, `armDormantTimer()`; `.frame(.user)` from a send → `turnRunning = true`; `.request` → insert into `pendingDecisions`; `.requestCancelled`/answered → remove; `.frame(.system(.initialize))` → `apiKeySource` and `mcpServers` recorded; `.sessionIdentityResolved(id)` → re-key (Task 6); `.exited(status, epoch)` → `handleExit`.
 - `armDormantTimer()`: cancel the previous; `Task { try? await clock.sleep(for: .seconds(1800)); await self.dormantTimerFired() }`; `dormantTimerFired()` evaluates `DormantEligibility.evaluate(await eligibilityInputs())` merged with the supervisor's own counts; eligible → `reap()`; blocked → re-arm.
-- `reap()`: `terminate()`; `nil` → `apply(.terminateExhausted)` (Task 5 fills the wedged handling; here record it); an exit → `apply(.readyDormantEligible)`, `process = nil`, `fleet.release(key)`.
+- `terminateOrWedge(during action: TerminatingAction) async -> TerminateOutcome` (`.exited(ExitStatus)` or `.wedged(EscalationTrace)`) is the only call site of `process.terminate()`: a `nil` applies `.terminateReturnedNil(during: action)` to `.wedged`, records the trace, and every caller returns at once on `.wedged` without running what would have followed an exit. `reap()`: `terminateOrWedge(during: .reap)`; `.wedged` → stop (Task 5 fills the wedged state); `.exited` → `apply(.dormantTimerFired, to: .dormant)`, `process = nil`, `fleet.release(key)`.
 - `send(_ input)`: dormant → `apply(.dormantSent)` path: spawn (pre-check) and queue the input until `.ready`, then `process.send`; foreign → `throw LifecycleError.heldElsewhere` (Task 5's row); ready → send; archived older → spawn then send.
 - `handleExit(status)`: clean exit after our own `terminate()` → nothing more; non-zero or signal while not terminating → `crashCount += 1`; if `crashCount <= 3` → sleep `[1, 2, 4][crashCount-1]` seconds on the clock, `spawn(reason: .respawn)`; else `state.systemItem = .crashed(exit:, reopenOffered: true)` and `apply(.exitedNonZero)` to ready-with-item or archived (archived when the channel was never ready in this epoch series).
-- `fleet: FleetCapCounter` is a small actor (`acquire(key, lruKey:) -> CapDecision {.granted, .evict(ChannelKey), .refused(live:)}`, `release(key)`, `noteActivity(key, sequence)`) shared by all supervisors; Task 5 implements the eviction path, Task 4 the counter.
+- `fleet: FleetCapCounter` is a small actor shared by all supervisors whose slots are reservations: `acquire(for: ChannelKey) -> CapDecision {.granted(Reservation), .evict(victim: ChannelKey, Reservation), .refused(live: Int)}` decides in one actor turn from `live + reserved + wedged`; `confirm(Reservation)` turns a reservation into a live slot after a clean handshake; `rollback(Reservation)` drops it on any failure between acquire and confirm; `evictionOutcome(_ r: Reservation, _ outcome: EvictionOutcome {.evicted, .victimWedged, .victimBecameIneligible}) -> CapDecision` is how the evicting supervisor reports what it observed and learns whether it may proceed (Task 5); `release(key)`, `noteActivity(key, sequence)`, `markWedged(key)`, `clearWedged(key)`. Task 4 implements the counter with reservations; Task 5 the eviction path.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `swift test --package-path FleetKit --filter LifecycleRowTests 2>&1 | grep -E "Executed|error:|failed"`
-Expected: 9 row tests pass and `testCoverageIsTotal` fails naming the ten rows Task 5 owns. Run the whole package: every other test passes.
+Expected: 10 row tests pass and `testCoverageIsTotal` fails naming the scenarios Tasks 5, 6 and 8 own. Run the whole package: every other test passes.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add FleetKit
-git commit -m "FleetSessions: ChannelSupervisor core, ownership checks, the first nine lifecycle rows (coverage test red until the handoff rows land)"
+git commit -m "FleetSessions: ChannelSupervisor core, ownership checks with no excused holder, the first ten lifecycle scenarios (coverage red until the handoff rows land)"
 ```
 
 ---
@@ -878,21 +1017,27 @@ git commit -m "FleetSessions: ChannelSupervisor core, ownership checks, the firs
 
 **Interfaces:**
 - Consumes: Task 4's supervisor and check; Task 3's `CLIVerbs`, `ScriptedProcessRunner`, `ScriptedHolderFiles`; Task 2's `PaneRequest`, `PaneExit`, `PanePurpose`.
-- Produces: `adopt()`, `sendToBackground()`, `openInTerminal() -> PaneRequest`, `attach(job:)`, `logs(job:)`, `paneExited(_:)`, `reopen()`, Contended handling, the wedged state, `FleetCapCounter.evictIfNeeded`; the coverage test turns green.
+- Produces: `adopt()`, `sendToBackground()`, `openInTerminal() -> PaneRequest`, `attach(job:)`, `logs(job:)`, `paneExited(_:)`, `reopen()`, Contended handling, the wedged state, the reservation-based eviction path; the coverage test is red on exactly the restart and logout fault scenarios afterwards.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add the ten entries to `coverage` and these tests:
+Add the entries to `coverage` (every scenario but the four `terminateExhausted` ones during `.restart` and `.logout`) and these tests:
 
-- `testTerminateReturningNilMarksTheChannelWedgedAndReopenWaitsForNoHolder` (row `terminateExhausted`): the factory returns a `ScriptedProcessHandle` whose `terminate()` returns `nil`; from ready, `reap()` → state `.owned(.dormant)` with `wedged == EscalationTrace(steps: [...], pid:, epoch:)`, `liveCount` still counts it, `DormantEligibility` for the channel reports `.blocked(.wedged)`, and a later `send` does *not* spawn; `reopen()` with a foreign holder present spawns nothing; `reopen()` with none spawns and clears `wedged`. Stated in the test's doc comment: this row runs against a scripted handle because SIGKILL cannot be refused. Deliberate break: treat `nil` as an exit → the channel respawns on `send`.
-- `testCapEvictsTheLeastRecentlyUsedEligibleChannelAndRefusesWhenNoneIsEligible` (row `capReached`): six supervisors ready (six `resume-no-replay` replays), activity sequences set so channel 3 is least recent; a seventh `open()` → channel 3 is reaped (its `terminate` observed) and the seventh spawns; then make all six ineligible (each with a pending `MirrorEntryStandIn` running) and open an eighth → `LifecycleError.capReached(live: 6)`, no `terminate` on any, every state's `liveCount == 6` and `headerNote == .capReached(live: 6)`. Also: a wedged channel among the six is never the eviction pick even when least recent. Deliberate break: pick by recency without the eligibility filter → the ineligible half evicts.
+- `testTerminateReturningNilMarksTheChannelWedgedAndReopenWaitsForNoHolder` (row `terminateExhausted`, `during: .reap`): `rig.useScriptedHandle(terminateReturns: nil)`; from ready, `reap()` → state `.owned(.dormant)` with `wedged == EscalationTrace(steps: [...], pid:, epoch:)`, `liveCount` still counts it, `DormantEligibility` for the channel reports `.blocked(.wedged)`, and a later `send` does *not* spawn; `reopen()` with a foreign holder present spawns nothing; `reopen()` with none spawns and clears `wedged`. Stated in the test's doc comment: this row runs against a scripted handle because SIGKILL cannot be refused. Deliberate break: treat `nil` as an exit → the channel respawns on `send`.
+- `testTerminateReturningNilDuringSendToBackgroundRunsNoVerb` (`during: .sendToBackground`): ready on the scripted handle; `sendToBackground()` throws `LifecycleError.wedged(trace)`; the runner recorded no `--bg --resume`; `FleetKitKeys.ownJobShorts` unchanged; state wedged. Deliberate break: run the verb before checking the outcome → the runner shows `--bg`.
+- `testTerminateReturningNilDuringOpenInTerminalReturnsNoPaneRequest` (`during: .openInTerminal`): `openInTerminal()` throws `LifecycleError.wedged(trace)`; no `.paneRequest` diagnostic; `pendingHatch == nil`; state wedged. Deliberate break: build the request before terminating → a request is returned for a process that is still alive.
+- `testAVictimThatWedgesMidEvictionFreesNoSlot` (`during: .capEviction`, and row `capReached`): six ready channels, the LRU victim on the scripted handle; a seventh `open()` → the victim is wedged (trace, still counted), the counter received `.victimWedged`, and the seventh either takes the next eligible victim (its `terminate` observed, the seventh spawns) or, with no other eligible channel, is refused with `capReached(live: 6)` and spawned nothing; in both cases no channel spawned against the ghost's slot (`fleet.live + fleet.wedged` never exceeds 6). Deliberate break: count a wedged victim as evicted → the seventh spawns and the fleet holds seven processes' worth of slots.
+- `testCapEvictsTheLeastRecentlyUsedEligibleChannelAndRefusesWhenNoneIsEligible` (row `capReached`): six supervisors ready (six `resume-no-replay` replays), activity sequences set so channel 3 is least recent; a seventh `open()` → channel 3 is reaped (its `terminate` observed), the counter received `.evicted`, and the seventh spawns; then make all six ineligible (each with a running `MirrorEntryStandIn`) and open an eighth → `LifecycleError.capReached(live: 6)`, no `terminate` on any, every state's `liveCount == 6` and `headerNote == .capReached(live: 6)`. Also: a wedged channel among the six is never the eviction pick even when least recent; and an already-dormant LRU channel is the victim without a reap (its slot is released, the `.capReached` dormant→dormant scenario). Deliberate break: pick by recency without the eligibility filter → the ineligible half evicts.
+- `testTwoConcurrentOpensAtTheCapTakeDistinctVictimsOrOneIsRefused` (row `capReached`): six ready channels, two of them eligible; two new supervisors call `open()` concurrently (`async let`); afterwards exactly two victims were reaped and both newcomers are ready, or one victim was reaped, one newcomer is ready and the other threw `capReached`; never one victim and two ready newcomers; `fleet.live.count <= 6` at every `capDecision` diagnostic. Deliberate break: decide from `live.count` alone without reservations → both newcomers see five live after the first eviction and both spawn.
 - `testAdoptStopsTheJobWaitsForRosterRemovalThenResumes` (row `jobAdopt`): a scripted job for the session with a roster worker; `adopt()` → the runner recorded `["stop", short]`, then the supervisor waited until the worker was gone (the scripted `stop` removes it), then `beforeSpawn` and a spawn with `.resume(id)`; state `.owned(.connecting)` → `.ready`. Deliberate break: spawn before the roster removal → the label order is wrong (`beforeSpawn` before the runner's `stop` completes).
 - `testSendToBackgroundTerminatesWaitsForRegistryRemovalThenStartsAJob` (row `ownedSendToBackground`): ready → `sendToBackground()` → own process terminated, `awaitRelease` observed the own registry record gone (the scripted files mirror our child's record: the rig writes a registry record for the fake-claude pid at spawn and removes it on exit, standing in for what the real CLI does), runner recorded `["--bg", "--resume", id]`, the new job's short returned and its `resumeSessionId == id`, state `.backgroundJob`, and the short is stored under `FleetKitKeys.ownJobShorts`. Deliberate break: skip the release wait → the verb runs while the record exists (assert order against the recorder's timestamps).
-- `testOpenInTerminalReturnsAHatchPaneRequestUnderTheSameConfigHome` (row `ownedOpenInTerminal`): ready → `openInTerminal()` → own process terminated and released; the returned `PaneRequest` has `purpose == .hatch(id)`, `arguments == ["--resume", id.description]`, `executable == binary`, `cwd == channel cwd`, and its `environment["CLAUDE_CONFIG_DIR"] == scratch root path` with no other `CLAUDE*` key except those `LaunchConfiguration.childEnvironment` sets (assert the key set equals that function's output for the same inputs); state `.foreignLive(.ownTerminalTab)`. Deliberate break: build the environment from `ProcessInfo` → the key set differs.
-- `testPaneExitReAdoptsWhenTheRecordIsGone` (row `ownTabExited`): after the hatch request, the rig writes a foreign registry record for the "terminal" (test pid), then `paneExited(PaneExit(request:, code: 0, observedAt:))`; the supervisor waits until the record is removed (the test removes it after the call), then `beforeSpawn` and a spawn; state `.owned(.connecting)`. A `PaneExit` for a request from an older epoch is ignored (recorded as `.staleExit`). Deliberate break: spawn on the exit without waiting for the record → the pre-spawn check finds the holder and the test's second expectation (spawn after removal) fails.
+- `testOpenInTerminalReturnsAHatchPaneRequestUnderTheSameConfigHome` (row `ownedOpenInTerminal`): ready → `openInTerminal()` → own process terminated and released; the returned `PaneRequest` has `purpose == .hatch(id)`, `arguments == ["--resume", id.description]`, `executable == binary`, `cwd == channel cwd`, and its `environment["CLAUDE_CONFIG_DIR"] == scratch root path` with no other `CLAUDE*` key except those `LaunchConfiguration.childEnvironment` sets (assert the key set equals that function's output for the same inputs); state `.foreignLive(.ownTerminalTab)`; after a re-adopt, a second `openInTerminal()` returns a request equal to the first in every field but `id`. Deliberate break: build the environment from `ProcessInfo` → the key set differs.
+- `testPaneExitReAdoptsWhenTheRecordIsGone` (row `ownTabExited`): after the hatch request, the rig writes a foreign registry record for the "terminal" (test pid), then `paneExited(PaneExit(request:, code: 0, observedAt:))`; the supervisor waits until the record is removed (the test removes it after the call), then `beforeSpawn` and a spawn; state `.owned(.connecting)`. Deliberate break: spawn on the exit without waiting for the record → the pre-spawn check finds the holder and the test's second expectation (spawn after removal) fails.
+- `testAStaleExitFromAnIdenticalOlderHatchIsDiscardedByID` (row `ownTabExited`): hatch once (request R1), re-adopt through a pane exit, hatch again (request R2) with every field equal to R1 but `id`; report `PaneExit(request: R2, …)` first, then `PaneExit(request: R1, …)`, and in a second run the reverse order; in both runs exactly one re-adopt happens, it is driven by R2's exit, and R1's exit is recorded as `.staleExit` whether it arrives before or after; a value-equal request with a fresh `id` never matches. Deliberate break: compare `pendingHatch == exit.request` → R1's exit matches R2's pending hatch and the channel re-adopts twice or on the wrong exit.
 - `testForeignRecordDisappearingArchivesTheChannel` (row `foreignRecordGone`): foreign live (foreign record present, no own process); remove the record; advance the poll → `.archived`.
 - `testSendOnAForeignSessionIsRefusedWithForkOffered` (row `foreignSendRefused`): `send` throws `LifecycleError.heldElsewhere(set)`; state `banner == .heldElsewhere(set)`; no spawn; `desired` unchanged. Deliberate break: spawn anyway → the factory was called.
-- `testHandoffTimeoutAndDisagreementEnterContended` (row `handoffTimedOutOrDisagree`): adopt with a scripted `stop` that never removes the worker; advance the clock 10 s → `.owned(.contended)`, `banner == .contended(set)` naming the holder's pid; second half: ready channel with `desired == .owned` and a foreign holder appearing → `.owned(.contended)` and the banner. Deliberate break: 10 s constant → the state is not contended at 10 s.
+- `testHandoffTimeoutEntersContendedFromEveryHandoff` (row `handoffTimedOut`, four scenarios): adopt with a scripted `stop` that never removes the worker, advance the clock 10 s → from `backgroundJob` to `.owned(.contended)`, `banner == .contended(set)` naming the holder's pid; send to background from ready and from dormant with our own registry record scripted to stay → contended; a pane exit whose tab record never disappears → from `foreignOwnTab` to contended. Deliberate break: 10 s constant → the state is not contended at 10 s.
+- `testDesiredOwnedWithAForeignHolderIsContendedFromEveryOwnedState` (row `desiredObservedDisagree`, three scenarios): with `desired == .owned`, a foreign holder appearing while connecting (between spawn and handshake, through the reader hook), while ready, and while dormant → `.owned(.contended)` with the banner, each recorded as the `.desiredObservedDisagree` event and not as a handoff timeout. Deliberate break: raise the disagreement only from ready → the connecting and dormant scenarios are missing from the observed set.
 - `testContendedResolvesWhenHoldersSettle` (row `contendedSettled`): from contended, remove the foreign record and advance the poll → the matching origin (`.archived` when nothing holds it; `.foreignLive` when one foreign holder remains).
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -904,25 +1049,25 @@ Expected: build errors for `adopt`, `sendToBackground`, `openInTerminal`, `paneE
 
 Decisions:
 
-- `adopt()`: requires a live job holder for the session; `verbs.stop(short)`; `ownership.awaitRelease(previous: jobHolder, upTo: 10 s)` — `.timedOut` → `apply(.handoffTimedOutOrDisagree)` with `banner = .contended`; `.released` → `spawn(reason: .adopt)`.
-- `sendToBackground()`: requires owned; `terminate()`; `awaitRelease(previous: ownHolder)` where `ownHolder` is the registry record whose pid is our child's (looked up before terminating); `verbs.backgroundResume(id, cwd)` → `JobShort`; store it in `FleetKitKeys.ownJobShorts`; `verbs.agentsJSON()` and the roster must list it, else `LifecycleError.verbFailed(verb: "--bg --resume", exitCode: 0)` with a diagnostic `.jobNotListedAfterBackground`; `apply(.ownedSendToBackground)`.
-- `openInTerminal()`: requires owned; `terminate()`; `awaitRelease`; build `PaneRequest(executable: launch.binary, arguments: ["--resume", key.session.description], cwd: launch.cwd, environment: launchTemplate.childEnvironment(over: environment, configHome: configHome), purpose: .hatch(key.session))`; `pendingHatch = request`; `apply(.ownedOpenInTerminal)`; return it. `attach(job:)`/`logs(job:)`: `PaneRequest(executable: binary, arguments: ["attach"|"logs", short.rawValue], cwd: job.cwd ?? launch.cwd, environment: same, purpose: .attach|.logs)`, no state change.
-- `paneExited(_ exit)`: only when `pendingHatch == exit.request`; otherwise record `.staleExit` and return; wait for the hatch's registry record to disappear (`awaitRelease` on the foreign holder for the session, `upTo: 10 s`; timeout → contended); then `spawn(reason: .readopt)` → `apply(.ownTabExited)`.
+- `adopt()`: requires a live job holder for the session; `verbs.stop(short)`; `ownership.awaitRelease(previous: jobHolder, upTo: 10 s)` — `.timedOut` → `apply(.handoffTimedOut, to: .contended)` with `banner = .contended`; `.released` → `spawn(reason: .adopt)`.
+- `sendToBackground()`: requires owned; `terminateOrWedge(during: .sendToBackground)` (`.wedged` → throw `LifecycleError.wedged(trace)`, nothing else runs); `awaitRelease(previous: ownHolder)` where `ownHolder` is the registry record whose pid is our child's (looked up before terminating); `verbs.backgroundResume(id, cwd)` → `JobShort`; store it in `FleetKitKeys.ownJobShorts`; `verbs.agentsJSON()` and the roster must list it, else `LifecycleError.verbFailed(verb: "--bg --resume", exitCode: 0)` with a diagnostic `.jobNotListedAfterBackground`; `apply(.ownedSendToBackground)`.
+- `openInTerminal()`: requires owned; `terminateOrWedge(during: .openInTerminal)` (`.wedged` → throw `LifecycleError.wedged(trace)`, no request); `awaitRelease`; build `PaneRequest(id: UUID(), executable: launch.binary, arguments: ["--resume", key.session.description], cwd: launch.cwd, environment: launchTemplate.childEnvironment(over: environment, configHome: configHome), purpose: .hatch(key.session))`; `pendingHatch = request`; `apply(.ownedOpenInTerminal)`; return it. `attach(job:)`/`logs(job:)`: `PaneRequest(executable: binary, arguments: ["attach"|"logs", short.rawValue], cwd: job.cwd ?? launch.cwd, environment: same, purpose: .attach|.logs)`, no state change.
+- `paneExited(_ exit)`: only when `pendingHatch?.id == exit.request.id`; otherwise record `.staleExit` and return (a value-equal request with another `id` is stale); wait for the hatch's registry record to disappear (`awaitRelease` on the foreign holder for the session, `upTo: 10 s`; timeout → contended); then `spawn(reason: .readopt)` → `apply(.ownTabExited)`.
 - Contended: `enterContended(holders)` sets `.owned(.contended)`, `banner = .contended(HolderSet)`; the observer's updates drive `resolveContended()`: zero foreign holders → `.archived` (or re-spawn when `desired == .owned` and the user acts; no automatic respawn), one holder → the matching origin; `apply(.contendedSettled)`.
-- Disagreement: on every `HolderSet` update, if `desired == .owned`, the channel is owned-ready or dormant, and a foreign holder names the session → `enterContended`.
-- Wedged: `reap()`/any `terminate()` returning `nil` → `state.wedged = EscalationTrace(steps: diagnosticsSteps, pid:, epoch:)`, `state.origin = .owned(.dormant)`, `state.systemItem = .wedged(trace, reopenOffered: true)`, `process = nil` but `fleet` keeps the count (`fleet.markWedged(key)`); `send` while wedged → `throw LifecycleError.wedged(trace)`; `reopen()` → `beforeSpawn`; holders → nothing (banner `.contended`); none → clear `wedged`, `fleet.clearWedged(key)`, spawn. The observer clears the ghost's count when its pid is dead and its record gone (`fleet.clearWedged` from the update handler).
-- Cap: `FleetCapCounter` actor holds `live: Set<ChannelKey>`, `wedged: Set<ChannelKey>`, `lru: [ChannelKey: UInt64]`, `eligibility: [ChannelKey: @Sendable () async -> Bool]`; `acquire(for key)`: if `live.count + wedged.count < 6` → `.granted`; else pick the least `lru` among `live - wedged` whose eligibility closure returns true → `.evict(that)`; none → `.refused(live: 6)`. The evicting supervisor calls the victim's `reap()` and waits for its `.owned(.dormant)` before spawning.
+- Disagreement: on every `HolderSet` update, if `desired == .owned`, the channel is owned (connecting, ready or dormant), and a foreign holder names the session → `apply(.desiredObservedDisagree, to: .contended)` then `enterContended`; this is its own event and never reported as a handoff timeout.
+- Wedged: `terminateOrWedge(during:)` is the single site; a `nil` from any of reap, send to background, open in terminal, restart (Task 6), logout (Task 8) or cap eviction → `state.wedged = EscalationTrace(steps: diagnosticsSteps, pid:, epoch:)`, `state.origin = .owned(.dormant)`, `state.systemItem = .wedged(trace, reopenOffered: true)`, `process = nil` but `fleet` keeps the count (`fleet.markWedged(key)`); `send` while wedged → `throw LifecycleError.wedged(trace)`; `reopen()` → `beforeSpawn`; holders → nothing (banner `.contended`); none → clear `wedged`, `fleet.clearWedged(key)`, spawn. The observer clears the ghost's count when its pid is dead and its record gone (`fleet.clearWedged` from the update handler).
+- Cap: `FleetCapCounter` actor holds `live: Set<ChannelKey>`, `wedged: Set<ChannelKey>`, `reserved: [Reservation: ChannelKey]`, `pendingEvictions: [Reservation: ChannelKey]`, `lru: [ChannelKey: UInt64]`, `eligibility: [ChannelKey: @Sendable () async -> Bool]`. `acquire(for key)` in one actor turn: if `live.count + reserved.count + wedged.count < 6` → `.granted(r)` with `reserved[r] = key`; else pick the least `lru` among `live - wedged - pendingEvictions.values` whose eligibility closure returns true → `.evict(victim, r)` with `pendingEvictions[r] = victim` (the victim is now spoken for, so a concurrent `acquire` cannot pick it); none → `.refused(live: 6)`. The evicting supervisor calls the victim's `evict()` (a `reap()` that returns the outcome) and reports `evictionOutcome(r, …)`: `.evicted` → the victim's slot moves to `reserved[r]` and the answer is `.granted(r)`; `.victimWedged` → the victim moves to `wedged`, nothing is freed, and the counter re-runs the pick for the next eligible victim (`.evict(next, r)`) or answers `.refused`; `.victimBecameIneligible` → the same re-pick. `confirm(r)` after a clean handshake moves the reservation into `live`; `rollback(r)` on any failure drops it and any pending eviction it held. Every decision is recorded as `.capDecision(decision:live:reserved:)`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `swift test --package-path FleetKit 2>&1 | grep -E "Executed|error:|failed"`
-Expected: `testCoverageIsTotal` green; all row tests green; quote the `Executed N tests, with 0 failures` line in the commit body.
+Expected: all row tests green; `testCoverageIsTotal` red on exactly the four `terminateExhausted` scenarios during `.restart` and `.logout` (named in the commit body); every other test green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add FleetKit
-git commit -m "FleetSessions: handoffs, the terminal hatch as a pane request, foreign and contended rows, wedged, the cap; G1 coverage total"
+git commit -m "FleetSessions: handoffs, the terminal hatch matched by id, foreign and contended rows, wedged from every action, the cap as reservations (coverage red on restart and logout faults)"
 ```
 
 ---
@@ -930,50 +1075,56 @@ git commit -m "FleetSessions: handoffs, the terminal hatch as a pane request, fo
 ### Task 6: The quiescent restart and forking
 
 **Files:**
-- Create: `FleetKit/Sources/FleetSessions/Lifecycle/RestartSnapshot.swift`
+- Create: `FleetKit/Sources/FleetSessions/Lifecycle/RuntimeState.swift` (the `SessionRuntimeState` updater: which answer or frame sets which field; `Readback`)
 - Modify: `FleetKit/Sources/FleetSessions/Lifecycle/ChannelSupervisor.swift`
-- Test: `FleetKit/Tests/FleetSessionsTests/RestartTests.swift`, `ForkTests.swift`
+- Test: `FleetKit/Tests/FleetSessionsTests/RestartTests.swift`, `ForkTests.swift`, `LifecycleRowTests+Restart.swift`
 
 **Interfaces:**
 - Consumes: Task 5's supervisor; `ClaudeWire`'s `ApplyFlagSettings`, `GetSettings`, `InitializeResponse`, `SessionIdentity`, `WireEvent.sessionIdentityResolved`.
-- Produces: `quiescentRestart(_ request: RestartRequest)`, `RestartSnapshot.take(from:)`, `Readback.verify(...) -> [String]` (the names that did not survive), `fork(at:) -> ChannelKey` (provisional), `updates` publishing the re-keyed state.
+- Produces: `SessionRuntimeState` ownership on the supervisor with `runtimeState()` read access, `RuntimeStateUpdater.apply(answer:to:)`/`apply(frame:to:)`, `quiescentRestart(_ request: RestartRequest)`, `Readback.verify(...) -> [String]` (the names that did not survive), `fork(at: ForkPoint?) -> ChannelKey` (provisional), `updates` publishing the re-keyed state.
 
 - [ ] **Step 1: Write the failing tests**
 
 `RestartTests.swift` (fixture `control-shapes` for the readbacks, `FAKE_CLAUDE_INIT` for the mismatch):
-- `testRestartCarriesRuntimeValuesAndNeverAgent`: a ready channel whose session object holds permission mode `plan`, model `opus`, effort `low`, fast mode on, output style `default`, `--add-dir` list `["/tmp/a"]`, launched with `agent: "reviewer"`; `quiescentRestart(RestartRequest(addDirectories: ["/tmp/a", "/tmp/b"]))` → the factory received a `LaunchConfiguration` with `permissionMode == .plan`, `model == "opus"`, `effort == "low"`, `addDirectories == [/tmp/a, /tmp/b]`, `agent == nil`, `session == .resume(sameID, fork: false)`, and the epoch advanced; after the handshake the process received `apply_flag_settings {settings: {fastMode: true}}` (assert on the scripted `expect` in a `FAKE_CLAUDE_SCRIPT`, which makes the replay fail with exit 3 if the request never arrives) and then `get_settings`. Deliberate break: re-pass `--agent` → `agent != nil`.
+- `testRestartCarriesRuntimeValuesAndNeverAgent`: a ready channel whose runtime state holds permission mode `plan`, model `opus`, effort `low`, fast mode on, output style `default`, `--add-dir` list `["/tmp/a"]`, launched with `agent: "reviewer"`, the values having arrived through answers (`set_permission_mode`, `set_model`, `get_settings.applied`, `fast_mode_state`), not through the launch template; `quiescentRestart(RestartRequest(addDirectories: ["/tmp/a", "/tmp/b"]))` → the factory received a `LaunchConfiguration` with `permissionMode == .plan`, `model == "opus"`, `effort == "low"`, `addDirectories == [/tmp/a, /tmp/b]`, `agent == nil`, `session == .resume(sameID, fork: false)`, and the epoch advanced; after the handshake the process received `apply_flag_settings {settings: {fastMode: true}}` (assert on the scripted `expect` in a `FAKE_CLAUDE_SCRIPT`, which makes the replay fail with exit 3 if the request never arrives) and then `get_settings`. Deliberate break: re-pass `--agent` → `agent != nil`.
 - `testRestartWaitsForDormantEligibilityAndQueuesTheChange`: with a running task in the mirror, `quiescentRestart` returns at once with `state.pendingChange == request` and no terminate; when the task ends (mirror empty) and the dormant timer fires, the restart runs. Deliberate break: restart immediately → `terminate` observed while the task runs.
 - `testAReadbackMismatchRaisesTheBannerAndKeepsConnecting`: `FAKE_CLAUDE_INIT` answering `current_permission_mode: "default"` against a snapshot of `plan` → `state.origin == .owned(.connecting)`, `banner == .settingDidNotSurvive("permissionMode")`; the user picking a value (`resolveSetting("permissionMode")`) clears it to `.ready`. Deliberate break: compare nothing → ready with no banner.
+- `testRouteChangeThenRestartCarriesTheChangedValuesEndToEnd`: open with model `sonnet` and permission mode `default`; route `/model opus` and `/permissions plan` through `CommandRouter` and the executor against a `FAKE_CLAUDE_SCRIPT` whose `expect`/`answer` steps answer `set_model` and `set_permission_mode` with success; `runtimeState()` now reads `opus`/`plan`; `quiescentRestart(RestartRequest(addDirectories: ["/tmp/b"]))` → the factory's launch carries `model == "opus"` and `permissionMode == .plan`, not the values the channel was opened with. Deliberate break: snapshot the launch template → `sonnet`/`default`.
+- `testRuntimeStateIsUpdatedByEachAnswerAndFrame`: table-driven over `RuntimeStateUpdater`: a `set_model` answer sets `model`; a `set_permission_mode` answer sets `permissionMode`; `get_settings.applied` sets `model`, `effort` and `outputStyle` when present; `fast_mode_state` on the initialize response and on a `result` frame sets `fastMode`; a `set_cwd` answer sets `cwd`; the first `system/init` seeds `model`, `permissionMode`, `outputStyle`, `cwd` and `agent`; an unrelated answer changes nothing. Deliberate break: ignore `fast_mode_state` on `result` → the toggle made mid-turn is lost.
 - `testReadbackReadsEachValueFromItsOwnSource`: a table-driven test over `Readback.verify(snapshot:, handshake:, settingsApplied:)` with one mismatch at a time, asserting the returned name list equals exactly the mismatched name (`["model"]`, `["effort"]`, `["permissionMode"]`, `["fastMode"]`, `["outputStyle"]`). Deliberate break: read model from the handshake instead of `get_settings.applied` → the `model` case passes with the wrong source, caught because the test's handshake carries a *different* model than `applied`.
 
 `ForkTests.swift`:
 - `testForkIsKeyedProvisionallyUntilTheIdentityEventThenReKeyed`: `fork(at: nil)` on a ready channel → a new supervisor with `key.session` provisional (`state.identity == .awaitingFork(from:, provisional:)`), launch `.resume(source, fork: true)`; the scripted handle (a real fake-claude replay of `plain-two-turn` emits `auth_status` with the fixture's id, which for this test *is* the "new" id) → `.sessionIdentityResolved` → `state.key.session == fixture id`, `updates` published the re-keyed state once, captures untouched. Deliberate break: key the fork on the source id → the re-key never happens and the key equals the source.
-- `testForkFromAMessagePassesTheInclusiveFlags`: `fork(at: uuid)` → launch arguments contain `--resume-session-at <uuid>` and `--resume-drops-turn <uuid>`; this needs a `LaunchConfiguration` field C2 does not have — see Decisions.
+- `testForkFromAMessageLaunchesForkFromWithTheClickedRecordAndTheDroppedTurn`: `fork(at: ForkPoint(entryUUID: "u-42", dropsTurn: "p-41"))` → the factory received `session == .forkFrom(source, at: ForkPoint(entryUUID: "u-42", dropsTurn: "p-41"))` and `identity == .awaitingFork(from: source, provisional:)`; C2's composer tests already pin the argv (`--resume <id> --fork-session --resume-session-at u-42 --resume-drops-turn p-41` through the token guard), so this test asserts the `SessionStart` value and adds no argument of its own; `fork(at: ForkPoint(entryUUID: "u-42"))` carries `dropsTurn == nil`. Deliberate break: launch `.resume(source, fork: true)` for a fork point → the session value differs.
+- `testAForkWhoseIdentityCollidesWithAnOwnedSessionYields`: two supervisors A (ready on session S) and F (a fork of another session); F's replay resolves its identity to S (`FAKE_CLAUDE_INIT` naming S); on `.sessionIdentityResolved(S)` F's post-handshake check sees A's pid, which is not F's own → F terminates its process, F is `.owned(.contended)` with the banner, the facade does not re-index F over A, and A's process and state are untouched. Deliberate break: skip the post-handshake check on re-key → two supervisors own S.
+
+`LifecycleRowTests+Restart.swift` (an extension of `LifecycleRowTests`, entries added to `coverage`):
+- `testTerminateReturningNilDuringRestartSpawnsNothing` (`during: .restart`, from ready and from connecting): the scripted handle refuses to die; `quiescentRestart(...)` → the channel is wedged with the trace, the factory was not called again, `state.pendingChange == nil` (the change is not silently queued behind a ghost), and `banner` is not `.settingDidNotSurvive`. Deliberate break: spawn after a `nil` → two processes for one session id.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `swift test --package-path FleetKit --filter "RestartTests|ForkTests" 2>&1 | tail -5`
-Expected: build errors for `quiescentRestart`, `RestartSnapshot`, `fork`.
+Expected: build errors for `quiescentRestart`, `SessionRuntimeState`, `RuntimeStateUpdater`, `fork(at: ForkPoint?)`.
 
 - [ ] **Step 3: Implement**
 
 Decisions:
-- `RestartSnapshot.take(from session: SessionObject)` reads the supervisor's session object (`permissionMode` from the last `set_permission_mode` answer or the handshake, `model`/`effort` from the last `get_settings.applied`, `fastMode` from the last `fast_mode_state`, `outputStyle` from the initialize response, `addDirectories` and `ChildEnvironmentOptions` from the current launch).
-- `quiescentRestart`: `DormantEligibility` blocked → `state.pendingChange = request`, return; eligible → snapshot; `terminate()`; `awaitRelease(own)`; new launch = template with the request applied (outer `nil` keeps, inner `nil` clears), `permissionMode/model/effort` from the snapshot, `agent = nil`; spawn; after `.ready`: `process.request(ApplyFlagSettings(settings: ["fastMode": true]))` when the snapshot had fast mode on; `process.request(GetSettings())`; `Readback.verify`; empty → `.ready`; else `banner = .settingDidNotSurvive(firstName)`, stay `.connecting` until `resolveSetting(name)`.
+- The supervisor owns `runtime: SessionRuntimeState`, seeded from the launch template and the handshake, and every control answer the supervisor sends or the router executes passes through `RuntimeStateUpdater.apply(answer:for request:to:)` before it is returned to the caller, every frame through `apply(frame:to:)`: `set_model` → `model`; `set_permission_mode` → `permissionMode`; `get_settings.applied` → `model`, `effort`, `outputStyle` when present; `fast_mode_state` (initialize response, `result`) → `fastMode`; `set_cwd` → `cwd`; the first `system/init` → `model`, `permissionMode`, `outputStyle`, `cwd`, `agent`; `RestartRequest` application → `addDirectories`, `environment`. The restart snapshot is a copy of `runtime` taken when the restart is decided; there is no second source of truth and no snapshot from the template.
+- `quiescentRestart`: `DormantEligibility` blocked → `state.pendingChange = request`, return; eligible → `let snapshot = runtime`; `terminateOrWedge(during: .restart)` (`.wedged` → clear `pendingChange`, stop); `awaitRelease(own)`; new launch = template with the request applied (outer `nil` keeps, inner `nil` clears), `permissionMode/model/effort` from the snapshot, `agent = nil`; spawn; after `.ready`: `process.request(ApplyFlagSettings(settings: ["fastMode": true]))` when the snapshot had fast mode on; `process.request(GetSettings())`; `Readback.verify`; empty → `.ready`; else `banner = .settingDidNotSurvive(firstName)`, stay `.connecting` until `resolveSetting(name)`.
 - `Readback.verify(snapshot:, handshake: InitializeResponse, settingsApplied: JSONValue) -> [String]`: `model` and `effort` from `settingsApplied["model"]`/`["effort"]`; `permissionMode` from `handshake.currentPermissionMode`; `fastMode` from `handshake.fastModeState == "on"`; `outputStyle` from `handshake.outputStyle`; names in that fixed order.
-- Fork: `fork(at uuid: UUID?) -> ChannelKey` creates a new `ChannelSupervisor` through a factory closure the facade injects (`spawnSibling`), with `session: .resume(source, fork: true)`, `identity = .awaitingFork(from: source, provisional: SessionID())`; on `.sessionIdentityResolved(id, epoch)` matching the current epoch: `key = ChannelKey(configHome:, session: id)`, `identity = .known(id)`, publish; the facade re-indexes the supervisor under the new key.
-- `--resume-session-at` and `--resume-drops-turn`: `LaunchConfiguration` has no field for them (C2 modelled the §6.1 line). Do **not** patch ClaudeWire from this branch. Add `FleetSessions.ForkPoint {messageUUID: UUID}` and carry it on the supervisor; the arguments are appended by the facade's `ProcessFactory` through `LaunchConfiguration.extraArguments` **if and only if** C2 has such a field on `main` at execution time; otherwise the executor files a `[parent-impact]` note on X3 ("`LaunchConfiguration` needs `resumeSessionAt: UUID?` and `resumeDropsTurn: UUID?`, both refused without `--resume`") and `testForkFromAMessagePassesTheInclusiveFlags` is written against the intended arguments and marked `XCTSkip("blocked on X3 fork-point flags")` with the note's date. This is the one deliberate skip in the package below the live gate, and it is reported in the task's commit body.
+- Fork: `fork(at point: ForkPoint?) -> ChannelKey` creates a new `ChannelSupervisor` through a factory closure the facade injects (`spawnSibling`), with `session: point.map { .forkFrom(source, at: $0) } ?? .resume(source, fork: true)`; `ClaudeProcess` sets `identity = .awaitingFork(from: source, provisional:)` for both; on `.sessionIdentityResolved(id, epoch)` matching the current epoch: run `ownership.afterHandshake(session: id, ownPID:, epoch:)` against the *resolved* id (a collision with a session another supervisor owns yields exactly as a post-handshake holder does), then `key = ChannelKey(configHome:, session: id)`, `identity = .known(id)`, publish; the facade re-indexes the supervisor under the new key only when the check was clean.
+- `--resume-session-at` and `--resume-drops-turn` are C2's: `SessionStart.forkFrom(_:at:)` (main `13c9ad4`) emits them through the line composer and the argv token guard (`b2ddd5d`). FleetKit appends no argument, defines no `ForkPoint` of its own, and skips no test; the v1 contingency is withdrawn.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `swift test --package-path FleetKit 2>&1 | grep -E "Executed|error:|failed|skipped"`
-Expected: 0 failures; at most 1 skipped (the fork-point flags), named.
+Expected: 0 failures, no skips; `testCoverageIsTotal` red on exactly the two `terminateExhausted` scenarios during `.logout`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add FleetKit
-git commit -m "FleetSessions: the quiescent restart with snapshot and readback, forking with a provisional key"
+git commit -m "FleetSessions: the runtime-state model, the quiescent restart from it, forking through forkFrom with a provisional key"
 ```
 
 ---
@@ -991,7 +1142,7 @@ git commit -m "FleetSessions: the quiescent restart with snapshot and readback, 
 
 **Interfaces:**
 - Consumes: Task 1's store (acceptances), Task 5's supervisor, `ScratchConfigHome`.
-- Produces: `TrustReader.isTrusted(root:configHome:)`, `ProjectRoot.canonical(for:)`, `ProjectMCPConsent.evaluate(...) -> [ServerVerdict]`, `LocalSettingsStore.decline(names:root:configHome:)`, `ManagedSettingsReader.isPending(configHome:)`, `SpawnPreconditions.evaluate(...) -> SpawnPrecondition`.
+- Produces: `TrustReader.isTrusted(root:configHome:)`, `ProjectRoot.canonical(for:)`, `ProjectMCPConsent.evaluate(...) -> [ServerVerdict]` (merged settings only), `LocalSettingsStore.decline(names:gitRoot:cwd:configHome:)` (descriptor-relative), `ManagedSettingsReader.isPending(configHome:)`, `SpawnPreconditions.evaluate(...) -> SpawnPrecondition`. The engine-side proof that a decline is honoured is Task 10's zero-cost scenario, not a test here.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -999,12 +1150,17 @@ git commit -m "FleetSessions: the quiescent restart with snapshot and readback, 
 
 - `testCanonicalRootIsTheRealPathWalkedUpToGit`: cwd `<proj>/a/b` → root `<proj>` realpath; a cwd with no `.git` above → itself; a `/tmp/...` path resolves to `/private/tmp/...` (compare against `URL.resolvingSymlinksInPath()`). Deliberate break: skip realpath → the `/tmp` case differs.
 - `testUntrustedRootYieldsHistoryOnly`: no project entry → `.untrusted(root:)`; entry with `false` → `.untrusted`; `true` → passes to the next check. Deliberate break: treat a missing entry as trusted → spawn allowed.
-- `testConsentIsComputedFromBothLocationsReadOnly`: `.mcp.json` declares `a`, `b`, `c`, `d`; local-settings store has `disabledMcpjsonServers: ["a"]`; the `.claude.json` project entry has `disabledMcpjsonServers: ["b"]`, `enabledMcpjsonServers: ["c"]`; a user settings file sets nothing → verdicts `a: rejected`, `b: rejected`, `c: approved`, `d: pending`; with `enableAllProjectMcpServers: true` in the project settings, `d: approved`. After the evaluation the project tree and the scratch `.claude.json` are byte-identical to before (hash them). Deliberate break: read only the local store → `b` is pending.
+- `testConsentIsComputedFromTheMergedSettingsOnlyReadOnly`: `.mcp.json` declares `a`, `b`, `c`, `d`, `e`; the local-settings store has `disabledMcpjsonServers: ["a"]`; `<root>/.claude/settings.json` has `enabledMcpjsonServers: ["b"]`; `<configHome>/settings.json` has `enabledMcpjsonServers: ["c"]`; the `.claude.json` project entry has `disabledMcpjsonServers: ["d"]`, `enabledMcpjsonServers: ["e"]` → verdicts `a: rejected(.localSettings)`, `b: approved(.projectSettings)`, `c: approved(.userSettings)`, `d: pending`, `e: pending` (the project entry is a legacy location the engine migrates and never reads for consent; spec *Preconditions* cites the bundle); with `enableAllProjectMcpServers: true` in the project settings, `d` and `e` are `approved(.projectSettings)`; with the launch's setting sources excluding `.user`, `c` is `pending`; a server both disabled locally and enabled in the project settings is `rejected`. After the evaluation the project tree and the scratch `.claude.json` are byte-identical to before (hash them). Deliberate break: read the project entry → `d` is rejected and `e` approved.
 - `testAcceptRecordsTheHashAndDoesNotRepeatUntilTheEntryChanges`: accept `d` → the store holds `(root, "d", hash)`; re-evaluate → `d: approved(byAcceptance)`; change `d`'s command in `.mcp.json` → `d: pending` again. Deliberate break: key by name alone → the changed entry is still approved.
-- `testDeclineWritesThroughTheCLIsOwnPolicy`: existing `.claude/settings.local.json` with keys `{"zeta": 1, "alpha": {"x": [1,2]}, "disabledMcpjsonServers": ["old"]}` and mode 0o640; `decline(["d"])` → the file's `disabledMcpjsonServers == ["old", "d"]`; every other top-level key's raw JSON text is byte-identical to before (compare substrings of the raw file); mode still 0o640; no file under `.claude/.cc-writes` remains; the directory listing of `.claude` equals `["settings.local.json"]` plus whatever existed before. A marker-file server: `.mcp.json` declares `d` with command `sh -c 'touch <proj>/marker'`; after decline and a spawn of `fake-claude` (which never runs servers), the marker is absent — asserted, and stated as the negative half; the positive half (a real engine honouring the decline) is G5's `mcp_status` check. Deliberate break: rewrite the whole JSON through `JSONSerialization` → key order or number formatting changes and the byte comparison fails.
-- `testDeclineRefusesASymlinkedDotClaude`: `.claude` is a symlink to a directory outside the project → `LifecycleError.declineRefused(reason: "symlink")`; the target directory's listing and bytes unchanged; no spawn (`SpawnPreconditions` returns `.consentNeeded` still) and `banner == .mcpDeclineRefused("symlink")`. Deliberate break: open without `O_NOFOLLOW` → the write lands in the target.
+- `testDeclineWritesThroughTheCLIsOwnPolicy`: existing `.claude/settings.local.json` with keys `{"zeta": 1, "alpha": {"x": [1,2]}, "disabledMcpjsonServers": ["old"]}`; `decline(["d"])` → the file's `disabledMcpjsonServers == ["old", "d"]`, the shape C1's spike recorded the terminal's own dialog writing; every other top-level key's raw JSON text is byte-identical to before (compare substrings of the raw file); no file under `.claude/.cc-writes` remains; the directory listing of `.claude` equals `["settings.local.json"]` plus whatever existed before; a missing file is created with mode 0o644 and the single key. The proof that the engine honours the write is Task 10's two-launch scenario against the installed CLI; `fake-claude` runs no server, so no marker is asserted here. Deliberate break: rewrite the whole JSON through `JSONSerialization` → key order or number formatting changes and the byte comparison fails.
+- `testDeclinePreservesTheModeAcrossTheRename`: existing files at 0o640 and at 0o600 → after `decline` the mode is unchanged in each case (`fstat` on the new inode), and the staging file was created 0o600 before `fchmod` (asserted through the injected `LocalSettingsStore.Hooks.afterStagingCreated`). Deliberate break: omit `fchmod` → the 0o640 file comes back 0o600.
+- `testDeclineRefusesASymlinkedDotClaude`: `.claude` is a symlink to a directory outside the project → `LifecycleError.declineRefused(reason: "symlink")`; the target directory's listing and bytes unchanged; no spawn (`SpawnPreconditions` returns `.consentNeeded` still) and `banner == .mcpDeclineRefused("symlink")`. Deliberate break: open `.claude` without `O_NOFOLLOW` → the write lands in the target.
+- `testDeclineRefusesASymlinkedStagingDirectory`: `.claude/.cc-writes` is a symlink to a directory outside the project → refused `symlink`; nothing created under the target; the target's listing unchanged. Deliberate break: `mkdir` the staging directory by path and open the staging file by path → the staging file appears in the target.
+- `testDeclineRefusesASymlinkedTargetFile`: `.claude/settings.local.json` is a symlink to a file outside the project → refused `symlink`; the linked file's bytes and mode unchanged; no staging file remains. Deliberate break: read the existing file through `open(path)` → the read follows the link and the rename replaces the link with a regular file (the target survives, but the test's "refused" expectation fails first).
+- `testDeclineRefusesAComponentSwappedAfterResolution`: `LocalSettingsStore.Hooks.afterResolve` replaces `<root>/.claude` with a symlink to a directory outside the project after `resolve` returned and before the first `openat`; the open with `O_DIRECTORY|O_NOFOLLOW` fails with `ELOOP` → refused `symlink`, nothing written anywhere. A second variant swaps `.cc-writes` between the `mkdirat` and the staging `openat`. Deliberate break: re-derive paths from the resolution and open by name → the write follows the swapped link.
+- `testDeclineRefusesAStagingDirectoryInsideTheConfigHome`: `.claude` is a real directory but `.claude/.cc-writes` is a symlink into the scratch config home → the `O_NOFOLLOW` open refuses `symlink` and nothing under the config home changes (witnessed by hashing it); and a project whose `.claude` resolves through a symlink into the config home is refused `insideConfigHome` at resolution, before any open. Deliberate break: check `insideConfigHome` on the store file only → the staging write lands in the config home.
 - `testDeclineRefusesAStoreInsideTheConfigHome`: a project whose canonical root lies under the scratch config home → refused with reason `insideConfigHome`, nothing written.
-- `testDeclineRefusesAForeignUIDAndUnparseableJSON`: the uid check is exercised by injecting an `owner(of:)` function that reports a different uid for `<root>/.git` → refused `foreignUID`; a `settings.local.json` containing `{` → refused `unparseable`, file untouched.
+- `testDeclineRefusesAForeignUIDAndUnparseableJSON`: the uid check is exercised by injecting an `ownerUID` function that reports a different uid for `<root>/.git`, then for the `.claude` descriptor's `fstat`, then for `.cc-writes` → refused `foreignUID` in each case; a `settings.local.json` containing `{` → refused `unparseable`, file untouched.
 - `testDeclineRunsOnlyWhileNoOwnedProcessIsLiveAndReReadsBeforeSpawn`: with a live owned process for the project, `decline` throws `LifecycleError.declineRefused(reason: "processLive")`; after the process is gone it succeeds and `SpawnPreconditions` re-reads the store through `LocalSettingsStore.resolve` before returning `.ready` (assert the resolver was called twice via an injected counter).
 - `testIsolatedSourcesWithDeclaredServersAddStrictMCPConfig`: `settingSources: []` and a `.mcp.json` with one server → the launch carries `strictMCPConfig == true` and the state `headerNote == .projectServersOff`; with no `.mcp.json` → `false`. Deliberate break: add the flag unconditionally → the second half fails.
 - `testManagedSettingsPendingBlocksTheSpawn`: `remote-settings.json` present and no consent file → `.managedSettingsPending`, no spawn, `banner == .managedSettingsPending`; both present with a consent record whose hash matches the payload → passes; an unparseable pair → pending (fail closed). Deliberate break: treat an unparseable consent file as consent → the third half spawns.
@@ -1029,8 +1185,11 @@ import Darwin
 /// nothing is ever half-written.
 public struct LocalSettingsStore: Sendable {
     public struct Resolution: Hashable, Sendable { public var storeDirectory: URL; public var storeFile: URL; public var legacyOverlay: URL?; public var atGitRoot: Bool }
-    public var ownerUID: @Sendable (URL) -> uid_t?          // lstat-based; injectable for the foreign-uid test
-    public init(ownerUID: @escaping @Sendable (URL) -> uid_t? = LocalSettingsStore.lstatOwner)
+    /// Test seams. `ownerUID` is consulted for every ownership check (paths before the first open, descriptors after);
+    /// `Hooks` lets a test act between steps (swap a component, inspect the staging file); production hooks do nothing.
+    public var ownerUID: @Sendable (OwnershipSubject) -> uid_t?          // .path(URL) or .descriptor(Int32)
+    public struct Hooks: Sendable { public var afterResolve: @Sendable (Resolution) -> Void; public var afterStagingCreated: @Sendable (Int32) -> Void; public var afterStagingDirectory: @Sendable () -> Void }
+    public init(ownerUID: @escaping @Sendable (OwnershipSubject) -> uid_t? = LocalSettingsStore.statOwner, hooks: Hooks = .none)
 
     /// `<root>/.claude/settings.local.json` when stat(root), lstat(root/.git) and lstat(root/.claude) are all owned by
     /// the effective uid and root is not the real home directory; otherwise `<cwd>/.claude/settings.local.json`,
@@ -1039,26 +1198,34 @@ public struct LocalSettingsStore: Sendable {
 
     public enum Refusal: String, Error, Sendable { case unparseable, symlink, foreignUID, insideConfigHome, processLive, writeFailed, notADirectory }
 
-    /// Steps, in order; any failure throws `Refusal` before or without touching the target:
-    /// 1. `resolve`; refuse `insideConfigHome` when `storeFile` lies under `configHome` (real paths).
-    /// 2. Read the raw file text if it exists; parse with `JSONSerialization` only to find the `disabledMcpjsonServers`
-    ///    array's byte range (a lightweight scanner over the raw text finds the top-level key and its bracketed value);
-    ///    refuse `unparseable` on any parse error. Merge `names` into the array (stable order, no duplicates) and splice
-    ///    the new array's JSON into the raw text at that range; when the key is absent, insert `"disabledMcpjsonServers": [...]`
+    /// Steps, in order. After step 1 no path is opened by name: every open, create and rename is relative to a directory
+    /// descriptor, so a component swapped for a symlink after resolution is refused (`ELOOP`/`ENOTDIR` → `symlink`),
+    /// not followed. Any failure throws `Refusal` before or without touching the target.
+    /// 1. `resolve`; realpath the store directory and the staging directory; refuse `insideConfigHome` when either lies
+    ///    under `configHome`. `hooks.afterResolve`.
+    /// 2. `rootFD = open(root, O_DIRECTORY|O_NOFOLLOW)`; `fstat` → directory, owned by the effective uid (else `foreignUID`).
+    ///    `mkdirat(rootFD, ".claude", 0o755)` if absent (EEXIST is fine); `dirFD = openat(rootFD, ".claude", O_DIRECTORY|O_NOFOLLOW)`
+    ///    (ELOOP/ENOTDIR → `symlink`; a non-directory → `notADirectory`); `fstat(dirFD)` → directory, same uid.
+    /// 3. When the file exists: `fileFD = openat(dirFD, "settings.local.json", O_RDONLY|O_NOFOLLOW)` (ELOOP → `symlink`);
+    ///    `fstat(fileFD)` → regular file, its mode is the mode to preserve (0o644 for a new file); read the raw text
+    ///    through the descriptor. Parse with `JSONSerialization` only to find the `disabledMcpjsonServers` array's byte
+    ///    range (a lightweight scanner over the raw text finds the top-level key and its bracketed value); refuse
+    ///    `unparseable` on any parse error. Merge `names` into the array (stable order, no duplicates) and splice the new
+    ///    array's JSON into the raw text at that range; when the key is absent, insert `"disabledMcpjsonServers": [...]`
     ///    before the final `}` with a leading comma when needed. Every other byte of the file is untouched.
-    /// 3. `mkdir(storeDirectory, 0o755)` if absent (refuse `notADirectory` if a non-directory exists).
-    /// 4. `open(storeDirectory, O_DIRECTORY | O_NOFOLLOW)` and, when the file exists, `open(storeFile, O_RDONLY | O_NOFOLLOW)`;
-    ///    ENOTDIR/ELOOP → refuse `symlink`.
-    /// 5. `fstat` the existing file for its mode (default 0o644 for a new file).
-    /// 6. `mkdir(storeDirectory/.cc-writes, 0o700)` if absent; write the new text to `.cc-writes/settings.local.json.<uuid>`;
-    ///    `fchmod` to the preserved mode; `fsync`; `rename` over `storeFile`; `fsync` the directory fd; remove the
-    ///    staging directory if empty. Any error → remove the staging file, refuse `writeFailed`.
+    /// 4. `mkdirat(dirFD, ".cc-writes", 0o700)` if absent; `hooks.afterStagingDirectory`;
+    ///    `stagingFD = openat(dirFD, ".cc-writes", O_DIRECTORY|O_NOFOLLOW)` (ELOOP → `symlink`); `fstat` → directory, same uid.
+    /// 5. `tmpFD = openat(stagingFD, "settings.local.json.<uuid>", O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, 0o600)`;
+    ///    `hooks.afterStagingCreated(tmpFD)`; write the new text whole; `fchmod(tmpFD, preservedMode)`; `fsync(tmpFD)`; close.
+    /// 6. `renameat(stagingFD, "settings.local.json.<uuid>", dirFD, "settings.local.json")`; `fsync(dirFD)`; `unlinkat(dirFD,
+    ///    ".cc-writes", AT_REMOVEDIR)` if empty (ignore ENOTEMPTY). Any error in 5–6 → `unlinkat(stagingFD, tmp, 0)`, refuse `writeFailed`.
+    ///    Every descriptor is closed on every path out.
     public func decline(names: [String], gitRoot: URL?, cwd: URL, configHome: URL) throws -> Resolution
-    public static func lstatOwner(_ url: URL) -> uid_t?
+    public static func statOwner(_ subject: OwnershipSubject) -> uid_t?
 }
 ```
 
-`Preconditions/ProjectMCPConsent.swift`: `ServerVerdict = .rejected(ServerSource) | .approved(ServerSource) | .pending` with `ServerSource = .localSettings | .projectEntry | .userSettings | .projectSettings | .acceptance`; `evaluate(root:cwd:configHome:acceptances:) -> [ProjectMCPServer: ServerVerdict]` reading `.mcp.json` (`mcpServers` object; each entry's `entryHash` = SHA-256 over the canonical JSON of the entry), the resolved local store and legacy overlay, `<root>/.claude/settings.json`, `<configHome>/settings.json`, and `.claude.json`'s `projects[<root>]` entry, all read-only; precedence: rejected wins over approved wins over pending.
+`Preconditions/ProjectMCPConsent.swift`: `ServerVerdict = .rejected(ServerSource) | .approved(ServerSource) | .pending` with `ServerSource = .localSettings | .projectSettings | .userSettings | .acceptance`; `evaluate(root:cwd:configHome:settingSources:acceptances:) -> [ProjectMCPServer: ServerVerdict]` reading `.mcp.json` (`mcpServers` object; each entry's `entryHash` = SHA-256 over the canonical JSON of the entry) and the merged settings sources the engine's consent function reads (spec *Preconditions*: `disabledMcpjsonServers` → rejected; `enabledMcpjsonServers` or `enableAllProjectMcpServers` → approved; else pending), which are the resolved local store and its legacy overlay, `<root>/.claude/settings.json` and `<configHome>/settings.json`, each only when the launch's setting sources include it, all read-only. `.claude.json`'s `projects[<root>]` arrays are never read: the engine migrates them into local settings at startup and its consent decision does not consult them. Precedence: rejected wins over approved wins over pending.
 
 `Preconditions/TrustReader.swift`: `ProjectRoot.canonical(for cwd: URL) -> (root: URL, gitRoot: URL?)` (realpath, walk up for `.git`); `TrustReader.isTrusted(root:configHome:) -> Bool` from `.claude.json` `projects[root.path].hasTrustDialogAccepted == true`.
 
@@ -1075,7 +1242,7 @@ Expected: 0 failures.
 
 ```bash
 git add FleetKit
-git commit -m "FleetSessions: spawn preconditions; trust and consent read-only from both locations; the one §6.12 write"
+git commit -m "FleetSessions: spawn preconditions; consent from the merged settings only; the one §6.12 write on directory descriptors"
 ```
 
 ---
@@ -1086,17 +1253,21 @@ git commit -m "FleetSessions: spawn preconditions; trust and consent read-only f
 - Create: `FleetKit/Sources/FleetSessions/Router/RouterTable.swift`
 - Create: `FleetKit/Sources/FleetSessions/Router/CommandRouter.swift`
 - Create: `FleetKit/Sources/FleetSessions/Router/LogoutPlan.swift`
-- Test: `FleetKit/Tests/FleetSessionsTests/RouterTests.swift`, `LogoutPlanTests.swift`
+- Test: `FleetKit/Tests/FleetSessionsTests/RouterTests.swift`, `LogoutPlanTests.swift`, `LifecycleRowTests+Logout.swift`
 
 **Interfaces:**
-- Consumes: Tasks 4–7; `ClaudeWire` request specs; `Handshake`; fixture `control-shapes`.
-- Produces: `RouterTable.local`, `LaunchSettingMatrix`, `CommandRouter.route(_:handshake:) -> Routed`, `RefusalInterceptor.intercept(_:) -> Intercepted?`, `LogoutPlan.build(...)`, `LogoutPlan.execute(...)`.
+- Consumes: Tasks 4–7; `ClaudeWire` request specs (`ApplyFlagSettings`, `SetCwd`, `SetModel`, `SetPermissionMode`, `RenameSession`, `RewindFiles`, `RewindConversation`, `ClaudeAuthenticate`, `ClaudeOAuthWaitForCompletion`, `GetSettings`, `MCPStatus`, `GetContextUsage`, `Interrupt`); `Handshake`; fixtures `control-shapes` and `zero-cost`.
+- Produces: `RouterTable.local` with a `RouteStrategy` per entry, `LaunchSettingMatrix`, `CommandRouter.route(_:handshake:) -> Routed`, `StrategyExecutor.run(_:on:)` for the multi-step strategies, `RefusalInterceptor.intercept(_:) -> Intercepted?`, `LogoutPlan.build(...)`, `LogoutPlan.execute(...)`; the G1 coverage test turns green here.
 
 - [ ] **Step 1: Write the failing tests**
 
 `RouterTests.swift`:
 - `testTheLocalTableEqualsTheParentsRowsAsASet`: `Set(RouterTable.local.map(\.name)) == ["/model", "/permissions", "/effort", "/rename", "/add-dir", "/agent", "/cd", "/fast", "/config", "/login", "/logout", "/color", "/clear", "/rewind", "/fork", "/background", "/stop", "/tasks", "/mcp", "/memory", "/btw", "/agents", "/resume", "/compact", "/context", "/cost", "/usage"]` and `RouterTable.local.count == 27` (no duplicates). Deliberate break: duplicate `/model` → the count differs while the set matches, which is why both are asserted.
-- `testEveryEntryMapsToAListedMechanism`: each entry's `mechanism` is one of the enum's cases and its `readback` names a source among `getSettingsApplied`, `getSettingsEffectiveKeys`, `handshakePermissionMode`, `fastModeState`, `none`.
+- `testRewindDryRunsSurfacesTheCountsThenAppliesAndRewindsTheConversation` (fixture `control-shapes` for the dry run and `rewind_conversation`; a `FAKE_CLAUDE_SCRIPT` `answer` step for the apply, which the corpus does not record, stated in the doc comment): route `/rewind <recorded uuid>` → `.strategy(.rewind(target))`; executing it sends `rewind_files {user_message_id, dry_run: true}` first and surfaces `RewindPreview(canRewind: true, filesChanged: [], insertions: 0, deletions: 0)` from the recorded answer for confirmation; nothing else is sent until `confirm()`; then `rewind_files {dry_run: false}` (scripted success) and `rewind_conversation {target_message_uuid}`, whose recorded answer yields `rewound == true` and `prefillText == "Reply with exactly the word: shapes"` for the composer. Deliberate break: send `rewind_conversation` before the dry run → the script's `expect` order fails the replay with exit 3.
+- `testLoginReturnsTheTwoURLsThenWaitsForCompletion` (fixture `control-shapes` for `claude_authenticate` and the recorded `claude_oauth_wait_for_completion` error; a scripted answer for the completed account, stated): route `/login` → `.strategy(.login)`; executing it sends `claude_authenticate` and surfaces `LoginPrompt(manualURL:, automaticURL:)` from the recorded (redacted) answer, handing the automatic URL to the Browser tab through the injected opener; then `claude_oauth_wait_for_completion`; the recorded error "No active claude_authenticate flow" is surfaced as `LoginOutcome.noActiveFlow` (retry offered), and the scripted success answer yields `LoginOutcome.signedIn(account:)`. Deliberate break: open the manual URL → the opener received the wrong one.
+- `testBarePermissionsOpensTheRulesViewFromGetSettings` (fixture `zero-cost`): route `/permissions` with no argument → `.strategy(.permissionsView)`; executing it sends `get_settings` and nothing else (no `set_permission_mode`), and produces `PermissionsView(rules:)` from the recorded answer's permission keys; `/permissions plan` routes to `set_permission_mode` instead. Deliberate break: send `set_permission_mode` for the bare form → the script's `expect` fails.
+- `testMCPBuildsThePopoverFromMCPStatus` (fixture `zero-cost`): `/mcp` → `.strategy(.mcpPopover)`; executing it sends `mcp_status` and produces `MCPPopover(servers:)` with one row per recorded server carrying its name and status word. Deliberate break: read `get_settings` instead → no servers.
+- `testMemoryOpensTheMemoryFilesFromGetContextUsage` (fixture `zero-cost`): `/memory` → `.strategy(.memoryFiles)`; executing it sends `get_context_usage` and returns the recorded `memoryFiles` paths for the Files tab, in the recorded order. Deliberate break: read `mcp_status` → empty.
 - `testEffortSendsApplyFlagSettingsAndReadsBackEffectiveKeys` (fixture `control-shapes`): route `/effort low` → `.controlRequest` whose spec encodes to `{"subtype":"apply_flag_settings","settings":{"effortLevel":"low"}}`; executing it against the replay yields the recorded success with no `response` key and then `get_settings` whose `effective_keys` contains `effortLevel`. Deliberate break: send `{effort: "low"}` → the replay refuses with exit 3 (unexpected host frame).
 - `testCDIntoAnUntrustedDirectoryRepeatsWithTrustAcceptedAndTrustedDirectory` (fixture `control-shapes`): route `/cd <recorded sibling>` → first `set_cwd {path}` answered `needs_trust`; the router's follow-up after the user's trust answer is `set_cwd {path, trust_accepted: true, trusted_directory: <the directory from the answer>}`; assert the second request's payload keys `== ["path", "trust_accepted", "trusted_directory"]`. Deliberate break: omit `trusted_directory` → the replay refuses.
 - `testRenameAndModelMapToTheirRequests`: `/rename hello` → `rename_session {title: "hello"}`; `/model sonnet` → `set_model {model: "sonnet"}`.
@@ -1123,46 +1294,61 @@ import Foundation
 import AfleetCore
 import ClaudeWire
 
-public enum RouteMechanism: Hashable, Sendable {
-    case controlRequest(subtype: String)          // built by CommandRouter from the arguments
-    case lifecycle(String)                        // a LifecycleAction name: fork, sendToBackground, stopEverything, backgroundAll, logout
-    case restart                                  // a RestartRequest built from the arguments
-    case text                                     // pass through; frames render the result
-    case native(String)                           // UI-only: picker, popover, focus, files tab
+/// What a local command does, as a value the executor interprets. Single-request strategies name their spec; multi-step
+/// strategies name the sequence, so a test checks each against the fixture that recorded it rather than checking that an
+/// enum case is an enum case.
+public enum RouteStrategy: Hashable, Sendable {
+    case applyFlagSetting(key: String)            // apply_flag_settings {settings: {key: value}} then get_settings.effective_keys
+    case setModel                                  // set_model {model}
+    case setPermissionMode                         // set_permission_mode {mode}; the bare form is `.permissionsView`
+    case renameSession                             // rename_session {title}
+    case setCwd                                    // set_cwd {path}; needs_trust → repeat with trust_accepted + trusted_directory
+    case interrupt                                 // interrupt
+    case sideQuestion                              // side_question {prompt}
+    case rewind                                    // rewind_files dry_run → confirm → rewind_files apply → rewind_conversation
+    case login                                     // claude_authenticate → open automaticUrl → claude_oauth_wait_for_completion
+    case permissionsView                           // get_settings → read-only rules view
+    case mcpPopover                                // mcp_status → popover
+    case memoryFiles                               // get_context_usage.memoryFiles → Files tab
+    case lifecycle(LifecycleActionName)            // fork, sendToBackground, stopEverything, backgroundAll, logout
+    case restart                                   // a RestartRequest built from the arguments
+    case text                                      // pass through; frames render the result
+    case native(String)                            // UI-only: picker, focus, tasks list, agents list
 }
+public enum LifecycleActionName: String, Hashable, Sendable { case fork, sendToBackground, stopEverything, backgroundAll, logout }
 public enum ReadbackSource: String, Hashable, Sendable { case getSettingsApplied, getSettingsEffectiveKeys, handshakePermissionMode, fastModeState, none }
 public struct LocalCommand: Hashable, Sendable {
-    public let name: String; public let mechanism: RouteMechanism; public let readback: ReadbackSource; public let explanation: String
+    public let name: String; public let strategy: RouteStrategy; public let readback: ReadbackSource; public let explanation: String
 }
 public enum RouterTable {
     public static let local: [LocalCommand] = [
-        .init(name: "/model", mechanism: .controlRequest(subtype: "set_model"), readback: .getSettingsApplied, explanation: "Changes the model for this channel without a Claude turn."),
-        .init(name: "/permissions", mechanism: .controlRequest(subtype: "set_permission_mode"), readback: .handshakePermissionMode, explanation: "Changes the permission mode; on its own opens the read-only rules view."),
-        .init(name: "/effort", mechanism: .controlRequest(subtype: "apply_flag_settings"), readback: .getSettingsEffectiveKeys, explanation: "Changes the effort level; max cannot be set mid-session."),
-        .init(name: "/rename", mechanism: .controlRequest(subtype: "rename_session"), readback: .none, explanation: "Renames the channel and the transcript's title."),
-        .init(name: "/add-dir", mechanism: .restart, readback: .none, explanation: "Adds a directory by restarting this channel under the same session id."),
-        .init(name: "/agent", mechanism: .controlRequest(subtype: "apply_flag_settings"), readback: .getSettingsEffectiveKeys, explanation: "Switches the agent from the next turn."),
-        .init(name: "/cd", mechanism: .controlRequest(subtype: "set_cwd"), readback: .none, explanation: "Changes the working directory; an untrusted directory asks for trust first."),
-        .init(name: "/fast", mechanism: .controlRequest(subtype: "apply_flag_settings"), readback: .fastModeState, explanation: "Turns fast mode on or off."),
-        .init(name: "/config", mechanism: .text, readback: .none, explanation: "Runs in the engine; the persisted setting is read back with get_settings."),
-        .init(name: "/login", mechanism: .controlRequest(subtype: "claude_authenticate"), readback: .none, explanation: "Signs in through the Browser tab."),
-        .init(name: "/logout", mechanism: .lifecycle("logout"), readback: .none, explanation: "Signs out every owned channel and afleet-launched job on this machine."),
-        .init(name: "/color", mechanism: .text, readback: .none, explanation: "Sent to the engine as text."),
-        .init(name: "/clear", mechanism: .text, readback: .none, explanation: "Clears the conversation; the timeline resets on conversation_reset."),
-        .init(name: "/rewind", mechanism: .controlRequest(subtype: "rewind_conversation"), readback: .none, explanation: "Rewinds the conversation and, after a dry run, the files."),
-        .init(name: "/fork", mechanism: .lifecycle("fork"), readback: .none, explanation: "Opens a new channel forked from this session."),
-        .init(name: "/background", mechanism: .lifecycle("sendToBackground"), readback: .none, explanation: "Hands this session to a background job."),
-        .init(name: "/stop", mechanism: .controlRequest(subtype: "interrupt"), readback: .none, explanation: "Stops the current turn; Stop everything also stops background tasks."),
-        .init(name: "/tasks", mechanism: .native("tasks"), readback: .none, explanation: "Shows the running tasks with per-task Stop."),
-        .init(name: "/mcp", mechanism: .controlRequest(subtype: "mcp_status"), readback: .none, explanation: "Shows MCP servers and their state."),
-        .init(name: "/memory", mechanism: .controlRequest(subtype: "get_context_usage"), readback: .none, explanation: "Opens the memory files in the Files tab."),
-        .init(name: "/btw", mechanism: .controlRequest(subtype: "side_question"), readback: .none, explanation: "Asks a side question without affecting the conversation."),
-        .init(name: "/agents", mechanism: .native("agents"), readback: .none, explanation: "Lists the agents from the handshake."),
-        .init(name: "/resume", mechanism: .native("switcher"), readback: .none, explanation: "Focuses the channel switcher."),
-        .init(name: "/compact", mechanism: .text, readback: .none, explanation: "Compacts in the engine; renders as a divider."),
-        .init(name: "/context", mechanism: .text, readback: .none, explanation: "Sent to the engine as text."),
-        .init(name: "/cost", mechanism: .text, readback: .none, explanation: "Sent to the engine as text."),
-        .init(name: "/usage", mechanism: .text, readback: .none, explanation: "Sent to the engine as text."),
+        .init(name: "/model", strategy: .setModel, readback: .getSettingsApplied, explanation: "Changes the model for this channel without a Claude turn."),
+        .init(name: "/permissions", strategy: .setPermissionMode, readback: .handshakePermissionMode, explanation: "Changes the permission mode; on its own opens the read-only rules view."),
+        .init(name: "/effort", strategy: .applyFlagSetting(key: "effortLevel"), readback: .getSettingsEffectiveKeys, explanation: "Changes the effort level; max cannot be set mid-session."),
+        .init(name: "/rename", strategy: .renameSession, readback: .none, explanation: "Renames the channel and the transcript's title."),
+        .init(name: "/add-dir", strategy: .restart, readback: .none, explanation: "Adds a directory by restarting this channel under the same session id."),
+        .init(name: "/agent", strategy: .applyFlagSetting(key: "agent"), readback: .getSettingsEffectiveKeys, explanation: "Switches the agent from the next turn."),
+        .init(name: "/cd", strategy: .setCwd, readback: .none, explanation: "Changes the working directory; an untrusted directory asks for trust first."),
+        .init(name: "/fast", strategy: .applyFlagSetting(key: "fastMode"), readback: .fastModeState, explanation: "Turns fast mode on or off."),
+        .init(name: "/config", strategy: .text, readback: .none, explanation: "Runs in the engine; the persisted setting is read back with get_settings."),
+        .init(name: "/login", strategy: .login, readback: .none, explanation: "Signs in through the Browser tab."),
+        .init(name: "/logout", strategy: .lifecycle(.logout), readback: .none, explanation: "Signs out every owned channel and afleet-launched job on this machine."),
+        .init(name: "/color", strategy: .text, readback: .none, explanation: "Sent to the engine as text."),
+        .init(name: "/clear", strategy: .text, readback: .none, explanation: "Clears the conversation; the timeline resets on conversation_reset."),
+        .init(name: "/rewind", strategy: .rewind, readback: .none, explanation: "Rewinds the conversation and, after a dry run you confirm, the files."),
+        .init(name: "/fork", strategy: .lifecycle(.fork), readback: .none, explanation: "Opens a new channel forked from this session."),
+        .init(name: "/background", strategy: .lifecycle(.sendToBackground), readback: .none, explanation: "Hands this session to a background job."),
+        .init(name: "/stop", strategy: .interrupt, readback: .none, explanation: "Stops the current turn; Stop everything also stops background tasks."),
+        .init(name: "/tasks", strategy: .native("tasks"), readback: .none, explanation: "Shows the running tasks with per-task Stop."),
+        .init(name: "/mcp", strategy: .mcpPopover, readback: .none, explanation: "Shows MCP servers and their state."),
+        .init(name: "/memory", strategy: .memoryFiles, readback: .none, explanation: "Opens the memory files in the Files tab."),
+        .init(name: "/btw", strategy: .sideQuestion, readback: .none, explanation: "Asks a side question without affecting the conversation."),
+        .init(name: "/agents", strategy: .native("agents"), readback: .none, explanation: "Lists the agents from the handshake."),
+        .init(name: "/resume", strategy: .native("switcher"), readback: .none, explanation: "Focuses the channel switcher."),
+        .init(name: "/compact", strategy: .text, readback: .none, explanation: "Compacts in the engine; renders as a divider."),
+        .init(name: "/context", strategy: .text, readback: .none, explanation: "Sent to the engine as text."),
+        .init(name: "/cost", strategy: .text, readback: .none, explanation: "Sent to the engine as text."),
+        .init(name: "/usage", strategy: .text, readback: .none, explanation: "Sent to the engine as text."),
     ]
     public static let bareRefusalPattern = #"^/([A-Za-z0-9:_-]+) isn't available in this environment\.$"#
 }
@@ -1172,7 +1358,9 @@ public enum LaunchSettingMatrix {
 }
 ```
 
-`Router/CommandRouter.swift`: `Routed = .controlRequest(RawControlRequest or a typed spec wrapped as `AnyControlRequest`) | .lifecycle(LifecycleAction) | .restart(RestartRequest) | .text(String) | .native(String) | .refusedLocally(explanation: String)`; `route(text, handshake, systemInit)`: split the first token; local table first (argument parsing per command: `/effort <level>` → `ApplyFlagSettings(settings: ["effortLevel": level])`; `/agent <name>` → `["agent": name]`; `/fast` → `["fastMode": true]` toggling on the session's state; `/cd <path>` → `SetCwd(path:)`; `/model <m>` → `SetModel`; `/permissions <mode>` → `SetPermissionMode`, bare → `.native("permissions")`; `/rename <t>` → `RenameSession`; `/stop` → `Interrupt()`), then `systemInit.terminalSlashCommands` → `.refusedLocally`, then `.text`. `continueCD(afterNeedsTrust directory:, path:)` builds `SetCwd(path:, trustAccepted: true, trustedDirectory: directory)`. `RefusalInterceptor` holds a drift counter (an actor-isolated `Int` on the facade) and matches the whole text against `bareRefusalPattern`.
+`Router/CommandRouter.swift`: `Routed = .controlRequest(AnyControlRequest) | .strategy(RouteStrategy, arguments: [String]) | .lifecycle(LifecycleAction) | .restart(RestartRequest) | .text(String) | .native(String) | .refusedLocally(explanation: String)`; `route(text, handshake, systemInit)`: split the first token; local table first (argument parsing per command: `/effort <level>` → `ApplyFlagSettings(settings: ["effortLevel": level])`; `/agent <name>` → `["agent": name]`; `/fast` → `["fastMode": true]` toggling on the runtime state's `fastMode`; `/cd <path>` → `SetCwd(path:)`; `/model <m>` → `SetModel`; `/permissions <mode>` → `SetPermissionMode`, bare → `.strategy(.permissionsView)`; `/rename <t>` → `RenameSession`; `/stop` → `Interrupt()`; `/rewind <uuid>`, `/login`, `/mcp`, `/memory`, `/btw <text>` → their strategies), then `systemInit.terminalSlashCommands` → `.refusedLocally`, then `.text`. `continueCD(afterNeedsTrust directory:, path:)` builds `SetCwd(path:, trustAccepted: true, trustedDirectory: directory)`. `StrategyExecutor.run(_ strategy:, on process:, ui: StrategyUI)` runs the multi-step strategies exactly as the tests above describe, pausing at `confirm()` for `.rewind`, handing URLs to `ui.open(url:)` for `.login`, and returning a typed result (`RewindPreview`/`RewindOutcome`, `LoginPrompt`/`LoginOutcome`, `PermissionsView`, `MCPPopover`, `[String]` memory files); every answer it receives passes through `RuntimeStateUpdater` first. `RefusalInterceptor` holds a drift counter (an actor-isolated `Int` on the facade) and matches the whole text against `bareRefusalPattern`.
+
+`LifecycleRowTests+Logout.swift` (an extension of `LifecycleRowTests`, the last entries added to `coverage`): `testTerminateReturningNilDuringLogoutRunsNoAuthLogout` (`during: .logout`, from ready and from connecting): two owned channels, one on the scripted handle; `LogoutPlan.execute(.stop)` → the first channel terminated, the second wedged with the trace, the runner recorded **no** `["auth", "logout"]`, the plan's outcome is `.blocked(wedged: [key])` naming the channel, and the barrier is lifted. Deliberate break: run `auth logout` after a wedged terminate → a live process loses its credentials mid-turn. With this file `testCoverageIsTotal` is green and stays green.
 
 `Router/LogoutPlan.swift`: `Census {owned: [ChannelKey], nonEligible: [(ChannelKey, [String])], ownJobs: [JobShort], foreign: [Holder]}`; `build(fleet:)`; `execute(choice: .wait | .stop, ...)` in the spec's order with the barrier (`Fleet.spawnBarrier = true` → every `spawn` throws `LifecycleError.logoutInProgress`).
 
@@ -1185,7 +1373,7 @@ Expected: 0 failures.
 
 ```bash
 git add FleetKit
-git commit -m "FleetSessions: the command router as data, the flag matrix, refusal interception, the logout plan"
+git commit -m "FleetSessions: the command router as data with typed strategies, the flag matrix, refusal interception, the logout plan; G1 coverage total"
 ```
 
 ---
@@ -1227,18 +1415,19 @@ import WireFrames
 /// Structural fields only: names, counts, ids, epochs, durations. Never a path under a config home, an environment,
 /// a record or stdout (parent §6.3).
 public enum FleetDiagnosticEvent: Sendable {
-    case transition(row: String, from: String, to: String, session: String, epoch: UInt64?)
-    case transitionNotInTable(event: String, from: String, session: String)
+    case transition(row: String, from: String, event: String, to: String, session: String, epoch: UInt64?)   // the (row, from, event, to) the rig's RecordingDiagnostics collects
+    case transitionNotInTable(event: String, from: String, to: String, session: String)
     case ownershipCheck(label: String, foreignHolders: Int, session: String)
     case handoffWait(outcome: String, waitedMs: Int, session: String)
     case verb(name: String, exitCode: Int32, durationMs: Int)
     case precondition(verdict: String, session: String)
     case declineWrite(outcome: String, servers: Int)
-    case paneRequest(purpose: String, session: String?)
-    case staleExit(purpose: String)
+    case paneRequest(id: UUID, purpose: String, session: String?)
+    case staleExit(id: UUID, purpose: String)
     case jobNotListedAfterBackground(session: String)
     case wedged(session: String, steps: Int)
-    case capDecision(decision: String, live: Int)
+    case capDecision(decision: String, live: Int, reserved: Int)
+    case evictionOutcome(outcome: String, victim: String)
     case logout(step: String, count: Int)
     case driftRefusalIntercepted(command: String)
     public var jsonValue: JSONValue { /* object with "event" plus the case's fields, keys in snake_case */ }
@@ -1271,7 +1460,7 @@ git commit -m "FleetSessions: the Activity query, FleetKit diagnostics, the impo
 
 **Files:**
 - Test: `FleetKit/Tests/FleetSessionsTests/LiveFleetTests.swift`
-- Create: `FleetKit/Tests/FleetSessionsTests/Support/LiveGate.swift` (budget reading and config-home diff, copied in shape from `ClaudeWire/Tests/ClaudeWireTests/LiveCLITests.swift`, which is not exported)
+- Create: `FleetKit/Tests/FleetSessionsTests/Support/LiveGate.swift` (the `LiveBudget` actor, the budget reading copied in shape from `ClaudeWire/Tests/ClaudeWireTests/LiveCLITests.swift`, which is not exported, and the config-home witness)
 
 **Interfaces:**
 - Consumes: the `Fleet` facade; the installed `claude` located through `BinaryLocator` from an `EnvironmentResolver` capture; `/tmp/afleet-fixtures/config-home`.
@@ -1279,27 +1468,30 @@ git commit -m "FleetSessions: the Activity query, FleetKit diagnostics, the impo
 
 - [ ] **Step 1: Write the gate**
 
-`Support/LiveGate.swift`: `skipUnlessLive()` throws `XCTSkip("set AFLEET_LIVE_CLI=1 to run against the installed CLI")`, then `XCTSkip("scratch config home has no login; run: CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home claude")` when none of `.credentials.json`, `credentials.json`, `.claude.json` exists there; `skipUnlessTurns()` for `AFLEET_LIVE_CLI_TURNS=1`; `LiveBudgetReading.read(getUsage:)` exactly as C2's (copied, with a comment naming the source file); `budgetOrSkip(fleet)` spawns nothing new: it runs `get_usage` over a zero-cost `ClaudeProcess` (`resume-no-replay`-style handshake with `--max-turns 1` is not needed; a fresh `--session-id` handshake and `get_usage` spend nothing, as C2's `zero-cost` fixture proved) and skips with the reading's `reason` when `isSpent`; `ConfigHomeWitness` records `{relative path: (size, mtime)}` for every regular file under the scratch home (hidden included) and `difference(from:)` returns created/modified/deleted relative paths; `engineWrittenPaths` is the spec's allowlist as prefix patterns: `sessions/`, `projects/`, `tasks/`, `jobs/`, `daemon/`, `daemon.log`, `history.jsonl`, `.claude.json`, `shell-snapshots/`, `session-env/`, `file-history/`, `statsig/`, `cache/`, `todos/`, `debug/`, `plugins/`, `backups/`, `plans/`, `ide/`, `logs/`, `history/`, `.credentials.json`, `.last-cleanup`, `.last-update-result.json`, `settings.json`; `unexplained(difference)` returns every path whose first component matches none.
+`Support/LiveGate.swift`: `skipUnlessLive()` throws `XCTSkip("set AFLEET_LIVE_CLI=1 to run against the installed CLI")`, then `XCTSkip("scratch config home has no login; run: CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home claude")` when none of `.credentials.json`, `credentials.json`, `.claude.json` exists there; `skipUnlessTurns()` for `AFLEET_LIVE_CLI_TURNS=1`; `LiveBudgetReading.read(getUsage:)` exactly as C2's (copied, with a comment naming the source file).
+
+`LiveBudget` is one actor for the whole suite (a `static let` on `LiveFleetTests`), and every live scenario runs inside `budget.run(turns: Int, wallTime: Duration) { ... }`: the call serialises scenarios (one at a time, in test order); it refuses with `XCTSkip("live budget: N turns already spent of 2")` or `"...wall time"` when the request would cross the suite ceilings of **two model turns** and **ten minutes**; for `turns > 0` it first reads C2's usage through a zero-cost `ClaudeProcess` (`get_usage` after a fresh handshake, `--max-turns 1`, then `get_session_cost` asserted zero) and skips with the reading's `reason` when `isSpent`; it decorates every `LaunchConfiguration` the scenario builds through `budget.launch(_:)` with `maxTurns` (1 for `turns == 0`, else the scenario's `turns`) and, for `turns > 0`, `model: "claude-haiku-4-5-20251001"`, and it asserts on the way out that no launch bypassed the decoration (the factory counts); it sums `total_cost_usd` from every `result` frame the scenario's channels observed and reports `budget.summary` (turns used, cost sum, wall time) after the last scenario. Zero-cost scenarios call `budget.witnessZeroCost(process)` before ending each process: `get_session_cost` → `session.total_cost_usd == 0`, asserted, because a zero-turn launch emits no `result` frame (the `zero-cost` fixture is the evidence). `ConfigHomeWitness` records `{relative path: (size, mtime)}` for every regular file under the scratch home (hidden included) and `difference(from:)` returns created/modified/deleted relative paths; `engineWrittenPaths` is the spec's allowlist as prefix patterns: `sessions/`, `projects/`, `tasks/`, `jobs/`, `daemon/`, `daemon.log`, `history.jsonl`, `.claude.json`, `shell-snapshots/`, `session-env/`, `file-history/`, `statsig/`, `cache/`, `todos/`, `debug/`, `plugins/`, `backups/`, `plans/`, `ide/`, `logs/`, `history/`, `.credentials.json`, `.last-cleanup`, `.last-update-result.json`, `settings.json`; `unexplained(difference)` returns every path whose first component matches none. The suite-level witness is taken in `LiveFleetTests`' class `setUp` and compared in class `tearDown` (`XCTAssert` through a recorded failure on the last test when unexplained paths exist); each scenario takes its own before/after pair inside `budget.run`; a path unexplained in either reading fails with the path named, so a write between scenarios is caught as surely as one inside a scenario.
 
 `LiveFleetTests.swift`:
 
-- `testAForeignInteractiveSessionIsDetectedWithinFiveSecondsAndArchivedWhenItEnds`: `skipUnlessLive`; pick a directory the scratch `.claude.json` already trusts (the first `projects` key with `hasTrustDialogAccepted == true` whose path is under `/private/tmp/afleet-fixtures/`; recreate it if absent; skip with `XCTSkip("no trusted scratch directory")` when none); start `claude` (no `-p`) on a pty via `openpty` + `posix_spawn` with the child environment from `LaunchConfiguration.childEnvironment` (so `CLAUDE_CONFIG_DIR` is the scratch home) and `TERM=xterm-256color`; build a `Fleet` over the scratch home with the real `FoundationProcessRunner`; poll `states()` on wall time up to 5 s until a channel with `origin == .foreignLive(.usersTerminal)` appears whose `key.session` is the pid's registry record's session; assert it appeared, its presence is one of `idle/busy/waiting/unknown`; write `Ctrl-C` twice or `/exit\r` to the pty and wait for the child to exit; poll up to 10 s until the channel is `.archived`. Never sends a prompt. Deliberate break: filter registry records by `entrypoint == "sdk-cli"` → the interactive session is never detected.
-- `testAnExecJobIsListedAsABackgroundJobAndStopRemovesIt`: `skipUnlessLive`; `fleet.verbs.backgroundExec("sleep 60", cwd: trustedDir)`; poll up to 5 s for `.backgroundJob`; `perform(.stopJob(short))`; poll until the job holder is gone; record in the test log whether the exec job's `state.json` carried a `sessionId` (the delegated unknown), as a one-line `XCTContext.runActivity` note with the boolean only.
-- `testAdoptingAConversationJobResumesItOwned`: `skipUnlessLive`, `skipUnlessTurns`, `budgetOrSkip`; `claude --bg --model claude-haiku-4-5-20251001 "Reply with exactly: pong"` through the runner; poll for the job; `perform(.adopt)`; assert the runner recorded `stop`, the job left the roster, the channel became `.owned(.ready)` under the job's `sessionId`, and the post-handshake check found no holder. One short turn.
-- `testTheWriteAllowlistHoldsAcrossHooksABackgroundShellASubagentAndRelocation`: `skipUnlessLive`, `skipUnlessTurns`, `budgetOrSkip`; witness before; open a new owned channel in the trusted directory with the Notification hook registered (C2's default `InitializeConfiguration`), send one `haiku` prompt: `Run "sleep 20 &" as a background shell, then use an Explore subagent to list the files in this directory, then reply "done".`; when the `result` arrives, `/cd` into a second trusted scratch directory (`set_cwd`) and wait for its answer; terminate; witness after; assert `unexplained(difference).isEmpty` with the offending relative paths in the message; assert the difference is non-empty (the gate saw writes at all) and that it touched `projects/` (the transcript) and `sessions/` (the record) as a floor on "the reading looked at the right tree". Deliberate break: remove `tasks/` from the allowlist → the background shell's output file is unexplained (this break is the discriminating demonstration and is run once).
+- `testAForeignInteractiveSessionIsDetectedWithinFiveSecondsAndArchivedWhenItEnds`: `skipUnlessLive`; `budget.run(turns: 0)` (the interactive child is not a `ClaudeProcess`; it never receives a prompt); pick a directory the scratch `.claude.json` already trusts (the first `projects` key with `hasTrustDialogAccepted == true` whose path is under `/private/tmp/afleet-fixtures/`; recreate it if absent; skip with `XCTSkip("no trusted scratch directory")` when none); start `claude` (no `-p`) on a pty via `openpty` + `posix_spawn` with the child environment from `LaunchConfiguration.childEnvironment` (so `CLAUDE_CONFIG_DIR` is the scratch home) and `TERM=xterm-256color`; build a `Fleet` over the scratch home with the real `FoundationProcessRunner`; poll `states()` on wall time up to 5 s until a channel with `origin == .foreignLive(.usersTerminal)` appears whose `key.session` is the pid's registry record's session; assert it appeared, its presence is one of `idle/busy/waiting/unknown`; write `Ctrl-C` twice or `/exit\r` to the pty and wait for the child to exit; poll up to 10 s until the channel is `.archived`. Never sends a prompt. Deliberate break: filter registry records by `entrypoint == "sdk-cli"` → the interactive session is never detected.
+- `testAnExecJobIsListedAsABackgroundJobAndStopRemovesIt`: `skipUnlessLive`; `budget.run(turns: 0)`; `fleet.verbs.backgroundExec("sleep 60", cwd: trustedDir)`; poll up to 5 s for `.backgroundJob`; `perform(.stopJob(short))`; poll until the job holder is gone; record in the test log whether the exec job's `state.json` carried a `sessionId` (the delegated unknown), as a one-line `XCTContext.runActivity` note with the boolean only.
+- `testADeclinedProjectServerIsNotSpawnedByTheEngine` (G3's engine-side proof; zero cost): `skipUnlessLive`; `budget.run(turns: 0)`; in a trusted scratch directory, write a `.mcp.json` declaring one stdio server `marker` whose command is `/bin/sh -c 'touch <dir>/marker-<uuid>; exec sleep 30'`; launch A through the `Fleet` with no decline on record (`--max-turns 1` from the budget) → handshake, `MCPStatus`, `witnessZeroCost`, terminate; assert the marker file exists (the headless path promoted the pending server and spawned its command, parent §6.12) and remove it; then `LocalSettingsStore.decline(["marker"])` through the facade's consent verb; launch B identically → handshake, `MCPStatus`, `witnessZeroCost`, terminate; assert no marker file exists and that the project tree differs from before only by `.claude/settings.local.json`; record both `mcp_status` answers as `XCTContext` notes carrying server counts and status words only (the shape for a rejected server is unrecorded, so it is not asserted). Deliberate break: skip the decline write → B spawns the marker too.
+- `testAdoptingAConversationJobResumesItOwned`: `skipUnlessLive`, `skipUnlessTurns`; `budget.run(turns: 1)`; `claude --bg --model claude-haiku-4-5-20251001 "Reply with exactly: pong"` (plus `--max-turns 1` when `claude --bg --help` lists the flag, checked once at zero cost and recorded) through the runner; poll for the job; `perform(.adopt)`; assert the runner recorded `stop`, the job left the roster, the channel became `.owned(.ready)` under the job's `sessionId`, and the post-handshake check found no holder. One short turn.
+- `testTheWriteAllowlistHoldsAcrossHooksABackgroundShellASubagentAndRelocation`: `skipUnlessLive`, `skipUnlessTurns`; `budget.run(turns: 1)` (the launch carries `--max-turns 2` because the subagent's reply arrives inside the one turn); witness before; open a new owned channel in the trusted directory with the Notification hook registered (C2's default `InitializeConfiguration`), send one `haiku` prompt: `Run "sleep 20 &" as a background shell, then use an Explore subagent to list the files in this directory, then reply "done".`; when the `result` arrives, `/cd` into a second trusted scratch directory (`set_cwd`) and wait for its answer; terminate; witness after; assert `unexplained(difference).isEmpty` with the offending relative paths in the message; assert the difference is non-empty (the gate saw writes at all) and that it touched `projects/` (the transcript) and `sessions/` (the record) as a floor on "the reading looked at the right tree". Deliberate break: remove `tasks/` from the allowlist → the background shell's output file is unexplained (this break is the discriminating demonstration and is run once).
 - `testTheAllowlistNamesNothingTheEngineIsNotKnownToWrite`: a unit test over `engineWrittenPaths` asserting the set equals the spec's list exactly, so an addition is deliberate.
 
 - [ ] **Step 2: Run without the live flag**
 
 Run: `swift test --package-path FleetKit --filter LiveFleetTests 2>&1 | grep -E "Executed|skipped"`
-Expected: `Executed 5 tests, with 4 tests skipped and 0 failures` (the allowlist unit test runs).
+Expected: `Executed 6 tests, with 5 tests skipped and 0 failures` (the allowlist unit test runs).
 
 - [ ] **Step 3: Run the live gate once**
 
 Run: `AFLEET_LIVE_CLI=1 swift test --package-path FleetKit --filter LiveFleetTests 2>&1 | grep -E "Test Case|Executed|skipped|error"`
-Expected: the two zero-turn tests pass; the two turn tests skip with `set AFLEET_LIVE_CLI_TURNS=1`.
+Expected: the three zero-turn tests pass, each with a `get_session_cost` reading of 0 in its log; the two turn tests skip with `set AFLEET_LIVE_CLI_TURNS=1`. Before the first live run, read the scratch account's window with C2's reading; the coordinator's last reading was 98% at 02:55Z resetting 06:00Z, and a spent window skips, not fails.
 Then, once: `AFLEET_LIVE_CLI=1 AFLEET_LIVE_CLI_TURNS=1 swift test --package-path FleetKit --filter LiveFleetTests 2>&1 | grep -E "Test Case|Executed|skipped|error"`
-Expected: all five pass, or the budget skip names the spent window. Quote the summary line and the two turns' `total_cost_usd` (from the `result` frames) in the commit body; do not retry a failed turn — report it.
+Expected: all six pass, or the budget skip names the spent window. Quote the summary line, `budget.summary` (turns used, the summed `total_cost_usd` from the `result` frames, wall time) and the three zero readings in the commit body; do not retry a failed turn — report it.
 
 - [ ] **Step 4: Commit**
 
@@ -1326,7 +1518,7 @@ This task is executable only after `child/c3-timeline` merges to `main` and this
 
 - [ ] **Step 1: Write the failing tests**
 
-`MirrorEligibilityTests.swift` (G2): drive C3's reducer with the `background-shell` fixture through a fake-claude replay under a `ChannelSupervisor`; while the mirror lists the running task, advance the clock 30 min → no `terminate`; after the `task_notification` empties the mirror and the heartbeat interval passes with no frames, advance → `terminate` observed. Deliberate break: feed the supervisor the empty stand-in instead of the mirror → the first half reaps.
+`MirrorEligibilityTests.swift` (G2): drive C3's reducer with the `background-shell` fixture through a fake-claude replay under a `ChannelSupervisor`, with C3's entry conforming to `TaskMirrorReading` (`isArmed` from the announced-not-started state, `isRunning` from started-or-updated-not-complete). The boundary cases are the same five as Task 2's `testTheMirrorBoundaryCases`, asserted case for case against the real mirror: while an entry is armed, advance the clock 30 min → no `terminate` (`.blocked(.taskArmed)`); while it runs with fresh frames → no `terminate` (`.taskRunning`); while it runs and the last task frame is older than the heartbeat → no `terminate` and the blocker is `.taskStateUncertain` (the second half of the fixture, paced by `FAKE_CLAUDE_SPEED` and the clock); after the `task_notification` empties the mirror and the heartbeat interval passes with no frames, advance → `terminate` observed (stale history is not uncertainty); a mirror holding only a completed entry with an old frame → `terminate` observed. Deliberate break: feed the supervisor the empty stand-in instead of the mirror → the first half reaps; treat any old frame as uncertainty → the fourth case never reaps.
 
 `StoreIndexStorageTests.swift`: `save` then `load` round-trips C3's snapshot type; a store from the future refuses; `load` on an empty store returns `nil`.
 
@@ -1353,14 +1545,14 @@ swift test --package-path AfleetCore 2>&1 | grep -E "Executed .* tests"
 swift test --package-path ClaudeWire 2>&1 | grep -E "Executed .* tests"
 swift test --package-path FleetKit 2>&1 | grep -E "Executed .* tests|skipped"
 ```
-Expected: every line reads `0 failures`; FleetKit's skips are exactly the four live tests plus, if still blocked, the fork-point flags test, each with its named reason.
+Expected: every line reads `0 failures`; FleetKit's skips are exactly the five live tests, each with its named reason; nothing else skips.
 
 - [ ] **Step 2: G1 by name**
 
 ```bash
 swift test --package-path FleetKit --filter LifecycleRowTests 2>&1 | grep -E "Test Case .*(passed|failed)|Executed"
 ```
-Expected: `testCoverageIsTotal` passed and one passed line per row name in `LifecycleRowTests.coverage`.
+Expected: `testCoverageIsTotal` passed and one passed line per method name in `LifecycleRowTests.coverage`, including the `+Restart` and `+Logout` extension tests.
 
 - [ ] **Step 3: G3 and G4 by name**
 
@@ -1382,12 +1574,13 @@ Expected: the identity grep prints nothing (exit 1); no typings tracked (exit 1)
 
 - [ ] **Step 6: Record**
 
-Record the counts, the skips with their reasons, the two live turns' cost, and the state of Task 11 in the plan's ledger (`.doperpowers/sde/2026-09-05-c4-fleetkit-sessions-fleet/progress.md`); the controller writes the spec's Outcomes. No commit unless a file changed.
+Record the counts, the skips with their reasons, `budget.summary` (turns, summed cost, wall time) and the three zero-cost readings, and the state of Task 11 in the plan's ledger (`.doperpowers/sde/2026-09-05-c4-fleetkit-sessions-fleet/progress.md`); the controller writes the spec's Outcomes. No commit unless a file changed.
 
 ---
 
 ## Self-review notes
 
-- Spec coverage: Purpose → Tasks 4–9; G1 → Tasks 4–5 (coverage total in Task 5); G2 → Task 11; G3 → Task 7; G4 → Task 8; G5 → Task 10; store (X6) → Task 1; X5 types and pane protocol → Tasks 2, 5; listing policy → Task 2; Activity → Task 9; diagnostics → Tasks 3, 9; verbs cadence → Task 3; wedged exclusions → Tasks 2, 5; consent from both locations → Task 7; `IndexStorage` → Task 11; the write allowlist → Task 10.
+- Spec coverage: Purpose → Tasks 4–9; G1 → Tasks 4–5 (coverage total in Task 5); G2 → Task 11; G3 → Task 7; G4 → Task 8; G5 → Task 10; store (X6) → Task 1; X5 types and pane protocol → Tasks 2, 5; listing policy → Task 2; Activity → Task 9; diagnostics → Tasks 3, 9; verbs cadence → Task 3; wedged exclusions → Tasks 2, 5; wedged from every terminating action → Tasks 5, 6, 8; the cap as reservations → Tasks 4, 5; ownership with no excused holder → Task 4; `PaneRequest.id` → Tasks 2, 5; runtime state and the restart → Task 6; `forkFrom` → Task 6; consent from the merged settings only → Task 7; the descriptor-relative §6.12 writer → Task 7; the engine-side decline proof → Task 10; typed router strategies → Task 8; the live budget and the suite-level witness → Task 10; `IndexStorage` → Task 11; the write allowlist → Task 10.
 - Interface consistency: `TaskMirrorReading` (Task 2) is consumed by Tasks 4, 5, 9 and satisfied by C3's type in Task 11; `PaneRequest`/`PaneExit` (Task 2) are produced by Task 5 and exercised by Task 9's facade test; `CLIVerbs` (Task 3) is consumed by Tasks 5, 8, 10; `FleetDiagnosticsSink` is introduced minimally in Task 3 and completed in Task 9.
-- One open item the plan could not settle: the two fork-point flags (`--resume-session-at`, `--resume-drops-turn`) have no field on C2's `LaunchConfiguration`; Task 6 files the `[parent-impact]` and skips one test by name rather than patching ClaudeWire from this branch.
+- No open item remains from v1: the fork-point flags landed as C2's `SessionStart.forkFrom` (`main` `13c9ad4`) and Task 6 uses them with no skip. Two steps in Task 8 run against scripted `fake-claude` answers because the corpus lacks the frames (the `rewind_files` apply and the completed `claude_oauth_wait_for_completion`), and each test says so; a completed login cannot be recorded without a real OAuth flow, and the rewind apply was never captured. Two facts G5 records rather than asserts: the `mcp_status` shape for a rejected server, and whether `claude --bg` accepts `--max-turns`.
+- G1's coverage test is red from Task 4 through Task 8 by design (the terminating actions land with the tasks that own them); every commit in between names the open scenarios, and Task 12 checks it green.
