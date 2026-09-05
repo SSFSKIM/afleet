@@ -278,7 +278,16 @@ final class WireReducerTests: XCTestCase {
         XCTAssertNotEqual(reducer.overlay.queue.lastState, nil)
 
         _ = reducer.apply(.processReplaced(ProcessEpoch.first.next()), at: Date(timeIntervalSince1970: 0))
-        XCTAssertEqual(reducer.overlay, .empty)
+        // Compared as a boolean: an `Overlay` carries `ItemID`s (and so a `LogicalStream` and the config home path)
+        // and engine-authored banner text, and XCTest prints both operands of a failing `XCTAssertEqual`. The message
+        // names counts and shapes only (C3 constraint 12), as Task 8's fix wave did at four other sites.
+        let after = reducer.overlay
+        XCTAssertTrue(after == .empty, """
+            the overlay was not reset: decisions \(after.decisions.count), clusters \(after.clusters.count), \
+            turns \(after.turns.count), notifications \(after.notifications.count), hooks \(after.hooks.count), \
+            banners \(after.banners.count), queue \(after.queue.queued.count)/\(after.queue.started.count), \
+            stale \(after.stale), sessionState \(after.sessionState != nil)
+            """)
         XCTAssertFalse(reducer.overlay.stale)
         XCTAssertNil(reducer.preview)
         XCTAssertTrue(reducer.outstandingPrompts.isEmpty)
