@@ -243,7 +243,12 @@ actor LiveBudget {
     nonisolated let launches = LaunchLedger()
 
     private var turnsReserved = 0
+    /// Wall time already accounted against the ceiling: the *actual* elapsed time of every scenario that has
+    /// finished, plus the declared projection of the one running now. Only one scenario runs at a time, so the
+    /// running one's start and projection are scalars.
     private var wallReserved = Duration.zero
+    private var scenarioStart: ContinuousClock.Instant?
+    private var scenarioProjection = Duration.zero
     private var costUSD: Double = 0
     private var startedAt: ContinuousClock.Instant?
     private var probedOnce = false
@@ -261,16 +266,26 @@ actor LiveBudget {
     /// `body` runs in the caller's isolation: `enter` and `leave` carry all of this actor's state, so the closure
     /// never has to be `Sendable` and a scenario can drive its own locals.
     @discardableResult
-    nonisolated func run<T>(turns: Int, wallTime: Duration, _ body: () async throws -> T) async throws -> T {
+    nonisolated func run<T>(turns: Int, wallTime: Duration, file: StaticString = #filePath, line: UInt = #line,
+                            _ body: () async throws -> T) async throws -> T {
         try await enter(turns: turns, wallTime: wallTime)
         do {
             let value = try await body()
-            await leave()
+            await report(leave(), wallTime, file: file, line: line)
             return value
         } catch {
-            await leave()
+            await report(leave(), wallTime, file: file, line: line)
             throw error
         }
+    }
+
+    /// A scenario that ran past the time it declared is a failure, not a shrug. The declaration is what the suite's
+    /// ten-minute ceiling is arithmetic over, so a declaration nothing checks makes the ceiling decorative — and a
+    /// scenario that overruns is also the one that pushes a later one into a skip it did not deserve.
+    private nonisolated func report(_ elapsed: Duration, _ declared: Duration,
+                                    file: StaticString, line: UInt) {
+        guard elapsed > declared else { return }
+        XCTFail("this scenario declared \(declared) of wall time and took \(elapsed)", file: file, line: line)
     }
 
     private func enter(turns: Int, wallTime: Duration) async throws {
@@ -287,6 +302,10 @@ actor LiveBudget {
         if startedAt == nil { startedAt = ContinuousClock.now }
 
         await acquire()
+        // The clock starts when the body is admitted, not when the call was made: a scenario queued behind another
+        // must not be charged for the wait.
+        scenarioStart = .now
+        scenarioProjection = wallTime
 
         // C2's reading, before the first scenario of the run and before every turn-spending one.
         guard let probe, turns > 0 || !probedOnce else { return }
@@ -310,10 +329,33 @@ actor LiveBudget {
     private func refund(turns: Int, wallTime: Duration) {
         turnsReserved -= turns
         wallReserved -= wallTime
+        scenarioStart = nil
+        scenarioProjection = .zero
         release()
     }
 
-    private func leave() { release() }
+    /// The scenario is over. Three things happen.
+    ///
+    /// The ledger's expectation goes with it, so a launch that arrives between scenarios — or in a scenario that
+    /// forgot to declare its cap — is counted as a bypass rather than silently stamped with the previous
+    /// scenario's `--max-turns` and model. Without this the bypass count could only ever catch a launch made
+    /// before the very first `budget.launch` of the run, which is nearly nothing.
+    ///
+    /// The projection this scenario reserved is swapped for what it actually took, so the ceiling accumulates real
+    /// time rather than guesses: a suite of cheap scenarios does not starve a later one, and a suite that really
+    /// has spent ten minutes refuses the next one.
+    ///
+    /// And the elapsed time is returned, so `run` can fail a scenario that overran its own declaration.
+    @discardableResult
+    private func leave() -> Duration {
+        launches.stopExpecting()
+        let elapsed = scenarioStart.map { ContinuousClock.now - $0 } ?? .zero
+        wallReserved += elapsed - scenarioProjection
+        scenarioStart = nil
+        scenarioProjection = .zero
+        release()
+        return elapsed
+    }
 
     private func acquire() async {
         guard occupied else { occupied = true; return }

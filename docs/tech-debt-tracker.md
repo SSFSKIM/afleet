@@ -55,3 +55,16 @@ durable index.
     after a respawn has already moved the epoch on. It is tidiness, not a leak, and it is
     deliberately not being fixed; it is logged so the whole-branch review does not rediscover
     it. Owner: C4. Closer: none planned.
+12. **`CLIVerbs`' twenty-second default may be too short for `claude --bg` against a cold or
+    contended daemon.** `Verbs/CLIVerbs.swift:64` defaults to twenty seconds and `Fleet` builds
+    its verbs with that default (`Fleet.swift:78-79`), so `sendToBackground`, `performJob` and
+    every `jobs()` reconcile run at twenty seconds in production. G5's live gate had to raise
+    its own separate instance to 180 s and still saw one failure: the daemon log of the failing
+    run shows about seventy seconds between the verb being invoked and
+    `[bg] bg spawned <short> (shell)` appearing, while earlier scenarios' workers and spares
+    were still settling in the same config home. Run from a shell against a warm daemon the same
+    command returns in 0.8 s whether its output is piped or redirected, so this is contention,
+    not pipe inheritance. Observed on `2.1.261`, 2026-09-05: the exec-job scenario passed at
+    9.1 s and 50.7 s and failed against ceilings of 90 s and 180 s. Owner: C4. Closer: measure
+    the verb under a deliberately cold daemon and set the default from that, rather than raising
+    it blind; consider whether a `--bg` verb should have a different budget from `agents --json`.

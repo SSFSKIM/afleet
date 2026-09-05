@@ -65,7 +65,7 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        try await Self.budget.run(turns: 0, wallTime: .seconds(60)) {
+        try await Self.budget.run(turns: 0, wallTime: .seconds(90)) {
             let directory = try Self.trustedDirectory(0)
             let session = SessionID()
             let key = ChannelKey(configHome: LiveGate.scratchHome, session: session)
@@ -132,7 +132,7 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        try await Self.budget.run(turns: 0, wallTime: .seconds(45)) {
+        try await Self.budget.run(turns: 0, wallTime: .seconds(240)) {
             let directory = try Self.trustedDirectory(0)
             let short = try await rig.verbs.backgroundExec("sleep 60", cwd: directory)
             var removed = false
@@ -168,16 +168,23 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        try await Self.budget.run(turns: 0, wallTime: .seconds(60)) {
+        try await Self.budget.run(turns: 0, wallTime: .seconds(120)) {
             let directory = try Self.trustedDirectory(3)
             let markerName = "marker-\(UUID().uuidString)"
             let marker = directory.appending(path: markerName)
             let mcpFile = directory.appending(path: ".mcp.json")
             let localSettings = directory.appending(path: ".claude/settings.local.json")
+            // Only what this scenario created. The §6.12 write may land in a `.claude` directory that already
+            // held other files, and removing the directory wholesale would delete somebody else's.
+            let claudeExisted = FileManager.default.fileExists(
+                atPath: directory.appending(path: ".claude").path(percentEncoded: false))
+            let settingsExisted = FileManager.default.fileExists(
+                atPath: localSettings.path(percentEncoded: false))
             defer {
                 try? FileManager.default.removeItem(at: mcpFile)
                 try? FileManager.default.removeItem(at: marker)
-                try? FileManager.default.removeItem(at: directory.appending(path: ".claude"))
+                if !settingsExisted { try? FileManager.default.removeItem(at: localSettings) }
+                if !claudeExisted { try? FileManager.default.removeItem(at: directory.appending(path: ".claude")) }
             }
 
             // stdio, because only a spawned command leaves a marker; an http or sse entry is listed and gated
@@ -247,13 +254,17 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        try await Self.budget.run(turns: 2, wallTime: .seconds(180)) {
+        try await Self.budget.run(turns: 2, wallTime: .seconds(240)) {
             let directory = try Self.trustedDirectory(0)
-            // `claude --bg` forwards `--max-turns` (bundle 824274's forwarded-flag set), so the job the test
-            // starts is capped exactly as every other launch of this suite is.
+            // No `--max-turns` on this line, and the spec was amended to match. `claude --bg` does forward the
+            // flag, but `--max-turns 1` ends the session the moment it answers: the live run recorded the job
+            // going terminal 3.5 s after creation, and `Fleet.jobs()` filters terminal records out, so the job
+            // afleet is supposed to adopt was gone before the first `jobs()` call could answer. A `--bg`
+            // conversation session without the cap stays resident and idle after replying, which is the state
+            // adoption is about. The job is a CLI verb and not a `ClaudeProcess`, so the "every launch carries an
+            // explicit cap" rule is untouched, and the one-word prompt bounds the spend by itself.
             _ = try await rig.runner.run(rig.binary,
-                                         arguments: ["--bg", "--model", Self.haiku, "--max-turns", "1",
-                                                     "Reply with exactly: pong"],
+                                         arguments: ["--bg", "--model", Self.haiku, "Reply with exactly: pong"],
                                          environment: rig.childEnvironment, cwd: directory, timeout: .seconds(120))
 
             let started = try await Self.poll(upTo: .seconds(60)) { () -> JobEntry? in
@@ -268,9 +279,11 @@ final class LiveFleetTests: XCTestCase {
             let log = LiveEventLog()
             let pump = Task { for await event in stream { await log.append(event) } }
             defer { pump.cancel() }
-            _ = try await Self.poll(upTo: .seconds(20)) { () -> Bool? in
+            let sawJobOrigin = try await Self.poll(upTo: .seconds(20)) { () -> Bool? in
                 await rig.fleet.state(of: key)?.origin == .backgroundJob ? true : nil
             }
+            XCTAssertEqual(sawJobOrigin, true,
+                           "the registered channel never read as .backgroundJob, so adopt has nothing to adopt")
 
             // The resume carries `--max-turns 1`: a resumed job may run a turn, which is the second reservation.
             _ = Self.budget.launch(LaunchConfiguration(binary: rig.binary, cwd: directory, session: .resume(session, fork: false)),
@@ -330,7 +343,7 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        try await Self.budget.run(turns: 2, wallTime: .seconds(240)) {
+        try await Self.budget.run(turns: 2, wallTime: .seconds(300)) {
             let home = try Self.trustedDirectory(1)
             let elsewhere = try Self.trustedDirectory(2)
             let written = home.appending(path: "live-gate-\(UUID().uuidString).txt")
@@ -377,14 +390,17 @@ final class LiveFleetTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(Self.results(in: firstTurn).count, 1,
                                         "the prompt produced no result frame within four minutes")
 
-            // The project rule forbids closing a channel over a running task, so the shell's notification and the
-            // engine's automatic follow-up turn are waited for rather than cut off.
-            let settled = await log.wait(upTo: .seconds(120)) { events in
-                Self.results(in: events).count >= 2 && events.contains { event in
-                    if case .frame(.system(.taskNotification), _) = event { return true }
-                    return false
-                }
+            // The project rule forbids closing a channel over a running task, so the channel is waited out until
+            // it goes quiet rather than until a frame count is reached. Counting was wrong: the live run produced
+            // *two* `task_notification`s — the background shell's and the Explore subagent's — and therefore three
+            // automatic follow-up turns, so "two results and one notification" was satisfied while a third turn
+            // was still running and the reap below cut it off. A settle window is correct for one notification or
+            // for three.
+            let settled = await Self.settle(log, quietFor: .seconds(15), upTo: .seconds(120)) { events in
+                Self.results(in: events).count >= 2
             }
+            XCTAssertTrue(settled,
+                          "the channel never went quiet: reaping now would close it over a running task")
 
             // `/cd` into a second trusted directory. The request goes to the channel's own process: the facade has
             // no generic control-request door, and Task 8's strategy executor takes a supervisor this test cannot
@@ -424,7 +440,6 @@ final class LiveFleetTests: XCTestCase {
             XCTAssertEqual(answered.first, "hook_callback",
                            "the held permission was answered before the hook; answers were \(answered)")
 
-            _ = settled
             let results = Self.results(in: events)
             XCTAssertGreaterThanOrEqual(results.count, 2,
                                         "expected the prompt's result and the follow-up turn's, saw \(results.count)")
@@ -460,15 +475,17 @@ final class LiveFleetTests: XCTestCase {
     /// Deliberate break: move the `turnsReserved += turns` in `LiveBudget.enter` to after `acquire()` → the third
     /// call is admitted, because the second one's turn is not yet on the books.
     func testTwoOverlappingScenariosRunOneAtATimeWithAtomicAccounting() async throws {
+        // Twenty seconds each against a sixty-second ceiling, so two fit and the third is refused on *turns* —
+        // which is the property under test — rather than on wall time.
         let budget = LiveBudget(turnCeiling: 2, wallCeiling: .seconds(60))
         let trace = OverlapTrace()
 
-        async let first: Void = budget.run(turns: 1, wallTime: .seconds(1)) {
+        async let first: Void = budget.run(turns: 1, wallTime: .seconds(20)) {
             trace.entered("A")
             await trace.suspend("A")
             trace.left("A")
         }
-        async let second: Void = budget.run(turns: 1, wallTime: .seconds(1)) {
+        async let second: Void = budget.run(turns: 1, wallTime: .seconds(20)) {
             trace.entered("B")
             await trace.suspend("B")
             trace.left("B")
@@ -483,7 +500,7 @@ final class LiveFleetTests: XCTestCase {
         XCTAssertEqual(trace.inside, 1, "two bodies were inside the budget at once")
 
         do {
-            try await budget.run(turns: 1, wallTime: .seconds(1)) { XCTFail("a third scenario was admitted") }
+            try await budget.run(turns: 1, wallTime: .seconds(20)) { XCTFail("a third scenario was admitted") }
             XCTFail("the third scenario was not refused")
         } catch let skip as XCTSkip {
             XCTAssertTrue((skip.message ?? "").contains("2 turns already spent of 2"),
@@ -591,9 +608,16 @@ final class LiveFleetTests: XCTestCase {
         let file = LiveGate.scratchHome.appending(path: ".claude.json")
         let document = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any]
         let projects = document?["projects"] as? [String: Any] ?? [:]
+        // `/tmp` is a symlink to `/private/tmp`, so the scratch config home lies under this prefix too. A stray
+        // trust entry naming it, or anything beneath it, would let this test create directories and write
+        // `.mcp.json` inside a config home — the one thing this child must never do — so it is excluded by code
+        // rather than by the fixture's good manners.
+        let home = LiveGate.scratchHome.resolvingSymlinksInPath().path(percentEncoded: false)
         let trusted = projects.compactMap { path, value -> String? in
             guard let entry = value as? [String: Any], entry["hasTrustDialogAccepted"] as? Bool == true,
                   path.hasPrefix("/private/tmp/afleet-fixtures/") else { return nil }
+            let resolved = URL(filePath: path).resolvingSymlinksInPath().path(percentEncoded: false)
+            guard resolved != home, !resolved.hasPrefix(home + "/") else { return nil }
             return path
         }.sorted()
         guard index < trusted.count else { throw XCTSkip("no trusted scratch directory at index \(index)") }
@@ -607,6 +631,22 @@ final class LiveFleetTests: XCTestCase {
     /// Relative paths of every regular file under a project directory.
     private static func tree(under root: URL) -> Set<String> {
         Set(ConfigHomeWitness(root: root).read().keys)
+    }
+
+    /// Waits until the channel has gone quiet: `condition` holds and no new event has arrived for `quietFor`.
+    /// Answers false at `deadline` rather than throwing, so the caller decides what an unsettled channel means.
+    private static func settle(_ log: LiveEventLog, quietFor: Duration, upTo deadline: Duration,
+                               _ condition: @Sendable ([WireEvent]) -> Bool) async -> Bool {
+        let start = ContinuousClock.now
+        var lastCount = -1
+        var lastChange = ContinuousClock.now
+        while ContinuousClock.now - start < deadline {
+            let events = await log.events
+            if events.count != lastCount { lastCount = events.count; lastChange = .now }
+            if condition(events), ContinuousClock.now - lastChange >= quietFor { return true }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        return false
     }
 
     /// Polls `body` on wall time until it answers non-nil or the deadline passes. Wall time is right here: this
@@ -635,6 +675,8 @@ private actor DecisionDriver {
     /// Every `callback_id` the engine asked about.
     private(set) var hookCallbackIDs: [String] = []
     private var held: (id: RequestID, input: JSONValue)?
+    /// Asks that arrived while the first was held; released in arrival order behind it.
+    private var queued: [(id: RequestID, input: JSONValue)] = []
     private var hookArrived = false
 
     init(fleet: Fleet, key: ChannelKey) { self.fleet = fleet; self.key = key }
@@ -648,7 +690,11 @@ private actor DecisionDriver {
             hookArrived = true
             await releaseHeld()
         case .canUseTool(let ask):
-            guard held == nil, !hookArrived else { return await allow(request.id, ask.input) }
+            // A second ask arriving while the first is still held is held behind it rather than allowed. Allowing
+            // it would put `can_use_tool` first in `answered` and redden the ordering assertion for a reason that
+            // has nothing to do with the ordering rule; queueing keeps the rule the only thing that test measures.
+            guard !hookArrived else { return await allow(request.id, ask.input) }
+            guard held == nil else { queued.append((request.id, ask.input)); return }
             held = (request.id, ask.input)
         default:
             break
@@ -662,6 +708,9 @@ private actor DecisionDriver {
         guard let pending = held else { return }
         held = nil
         await allow(pending.id, pending.input)
+        let waiting = queued
+        queued = []
+        for ask in waiting { await allow(ask.id, ask.input) }
     }
 
     private func allow(_ id: RequestID, _ input: JSONValue) async {
@@ -853,8 +902,8 @@ private final class PseudoTerminalChild {
         drain.start()
     }
 
-    /// Ends the child this test started, and nothing else. `/exit` first, then two interrupts, then a signal to
-    /// the pid — every step aimed at a pid this object owns.
+    /// Ends the child this test started, and nothing else: two interrupts, then `/exit`, then `SIGTERM`, then
+    /// `SIGKILL`, each step waited out. Every one of them is aimed at the pid this object spawned.
     func stop() {
         guard !reaped else { return }
         reaped = true
