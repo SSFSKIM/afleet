@@ -28,7 +28,9 @@ public struct WireReducer: Sendable {
     /// The projection the file already held when the channel opened — what `StreamIngestion.open` returned. Wire
     /// items continue it; a rewind may cut into it.
     private var seedItems: [TimelineItem]
-    private let seed: DurableProjection
+    /// Everything the seed contributes besides its items. `var`, not `let`: `conversation_reset` clears the whole
+    /// durable half, and the seed's hidden records, branches, warnings and window are part of it.
+    private var seed: DurableProjection
     private var main: ItemBuilder
     private var agentBuilders: [String: ItemBuilder]
     private var agentOrder: [String]
@@ -330,8 +332,11 @@ public struct WireReducer: Sendable {
             overlay.sessionState = f                          // last frame wins; no item
 
         case .status(let f):
-            // `status` arrives several times a turn and carries nothing a channel would show — except when a
-            // compaction failed, which is the one thing about it the operator has to see.
+            // The plan lists `.status` among the banner subtypes; this narrows it deliberately, and
+            // `testStatusBannersOnlyWhenACompactionFailed` pins both directions so the narrowing cannot be mistaken
+            // for an omission. `Banner.Kind` has no `status` case, and the frame arrives several times a turn
+            // carrying nothing a channel would show — except `compact_error`, which is the one thing about it the
+            // operator has to see, and which no fixture carries.
             if let failure = f.compactError { banner(.compatibility, text: failure, at: now) }
 
         case .apiRetry(let f):
@@ -456,6 +461,7 @@ public struct WireReducer: Sendable {
     }
 
     private mutating func clearConversation() {
+        seed = .empty
         seedItems = []
         main = ItemBuilder(stream: stream, sourceFile: nil, origin: .wire)
         agentBuilders = [:]

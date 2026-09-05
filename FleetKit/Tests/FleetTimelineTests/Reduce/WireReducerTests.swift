@@ -260,8 +260,10 @@ final class WireReducerTests: XCTestCase {
         let target = try XCTUnwrap(firstMessage.recordUUIDs.first)
         _ = reducer.apply(.rewound(toUUID: target), at: Date(timeIntervalSince1970: 0))
 
-        XCTAssertEqual(reducer.durable.items.map(\.id), Array(before.prefix(2)),
-                       "the first prompt and the whole first message.id group survive; nothing after them does")
+        // Compared as booleans throughout this file: an `ItemID` holds a `LogicalStream`, which carries the config
+        // home path and is never logged (C3 constraint 12), so a diagnostic names item keys and counts only.
+        XCTAssertTrue(reducer.durable.items.map(\.id) == Array(before.prefix(2)),
+                      "kept \(reducer.durable.items.map(\.id.key)) of \(before.map(\.key))")
         XCTAssertEqual(reducer.durable.session.leaf, target)
         XCTAssertNil(reducer.preview)
     }
@@ -280,7 +282,8 @@ final class WireReducerTests: XCTestCase {
         XCTAssertFalse(reducer.overlay.stale)
         XCTAssertNil(reducer.preview)
         XCTAssertTrue(reducer.outstandingPrompts.isEmpty)
-        XCTAssertEqual(reducer.durable.items, items, "the durable half is untouched")
+        XCTAssertTrue(reducer.durable.items == items,
+                      "the durable half is untouched: \(reducer.durable.items.map(\.id.key)) vs \(items.map(\.id.key))")
     }
 
     /// `command_lifecycle` drives the queue. `plain-two-turn` carries two commands through `queued`, `started` and
@@ -361,8 +364,10 @@ final class WireReducerTests: XCTestCase {
             XCTAssertTrue(url.path.contains("/_other_/"), "agent \(id) moved with the slug")
             XCTAssertFalse(url.path.contains("/_slug_/"))
         }
-        XCTAssertEqual(reducer.durable.items, items, "a relocation renames nothing in the projection")
-        XCTAssertEqual(reducer.overlay, overlay, "and adds no banner when the path resolves to this session")
+        XCTAssertTrue(reducer.durable.items == items,
+                      "a relocation renames nothing in the projection: \(reducer.durable.items.map(\.id.key))")
+        XCTAssertTrue(reducer.overlay == overlay,
+                      "and adds no banner when the path resolves to this session: \(reducer.overlay.banners.count) banners")
 
         // A path that names another session is ignored and counted.
         let elsewhere = FixtureCorpus.recordedConfigHome
@@ -404,6 +409,106 @@ final class WireReducerTests: XCTestCase {
             if case .assistantMessage = $0 { true } else { false }
         }
         XCTAssertEqual(seedGroups.count, 5, "the seed supplies the five assistant groups the wire never re-sends")
+    }
+
+    /// **No fixture carries a `conversation_reset` frame.** The frame clears the durable half outright, and the
+    /// half a resume seeded is part of it: `session-mirror-resume`'s seed is real, so its items, hidden records and
+    /// branches are asserted non-empty first and the reset must leave nothing of any of them.
+    func testConversationResetClearsTheWholeDurableHalf_unwitnessed() throws {
+        for fixture in try FixtureCorpus.all() {
+            XCTAssertTrue(try fixture.frames().allSatisfy { if case .conversationReset = $0.frame { false } else { true } },
+                          "the corpus is still free of conversation_reset frames; this test's frame is constructed")
+        }
+        let fixture = try FixtureCorpus.named("session-mirror-resume")
+        var reducer = try FixtureWireReplay.replay(fixture)
+
+        XCTAssertFalse(reducer.durable.items.isEmpty, "the seeded projection has items to lose")
+        XCTAssertFalse(reducer.durable.hidden.isEmpty, "the seed contributed hidden records")
+        XCTAssertNotNil(reducer.durable.session.leaf, "the seed named a leaf")
+        let seeded = try FixtureWireReplay.seed(for: fixture)
+        XCTAssertFalse(seeded.hidden.isEmpty, "and those hidden records came from initial/, not from the wire")
+
+        let line = JSONValue.object([
+            "type": .string("conversation_reset"),
+            "new_conversation_id": .string("00000000-0000-4000-8000-00000000c0de"),
+            "uuid": .string("00000000-0000-4000-8000-00000000c0d1"),
+            "session_id": .string("00000000-0000-4000-8000-0000000005e5"),
+        ])
+        _ = reducer.apply(.frame(FrameDecoder.decode(line: try line.canonicalData()), .first),
+                          at: Date(timeIntervalSince1970: 0))
+
+        XCTAssertTrue(reducer.durable.items.isEmpty, "items: \(reducer.durable.items.count)")
+        XCTAssertTrue(reducer.durable.hidden.isEmpty, "hidden: \(reducer.durable.hidden.count)")
+        XCTAssertTrue(reducer.durable.branches.isEmpty, "branches: \(reducer.durable.branches.count)")
+        XCTAssertTrue(reducer.durable.warnings.isEmpty, "warnings: \(reducer.durable.warnings.count)")
+        XCTAssertNil(reducer.durable.window)
+        XCTAssertNil(reducer.durable.session.leaf)
+        XCTAssertEqual(reducer.durable.session, SessionState())
+        XCTAssertNil(reducer.preview)
+
+        // `session-mirror-resume`'s transcript is one clean chain, so its seed's `branches`, `warnings` and `window`
+        // are structurally empty and the four assertions above them would pass vacuously. A seed built here from
+        // invented identifiers populates all five, so the reset is asserted against something in every field.
+        let stream = LogicalStream(configHome: FixtureCorpus.recordedConfigHome,
+                                   sessionID: fixture.sessionID, name: .main)
+        let key = RecordKey(stream: stream, identity: .uuid("00000000-0000-4000-8000-0000000000a1"))
+        let populated = DurableProjection(
+            items: [.notification(NotificationItem(id: ItemID(stream: stream, key: "invented-seed-item"),
+                                                   provenance: Provenance(stream: stream, origin: .file),
+                                                   key: "invented", text: "", level: "info", fileOnly: true))],
+            hidden: [HiddenRecord(key: key, kind: "attachment", reason: .attachment)],
+            branches: [Branch(head: "00000000-0000-4000-8000-0000000000b1",
+                              tail: "00000000-0000-4000-8000-0000000000b2", count: 2)],
+            session: { var state = SessionState(); state.leaf = "00000000-0000-4000-8000-0000000000c1"; return state }(),
+            warnings: [ReadWarning(kind: .undecodable, stream: .main, byteOffset: 0)],
+            window: WindowMarker(earlierAvailable: true, continueBefore: 128),
+            streams: [stream])
+        var loaded = WireReducer(stream: stream, slug: "_slug_", seed: populated)
+        XCTAssertEqual([loaded.durable.items.count, loaded.durable.hidden.count,
+                        loaded.durable.branches.count, loaded.durable.warnings.count], [1, 1, 1, 1])
+        XCTAssertNotNil(loaded.durable.window)
+        _ = loaded.apply(.frame(FrameDecoder.decode(line: try line.canonicalData()), .first),
+                         at: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual([loaded.durable.items.count, loaded.durable.hidden.count,
+                        loaded.durable.branches.count, loaded.durable.warnings.count], [0, 0, 0, 0],
+                       "the reset cleared every collection the seed had populated")
+        XCTAssertNil(loaded.durable.window)
+        XCTAssertNil(loaded.durable.session.leaf)
+    }
+
+    /// `system/status` is deliberately not a banner on its own: `Banner.Kind` has no `status` case and the frame
+    /// arrives several times a turn. Both directions are pinned here, so the narrowing cannot be read as an
+    /// omission. The corpus witnesses the quiet direction; **no fixture carries `compact_error`**, so the loud one
+    /// is a constructed frame with an invented identifier.
+    func testStatusBannersOnlyWhenACompactionFailed() throws {
+        let fixture = try FixtureCorpus.named("plain-two-turn")
+        let statusFrames = try fixture.frames().filter {
+            if case .system(.status) = $0.frame { true } else { false }
+        }
+        XCTAssertEqual(statusFrames.count, 2, "plain-two-turn carries two status frames, none of them a failure")
+        XCTAssertTrue(statusFrames.allSatisfy {
+            if case .system(.status(let f)) = $0.frame { f.compactError == nil } else { false }
+        }, "the corpus is still free of compact_error; the failing frame below is constructed")
+
+        var reducer = try FixtureWireReplay.replay(fixture)
+        let quiet = reducer.overlay.banners
+        XCTAssertFalse(quiet.isEmpty, "the recording did raise other banners, so the assertion below is not vacuous")
+        XCTAssertFalse(quiet.contains { $0.kind == .compatibility },
+                       "two status frames without compact_error raised no banner")
+
+        let line = JSONValue.object([
+            "type": .string("system"),
+            "subtype": .string("status"),
+            "status": .string("compacting"),
+            "compact_error": .string("afleet invented compaction failure"),
+            "uuid": .string("00000000-0000-4000-8000-000000005747"),
+            "session_id": .string("00000000-0000-4000-8000-0000000005e5"),
+        ])
+        _ = reducer.apply(.frame(FrameDecoder.decode(line: try line.canonicalData()), .first),
+                          at: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(reducer.overlay.banners.count, quiet.count + 1, "the failing status frame raised one banner")
+        XCTAssertEqual(reducer.overlay.banners.last?.kind, .compatibility)
+        XCTAssertEqual(reducer.overlay.banners.last?.text, "afleet invented compaction failure")
     }
 
     // MARK: - The policy's own bookkeeping
@@ -524,7 +629,8 @@ final class WireReducerTests: XCTestCase {
         let first = try constructed("afleet-invented-mode-one", uuid: "00000000-0000-4000-8000-000000005701")
         let changes = reducer.apply(.frame(first, .first), at: Date(timeIntervalSince1970: 0))
         XCTAssertEqual(reducer.overlay.sessionState?.state, .object(["mode": .string("afleet-invented-mode-one")]))
-        XCTAssertEqual(reducer.durable.items, items, "no item is made from the frame")
+        XCTAssertTrue(reducer.durable.items == items,
+                      "no item is made from the frame: \(reducer.durable.items.count) items, was \(items.count)")
         XCTAssertTrue(changes.contains(.sessionStateChanged))
         XCTAssertFalse(changes.contains { if case .inserted = $0 { true } else { false } })
 
