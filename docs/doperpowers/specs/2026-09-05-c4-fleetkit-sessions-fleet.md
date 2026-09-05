@@ -1333,6 +1333,24 @@ parent's §7.8.
   Rejected: hardcoding `archivedRecent` (it silently promotes an old channel's recency
   merely for having passed through Contended).
   Date/Author: 2026-09-05 / C4 Task 5 second review, architect ruling.
+- Decision: `/logout` blocks, with nothing signed out, when any owned channel is wedged before
+  the plan starts or wedges during it, or when an afleet-launched job is still listed in the
+  roster after the removal wait; a refused `auth logout` is reported as `signOutFailed` with
+  the exit and reason, never as success.
+  Rationale: found in execution. A wedged channel is `.owned`, so a census that listed on
+  origin alone took the ghost for an ordinary channel, and the terminate's sentinel return
+  reported it as exited — `auth logout` then ran behind a live process, taking the token out
+  from under it. The same fact holds for a roster worker that will not leave: it is a live
+  process holding a token, so it earns the same answer rather than a softer one, which is
+  also what the parent's §7.7 requires when it says success is reported only "when every
+  listed process has exited". The block is checked twice, once at the census and once on each
+  terminate's answer, because the two ask different questions — "should this plan start?" and
+  "did a channel wedge while it ran?" — and a plan that cannot finish must not first run its
+  irreversible stop phase (`interrupt`, `stop_task` per mirror id, `claude stop` per job).
+  Rejected: a third success list for jobs that would not leave (it contradicts §7.7's sentence
+  and reports a sign-out that did not happen); one guard rather than two (the stop phase's
+  work is irreversible and would be done for a sign-out that never runs).
+  Date/Author: 2026-09-05 / C4 Task 8 review, architect ruling.
 
 ## Surprises & Discoveries
 
