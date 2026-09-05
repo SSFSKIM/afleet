@@ -1371,6 +1371,21 @@ parent's §7.8.
   stopped S12 jobs in the scratch home. Impact: send-to-background finds its new job without
   parsing `--bg`'s stderr note.
 
+- Observation: the §6.12 writer's config-home containment check must run on the *store
+  directory's* descriptor, not only on the project root's. Evidence: found by the Task 7
+  review, which demonstrated it by running a probe. With `CLAUDE_CONFIG_DIR=<project>/.claude`
+  the project root is not under the config home, so a root-only check passes and `decline`
+  writes `<configHome>/settings.local.json` — a write into a Claude Code config home, the one
+  rule the child is organised around. The execution plan's step 2 asked for the check on the
+  root alone, and the test that claimed to cover the case built the project *inside* the
+  config home instead, which is the opposite arrangement and the one the root check already
+  catches. Impact: the containment predicate now runs additionally on the `F_GETPATH` of the
+  `.claude` directory descriptor and of the staging directory descriptor, after each is
+  opened and `fstat`ed, so the discipline "never a string computed before the open" is kept;
+  both arrangements have their own named test. The lesson generalises past this instance: a
+  containment check belongs on every descriptor a write can reach, not only on the one the
+  path resolution started from.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
