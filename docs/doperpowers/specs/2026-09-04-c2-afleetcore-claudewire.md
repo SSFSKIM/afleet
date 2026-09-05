@@ -326,6 +326,15 @@ implementation; its test fixture is the adversarial output of parent item 60.
 
 ### `WireTransport`: `ClaudeProcess` (contract X3, owned)
 
+**`Handshake.pending` is a wire fact; nothing renders from it.** It is the engine's own
+report, recorded verbatim, of the requests it re-arms inside the initialize response. The
+only surface a consumer may render prompts from is the event stream: the engine re-sends
+each of those as a live `control_request` right after the handshake, they pass through the
+inbound policy like any other, and only the ones policy surfaces become request events. A
+consumer that reads this array to display prompts is not resolving an ambiguity in the
+contract, it is violating the contract — it will double-show a prompt the stream is also
+delivering, or show one the policy already answered on its behalf.
+
 **One instance, one process, one epoch.** A `ClaudeProcess` is created for exactly one
 spawn with the epoch FleetKit assigns; it cannot be respawned. Respawn and quiescent
 restart create a new instance with a higher epoch, so "discard events from a superseded
@@ -474,8 +483,25 @@ to exit, send SIGTERM, wait up to five seconds more, send SIGKILL. `status` stay
 that observation, never on a timer, so FleetKit's handoff, ownership release and
 respawn always wait on a real exit and two holders can never coexist because a child
 ignored a signal. Each escalation step is a diagnostic event (`terminateEscalated`
-with the step reached); a SIGKILLed child reports signal 9. This is the parent's §6.7
-sequence as amended on `main` on 2026-09-04 (gate decision: SIGKILL accepted).
+with the step reached); a SIGKILLed child reports signal 9. The steps are
+`never_launched`, `end_session`, `stdin_close_requested`,
+`graceful_phase_deadline_exceeded`, `no_live_child_to_signal`, `SIGTERM`, `SIGKILL` and
+`exit_not_observed`. `stdin_close_requested` is named for the request rather than the
+result: the writer serialises on one queue, so when the `end_session` write is parked on
+a pipe the child has stopped reading, the close is queued behind it and the descriptor is
+still open at that moment. `graceful_phase_deadline_exceeded` says the five-second
+graceful budget ran out with the write and close still outstanding, and the escalation
+went on anyway. `exit_not_observed` says the escalation is exhausted and no exit was
+seen; `terminate()` returns `nil`, `status` stays `.terminating`, and the event stream is
+left open, because it ends only on an observed exit and this layer does not synthesise
+one. This is the parent's §6.7 sequence as amended on `main` on 2026-09-04 (gate
+decision: SIGKILL accepted).
+
+The lifecycle notice `mcp_delivery_abandoned` (reasons `cancelled` and `write_failed`)
+records an `mcp_message` answer that was composed but never reached the engine, so a
+delivery event is only ever emitted for a delivery that happened. The parent deliberately
+does not enumerate lifecycle notices — its constraint is on the structural fields every
+diagnostic line carries, which these satisfy — so the vocabulary lives here.
 
 ### `WireMCP`: the in-process server
 
@@ -829,6 +855,22 @@ Pending — written at finish.
 
 ## Revision Notes
 
+- 2026-09-05: Closing batch. Three vocabulary entries added to the `terminate()`
+  enumeration above: the escalation steps `graceful_phase_deadline_exceeded` and
+  `exit_not_observed`, and the lifecycle notice `mcp_delivery_abandoned` with its reasons
+  `cancelled` and `write_failed`. The step `stdin_closed` is renamed
+  `stdin_close_requested` in the same enumeration, because on the parked-write path the
+  descriptor is not closed at the moment the step is recorded and a diagnostic that names a
+  state the system is not in teaches the reader something false.
+- 2026-09-05: `VersionGate.check` now takes the `ResolvedEnvironment`. That is a
+  source-breaking change to a pre-1.0 internal API, accepted with no compatibility shim:
+  only tests call it, and the project's simplicity rule prefers changing the code over
+  carrying a shim for a caller that does not exist.
+- 2026-09-05: A modelled `PermissionUpdate` variant carrying an unmodelled key decodes into
+  its typed case and keeps that key in the case's `extras`, which re-encode after the
+  modelled keys. `.unknown` remains the answer to a variant this build does not model and
+  only to that: a decoder too wide loses the control a familiar variant drives, which is the
+  same forward-compatibility failure `.unknown` exists to prevent, one level down.
 - 2026-09-04: v1, written at dispatch against parent commit `9fd067c`.
 - 2026-09-04: v2 after the parent's review, the human gate and a Codex adversarial review.
   Gate decisions folded in: SIGKILL after SIGTERM with exit reported only when observed
