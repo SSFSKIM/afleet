@@ -329,7 +329,7 @@ resolve to one stream.
 returns every record and the file's byte length; `readAppended(from offset:)` returns the
 records after an offset and the new length, sealing a torn tail the way the engine does (a
 final line without a terminator is held back and re-read on the next call, and a leading
-`\n` the engine writes to seal a torn tail is skipped); `readWindow(tailBytes:)` returns a
+`\n` the engine writes to seal a torn tail is skipped); `readWindow(policy:)` returns a
 bounded window from the end, aligned back to a record boundary and then extended
 backwards until the leaf path is closed, with `earlierAvailable: true` and the offset the
 next `readEarlier(before:)` continues from. Files are opened `O_RDONLY | O_NOFOLLOW`; a
@@ -415,7 +415,7 @@ Rules, in the order they apply:
 
 ```swift
 public struct WireReducer: Sendable {
-  public init(stream: LogicalStream)
+  public init(stream: LogicalStream, slug: String)     // the slug constructs agent transcript paths at spawn
   public mutating func apply(_ event: WireEvent) -> [TimelineChange]
   public mutating func apply(_ signal: HostSignal) -> [TimelineChange]
   public var durable: DurableProjection { get }      // the categories the wire carries, built from assistant/user frames
@@ -463,16 +463,17 @@ public actor StreamIngestion {
   public enum Mode: Sendable { case filePrimary, mirrorPrimary }       // the parent's build flag
   public enum State: Sendable, Hashable { case both, fileOnly(since: ProcessEpoch), mirrorOnly }
   public init(session: SessionID, configHome: URL, mode: Mode, diagnostics: any TimelineDiagnosticsSink)
-  public func open(mainPath: URL, window: TranscriptReader.WindowPolicy) async throws -> DurableProjection
-  public func apply(mirror frame: TranscriptMirrorFrame, epoch: ProcessEpoch) async -> IngestionEffect
-  public func fileChanged(_ path: URL) async -> IngestionEffect
-  public func mirrorError(_ error: MirrorError, epoch: ProcessEpoch) async -> IngestionEffect
+  public struct Effect: Sendable { public var applied: [RecordKey]; public var duplicates: Int; public var routedElsewhere: Int; public var changes: [TimelineChange]; public var stateChange: State? }
+  public func open(mainPath: URL, policy: WindowPolicy) async throws -> DurableProjection
+  public func apply(mirror frame: TranscriptMirrorFrame, epoch: ProcessEpoch, at: Date) -> Effect
+  public func fileChanged(_ path: URL, at: Date) async -> Effect
+  public func mirrorError(_ error: MirrorError, epoch: ProcessEpoch) -> Effect
   public func relocated(mainPath: URL) async
-  public func processExited(_ epoch: ProcessEpoch) async -> IngestionEffect     // re-read each stream, reconcile by key
+  public func processExited(_ epoch: ProcessEpoch) async -> Effect     // re-read each stream, reconcile by key
+  public var offsets: [LogicalStream: Int] { get }
   public var projection: DurableProjection { get }
   public var state: State { get }
 }
-public struct IngestionEffect: Sendable { public var applied: [RecordKey]; public var duplicates: Int; public var changes: [TimelineChange]; public var stateChange: StreamIngestion.State? }
 ```
 
 One ingestion per channel holds every stream of the session, a set of applied record keys
@@ -653,7 +654,7 @@ public struct AgentRunTree: Hashable, Sendable {
   public mutating func apply(taskStarted:), apply(taskProgress:), apply(taskUpdated:), apply(taskNotification:)
   public mutating func apply(agentMetadata: AgentMetadataRecord, stream: LogicalStream)
   public mutating func apply(metaFile: URL) throws
-  public mutating func observe(frameParentToolUse: String?, carryingToolUseIDs: [String])   // the two-step join's input
+  public mutating func observe(parentToolUseID: String?, carryingToolUseIDs: [String])   // the two-step join's input
   public mutating func observe(assistantModel: String, agentID: String)
 }
 ```
@@ -960,6 +961,10 @@ Pending — written at finish.
 
 ## Revision Notes
 
+- 2026-09-05: v2.1, at planning. Signatures aligned with the plan's: `readWindow(policy:)`,
+  `StreamIngestion.Effect` nested with a `routedElsewhere` count and an `offsets` view,
+  `WireReducer.init(stream:slug:)`, `AgentRunTree.observe(parentToolUseID:carryingToolUseIDs:)`.
+  Plan: `docs/doperpowers/plans/2026-09-05-c3-fleetkit-timeline.md`.
 - 2026-09-05: v2, after the orchestrator's review. Rulings on the four questions: (1) the
   leaf path is rendered and branches are kept unrendered; (2) a rewind and a compaction
   recording are a C1 follow-up dispatched separately, C3 tests both paths by mutation, names
