@@ -25,10 +25,27 @@ extension LifecycleTable.Event {
     }
 }
 
+/// Builds the supervisor a fork spawns beside this one. The facade injects it (Task 9): a fork is a *new channel*
+/// under a provisional key, not a second process on this one. The key is the provisional one this supervisor minted
+/// and the `SessionStart` is the fork's, so the sibling's launch template carries the fork on its command line.
+public typealias SiblingSpawner = @Sendable (ChannelKey, SessionStart) async -> ChannelSupervisor?
+
+/// The channel's key, readable without hopping onto the actor. A fork's is provisional until
+/// `.sessionIdentityResolved` rewrites it; every other channel's never changes.
+final class ChannelKeyBox: @unchecked Sendable {   // `lock` serialises `stored`
+    private let lock = NSLock()
+    private var stored: ChannelKey
+    init(_ key: ChannelKey) { stored = key }
+    var value: ChannelKey { lock.lock(); defer { lock.unlock() }; return stored }
+    func set(_ key: ChannelKey) { lock.lock(); stored = key; lock.unlock() }
+}
+
 /// One actor per channel. It owns at most one process at a time, the channel's epoch progression, and every
 /// transition, which goes through `LifecycleTable` and nowhere else.
 public actor ChannelSupervisor {
-    public nonisolated let key: ChannelKey
+    private let keyBox: ChannelKeyBox
+    /// The channel's key. A fork's `session` is provisional until the identity event; nothing else ever rewrites it.
+    public nonisolated var key: ChannelKey { keyBox.value }
 
     private let launchTemplate: LaunchConfiguration
     private let factory: ProcessFactory
@@ -90,6 +107,25 @@ public actor ChannelSupervisor {
     /// that arrive in that window belong to the post-handshake check, not to the disagreement rule.
     private var spawning = false
 
+    /// What the channel is *running*: every value here arrived from an engine answer or an engine frame, and the
+    /// quiescent restart relaunches from a copy of it rather than from the launch template.
+    private var runtime: SessionRuntimeState
+    /// The first `system/init` seeds; later ones only report fast mode.
+    private var seededFromInit = false
+    /// The newest handshake's initialize response, which is the source for the permission-mode and output-style
+    /// readbacks.
+    private var lastHandshake: InitializeResponse?
+    /// The names a restart's readbacks rejected, in `Readback.verify`'s order. The banner names the first; the user
+    /// picking a value for it moves on to the next, and an empty list is what lets the channel become ready.
+    private var unresolvedSettings: [String] = []
+    /// A fork's reservation, held from the handshake until `.sessionIdentityResolved` says which key it belongs to.
+    private var forkReservation: Reservation?
+    /// An identity that resolved before the spawn had finished taking its reservation. The engine emits
+    /// `auth_status` immediately after the initialize response, so the pump can reach the event while `spawn` is
+    /// still suspended inside `handle.spawn`; dropping it would leave the fork connecting forever.
+    private var forkIdentityPending: SessionID?
+    private let spawnSibling: SiblingSpawner
+
     private let updatesContinuation: AsyncStream<ChannelState>.Continuation
     /// Every transition, published after the state has changed.
     public nonisolated let updates: AsyncStream<ChannelState>
@@ -109,19 +145,41 @@ public actor ChannelSupervisor {
                 store: (any StateStore)? = nil,
                 evictVictim: @escaping @Sendable (ChannelKey) async -> EvictionOutcome = { _ in .victimBecameIneligible },
                 evictionBarrier: @escaping @Sendable (ChannelKey) async -> Void = { _ in },
+                spawnSibling: @escaping SiblingSpawner = { _, _ in nil },
                 initialOrigin: ChannelOrigin = .archived, initialDesired: DesiredOwnership = .none,
                 handshakeTimeout: Duration = .seconds(30)) {
-        self.key = key; self.launchTemplate = launchTemplate; self.factory = factory
+        self.keyBox = ChannelKeyBox(key); self.launchTemplate = launchTemplate; self.factory = factory
+        self.spawnSibling = spawnSibling
         self.ownership = ownership; self.observer = observer; self.clock = clock
         self.eligibilityInputs = eligibilityInputs; self.fleet = fleet; self.diagnostics = diagnostics
         self.isRecent = isRecent; self.handshakeTimeout = handshakeTimeout
         self.environment = environment; self.configHome = configHome; self.verbs = verbs; self.store = store
         self.evictVictim = evictVictim; self.evictionBarrier = evictionBarrier
+        // A fork's own id is minted by the engine and announced on `auth_status`, so the template's `--fork-session`
+        // is what says this channel's key is provisional. Nothing else in the launch can tell us.
+        let identity: SessionIdentity = {
+            switch launchTemplate.session {
+            case .resume(let source, true), .forkFrom(let source, _):
+                return .awaitingFork(from: source, provisional: key.session)
+            case .new, .resume: return .known(key.session)
+            }
+        }()
         self.state = ChannelState(key: key, origin: initialOrigin, desired: initialDesired,
                                   observed: HolderSet(holders: [], observedAt: Date()),
-                                  identity: .known(key.session), lastActivity: Date())
+                                  identity: identity, lastActivity: Date())
+        self.runtime = SessionRuntimeState(permissionMode: launchTemplate.permissionMode, model: launchTemplate.model,
+                                           effort: launchTemplate.effort, cwd: launchTemplate.cwd,
+                                           agent: launchTemplate.agent,
+                                           addDirectories: launchTemplate.addDirectories,
+                                           environment: launchTemplate.environment)
         (updates, updatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
+
+    /// The record a restart relaunches from.
+    public func runtimeState() -> SessionRuntimeState { runtime }
+
+    /// True while this channel is a fork whose own session id has not arrived.
+    private var isAwaitingFork: Bool { if case .awaitingFork = state.identity { return true }; return false }
 
     // MARK: - The state name the table speaks in
 
@@ -639,7 +697,9 @@ public actor ChannelSupervisor {
 
     // MARK: - Spawning
 
-    func spawn(reason: SpawnReason) async throws {
+    /// `launch` overrides the template for this spawn only: the quiescent restart composes its line from the runtime
+    /// snapshot, and nothing else does.
+    func spawn(reason: SpawnReason, launch launchOverride: LaunchConfiguration? = nil) async throws {
         spawning = true
         defer { spawning = false }
         // A respawn continues the crash series; anything the user asked for starts a new one, which is what makes
@@ -679,18 +739,36 @@ public actor ChannelSupervisor {
         epoch = epoch.next()
         state.epoch = epoch
         let mine = epoch
-        let handle = factory(epoch, launchTemplate)
+        let handle = factory(epoch, launchOverride ?? launchTemplate)
         process = handle
         startPump(handle)
 
         do {
-            _ = try await handle.spawn(handshakeTimeout: handshakeTimeout)
+            let handshake = try await handle.spawn(handshakeTimeout: handshakeTimeout)
+            if epoch == mine {
+                lastHandshake = handshake.initialize
+                RuntimeStateUpdater.apply(handshake: handshake.initialize, to: &runtime)
+            }
         } catch {
             await fleet.rollback(reservation)
-            if epoch == mine { process = nil }
+            if epoch == mine { process = nil; forkIdentityPending = nil }
             throw error
         }
         guard epoch == mine else { return }   // an exit already respawned past this attempt
+
+        // A fork's key is a random provisional id, so the post-handshake check has nothing to ask about: it runs on
+        // the *resolved* id when `.sessionIdentityResolved` arrives, and until then the channel stays connecting.
+        // The reservation is held rather than confirmed, because which key it belongs to is not known yet.
+        if isAwaitingFork {
+            state.banner = nil
+            state.headerNote = nil
+            forkReservation = reservation
+            if let resolved = forkIdentityPending {
+                forkIdentityPending = nil
+                await resolveForkIdentity(resolved, epoch: mine)
+            }
+            return
+        }
 
         let ownPID = await handle.childProcessIdentifier
         let after = await ownership.afterHandshake(session: key.session, ownPID: ownPID, epoch: mine)
@@ -745,6 +823,188 @@ public actor ChannelSupervisor {
         publish()
     }
 
+    // MARK: - Control requests
+
+    /// The one door for a control request. Task 8's strategy executor and the app both come through here, and every
+    /// answer passes through `RuntimeStateUpdater` on the way out — which is what makes the runtime record the
+    /// channel's own account of itself rather than a second guess maintained beside it.
+    @discardableResult
+    public func perform<R: ControlRequestSpec>(_ request: R) async throws -> R.Response {
+        guard let handle = process else { throw LifecycleError.notOwned }
+        let answer = try await handle.request(request, timeout: nil)
+        RuntimeStateUpdater.apply(answer: answer, for: request, to: &runtime)
+        noteActivity()
+        return answer
+    }
+
+    // MARK: - Fork
+
+    /// Spawns a fork of this channel as a new channel under a provisional key, and returns that key.
+    ///
+    /// The key is provisional because `--fork-session` makes the engine mint a fresh session id and announce it on
+    /// `auth_status`: the `--resume` target names the session forked *from* and never the fork's own. The sibling
+    /// therefore stays `.connecting` until `.sessionIdentityResolved`, when the ownership check runs against the id
+    /// that actually arrived and the counter's slot is rekeyed onto it.
+    ///
+    /// `--resume-session-at` and `--resume-drops-turn` are the line composer's: this appends no argument of its own.
+    @discardableResult
+    public func fork(at point: ForkPoint?) async throws -> ChannelKey {
+        guard let source = state.identity.resolved else { throw LifecycleError.notOwned }
+        let start: SessionStart = point.map { .forkFrom(source, at: $0) } ?? .resume(source, fork: true)
+        let provisional = ChannelKey(configHome: key.configHome, session: SessionID())
+        guard let sibling = await spawnSibling(provisional, start) else { throw LifecycleError.notOwned }
+        try await sibling.open()
+        return provisional
+    }
+
+    /// The fork's own id has arrived. In order: the post-handshake check against the *resolved* id, where a holder
+    /// takes the `connectingFoundHolder` rows exactly as a post-handshake holder does; then, clean, one counter turn
+    /// moving the slot onto the resolved key, the key itself, the identity, and only now `.ready`.
+    private func resolveForkIdentity(_ resolved: SessionID, epoch resolvedEpoch: ProcessEpoch) async {
+        guard case .awaitingFork = state.identity, resolvedEpoch == epoch,
+              let handle = process, let reservation = forkReservation else { return }
+        forkReservation = nil
+
+        // Every question from here on is about the *resolved* session, the provisional key included: a holder set is
+        // narrowed by session id, and narrowing it by the random provisional would find nobody.
+        let resolvedKey = ChannelKey(configHome: key.configHome, session: resolved)
+        let ownPID = await handle.childProcessIdentifier
+        let after = await ownership.afterHandshake(session: resolved, ownPID: ownPID, epoch: resolvedEpoch)
+        if !after.isEmpty {
+            let holders = HolderSet(holders: after, observedAt: Date())
+            if case .wedged = await terminateOrWedge(during: .postHandshakeYield) {
+                await fleet.rollback(reservation)
+                state.observed = holders
+                state.desired = .owned
+                publish()
+                return
+            }
+            await fleet.rollback(reservation)
+            state.observed = holders
+            let (origin, presence) = OriginResolver.resolve(key: resolvedKey, ownedState: nil, holders: after,
+                                                            pendingHatch: false)
+            state.presence = presence
+            if case .owned(.contended) = origin {
+                state.banner = .contended(holders)
+                apply(.handshakeFoundHolder, to: .contended)
+            } else {
+                state.banner = .releasedToTerminal
+                apply(.handshakeFoundHolder, to: .foreignUsersTerminal)
+            }
+            state.desired = .owned
+            return
+        }
+
+        await fleet.rekey(key, to: resolvedKey)
+        await fleet.confirm(reservation)
+        keyBox.set(resolvedKey)
+        state.key = resolvedKey
+        state.identity = .known(resolved)
+        apply(.handshakeClean, to: .ready)
+        armDormantTimer()
+        pushEligibility()
+        await flushQueuedInput()
+    }
+
+    // MARK: - The quiescent restart
+
+    /// §7.4's quiescent restart. It carries the channel's runtime state and never the launch template: `--resume`
+    /// restores the conversation and nothing else, so the permission mode, the model, the effort and every
+    /// `apply_flag_settings` value have to be put back by hand and then read back.
+    ///
+    /// The channel is not eligible yet: the change is queued and the composer says so, and the dormant timer runs it
+    /// when the current work finishes. Eligible: snapshot, terminate (a `nil` wedges and stops here), wait for the
+    /// release, relaunch every launch field from the snapshot with no `--agent`, re-send the whole flag union, ask
+    /// `get_settings`, and publish `.ready` only once every readback matches.
+    public func quiescentRestart(_ request: RestartRequest) async throws {
+        guard await currentVerdict().isEligible else {
+            state.pendingChange = request
+            publish()
+            return
+        }
+        let snapshot = runtime
+        let ownPID = await process?.childProcessIdentifier ?? 0
+        if case .wedged(let trace) = await terminateOrWedge(during: .restart) {
+            state.pendingChange = nil          // nothing is queued behind a ghost
+            throw LifecycleError.wedged(trace)
+        }
+        state.pendingChange = nil
+        process = nil
+        await fleet.release(key)
+        if ownPID > 0 {
+            let own = Holder(pid: ownPID, sessionID: key.session, sources: [.registry], kind: "own", isOwnChild: true)
+            // A wait that runs out leaves the holder in place for the pre-spawn check inside `spawn`, which refuses
+            // every live holder: the restart never writes the transcript behind somebody still holding it.
+            _ = await ownership.awaitRelease(previous: own, upTo: Self.handoffBudget)
+        }
+
+        // Terminate with no replacement yet is a reap, and a resume under the same session id is the dormant-send
+        // row: the restart is those two, in that order, and invents no transition of its own.
+        if currentName == .ready {
+            guard apply(.dormantTimerFired, to: .dormant) else { return }
+        }
+        state.desired = .owned
+        if currentName == .dormant {
+            guard apply(.userSent, to: .connecting) else { return }
+        }
+
+        try await spawn(reason: .restart, launch: relaunch(from: snapshot, applying: request))
+        guard currentName == .connecting, process != nil else { return }   // the spawn yielded or wedged
+
+        if !snapshot.flagSettings.isEmpty {
+            _ = try await perform(ApplyFlagSettings(settings: .object(snapshot.flagSettings)))
+        }
+        let settings = try await perform(GetSettings())
+        let handshake = lastHandshake ?? InitializeResponse(raw: .object([:]))
+        unresolvedSettings = Readback.verify(
+            snapshot: snapshot, handshake: handshake,
+            settingsApplied: settings["applied"] ?? .object([:]),
+            effectiveKeys: settings["effective_keys"]?.arrayValue?.compactMap(\.stringValue) ?? [])
+        becomeReadyOrBanner()
+    }
+
+    /// The user picked a value for a setting that did not survive. The next unresolved one takes the banner; with
+    /// none left the channel is finally ready.
+    public func resolveSetting(_ name: String) {
+        guard unresolvedSettings.first == name else { return }
+        unresolvedSettings.removeFirst()
+        becomeReadyOrBanner()
+    }
+
+    private func becomeReadyOrBanner() {
+        guard unresolvedSettings.isEmpty else {
+            state.banner = .settingDidNotSurvive(unresolvedSettings[0])
+            publish()
+            return
+        }
+        state.banner = nil
+        guard apply(.handshakeClean, to: .ready) else { return }
+        armDormantTimer()
+        pushEligibility()
+    }
+
+    /// Every launch field from the snapshot, the template's invariants, and never `--agent`: re-passing it replays
+    /// the agent's `initialPrompt` as a user turn behind the connecting glyph (parent §7.4).
+    private func relaunch(from snapshot: RestartSnapshot, applying request: RestartRequest) -> LaunchConfiguration {
+        var launch = launchTemplate
+        launch.session = .resume(key.session, fork: false)
+        launch.cwd = snapshot.cwd
+        launch.model = snapshot.model
+        launch.permissionMode = snapshot.permissionMode
+        launch.effort = snapshot.effort
+        launch.addDirectories = request.addDirectories ?? snapshot.addDirectories
+        launch.environment = request.environment ?? snapshot.environment
+        launch.agent = nil
+        // Each invariant the request names is overridden; an outer nil keeps the template's, an inner nil clears it.
+        if let settingSources = request.settingSources { launch.settingSources = settingSources }
+        if let worktree = request.worktree { launch.worktree = worktree }
+        if let allowBypass = request.allowBypass { launch.allowBypass = allowBypass }
+        if let promptSuggestions = request.promptSuggestions { launch.promptSuggestions = promptSuggestions }
+        runtime.addDirectories = launch.addDirectories
+        runtime.environment = launch.environment
+        return launch
+    }
+
     /// The origin a set of observed holders implies, with no table transition: nothing of ours changed state, the
     /// world did.
     private func adoptOrigin(from holders: [Holder]) {
@@ -777,8 +1037,15 @@ public actor ChannelSupervisor {
         for continuation in subscribers.values { continuation.yield(event) }
 
         switch event {
+        case .sessionIdentityResolved(let resolved, let resolvedEpoch):
+            guard isAwaitingFork, resolvedEpoch == epoch else { return }
+            // The spawn may still be inside `handle.spawn`: the engine emits `auth_status` right after the initialize
+            // response, so the reservation this event has to move may not have been recorded yet.
+            guard forkReservation != nil else { forkIdentityPending = resolved; return }
+            await resolveForkIdentity(resolved, epoch: resolvedEpoch)
         case .frame(let frame, _):
             noteActivity()
+            RuntimeStateUpdater.apply(frame: frame, to: &runtime, seededFromInit: &seededFromInit)
             switch frame {
             case .result:
                 turnRunning = false
@@ -947,11 +1214,14 @@ public actor ChannelSupervisor {
 
     private func dormantTimerFired() async {
         guard currentName == .ready else { return }
-        if await currentVerdict().isEligible {
-            await reap()
-        } else {
-            armDormantTimer()
+        guard await currentVerdict().isEligible else { armDormantTimer(); return }
+        // A change the user asked for while work was running is what "applies when the current work finishes" means:
+        // the channel restarts into it rather than being reaped out from under it.
+        if let queued = state.pendingChange {
+            try? await quiescentRestart(queued)
+            return
         }
+        await reap()
     }
 
     // MARK: - Eligibility, pushed and never pulled

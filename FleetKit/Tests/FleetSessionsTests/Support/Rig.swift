@@ -90,6 +90,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     private var _scriptedTermination: TerminationReport?
     private var _useScripted = false
     private var _scriptedSpawnError: (any Error)?
+    private var _scriptedSpawnGate: (@Sendable () async -> Void)?
+    private var _onScriptedHandle: (@Sendable (ScriptedProcessHandle) -> Void)?
     private var tasks: [Task<Void, Never>] = []
 
     /// A rig with its own diagnostics sink, or one sharing another rig's so a two-rig test still asserts one
@@ -167,6 +169,18 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     /// process — the state a channel is genuinely in between `open()` and a handshake.
     func failScriptedSpawns(with error: any Error = ScriptedSpawnFailure()) {
         lock.lock(); _scriptedSpawnError = error; lock.unlock()
+    }
+
+    /// Runs on every scripted handle the factory builds, at construction and before its `spawn`: how a test scripts
+    /// the answers of a child that does not exist yet, such as the one a restart is about to launch.
+    func configureScriptedHandles(_ body: @escaping @Sendable (ScriptedProcessHandle) -> Void) {
+        lock.lock(); _onScriptedHandle = body; lock.unlock()
+    }
+
+    /// Every scripted handle built from now on parks inside `spawn` until `gate` returns: the channel is connecting
+    /// *with* a live process of its own, which a spawn that throws cannot produce.
+    func holdNextSpawn(_ gate: @escaping @Sendable () async -> Void) {
+        lock.lock(); _scriptedSpawnGate = gate; lock.unlock()
     }
 
     // MARK: - Real processes the test started
@@ -290,13 +304,22 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     func supervisor(session: SessionID, fixture: String = "resume-no-replay", isRecent: Bool = true,
                     origin: ChannelOrigin = .archived, desired: DesiredOwnership = .none, speed: Double = 50,
                     dropFixture: Bool = false, eligibility: EligibilityBox = EligibilityBox(),
-                    records: Bool = true) -> ChannelSupervisor {
-        let environment: ResolvedEnvironment = {
-            var e = FakeClaudeLaunch.environment(fixture: fixture, speed: speed)
+                    records: Bool = true, template overrideTemplate: LaunchConfiguration? = nil,
+                    script: URL? = nil, relaunchScript: URL? = nil, initOverride: URL? = nil,
+                    forkFixture: String? = nil) -> ChannelSupervisor {
+        func makeEnvironment(script: URL?) -> ResolvedEnvironment {
+            var e = FakeClaudeLaunch.environment(fixture: fixture, script: script, initOverride: initOverride,
+                                                 speed: speed)
             if dropFixture { e.variables["FAKE_CLAUDE_FIXTURE"] = nil }
             return e
-        }()
-        let template = FakeClaudeLaunch.launch(fixture: fixture, cwd: cwd, session: .resume(session, fork: false))
+        }
+        let environment = makeEnvironment(script: script)
+        // One `FAKE_CLAUDE_SCRIPT` file is read by every process the rig starts, and a restarted child's request
+        // sequence is not the original's: the relaunch therefore replays under its own script. Nothing in production
+        // has two environments; this is the rig standing in for two recordings of one channel.
+        let relaunchEnvironment = relaunchScript.map { makeEnvironment(script: $0) } ?? environment
+        let template = overrideTemplate
+            ?? FakeClaudeLaunch.launch(fixture: fixture, cwd: cwd, session: .resume(session, fork: false))
         let key = ChannelKey(configHome: home.url, session: session)
         let sink: any FleetDiagnosticsSink = records ? diagnostics : NullFleetDiagnostics()
 
@@ -304,7 +327,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
             key: key, launchTemplate: template,
             factory: { [weak self] epoch, launch in
                 guard let self else { fatalError("the rig went away while a supervisor was still spawning") }
-                return self.makeHandle(epoch: epoch, launch: launch, environment: environment, session: session)
+                let e = epoch.rawValue > 1 ? relaunchEnvironment : environment
+                return self.makeHandle(epoch: epoch, launch: launch, environment: e, session: session)
             },
             ownership: OwnershipCheck(observer: observer, clock: clock, diagnostics: sink,
                                       onReleased: { [weak self] in await self?.onReleased?() }),
@@ -317,6 +341,17 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
                 return await target.evict()
             },
             evictionBarrier: { [weak self] victim in await self?.barrier(for: victim) },
+            // The part Task 9's facade plays: a fork is a new channel, built here under the provisional key its
+            // source minted and with the fork's own `SessionStart` on its launch line.
+            spawnSibling: { [weak self] provisional, start in
+                guard let self else { return nil }
+                let siblingFixture = forkFixture ?? fixture
+                return self.supervisor(
+                    session: provisional.session, fixture: siblingFixture, isRecent: true, speed: speed,
+                    eligibility: EligibilityBox(), records: records,
+                    template: FakeClaudeLaunch.launch(fixture: siblingFixture, cwd: self.cwd, session: start),
+                    script: script, relaunchScript: relaunchScript, initOverride: initOverride)
+            },
             initialOrigin: origin, initialDesired: desired)
 
         lock.lock()
@@ -346,6 +381,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         let scripted = _useScripted
         let termination = _scriptedTermination ?? TerminationReport(exit: .code(0, stderrTail: ""), steps: [])
         let spawnError = _scriptedSpawnError
+        let spawnGate = _scriptedSpawnGate
+        let configure = _onScriptedHandle
         lock.unlock()
 
         if scripted {
@@ -353,6 +390,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
                                                pid: 400_000 + Int32(epoch.rawValue),
                                                terminateReturns: termination)
             handle.spawnError = spawnError
+            handle.spawnGate = spawnGate
+            configure?(handle)
             lock.lock(); _scriptedHandles.append(handle); lock.unlock()
             return handle
         }

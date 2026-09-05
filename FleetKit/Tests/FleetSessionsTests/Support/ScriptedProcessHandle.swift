@@ -22,6 +22,11 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
     private var _spawnCount = 0
     private var _terminateCount = 0
     private var _spawnError: (any Error)?
+    private var _initialize: JSONValue = .object([:])
+    private var _controlAnswers: [String: JSONValue] = [:]
+    private var _controlRequests: [(subtype: String, payload: JSONValue)] = []
+    private var _controlGate: (@Sendable (String) async -> Void)?
+    private var _spawnGate: (@Sendable () async -> Void)?
 
     init(epoch: ProcessEpoch, session: SessionID?, pid: Int32 = 424_242,
          terminateReturns: TerminationReport = TerminationReport(exit: .code(0, stderrTail: ""), steps: [])) {
@@ -69,6 +74,34 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
         get { lock.lock(); defer { lock.unlock() }; return _session }
         set { lock.lock(); _session = newValue; lock.unlock() }
     }
+    /// The body of the initialize response `spawn` answers with, which is where the restart reads the permission
+    /// mode, the output style and the fast-mode state back from.
+    var initialize: JSONValue {
+        get { lock.lock(); defer { lock.unlock() }; return _initialize }
+        set { lock.lock(); _initialize = newValue; lock.unlock() }
+    }
+    /// Wire subtype -> the `response` body the engine answers with. A subtype with no entry answers a bare success,
+    /// which is what the engine really sends for `apply_flag_settings` and the setters.
+    var controlAnswers: [String: JSONValue] {
+        get { lock.lock(); defer { lock.unlock() }; return _controlAnswers }
+        set { lock.lock(); _controlAnswers = newValue; lock.unlock() }
+    }
+    /// Every control request this handle was asked for, in order, with the payload it carried.
+    var controlRequests: [(subtype: String, payload: JSONValue)] {
+        lock.lock(); defer { lock.unlock() }; return _controlRequests
+    }
+    /// Awaited inside `request`, before the answer: how a test holds one control answer open while it watches what
+    /// the supervisor does — or does not — publish in the meantime.
+    var controlGate: (@Sendable (String) async -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _controlGate }
+        set { lock.lock(); _controlGate = newValue; lock.unlock() }
+    }
+    /// Awaited inside `spawn`: how a test parks a channel in connecting *with* a live process, the one state a
+    /// scripted spawn that throws cannot produce.
+    var spawnGate: (@Sendable () async -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _spawnGate }
+        set { lock.lock(); _spawnGate = newValue; lock.unlock() }
+    }
 
     // MARK: - ProcessHandle
 
@@ -77,19 +110,30 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
     var sessionID: SessionID? { get async { locked { _session } } }
 
     func spawn(handshakeTimeout: Duration) async throws -> Handshake {
-        let failure = locked { () -> (any Error)? in _spawnCount += 1; return _spawnError }
-        if let failure { throw failure }
-        return Handshake(initialize: InitializeResponse(raw: .object([:])), pending: [])
+        let gate = locked { () -> (@Sendable () async -> Void)? in _spawnCount += 1; return _spawnGate }
+        // The error is read *after* the gate, so a test that parks a spawn can unwind it deliberately rather than
+        // having to resume it into a handshake the channel has already moved past.
+        await gate?()
+        if let failure = locked({ _spawnError }) { throw failure }
+        return Handshake(initialize: InitializeResponse(raw: locked { _initialize }), pending: [])
     }
 
     func send(_ input: UserInput) async throws -> UUID { UUID() }
 
     func request<R: ControlRequestSpec>(_ spec: R, timeout: Duration?) async throws -> R.Response {
-        throw WireError.controlError("the scripted handle answers no control requests")
+        let subtype = (spec as? RawControlRequest)?.wireSubtype ?? R.subtype
+        let gate = locked { () -> (@Sendable (String) async -> Void)? in
+            _controlRequests.append((subtype, spec.payload)); return _controlGate
+        }
+        await gate?(subtype)
+        // The same decode `ClaudeProcess.request` runs, over the same bare-success default.
+        if R.Response.self == EmptyResponse.self { return EmptyResponse() as! R.Response }
+        let body = locked { _controlAnswers[subtype] } ?? .object([:])
+        return try JSONDecoder().decode(R.Response.self, from: try body.canonicalData())
     }
 
     func requestRaw(subtype: String, payload: JSONValue, timeout: Duration?) async throws -> JSONValue {
-        throw WireError.controlError("the scripted handle answers no control requests")
+        try await request(RawControlRequest(subtype: subtype, payload: payload), timeout: timeout)
     }
 
     func answer(_ id: RequestID, _ answer: InboundAnswer) async throws {

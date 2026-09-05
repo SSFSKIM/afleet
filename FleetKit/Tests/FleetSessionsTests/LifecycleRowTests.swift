@@ -92,7 +92,11 @@ final class LifecycleRowTests: XCTestCase {
             T(.contendedSettled, .contended, .holdersSettled, .dormant),
             T(.contendedSettled, .contended, .holdersSettled, .foreignUsersTerminal),
             T(.contendedSettled, .contended, .holdersSettled, .backgroundJob)],
-        // Task 6 adds terminateExhausted during restart (two); Task 8 adds terminateExhausted during logout (two).
+        // Task 6's rows (the test lives in `LifecycleRowTests+Restart.swift`).
+        "testTerminateReturningNilDuringRestartSpawnsNothing": [
+            T(.terminateExhausted, .ready, .terminateReturnedNil(during: .restart), .wedged),
+            T(.terminateExhausted, .connecting, .terminateReturnedNil(during: .restart), .wedged)],
+        // Task 8 adds terminateExhausted during logout (two).
     ]
 
     /// The six `handoffPreempted` scenarios: three holder kinds, from ready and from dormant. Both preempt tests
@@ -1641,8 +1645,6 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(rig.spawnCount, 0)
         rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
-
-
 
     /// Contended is a state the channel comes back out of. Zero holders means the session is nobody's — unless the
     /// channel still owns a process, or was dormant when the disagreement arrived; one holder means that holder's
