@@ -21,12 +21,9 @@ The split earned its place twice:
 - It also used to gate all MCP traffic behind `mcp_sequence`, so the default modelled a session whose host tool
   was live the instant the handshake completed. It is not: see `mcp_handshake()` below.
 
-Two divergences from the corpus that are known and deliberately not modelled, recorded so the next reader does
+One divergence from the corpus that is known and deliberately not modelled, recorded so the next reader does
 not mistake this file for complete:
 
-- **`auth_status`.** Every recorded fixture emits one at the same millisecond as the initialize response
-  (t=751/751 in `ask-user-question`, 891/891 in `zero-cost`, sixteen for sixteen). This stand-in never emits
-  one. Nothing under test reads it yet; when something does, this is the gap to close first.
 - **`system/init` is not strictly one per turn.** The corpus has `nested-depth-2` at one inbound `user` frame
   and three `system/init`s, `session-mirror-relocation` at four and five — with one of those arriving *before*
   its adjacent user frame — and `explore-depth-1` and `background-shell` at one and two. Subagents and session
@@ -43,6 +40,12 @@ if "--version" in ARGS:
 def arg_after(flag):
     return ARGS[ARGS.index(flag) + 1] if flag in ARGS and ARGS.index(flag) + 1 < len(ARGS) else None
 SESSION = arg_after("--session-id") or arg_after("--resume") or "00000000-0000-4000-8000-000000000000"
+# `--fork-session` makes the engine mint a NEW session id: the `--resume` target names the session forked
+# from, and every frame this process emits carries the new one. A stand-in that echoed the resume target
+# would model a fork that does not exist and let a host keep the source id for a channel that is not it.
+FORKED = "--fork-session" in ARGS
+if FORKED:
+    SESSION = "f0f0f0f0-0000-4000-8000-000000000fff"
 OUT_LOCK = threading.Lock()
 def emit(obj):
     with OUT_LOCK:
@@ -101,6 +104,11 @@ def release_initialize_response():
     body = held_initialize.pop("body", None)
     if body is None: return
     emit({"type": "control_response", "response": body})
+    # Frame 5, at the same millisecond as frame 4 in all sixteen recorded fixtures, and before any user
+    # frame. It is the first frame carrying `session_id`, which is what makes a fork's own id knowable
+    # without waiting for a turn.
+    emit({"type": "auth_status", "isAuthenticating": False, "output": [], "error": None,
+          "uuid": uuid(), "session_id": SESSION})
     mcp_message("s1n", {"jsonrpc": "2.0", "method": "notifications/initialized"})
     if held_initialize.pop("pending", False): can_use_tool("p1")
     threading.Thread(target=after_init, daemon=True).start()

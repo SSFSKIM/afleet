@@ -1,4 +1,5 @@
 import Foundation
+import AfleetCore
 import WireFrames
 import WireMCP
 
@@ -55,8 +56,36 @@ public enum WireError: Error, Sendable, Equatable {
     case invalidArgument(option: String, reason: String)
 }
 
+/// Whose session this channel is, and whether that is yet a fact.
+///
+/// `.new` and `.resume` know it at construction: the id on the command line is the id the engine adopts.
+/// A **fork** does not. `--fork-session` makes the engine mint a fresh id and write the forked transcript
+/// under it, so the `--resume` target names the session forked *from* and never this one. Reporting it as
+/// this channel's id collides two channels — captures are keyed by session id, and so is everything a
+/// consumer files under one.
+///
+/// The unknown is in the type rather than behind a plausible-looking default, because a guess that is right
+/// most of the time is exactly what nobody checks. The real id arrives at frame 5, on the `auth_status` the
+/// engine emits immediately after the initialize response and before any user frame.
+public enum SessionIdentity: Hashable, Sendable {
+    case known(SessionID)
+    /// A fork, before its own id has arrived. `from` is the session forked from — kept because it is worth
+    /// reporting, never as a stand-in for the answer. `provisional` names the capture file until then.
+    case awaitingFork(from: SessionID, provisional: SessionID)
+
+    /// This channel's own session id, or `nil` while a fork's is still unknown.
+    public var resolved: SessionID? { if case .known(let id) = self { return id }; return nil }
+    /// The id a capture file is keyed by right now. Provisional for an unresolved fork; the capture is
+    /// renamed when the real id arrives.
+    public var captureKey: SessionID {
+        switch self { case .known(let id): id; case .awaitingFork(_, let provisional): provisional }
+    }
+}
+
 public enum WireEvent: Sendable {
     case handshakeCompleted(Handshake, ProcessEpoch)
+    /// A fork learned its own session id. Emitted once, from the first frame that carries one.
+    case sessionIdentityResolved(SessionID, ProcessEpoch)
     case frame(Frame, ProcessEpoch)
     case request(InboundRequest)
     case requestCancelled(RequestID, ProcessEpoch)

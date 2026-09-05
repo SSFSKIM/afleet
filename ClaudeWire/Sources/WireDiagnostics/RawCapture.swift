@@ -32,6 +32,21 @@ public actor RawCapture {
         if handles[session] == nil { handles[session] = openSessionFile(name, in: dirFD) }
         try? handles[session]?.write(contentsOf: redacted)
     }
+    /// Renames a capture opened before its session was named — a fork, whose id arrives a few frames in.
+    ///
+    /// A file, not a copy: the frames already written belong to this session and there is exactly one file
+    /// for it. The provisional key is itself a fresh `SessionID`, so the file is a well-formed one this
+    /// capture owns while it waits, and stays inside the budget and the prune sweep rather than sitting
+    /// outside both under a name neither recognises.
+    public func rename(from provisional: SessionID, to real: SessionID) {
+        guard provisional != real else { return }
+        try? handles[provisional]?.close(); handles[provisional] = nil
+        guard let dirFD = openDirectory() else { return }
+        defer { close(dirFD) }
+        // Relative to the verified descriptor, like every other access here. A provisional file that was
+        // never opened — nothing written yet — simply is not there, and `renameat` failing is the answer.
+        _ = renameat(dirFD, "\(provisional).ndjson", dirFD, "\(real).ndjson")
+    }
     public func prune(keeping: Set<SessionID>) {
         for (session, handle) in handles where !keeping.contains(session) { try? handle.close(); handles[session] = nil }
         for entry in ownedEntries() where !keeping.contains(entry.session) {

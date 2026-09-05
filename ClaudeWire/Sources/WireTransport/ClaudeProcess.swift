@@ -16,7 +16,12 @@ public actor ClaudeProcess {
     public let mcpServer: AfleetMCPServer
     public let diagnostics: any DiagnosticsSink
     public let capture: RawCapture?
-    public let sessionID: SessionID
+
+    /// Whose session this is. `.new` and `.resume` are `.known` from construction; a fork stays
+    /// `.awaitingFork` until `auth_status` brings its own id. Never reports the source id as the fork's.
+    public private(set) var identity: SessionIdentity
+    /// This channel's session id, or `nil` while a fork's is still unknown.
+    public var sessionID: SessionID? { identity.resolved }
 
     public nonisolated let events: WireEventStream<WireEvent>
     private let channel: BoundedChannel<WireEvent>
@@ -44,7 +49,10 @@ public actor ClaudeProcess {
         self.epoch = epoch; self.launch = launch; self.environment = environment; self.configHome = configHome; self.initialize = initialize
         self.policy = policy ?? .default(declaredDialogKinds: Set(initialize.supportedDialogKinds), registeredHookCallbackIDs: initialize.registeredHookCallbackIDs)
         self.mcpServer = mcpServer; self.diagnostics = diagnostics; self.capture = capture
-        switch launch.session { case .new(let id), .resume(let id, _): sessionID = id }
+        switch launch.session {
+        case .new(let id): identity = .known(id)
+        case .resume(let id, let fork): identity = fork ? .awaitingFork(from: id, provisional: SessionID()) : .known(id)
+        }
         channel = BoundedChannel(capacity: eventBufferCapacity)
         events = WireEventStream(channel: channel)
         signal(SIGPIPE, SIG_IGN)
@@ -179,7 +187,8 @@ public actor ClaudeProcess {
     private func receive(line: Data) async {
         let frame = FrameDecoder.decode(line: line)
         diagnostics.record(.frame(direction: .inbound, type: frame.typeName, subtype: subtype(of: frame), bytes: line.count, epoch: epoch, requestID: requestID(of: frame)))
-        await capture?.write(line: line, session: sessionID)
+        await resolveForkIdentity(from: line)
+        await capture?.write(line: line, session: identity.captureKey)
         switch frame {
         case .controlResponse(let resp):
             if resp.requestID.rawValue == "init-1" {
@@ -210,6 +219,27 @@ public actor ClaudeProcess {
             await channel.push(.frame(frame, epoch))
         }
     }
+    /// A fork's own id, taken from the first inbound frame that carries a `session_id`.
+    ///
+    /// That frame is `auth_status`, which every recorded fixture places at position 5 — immediately after
+    /// the initialize response and **before any user frame**. `--enable-auth-status` is already on the
+    /// launch line, so this is wire the transport receives anyway.
+    ///
+    /// Not `system/init`, which would be the obvious place to look and is the wrong one: the engine does not
+    /// emit it until the first user turn, so a fork that is never spoken to would never learn its own id.
+    /// The key is read from the line rather than from the typed frame because every frame type that carries
+    /// it declares it under the same name, and this stops as soon as it has an answer.
+    private func resolveForkIdentity(from line: Data) async {
+        guard case .awaitingFork(_, let provisional) = identity,
+              let value = try? JSONDecoder().decode(JSONValue.self, from: line),
+              let raw = value["session_id"]?.stringValue, let id = SessionID(raw) else { return }
+        identity = .known(id)
+        // Captures are keyed by session id, so the file opened under the provisional name becomes the file
+        // for this session rather than a second one nobody can find.
+        await capture?.rename(from: provisional, to: id)
+        await channel.push(.sessionIdentityResolved(id, epoch))
+    }
+
     private func handleInbound(_ req: ControlRequestFrame) async {
         let request = InboundRequest.parse(frame: req, epoch: epoch, receivedAt: .now)
         if seenInboundIDs.contains(request.id) { return }              // a live duplicate of a pending request re-armed at handshake
@@ -265,7 +295,7 @@ public actor ClaudeProcess {
     private func writeLine(_ data: Data, type: String, subtype: String?, requestID: RequestID?) async throws {
         guard let writer, !terminating, !isExited else { throw WireError.processExited }
         diagnostics.record(.frame(direction: .outbound, type: type, subtype: subtype, bytes: data.count, epoch: epoch, requestID: requestID))
-        await capture?.write(line: data, session: sessionID)
+        await capture?.write(line: data, session: identity.captureKey)
         do { try await writer.write(data) } catch { throw WireError.processExited }
     }
     private func writeAnswer(_ id: RequestID, _ answer: InboundAnswer, subtype: String) async throws {

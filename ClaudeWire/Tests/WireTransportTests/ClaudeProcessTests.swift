@@ -51,9 +51,10 @@ final class Harness {
         env = ResolvedEnvironment(variables: vars, shell: "/bin/zsh", capturedAt: .init(), mode: .processFallback)
     }
     func make(scenario: String, epoch: ProcessEpoch = .first, bufferCapacity: Int = 4096, capture: RawCapture? = nil,
-              diagnostics: any DiagnosticsSink = NullDiagnostics(), extraTools: [any MCPTool] = []) -> ClaudeProcess {
+              diagnostics: any DiagnosticsSink = NullDiagnostics(), extraTools: [any MCPTool] = [],
+              session: SessionStart = .new(SessionID())) -> ClaudeProcess {
         var e = env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = scenario
-        let launch = LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: cwd, session: .new(SessionID()))
+        let launch = LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: cwd, session: session)
         let p = ClaudeProcess(epoch: epoch, launch: launch, environment: e, configHome: ConfigHome(root: cwd.appendingPathComponent("cfg"), source: .environment),
                               mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: cwd, tools: [SendUserFileTool()] + extraTools),
                               diagnostics: diagnostics, capture: capture, eventBufferCapacity: bufferCapacity)
@@ -465,6 +466,79 @@ final class MCPStartupOrderingTests: XCTestCase {
         }
         let server = try XCTUnwrap(connected, "the server never reached connected")
         XCTAssertEqual(server["tools"]?.arrayValue?.compactMap { $0["name"]?.stringValue }, ["send_user_file"])
+        await p.terminate()
+    }
+
+}
+
+/// Who a channel is, when the engine is the one who decides.
+final class ForkIdentityTests: XCTestCase {
+
+    /// A fork's id is the engine's, not the one it was forked from.
+    ///
+    /// `--fork-session` makes the CLI mint a fresh session id, so the `--resume` target names the source and
+    /// never this channel. The id arrives on `auth_status`, which the stand-in emits at frame 5 exactly as
+    /// every recorded fixture does — after the initialize response and before any user frame, which is why
+    /// this resolves without a turn ever being taken.
+    ///
+    /// The capture is the sharpest form of the defect: files are keyed by session id, so a fork reporting the
+    /// source id writes into the source channel's capture. Asserted as an exact directory listing, because
+    /// "the real file exists" would hold just as well beside a stray one under the wrong name.
+    func testForkTakesItsIdentityFromAuthStatusAndNeverReportsTheSourceId() async throws {
+        let h = try Harness()
+        let source = SessionID("11111111-0000-4000-8000-000000000001")!
+        let expected = SessionID("f0f0f0f0-0000-4000-8000-000000000fff")!
+        let configHome = ConfigHome(root: h.cwd.appendingPathComponent("cfg"), source: .environment)
+        let captureRoot = h.cwd.appendingPathComponent("capture")
+        let capture = RawCapture(root: captureRoot, configHome: configHome)
+        let p = h.make(scenario: "", capture: capture, session: .resume(source, fork: true))
+
+        let atConstruction = await p.identity
+        guard case .awaitingFork(let from, let provisional) = atConstruction else {
+            return XCTFail("a fork's identity is not awaiting resolution at construction: \(atConstruction)")
+        }
+        XCTAssertEqual(from, source)
+        let beforeSpawn = await p.sessionID
+        XCTAssertNil(beforeSpawn, "a fork reported an id before the engine gave it one")
+
+        _ = try await p.spawn()
+        guard case .sessionIdentityResolved(let resolved, .first)? = await h.expect({
+            if case .sessionIdentityResolved = $0 { return true }; return false
+        }, "sessionIdentityResolved") else { return }
+        XCTAssertEqual(resolved, expected)
+        XCTAssertNotEqual(resolved, source)
+        let after = await p.sessionID
+        XCTAssertEqual(after, resolved)
+        await p.terminate()
+        _ = await h.expect({ if case .exited = $0 { return true }; return false }, "exited")
+
+        let directory = captureRoot.appendingPathComponent(RawCapture.configHomeHash(configHome))
+        let files = Set((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+        XCTAssertEqual(files, ["\(resolved).ndjson"],
+                       "the capture opened under the provisional name did not become the real one")
+        XCTAssertFalse(files.contains("\(provisional).ndjson"))
+        XCTAssertFalse(files.contains("\(source).ndjson"))
+        // The whole event stream, not just the resolution: nothing anywhere named the session forked from.
+        let resolutions = await h.log.events.compactMap { event -> SessionID? in
+            if case .sessionIdentityResolved(let id, _) = event { return id }; return nil
+        }
+        XCTAssertEqual(resolutions, [expected])
+    }
+
+    /// The other half: a plain resume keeps the id it was given, at construction and after the same
+    /// `auth_status` that resolves a fork. Only a fork's identity is unknown.
+    func testAResumeKeepsItsIdentityAndEmitsNoResolution() async throws {
+        let h = try Harness()
+        let target = SessionID("22222222-0000-4000-8000-000000000002")!
+        let p = h.make(scenario: "", session: .resume(target, fork: false))
+        let atConstruction = await p.identity
+        XCTAssertEqual(atConstruction, .known(target))
+        _ = try await p.spawn()
+        try await Task.sleep(for: .milliseconds(500))     // long enough for frame 5 to have arrived
+        let stillTheTarget = await p.sessionID
+        XCTAssertEqual(stillTheTarget, target)
+        let resolutions = await h.log.events.filter { if case .sessionIdentityResolved = $0 { return true }; return false }
+        XCTAssertTrue(resolutions.isEmpty, "a non-fork resolved an identity it already had: \(resolutions)")
         await p.terminate()
     }
 }
