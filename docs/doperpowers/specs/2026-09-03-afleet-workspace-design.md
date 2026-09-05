@@ -2424,12 +2424,12 @@ notarized distribution, and any write under `<configHome>` (X9).
 | Child | Spec | Status |
 |---|---|---|
 | C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `2515b04` from `child/c1-probes-fixtures` `13226e6` (89 commits); G1–G4 green: 18 fixtures (16 recorded on the pinned 2.1.259 binary, 2 synthetic with shapes confirmed on the installed binary), 242 probe and 24 fake-claude tests on Python 3.9 and 3.14, drift ritual clean 2.1.259→2.1.260, one independent Codex leak-risk review closed; fifteen `C1/…` notes filed and reconciled |
-| C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md` on `child/c2-core-wire`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks) | in-flight (wave 1); Tasks 1–6 landed 2026-09-04 (ClaudeWire 65 tests, AfleetCore 6); G2 pending C1.G1; G3 split into its inference-free half (provable now) and the live round trip (runnable again since the re-login) |
-| C3 FleetKit timeline | — | blocked-by C2 |
-| C4 FleetKit sessions and fleet | — | blocked-by C2 |
+| C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `b38e1f2` from `child/c2-core-wire` `9ab116a` (72 commits; history rewritten before merge so no engine byte from the recording workstation reaches the repository); G1–G4 green at the tip: ClaudeWire 225 tests, four of them live and run once from a clean build against the installed CLI under the scratch config home with no failures, AfleetCore 6; G2 over 18 fixtures and 1353 frames with the ten synthetic findings pinned as an exact set; one independent Codex leak-risk review (5 findings) and a six-lens review panel (32 findings) both closed by four sequential fix waves; the C2 reconciliations of 2026-09-04 and 2026-09-05 are in the Revision Notes; deferred debt indexed in `docs/tech-debt-tracker.md`; spend: three model turns on the child's own live gates and one in the orchestrator's final live pass |
+| C3 FleetKit timeline | — | dispatchable (C2 merged); reads §6.1/X11, §6.2/X3, §6.3, §7.6, §11 and §17.7 as revised 2026-09-05 |
+| C4 FleetKit sessions and fleet | — | dispatchable (C2 merged); owns §7.4's wedged row, the pending-list surface, channel keying on the identity event and the `apiKeySource` readback; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
 | C6 Conversation surface and Agents panel | — | composite; blocked-by C3, C4, C5 |
-| C7 Workbench panels | — | composite; cut dispatchable when C2 lands; UI blocked-by C5.G4 |
+| C7 Workbench panels | — | composite; decomposing run dispatchable now (C2 merged); UI blocked-by C5.G4 |
 
 Each child's spec path is filled in when it is dispatched; a composite's row points at
 its own composite spec, whose tracking map lists its leaves. Children keep their own
@@ -4061,3 +4061,13 @@ Pending — written at finish.
   2026-09-05 after the option was put to them with a recommendation to leave it. The child
   branch is different: never pushed, so its six leaking historical blobs are rewritten out
   before merge.
+- 2026-09-05: C2 merged at `b38e1f2` (branch tip `9ab116a`, 72 commits); §17.9 records the gates,
+  reviews, waves and spend, and C3, C4 and C7 become dispatchable. Deferred debt from C2 is
+  indexed in `docs/tech-debt-tracker.md`, a new durable index for every child; the ledgers keep
+  the narrative. Two of its ten items are addressed to other children: the `LineReader`
+  thread-per-stream limit that exhausts the dispatch pool near thirty sessions (C4's scale) and
+  the fixture census `count` that is a running total across re-recordings (a C1 follow-up). The
+  child's retrospective names its most consequential unverified claim plainly: the config-home
+  write allowlist rests on one turn's writes and is untested against hooks, plugins, background
+  shells, subagents and session relocation. That is a gate for C4 to widen, not a C2 defect.
+  Flags C3, C4 and C7 (dispatch), C1 (census count).
