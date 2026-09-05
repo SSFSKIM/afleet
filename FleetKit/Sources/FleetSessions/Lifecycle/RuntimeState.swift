@@ -44,7 +44,10 @@ public enum RuntimeStateUpdater {
         case GetSettings.subtype:
             let applied = answer["applied"] ?? .object([:])
             if let model = applied["model"]?.stringValue { state.model = model }
-            if let effort = applied["effort"]?.stringValue { state.effort = effort }
+            // Present-and-null is the engine's "back to the default" and clears the value, exactly as `set_model`
+            // above reads it; *absent* is not a statement about the effort and leaves it alone. Reading only the
+            // string would leave a cleared effort in the record for a restart to re-send.
+            if let effort = applied["effort"] { state.effort = effort.stringValue }
             if let style = applied["output_style"]?.stringValue { state.outputStyle = style }
         case SetCwd.subtype:
             // `{status: "ok", cwd: <resolved>}` is the accepted answer; a `needs_trust` answer carries no `cwd` and
@@ -77,6 +80,9 @@ public enum RuntimeStateUpdater {
             state.model = initFrame.model
             state.permissionMode = PermissionMode(rawValue: initFrame.permissionMode) ?? state.permissionMode
             state.outputStyle = initFrame.outputStyle
+            // The engine reports the launch's effort here and nowhere else until a `get_settings` is asked for, and
+            // this block runs once: left out, the seed is missed for the life of the channel.
+            state.effort = initFrame.effort
             state.cwd = URL(fileURLWithPath: initFrame.cwd)
             // `system/init.agent` is absent on every recorded launch, `--agent` ones included (parent §7.4), so this
             // reads whatever an engine that grows the key would send and leaves the value alone until one does.
@@ -104,15 +110,23 @@ public enum Readback {
     ///
     /// Each value is read from the source that carries it and from no other: `model` and `effort` from
     /// `get_settings.applied` (the only answer that reports them), the permission mode and the output style from the
-    /// new handshake, every `apply_flag_settings` key from `effective_keys`. Fast mode has two sources and they must
-    /// not be confused: when the host applied it the key is in `flagSettings` and `effective_keys` is the whole
+    /// new handshake, every `apply_flag_settings` key from the keys of `get_settings.effective`. Fast mode has two
+    /// sources and they must not be confused: when the host applied it the key is in `flagSettings` and those keys
+    /// are the whole
     /// check — the handshake is not consulted, because the engine reports a host toggle lazily and a correct restart
     /// would fail against it. Only when fast mode was *observed* and never applied does the new handshake's
     /// `fast_mode_state` answer for it.
     public static func verify(snapshot: RestartSnapshot, handshake: InitializeResponse,
                               settingsApplied: JSONValue, effectiveKeys: [String]) -> [String] {
         var failed: [String] = []
-        if let model = snapshot.model, settingsApplied["model"]?.stringValue != model { failed.append("model") }
+        // `applied.model` reports the model the engine *resolved*, and the host set an alias: `opus[1m]` comes back
+        // as `claude-opus-5[1m]`. The handshake's `models` table is the engine's own map between the two, so the
+        // snapshot's value is resolved through it first. An alias the table does not carry — and a value that is
+        // already a resolved id — has no entry and compares raw, which is what the comparison meant all along.
+        if let model = snapshot.model {
+            let resolved = handshake.models.first { $0["value"]?.stringValue == model }?["resolvedModel"]?.stringValue
+            if settingsApplied["model"]?.stringValue != (resolved ?? model) { failed.append("model") }
+        }
         if let effort = snapshot.effort, settingsApplied["effort"]?.stringValue != effort { failed.append("effort") }
         if let mode = snapshot.permissionMode, handshake.currentPermissionMode != mode {
             failed.append("permissionMode")

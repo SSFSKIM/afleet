@@ -69,7 +69,7 @@ outcome added later without a test fails the build. The scenarios, grouped by ro
 - open in terminal: `terminate()`, wait, the same recheck before the request is built (a holder means no request and `LifecycleError.heldElsewhere`), return a `PaneRequest` whose purpose is `.hatch(id)`, whose arguments are the interactive `--resume <id>` line and whose environment is composed through ClaudeWire's launch configuration so the hatch resumes under the same config home; keep mirroring; re-adopt when the panel reports the `PaneExit` and the record is gone (the test plays the panel: it takes the request and reports the exit);
 - foreign live in the user's terminal: send refused with the "running in your terminal" reason and *Fork* offered; record gone means archived;
 - Contended after a handoff wait exceeds 10 s; and, as a transition of its own with its own event, Contended whenever desired and observed disagree (a foreign holder named while `desired` is owned, from connecting, ready or dormant); back to the matching origin when the holder set settles to zero or one;
-- the quiescent restart: the values to carry come from the channel's runtime-state model, an actor-owned record of permission mode, model, effort, output style, cwd, agent, the cumulative `--add-dir` list, the environment options, the union of every `apply_flag_settings` payload the host sent and the fast-mode state the engine reported, that every control response and frame updates (a `set_model` answer, a `set_permission_mode` answer, `get_settings.applied`, an `apply_flag_settings` sent through the API, `fast_mode_state`, `set_cwd`, an accepted `add_directory`), not from the launch template; snapshot it, terminate, wait, spawn with every launch field from the snapshot and never `--agent`, re-send the flag union, verify every readback (`model` and `effort` from `applied`, permission mode and output style from the new handshake, every flag key present in `effective_keys`, fast mode from `effective_keys` when the host applied it and from the new handshake when it was only observed), `.ready` published only after the readbacks, composer disabled until each matches, a banner naming the setting that did not survive (items 58 and 63 at the API level, the mismatch half driven by `FAKE_CLAUDE_INIT` answering a different `current_permission_mode`). One end-to-end test routes `/model` and `/permissions` through the command router, then restarts, and asserts the relaunch carries the changed values, not the ones the channel was opened with.
+- the quiescent restart: the values to carry come from the channel's runtime-state model, an actor-owned record of permission mode, model, effort, output style, cwd, agent, the cumulative `--add-dir` list, the environment options, the union of every `apply_flag_settings` payload the host sent and the fast-mode state the engine reported, that every control response and frame updates (a `set_model` answer, a `set_permission_mode` answer, `get_settings.applied`, an `apply_flag_settings` sent through the API, `fast_mode_state`, `set_cwd`, an accepted `add_directory`), not from the launch template; snapshot it, terminate, wait, spawn with every launch field from the snapshot and never `--agent`, re-send the flag union, verify every readback (`model` and `effort` from `applied`, permission mode and output style from the new handshake, every flag key present among the keys of `effective`, fast mode from `effective` when the host applied it and from the new handshake when it was only observed), `.ready` published only after the readbacks, composer disabled until each matches, a banner naming the setting that did not survive (items 58 and 63 at the API level, the mismatch half driven by `FAKE_CLAUDE_INIT` answering a different `current_permission_mode`). One end-to-end test routes `/model` and `/permissions` through the command router, then restarts, and asserts the relaunch carries the changed values, not the ones the channel was opened with.
 
 Forking is exercised beside the table because the parent's table has no fork row: a plain
 fork launches `SessionStart.resume(source, fork: true)`; *Fork from here* launches
@@ -153,7 +153,8 @@ duplicates. Each entry carries a typed strategy whose cases name the exact reque
 or lifecycle action the command runs, so the mechanism test is a check of each strategy's
 behaviour against the fixture that recorded it, not an assertion that an enum value is one of
 the enum's values. Against the `control-shapes` fixture: `/effort low` sends
-`apply_flag_settings {effortLevel}` and reads back `get_settings.effective_keys`; `/cd` into
+`apply_flag_settings {effortLevel}` and reads back the key names of `get_settings.effective`,
+which the engine answers as an **object** of key to value; `/cd` into
 an untrusted directory receives `needs_trust` and, after the trust answer, repeats the call
 with `trust_accepted: true` and `trusted_directory`; `/rename` sends `rename_session`;
 `/model` sends `set_model`; `/rewind <uuid>` sends `rewind_files {user_message_id, dry_run:
@@ -186,8 +187,9 @@ scenario states (1 for a handshake-only scenario and for adoption, 12 for the co
 prompt), because the flag caps agentic turns inside one prompt, not prompts, and ends the
 turn with a `result` of subtype `error_max_turns` at the limit (bundle 36222
 `turnCount`/`maxTurns`; C1's `exit-plan-mode` fixture records the subtype), which every
-scenario treats as a failure naming it; the suite's ceilings are four model turns (two
-reserved for adoption, two for the composed scenario) and twenty minutes of wall time in total,
+scenario treats as a failure naming it; the suite's ceilings are five model turns (two
+reserved for adoption, two for the composed scenario, one for the restart readback) and twenty
+minutes of wall time in total,
 and the budget refuses a scenario that would cross either; C2's usage reader is consulted
 before the first scenario and again before each turn-spending one, and a spent window skips
 with its reason; every `result` frame any scenario observes has its `total_cost_usd` summed,
@@ -217,7 +219,15 @@ is also set, and asserts that adopt stops the job, resumes the same session id o
 the next handshake is clean, and then that *Send to background* hands the owned channel
 back: `--bg --resume <id>` ran, the roster lists a new job for the session, the channel
 reads `.backgroundJob`, and the test stops that job through `performJob(.stop, short)`; the
-second turn is the reservation for a resumed job that runs one. One config-home witness
+second turn is the reservation for a resumed job that runs one. The **restart readback** scenario, the eighth, is the one place an engine
+witness is worth a cent: it spends one short `haiku` turn (`--max-turns 1`) so a transcript
+exists, then routes `/model` to a second alias and `/add-dir <scratch directory>` — a
+restart-required setting — so a quiescent restart runs, and asserts that `.ready` is published
+with no `settingDidNotSurvive` banner, that the relaunch argv carries the new model and the
+directory, and that the `get_settings` answer's `effective` is an **object** and not a
+synthesised key list, read through the diagnostics sink or an injected readback observer. It
+exists because the restart readback is the class of defect a fixture-driven suite cannot catch:
+the stand-ins agreed with the code rather than with the engine. One config-home witness
 spans the whole of G5, taken before the first live scenario and after the last, and a second
 reading brackets each scenario: the set of relative paths the engine created, modified or
 deleted is reported, never their contents, and compared against the allowlist that G5 widens
@@ -651,8 +661,8 @@ worktree, bypass allowance, prompt suggestions) unless the request overrides one
 relaunch stops at the handshake without publishing `.ready`; then `apply_flag_settings` with
 the whole `flagSettings` union when it is non-empty, then `get_settings`; then verify every
 readback: `model` and `effort` from `applied`, permission mode and output style from the new
-handshake, every key of `flagSettings` present in `effective_keys`, and fast mode from
-`effective_keys` containing `fastMode` when the host applied it or from the new handshake's
+handshake, every key of `flagSettings` present among the keys of `effective`, and fast mode from
+`effective` carrying `fastMode` when the host applied it or from the new handshake's
 `fast_mode_state` against `fastModeObserved` when it was only observed. Only when every
 readback matches does the channel publish `.ready`; otherwise it stays `.connecting` with a
 banner naming the first setting that did not survive and keeps the composer disabled until
@@ -978,6 +988,39 @@ records them. Nothing about §6.12 flows back: the bundle read and C1's spike co
 parent's rule that the local-settings store is the only source the rejection gate reads, and
 this document's v2 widening to the `.claude.json` project entry is withdrawn in v2.2.
 
+### From the whole-branch review of 2026-09-06
+
+Three parent impacts the architect applies at merge, all of them consequences of the rulings
+recorded in the Decision Log.
+
+**§7.4, the lifecycle table.** Three amendments, one principle.
+
+- **A new row**, `(readyExitedClean, Owned ready, exitedClean, Owned dormant)`: a child that ends
+  cleanly on its own. The slot is released and no system item is written, because a clean exit is
+  not a crash. The table has no row for this at all today.
+- **The crash row's *To*** becomes "Owned, dormant or Archived (older)": dormant when the series
+  had reached ready, archived-older when it never did, from ready and from connecting alike.
+- **One sentence of principle**: dormant is the resting state of every processless owned channel,
+  and a spawn that does not complete leaves the channel where it started. Never leave a channel in
+  ready or connecting with no process. The restore is not a row of its own — it is the
+  `adoptOrigin` idiom, "nothing of ours changed, the attempt did not happen".
+
+**§8.5, the composer.** `/rewind` sends `rewind_conversation` before it touches a single file, and
+`rewind_files {dry_run: false}` only when the conversation rewind was honoured *and* the user asked
+for the files as well. §8.5's refusal design is unchanged and is the parent's: the engine's `error`
+string is surfaced and *Fork from here* is offered (item 13). What changes is only that no file is
+reverted ahead of a refusal. The paragraph's "shows the counts before applying" stays true — the
+`dry_run: true` preview is read-only and still runs first — and the sheet now answers with three
+choices rather than a yes/no, because the two rewinds are independent.
+
+**X5, the action and error vocabulary.** `LifecycleError.busy(LifecycleOperation)` is an addition
+C5 and C6 must know about: every lifecycle action a surface can invoke may now throw it, and the
+right response is to leave the channel alone and let the user retry, never to retry automatically.
+`LifecycleOperation` (`spawn, handOff, restart, reopen, adopt, evict, reap`) comes with it. Two
+entry points refuse without throwing, because their signatures cannot: `reap()` returns silently
+and `evict()` answers `.victimBecameIneligible` — a channel already running an operation of its own
+is not a victim.
+
 ## Delegated unknowns
 
 - The `remote-settings.json` and `remote-settings-consent.json` shapes. Modelled from the
@@ -1015,7 +1058,8 @@ parent's §7.8.
 2. **Spend one live turn to widen the write allowlist?** Recommendation: yes, once, behind
    `AFLEET_LIVE_CLI_TURNS=1`, on `haiku`, after the budget check; the never-write claim is
    the project's central safety promise and one composed turn is the cheapest evidence that
-   exists. Total live spend for C4 is then at most four short turns (adoption two, composed two).
+   exists. Total live spend for C4 is then at most five short turns (adoption two, composed two,
+   restart readback one).
 3. **Store layout.** The parent's §7.8 names one `state.json`; this child chooses one document
    per namespace under the same directory so three packages never contend for one file. The
    file format is advisory inheritance; if the single file is preferred, the change is local.
@@ -1191,7 +1235,7 @@ parent's §7.8.
   Date/Author: 2026-09-05 / C4 plan review 2, ruling 3.
 - Decision: `SessionRuntimeState` records `flagSettings` (the union of every
   `apply_flag_settings` payload) and `fastModeObserved`; the restart relaunches every launch
-  field from the snapshot, re-applies the union, verifies every key against `effective_keys`
+  field from the snapshot, re-applies the union, verifies every key against the keys of `effective`
   and publishes `.ready` only after the readbacks.
   Rationale: `get_settings.applied` carries no fast-mode key and `fast_mode_state` is
   reported only by the initialize response and `result` frames; a single boolean could
@@ -1433,6 +1477,105 @@ parent's §7.8.
   Rejected: all three earlier recipes, on the evidence above.
   Date/Author: 2026-09-06 / C4 Task 10, settled after four live runs.
 
+- Decision (**ruling 1**): a processless *owned* channel rests in **dormant**, always.
+  Rationale: the parent's own words settle it — `ready` and `connecting` each assert a process,
+  live or being launched, and `dormant` is "owned, no process, a send resumes it under the same
+  id". There is one resting state for a processless owned channel and it is dormant, so the table
+  gains a clean-exit row `(.readyExitedClean, .ready, .exitedClean, .dormant)`, the ready crash row
+  retargets from ready to dormant, `(.exitedNonZero, .connecting, .exitedNonZero, .dormant)` joins
+  the two exhaustion rows, and a spawn that does not complete restores the resting origin the
+  channel left rather than parking it in connecting — the `adoptOrigin` idiom, no row of its own.
+  `reopen()` acts on every processless owned channel whose system item offers *Reopen* and takes
+  the send row of the resting state, which is the first read of `reopenOffered`. The table moves
+  from 55 scenarios to **57** and G1's set-equality count moves with it.
+  One deviation from the ruling's stated mechanism, found in execution and kept: the handshake
+  catch restores only when this supervisor ended the epoch itself. `ClaudeProcess.processDidExit`
+  settles the handshake waiter *before* it pushes `.exited`, so the catch always runs ahead of
+  `handleExit`; an unconditional restore would leave the crash row with no candidate and make every
+  handshake-phase crash a `transitionNotInTable` diagnostic. On every other failure an exit is on
+  its way and `handleExit` owns the outcome, which reaches the same resting state through case 4.
+  Rejected: patching each of the five findings where it was found (five different answers to one
+  design question); leaving a wedged or crashed channel in ready with `process == nil`.
+  Date/Author: 2026-09-06 / reconciling architect, executed by the fix wave's worker 1.
+
+- Decision (**ruling 2**): one in-flight marker per channel — `inFlight: LifecycleOperation?` —
+  and refusal, not queueing. Rationale: `spawning` and `handingOff` were two booleans covering two
+  of eleven public entry points, and the alternative on the table was a FIFO lease across a
+  1,483-line actor. Nothing waits on a marker, so nothing can deadlock; and the product semantics
+  want refusal (a double-click on *Send to background*) or merge (two restart-required changes),
+  never a queued second handoff. The marker is set synchronously after each entry's pure guards
+  and cleared by `defer`; a second entrant throws `LifecycleError.busy(operation)`. Two exceptions
+  keep today's behaviour: `send` behind a spawn queues, because the channel is connecting and
+  queueing is what the user means there, and `quiescentRestart` behind a restart merges into
+  `pendingChange`. `answer` and `perform(controlRequest)` are exempt: they mutate no lifecycle
+  state. `deliver` now sets `turnRunning` before `await handle.send`, which with the eviction, the
+  reap and the restart all taking the marker before their eligibility check closes both halves of
+  the eligibility-to-termination window.
+  Rejected: the FIFO lease (a structural change at the merge gate, and a boundary taken in the
+  wrong place deadlocks the fleet); leaving the comment at `ChannelSupervisor.swift:346-347`
+  promising a serialisation nothing implemented.
+  Date/Author: 2026-09-06 / reconciling architect, executed by the fix wave's worker 1.
+
+- Decision (**ruling 3**): `/rewind` sends `rewind_conversation` **first**, and
+  `rewind_files {dry_run: false}` only on `rewound: true` and only when the user asked for the
+  files as well. Rationale: as shipped, an ordinary `/rewind` reverted the user's working tree and
+  then had the conversation rewind refused, leaving the two halves inconsistent with no signal —
+  `rewind_conversation` honours only a target the running process itself sent, which after a reopen
+  is every earlier message, and it refuses with `rewound: false` and a body-level `error` inside a
+  *success* envelope. The reorder is safe on an engine fact rather than on hope: `rewind_files`
+  resolves its checkpoint through `fileHistory` keyed by the user message id
+  (`Oze(n.fileHistory, id)`, then `Pze(...)`, 2.1.258 `cli.pretty.js:153445-153460`) and never
+  through the message array, so the checkpoint outlives the conversation rewind. On a refusal the
+  engine's `error` string is surfaced and *Fork from here* is offered exactly as parent §8.5 and
+  item 13 design it; on success `skippedLinks` is surfaced rather than reporting a clean revert.
+  The confirmation sheet answers `RewindChoice` — cancel, conversation only, or conversation and
+  files — because the two rewinds are independent and the engine's own `/rewind` offers the same
+  three.
+  Rejected: keeping the shipped order (it modifies the working tree on the ordinary path);
+  supplying `last_seen_user_message_uuid`, which the finding asked for on a premise the bundle
+  refutes — the field is optional, and the refusal design is the parent's, not this child's.
+  Date/Author: 2026-09-06 / reconciling architect, executed by the fix wave's worker 3.
+
+- Decision (**ruling 4**): the restart readback reads the key names of `get_settings.effective`,
+  and the shape is fixed at its source rather than worked around here. Rationale: the redactor
+  replaced the whole `effective` field before anything reached disk, so no recording carried the
+  engine's answer and every restart test scripted a synthesised `effective_keys` and called it "the
+  recorded shape" — a green suite over an unproven path. The corrective landed on `main` first:
+  both redactors keep `effective` as an object with its keys and every value `"<redacted>"`, and
+  `sources` as `[{source, settings: {key: "<redacted>"}}]`; `control-shapes` and `zero-cost` were
+  migrated and independently re-signed; C4 merged `main` before Group E. In C4:
+  `ReadbackSource.getSettingsEffectiveKeys` becomes `.getSettingsEffective`, every scripted
+  `get_settings` answer builds the live shape, and `snapshot.model` resolves through the
+  handshake's `models[].{value, resolvedModel}` table before comparing with `applied.model`.
+  Rejected: fixing the reader against the bundle alone and leaving the fixtures as they were.
+  Date/Author: 2026-09-06 / reconciling architect, cross-child with C1 and C2.
+
+- Decision (**ruling 5**): the task mirror is wired per channel in this child, not deferred.
+  Rationale: an unwired mirror means the thirty-minute reap, the cap eviction and `/logout` cannot
+  see a running background shell — the exact loss parent §7.4's dormant-eligibility paragraph
+  exists to prevent — and that is not debt to carry across a merge. The inputs are wire frames the
+  supervisor already pumps and Task 11's `MirrorFold` rig already shows the fold: `Fleet.build`
+  gives each supervisor a `RegistryMirror` fed from its own pump through C3's `apply(_:at:epoch:)`,
+  `eligibilityInputs` reads the live mirror and its `lastFrameAt`, and `liveTaskIDs()` reads the
+  same mirror at the moment *Stop* executes rather than replaying census-time ids.
+  Rejected: carrying it as tracker debt behind a stand-in mirror.
+  Date/Author: 2026-09-06 / reconciling architect.
+
+- Decision: the live budget rises from four short turns to **five**, and the fifth buys an eighth
+  scenario, "restart readback".
+  Rationale: the whole-branch review's closing paragraph named the pattern — the suite is green
+  because the stand-ins agree with the code rather than with the engine — and the restart readback
+  is where that pattern cost the most: the reader, the fixtures and every test agreed on a shape the
+  engine does not send. One `--max-turns 1` turn gives the scenario a transcript; `/model` to a
+  second alias and `/add-dir <scratch directory>` make a quiescent restart run; the scenario asserts
+  `.ready` with no `settingDidNotSurvive` banner, the relaunch argv, and that `effective` arrives as
+  an object. Five short `haiku` turns remain far inside the twenty-minute wall declaration, which is
+  derived the same way as the others.
+  Rejected: witnessing the shape from the migrated fixtures alone (they are the thing under
+  suspicion); leaving the ceiling at four and folding the assertion into the composed scenario,
+  which would couple two independent failures into one turn.
+  Date/Author: 2026-09-06 / reconciling architect.
+
 ## Surprises & Discoveries
 
 - Observation: `fake-claude` emulates no CLI verb. Evidence: `Tools/fake-claude/fake_claude.py`
@@ -1541,7 +1684,7 @@ Pending — written at finish.
   conformance; the cap counter counts pending evictions and decides from pushed eligibility;
   the §6.12 writer verifies the root descriptor with `F_GETPATH`; `SessionRuntimeState`
   gains `flagSettings` and `fastModeObserved` and the restart relaunches every field from
-  the snapshot and verifies against `effective_keys`; `LifecycleAction.answer` and
+  the snapshot and verifies against the keys of `effective`; `LifecycleAction.answer` and
   `LifecycleAPI.events(of:)` are added and `LifecycleAction` is `Sendable` only;
   `LiveBudget.run` reserves synchronously; G3/G5 accept the marker through the store first
   and the allowlist scenario reads twice, asserts the actions from events and breaks on

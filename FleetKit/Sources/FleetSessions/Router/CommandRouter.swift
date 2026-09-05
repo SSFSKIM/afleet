@@ -58,7 +58,7 @@ public enum CommandRouter {
         if let command = RouterTable.command(named: name) {
             return resolve(command, arguments: arguments, runtime: runtime, original: text)
         }
-        if systemInit?.terminalSlashCommands?.contains(name) == true {
+        if Self.slashed(systemInit?.terminalSlashCommands ?? []).contains(name) {
             return .refusedLocally(explanation: RouterTable.explanation(forTerminalOnly: name))
         }
         return .text(text)
@@ -68,14 +68,21 @@ public enum CommandRouter {
     /// says belongs to its terminal interface — those are hidden, not offered and then refused.
     public static func autocomplete(handshake: InitializeResponse? = nil,
                                     systemInit: SystemInitFields? = nil) -> [String] {
-        let terminalOnly = Set(systemInit?.terminalSlashCommands ?? [])
+        let terminalOnly = Self.slashed(systemInit?.terminalSlashCommands ?? [])
         var names = Set(RouterTable.local.map(\.name))
-        for command in systemInit?.slashCommands ?? [] { names.insert(command) }
-        for command in handshake?.commands ?? [] {
-            guard let name = command["name"]?.stringValue else { continue }
-            names.insert(name.hasPrefix("/") ? name : "/" + name)
-        }
+        names.formUnion(Self.slashed(systemInit?.slashCommands ?? []))
+        names.formUnion(Self.slashed((handshake?.commands ?? []).compactMap { $0["name"]?.stringValue }))
         return names.subtracting(terminalOnly).sorted()
+    }
+
+    /// The one spelling every command name is compared in.
+    ///
+    /// `system/init` names its commands **without** a leading slash (`vim`, `doctor`) — on every recorded fixture
+    /// and in the bundle that builds the frame — while the composer's line and the local table always carry one.
+    /// Comparing the two spellings makes the terminal-only refusal dead code and leaves the subtraction in
+    /// `autocomplete` offering the very commands the engine said belong to its terminal.
+    private static func slashed(_ names: [String]) -> Set<String> {
+        Set(names.map { $0.hasPrefix("/") ? $0 : "/" + $0 })
     }
 
     /// The second `set_cwd` after a `needs_trust`. `trusted_directory` echoes the directory the *answer* named —
@@ -122,7 +129,14 @@ public enum CommandRouter {
         case .restart:
             guard let argument else { return .text(original) }
             var directories = runtime?.addDirectories ?? []
-            let added = URL(fileURLWithPath: argument)
+            // A relative path is relative to the *channel's* directory. `URL(fileURLWithPath:)` with no base
+            // resolves against afleet's own process cwd, which is not a directory the user has ever seen. The base
+            // is hinted as a directory: a cwd that reached the runtime record as a plain file URL would otherwise
+            // have its last component replaced rather than appended to.
+            let base = (runtime?.cwd).map {
+                URL(filePath: $0.path(percentEncoded: false), directoryHint: .isDirectory)
+            }
+            let added = URL(filePath: argument, relativeTo: base).standardizedFileURL
             if !directories.contains(added) { directories.append(added) }
             return .restart(RestartRequest(addDirectories: directories))
         case .lifecycle(let action):
@@ -181,11 +195,51 @@ public struct RewindPreview: Hashable, Sendable {
     }
 }
 
+/// What the confirmation sheet answered. `/rewind` is two independent rewinds — the conversation and the working
+/// tree — and the sheet says which of them the user asked for.
+public enum RewindChoice: Hashable, Sendable {
+    /// Nothing is sent. The read-only dry run has already run and touched nothing.
+    case cancel
+    case conversationOnly
+    case conversationAndFiles
+}
+
+/// The `rewind_files {dry_run: false}` answer: `{canRewind: true, skippedLinks}` when the revert ran and
+/// `{canRewind: false, error}` when the engine would not (2.1.258 `cli.pretty.js:153445-153460`).
+/// `skippedLinks` counts tracked paths the engine left alone, which the surface says rather than reporting a clean
+/// revert of everything the dry run listed.
+public struct RewindFilesOutcome: Hashable, Sendable {
+    public var canRewind: Bool
+    public var skippedLinks: Int
+    public var error: String?
+    public init(canRewind: Bool, skippedLinks: Int, error: String? = nil) {
+        self.canRewind = canRewind; self.skippedLinks = skippedLinks; self.error = error
+    }
+    init(_ answer: JSONValue) {
+        self.init(canRewind: answer["canRewind"]?.boolValue ?? false,
+                  skippedLinks: Int(answer["skippedLinks"]?.intValue ?? 0),
+                  error: answer["error"]?.stringValue)
+    }
+}
+
 /// The `rewind_conversation` answer. `prefillText` is the prompt to put back in the composer.
+///
+/// `error` is the body-level reason inside a *success* envelope — `"stale target"` for any message the running
+/// process did not itself send, which after a reopen is every earlier message (fixture `rewind-turn`). A host that
+/// read the envelope alone would report a refused rewind as done, so the body is what is read and the reason is
+/// carried to the surface.
 public struct RewindOutcome: Hashable, Sendable {
     public var rewound: Bool
     public var prefillText: String?
-    public init(rewound: Bool, prefillText: String?) { self.rewound = rewound; self.prefillText = prefillText }
+    public var error: String?
+    /// The files half: present only when the user asked for it *and* the conversation rewind was honoured.
+    public var files: RewindFilesOutcome?
+    /// Parent §8.5 item 13: a refused rewind is never reported as done, and what is offered instead is
+    /// *Fork from here* at the message's preceding assistant record.
+    public var offersForkFromHere: Bool { !rewound }
+    public init(rewound: Bool, prefillText: String?, error: String? = nil, files: RewindFilesOutcome? = nil) {
+        self.rewound = rewound; self.prefillText = prefillText; self.error = error; self.files = files
+    }
 }
 
 /// The two URLs `claude_authenticate` answers with, as strings: the recorded pair carries a redaction marker in its
@@ -249,8 +303,8 @@ public enum StrategyOutcome: Sendable {
 public protocol StrategyUI: Sendable {
     /// Hands a URL to the Browser tab.
     func open(url: String) async
-    /// Puts the dry run's counts in front of the user and answers whether to apply them.
-    func confirm(preview: RewindPreview) async -> Bool
+    /// Puts the dry run's counts in front of the user and answers how much of the rewind they asked for.
+    func confirm(preview: RewindPreview) async -> RewindChoice
 }
 
 /// Runs a `RouteStrategy` against one channel.
@@ -271,13 +325,28 @@ public enum StrategyExecutor {
         switch strategy {
         case .rewind:
             guard let target = arguments.first else { return .notARequest }
+            // The dry run reports what a revert would change and changes nothing.
             let preview = RewindPreview(try await supervisor.perform(RewindFiles(userMessageID: target, dryRun: true)))
-            // Nothing else goes out until the user has seen the counts and said yes.
-            guard await ui.confirm(preview: preview) else { return .rewind(preview, nil) }
-            _ = try await supervisor.perform(RewindFiles(userMessageID: target, dryRun: false))
+            // Nothing else goes out until the user has seen the counts and answered the sheet.
+            let choice = await ui.confirm(preview: preview)
+            guard choice != .cancel else { return .rewind(preview, nil) }
+
+            // The conversation first, always. `rewind_conversation` refuses any target the running process did not
+            // itself send, and applying the files ahead of it would leave that ordinary refusal with the user's
+            // working tree reverted under a conversation that never moved — silently, inside a success envelope.
+            // Safe because `rewind_files` resolves its checkpoint through the engine's file history keyed by the
+            // message id and never through the message array (2.1.258 `cli.pretty.js:153445-153460`), so the
+            // checkpoint outlives the conversation rewind.
             let answer = try await supervisor.perform(RewindConversation(targetMessageUUID: target))
-            return .rewind(preview, RewindOutcome(rewound: answer["rewound"]?.boolValue ?? false,
-                                                  prefillText: answer["prefillText"]?.stringValue))
+            let rewound = answer["rewound"]?.boolValue ?? false
+            let prefill = answer["prefillText"]?.stringValue
+            let refusal = answer["error"]?.stringValue
+            guard rewound, choice == .conversationAndFiles else {
+                return .rewind(preview, RewindOutcome(rewound: rewound, prefillText: prefill, error: refusal))
+            }
+            let applied = try await supervisor.perform(RewindFiles(userMessageID: target, dryRun: false))
+            return .rewind(preview, RewindOutcome(rewound: true, prefillText: prefill,
+                                                  files: RewindFilesOutcome(applied)))
 
         case .login:
             let urls = try await supervisor.perform(ClaudeAuthenticate())

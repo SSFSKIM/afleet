@@ -138,7 +138,11 @@ public struct LocalSettingsStore: Sendable {
         guard rootFD >= 0 else { throw Self.refusal(forErrno: errno) }
         defer { Darwin.close(rootFD) }
         guard let opened = Self.descriptorPath(rootFD), opened == resolved else { throw Refusal.symlink }
-        let home = RealPath.string(configHome)
+        // The config home goes through the *same* normaliser as the descriptors it is compared against. A path
+        // spelled through the data volume's firmlink (`/System/Volumes/Data/...`) survives `realpath(3)` — a
+        // firmlink is not a symlink, so there is nothing to resolve — while `F_GETPATH` answers the same directory
+        // without the prefix, and a containment check between the two spellings never fires.
+        let home = Self.canonicalDirectory(configHome)
         guard !RealPath.contains(home, opened) else { throw Refusal.insideConfigHome }
         guard Self.isDirectory(rootFD) else { throw Refusal.notADirectory }
         guard ownerUID(.descriptor(rootFD)) == me else { throw Refusal.foreignUID }
@@ -290,6 +294,17 @@ public struct LocalSettingsStore: Sendable {
     private static func isDirectory(_ fd: Int32) -> Bool {
         var st = stat()
         return fstat(fd, &st) == 0 && st.st_mode & S_IFMT == S_IFDIR
+    }
+
+    /// A directory's path in the spelling `F_GETPATH` answers in, so it compares against a descriptor's own path.
+    /// Falls back to `realpath(3)` when the directory cannot be opened — a home that is not there contains nothing,
+    /// and the string check is what the writer had before.
+    private static func canonicalDirectory(_ url: URL) -> String {
+        let given = RealPath.trimmed(url.path(percentEncoded: false))
+        let fd = given.withCString { Darwin.open($0, O_RDONLY | O_DIRECTORY) }
+        guard fd >= 0 else { return RealPath.string(url) }
+        defer { Darwin.close(fd) }
+        return descriptorPath(fd).map(RealPath.trimmed) ?? RealPath.string(url)
     }
 
     /// Where the kernel says this descriptor actually is, which is the only trustworthy answer once a name may have

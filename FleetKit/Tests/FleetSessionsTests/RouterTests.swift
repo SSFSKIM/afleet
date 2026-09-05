@@ -65,18 +65,26 @@ final class RouterTests: XCTestCase {
 
     // MARK: - The multi-step strategies
 
-    /// `/rewind <uuid>`: the dry run first, the counts surfaced for confirmation, and nothing else until the user
-    /// confirms; then the apply and the conversation rewind, whose answer carries the composer's prefill.
+    /// `/rewind <uuid>`: the read-only dry run first, the counts surfaced for confirmation, then the **conversation**
+    /// and only then, and only if the conversation moved and the user asked for them, the files.
+    ///
+    /// The order is the whole point. `rewind_files {dry_run: false}` reverts the user's working tree, and
+    /// `rewind_conversation` refuses any target the running process did not itself send — which after a reopen is
+    /// every earlier message — with `rewound: false` inside a *success* envelope. Applying the files first therefore
+    /// leaves the ordinary refusal case with a reverted tree under a conversation that never moved, silently. The
+    /// reorder is safe because `rewind_files` resolves its checkpoint through the engine's file history keyed by the
+    /// message id and never through the message array (2.1.258 `cli.pretty.js:153445-153460`), so the checkpoint
+    /// outlives the conversation rewind.
     ///
     /// Recorded: the `rewind_files {dry_run: true}` answer and the `rewind_conversation` answer are the
     /// `control-shapes` recording's own, read out of `frames.ndjson`, and the target uuid is the one that recording
     /// rewound to. Scripted, not recorded: the `rewind_files {dry_run: false}` **apply** — the corpus records only
     /// the dry run, because the recording's scenario deliberately did not roll the working tree back — so the apply
-    /// is answered with the bare success every setter is answered with.
+    /// answers `{canRewind, skippedLinks}`, the shape the bundle's own handler builds at `:153460`.
     ///
-    /// The second leg runs the same strategy against the scripted handle so that "nothing else is sent until
-    /// `confirm()`" is asserted on the host side, from the exact ordered request list, rather than inferred.
-    func testRewindDryRunsSurfacesTheCountsThenAppliesAndRewindsTheConversation() async throws {
+    /// Deliberate break: send `rewind_files {dry_run: false}` before `rewind_conversation` again → legs two and
+    /// three fail, the refusal leg on the extra request that reverted the tree behind a refused rewind.
+    func testRewindRewindsTheConversationFirstAndTheFilesOnlyOnceItIsHonoured() async throws {
         let rig = try newRig()
         let dryRun = try FixtureAnswers.exchange("control-shapes", "rewind_files")
         let target = try XCTUnwrap(dryRun.request["user_message_id"] as? String)
@@ -85,9 +93,10 @@ final class RouterTests: XCTestCase {
 
         let steps = ReplayScript.exchange("rewind_files", matching: ["request.user_message_id": target,
                                                                      "request.dry_run": true], answer: preview)
-            + ReplayScript.exchange("rewind_files", matching: ["request.dry_run": false])
             + ReplayScript.exchange("rewind_conversation", matching: ["request.target_message_uuid": target],
                                     answer: rewound)
+            + ReplayScript.exchange("rewind_files", matching: ["request.dry_run": false],
+                                    answer: ["canRewind": true, "skippedLinks": 2])
         let supervisor = try await liveChannel(rig, steps)
 
         guard case .strategy(let strategy, let arguments) = CommandRouter.route("/rewind \(target)") else {
@@ -96,7 +105,7 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(strategy, .rewind)
         XCTAssertEqual(arguments, [target])
 
-        let ui = ScriptedStrategyUI(confirms: true)
+        let ui = ScriptedStrategyUI(answers: .conversationAndFiles)
         let outcome = try await StrategyExecutor.run(strategy, arguments: arguments, on: supervisor, ui: ui)
         guard case .rewind(let surfaced, let result) = outcome else {
             return XCTFail("the rewind gave \(outcome)")
@@ -104,25 +113,95 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(surfaced, RewindPreview(canRewind: true, filesChanged: [], insertions: 0, deletions: 0))
         let previews = await ui.previews
         XCTAssertEqual(previews, [surfaced], "the counts were put in front of the user before anything applied")
-        XCTAssertEqual(result, RewindOutcome(rewound: true, prefillText: "Reply with exactly the word: shapes"))
+        XCTAssertEqual(result, RewindOutcome(rewound: true, prefillText: "Reply with exactly the word: shapes",
+                                             files: RewindFilesOutcome(canRewind: true, skippedLinks: 2)))
 
-        // Leg two: the declined confirmation, on the scripted handle so the host-side sequence is readable.
+        // Leg two: the same happy path on the scripted handle, where the *order* is readable as a list. One
+        // answer per subtype is all the scripted handle holds, so the two `rewind_files` legs share an answer
+        // carrying both shapes' keys; the dry run reads its four and the apply reads its two.
+        let orderRig = try newRig()
+        orderRig.useScriptedHandle()
+        orderRig.configureScriptedHandles { handle in
+            handle.controlAnswers = [
+                "rewind_files": Self.json(["canRewind": true, "filesChanged": ["a.swift"], "insertions": 3,
+                                           "deletions": 1, "skippedLinks": 0]),
+                "rewind_conversation": Self.json(["rewound": true, "prefillText": "put this back",
+                                                  "targetMessageUuid": target]),
+            ]
+        }
+        let ordered = orderRig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await ordered.spawn(reason: .open)
+        let orderedOutcome = try await StrategyExecutor.run(.rewind, arguments: [target], on: ordered,
+                                                            ui: ScriptedStrategyUI(answers: .conversationAndFiles))
+        guard case .rewind(_, let applied) = orderedOutcome else { return XCTFail("gave \(orderedOutcome)") }
+        XCTAssertEqual(applied?.prefillText, "put this back")
+        let orderedSent = orderRig.scriptedHandles[0].controlRequests
+        XCTAssertEqual(orderedSent.map(\.subtype), ["rewind_files", "rewind_conversation", "rewind_files"],
+                       "the conversation is rewound before the working tree is touched")
+        XCTAssertEqual(orderedSent[0].payload["dry_run"]?.boolValue, true)
+        XCTAssertEqual(orderedSent[2].payload["dry_run"]?.boolValue, false)
+
+        // Leg three: the refusal. `rewound: false` with a body-level `error` inside a success envelope is the
+        // ordinary case for any message the current process did not send, and no file may be touched behind it.
+        let previewAnswer = Self.json(preview)
+        let staleRig = try newRig()
+        staleRig.useScriptedHandle()
+        staleRig.configureScriptedHandles { handle in
+            handle.controlAnswers = [
+                "rewind_files": previewAnswer,
+                "rewind_conversation": Self.json(["rewound": false, "prefillText": NSNull(),
+                                                  "precedingAssistantUuid": NSNull(), "error": "stale target"]),
+            ]
+        }
+        let stale = staleRig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await stale.spawn(reason: .open)
+        let staleOutcome = try await StrategyExecutor.run(.rewind, arguments: [target], on: stale,
+                                                          ui: ScriptedStrategyUI(answers: .conversationAndFiles))
+        guard case .rewind(_, let refused) = staleOutcome else { return XCTFail("gave \(staleOutcome)") }
+        XCTAssertEqual(refused?.rewound, false)
+        XCTAssertEqual(refused?.error, "stale target", "the engine's own reason is surfaced, not swallowed")
+        XCTAssertEqual(refused?.offersForkFromHere, true, "the affordance parent §8.5 item 13 designs")
+        XCTAssertNil(refused?.files, "no file was touched behind a refused rewind")
+        XCTAssertEqual(staleRig.scriptedHandles[0].controlRequests.map(\.subtype),
+                       ["rewind_files", "rewind_conversation"],
+                       "a refused rewind sends no apply")
+
+        // Leg four: the cancelled confirmation. Nothing but the read-only dry run goes out.
         let declineRig = try newRig()
         declineRig.useScriptedHandle()
-        let previewAnswer = Self.json(preview)
         declineRig.configureScriptedHandles { handle in
             handle.controlAnswers = ["rewind_files": previewAnswer]
         }
         let declined = declineRig.supervisor(session: SessionID(), origin: .owned(.connecting))
         try await declined.spawn(reason: .open)
-        let declineUI = ScriptedStrategyUI(confirms: false)
+        let declineUI = ScriptedStrategyUI(answers: .cancel)
         let declinedOutcome = try await StrategyExecutor.run(.rewind, arguments: [target], on: declined,
                                                              ui: declineUI)
         guard case .rewind(_, let none) = declinedOutcome else { return XCTFail("declined gave \(declinedOutcome)") }
-        XCTAssertNil(none, "a declined rewind rewinds nothing")
+        XCTAssertNil(none, "a cancelled rewind rewinds nothing")
         let sent = declineRig.scriptedHandles[0].controlRequests
-        XCTAssertEqual(sent.map(\.subtype), ["rewind_files"], "nothing else is sent until confirm()")
+        XCTAssertEqual(sent.map(\.subtype), ["rewind_files"], "nothing else is sent until the sheet is answered")
         XCTAssertEqual(sent[0].payload["dry_run"]?.boolValue, true)
+
+        // Leg five: the conversation alone. The user asked for the messages back and their working tree left as it
+        // is, so the apply never runs even though the rewind was honoured.
+        let conversationRig = try newRig()
+        conversationRig.useScriptedHandle()
+        conversationRig.configureScriptedHandles { handle in
+            handle.controlAnswers = ["rewind_files": previewAnswer,
+                                     "rewind_conversation": Self.json(["rewound": true, "prefillText": "back"])]
+        }
+        let conversationOnly = conversationRig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await conversationOnly.spawn(reason: .open)
+        let conversationOutcome = try await StrategyExecutor.run(
+            .rewind, arguments: [target], on: conversationOnly, ui: ScriptedStrategyUI(answers: .conversationOnly))
+        guard case .rewind(_, let messagesOnly) = conversationOutcome else {
+            return XCTFail("gave \(conversationOutcome)")
+        }
+        XCTAssertEqual(messagesOnly, RewindOutcome(rewound: true, prefillText: "back"))
+        XCTAssertEqual(conversationRig.scriptedHandles[0].controlRequests.map(\.subtype),
+                       ["rewind_files", "rewind_conversation"],
+                       "the files the user did not ask for were left alone")
     }
 
     /// `/login`: the two URLs, the automatic one handed to the Browser tab, then the wait.
@@ -156,7 +235,7 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(strategy, .login)
         XCTAssertEqual(arguments, [])
 
-        let ui = ScriptedStrategyUI(confirms: true)
+        let ui = ScriptedStrategyUI(answers: .conversationAndFiles)
         let first = try await StrategyExecutor.run(strategy, arguments: arguments, on: supervisor, ui: ui)
         guard case .login(let prompt, let outcome) = first else { return XCTFail("/login gave \(first)") }
         XCTAssertEqual(prompt.manualURL, recorded["manualUrl"] as? String)
@@ -189,7 +268,7 @@ final class RouterTests: XCTestCase {
         }
         XCTAssertEqual(strategy, .permissionsView)
 
-        let ui = ScriptedStrategyUI(confirms: true)
+        let ui = ScriptedStrategyUI(answers: .conversationAndFiles)
         let outcome = try await StrategyExecutor.run(strategy, on: supervisor, ui: ui)
         guard case .permissions(let view) = outcome else { return XCTFail("bare /permissions gave \(outcome)") }
         XCTAssertEqual(view.settings, Self.json(settings), "the whole answer, verbatim")
@@ -211,7 +290,8 @@ final class RouterTests: XCTestCase {
         scriptedRig.configureScriptedHandles { handle in handle.controlAnswers = ["get_settings": recorded] }
         let scripted = scriptedRig.supervisor(session: SessionID(), origin: .owned(.connecting))
         try await scripted.spawn(reason: .open)
-        _ = try await StrategyExecutor.run(.permissionsView, on: scripted, ui: ScriptedStrategyUI(confirms: true))
+        _ = try await StrategyExecutor.run(.permissionsView, on: scripted,
+                                           ui: ScriptedStrategyUI(answers: .conversationAndFiles))
         XCTAssertEqual(scriptedRig.scriptedHandles[0].controlRequests.map(\.subtype), ["get_settings"],
                        "the bare form reads and changes nothing")
 
@@ -236,7 +316,8 @@ final class RouterTests: XCTestCase {
         }
         XCTAssertEqual(strategy, .mcpPopover)
 
-        let outcome = try await StrategyExecutor.run(strategy, on: supervisor, ui: ScriptedStrategyUI(confirms: true))
+        let outcome = try await StrategyExecutor.run(strategy, on: supervisor,
+                                                     ui: ScriptedStrategyUI(answers: .conversationAndFiles))
         guard case .mcp(let popover) = outcome else { return XCTFail("/mcp gave \(outcome)") }
         let recorded = try XCTUnwrap(status["mcpServers"] as? [[String: Any]])
         XCTAssertEqual(popover.servers.map(\.name), recorded.map { $0["name"] as? String })
@@ -264,7 +345,7 @@ final class RouterTests: XCTestCase {
         }
         XCTAssertEqual(strategy, .memoryFiles)
 
-        let ui = ScriptedStrategyUI(confirms: true)
+        let ui = ScriptedStrategyUI(answers: .conversationAndFiles)
         let first = try await StrategyExecutor.run(strategy, on: supervisor, ui: ui)
         guard case .memory(let files) = first else { return XCTFail("/memory gave \(first)") }
         XCTAssertEqual(files, recorded["memoryFiles"] as? [String] ?? [])
@@ -295,7 +376,7 @@ final class RouterTests: XCTestCase {
             ReplayScript.exchange("set_model") + ReplayScript.exchange("set_permission_mode"),
             fixture: Self.idle, into: scriptDirectory(rig))
         let relaunch = try ReplayScript.write(
-            ReplayScript.exchange("get_settings", answer: ["applied": [:], "effective_keys": []]),
+            ReplayScript.exchange("get_settings", answer: ["applied": [:], "effective": [:], "sources": []]),
             fixture: Self.idle, into: scriptDirectory(rig))
         let supervisor = rig.supervisor(session: session, fixture: Self.idle, template: template,
                                         script: script, relaunchScript: relaunch)
@@ -318,11 +399,11 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(rig.launches[0].model, "sonnet", "the template still reads what the channel was opened with")
     }
 
-    /// `/effort low` is an `apply_flag_settings` whose readback is `get_settings.effective_keys`.
+    /// `/effort low` is an `apply_flag_settings` whose readback is `get_settings.effective`.
     ///
     /// Recorded: both answers are the `control-shapes` recording's own — the bare success with no `response` key at
-    /// all, and the `get_settings` whose `effective_keys` names the flag just applied.
-    func testEffortSendsApplyFlagSettingsAndReadsBackEffectiveKeys() async throws {
+    /// all, and the `get_settings` whose `effective` object names the flag just applied.
+    func testEffortSendsApplyFlagSettingsAndReadsBackEffective() async throws {
         let rig = try newRig()
         let settings = try FixtureAnswers.body("control-shapes", "get_settings")
         let supervisor = try await liveChannel(
@@ -340,7 +421,7 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(answer, .object([:]), "the engine answers a bare success with no response key")
 
         let readback = try await supervisor.perform(GetSettings())
-        let keys = readback["effective_keys"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        let keys = readback["effective"]?.objectValue.map { Array($0.keys) } ?? []
         XCTAssertTrue(keys.contains("effortLevel"), "the readback names the key the flag set; got \(keys)")
         let runtime = await supervisor.runtimeState()
         XCTAssertEqual(runtime.flagSettings["effortLevel"], .string("low"))
@@ -399,15 +480,29 @@ final class RouterTests: XCTestCase {
 
     /// A command the engine says belongs to the terminal is hidden from autocomplete and refused here with the
     /// explanation, rather than being sent as text for the engine to refuse.
+    ///
+    /// The lists are fed in the form the engine actually sends them: `system/init.slash_commands` and
+    /// `terminal_slash_commands` carry **bare** names (`vim`, `doctor`) on every one of the recorded fixtures and in
+    /// the bundle that builds them, while the composer's line and the local table are slash-prefixed. Comparing the
+    /// two spellings makes the terminal-only refusal dead code and leaves every engine command missing from
+    /// autocomplete's subtraction, so both sides are normalised on ingestion.
+    ///
+    /// Deliberate break: drop the normalisation from `route` → `/vim` falls through as text; drop it from
+    /// `autocomplete` → `/doctor` is offered and the engine's own commands are offered unslashed.
     func testTerminalOnlyCommandsAreHiddenAndRefusedWithAnExplanation() throws {
-        let systemInit = try Self.systemInit(commands: ["/model", "/vim"], terminalOnly: ["/vim"])
+        let systemInit = try Self.systemInit(commands: ["model", "vim", "doctor"], terminalOnly: ["vim", "doctor"])
         guard case .refusedLocally(let explanation) = CommandRouter.route("/vim", systemInit: systemInit) else {
             return XCTFail("/vim was not refused locally")
         }
         XCTAssertTrue(explanation.contains("/vim"), "the explanation names the command; got \(explanation)")
         let completions = CommandRouter.autocomplete(systemInit: systemInit)
         XCTAssertFalse(completions.contains("/vim"), "a terminal-only command is not offered")
+        XCTAssertFalse(completions.contains("vim"), "nor is its unslashed spelling")
+        XCTAssertFalse(completions.contains("/doctor"), "a terminal-only command survives the subtraction only "
+                       + "when the two lists are spelled the same way")
         XCTAssertTrue(completions.contains("/model"))
+        XCTAssertTrue(completions.allSatisfy { $0.hasPrefix("/") },
+                      "autocomplete offers one spelling; got \(completions)")
     }
 
     /// A command whose value the user did not type opens the surface's picker. Nothing is sent: an
@@ -465,6 +560,17 @@ final class RouterTests: XCTestCase {
             return XCTFail("/add-dir did not route to a restart")
         }
         XCTAssertEqual(request.addDirectories, [URL(fileURLWithPath: "/tmp")])
+
+        // A relative path is the user's, and the user's directory is the *channel's* cwd — never the directory
+        // afleet's own process happens to have been started in, which is what an unbased `fileURLWithPath` reads.
+        //
+        // Deliberate break: drop `relativeTo: runtime?.cwd` -> the launch carries afleet's own cwd + `/sub`.
+        let runtime = SessionRuntimeState(cwd: URL(fileURLWithPath: "/tmp/project"))
+        guard case .restart(let relative) = CommandRouter.route("/add-dir sub", runtime: runtime) else {
+            return XCTFail("/add-dir did not route to a restart")
+        }
+        let resolved = (relative.addDirectories ?? []).map { (url: URL) in url.path(percentEncoded: false) }
+        XCTAssertEqual(resolved, ["/tmp/project/sub"], "a relative add-dir resolves against the channel's cwd")
         XCTAssertEqual(LaunchSettingMatrix.runtimeMutable,
                        ["model", "permissionMode", "effort", "agent", "sessionName", "thinkingTokens", "fastMode",
                         "cwd"])
@@ -503,13 +609,13 @@ final class RouterTests: XCTestCase {
 actor ScriptedStrategyUI: StrategyUI {
     private(set) var opened: [String] = []
     private(set) var previews: [RewindPreview] = []
-    private let confirms: Bool
+    private let answer: RewindChoice
 
-    init(confirms: Bool) { self.confirms = confirms }
+    init(answers: RewindChoice) { self.answer = answers }
 
     func open(url: String) async { opened.append(url) }
-    func confirm(preview: RewindPreview) async -> Bool {
+    func confirm(preview: RewindPreview) async -> RewindChoice {
         previews.append(preview)
-        return confirms
+        return answer
     }
 }

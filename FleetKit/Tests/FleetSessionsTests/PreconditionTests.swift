@@ -629,6 +629,44 @@ final class PreconditionTests: XCTestCase {
                        "and the refusal came before the target was written")
     }
 
+    /// The same arrangement, with the config home spelled through the data volume's firmlink.
+    ///
+    /// `realpath(3)` keeps a `/System/Volumes/Data` prefix — the firmlink is not a symlink and there is nothing for
+    /// it to resolve — while `fcntl(F_GETPATH)` answers the same directory without it. The writer compares the
+    /// descriptor's `F_GETPATH` against the config home, so a home spelled with the prefix never contains anything
+    /// and the child's one absolute rule stops holding for it. Both sides are canonicalised through the same
+    /// normaliser instead.
+    ///
+    /// Deliberate break: take the config home through `RealPath.string` again -> the containment check passes and
+    /// `settings.local.json` is written into a Claude Code config home.
+    func testDeclineRefusesAConfigHomeSpelledThroughTheDataVolumeFirmlink() throws {
+        let firmlink = "/System/Volumes/Data"
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: firmlink, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw XCTSkip("no \(firmlink) on this machine: the two spellings cannot differ")
+        }
+        let project = try newProject()
+        let configHome = project.root.appending(path: ".claude")
+        try FileManager.default.createDirectory(at: configHome, withIntermediateDirectories: true)
+        try Data("{\"projects\": {}}".utf8).write(to: configHome.appending(path: ".claude.json"))
+
+        let aliased = URL(filePath: firmlink + TemporaryProject.realpath(configHome), directoryHint: .isDirectory)
+        guard FileManager.default.fileExists(atPath: aliased.path(percentEncoded: false)) else {
+            throw XCTSkip("the data volume does not reach \(aliased.path(percentEncoded: false))")
+        }
+        XCTAssertNotEqual(TemporaryProject.realpath(aliased), TemporaryProject.realpath(configHome),
+                          "the two spellings are the same directory and realpath keeps them apart")
+
+        let witness = TreeWitness(configHome)
+        XCTAssertThrowsError(try LocalSettingsStore()
+            .decline(names: ["d"], gitRoot: project.root, cwd: project.root, configHome: aliased)) { error in
+            XCTAssertEqual(error as? LocalSettingsStore.Refusal, .insideConfigHome)
+        }
+        witness.assertUnchanged("the config home spelled through the firmlink")
+        XCTAssertEqual(TreeDigest.listing(of: configHome), [".claude.json"],
+                       "no settings.local.json was written into the config home")
+    }
+
     /// A `.claude` that is a plain file is `notADirectory`, and a `.claude` that is a symlink is `symlink` — and on
     /// Darwin the errno cannot tell the two apart. `openat` with `O_DIRECTORY|O_NOFOLLOW` answers `ENOTDIR` for
     /// both (`ELOOP` appears only without `O_DIRECTORY`), so the writer asks the entry through the descriptor it

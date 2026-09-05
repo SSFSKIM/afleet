@@ -207,10 +207,71 @@ do not renumber anything above.
     flag while the second is still inside. Overlapping handoffs are already ill-defined — the second
     passes the owned-ready-or-dormant guard because the origin does not change until the end — so
     this is a facet of a pre-existing hazard rather than a new one. Owner: C4. Closer: a counter, or
-    a guard that refuses a second concurrent handoff outright.
+    a guard that refuses a second concurrent handoff outright. **Closed** 2026-09-06 by the fix
+    wave's ruling 2: `handingOff` is gone, and a second entrant to any lifecycle operation is
+    refused with `LifecycleError.busy`.
 30. **The handoff row test proves the guard, not the delivery.**
     `Tests/FleetSessionsTests/LifecycleRowTests.swift:1230-1236` pushes a `HolderSet` straight into
     `holdersChanged` rather than through the observer, so it does not show that the observer would
     produce such a set. The live run showed that, and the test's comment says so. Owner: C4.
     Closer: none planned; noted so the coverage is not overread.
+
+The entries from here on come from the whole-branch review of 2026-09-06
+(`.doperpowers/sde/2026-09-05-c4-fleetkit-sessions-fleet/final-review-triage.md`, buckets as the
+architect's rulings settled them). Line numbers are as at `4f2102d`, before the fix wave.
+
+31. **A store-write failure after `claude --bg` leaves the job invisible to logout twice over.**
+    `scalpel-1#8`. The verb has already created the job when `rememberOwnJob` fails, so the short
+    is neither in the store nor in the census, and `/logout` neither stops it nor is blocked by it.
+    Reachable only when the store write itself fails. Owner: C4. Closer: compensate on the failure
+    — stop the job just created, or adopt it into the record on the next reconcile.
+32. **`resolveContended` filters every `isOwnChild` holder rather than this supervisor's process.**
+    `scalpel-1#13`. Another afleet channel's child is excluded from the contention it should cause.
+    The residual harm is a wrong displayed origin, not a wrong lifecycle decision. Owner: C4.
+    Closer: compare the holder's pid with this supervisor's own child pid.
+33. **The `.git` ownership check is the last path-after-resolution in the §6.12 writer.**
+    `scalpel-3#3`. `Preconditions/LocalSettingsStore.swift` asks `lstat(resolved + "/.git")` by name
+    after the root descriptor is open. The root descriptor's own ownership is already `fstat`-
+    verified, so a decoy can only suppress or fabricate a refusal for a directory the user owns.
+    Owner: C4. Closer: `case relative(Int32, String)` on `OwnershipSubject`, backed by
+    `fstatat(fd, name, …, AT_SYMLINK_NOFOLLOW)`.
+34. **The settings target descriptor is checked for type and mode but not `st_uid`.**
+    `scalpel-3#4`, at `LocalSettingsStore.swift:177`. Same-uid only, and the directory holding it
+    has been ownership-checked. Owner: C4. Closer: one guard after the `fstat`.
+35. **The post-rename `fsync` result is discarded, contradicting the file's own step-6 comment.**
+    `scalpel-3#5`. `Store/FileStateStore.swift:196` answers the same question the opposite way.
+    Owner: C4. Closer: settle it once, in whichever direction, and make both files say the same.
+36. **The writer's root-equality check compares an `F_GETPATH` string with a `realpath` string.**
+    `scalpel-3#1`'s second half, at `LocalSettingsStore.swift:140`. A project root spelled through
+    the data volume's firmlink therefore refuses `symlink` for ever. Fail-closed, so a wrong answer
+    costs a refusal and never a write. The *containment* half of the same finding was fixed in the
+    2026-09-06 wave by canonicalising both sides through `F_GETPATH`; this comparison is against
+    the resolution string the writer deliberately took *before* the open, which is what makes the
+    ancestor-swap refusal work, so it cannot take the same treatment without thought. Owner: C4.
+    Closer: canonicalise the resolution the same way, or compare device and inode for this one
+    check only.
+37. **Fork re-key destination collisions in `Fleet.publish` and `FleetCapCounter.rekey`.**
+    `scalpel-4#6` and `scalpel-4#7`. A fork whose real session id is already registered overwrites
+    the entry rather than refusing. Owner: C4, revisit with C5's registration model. Closer: a
+    diagnostic on the collision could land now; the resolution belongs with C5.
+38. **`RuntimeStateUpdater` has no `update_settings` case, and `applied.output_style` is a dead
+    branch.** `sweep#11` and `scalpel-5#12`. The engine does not emit `output_style` under
+    `applied`, so an output-style change made by an answer is never recorded and the *next* restart
+    re-reports the same stale mismatch. The same hole exists for `resolveSetting("effort", …)`,
+    which lands in `flagSettings` and never in `state.effort`; that half lives in
+    `Lifecycle/ChannelSupervisor.swift` and was left alone by the 2026-09-06 wave, which fixed only
+    the `get_settings` reader beside it. Owner: C4. Closer: add the `update_settings` case and read
+    the output style from the source that carries it.
+39. **`apply_flag_settings` deletes a null-valued key; the updater stores it as JSON null.**
+    `scalpel-5#13`. The engine merges and then deletes null-valued keys (2.1.258
+    `cli.pretty.js:152496`), so a restart would re-send a key the engine has dropped and fail its
+    readback for ever. Unreachable as shipped: `CommandRouter.flagValue` produces only strings and
+    bools, and the only other producer would need a picker that does not exist. Owner: C4. Closer:
+    drop a null value from `state.flagSettings` rather than storing it.
+40. **The state store re-resolves its base by name on every write.** `scalpel-3#2`. Not a privilege
+    boundary — the base lives under `~/Library/Application Support/afleet`, whose ancestors only the
+    user can swap, and a same-uid process can rewrite the document directly — and scoped out by the
+    child's ruling 7, whose only ask is that the constructor validate the base against the config
+    homes. Owner: C4. Closer: hold a verified directory descriptor for the base, if the store ever
+    holds something a same-uid process should not be able to redirect.
 

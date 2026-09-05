@@ -114,7 +114,10 @@ public enum LogoutPlan {
         nonEligible.sort { $0.key.session.description < $1.key.session.description }
         wedged.sort { $0.session.description < $1.session.description }
 
-        let ourSessions = Set(fleet.channels.map(\.key.session))
+        // The sessions afleet owns a *process* for, which is what makes a holder ours rather than somebody else's.
+        // A channel afleet has registered but never opened owns nothing, so a terminal holding its session is as
+        // foreign as any other; building this set from every registered supervisor hides exactly those.
+        let ourSessions = Set(owned.map(\.session))
         let ourShorts = Set(fleet.ownJobShorts.map(\.rawValue))
         let ownJobs = fleet.ownJobShorts.filter { snapshot.jobs[$0]?.isTerminal == false }
             .sorted { $0.rawValue < $1.rawValue }
@@ -143,8 +146,11 @@ public enum LogoutPlan {
             fleet.barrier.lower()
             return .blocked(wedged: census.wedged, jobsStillListed: [])
         }
+        // *Wait* holds for every non-eligible channel. The task ids are the payload of the answer and never the
+        // decision: a turn in flight, a pending decision or a queued input blocks a channel and names no task at
+        // all, and a plan that decided on the task list would terminate that channel and sign out behind its turn.
         let blocking = census.nonEligible.flatMap(\.tasks)
-        if choice == .wait, !blocking.isEmpty {
+        if choice == .wait, !census.nonEligible.isEmpty {
             fleet.diagnostics.record(.logout(step: "waiting", count: blocking.count))
             return .waiting(on: blocking)
         }

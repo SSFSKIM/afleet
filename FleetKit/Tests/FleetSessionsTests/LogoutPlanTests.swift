@@ -277,4 +277,72 @@ final class LogoutPlanTests: XCTestCase {
         XCTAssertEqual(rig.runnerCalls.invocations.filter { $0 == ["stop", short.rawValue] }.count, 1)
         XCTAssertFalse(rig.spawnBarrier.isRaised)
     }
+
+    /// *Wait* holds for **every** non-eligible channel, not only for the ones whose blocker is a task. A turn in
+    /// flight is the commonest blocker of all and it names no task id, so a plan that decides on the task list
+    /// alone reads an empty list, falls through *Wait* entirely, terminates the channel mid-turn and signs out —
+    /// the opposite of what the user asked for (parent §7.7, acceptance item 59).
+    ///
+    /// Scripted, not recorded: the turn is held open inside the handle's `send`, which no recording can do.
+    ///
+    /// Deliberate break: gate the wait on `!blocking.isEmpty` again → the plan terminates the channel and
+    /// `auth logout` runs behind a live turn.
+    func testWaitHoldsForAChannelBlockedByARunningTurnAndNoTask() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        let handle = rig.scriptedHandles[0]
+        let held = HeldAnswer()
+        handle.sendGate = { await held.wait() }
+
+        let sending = Task { try await supervisor.send(UserInput(text: "hi")) }
+        try await rig.waitFor("the send to reach the write") { handle.sent.count == 1 }
+
+        let fleet = context(rig, channels: [supervisor])
+        let census = await LogoutPlan.build(fleet: fleet)
+        XCTAssertEqual(census.nonEligible.map(\.key), [supervisor.key], "a turn in flight is a blocker")
+        XCTAssertEqual(census.nonEligible.first?.tasks, [], "and it names no task; the mirror is empty")
+
+        let outcome = await LogoutPlan.execute(census, choice: .wait, fleet: fleet)
+        XCTAssertEqual(outcome, .waiting(on: []), "Wait holds on a blocker that is not a task")
+        XCTAssertEqual(handle.terminateCount, 0, "Wait terminated a channel with a turn in flight")
+        XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 0,
+                       "the token was taken out from under a running turn")
+        XCTAssertTrue(rig.spawnBarrier.isRaised, "a waiting plan keeps its barrier up")
+        let state = await supervisor.state
+        XCTAssertEqual(state.origin, .owned(.ready), "the channel is where it was")
+
+        held.release()
+        _ = try await sending.value
+        LogoutPlan.abandon(fleet: fleet)
+    }
+
+    /// A channel afleet has registered but never opened owns no process, so it is not in `owned` — and a terminal
+    /// holding *its* session is a foreign session like any other. Building the our-sessions set from every
+    /// registered supervisor hides exactly those: the user is told everything signed out while a live `claude` in
+    /// Terminal.app keeps its token.
+    ///
+    /// Deliberate break: build `ourSessions` from `fleet.channels` again → `foreignLeftRunning` comes back empty.
+    func testAForeignHolderOnARegisteredButNeverOpenedChannelIsReported() async throws {
+        let rig = try newRig()
+        let neverOpened = SessionID()
+        let registered = rig.supervisor(session: neverOpened, fixture: Self.idle)
+        let opened = rig.supervisor(session: SessionID(), fixture: Self.idle)
+        try await opened.open()
+
+        // Somebody else's `claude`, on the session afleet has a supervisor for and no process of.
+        let foreignPID = try rig.startHelper()
+        try rig.files.writeRegistry(pid: foreignPID, sessionID: neverOpened, kind: "interactive", entrypoint: "cli")
+
+        let fleet = context(rig, channels: [registered, opened])
+        let census = await LogoutPlan.build(fleet: fleet)
+        XCTAssertEqual(census.owned, [opened.key], "the never-opened channel owns no process")
+        XCTAssertEqual(census.foreign.map(\.sessionID), [neverOpened],
+                       "a terminal on a registered session is still somebody else's session")
+
+        let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
+        XCTAssertEqual(outcome, .success(exited: [opened.key], foreignLeftRunning: [neverOpened]),
+                       "the report names the session that kept its token")
+    }
 }

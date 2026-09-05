@@ -36,9 +36,14 @@ final class RestartTests: XCTestCase {
 
     private func scriptDirectory(_ rig: Rig) -> URL { rig.scratch.appending(path: "scripts") }
 
-    /// The `get_settings` answer, in the recorded shape: `{applied: {...}, effective_keys: [...]}`.
-    private static func settingsAnswer(applied: [String: Any], effectiveKeys: [String]) -> [String: Any] {
-        ["applied": applied, "effective_keys": effectiveKeys]
+    /// The `get_settings` answer, in the live shape the `control-shapes` recording carries:
+    /// `{applied: {...}, effective: {key: value}, sources: [{source, settings: {key: value}}]}`. The engine reports
+    /// `effective` as an *object* of applied settings, and the reader takes its keys; a fixture's own values are
+    /// redacted, so the ones here are invented and only the shape is the recording's.
+    private static func settingsAnswer(applied: [String: Any], effective keys: [String]) -> [String: Any] {
+        let values = Dictionary(uniqueKeysWithValues: keys.map { ($0, "invented-\($0)") })
+        return ["applied": applied, "effective": values,
+                "sources": [["source": "flagSettings", "settings": values]]]
     }
 
     /// The fixture's own initialize response with one key replaced — the `FAKE_CLAUDE_INIT` override, which is a
@@ -84,7 +89,7 @@ final class RestartTests: XCTestCase {
         template.addDirectories = [URL(fileURLWithPath: "/tmp/a")]
 
         let applied = Self.settingsAnswer(applied: ["model": "opus", "effort": "low"],
-                                          effectiveKeys: ["fastMode"])
+                                          effective: ["fastMode"])
         let script = try ReplayScript.write(
             ReplayScript.exchange("set_permission_mode")
                 + ReplayScript.exchange("set_model")
@@ -184,7 +189,7 @@ final class RestartTests: XCTestCase {
                                                 fixture: Self.idle, into: scriptDirectory(rig))
             let relaunch = try ReplayScript.write(
                 ReplayScript.exchange("get_settings",
-                                      answer: Self.settingsAnswer(applied: [:], effectiveKeys: [])),
+                                      answer: Self.settingsAnswer(applied: [:], effective: [])),
                 fixture: Self.idle, into: scriptDirectory(rig))
             let supervisor = rig.supervisor(session: session, fixture: Self.idle, script: script,
                                             relaunchScript: relaunch,
@@ -243,7 +248,7 @@ final class RestartTests: XCTestCase {
             ReplayScript.exchange("set_model") + ReplayScript.exchange("set_permission_mode"),
             fixture: Self.idle, into: scriptDirectory(rig))
         let relaunch = try ReplayScript.write(
-            ReplayScript.exchange("get_settings", answer: Self.settingsAnswer(applied: [:], effectiveKeys: [])),
+            ReplayScript.exchange("get_settings", answer: Self.settingsAnswer(applied: [:], effective: [])),
             fixture: Self.idle, into: scriptDirectory(rig))
         let supervisor = rig.supervisor(session: session, fixture: Self.idle, template: template,
                                         script: script, relaunchScript: relaunch)
@@ -283,7 +288,7 @@ final class RestartTests: XCTestCase {
             ReplayScript.exchange("set_cwd", answer: ["status": "ok", "cwd": b.path, "changed": true]),
             fixture: Self.idle, into: scriptDirectory(rig))
         let relaunch = try ReplayScript.write(
-            ReplayScript.exchange("get_settings", answer: Self.settingsAnswer(applied: [:], effectiveKeys: [])),
+            ReplayScript.exchange("get_settings", answer: Self.settingsAnswer(applied: [:], effective: [])),
             fixture: Self.idle, into: scriptDirectory(rig))
         let supervisor = rig.supervisor(session: session, fixture: Self.idle, template: template,
                                         script: script, relaunchScript: relaunch)
@@ -312,7 +317,7 @@ final class RestartTests: XCTestCase {
             ReplayScript.exchange("add_directory", answer: ["directory": "/tmp/mid"]),
             fixture: Self.idle, into: scriptDirectory(rig))
         let relaunch = try ReplayScript.write(
-            ReplayScript.exchange("get_settings", answer: Self.settingsAnswer(applied: [:], effectiveKeys: [])),
+            ReplayScript.exchange("get_settings", answer: Self.settingsAnswer(applied: [:], effective: [])),
             fixture: Self.idle, into: scriptDirectory(rig))
         let supervisor = rig.supervisor(session: session, fixture: Self.idle, template: template,
                                         script: script, relaunchScript: relaunch)
@@ -333,11 +338,11 @@ final class RestartTests: XCTestCase {
     }
 
     /// The whole flag union goes out in one `apply_flag_settings`, and every key of it must come back in
-    /// `effective_keys`.
+    /// `get_settings.effective`.
     ///
     /// Scripted, not recorded: the answers are the script's. Their shapes are the `control-shapes` recording's —
     /// `apply_flag_settings` is answered with a bare success there, and its `get_settings` answer carries
-    /// `effective_keys: ["effortLevel"]`; the script's answer carries `fastMode` beside it.
+    /// `effective: {effortLevel: …}`; the script's answer carries `fastMode` beside it.
     func testEveryFlagSettingKeyIsReappliedAndPresentInEffectiveKeys() async throws {
         for (keys, survives) in [(["effortLevel", "fastMode"], true), (["effortLevel"], false)] {
             let rig = try newRig()
@@ -351,7 +356,7 @@ final class RestartTests: XCTestCase {
                                       matching: ["request.settings.effortLevel": "low",
                                                  "request.settings.fastMode": true])
                     + ReplayScript.exchange("get_settings",
-                                            answer: Self.settingsAnswer(applied: [:], effectiveKeys: keys)),
+                                            answer: Self.settingsAnswer(applied: [:], effective: keys)),
                 fixture: Self.idle, into: scriptDirectory(rig))
             let supervisor = rig.supervisor(session: session, fixture: Self.idle, script: script,
                                             relaunchScript: relaunch)
@@ -401,12 +406,32 @@ final class RestartTests: XCTestCase {
             answer: .object(["applied": .object(["model": .string("haiku"), "effort": .string("low"),
                                                  "advisor": .null, "ultracode": .bool(false),
                                                  "output_style": .string("Concise")]),
-                             "effective_keys": .array([.string("effortLevel")])]),
+                             "effective": .object(["effortLevel": .string("low")]),
+                             "sources": .array([])]),
             to: &state)
         XCTAssertEqual(state.model, "haiku")
         XCTAssertEqual(state.effort, "low")
         XCTAssertEqual(state.outputStyle, "Concise")
         XCTAssertNil(state.fastModeObserved, "no `get_settings` answer carries fast mode")
+
+        // Present-and-null is the engine's "back to the default" and clears the value, exactly as `set_model` two
+        // rows above reads it; a reader that took only the string would leave a stale effort in the record and a
+        // restart would re-send a level the user has since cleared.
+        //
+        // Deliberate break: read `applied["effort"]?.stringValue` under an `if let` again -> the cleared effort
+        // stays "low" and the next relaunch carries it.
+        RuntimeStateUpdater.apply(
+            subtype: "get_settings", payload: .object([:]),
+            answer: .object(["applied": .object(["effort": .null])]), to: &state)
+        XCTAssertNil(state.effort, "present-and-null clears the effort")
+        RuntimeStateUpdater.apply(
+            subtype: "get_settings", payload: .object([:]),
+            answer: .object(["applied": .object(["model": .string("haiku")])]), to: &state)
+        XCTAssertNil(state.effort, "an answer that does not mention effort is not a statement about it")
+        RuntimeStateUpdater.apply(
+            subtype: "get_settings", payload: .object([:]),
+            answer: .object(["applied": .object(["effort": .string("low")])]), to: &state)
+        XCTAssertEqual(state.effort, "low")
 
         RuntimeStateUpdater.apply(subtype: "apply_flag_settings",
                                   payload: .object(["settings": .object(["effortLevel": .string("low")])]),
@@ -445,10 +470,17 @@ final class RestartTests: XCTestCase {
 
         var fresh = SessionRuntimeState(cwd: URL(fileURLWithPath: "/tmp/one"))
         var freshSeeded = false
+        // `effort` is a typed field of `system/init` and the engine emits it. Left out of the seeding block it is
+        // missed for ever, because the block runs once: the record then reports no effort for a channel launched
+        // with one, and the restart's readback compares against nothing.
+        //
+        // Deliberate break: drop `state.effort = initFrame.effort` -> the seed reads nil and the second init,
+        // which seeds nothing, cannot recover it.
         RuntimeStateUpdater.apply(frame: try Self.systemInitFrame(model: "haiku", permissionMode: "acceptEdits",
                                                                   outputStyle: "Concise", cwd: "/tmp/three",
-                                                                  agent: "reviewer"),
+                                                                  agent: "reviewer", effort: "high"),
                                   to: &fresh, seededFromInit: &freshSeeded)
+        XCTAssertEqual(fresh.effort, "high", "the first system/init seeds the effort it reports")
         XCTAssertEqual(fresh.model, "haiku")
         XCTAssertEqual(fresh.permissionMode, .acceptEdits)
         XCTAssertEqual(fresh.outputStyle, "Concise")
@@ -456,9 +488,10 @@ final class RestartTests: XCTestCase {
         XCTAssertEqual(fresh.agent, "reviewer")
         RuntimeStateUpdater.apply(frame: try Self.systemInitFrame(model: "opus", permissionMode: "plan",
                                                                   outputStyle: "default", cwd: "/tmp/four",
-                                                                  agent: nil),
+                                                                  agent: nil, effort: "low"),
                                   to: &fresh, seededFromInit: &freshSeeded)
         XCTAssertEqual(fresh.model, "haiku", "only the first system/init seeds")
+        XCTAssertEqual(fresh.effort, "high", "and the effort with it")
     }
 
     /// Each value is read back from its own source and from no other, and a mismatch names exactly that setting.
@@ -512,7 +545,41 @@ final class RestartTests: XCTestCase {
                        ["model", "permissionMode", "flagSettings.effortLevel"])
     }
 
-    /// Fast mode has two sources and they must not be confused: `effective_keys` when the host applied it, the new
+    /// The model the host set is an *alias*; `get_settings.applied.model` reports the model the engine resolved it
+    /// to. Comparing the two raw fails a restart that put the model back exactly right, and the banner it raises
+    /// never clears. The handshake's `models` table is the engine's own alias-to-resolution map, so the snapshot's
+    /// value is resolved through it before the comparison; an alias the table does not carry compares raw.
+    ///
+    /// Scripted, not recorded, in shape only: `models[].{value, resolvedModel}` and the resolved id are the
+    /// `control-shapes` recording's own key names and its own resolution of `opus[1m]`.
+    ///
+    /// Deliberate break: compare `snapshot.model` with `applied["model"]` directly again.
+    func testTheModelReadbackResolvesTheAliasThroughTheHandshakeTable() throws {
+        let table = JSONValue.array([
+            .object(["value": .string("default"), "resolvedModel": .string("claude-opus-5[1m]")]),
+            .object(["value": .string("opus[1m]"), "resolvedModel": .string("claude-opus-5[1m]")]),
+        ])
+        let handshake = InitializeResponse(raw: .object(["models": table,
+                                                         "current_permission_mode": .string("plan")]))
+        let resolved = JSONValue.object(["model": .string("claude-opus-5[1m]")])
+
+        var snapshot = SessionRuntimeState(model: "opus[1m]", cwd: URL(fileURLWithPath: "/tmp/one"))
+        XCTAssertEqual(Readback.verify(snapshot: snapshot, handshake: handshake, settingsApplied: resolved,
+                                       effectiveKeys: []), [],
+                       "the alias resolves to the id the engine reported, so the model did survive")
+
+        snapshot.model = "sonnet"
+        XCTAssertEqual(Readback.verify(snapshot: snapshot, handshake: handshake, settingsApplied: resolved,
+                                       effectiveKeys: []), ["model"],
+                       "an alias the table does not carry is compared raw, and this one really did not survive")
+
+        snapshot.model = "claude-opus-5[1m]"
+        XCTAssertEqual(Readback.verify(snapshot: snapshot, handshake: handshake, settingsApplied: resolved,
+                                       effectiveKeys: []), [],
+                       "a resolved id is not in the table's `value` column and compares raw, which matches")
+    }
+
+    /// Fast mode has two sources and they must not be confused: `get_settings.effective` when the host applied it, the new
     /// handshake when it was only observed, and nothing at all when neither holds.
     func testFastModeIsVerifiedFromEffectiveKeysWhenHostAppliedAndFromTheHandshakeWhenObserved() throws {
         let off = InitializeResponse(raw: .object(["fast_mode_state": .string("off")]))
@@ -526,7 +593,7 @@ final class RestartTests: XCTestCase {
         XCTAssertEqual(Readback.verify(snapshot: applied, handshake: on, settingsApplied: .object([:]),
                                        effectiveKeys: []), ["flagSettings.fastMode"])
         // The engine reports a host toggle lazily: the last state it reported can contradict the new handshake while
-        // `effective_keys` says the key was applied. That is a correct restart, and consulting the handshake here
+        // `effective` names the key as applied. That is a correct restart, and consulting the handshake here
         // would fail it.
         applied.fastModeObserved = true
         XCTAssertEqual(Readback.verify(snapshot: applied, handshake: off, settingsApplied: .object([:]),
@@ -565,7 +632,8 @@ final class RestartTests: XCTestCase {
             rig.configureScriptedHandles { handle in
                 handle.initialize = .object(["current_permission_mode": .string(matching ? "plan" : "default")])
                 handle.controlAnswers = ["get_settings": .object(["applied": .object([:]),
-                                                                  "effective_keys": .array([])])]
+                                                                  "effective": .object([:]),
+                                                                  "sources": .array([])])]
                 handle.controlGate = { subtype in
                     guard subtype == "get_settings" else { return }
                     await held.wait()
@@ -650,7 +718,8 @@ final class RestartTests: XCTestCase {
         rig.useScriptedHandle()
         rig.configureScriptedHandles { handle in
             handle.controlAnswers = ["get_settings": .object(["applied": .object(["model": .string("opus")]),
-                                                              "effective_keys": .array([])])]
+                                                              "effective": .object([:]),
+                                                                  "sources": .array([])])]
         }
         let session = SessionID()
         var template = FakeClaudeLaunch.launch(fixture: Self.idle, cwd: rig.cwd,
@@ -728,7 +797,7 @@ final class RestartTests: XCTestCase {
     }
 
     private static func systemInitFrame(model: String, permissionMode: String, outputStyle: String, cwd: String,
-                                        agent: String?) throws -> Frame {
+                                        agent: String?, effort: String? = nil) throws -> Frame {
         var object: [String: JSONValue] = [
             "type": .string("system"), "subtype": .string("init"), "cwd": .string(cwd),
             "session_id": .string("s-1"), "tools": .array([]), "mcp_servers": .array([]),
@@ -738,6 +807,7 @@ final class RestartTests: XCTestCase {
             "uuid": .string("u-1"),
         ]
         if let agent { object["agent"] = .string(agent) }
+        if let effort { object["effort"] = .string(effort) }
         return FrameDecoder.decode(line: try JSONValue.object(object).canonicalData())
     }
 }
