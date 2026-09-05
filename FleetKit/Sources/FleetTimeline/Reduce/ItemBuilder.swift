@@ -124,9 +124,12 @@ struct ItemBuilder {
     /// One `user` record or frame. Its `tool_result` blocks complete the calls they name; a record that is nothing but
     /// tool results renders no message of its own (rule 6). `origin.kind` absent or `"human"` is the operator, anything
     /// else is a peer (rule 7).
+    ///
+    /// `isReplay` is a wire-only field: the engine echoes a prompt back with `isReplay: true` and no transcript record
+    /// carries the key, so the record reducer leaves the default and only the wire reducer passes it.
     mutating func addUser(uuid: String, key: RecordKey?, message: UserMessage, timestamp: Date?,
                           messageOrigin: MessageOrigin?, toolUseResult: JSONValue?, toolDenialKind: String?,
-                          sourceToolAssistantUUID: String?) {
+                          sourceToolAssistantUUID: String?, isReplay: Bool = false) {
         closeRun()
         let content = message.fields.content
         if joinToolResults(message: message, key: key, toolUseResult: toolUseResult,
@@ -135,7 +138,7 @@ struct ItemBuilder {
         if kind == nil || kind == "human" {
             append(.userMessage(UserMessageItem(id: id(uuid), timestamp: timestamp, provenance: provenance(key),
                                                 blocks: Self.blocks(of: content), text: Self.text(of: content),
-                                                promptUUID: uuid)))
+                                                isReplay: isReplay, promptUUID: uuid)))
         } else {
             append(.peerMessage(PeerMessageItem(id: id(uuid), timestamp: timestamp, provenance: provenance(key),
                                                 originKind: kind ?? "", from: messageOrigin?.fields.from,
@@ -285,6 +288,77 @@ struct ItemBuilder {
     mutating func closeRun() {
         runKey = nil
         runMessageID = nil
+    }
+
+    // MARK: - Entry points the wire has and the file does not
+
+    /// A background task's completion row, synthesised from a `task_notification` the transcript never records
+    /// (Task 8). It is a rendered row like any other, so it closes the open assistant run, and it goes through the
+    /// same cursor so `update(taskRun:)` finds it again and a rewind truncates it with everything else.
+    mutating func addTaskRun(_ run: TaskRunItem) {
+        closeRun()
+        if let index = indexByKey[run.id.key] { items[index] = .taskRun(run); return }
+        append(.taskRun(run))
+    }
+
+    /// Edits a task row already in the line — a later `task_updated` or `task_notification` for the same task id.
+    /// Returns false when this builder holds no such row.
+    @discardableResult
+    mutating func update(taskRun key: String, _ body: (inout TaskRunItem) -> Void) -> Bool {
+        guard let index = indexByKey[key], case .taskRun(var run) = items[index] else { return false }
+        body(&run)
+        items[index] = .taskRun(run)
+        return true
+    }
+
+    /// `system/permission_denied`: the engine refused a call the host never got to answer. Only a running call can be
+    /// denied — a call already completed by a `tool_result` keeps the result it has.
+    @discardableResult
+    mutating func deny(toolUseID: String, kind: String?, message: String?) -> Bool {
+        guard let index = indexByKey[toolUseID], case .toolCall(var call) = items[index], call.status == .running
+        else { return false }
+        call.status = .denied
+        call.denialKind = kind
+        call.isError = true
+        if let message { call.result = .string(message) }
+        items[index] = .toolCall(call)
+        return true
+    }
+
+    /// The host's MCP server answered a `send_user_file` call. `HostToolInvocation` names no tool-use id, so the
+    /// oldest row still awaiting delivery is the one it answered; false when none is open and the caller holds the
+    /// delivery for the next row this builder opens.
+    @discardableResult
+    mutating func deliverOldestSentFile() -> Bool {
+        for (index, item) in items.enumerated() {
+            guard case .sentFile(var sent) = item, sent.delivered == nil else { continue }
+            sent.delivered = true
+            items[index] = .sentFile(sent)
+            return true
+        }
+        return false
+    }
+
+    /// A rewind: everything after the item the record uuid produced is dropped. The uuid may name a record that
+    /// merged into an item alongside others, in which case that whole item stays — a merged group cannot be cut in
+    /// half. Returns false when the uuid names nothing this builder produced, and nothing is dropped.
+    @discardableResult
+    mutating func truncate(afterRecordUUID uuid: String) -> Bool {
+        guard let key = itemKeyByRecordUUID[uuid] ?? (indexByKey[uuid] != nil ? uuid : nil),
+              let index = indexByKey[key] else { return false }
+        guard index + 1 < items.count else { closeRun(); return true }
+        let dropped = Set(items[(index + 1)...].map(\.id.key))
+        items.removeSubrange((index + 1)...)
+        reindex()
+        callsByAssistantUUID = callsByAssistantUUID.mapValues { $0.filter { !dropped.contains($0) } }
+        itemKeyByRecordUUID = itemKeyByRecordUUID.filter { indexByKey[$0.value] != nil }
+        closeRun()
+        return true
+    }
+
+    /// Whether this builder produced anything for that record uuid — the rewind target test.
+    func holds(recordUUID uuid: String) -> Bool {
+        itemKeyByRecordUUID[uuid] != nil || indexByKey[uuid] != nil
     }
 
     // MARK: - Content

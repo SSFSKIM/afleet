@@ -142,9 +142,16 @@ public struct RegistryMirror: Hashable, Sendable {
 
     /// `tool_progress` is a heartbeat: it proves the task is still being worked, and says nothing else the registry
     /// does not already hold. It never creates a row — an id the mirror has not seen has no registry state to move.
+    /// The frame names its task directly when it has one; otherwise the row it belongs to is the one whose tool-use
+    /// id the frame carries — its `parent_tool_use_id` when the heartbeat comes from inside a run, else its own
+    /// `tool_use_id`. Either way no row is created.
     public mutating func apply(toolProgress: ToolProgressFrame, at now: Date) {
-        guard let id = toolProgress.taskID, entries[id] != nil else { return }
-        entries[id]?.lastFrameAt = now
+        if let id = toolProgress.taskID, entries[id] != nil {
+            entries[id]?.lastFrameAt = now
+            return
+        }
+        guard let row = entry(forToolUse: toolProgress.parentToolUseID ?? toolProgress.toolUseID) else { return }
+        entries[row.id]?.lastFrameAt = now
     }
 
     /// The Bash tool's own result sentence: "Command running in background with ID: <id>. Output is being written to:
