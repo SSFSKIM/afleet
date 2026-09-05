@@ -647,9 +647,11 @@ decision from Activity goes through the same `answer` path as the channel.
 
 ### Router (`Router/`, contract X10, owned)
 
-`RouterTable` is data: `[LocalCommand]` with `name`, `mechanism` (`.controlRequest(spec
-builder)`, `.lifecycle(LifecycleAction)`, `.restart(RestartRequest builder)`, `.text`,
-`.native(NativeAction)`), `readback`, and `explanation`. `CommandRouter.route(text,
+`RouterTable` is data: `[LocalCommand]` with `name`, `strategy` (a closed `RouteStrategy`
+whose cases name the exact request or request sequence the command runs: single requests such
+as `.setModel` and `.setPermissionMode`, multi-step `.rewind` and `.login`, the read-only
+`.permissionsView`, `.mcpPopover` and `.memoryFiles`, `.lifecycle(action)`, `.restart`,
+`.text` and `.native(name)`), `readback`, and `explanation`. `CommandRouter.route(text,
 handshake)` resolves in the parent's order: local table, then `terminal_slash_commands`
 (hidden and refused with the explanation), then pass-through as text. Autocomplete merges
 the handshake's `commands` with the local table. `RefusalInterceptor` matches the exact bare
@@ -1076,3 +1078,8 @@ Pending — written at finish.
   typed strategies with fixture-backed multi-step tests. G5 runs behind one serialised live
   budget and one suite-level config-home witness. The delegated unknown about the
   `.claude.json` arrays is closed.
+- 2026-09-05: touch-up after v2.2, with the plan's. The Router paragraph now names
+  `RouteStrategy` as the entry's typed strategy, as the Decision Log already did; the plan's
+  G1 coverage assertion moves to its final task as a gate so every checkpoint is green.
+  Merged `main` at `6f3ea5a`; the WireEventPolicy corrective (`ca68f2e`) touches no internal
+  this document cites.
