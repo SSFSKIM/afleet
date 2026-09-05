@@ -193,7 +193,9 @@ before the first scenario and again before each turn-spending one, and a spent w
 with its reason; every `result` frame any scenario observes has its `total_cost_usd` summed,
 and the sum is reported after the run. Zero-cost scenarios are witnessed, not assumed: a
 zero-turn launch emits no `result` frame, so each asks `get_session_cost` before ending its
-process and asserts `total_cost_usd == 0`. The foreign-session half spends no model turn:
+process and asserts the cost is zero. Corrected in execution (Task 10): `get_session_cost`'s
+answer carries the rendered text and not a `total_cost_usd` field, so the numeric assertion
+reads `session.total_cost_usd` from `get_usage`, and the gate asks both. The foreign-session half spends no model turn:
 the test starts an interactive `claude` on a pseudo-terminal in a directory the scratch
 config home already trusts (recreated if absent; the test never writes trust), and within
 five seconds the fleet reports a foreign live channel with the record's `status`; the test
@@ -205,8 +207,12 @@ through the real runner removes it. The consent half is the two-launch marker sc
 names, zero cost, the marker accepted through the store-only accept before launch A so the
 consent gate does not stop A and the marker proves the engine's own promotion. Adoption of a
 job with a conversation reserves two short `haiku` turns (`claude --bg --model
-claude-haiku-4-5-20251001 --max-turns 1 "Reply with exactly: pong"`; `claude --bg` forwards
-`--max-turns`, bundle 824274's forwarded-flag set), runs only when `AFLEET_LIVE_CLI_TURNS=1`
+claude-haiku-4-5-20251001 "Reply with exactly: pong"`; the recipe carried `--max-turns 1`
+until 2026-09-06, when the gate showed it self-defeating: the job reaches a terminal state
+about three and a half seconds after creation and leaves the roster before `jobs()`, which
+filters terminal records, can list it. `claude --bg` does forward `--max-turns`, bundle
+824274's forwarded-flag set, and a `--bg` job is a CLI verb rather than a `ClaudeProcess`, so
+dropping the flag from this one line leaves the per-launch cap rule untouched), runs only when `AFLEET_LIVE_CLI_TURNS=1`
 is also set, and asserts that adopt stops the job, resumes the same session id owned, that
 the next handshake is clean, and then that *Send to background* hands the owned channel
 back: `--bg --resume <id>` ran, the roster lists a new job for the session, the channel
@@ -906,8 +912,11 @@ child exercises: `sessions/`, `projects/`, `tasks/`, `jobs/`, `daemon/`, `todos/
 `statsig/`, `shell-snapshots/`, `session-env/`, `file-history/`, `debug/`, `plugins/`,
 `cache/`, `backups/`, `plans/`, `ide/`, `logs/`, `history/`, `.claude.json`,
 `.credentials.json`, `.last-cleanup`, `.last-update-result.json`, `daemon.log`,
-`history.jsonl` and `settings.json`; a unit test pins the set exactly so an addition is
-deliberate. An observed path outside the allowlist fails the gate with the path named,
+`daemon.lock`, `daemon.status.json`, `history.jsonl` and `settings.json`; a unit test pins the
+set exactly so an addition is deliberate. `daemon.lock` and `daemon.status.json` were added on
+2026-09-06 by the gate itself naming them on its first live run: they are writes of the daemon
+subsystem the list already carries through `daemon/` and `daemon.log`, and the gate reporting
+them is the allowlist working as designed. An observed path outside the allowlist fails the gate with the path named,
 because either the allowlist or the never-write claim is wrong and both deserve a look. The
 turn-spending scenario behind `AFLEET_LIVE_CLI_TURNS=1` sends one `haiku` prompt asking for
 a five-second background shell and an Explore subagent under a channel with the Notification
@@ -1351,6 +1360,23 @@ parent's §7.8.
   and reports a sign-out that did not happen); one guard rather than two (the stop phase's
   work is irreversible and would be done for a sign-out that never runs).
   Date/Author: 2026-09-05 / C4 Task 8 review, architect ruling.
+- Decision: `holderAppeared` gains four scenarios from the two archived states, so an archived
+  channel whose session a foreign holder claims becomes foreign live or a background job.
+  Rationale: found by G5's live gate, which could never report a foreign interactive session at
+  all. A registered channel starts `.archived`, and `holdersChanged` consulted `OriginResolver`
+  only from `.dormant`, so an archived channel with a live foreign holder stayed archived for
+  ever. That contradicts two sentences already in this spec — the origin rule ("*foreign live*
+  when a live registry holder names the session id and is not our child") and G5's own
+  acceptance sentence ("within five seconds the fleet reports a foreign live channel with the
+  record's `status`") — so the concrete table had under-enumerated an origin rule the spec
+  states generally. The same under-enumeration pattern as `TerminatingAction.postHandshakeYield`
+  and `contendedSettled`'s sixth scenario, and a child means rather than a parent impact: the
+  parent's §7.4 does not model an archived channel at all, and its origin rule is what C4 is
+  implementing. Rule 1 does not fire on the way: it requires `desired == .owned`, which a
+  channel that was registered but never opened does not have.
+  Rejected: leaving detection to the facade by synthesising a channel outside the table (it puts
+  a state change where the diagnostics and the coverage gate cannot see it).
+  Date/Author: 2026-09-06 / C4 Task 10 live gate, G5 finding 2.
 
 ## Surprises & Discoveries
 
