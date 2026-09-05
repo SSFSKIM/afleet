@@ -993,8 +993,9 @@ public enum TaskStatus: String, Sendable, Codable { case running, completed, fai
 
 ```swift
 public enum RecordKindMatcher: Hashable, Sendable {
-    case kind(String), system(String), userWhere(UserFlag)
-    public enum UserFlag: String, Sendable { case isMeta }
+    case kind(String), system(String), userWhere(UserFlag), userOrigin(String)
+    /// `sidechainRoot`: `isSidechain == true` with no `parentUuid` — an agent stream's opening prompt.
+    public enum UserFlag: String, Sendable { case isMeta, sidechainRoot }
     public func matches(_ record: TranscriptRecord) -> Bool
 }
 public struct ItemFieldSet: Hashable, Sendable, ExpressibleByArrayLiteral {
@@ -1010,9 +1011,17 @@ public enum ProjectionCategories {
     /// 2026-09-05 after the `compact-boundary` recording showed the engine emitting the boundary
     /// on the wire as a `system` frame of that subtype and mirroring the record, so it is compared
     /// like any other record rather than file-to-file only.
+    /// The last two entries were added 2026-09-05 from C3's check-two evidence and are filed as a
+    /// parent revision. Both are witnessed on disk and appear on the wire only inside
+    /// `transcript_mirror` frames, which the wire reducer does not reduce (they are `StreamIngestion`'s):
+    /// a `user` record whose `origin.kind` is `task-notification` — the engine injects the
+    /// `<task-notification>` message and never emits it as a `user` frame, which parent §7.3 already
+    /// states in prose — and the root `user` record of an agent stream, the prompt the parent injected,
+    /// which reaches the wire only as the spawning `Task` call's input.
     public static let fileOnlyRecordKinds: Set<RecordKindMatcher> = [
         .kind("attachment"), .system("turn_duration"), .system("stop_hook_summary"), .system("local_command"),
-        .system("informational"), .userWhere(.isMeta)]
+        .system("informational"), .userWhere(.isMeta),
+        .userOrigin("task-notification"), .userWhere(.sidechainRoot)]
     public static let comparedItemFields: ItemFieldSet = [.role, .model, .origin, .toolDenialKind,
         .contentBlocks(text: true, thinking: true, toolUseID: true, toolUseName: true, toolUseInput: true, toolResultContent: true, toolResultIsError: true, image: true, document: true)]
     /// Excluded on purpose and named so: `stop_reason` and `usage` differ between the mirror and the file of an agent stream
@@ -1834,6 +1843,22 @@ Each was answered with the recommendation below and the plan proceeds on it; ove
 7. **The `WireEventPolicy` pin.** Tasks 8 and 9 consume `WireEventPolicy` from `WireTransport`, on `main` at merge `ca68f2e` (branch commit `f187499`); Task 8's Step 0 preflights `git merge-base --is-ancestor ca68f2e HEAD` and stops if the pin is missing. The five `WireEventPolicyFixtureTests` on `main` are the parity witness between the actor and the function, which agree by construction; no separate parity test is written, because no fake-claude Swift harness exists to drive the actor in-process. C3 still duplicates none of that logic.
 
 ## Revision Notes
+
+- 2026-09-05: three controller rulings from Task 9's check-two run, which found four real
+  differences on recorded fixtures and stopped rather than pinning them. (1) `fileOnlyRecordKinds`
+  gains `.userOrigin("task-notification")` and `.userWhere(.sidechainRoot)`, and `RecordKindMatcher`
+  gains the two cases to express them. Both record classes are witnessed on disk and reach the wire
+  only inside `transcript_mirror` frames, which the wire reducer does not reduce, so they are
+  file-only by the constant's own definition. Verified over the corpus: the origin matcher selects
+  exactly four records, the sidechain-root matcher exactly the three agent-stream opening prompts and
+  no main-stream record (every main root carries `isSidechain: false`). Filed as a parent revision to
+  §7.3's exclusion list, on the same footing as the `isMeta` addition. (2) A subagent `TaskRunItem`
+  takes its timestamp from the spawning tool call, which both sides hold, rather than from the agent
+  stream's first item, which on the file side was the now-excluded opening prompt. (3) A real wire
+  defect: `permission-deny`'s `user` frame carries the denial as
+  `tool_result_meta[].non_execution_kind`, which `UserFields` does not model, so the wire read the
+  denied call as completed while the file read `toolDenialKind`. Read it from the frame's lossless
+  extras; `ClaudeWire` is not changed.
 
 - 2026-09-05: controller ruling during Task 8, recorded so the departure is not read as an omission.
   Step 2's routing table lists `.system(.status)` among the subtypes that become banners. The

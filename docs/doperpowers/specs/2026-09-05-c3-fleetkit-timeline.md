@@ -706,7 +706,8 @@ public enum ProjectionCategories {
   /// `compact_boundary` left this list on 2026-09-05 (parent amendment; Revision Notes below).
   public static let fileOnlyRecordKinds: Set<RecordKindMatcher> = [
     .kind("attachment"), .system("turn_duration"), .system("stop_hook_summary"), .system("local_command"),
-    .system("informational"), .userWhere(.isMeta)]
+    .system("informational"), .userWhere(.isMeta),
+    .userOrigin("task-notification"), .userWhere(.sidechainRoot)]
   /// Fields compared inside an item under check two; everything else is display or timing.
   public static let comparedItemFields: ItemFieldSet = [.role, .model, .contentBlocks(.text, .thinking, .toolUse(id: true, name: true, input: true), .toolResult(content: true, isError: true), .image, .document), .origin, .toolDenialKind]
 }
@@ -1094,6 +1095,18 @@ byte-equal, and task output files live under the temporary directory, not the co
 (5) the engine's picker hides `entrypoint: sdk-cli`, which is afleet's own sessions, so the
 listing policy must not copy it; (6) §17.2's transcript count is 2,967 today. None of these
 contradicts binding content; (1) extends a binding list and was filed as such.
+
+Filed 2026-09-05 during execution, from check two's evidence, and extending the same binding list
+as (1): (7) §7.3's file-only exclusion list gains a `user` record whose `origin.kind` is
+`task-notification` — the parent's own §7.3 prose already states that the `<task-notification>`
+message the engine injects "is never emitted as a `user` frame", so the list was simply behind the
+text; and (8) it gains the root `user` record of an agent stream — the prompt the parent injected,
+which reaches the wire only as the spawning `Task` call's input. Both are witnessed on disk across
+the corpus and appear on the wire only inside `transcript_mirror` frames, which the wire reducer
+does not reduce. Measured over the corpus: the origin matcher selects exactly four records; the
+sidechain-root matcher selects exactly the three agent-stream opening prompts and no main-stream
+record, every main root carrying `isSidechain: false`. Conversely (9), §7.3's compaction paragraph
+loses `compact_boundary` from that list, per the coordinator's amendment of the same date.
 
 ## Questions for the human gate
 
