@@ -45,14 +45,11 @@ final class FleetObserverTests: XCTestCase {
         await settle()
     }
 
-    /// Both timers armed means both refreshes finished: each loop awaits its refresh before it sleeps again. No
-    /// wall-clock waiting is involved — this only yields until the tasks have run.
+    /// Both timers armed means both refreshes finished: each loop awaits its refresh before it sleeps again.
+    /// `TestClock.waitForSleeperCount` is a genuine synchronisation point on the clock's own state — resumed the
+    /// instant a `sleep` call brings the count to two — rather than a bounded guess at how many yields that takes.
     private func settle() async {
-        for _ in 0..<2000 {
-            if clock.sleeperCount >= 2 { return }
-            await Task.yield()
-        }
-        XCTFail("the observer never armed its two timers")
+        await clock.waitForSleeperCount(atLeast: 2)
     }
 
     /// An in-place edit of a registry record fires no directory event, which is exactly why the five-second poll
@@ -115,20 +112,23 @@ final class FleetObserverTests: XCTestCase {
     func testUpdatesArePublishedOnlyOnChange() async throws {
         try files.writeRegistry(pid: ScriptedHolderFiles.livePID, sessionID: SessionID())
         await start()
+        // `start()` already awaited the initial `refresh` to completion, so the one read it publishes is sitting in
+        // the stream's buffer before this line runs: drawing it is an immediate `next()`, not a race.
+        var iterator = observer.updates.makeAsyncIterator()
         let published = PublishedSets()
-        let collector = Task { [observer] in
-            guard let observer else { return }
-            for await set in observer.updates { published.append(set) }
-        }
-        defer { collector.cancel() }
-        for _ in 0..<20 { await Task.yield() }
+        if let first = await iterator.next() { published.append(first) }
         XCTAssertEqual(published.count, 1, "the initial read")
 
         for _ in 0..<3 {
             await clock.advance(by: .seconds(5))
             await settle()
         }
-        for _ in 0..<20 { await Task.yield() }
+        // `settle()` proves every one of those polls has already run `perform()` to completion, so whatever it did
+        // or did not publish is already sitting in the stream. `stop()` finishes the stream, which turns "did
+        // nothing more get published" from a guess into a real drain: `next()` returns every remaining buffered
+        // element and then `nil`, deterministically, with nothing left to race.
+        await observer.stop()
+        while let next = await iterator.next() { published.append(next) }
         XCTAssertEqual(published.count, 1, "three polls over unchanged files publish nothing")
     }
 }

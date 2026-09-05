@@ -14,6 +14,10 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
     private typealias Waiter = (deadline: Instant, id: UUID, continuation: CheckedContinuation<Void, any Error>)
     private var waiters: [Waiter] = []
     private var _requested: [Duration] = []
+    private typealias CountWaiter = (threshold: Int, continuation: CheckedContinuation<Void, Never>)
+    /// Parties waiting for `waiters.count` to reach a threshold, registered and checked under `lock` so the
+    /// registration cannot straddle the moment the count actually gets there.
+    private var countWaiters: [CountWaiter] = []
     public init() {}
     /// Every duration a sleeper asked for, in the order it asked. The backoff row asserts on this: "how long did the
     /// supervisor wait" is invisible in the state and is exactly what a constant backoff would get wrong.
@@ -30,12 +34,41 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
                 _requested.append(_now.duration(to: deadline))
                 if Task.isCancelled { lock.unlock(); c.resume(throwing: CancellationError()); return }
                 if deadline <= _now { lock.unlock(); c.resume(); return }
-                waiters.append((deadline, id, c)); lock.unlock()
+                waiters.append((deadline, id, c))
+                let ready = takeReadyCountWaiters()
+                lock.unlock()
+                for w in ready { w.resume() }
             }
         } onCancel: {
             lock.lock(); let i = waiters.firstIndex { $0.id == id }; let w = i.map { waiters.remove(at: $0) }; lock.unlock()
             w?.continuation.resume(throwing: CancellationError())
         }
+    }
+
+    /// Suspends until at least `n` sleepers are parked — resumed the instant whichever `sleep` call makes that true,
+    /// registered under the same lock that governs `waiters` so the check-and-register cannot straddle the count
+    /// actually reaching `n`. No polling, no wall time: a genuine synchronisation point on the clock's own state,
+    /// the thing tests that need both of the observer's timers armed are actually waiting on.
+    func waitForSleeperCount(atLeast n: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if waiters.count >= n { lock.unlock(); continuation.resume(); return }
+            countWaiters.append((n, continuation))
+            lock.unlock()
+        }
+    }
+
+    /// Removes and returns every registered count-waiter now satisfied by the current waiter count. Must be called
+    /// with `lock` held; the caller resumes the continuations after unlocking, so none of them runs while the lock
+    /// is taken.
+    private func takeReadyCountWaiters() -> [CheckedContinuation<Void, Never>] {
+        var ready: [CheckedContinuation<Void, Never>] = []
+        countWaiters.removeAll { waiter in
+            guard waiters.count >= waiter.threshold else { return false }
+            ready.append(waiter.continuation)
+            return true
+        }
+        return ready
     }
     /// Moves time forward and lets every sleeper whose deadline passed run, one at a time.
     ///
