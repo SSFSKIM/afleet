@@ -123,9 +123,16 @@ public struct LaunchConfiguration: Hashable, Sendable {
         // resolved rather than from whatever the shell happened to hold. An override redirects it and nothing
         // else; that is what a recording uses to point a child at a scratch home.
         env["CLAUDE_CONFIG_DIR"] = (configHomeOverride ?? configHome.root).path
-        // §6.9 reads the project directory name together with the config home and the engine honours it the
-        // same way, so it travels with it or not at all.
-        if let projectDirName = base.variables["CLAUDE_CODE_PROJECT_DIR_NAME"] {
+        // §6.9 reads the project directory name together with the config home, so it travels with the home
+        // or not at all — and it is read from the **resolved record**, never from the captured environment.
+        //
+        // The engine honours this variable only when `CLAUDE_CONFIG_DIR` is present in the environment it
+        // sees, and afleet now always injects that home, so inside an afleet child the engine's gate is
+        // always open. `ConfigHome.derive` mirrors the same gate against the *captured* environment, where
+        // the home is often absent: a default-home channel would therefore record no project name while
+        // handing the shell's one to a child that would go on to honour it. Reading the record closes that —
+        // the child gets the name exactly when afleet's own view of the home has one.
+        if let projectDirName = configHome.projectDirName {
             env["CLAUDE_CODE_PROJECT_DIR_NAME"] = projectDirName
         }
         for name in Self.passedThroughConfiguration { env[name] = base.variables[name] }

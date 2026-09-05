@@ -164,16 +164,44 @@ final class LaunchConfigurationTests: XCTestCase {
                        "the child re-derives a different home from the environment it was given")
     }
 
-    /// §6.9 reads the project directory name together with the config home, and the engine honours it only
-    /// together with the home, so it travels with it — when the captured environment had one, and not
-    /// otherwise.
-    func testProjectDirNameSurvivesWhenTheCaptureHadIt() {
-        let withName = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "CLAUDE_CODE_PROJECT_DIR_NAME": "afleet-work"],
-                                           shell: "/bin/zsh", capturedAt: .init(), mode: .login)
+    /// §6.9 reads the project directory name together with the config home, and the source is the resolved
+    /// record rather than the captured environment.
+    ///
+    /// This test previously asserted the opposite — that a captured `CLAUDE_CODE_PROJECT_DIR_NAME` reaches
+    /// the child whatever the record says — and that rule is now wrong rather than merely superseded. The
+    /// engine honours the name only when it also sees `CLAUDE_CONFIG_DIR`, and afleet always injects one, so
+    /// the engine's gate is open inside every afleet child. A default-home channel handed the shell's name
+    /// would honour it while `ConfigHome.derive`, which applies the same gate to the captured environment
+    /// where the home was absent, recorded nothing: afleet's view of the session and the session's own
+    /// behaviour would disagree, which is the split the config-home fix just closed, displaced by one field.
+    func testTheProjectDirNameComesFromTheResolvedRecordNotTheCapture() {
         let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid))
-        XCTAssertEqual(c.childEnvironment(over: withName, configHome: resolved)["CLAUDE_CODE_PROJECT_DIR_NAME"], "afleet-work")
-        let without = ResolvedEnvironment(variables: ["PATH": "/usr/bin"], shell: "/bin/zsh", capturedAt: .init(), mode: .login)
-        XCTAssertNil(c.childEnvironment(over: without, configHome: resolved)["CLAUDE_CODE_PROJECT_DIR_NAME"])
+        let captured = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "HOME": "/Users/x", "CLAUDE_CODE_PROJECT_DIR_NAME": "afleet-work"],
+                                           shell: "/bin/zsh", capturedAt: .init(), mode: .login)
+
+        // A default home records no project name, and the captured one must not leak past it.
+        let defaultHome = ConfigHome.derive(from: captured)
+        XCTAssertEqual(defaultHome.source, .default)
+        XCTAssertNil(defaultHome.projectDirName)
+        let defaultChild = c.childEnvironment(over: captured, configHome: defaultHome)
+        XCTAssertNil(defaultChild["CLAUDE_CODE_PROJECT_DIR_NAME"],
+                     "a record with no project name handed the child the shell's one")
+        XCTAssertEqual(defaultChild["CLAUDE_CONFIG_DIR"], defaultHome.root.path,
+                       "and the home is injected regardless, which is what opens the engine's gate")
+
+        // A home that came from the environment records the name, and the child is given both.
+        let named = ConfigHome.derive(from: ResolvedEnvironment(
+            variables: ["PATH": "/usr/bin", "HOME": "/Users/x", "CLAUDE_CONFIG_DIR": "/Users/x/.claude-scratch",
+                        "CLAUDE_CODE_PROJECT_DIR_NAME": "afleet-work"],
+            shell: "/bin/zsh", capturedAt: .init(), mode: .login))
+        XCTAssertEqual(named.projectDirName, "afleet-work")
+        let namedChild = c.childEnvironment(over: captured, configHome: named)
+        XCTAssertEqual(namedChild["CLAUDE_CODE_PROJECT_DIR_NAME"], "afleet-work")
+        XCTAssertEqual(namedChild["CLAUDE_CONFIG_DIR"], "/Users/x/.claude-scratch")
+
+        // And the record, not the capture, decides which name: a capture that disagrees does not win.
+        let other = ConfigHome(root: URL(fileURLWithPath: "/Users/x/.claude-scratch"), source: .environment, projectDirName: "from-the-record")
+        XCTAssertEqual(c.childEnvironment(over: captured, configHome: other)["CLAUDE_CODE_PROJECT_DIR_NAME"], "from-the-record")
     }
 
     /// Configuration the engine reads survives the scrub; a marker it sets on its own children does not.
