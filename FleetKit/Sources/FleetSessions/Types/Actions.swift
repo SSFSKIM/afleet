@@ -1,0 +1,91 @@
+import Foundation
+import AfleetCore
+import ClaudeWire
+
+/// What the lifecycle must be satisfied of before it spawns. `.ready` is the only value that lets a spawn through.
+public enum SpawnPrecondition: Hashable, Sendable {
+    case ready
+    case untrusted(root: URL)
+    /// Name, transport summary and hash of every project server the user has not decided about.
+    case consentNeeded([ProjectMCPServer])
+    case managedSettingsPending
+    case contended(HolderSet)
+    case wedged(EscalationTrace)
+}
+
+/// One server entry of a project's `.mcp.json`, parsed far enough to describe and to gate.
+public struct ProjectMCPServer: Hashable, Sendable {
+    public var name: String
+    /// Parsed from the raw entry: no `type` and a `command` is stdio; `type` http/sse carries a url; anything else
+    /// is `.other`, still listed and still consent-gated.
+    public var transport: Transport
+    /// SHA-256 (`ContentHash.sha256Hex`) over the canonical JSON of the *whole* raw entry, so any field change
+    /// reopens consent.
+    public var entryHash: String
+    public init(name: String, transport: Transport, entryHash: String) {
+        self.name = name; self.transport = transport; self.entryHash = entryHash
+    }
+}
+
+extension ProjectMCPServer {
+    public enum Transport: Hashable, Sendable {
+        case stdio(command: String, arguments: [String])   // no `type`, a `command`
+        case http(url: String)                             // type: "http"
+        case sse(url: String)                              // type: "sse"
+        case other(type: String)                           // anything else: still listed, still consent-gated
+    }
+}
+
+/// One roster job, reconciled with `agents --json` when read; an exec job has no session.
+public struct JobEntry: Hashable, Sendable {
+    public var short: JobShort
+    public var state: String
+    public var kind: String
+    /// nil for an exec job.
+    public var sessionID: SessionID?
+    public var cwd: URL?
+    public var name: String?
+    public init(short: JobShort, state: String, kind: String, sessionID: SessionID?, cwd: URL?, name: String?) {
+        self.short = short; self.state = state; self.kind = kind
+        self.sessionID = sessionID; self.cwd = cwd; self.name = name
+    }
+}
+
+/// `LifecycleAPI.performJob(_:_:)`: `claude stop|respawn|rm <short>` through the runner, no PTY.
+public enum JobVerb: Hashable, Sendable { case stop, respawn, remove }
+
+/// Sendable only, never Hashable: `InboundAnswer` is not Hashable.
+public enum LifecycleAction: Sendable {
+    case open
+    case send(UserInput)
+    case reap
+    case adopt
+    case sendToBackground
+    /// nil = a plain fork; `ForkPoint` is ClaudeWire's `{entryUUID, dropsTurn?}`.
+    case fork(at: ForkPoint?)
+    case quiescentRestart(RestartRequest)
+    case stopEverything
+    case backgroundAll
+    case logout
+    case reopen
+    /// The one path a decision is answered through; `LifecycleError.decisionGone` when the id is gone.
+    case answer(RequestID, InboundAnswer)
+}
+
+public enum LifecycleError: Error, Hashable, Sendable {
+    case heldElsewhere(HolderSet)
+    case capReached(live: Int)
+    case precondition(SpawnPrecondition)
+    case wedged(EscalationTrace)
+    case handoffTimedOut(HolderSet)
+    case declineRefused(reason: String)
+    case notOwned
+    case verbFailed(verb: String, exitCode: Int32)
+    /// An answer for an id that is unknown, cancelled, already answered or from an older epoch.
+    case decisionGone(RequestID)
+    /// The write behind an answer failed; the id is consumed (`ClaudeProcess.answer` removes `pendingInbound[id]`
+    /// before it writes) and is not restored.
+    case answerFailed(RequestID, reason: String)
+    /// The spawn barrier while a `LogoutPlan` runs.
+    case logoutInProgress
+}
