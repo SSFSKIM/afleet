@@ -52,6 +52,9 @@ public actor ClaudeProcess {
         switch launch.session {
         case .new(let id): identity = .known(id)
         case .resume(let id, let fork): identity = fork ? .awaitingFork(from: id, provisional: SessionID()) : .known(id)
+        // A truncating fork is a fork: the child announces its own session id, so the identity is provisional
+        // until the handshake, exactly as for a whole-history fork.
+        case .forkFrom(let id, _): identity = .awaitingFork(from: id, provisional: SessionID())
         }
         channel = BoundedChannel(capacity: eventBufferCapacity)
         events = WireEventStream(channel: channel)

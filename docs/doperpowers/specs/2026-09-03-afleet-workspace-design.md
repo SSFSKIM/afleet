@@ -245,7 +245,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
   --include-partial-messages --replay-user-messages --forward-subagent-text \
   --include-hook-events \
   --permission-prompt-tool stdio --permission-prompts host \
-  [--session-id <uuid> | --resume <session-id> [--fork-session]] \
+  [--session-id <uuid> | --resume <session-id> [--fork-session [--resume-session-at <uuid> [--resume-drops-turn <uuid>]]]] \
   [--model <m>] [--permission-mode <mode>] [--agent <a>] [--effort <l>] \
   [-n <name>] [--add-dir <dir>...] [-w [<worktree-name>]] \
   [--allow-dangerously-skip-permissions] --enable-auth-status --session-mirror \
@@ -4171,3 +4171,8 @@ Pending — written at finish.
   itself, and the CLI does not refuse a second holder (S12), so the after-handshake check of
   §7.2 rule 4 remains the backstop. The other findings are child-local and fold into C4's spec
   and plan.
+- 2026-09-05 C2 corrective (`13c9ad4`): `SessionStart` gains `forkFrom(SessionID, at: ForkPoint
+  {entryUUID, dropsTurn?})`, emitting `--resume <id> --fork-session --resume-session-at <uuid>`
+  and, when set, `--resume-drops-turn <uuid>`; the shape makes the CLI's refusal without
+  `--resume` unrepresentable. §6.1's usage line now shows the two hidden flags under
+  `--fork-session`. C4's fork-from-a-message task builds on it; its planned skip is withdrawn.
