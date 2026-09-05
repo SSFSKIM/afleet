@@ -101,8 +101,11 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     var supervisors: [ChannelSupervisor] { lock.lock(); defer { lock.unlock() }; return _supervisors }
     /// How many processes the factory built, whatever kind.
     var spawnCount: Int { lock.lock(); defer { lock.unlock() }; return _launches.count }
-    /// The backoff sleeps, with the thirty-minute reap timer and the observer's own intervals filtered out.
-    var backoffSleeps: [Duration] { clock.requestedDurations.filter { $0 < .seconds(60) } }
+    /// The backoff sleeps, keyed on the durations the backoff actually asks for rather than on a size threshold that
+    /// later tasks' waits would slip under.
+    var backoffSleeps: [Duration] {
+        clock.requestedDurations.filter { ChannelSupervisor.backoffs.contains($0) }
+    }
 
     func published(of supervisor: ChannelSupervisor) -> [ChannelState] {
         lock.lock(); defer { lock.unlock() }
@@ -217,15 +220,46 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         throw Timeout()
     }
 
-    /// Waits until the manual clock has the expected number of sleepers parked on it, so `advance` cannot race the
-    /// arming of the timer it is meant to fire.
-    func waitForSleepers(atLeast count: Int, file: StaticString = #filePath, line: UInt = #line) async throws {
+    /// Waits until a sleeper is parked with exactly this much time left, so `advance` cannot race the arming of the
+    /// timer it is meant to fire — and cannot be satisfied by a different timer that happens to exist.
+    func waitForSleeper(due duration: Duration, file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(30))
         while ContinuousClock.now < deadline {
-            if clock.sleeperCount >= count { return }
+            if clock.sleeperCount(due: duration) >= 1 { return }
             try? await Task.sleep(for: .milliseconds(5))
         }
-        XCTFail("timed out waiting for \(count) sleeper(s); the clock has \(clock.sleeperCount)", file: file, line: line)
+        XCTFail("timed out waiting for a sleeper due in \(duration)", file: file, line: line)
+        struct Timeout: Error {}
+        throw Timeout()
+    }
+
+    /// Waits for the detached collector draining `supervisor.updates` to have caught up with everything the actor has
+    /// published. The actor's own count is the authority; without this, a count read from `published(of:)` can hold
+    /// because an update has not been appended yet rather than because it was never made.
+    func drainPublished(of supervisor: ChannelSupervisor,
+                        file: StaticString = #filePath, line: UInt = #line) async throws {
+        let want = await supervisor.publishedCount
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        while ContinuousClock.now < deadline {
+            if published(of: supervisor).count >= want { return }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        XCTFail("the update collector never caught up: \(published(of: supervisor).count) of \(want)",
+                file: file, line: line)
+        struct Timeout: Error {}
+        throw Timeout()
+    }
+
+    /// Waits for the supervisor to publish past a count the caller took earlier. `handleExit` publishes once on every
+    /// branch, after the whole decision, so this is a synchronisation point on "the exit has been fully processed".
+    func waitForPublish(_ supervisor: ChannelSupervisor, above count: Int,
+                        file: StaticString = #filePath, line: UInt = #line) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        while ContinuousClock.now < deadline {
+            if await supervisor.publishedCount > count { return }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        XCTFail("the supervisor never published past \(count)", file: file, line: line)
         struct Timeout: Error {}
         throw Timeout()
     }

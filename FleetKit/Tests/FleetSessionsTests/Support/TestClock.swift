@@ -56,4 +56,10 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
         let w = waiters.remove(at: i); _now = w.deadline; return w
     }
     public var sleeperCount: Int { lock.lock(); defer { lock.unlock() }; return waiters.count }
+    /// How many sleepers are parked with exactly this much time left. A count of sleepers of *any* kind is satisfied
+    /// by whichever timer happens to exist, so a test that means "the one-second backoff is armed" asks for that.
+    public func sleeperCount(due duration: Duration) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return waiters.filter { _now.duration(to: $0.deadline) == duration }.count
+    }
 }

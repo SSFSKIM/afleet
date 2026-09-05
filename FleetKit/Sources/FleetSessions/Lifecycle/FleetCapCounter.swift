@@ -74,10 +74,14 @@ public actor FleetCapCounter {
     }
 
     /// A clean handshake turns the reservation into a live slot.
+    ///
+    /// The key comes from the *stored* reservation and never from the caller's copy: `rekey` rewrites the stored one
+    /// when a fork learns its own session id, and the caller is still holding the provisional key. Inserting that
+    /// would take a live slot under a key nothing will ever release.
     public func confirm(_ r: Reservation) {
-        guard reserved.removeValue(forKey: r.id) != nil else { return }
-        live.insert(r.key)
-        if lru[r.key] == nil { activityClock += 1; lru[r.key] = activityClock }
+        guard let stored = reserved.removeValue(forKey: r.id) else { return }
+        live.insert(stored.key)
+        if lru[stored.key] == nil { activityClock += 1; lru[stored.key] = activityClock }
     }
 
     /// Any failure between `acquire` and `confirm`: the reservation is dropped and a named victim returns to `live`.

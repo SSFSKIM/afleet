@@ -5,7 +5,7 @@ import ClaudeWire
 @testable import FleetSessions
 
 /// One test per parent §7.4 row, and one declared scenario set per test. `coverage` maps every test method to the
-/// `(row, from, event, to)` scenarios it drives; each test ends with `rig.assertObserved(Self.coverage[Self.testID()]!)`,
+/// `(row, from, event, to)` scenarios it drives; each test ends with `rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))`,
 /// where `static func testID(_ function: String = #function) -> String` strips from the first `(`: Swift reports `testFoo()`,
 /// the keys are bare names, and Task 12's parity gate matches the same bare names against the suite,
 /// which compares the transitions the supervisor recorded on the diagnostics sink with the declared set (extra
@@ -63,7 +63,7 @@ final class LifecycleRowTests: XCTestCase {
     /// Drives a channel to dormant: spawn, then the thirty-minute reap on the manual clock.
     private func makeDormant(_ rig: Rig, _ supervisor: ChannelSupervisor) async throws {
         try await supervisor.spawn(reason: .open)
-        try await rig.waitForSleepers(atLeast: 1)
+        try await rig.waitForSleeper(due: ChannelSupervisor.dormantAfter)
         await rig.clock.advance(by: ChannelSupervisor.dormantAfter)
         try await rig.waitUntil(supervisor, "dormant") { $0.origin == .owned(.dormant) }
     }
@@ -81,9 +81,10 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(rig.spawnCount, 1)
         let opened = await supervisor.state
         XCTAssertEqual(opened.origin, .owned(.ready))
+        try await rig.drainPublished(of: supervisor)
         XCTAssertTrue(rig.published(of: supervisor).contains { $0.origin == .owned(.connecting) },
                       "the channel was published as connecting before it was published as ready")
-        rig.assertObserved(Self.coverage[Self.testID()]!)
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - archivedOlderOpened
@@ -99,7 +100,7 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertTrue(rig.reader.checkLabels.isEmpty)
         let history = await supervisor.state
         XCTAssertEqual(history.origin, .archived)
-        rig.assertObserved(Self.coverage[Self.testID()]!)
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - archivedOlderSent
@@ -118,7 +119,7 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertNotEqual(uuid, UUID(uuidString: "00000000-0000-0000-0000-000000000000"))
         try await frames.waitForResult()
         XCTAssertTrue(frames.sawUserFrame, "the engine replayed the user frame this send produced")
-        rig.assertObserved(Self.coverage[Self.testID()]!)
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - connectingClean
@@ -137,7 +138,7 @@ final class LifecycleRowTests: XCTestCase {
                        "the post-handshake read ran while the only pid of ours was the child this spawn started")
         let clean = await supervisor.state
         XCTAssertEqual(clean.origin, .owned(.ready))
-        rig.assertObserved(Self.coverage[Self.testID()]!)
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - connectingFoundHolder, the foreign half
@@ -162,7 +163,7 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(yielded.banner, .releasedToTerminal)
         XCTAssertEqual(yielded.desired, .owned)
         XCTAssertFalse(isAlive(childPID), "our own process was terminated when the check found another holder")
-        rig.assertObserved(Self.coverage[Self.testID()]!)
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - connectingFoundHolder, the own-pid half
@@ -177,7 +178,9 @@ final class LifecycleRowTests: XCTestCase {
         try await a.spawn(reason: .open)
         let aPID = await rig.liveHandles.last!.childProcessIdentifier
         try rig.files.writeRegistry(pid: aPID, sessionID: session, kind: "interactive", entrypoint: "sdk-cli")
-        let aPublished = rig.published(of: a).count
+        try await rig.drainPublished(of: a)
+        let aPublished = await a.publishedCount
+        XCTAssertEqual(rig.published(of: a).count, aPublished)
 
         // First half: B's pre-spawn check sees a pid that is ours, and refuses. Nothing spawns.
         let b = rig.supervisor(session: session, fixture: Self.idleFixture, origin: .owned(.connecting))
@@ -208,8 +211,11 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertTrue(isAlive(aPID), "A keeps the session")
         let aState = await a.state
         XCTAssertEqual(aState.origin, .owned(.ready))
-        XCTAssertEqual(rig.published(of: a).count, aPublished, "A published nothing while B contended for its session")
-        rig.assertObserved(Self.coverage[Self.testID()]!)
+        try await rig.drainPublished(of: a)
+        let aPublishedAfter = await a.publishedCount
+        XCTAssertEqual(aPublishedAfter, aPublished, "A published nothing while B contended for its session")
+        XCTAssertEqual(rig.published(of: a).count, aPublished)
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - readyDormantEligible
@@ -232,8 +238,8 @@ final class LifecycleRowTests: XCTestCase {
         let blockedPID = await blockedRig.liveHandles.last!.childProcessIdentifier
         eligibleRig.forgetTransitions()   // arranging both channels is other rows' work
 
-        try await eligibleRig.waitForSleepers(atLeast: 1)
-        try await blockedRig.waitForSleepers(atLeast: 1)
+        try await eligibleRig.waitForSleeper(due: ChannelSupervisor.dormantAfter)
+        try await blockedRig.waitForSleeper(due: ChannelSupervisor.dormantAfter)
         await eligibleRig.clock.advance(by: .seconds(29 * 60))
         await blockedRig.clock.advance(by: .seconds(29 * 60))
         let atTwentyNine = await eligible.state
@@ -244,14 +250,14 @@ final class LifecycleRowTests: XCTestCase {
         try await eligibleRig.waitUntil(eligible, "the reap") { $0.origin == .owned(.dormant) }
 
         // The blocked half re-arms instead of reaping, so its process is still there a whole timer later.
-        try await blockedRig.waitForSleepers(atLeast: 1)
+        try await blockedRig.waitForSleeper(due: ChannelSupervisor.dormantAfter)
         let blockedState = await blocked.state
         XCTAssertEqual(blockedState.origin, .owned(.ready))
         XCTAssertTrue(isAlive(blockedPID), "a channel with a running task is not reaped")
         await blocked.drainEligibility()
         let verdict = await blockedRig.fleet.verdict(of: blocked.key)
         XCTAssertEqual(verdict, .blocked(.taskRunning("t-1")))
-        eligibleRig.assertObserved(Self.coverage[Self.testID()]!)
+        eligibleRig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - dormantSent
@@ -264,6 +270,7 @@ final class LifecycleRowTests: XCTestCase {
         rig.forgetTransitions()
 
         let frames = FrameCollector(await supervisor.events())
+        try await rig.drainPublished(of: supervisor)
         let publishedBefore = rig.published(of: supervisor).count
         let labelsBefore = rig.reader.checkLabels.count
 
@@ -279,11 +286,12 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(id, session, "the same session id, not a new one")
         XCTAssertFalse(fork)
         XCTAssertEqual(resumed.epoch, ProcessEpoch(rawValue: 2), "the next epoch, never the old one")
+        try await rig.drainPublished(of: supervisor)
         let connecting = rig.published(of: supervisor).dropFirst(publishedBefore)
             .filter { $0.origin == .owned(.connecting) }
         XCTAssertEqual(connecting.count, 1, "one connecting glyph")
         try await frames.waitForResult()
-        rig.assertObserved(Self.coverage[Self.testID()]!)
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - dormantHolderAppeared
@@ -310,7 +318,7 @@ final class LifecycleRowTests: XCTestCase {
 
         try await foreignRig.waitUntil(foreignSide, "the foreign origin") { $0.origin == .foreignLive(.usersTerminal) }
         try await jobRig.waitUntil(jobSide, "the job origin") { $0.origin == .backgroundJob }
-        foreignRig.assertObserved(Self.coverage[Self.testID()]!)
+        foreignRig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - exitedNonZero
@@ -327,7 +335,7 @@ final class LifecycleRowTests: XCTestCase {
         for backoff in ChannelSupervisor.backoffs {
             let pid = await readyRig.liveHandles.last!.childProcessIdentifier
             XCTAssertEqual(kill(pid, SIGKILL), 0)
-            try await readyRig.waitForSleepers(atLeast: 2)   // the dormant timer, plus the backoff
+            try await readyRig.waitForSleeper(due: backoff)
             await readyRig.clock.advance(by: backoff)
             try await readyRig.waitUntil(ready, "the respawn") { $0.origin == .owned(.ready) && $0.systemItem == nil }
         }
@@ -352,7 +360,7 @@ final class LifecycleRowTests: XCTestCase {
                                                   origin: .owned(.connecting), dropFixture: true)
         try? await neverReady.spawn(reason: .open)
         for backoff in ChannelSupervisor.backoffs {
-            try await neverReadyRig.waitForSleepers(atLeast: 1)
+            try await neverReadyRig.waitForSleeper(due: backoff)
             await neverReadyRig.clock.advance(by: backoff)
             try await neverReadyRig.waitUntil(neverReady, "the next failure") {
                 $0.epoch.map { $0.rawValue } ?? 0 >= UInt64(neverReadyRig.spawnCount)
@@ -364,7 +372,70 @@ final class LifecycleRowTests: XCTestCase {
         let archivedState = await neverReady.state
         guard case .crashed? = archivedState.systemItem else { return XCTFail("no crashed system item") }
 
-        readyRig.assertObserved(Self.coverage[Self.testID()]!)
+        readyRig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
+    }
+
+    // MARK: - Not a §7.4 row: the exit that follows a deliberate termination
+
+    /// `ClaudeProcess` settles the exit waiter that `terminate()` blocks on before it pushes the `.exited` event —
+    /// `ClaudeProcess.swift:431` and `:450`, either side of a reader drain bounded at two seconds — so the event a
+    /// supervisor's pump sees normally arrives *after* its own `terminate()` has already returned. An escalation that
+    /// reached SIGTERM or SIGKILL never produces `.code(0)`, so suppressing "our own termination" with anything
+    /// narrower than the epoch reads that exit as a crash and respawns a channel the user deliberately reaped.
+    ///
+    /// This drives the scripted handle because that is the only way to produce the ordering: `fake-claude` answers
+    /// `end_session` and exits zero, so the reap path in every other test only ever produces a clean exit. It
+    /// declares no scenarios and belongs to no row — the claim is that the reap produces exactly one transition and
+    /// the exit that follows it produces none at all.
+    func testTheExitThatFollowsADeliberateTerminationIsNotACrash() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle(terminateReturns: TerminationReport(exit: .signal(9, stderrTail: ""),
+                                                                  steps: ["SIGTERM", "SIGKILL"]))
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        let handle = rig.scriptedHandles[0]
+        rig.forgetTransitions()
+
+        await supervisor.reap()
+        let reaped = await supervisor.state
+        XCTAssertEqual(reaped.origin, .owned(.dormant))
+        let publishedAfterReap = await supervisor.publishedCount
+
+        // The escalation's own exit, arriving after `terminate()` returned, exactly as ClaudeWire orders it.
+        handle.push(.exited(.signal(9, stderrTail: ""), handle.epoch))
+        handle.finish()
+        try await rig.waitForPublish(supervisor, above: publishedAfterReap)
+
+        let settled = await supervisor.state
+        XCTAssertEqual(settled.origin, .owned(.dormant), "a reaped channel stays reaped")
+        XCTAssertNil(settled.systemItem, "a deliberate termination is not a crash the user is offered a Reopen for")
+        XCTAssertEqual(rig.spawnCount, 1, "no replacement child was built")
+        XCTAssertEqual(rig.clock.sleeperCount(due: ChannelSupervisor.backoffs[0]), 0, "no backoff was armed")
+        rig.assertObserved([T(.readyDormantEligible, .ready, .dormantTimerFired, .dormant)])
+    }
+
+    /// `rekey` rewrites the *stored* reservation when a fork learns its own session id, so `confirm` has to read the
+    /// key back out of the counter rather than off the caller's copy — which is still the provisional one. Task 6
+    /// forks; the counter is this task's, so the guarantee is pinned here.
+    func testAReservationConfirmedAfterARekeyTakesTheResolvedKey() async throws {
+        let rig = try newRig()
+        let provisional = ChannelKey(configHome: rig.home.url, session: SessionID())
+        let resolved = ChannelKey(configHome: rig.home.url, session: SessionID())
+
+        guard case .granted(let reservation) = await rig.fleet.acquire(for: provisional) else {
+            return XCTFail("an empty counter refused a reservation")
+        }
+        await rig.fleet.rekey(provisional, to: resolved)
+        await rig.fleet.confirm(reservation)
+
+        let underResolved = await rig.fleet.isLive(resolved)
+        let underProvisional = await rig.fleet.isLive(provisional)
+        XCTAssertTrue(underResolved, "the slot is held under the id the engine resolved")
+        XCTAssertFalse(underProvisional, "nothing would ever release a slot held under the provisional key")
+
+        await rig.fleet.release(resolved)
+        let remaining = await rig.fleet.liveCount
+        XCTAssertEqual(remaining, 0, "the channel's own release frees the slot")
     }
 }
 

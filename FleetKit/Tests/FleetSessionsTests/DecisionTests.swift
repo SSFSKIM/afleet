@@ -173,7 +173,7 @@ final class DecisionTests: XCTestCase {
         first.finish()
         try await waitForDecisions(supervisor, 0)
 
-        try await rig.waitForSleepers(atLeast: 1)
+        try await rig.waitForSleeper(due: ChannelSupervisor.backoffs[0])
         await rig.clock.advance(by: .seconds(1))
         try await rig.waitUntil(supervisor, "the respawn to reach ready") { $0.origin == .owned(.ready) }
         XCTAssertEqual(rig.scriptedHandles.count, 2)

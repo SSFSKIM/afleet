@@ -55,7 +55,12 @@ public actor ChannelSupervisor {
     private var pendingHatch: PaneRequest?
     private var crashCount = 0
     private var wasReadyInThisSeries = false
-    private var terminating = false
+    /// The epochs this supervisor deliberately ended. Keyed on the epoch and not on a flag held across one `await`,
+    /// because `ClaudeProcess.terminate()` returns from the exit *waiter* (`ClaudeProcess.swift:431`) while the
+    /// `.exited` **event** the pump sees is pushed after a bounded reader drain (`:450`): the event normally arrives
+    /// after `terminate()` has already returned. A flag would be false by then and a SIGTERM or SIGKILL exit — which
+    /// is never `.code(0)` — would be read as a crash and respawn a channel the user deliberately reaped.
+    private var terminatedEpochs: Set<ProcessEpoch> = []
     private var dormantTimer: Task<Void, Never>?
     private var pumpTask: Task<Void, Never>?
     private var respawnTask: Task<Void, Never>?
@@ -142,6 +147,20 @@ public actor ChannelSupervisor {
     /// An owned channel's presence is afleet's own turn state. Every other origin's presence is whatever the holder's
     /// record said, which `OriginResolver` resolved and the caller has already stored; recomputing it here would
     /// overwrite a fact with a guess.
+    /// The table's name for an origin `OriginResolver` produced.
+    private static func name(of origin: ChannelOrigin, isRecent: Bool) -> LifecycleTable.StateName {
+        switch origin {
+        case .owned(.connecting): return .connecting
+        case .owned(.ready): return .ready
+        case .owned(.dormant): return .dormant
+        case .owned(.contended): return .contended
+        case .foreignLive(.usersTerminal): return .foreignUsersTerminal
+        case .foreignLive(.ownTerminalTab): return .foreignOwnTab
+        case .backgroundJob: return .backgroundJob
+        case .archived: return isRecent ? .archivedRecent : .archivedOlder
+        }
+    }
+
     private func presenceNow() -> Presence {
         guard case .owned(let owned) = state.origin, owned != .contended else { return state.presence }
         if !state.pendingDecisions.isEmpty { return .waiting(for: nil) }
@@ -149,7 +168,14 @@ public actor ChannelSupervisor {
         return .idle
     }
 
-    private func publish() { updatesContinuation.yield(state) }
+    /// How many states this supervisor has published. Read on the actor, so a caller that awaits it after an action
+    /// sees every publish that action caused — which `updates`, drained from outside, cannot promise.
+    public private(set) var publishedCount = 0
+
+    private func publish() {
+        publishedCount += 1
+        updatesContinuation.yield(state)
+    }
 
     // MARK: - Actions
 
@@ -245,14 +271,22 @@ public actor ChannelSupervisor {
     public func terminateOrWedge(during action: LifecycleTable.TerminatingAction? = nil) async -> TerminateOutcome {
         guard let handle = process else { return .exited(.code(0, stderrTail: "")) }
         let pid = await handle.childProcessIdentifier
-        terminating = true
+        terminatedEpochs.insert(handle.epoch)
         let report = await handle.terminate()
-        terminating = false
         guard let exit = report.exit else {
             let trace = EscalationTrace(steps: report.steps, pid: pid, epoch: handle.epoch)
             state.wedged = trace
             diagnostics.record(.wedged(session: key.session.description, steps: report.steps.count))
-            if let action { apply(.terminateReturnedNil(during: action), to: .wedged) } else { publish() }
+            if let action {
+                apply(.terminateReturnedNil(during: action), to: .wedged)
+            } else {
+                // The one terminating path the parent's table does not model. The trace still has to be *findable*:
+                // `currentName` reads `state.wedged` only under `.owned(.dormant)`, so the state name is entered
+                // directly — through `enter`, which stays the only writer of `state.origin` — and no table
+                // transition is applied.
+                enter(.wedged)
+                publish()
+            }
             await fleet.markWedged(key)
             pushEligibility()
             return .wedged(trace)
@@ -352,9 +386,17 @@ public actor ChannelSupervisor {
         let ownPID = await handle.childProcessIdentifier
         let after = await ownership.afterHandshake(session: key.session, ownPID: ownPID, epoch: mine)
         if !after.isEmpty {
-            _ = await terminateOrWedge()
-            await fleet.rollback(reservation)
             let holders = HolderSet(holders: after, observedAt: Date())
+            if case .wedged = await terminateOrWedge() {
+                // Our own child would not end, so nothing was released to anyone. Announcing `.releasedToTerminal`
+                // here would tell the user afleet let go of a session its own ghost is still holding.
+                await fleet.rollback(reservation)
+                state.observed = holders
+                state.desired = .owned
+                publish()
+                return
+            }
+            await fleet.rollback(reservation)
             state.observed = holders
             let (origin, presence) = OriginResolver.resolve(key: key, ownedState: nil, holders: after,
                                                              pendingHatch: false)
@@ -401,8 +443,8 @@ public actor ChannelSupervisor {
         state.observed = set
         let (origin, presence) = OriginResolver.resolve(key: key, ownedState: nil, holders: holders,
                                                         pendingHatch: pendingHatch != nil)
-        state.origin = origin
         state.presence = presence
+        enter(Self.name(of: origin, isRecent: isRecent))   // no table row: nothing of ours changed, the world did
         state.banner = { if case .owned(.contended) = origin { return .contended(set) } else { return nil } }()
         publish()
     }
@@ -456,8 +498,8 @@ public actor ChannelSupervisor {
             pushEligibility()
             state.presence = presenceNow()
             publish()
-        case .exited(let status, _):
-            await handleExit(status)
+        case .exited(let status, let exitedEpoch):
+            await handleExit(status, epoch: exitedEpoch)
         default:
             break
         }
@@ -484,35 +526,37 @@ public actor ChannelSupervisor {
 
     // MARK: - Exits
 
-    private func handleExit(_ status: ExitStatus) async {
+    /// Every branch publishes exactly once — directly, or through the `apply` that succeeded — so a caller watching
+    /// `publishedCount` has a synchronisation point that is after the whole decision and not in the middle of it.
+    private func handleExit(_ status: ExitStatus, epoch exited: ProcessEpoch) async {
         state.pendingDecisions = []
         turnRunning = false
         process = nil
         pushEligibility()
-        publish()
-        if terminating { return }             // our own `terminateOrWedge()` is driving this
-        if status.isClean { await fleet.release(key); return }
-        guard !shuttingDown else { return }
+
+        // Our own `terminateOrWedge()` ended this epoch. Whatever status the escalation produced is not a crash: a
+        // SIGTERM or SIGKILL exit is never `.code(0)`, so a clean-exit test alone would respawn a reaped channel.
+        if terminatedEpochs.remove(exited) != nil { publish(); return }
+        if status.isClean { await fleet.release(key); publish(); return }
+        guard !shuttingDown else { publish(); return }
 
         crashCount += 1
         await fleet.release(key)
         if crashCount <= Self.backoffs.count {
             let delay = Self.backoffs[crashCount - 1]
-            apply(.exitedNonZero, to: .connecting)
-            let respawn = Task { [weak self] in
+            // The table is the authority for the respawn as well: a from-state it admits no crash from gets the
+            // `.transitionNotInTable` diagnostic and no replacement child.
+            guard apply(.exitedNonZero, to: .connecting) else { publish(); return }
+            respawnTask = Task { [weak self] in
                 guard let self else { return }
                 guard (try? await self.sleepOnClock(delay)) != nil else { return }
                 try? await self.spawn(reason: .respawn)
             }
-            respawnTask = respawn
             return
         }
+        let target: LifecycleTable.StateName = wasReadyInThisSeries ? .ready : .archivedOlder
         state.systemItem = .crashed(exit: status, reopenOffered: true)
-        if wasReadyInThisSeries {
-            apply(.exitedNonZero, to: .ready)
-        } else {
-            apply(.exitedNonZero, to: .archivedOlder)
-        }
+        guard apply(.exitedNonZero, to: target) else { state.systemItem = nil; publish(); return }
     }
 
     private func sleepOnClock(_ duration: Duration) async throws { try await clock.sleep(for: duration) }
