@@ -1,7 +1,9 @@
 import Foundation
+import FleetTimeline
 
-/// C3's registry-mirror entry, as much of X4 as eligibility reads. C3's real type conforms in Task 11; until then
-/// `MirrorEntryStandIn` does. Reading a protocol, not a concrete type, is what makes G2 a swap rather than a rewrite.
+/// C3's registry-mirror entry, as much of X4 as eligibility reads. C3's `RegistryEntry` conforms at the foot of this
+/// file; `MirrorEntryStandIn` still serves the tests that state a mirror outright. Reading a protocol, not a concrete
+/// type, is what made G2 a swap rather than a rewrite.
 /// `isArmed` and `isRunning` are separate facts: an armed task has been announced and not started; a running one has
 /// started or updated and not yet been notified complete.
 public protocol TaskMirrorReading: Sendable {
@@ -41,4 +43,18 @@ public enum DormantEligibility {
         if let armed = i.mirror.first(where: { $0.isArmed }) { return .blocked(.taskArmed(armed.taskID)) }
         return .eligible
     }
+}
+
+/// C3's registry-mirror row, read as eligibility reads one (X4). This is the conformance G2 swaps in for
+/// `MirrorEntryStandIn`: the protocol was written so replacing the stand-in would be a swap rather than a rewrite.
+///
+/// Armed and running are separate facts, and `notified` is what separates both from finished: C3's mirror calls a row
+/// live until the `task_notification` hands its result back, "even once the status is terminal", so a terminal row
+/// the host has not been told about is still work in flight. Before the first `task_started` the row is only
+/// announced — a `background_tasks_changed` listing, or the Bash tool's own sentence — and that is armed.
+extension RegistryEntry: TaskMirrorReading {
+    public var taskID: String { id }
+    public var isRunning: Bool { startedCount > 0 && !notified }
+    public var isArmed: Bool { startedCount == 0 && !notified }
+    public var isBackground: Bool { placement == .background }
 }

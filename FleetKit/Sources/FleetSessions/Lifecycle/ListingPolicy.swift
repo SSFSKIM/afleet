@@ -1,4 +1,5 @@
 import Foundation
+import FleetTimeline
 
 /// Which transcripts the sidebar lists, and how. The rules are data so the sidebar can name the one that decided,
 /// and so a new rule is a row rather than a branch in a chain of `if`s.
@@ -43,5 +44,15 @@ public enum ListingPolicy {
     public static func include(_ entry: IndexEntry) -> Verdict {
         for rule in rules { if let verdict = rule.decide(entry) { return verdict } }
         return .listed(.ownedCandidate)
+    }
+}
+
+extension ListingPolicy.IndexEntry {
+    /// The policy's reading of one of C3's index entries. C3 applies none of the engine's picker drop rules and
+    /// carries these five fields per transcript precisely so this decision can be C4's (X5).
+    public init(_ entry: FleetTimeline.IndexEntry) {
+        self.init(sessionID: entry.sessionID.description, entrypoint: entry.entrypoint,
+                  sessionKind: entry.sessionKind, isSidechain: entry.isSidechain, teamName: entry.teamName,
+                  continuedIn: entry.continuedIn?.description)
     }
 }
