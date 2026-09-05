@@ -245,7 +245,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
   --include-partial-messages --replay-user-messages --forward-subagent-text \
   --include-hook-events \
   --permission-prompt-tool stdio --permission-prompts host \
-  [--session-id <uuid> | --resume <session-id> [--fork-session]] \
+  [--session-id <uuid> | --resume <session-id> [--fork-session [--resume-session-at <uuid> [--resume-drops-turn <uuid>]]]] \
   [--model <m>] [--permission-mode <mode>] [--agent <a>] [--effort <l>] \
   [-n <name>] [--add-dir <dir>...] [-w [<worktree-name>]] \
   [--allow-dangerously-skip-permissions] --enable-auth-status --session-mirror \
@@ -725,7 +725,9 @@ presence glyph and the composer state. Detection: a channel is *foreign live* wh
 registry record names its session id and its pid is not one of afleet's own children;
 *background job* when the roster or `agents --json` names it; *owned* when afleet holds it;
 otherwise *archived*. The registry and roster are watched with FSEvents and polled every
-five seconds as a fallback. Observation alone is not a claim; the ownership protocol
+five seconds as a fallback; `claude agents --json`, which boots the CLI on every run, is
+run at the pre-spawn check, on adopt, send-to-background and the `/logout` census, and on a
+slow reconciliation, never on the five-second poll. Observation alone is not a claim; the ownership protocol
 below decides who may spawn.
 
 **Foreign-session safety invariant.** afleet never stops, kills, signals or adopts a
@@ -883,8 +885,10 @@ produced by the record reducer for the categories the wire carries, item for ite
 (streaming collapsed, timestamps within tolerance, identity by uuid, subagent items by
 agent id and source file). The test holds an explicit exclusion list of record kinds that
 never reach the wire and are therefore compared file-to-file only: attachment records
-(*A-11*) and the `system` records `turn_duration`, `stop_hook_summary`,
-`local_command`, `informational` and `compact_boundary`. The overlay is tested separately
+(*A-11*), the `system` records `turn_duration`, `stop_hook_summary`,
+`local_command`, `informational` and `compact_boundary`, and `user` records carrying `isMeta`
+(on disk with no wire counterpart across C1's corpus; added 2026-09-05 from C3's grounding).
+The overlay is tested separately
 against wire fixtures only. Both lists are explicit in the test and are reviewed whenever
 the baseline moves.
 
@@ -1109,7 +1113,8 @@ permission mode, model, effort or fast mode.
 
 ### 7.8 Store
 
-`~/Library/Application Support/afleet/state.json`, atomic writes, schema version. The
+`~/Library/Application Support/afleet/state.<namespace>.json`, one document per namespace so
+three packages never contend for one file, atomic writes, a schema version per namespace. The
 store is a **namespaced key-value API**: each package persists its own `Codable` types
 under its own namespace and FleetKit never models upper-layer state. FleetKit's own
 namespace holds channel grouping and pins, section order and collapse, unread cursors per
@@ -1338,7 +1343,8 @@ the tree, in the timeline and in Activity, which also lists running and failed r
 ### 9.1 Files
 
 Tree rooted at the channel's cwd, gitignore toggle, filter; open, reveal, copy path. Code
-opens in Monaco inside a `WKWebView`, bundled at build time from npm with bun into
+opens in Monaco inside a `WKWebView`, bundled by a script (`Tools/build-monaco.sh`, bun,
+the tree-shaken output committed per §11, never built inside `swift build`) from npm into
 `Resources/monaco/`, served through a custom URL scheme handler, bridged with
 `WKScriptMessageHandler` for open, save, goto-line, theme and diff. Syntax highlighting
 for all Monaco languages; language services only for the web languages it ships. Markdown,
@@ -1380,6 +1386,10 @@ The Background section reads the roster and `claude agents --json`, and drives j
 through the CLI verbs `stop`, `attach`, `logs`, `rm`, `respawn`. *Attach* runs
 `claude attach <id>` in a Terminal pane. The daemon control socket (*SPEC 38.11*) is not
 spoken directly in v1. Dispatching new jobs is v1.1.
+
+The verbs split by whether they produce a screen (decided 2026-09-05 with C7's cut): `attach`
+and `logs` run in a Terminal pane through X5's pane request; `stop`, `respawn` and `rm` are
+one-shot lifecycle actions with no PTY.
 
 ### 9.6 Link routing
 
@@ -1427,7 +1437,7 @@ output committed), the SDK typings fetched on demand.
 
 | Path | Content | Rules |
 |---|---|---|
-| `~/Library/Application Support/afleet/state.json` | the namespaced store (§7.8) | atomic writes, schema version |
+| `~/Library/Application Support/afleet/state.<namespace>.json` | the namespaced store (§7.8), one document per namespace | atomic writes, schema version per namespace |
 | `~/Library/Logs/afleet/diagnostics.log` | metadata-only diagnostics: frame type, subtype, size, timing, request id, control answer behavior and classification without payload, lifecycle and ownership events | rotated, 50 MB budget |
 | `~/Library/Logs/afleet/capture/<configHomeHash>/<session-id>.ndjson` | raw frame capture, **only while the Developer setting is on** | redacted before disk: identity fields by key name, normalised and case-insensitive, on string values — the set C1's redactor fixes (`account`, `accountUuid`, `accountId`, `accountName`, `organization`, `organizationUuid`, `organizationId`, `organizationName`, `user`, `userId`, `userUuid`, `userName`, `subscription`, `subscriptionType`, `fullName`) plus any email-shaped string anywhere, and an `account`, `organization` or `user` object replaced whole; `update_environment_variables` frames; any string-valued field whose name contains token, oauth, key or secret, excluding the usage counters (`input_tokens`, `output_tokens`, `max_tokens`, `thinking_tokens` and their kin), with an assertion after redaction that every frame typed before it stays typed; the capture redactor implements the same rule set as C1's `Tools/probe/redact.py` in full — its secret words including `bearer`, its structural exemptions (`projectKey`, `apiKeySource` and the rest of `SECRET_EXEMPT` and `SECRET_STRUCTURE_PATHS`), its handling of arrays under identity names and its per-rule placeholders — so a divergence between the two is a defect, not a choice, with one stated exception: C1's home-directory and hostname rule is a publication rule and does not run at capture, because a capture stays in the user's own log directory and their own paths are the diagnostic they opened it for; any future affordance that exports or shares a capture applies that rule at export; MCP JSON-RPC bodies truncated to 4 KB; directory 0700, files 0600; 200 MB total budget, oldest deleted first; a session's capture is deleted when its transcript disappears from `<configHome>/projects`; *Delete diagnostics* in Settings removes everything |
 
@@ -2199,7 +2209,7 @@ SwiftPM package or target that builds and tests without the children above it, p
   through `claude attach <id>`, the raw-TUI hatch through `claude --resume <id>` with
   re-adoption on exit via C4's lifecycle API, and the Background section's *Attach*,
   *Stop*, *Logs* and *Respawn* through CLI verbs. Files: the tree with gitignore toggle
-  and filter, Monaco in a `WKWebView` bundled at build time with bun and bridged for
+  and filter, Monaco in a `WKWebView` bundled by script with bun, committed, and bridged for
   open, save, goto-line, theme and diff, native viewers for markdown, images, PDF, audio
   and video, the file watcher with dirty-buffer conflict banner, and `LinkRouter`, which
   opens every `WorkspaceLink` case in the right tab or popped-out window. Browser: shared
@@ -2243,8 +2253,9 @@ SwiftPM package or target that builds and tests without the children above it, p
   shared window-wide, binding by decision; §9.2's scope binding by decision and its
   algorithm advisory; §9.6's `WorkspaceLink` binding.
 - **Required:** required.
-- **Status:** not-dispatched, composite; the cut is dispatchable when C2 lands; UI
-  blocked-by C5.G4.
+- **Status:** cut landed 2026-09-05 as `2026-09-05-c7-workbench-panels.md` (seven leaves on
+  two axes: three package cores dispatchable now, four panel leaves after C5.G4); W1's
+  Workbench skeleton is on `main`.
 
 ### 17.5 Cross-child contracts
 
@@ -2258,6 +2269,10 @@ SwiftPM package or target that builds and tests without the children above it, p
   targets only inside its own marked region of the manifest; C4 owns the rest of the file.
   Binding, because two children build one package in parallel worktrees and the split is
   what makes their merges independent; the target names inside a group are the child's.
+  Workbench's manifest skeleton is on `main` since 2026-09-05 the same way (C7's contract
+  W1): one region per leaf, C7.1 owning the file, a `PanelHostAPI` target reserved for C5
+  because X7's protocol must be importable by Workbench and the app, and libghostty-spm
+  pinned to an exact tag that only a leaf bumps with a Revision Note on the C7 spec.
 - **X2 Core value types.** `WorkspaceLink` exactly as §9.6; `ResolvedEnvironment`
   (variables, PATH, shell, capture time); `ConfigHome` (root URL, source: env or
   default); `SessionID` (UUID); `DiffRef` as §9.6; `ChannelOrigin` as
@@ -2286,23 +2301,43 @@ SwiftPM package or target that builds and tests without the children above it, p
   agent-run tree node (task id, type, model, status, depth, parent, activity line,
   elapsed origin) and the registry mirror entry (task id, kind, foreground or background,
   output file, last frame time) are FleetKit types. Owner: C3. Binds C4, C6, and every
-  leaf C6's cut produces.
+  leaf C6's cut produces. Amended 2026-09-05 from C7's cut: a recent-URL query over the
+  channel's reduced items (URL, first-seen item, time; de-duplicated, most recent first),
+  with the contributing item kinds a named constant, feeds X7's channel context.
 - **X5 Lifecycle API.** Channel origin and sub-state as observable state; the actions
   open, send, reap, adopt, sendToBackground, openInTerminal, fork, quiescentRestart,
   stopEverything, backgroundAll, logout; the preconditions as a typed result (ready,
   untrusted, consentNeeded with the server list, managedSettingsPending, contended with
   holders); dormant eligibility as a query. The Terminal panel's attach and hatch and
   the composer's send go through it and nothing else spawns. Owner: C4. Binds C5, C6,
-  C7.
+  C7. Amended 2026-09-05 from C7's cut (its W8): `openInTerminal` and `attach` perform the
+  ownership work and hand the Terminal panel a `PaneRequest {id, executable, arguments, cwd,
+  environment, purpose: .hatch(SessionID) | .attach(job) | .logs(job) | .shell | .command}`
+  whose environment C4 composes through ClaudeWire's launch configuration (§6.1, X11); the
+  panel runs it and reports `PaneExit {request, code, observedAt}` back through this API,
+  which owns the re-adoption. `id` is an opaque identifier fresh per request (amended
+  2026-09-05 from the C4 plan review): two hatches of one session are otherwise equal by
+  value, so the lifecycle accepts an exit only when its `request.id` is the one it is
+  waiting on, and a late exit from an older pane is discarded. The panel never spawns `claude` for a session on its own
+  initiative. `stop`, `respawn` and `rm` are actions here with no PTY; `attach` and `logs`
+  are panes.
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
-  types; FleetKit never models upper-layer state. Owner: C4. Binds C5, C7.
+  types; FleetKit never models upper-layer state. Owner: C4. Binds C5, C7. Amended
+  2026-09-05: the store protocol stays in `FleetSessions`; `FleetTimeline` persists only
+  through `IndexStorage`, a two-function protocol it declares, which C4 implements in
+  `FleetSessions` over the store, so nothing moves to `AfleetCore` and the package edge
+  between the two children stays one-way.
 - **X7 Panel tab host.** A tab registers with an id, title, icon, a view builder that
   receives the current channel context (session id, cwd, environment, store handle)
   and a `LinkRouter` target capability; the host owns tab order (Thread, Agents, Files,
   Source Control, Terminal, Browser, GitHub, Cmd+1 through 7), pop-out and per-channel
   panel state. Owner: C5. Binds C6, C7. Named now so that the two late cuts inherit a
-  fixed host rather than negotiating one.
+  fixed host rather than negotiating one. Amended 2026-09-05 from C7's cut: the channel
+  context also carries a recent-URL feed, the FleetKit query of X4 over the channel's
+  timeline, so the Browser's quick-open never parses timeline items; and the protocol lives
+  in the `PanelHostAPI` target of the Workbench package, which C5 fills, because Workbench
+  registers tabs and the app hosts them and Workbench cannot import the app.
 - **X8 Fixture and fake-claude format.** NDJSON frames with relative timestamps, paired
   with a transcript snapshot directory and a census JSON; a redaction manifest naming
   the fields removed; `fake-claude` accepts a fixture path, a speed factor, an
@@ -2429,13 +2464,13 @@ notarized distribution, and any write under `<configHome>` (X9).
 
 | Child | Spec | Status |
 |---|---|---|
-| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `2515b04` from `child/c1-probes-fixtures` `13226e6` (89 commits); G1–G4 green: 18 fixtures (16 recorded on the pinned 2.1.259 binary, 2 synthetic with shapes confirmed on the installed binary), 242 probe and 24 fake-claude tests on Python 3.9 and 3.14, drift ritual clean 2.1.259→2.1.260, one independent Codex leak-risk review closed; fifteen `C1/…` notes filed and reconciled |
+| C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `2515b04` from `child/c1-probes-fixtures` `13226e6` (89 commits); G1–G4 green: 18 fixtures (16 recorded on the pinned 2.1.259 binary, 2 synthetic with shapes confirmed on the installed binary), 242 probe and 24 fake-claude tests on Python 3.9 and 3.14, drift ritual clean 2.1.259→2.1.260, one independent Codex leak-risk review closed; fifteen `C1/…` notes filed and reconciled. Follow-up wave **merged** 2026-09-05 at `66fd4a5`: `spike-mcp-decline-files` settled at zero cost (§6.12 confirmed; note filed), `rewind-turn` and `compact-boundary` scenarios written and offline-verified; their recordings wait on the scratch account's five-hour window (resets 2026-09-05T06:00Z), then redact, verify, independent sign-off, catalogue 18→20 |
 | C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `b38e1f2` from `child/c2-core-wire` `9ab116a` (72 commits; history rewritten before merge so no engine byte from the recording workstation reaches the repository); G1–G4 green at the tip: ClaudeWire 225 tests, four of them live and run once from a clean build against the installed CLI under the scratch config home with no failures, AfleetCore 6; G2 over 18 fixtures and 1353 frames with the ten synthetic findings pinned as an exact set; one independent Codex leak-risk review (5 findings) and a six-lens review panel (32 findings) both closed by four sequential fix waves; the C2 reconciliations of 2026-09-04 and 2026-09-05 are in the Revision Notes; deferred debt indexed in `docs/tech-debt-tracker.md`; spend: three model turns on the child's own live gates and one in the orchestrator's final live pass |
-| C3 FleetKit timeline | — | dispatchable (C2 merged); reads §6.1/X11, §6.2/X3, §6.3, §7.6, §11 and §17.7 as revised 2026-09-05 |
-| C4 FleetKit sessions and fleet | — | dispatchable (C2 merged); owns §7.4's wedged row, the pending-list surface, channel keying on the identity event and the `apiKeySource` readback; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
+| C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` on `child/c3-timeline` (v1 `916ce02`, parent-pin `ee94449`); plan in progress | in-flight (wave 2): spec v1 reviewed 2026-09-05, four questions ruled (leaf path; rewind and compact recordings as a C1 follow-up; opt-in local index measurement; listing policy is C4's), six grounding facts filed on this parent; adds targets only inside the C3 region of `FleetKit/Package.swift` |
+| C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md` on `child/c4-sessions-fleet` (v1 `2b77140`, X5/X6 amendments folded at `847ad41`, parent-pin `ee94449`); plan in progress | in-flight (wave 2): spec v1 reviewed 2026-09-05, three questions ruled (store protocol stays in FleetKit with C3's `IndexStorage` implemented in `FleetSessions`; one composed haiku turn to widen the write allowlist; one store document per namespace) plus four rulings on `agents --json` cadence, wedged exclusion from eligibility and eviction, MCP consent read from both locations, and the listing policy; owns `FleetKit/Package.swift`; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
 | C6 Conversation surface and Agents panel | — | composite; blocked-by C3, C4, C5 |
-| C7 Workbench panels | — | composite; decomposing run dispatchable now (C2 merged); UI blocked-by C5.G4 |
+| C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core dispatchable now, held for the human's approval of the cut; C7.4–C7.7 blocked-by C5.G4 (C7.4 also by C4's X5, C7.6 by C4's store) |
 
 Each child's spec path is filled in when it is dispatched; a composite's row points at
 its own composite spec, whose tracking map lists its leaves. Children keep their own
@@ -4081,3 +4116,63 @@ Pending — written at finish.
   (C3) and `FleetSessions` (C4), one umbrella, each child confined to its marked region.
   Written by the orchestrator before wave 2 dispatch so the two children never contend for
   one manifest; the empty targets build and test on `main`. Flags C3 and C4 (dispatch).
+- 2026-09-05: C7's decomposing run landed (`1fe6fc1`): seven leaves on two axes, three package
+  cores now and four panels after C5.G4. Its flow-back is filed: X5 gains the pane request and
+  exit report and the verb split (also §9.5); X7 gains the recent-URL feed and the
+  `PanelHostAPI` location; X4 gains the recent-URL query; X1 records Workbench's skeleton; §9.1
+  and §17.4 now say the Monaco bundle is built by a script and committed, which is what §11
+  already listed. The cut's two questions are answered from this document rather than sent up:
+  the bundle is committed because §11 decided it, with S3's measured size reported and a size
+  above 25 MB reopening the question; libghostty-spm is pinned exactly and bumped only at a
+  leaf's dispatch with a Revision Note. One caveat for C7.1 recorded here because the cut's
+  PTY route rests on it: on Darwin the controlling terminal is acquired at `open` by a session
+  leader only if the kernel's tty open path grants it, and `posix_spawn` cannot issue
+  `TIOCSCTTY`; G1's `stty size` and job-control checks decide, and `forkpty` is the fallback.
+  Also verified in the bundle for C4: the engine's own MCP consent dialog writes
+  `enabledMcpjsonServers` and `disabledMcpjsonServers` through its local-settings writer, so
+  §6.12's decline write is the engine's own path, and the per-project arrays in `.claude.json`
+  are a read location the engine also consults, never afleet's write target.
+- 2026-09-05: C3 and C4 child specs reviewed at the human gate the orchestrator holds for
+  children. From C3's grounding, filed here: `user` records with `isMeta` are file-only
+  (§7.3's list extended, a binding list, on the corpus evidence); the engine's head-and-tail
+  read is 64 KiB each way; a forked subagent's `system/init` and `result` carry the session's
+  own id and no parent id, so result attribution is host state, never a frame field; an
+  agent's `<taskId>.output` is JSON-equal to its transcript and not byte-equal, and task
+  output files live under the temporary directory, not the config home; the engine's picker
+  hides `entrypoint: sdk-cli`, which is every afleet session, so the listing policy (C4's under
+  X5) copies none of its drop rules; §17.2's transcript count is 2,967 today. From C4's:
+  §7.8's store is one document per namespace; §7.1 states when `agents --json` runs; X6 records
+  C3's `IndexStorage` as the only persistence seam between the two children; a wedged channel
+  is excluded from dormant eligibility and cap eviction; MCP consent state is computed from
+  both the local-settings store and the project entry in `.claude.json`, read-only, and written
+  only through §6.12. Two C1 follow-ups queued: corrective recordings for a rewind and a
+  compaction, and a zero-cost probe that declines a project server in the TUI under the scratch
+  home and diffs which files change. Flags C3, C4 (plans), C1 (follow-ups), C6 (§7.3 list).
+- 2026-09-05 C1/mcp-decline-files: §6.12's decline write is confirmed against the terminal's
+  own dialog, on 2.1.259 under the scratch config home, for zero cost
+  (`Tools/probe/spikes/mcp-decline-files.md`, scenario `spike-mcp-decline-files`). Declining a
+  project `.mcp.json` server creates exactly one file, `<project>/.claude/settings.local.json`,
+  holding exactly one key, `disabledMcpjsonServers`, with the declined server's name — the file
+  and the key §6.12 already names. The project's entry in the scratch `.claude.json` is created
+  by the *workspace-trust* dialog, not the MCP one, and arrives with `enabledMcpjsonServers` and
+  `disabledMcpjsonServers` already present as empty arrays; both are still empty after the
+  decline, and `enableAllProjectMcpServers` never appears. So the read side of the 2026-09-05
+  C4 note above holds with a sharpening: the rejection is readable only from the local-settings
+  store, and a host that reads the project entry's identically-named arrays sees no rejection.
+  Two dialogs matter to whoever automates this: both arrive with the safe option preselected —
+  workspace trust on `No, exit`, the MCP dialog on `Continue without using this MCP server` — so
+  a decline is a bare `Enter` and an arrow key can wrap the selection onto *Use this MCP
+  server*. Not settled: a project whose store resolves to a repository root above the session
+  cwd, the multi-server dialog, the *all future servers* leg, and whether the write preserves
+  unrecognised keys in an existing store, since this run created the file.
+- 2026-09-05 C4 plan review (Codex, adversarial): X5's `PaneRequest` gains an opaque `id` so a
+  stale pane exit cannot be mistaken for the current hatch; the recheck-before-launch the review
+  also asked for is not added: the panel is a plain executor by W8, the window is the handoff
+  itself, and the CLI does not refuse a second holder (S12), so the after-handshake check of
+  §7.2 rule 4 remains the backstop. The other findings are child-local and fold into C4's spec
+  and plan.
+- 2026-09-05 C2 corrective (`13c9ad4`): `SessionStart` gains `forkFrom(SessionID, at: ForkPoint
+  {entryUUID, dropsTurn?})`, emitting `--resume <id> --fork-session --resume-session-at <uuid>`
+  and, when set, `--resume-drops-turn <uuid>`; the shape makes the CLI's refusal without
+  `--resume` unrepresentable. §6.1's usage line now shows the two hidden flags under
+  `--fork-session`. C4's fork-from-a-message task builds on it; its planned skip is withdrawn.

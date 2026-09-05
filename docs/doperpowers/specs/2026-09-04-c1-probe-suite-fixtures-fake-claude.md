@@ -317,6 +317,15 @@ bundle source and then confirmed on a recorded `ask-user-question`), S17
 (`apply_flag_settings {agent}` then a turn; then `--resume` of an `--agent` session with
 an `initialPrompt`, with the agent defined in the scratch cwd's `.claude/agents/`).
 
+A follow-up spike carries the same shape and is written up the same way:
+`spike-mcp-decline-files` (C4's, on the parent's §6.12) drives the interactive CLI on a
+pseudo-terminal, declines a project `.mcp.json` server at the engine's own consent dialog and
+diffs the project directory and the scratch config home across the run, so the finding names
+the files that changed and the keys they gained. Its write-up is
+`Tools/probe/spikes/mcp-decline-files.md`, the first prose finding kept beside the extraction
+script in that directory; §4.9's Revision Note on the parent carries the same answer in the
+parent's own words.
+
 Recording is a deliberate act: `make record SCENARIO=<name>` runs one scenario; the
 unit tests never touch a live binary. Everything records on `haiku` with `--max-turns`
 between 2 and 6; a full re-record of the catalogue is about twenty short sessions,
@@ -1924,3 +1933,11 @@ fake-claude injections above, not the clean live run.
   document quote the older figures as observations made at the time; they are left as the record
   of what was seen then. The check that caught them is worth keeping: every integer in a README
   held against the counts computed from the fixture, with the unmatched ones read by hand.
+
+- 2026-09-05: follow-up wave for C3 and C4, on `worktree-agent-aaf78bf28064267d9`. Adds the
+  spike `spike-mcp-decline-files` with its finding under `Tools/probe/spikes/`, which cost
+  nothing, and the two scenarios C3's corrective recordings need, `rewind-turn` and
+  `compact-boundary`. The recordings themselves are not in this commit: the scratch account's
+  five-hour window read 98 per cent utilisation at the wave's usage check, which is the
+  condition this wave was dispatched to stop on, so the two model turns were not spent. Each
+  scenario is one `make record` away once the window resets.

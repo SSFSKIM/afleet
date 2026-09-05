@@ -40,6 +40,47 @@ final class LaunchConfigurationTests: XCTestCase {
                        ["-w", "--enable-auth-status", "--session-mirror", "--setting-sources", "user,project"])
     }
 
+    /// Invented uuids: never a record uuid copied from a fixture or a transcript.
+    private let forkEntry = "b7c41d02-5e38-4a91-9f60-2d8ac31be745"
+    private let droppedPrompt = "3e91f7a4-0c62-4d18-8b53-6af02d9c1e87"
+
+    private func assertContainsSubsequence(_ argv: [String], _ needle: [String], _ message: String,
+                                           file: StaticString = #filePath, line: UInt = #line) {
+        let found = argv.indices.contains { i in
+            i + needle.count <= argv.count && Array(argv[i ..< i + needle.count]) == needle
+        }
+        XCTAssertTrue(found, "\(message): \(needle) not contiguous in \(argv)", file: file, line: line)
+    }
+
+    /// *Fork from here* (§7.4): `--resume-session-at` is inclusive of the entry it names and
+    /// `--resume-drops-turn` is the CLI's guard on what the truncation discards. Both are refused
+    /// without `--resume`, so the case emits the whole group or nothing.
+    func testForkFromEmitsResumeSessionAtAndOptionalDropsTurn() throws {
+        let both = try LaunchConfiguration(binary: bin, cwd: cwd,
+                                           session: .forkFrom(sid, at: .init(entryUUID: forkEntry, dropsTurn: droppedPrompt))).arguments()
+        assertContainsSubsequence(both, ["--resume", sid.description, "--fork-session",
+                                         "--resume-session-at", forkEntry, "--resume-drops-turn", droppedPrompt],
+                                  "fork point with a declared discarded turn")
+
+        let entryOnly = try LaunchConfiguration(binary: bin, cwd: cwd,
+                                                session: .forkFrom(sid, at: .init(entryUUID: forkEntry))).arguments()
+        assertContainsSubsequence(entryOnly, ["--resume", sid.description, "--fork-session", "--resume-session-at", forkEntry],
+                                  "fork point without a declared discarded turn")
+        XCTAssertFalse(entryOnly.contains("--resume-drops-turn"))
+    }
+
+    func testPlainResumeAndNewChannelCarryNoForkPointFlags() throws {
+        for session in [SessionStart.resume(sid, fork: true), .resume(sid, fork: false)] {
+            let argv = try LaunchConfiguration(binary: bin, cwd: cwd, session: session).arguments()
+            XCTAssertFalse(argv.contains("--resume-session-at"), "\(session)")
+            XCTAssertFalse(argv.contains("--resume-drops-turn"), "\(session)")
+        }
+        let fresh = try LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)).arguments()
+        for flag in ["--resume", "--fork-session", "--resume-session-at", "--resume-drops-turn"] {
+            XCTAssertFalse(fresh.contains(flag), flag)
+        }
+    }
+
     /// The options whose value the caller writes, and which therefore reach the child as caller-chosen argv
     /// text. `testEveryCallerSuppliedArgvTokenIsAValidatedOne` asserts this set is complete; the test below
     /// asserts every member of it rejects an option-shaped value. Neither is worth much without the other.
