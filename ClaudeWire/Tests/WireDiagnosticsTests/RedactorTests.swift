@@ -190,6 +190,50 @@ final class RedactorTests: XCTestCase {
         XCTAssertEqual(body["session_state"]?["state"], .string("idle"))
     }
 
+    // MARK: - Correlation
+
+    /// Rules 4, 5 and 6 are about a response's *body*, but a response names no subtype of its own: the only
+    /// place its subtype is written down is the request it answers. Without that correlation every response
+    /// carrying a body of the right shape was treated as a response to the request that shape belongs to —
+    /// an MCP body truncated on a `get_usage` answer, a settings answer reduced on anything.
+    ///
+    /// One body carrying all four shapes, correlated in turn to four subtypes, so each rule is seen firing
+    /// and not firing over identical input.
+    func testResponseRulesAreGatedOnTheSubtypeOfTheRequestTheyAnswer() throws {
+        let body = #"{"mcp_response":{"jsonrpc":"2.0","id":9,"result":{"blob":"\#(String(repeating: "x", count: 5000))"}},"effective":{"model":"haiku"},"link":"https://claude.ai/oauth/cb?code=grant-1&state=nonce-1"}"#
+        func answer(to subtype: String?) throws -> JSONValue {
+            var correlation = Redactor.Correlation()
+            if let subtype {
+                _ = Redactor.redact(line: Data(#"{"type":"control_request","request_id":"q","request":{"subtype":"\#(subtype)"}}"#.utf8),
+                                    correlation: &correlation)
+            }
+            let line = #"{"type":"control_response","response":{"subtype":"success","request_id":"q","response":\#(body)}}"#
+            let out = try XCTUnwrap(Redactor.redact(line: Data(line.utf8), correlation: &correlation))
+            return try XCTUnwrap(JSONDecoder().decode(JSONValue.self, from: out)["response"]?["response"])
+        }
+        // A subtype none of the three belong to: the body is walked by rules 1 and 2 and otherwise left alone.
+        let usage = try answer(to: "get_usage")
+        XCTAssertNotNil(usage["mcp_response"]?["result"])
+        XCTAssertNotNil(usage["effective"])
+        XCTAssertEqual(usage["link"], .string("https://claude.ai/oauth/cb?code=grant-1&state=nonce-1"))
+        // One rule each, and only its own.
+        let mcp = try answer(to: "mcp_message")
+        XCTAssertNotNil(mcp["mcp_response"]?["truncated"]); XCTAssertNotNil(mcp["effective"])
+        let settings = try answer(to: "get_settings")
+        XCTAssertNotNil(settings["effective_keys"]); XCTAssertNotNil(settings["mcp_response"]?["result"])
+        let oauth = try answer(to: "claude_authenticate")
+        XCTAssertEqual(oauth["link"], .string("https://claude.ai/oauth/cb?<redacted>"))
+        XCTAssertNotNil(oauth["effective"])
+        // No correlation — a capture opened mid-stream, or a late response whose request was forgotten. All
+        // three fire, because failing *open* would switch the rules off exactly where the frame is least
+        // understood. redact.py's response branch reads the same way, so this is parity, not a divergence;
+        // the request-side gate is subtype-only because a request always states its own subtype.
+        let unknown = try answer(to: nil)
+        XCTAssertNotNil(unknown["mcp_response"]?["truncated"])
+        XCTAssertNotNil(unknown["effective_keys"])
+        XCTAssertEqual(unknown["link"], .string("https://claude.ai/oauth/cb?<redacted>"))
+    }
+
     // MARK: - Keys, idempotence, and the corpus
 
     /// A key is data too: project maps are keyed by absolute path and contact maps by address. Two keys can

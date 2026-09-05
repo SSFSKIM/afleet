@@ -9,6 +9,10 @@ public actor RawCapture {
     public let directory: URL
     public let budgetBytes: Int
     private var handles: [SessionID: FileHandle] = [:]
+    /// One per session: a `control_response` is gated on the subtype of the request it answers, and that is
+    /// the only place the subtype is written down. Per session rather than shared, because request ids are
+    /// only unique within the stream that issued them.
+    private var correlations: [SessionID: Redactor.Correlation] = [:]
 
     public init(root: URL, configHome: ConfigHome, budgetBytes: Int = 200 * 1024 * 1024) {
         self.root = root
@@ -21,7 +25,9 @@ public actor RawCapture {
     /// Redaction happens before the file is even opened, so no unredacted byte ever reaches disk.
     /// A line that does not parse is dropped, not written through.
     public func write(line: Data, session: SessionID) {
-        guard var redacted = Redactor.redact(line: line) else { return }
+        var correlation = correlations[session] ?? .init()
+        defer { correlations[session] = correlation }
+        guard var redacted = Redactor.redact(line: line, correlation: &correlation) else { return }
         redacted.append(0x0A)
         guard let dirFD = openDirectory() else { return }
         defer { close(dirFD) }
@@ -41,6 +47,7 @@ public actor RawCapture {
     public func rename(from provisional: SessionID, to real: SessionID) {
         guard provisional != real else { return }
         try? handles[provisional]?.close(); handles[provisional] = nil
+        correlations[real] = correlations.removeValue(forKey: provisional)
         guard let dirFD = openDirectory() else { return }
         defer { close(dirFD) }
         // Relative to the verified descriptor, like every other access here. A provisional file that was
@@ -49,6 +56,7 @@ public actor RawCapture {
     }
     public func prune(keeping: Set<SessionID>) {
         for (session, handle) in handles where !keeping.contains(session) { try? handle.close(); handles[session] = nil }
+        for session in correlations.keys where !keeping.contains(session) { correlations[session] = nil }
         for entry in ownedEntries() where !keeping.contains(entry.session) {
             try? FileManager.default.removeItem(at: entry.url)
         }

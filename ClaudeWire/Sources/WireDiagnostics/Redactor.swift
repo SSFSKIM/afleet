@@ -55,17 +55,55 @@ public enum Redactor {
                                              "mcp_authenticate", "mcp_oauth_callback_url"]
     public static let mcpBodyLimit = 4096
 
+    // MARK: - Correlation
+
+    /// `request_id` → the subtype of the `control_request` that carries it, in either direction.
+    ///
+    /// A `control_response` names no subtype of its own; the only place its subtype is written down is the
+    /// request it answers. redact.py's callers build exactly this map — `Tools/probe/census.py`'s
+    /// `request_subtypes` over a whole recording, `harness.py` accumulating it line by line as it records —
+    /// and pass it to `redact_frame`, which gates rules 4, 5 and 6 on it. Without one, every response
+    /// carrying a body of the right *shape* was treated as a response to the request that shape belongs to.
+    ///
+    /// A capture is a stream, so this accumulates line by line, like `harness.py` and unlike the whole-file
+    /// map `probe.py` builds after the fact. The difference shows only for a response that arrives before
+    /// its request, which puts it in the unknown case — see `Rules.frame`, which fails toward redaction there.
+    public struct Correlation: Sendable {
+        private var subtypes: [String: String] = [:]
+        public init() {}
+        /// What this line says about the map. Called before the line is redacted, and for a dropped frame too.
+        public mutating func observe(_ value: JSONValue) {
+            guard value["type"]?.stringValue == "control_request",
+                  let id = value["request_id"]?.stringValue,
+                  let subtype = value["request"]?["subtype"]?.stringValue else { return }
+            subtypes[id] = subtype
+        }
+        /// The subtype of the request this response answers, or `nil` when it was never seen.
+        func subtype(answering id: String?) -> String? { id.flatMap { subtypes[$0] } }
+    }
+
     // MARK: - Entry points
 
-    /// Redacts one wire line. Returns canonical bytes — a captured line is canonicalised (keys sorted,
-    /// whitespace dropped, integral numbers normalised), not byte-identical to what arrived on the wire.
-    /// `nil` means the line is not captured at all: it did not parse, or the frame is dropped wholesale.
-    public static func redact(line: Data) -> Data? {
-        guard let v = try? JSONDecoder().decode(JSONValue.self, from: line), let r = redact(v) else { return nil }
+    /// Redacts one wire line, updating `correlation` from it first. Returns canonical bytes — a captured line
+    /// is canonicalised (keys sorted, whitespace dropped, integral numbers normalised), not byte-identical to
+    /// what arrived on the wire. `nil` means the line is not captured at all: it did not parse, or the frame
+    /// is dropped wholesale.
+    public static func redact(line: Data, correlation: inout Correlation) -> Data? {
+        guard let v = try? JSONDecoder().decode(JSONValue.self, from: line) else { return nil }
+        correlation.observe(v)
+        guard let r = redact(v, correlation: correlation) else { return nil }
         return try? r.canonicalData()
     }
+    /// One line with no correlation at all: every gated rule fires, which is the unknown case. This is the
+    /// right entry point for a caller holding a single frame and no stream to correlate it against.
+    public static func redact(line: Data) -> Data? {
+        var throwaway = Correlation()
+        return redact(line: line, correlation: &throwaway)
+    }
     /// One frame. `nil` means "drop this frame entirely" — redact.py `redact_frame` (line 376).
-    public static func redact(_ value: JSONValue) -> JSONValue? { Rules().frame(value) }
+    public static func redact(_ value: JSONValue, correlation: Correlation = .init()) -> JSONValue? {
+        Rules(correlation: correlation).frame(value)
+    }
 
     // MARK: - Name and path predicates, shared with the tests
 
@@ -176,6 +214,7 @@ public enum Redactor {
     /// The patterns live on a value rather than in statics because `Regex` is not `Sendable` and so cannot
     /// be a stored global under language mode 6. One `Rules` is built per frame.
     struct Rules {
+        let correlation: Correlation
         // redact.py lines 33 to 55.
         let email = #/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]+/#
         let skAnt = #/sk-ant-[A-Za-z0-9_\-]+/#
@@ -307,9 +346,16 @@ public enum Redactor {
         /// walk of rules 1 and 2: rule 5 needs the pre-redaction `effective` dict and rule 4 the
         /// pre-redaction body size.
         ///
-        /// C1 gates rules 4, 5 and 6 on the correlated request subtype, firing on its own subtype *or on an
-        /// unknown one* so that a rule never fails open exactly when a frame is least understood. This
-        /// redactor sees one line with no correlation map, which is C1's unknown case, so all three fire.
+        /// Rules 4, 5 and 6 are gated on the correlated request subtype, firing on their own subtype *or on
+        /// an unknown one*, exactly as redact.py does.
+        ///
+        /// **The request gate and the response gate are asymmetric, and both are right.** A request states
+        /// its own subtype, so there is nothing to lose and the gate is the subtype and nothing else. A
+        /// response does not: its subtype comes from the request it answers, and that correlation can
+        /// genuinely be missing — a capture opened mid-stream, or a late response whose request has been
+        /// forgotten. Failing *open* there would switch the rules off exactly when the frame is least
+        /// understood, so an uncorrelated response is treated as possibly any of them. Do not "fix" the
+        /// asymmetry into a single rule; each side is answering a different question.
         func frame(_ value: JSONValue) -> JSONValue? {
             let type = value["type"]?.stringValue
             if type == "control_request" {
@@ -342,18 +388,24 @@ public enum Redactor {
             if type == "control_response" {
                 var f = value
                 if var outer = f.objectValue, var resp = outer["response"]?.objectValue, var body = resp["response"]?.objectValue {
-                    if body["mcp_response"] != nil { body["mcp_response"] = truncateMCP(body["mcp_response"]) ?? .null }
-                    if let eff = body.removeValue(forKey: "effective") {
-                        body["effective_keys"] = .array((eff.objectValue?.keys.sorted() ?? []).map(JSONValue.string))
+                    let sub = correlation.subtype(answering: resp["request_id"]?.stringValue)
+                    if sub == nil || sub == "mcp_message", body["mcp_response"] != nil {
+                        body["mcp_response"] = truncateMCP(body["mcp_response"]) ?? .null
                     }
-                    if let srcs = body.removeValue(forKey: "sources") {
-                        body["sources_keys"] = .array((srcs.arrayValue ?? []).compactMap { s in
-                            guard let s = s.objectValue else { return nil }
-                            return .object(["source": s["source"] ?? .null,
-                                            "keys": .array((s["settings"]?.objectValue?.keys.sorted() ?? []).map(JSONValue.string))])
-                        })
+                    if sub == nil || sub == "get_settings" {
+                        if let eff = body.removeValue(forKey: "effective") {
+                            body["effective_keys"] = .array((eff.objectValue?.keys.sorted() ?? []).map(JSONValue.string))
+                        }
+                        if let srcs = body.removeValue(forKey: "sources") {
+                            body["sources_keys"] = .array((srcs.arrayValue ?? []).compactMap { s in
+                                guard let s = s.objectValue else { return nil }
+                                return .object(["source": s["source"] ?? .null,
+                                                "keys": .array((s["settings"]?.objectValue?.keys.sorted() ?? []).map(JSONValue.string))])
+                            })
+                        }
                     }
-                    resp["response"] = urls(.object(body))
+                    let oauth = sub == nil || Redactor.oauthSubtypes.contains(sub!)
+                    resp["response"] = oauth ? urls(.object(body)) : .object(body)
                     outer["response"] = .object(resp)
                     f = .object(outer)
                 }

@@ -72,7 +72,35 @@ final class RedactorDifferentialTests: XCTestCase {
         mcpFrame(mcpMessage(canonicalBytes: 4000)),
         // arrays, nesting, non-ASCII including an astral scalar, and a frame type neither side models
         #"{"type":"tool_progress","items":[{"user":"u"},[{"apiKey":"k"}],null,3],"nested":{"deep":{"deeper":{"token":"t"}}},"text":"ünïcødé and 𝄞 and \u0007"}"#,
-    ]
+        // Rule 6 on the **request** side, both halves. The grant values are short on purpose: the
+        // pre-existing query-run pattern strips any run of 32 characters or more, so a long value would be
+        // redacted whatever the subtype gate does and the vector would agree across a change to it.
+        #"{"type":"control_request","request_id":"r4","request":{"subtype":"mcp_oauth_callback_url","server_name":"afleet","callbackUrl":"http://localhost:1455/callback?code=grant-1&state=nonce-1"}}"#,
+        #"{"type":"control_request","request_id":"r5","request":{"subtype":"mcp_authenticate","server_name":"afleet","nested":{"redirectUri":"https://claude.ai/oauth/cb?code=grant-2&state=nonce-2"}}}"#,
+        #"{"type":"control_request","request_id":"r6","request":{"subtype":"claude_oauth_callback","authorizationCode":"grant-3","state":"nonce-3"}}"#,
+        // ...and the subtype gate's other side: an ordinary request carrying both shapes, untouched.
+        #"{"type":"control_request","request_id":"r7","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"state":"expanded","url":"https://docs.test/page?section=intro"}}}"#,
+    ] + correlationVectors
+
+    /// Correlation, which is the whole reason these are ordered. Each pair is a `control_request` naming a
+    /// subtype followed by the `control_response` that answers it, over one body carrying all four shapes
+    /// rules 4, 5 and 6 look for. Gating changes the outcome of every pair, and differently in each: one
+    /// truncates only the MCP body, one reduces only the settings, one strips only the URL, and one — a
+    /// subtype none of the rules belong to — leaves all four alone. A redactor without correlation applies
+    /// all three to all four and cannot pass this.
+    ///
+    /// One body, reused, so the only variable is the subtype it is correlated to.
+    private static let gatedBody = #"{"mcp_response":{"jsonrpc":"2.0","id":9,"result":{"blob":"\#(String(repeating: "x", count: 5000))"}},"effective":{"model":"haiku","apiKeyHelper":"/bin/x"},"sources":[{"source":"user","settings":{"theme":"dark"}}],"link":"https://claude.ai/oauth/cb?code=grant-4&state=nonce-4"}"#
+    private static func gatedPair(_ id: String, _ subtype: String) -> [String] {
+        [#"{"type":"control_request","request_id":"\#(id)","request":{"subtype":"\#(subtype)"}}"#,
+         #"{"type":"control_response","response":{"subtype":"success","request_id":"\#(id)","response":\#(gatedBody)}}"#]
+    }
+    private static let correlationVectors: [String] =
+        gatedPair("g1", "get_usage") + gatedPair("g2", "get_settings")
+        + gatedPair("g3", "mcp_message") + gatedPair("g4", "claude_authenticate")
+        // The unknown case, last: a response whose request this stream never saw. Both sides apply all three
+        // rules to it rather than none, which is the fail-closed direction for anything reaching disk.
+        + [#"{"type":"control_response","response":{"subtype":"success","request_id":"never-seen","response":\#(gatedBody)}}"#]
 
     private func allInputs() throws -> (inputs: [String], labels: [String]) {
         let names = try TestPaths.sampleNames()
@@ -94,15 +122,25 @@ final class RedactorDifferentialTests: XCTestCase {
     func testMatchesTheReferenceRedactorOverTheCorpusAndTheVectors() throws {
         let reference = try requireReference()
         let (inputs, labels) = try allInputs()
+        // The reference's correlation map, accumulated line by line exactly as `harness.py` does while it
+        // records. Passing `{}` here — as this test used to — put every response in the unknown case on the
+        // reference side as well, so the two agreed no matter what either did about gating: the test that
+        // exists to catch drift in these three rules could not observe it.
         let driver = """
         import json, sys, os
         sys.path.insert(0, os.path.dirname(sys.argv[1]))
         import redact
+        rs = {}
         for line in sys.stdin:
             line = line.strip()
             if not line:
                 continue
-            out = redact.Redactor(home="/", hostname="zz").redact_frame(json.loads(line), "in", {})
+            frame = json.loads(line)
+            if frame.get("type") == "control_request":
+                rid, sub = frame.get("request_id"), (frame.get("request") or {}).get("subtype")
+                if rid and sub:
+                    rs[rid] = sub
+            out = redact.Redactor(home="/", hostname="zz").redact_frame(frame, "in", rs)
             sys.stdout.write("" if out is None else json.dumps(out, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
             sys.stdout.write("\\n")
         """
@@ -110,8 +148,9 @@ final class RedactorDifferentialTests: XCTestCase {
         guard theirs.count == inputs.count else {
             return XCTFail("reference produced \(theirs.count) lines for \(inputs.count) inputs")
         }
+        var correlation = Redactor.Correlation()
         for (i, input) in inputs.enumerated() {
-            let mine = Redactor.redact(line: Data(input.utf8))
+            let mine = Redactor.redact(line: Data(input.utf8), correlation: &correlation)
             if theirs[i].isEmpty {
                 XCTAssertNil(mine, "\(labels[i]): the reference drops this frame and we do not")
                 continue
