@@ -9,3 +9,4 @@ DerivedData/
 .doperpowers/
 __pycache__/
 .obsidian/
+.claude/worktrees/
