@@ -4,7 +4,10 @@ import Foundation
 /// record (parity §35.1), so an empty line is skipped, and a final run of bytes without a terminator is *held back*: it is
 /// returned as `partial` and never decoded, because the next append will complete it.
 public enum LineScanner {
-    public struct Scan: Sendable { public var lines: [(offset: Int, bytes: Data)]; public var consumed: Int; public var partial: Data? }
+    public struct Scan: Sendable {
+        public var lines: [(offset: Int, bytes: Data)]; public var consumed: Int; public var partial: Data?
+        public init(lines: [(offset: Int, bytes: Data)], consumed: Int, partial: Data?) { self.lines = lines; self.consumed = consumed; self.partial = partial }
+    }
     public static func scan(_ data: Data, base: Int = 0) -> Scan {
         var lines: [(Int, Data)] = []; var start = data.startIndex
         while let nl = data[start...].firstIndex(of: UInt8(ascii: "\n")) {

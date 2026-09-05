@@ -2,7 +2,10 @@ import Foundation
 import ClaudeWire
 
 /// The picker's read, exactly (2.1.258 `ihe`, line 13803; `od = 65536`): the first and last 64 KiB and the stat.
-public struct HeadTail: Sendable, Hashable { public var mtime: Date; public var size: Int64; public var head: String; public var tail: String }
+public struct HeadTail: Sendable, Hashable {
+    public var mtime: Date; public var size: Int64; public var head: String; public var tail: String
+    public init(mtime: Date, size: Int64, head: String, tail: String) { self.mtime = mtime; self.size = size; self.head = head; self.tail = tail }
+}
 public protocol HeadTailReading: Sendable { func read(_ url: URL) throws -> HeadTail? }
 public struct HeadTailReader: HeadTailReading {
     public static let chunk = 65_536
@@ -70,13 +73,19 @@ public struct HeadTailReader: HeadTailReading {
     }
 
     /// `Ose` (which is `V` with its arguments swapped): scanning lines from the end, the first line that contains `"key":`
-    /// and — when a type is given — the literal `"type":"<type>"`, parsed as JSON, its string field `key`.
-    /// That type prefilter is written unspaced only: a line spelled `"type": "<type>"` never matches, engine and here alike.
+    /// and — when a type is given — a `"type":"<type>"` marker, parsed as JSON, its string field `key`.
+    ///
+    /// One deliberate, bounded divergence from the engine: `V`'s substring prefilter is written unspaced only
+    /// (`"type":"<type>"`, bundle line 13402), so it never matches a line spelled `"type": "<type>"`. The committed
+    /// recordings are re-serialised with that space, so the engine's literal would find nothing in them. Both spellings
+    /// are accepted here, exactly as `G1`/`Gf` already accept both. The widening cannot produce a false positive: this
+    /// is only a prefilter, and the post-parse guard below reproduces the engine's own `u.type === r` check (line 13405).
+    /// It cannot produce a false negative on real engine bytes either, being a strict superset of the engine's literal.
     public static func lastLineString(_ text: String, type: String?, key: String) -> String? {
-        let typeMark = type.map { "\"type\":\"\($0)\"" }
+        let typeMarks = type.map { ["\"type\":\"\($0)\"", "\"type\": \"\($0)\""] }
         let keyMark = "\"\(key)\":"
         for line in text.split(separator: "\n", omittingEmptySubsequences: false).reversed() {
-            guard line.contains(keyMark), typeMark.map({ line.contains($0) }) ?? true else { continue }
+            guard line.contains(keyMark), typeMarks.map({ marks in marks.contains { line.contains($0) } }) ?? true else { continue }
             guard let object = object(String(line)) else { continue }
             if let type, object["type"]?.stringValue != type { continue }
             if let value = object[key]?.stringValue { return value }

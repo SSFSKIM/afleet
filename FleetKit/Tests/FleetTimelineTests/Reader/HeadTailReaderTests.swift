@@ -46,21 +46,29 @@ final class HeadTailReaderTests: XCTestCase {
         let relocated = try XCTUnwrap(reader.read(relocationURL))
         let recordedCwd = try XCTUnwrap(HeadTailReader.firstLineString(relocated.head, key: "cwd"),
                                         "the first line carrying a cwd names the session's directory")
-        let relocatedCwd = try XCTUnwrap(HeadTailReader.lastLineString(relocated.tail, type: nil, key: "relocatedCwd"),
-                                         "the last line carrying a relocatedCwd names where the session moved to")
+        // The typed path against the recording itself: the last `relocated` line in the tail names where it moved to.
+        let relocatedCwd = try XCTUnwrap(HeadTailReader.lastLineString(relocated.tail, type: "relocated", key: "relocatedCwd"),
+                                         "the last relocated line names where the session moved to")
         XCTAssertNotEqual(recordedCwd, relocatedCwd, "a relocation moved the session, so the two differ")
-        // The engine's type prefilter (`V`, line 13408) is written unspaced — `"type":"relocated"` — and the committed
-        // recordings are pretty-printed with a space, so the typed lookup finds nothing in them. Against the same record
-        // re-encoded compactly, as the engine writes it, the typed lookup does find it. The record is the recording's;
-        // only its whitespace is the test's.
-        XCTAssertNil(HeadTailReader.lastLineString(relocated.tail, type: "relocated", key: "relocatedCwd"),
-                     "the recording spells the key with a space, which the engine's unspaced prefilter never matches")
+        XCTAssertEqual(HeadTailReader.lastLineString(relocated.tail, type: nil, key: "relocatedCwd"), relocatedCwd,
+                       "the typed and untyped lookups agree when only one kind carries the key")
+
+        // The type filter still discriminates: a key that other kinds do carry is found untyped and refused when the
+        // type does not match. `lastPrompt` is on this recording's `last-prompt` records, never on a `relocated` one.
+        XCTAssertNotNil(HeadTailReader.lastLineString(relocated.tail, type: nil, key: "lastPrompt"),
+                        "the tail carries a last-prompt record")
+        XCTAssertNil(HeadTailReader.lastLineString(relocated.tail, type: "relocated", key: "lastPrompt"),
+                     "a line of the wrong type is refused even though it carries the key")
+        XCTAssertNil(HeadTailReader.lastLineString(relocated.tail, type: "a-kind-no-record-carries", key: "relocatedCwd"))
+
+        // The same records written the way the engine writes them — compact, no space after the colon — read the same.
+        // The engine's own prefilter is unspaced only; this reader accepts both spellings, so both forms resolve.
         let compact = try TranscriptReader(url: relocationURL).readAll().records
             .filter { $0.kind == "relocated" }
             .map { String(decoding: try JSONDecoder().decode(JSONValue.self, from: RecordDecoder.encode($0)).canonicalData(), as: UTF8.self) }
             .joined(separator: "\n")
         XCTAssertEqual(HeadTailReader.lastLineString(compact, type: "relocated", key: "relocatedCwd"), relocatedCwd,
-                       "written as the engine writes it, the typed lookup returns the same value")
+                       "the engine's own spelling resolves to the same value")
 
         let plain = try FixtureCorpus.named("plain-two-turn")
         let plainURL = try XCTUnwrap(try plain.transcriptFiles().first).2
