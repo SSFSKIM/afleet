@@ -68,9 +68,9 @@
  "recorded_at": "2026-09-04T11:09:47Z",
  "review": {
   "checklist_version": 3,
-  "date": "2026-09-05",
+  "date": "2026-09-06",
   "reviewer": "Claude reviewer for kimmi",
-  "tree_sha256": "07edfc2bc40088f7d58ea261b383eb8b871e19af39ff3d769bea672e34ea0e5b"
+  "tree_sha256": "dfecb4a551fd598886347c306632998f23bbc6cc38c240b6e37412b180d874a5"
  },
  "scenario": "control_shapes",
  "serves": [
