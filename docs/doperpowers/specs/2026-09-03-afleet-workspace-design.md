@@ -1338,7 +1338,8 @@ the tree, in the timeline and in Activity, which also lists running and failed r
 ### 9.1 Files
 
 Tree rooted at the channel's cwd, gitignore toggle, filter; open, reveal, copy path. Code
-opens in Monaco inside a `WKWebView`, bundled at build time from npm with bun into
+opens in Monaco inside a `WKWebView`, bundled by a script (`Tools/build-monaco.sh`, bun,
+the tree-shaken output committed per §11, never built inside `swift build`) from npm into
 `Resources/monaco/`, served through a custom URL scheme handler, bridged with
 `WKScriptMessageHandler` for open, save, goto-line, theme and diff. Syntax highlighting
 for all Monaco languages; language services only for the web languages it ships. Markdown,
@@ -1380,6 +1381,10 @@ The Background section reads the roster and `claude agents --json`, and drives j
 through the CLI verbs `stop`, `attach`, `logs`, `rm`, `respawn`. *Attach* runs
 `claude attach <id>` in a Terminal pane. The daemon control socket (*SPEC 38.11*) is not
 spoken directly in v1. Dispatching new jobs is v1.1.
+
+The verbs split by whether they produce a screen (decided 2026-09-05 with C7's cut): `attach`
+and `logs` run in a Terminal pane through X5's pane request; `stop`, `respawn` and `rm` are
+one-shot lifecycle actions with no PTY.
 
 ### 9.6 Link routing
 
@@ -2199,7 +2204,7 @@ SwiftPM package or target that builds and tests without the children above it, p
   through `claude attach <id>`, the raw-TUI hatch through `claude --resume <id>` with
   re-adoption on exit via C4's lifecycle API, and the Background section's *Attach*,
   *Stop*, *Logs* and *Respawn* through CLI verbs. Files: the tree with gitignore toggle
-  and filter, Monaco in a `WKWebView` bundled at build time with bun and bridged for
+  and filter, Monaco in a `WKWebView` bundled by script with bun, committed, and bridged for
   open, save, goto-line, theme and diff, native viewers for markdown, images, PDF, audio
   and video, the file watcher with dirty-buffer conflict banner, and `LinkRouter`, which
   opens every `WorkspaceLink` case in the right tab or popped-out window. Browser: shared
@@ -2243,8 +2248,9 @@ SwiftPM package or target that builds and tests without the children above it, p
   shared window-wide, binding by decision; §9.2's scope binding by decision and its
   algorithm advisory; §9.6's `WorkspaceLink` binding.
 - **Required:** required.
-- **Status:** not-dispatched, composite; the cut is dispatchable when C2 lands; UI
-  blocked-by C5.G4.
+- **Status:** cut landed 2026-09-05 as `2026-09-05-c7-workbench-panels.md` (seven leaves on
+  two axes: three package cores dispatchable now, four panel leaves after C5.G4); W1's
+  Workbench skeleton is on `main`.
 
 ### 17.5 Cross-child contracts
 
@@ -2258,6 +2264,10 @@ SwiftPM package or target that builds and tests without the children above it, p
   targets only inside its own marked region of the manifest; C4 owns the rest of the file.
   Binding, because two children build one package in parallel worktrees and the split is
   what makes their merges independent; the target names inside a group are the child's.
+  Workbench's manifest skeleton is on `main` since 2026-09-05 the same way (C7's contract
+  W1): one region per leaf, C7.1 owning the file, a `PanelHostAPI` target reserved for C5
+  because X7's protocol must be importable by Workbench and the app, and libghostty-spm
+  pinned to an exact tag that only a leaf bumps with a Revision Note on the C7 spec.
 - **X2 Core value types.** `WorkspaceLink` exactly as §9.6; `ResolvedEnvironment`
   (variables, PATH, shell, capture time); `ConfigHome` (root URL, source: env or
   default); `SessionID` (UUID); `DiffRef` as §9.6; `ChannelOrigin` as
@@ -2286,14 +2296,23 @@ SwiftPM package or target that builds and tests without the children above it, p
   agent-run tree node (task id, type, model, status, depth, parent, activity line,
   elapsed origin) and the registry mirror entry (task id, kind, foreground or background,
   output file, last frame time) are FleetKit types. Owner: C3. Binds C4, C6, and every
-  leaf C6's cut produces.
+  leaf C6's cut produces. Amended 2026-09-05 from C7's cut: a recent-URL query over the
+  channel's reduced items (URL, first-seen item, time; de-duplicated, most recent first),
+  with the contributing item kinds a named constant, feeds X7's channel context.
 - **X5 Lifecycle API.** Channel origin and sub-state as observable state; the actions
   open, send, reap, adopt, sendToBackground, openInTerminal, fork, quiescentRestart,
   stopEverything, backgroundAll, logout; the preconditions as a typed result (ready,
   untrusted, consentNeeded with the server list, managedSettingsPending, contended with
   holders); dormant eligibility as a query. The Terminal panel's attach and hatch and
   the composer's send go through it and nothing else spawns. Owner: C4. Binds C5, C6,
-  C7.
+  C7. Amended 2026-09-05 from C7's cut (its W8): `openInTerminal` and `attach` perform the
+  ownership work and hand the Terminal panel a `PaneRequest {executable, arguments, cwd,
+  environment, purpose: .hatch(SessionID) | .attach(job) | .logs(job) | .shell | .command}`
+  whose environment C4 composes through ClaudeWire's launch configuration (§6.1, X11); the
+  panel runs it and reports `PaneExit {request, code, observedAt}` back through this API,
+  which owns the re-adoption. The panel never spawns `claude` for a session on its own
+  initiative. `stop`, `respawn` and `rm` are actions here with no PTY; `attach` and `logs`
+  are panes.
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
   types; FleetKit never models upper-layer state. Owner: C4. Binds C5, C7.
@@ -2302,7 +2321,11 @@ SwiftPM package or target that builds and tests without the children above it, p
   and a `LinkRouter` target capability; the host owns tab order (Thread, Agents, Files,
   Source Control, Terminal, Browser, GitHub, Cmd+1 through 7), pop-out and per-channel
   panel state. Owner: C5. Binds C6, C7. Named now so that the two late cuts inherit a
-  fixed host rather than negotiating one.
+  fixed host rather than negotiating one. Amended 2026-09-05 from C7's cut: the channel
+  context also carries a recent-URL feed, the FleetKit query of X4 over the channel's
+  timeline, so the Browser's quick-open never parses timeline items; and the protocol lives
+  in the `PanelHostAPI` target of the Workbench package, which C5 fills, because Workbench
+  registers tabs and the app hosts them and Workbench cannot import the app.
 - **X8 Fixture and fake-claude format.** NDJSON frames with relative timestamps, paired
   with a transcript snapshot directory and a census JSON; a redaction manifest naming
   the fields removed; `fake-claude` accepts a fixture path, a speed factor, an
@@ -2435,7 +2458,7 @@ notarized distribution, and any write under `<configHome>` (X9).
 | C4 FleetKit sessions and fleet | child spec in progress on `child/c4-sessions-fleet` (worktree `../afleet-c4`, parent-pin `ee94449`) | in-flight (wave 2): child spec dispatched 2026-09-05; owns `FleetKit/Package.swift`, §7.4's wedged row, the pending-list surface, channel keying on the identity event and the `apiKeySource` readback; its live gate widens C2's one-turn config-home write allowlist; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
 | C6 Conversation surface and Agents panel | — | composite; blocked-by C3, C4, C5 |
-| C7 Workbench panels | composite spec in progress (decomposing run dispatched 2026-09-05 at parent-pin `ee94449`; lands as `2026-09-05-c7-workbench-panels.md`) | composite; cut in progress; package-level leaves dispatchable against C2's types once the cut is approved; UI leaves blocked-by C5.G4 |
+| C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core dispatchable now, held for the human's approval of the cut; C7.4–C7.7 blocked-by C5.G4 (C7.4 also by C4's X5, C7.6 by C4's store) |
 
 Each child's spec path is filled in when it is dispatched; a composite's row points at
 its own composite spec, whose tracking map lists its leaves. Children keep their own
@@ -4081,3 +4104,19 @@ Pending — written at finish.
   (C3) and `FleetSessions` (C4), one umbrella, each child confined to its marked region.
   Written by the orchestrator before wave 2 dispatch so the two children never contend for
   one manifest; the empty targets build and test on `main`. Flags C3 and C4 (dispatch).
+- 2026-09-05: C7's decomposing run landed (`1fe6fc1`): seven leaves on two axes, three package
+  cores now and four panels after C5.G4. Its flow-back is filed: X5 gains the pane request and
+  exit report and the verb split (also §9.5); X7 gains the recent-URL feed and the
+  `PanelHostAPI` location; X4 gains the recent-URL query; X1 records Workbench's skeleton; §9.1
+  and §17.4 now say the Monaco bundle is built by a script and committed, which is what §11
+  already listed. The cut's two questions are answered from this document rather than sent up:
+  the bundle is committed because §11 decided it, with S3's measured size reported and a size
+  above 25 MB reopening the question; libghostty-spm is pinned exactly and bumped only at a
+  leaf's dispatch with a Revision Note. One caveat for C7.1 recorded here because the cut's
+  PTY route rests on it: on Darwin the controlling terminal is acquired at `open` by a session
+  leader only if the kernel's tty open path grants it, and `posix_spawn` cannot issue
+  `TIOCSCTTY`; G1's `stty size` and job-control checks decide, and `forkpty` is the fallback.
+  Also verified in the bundle for C4: the engine's own MCP consent dialog writes
+  `enabledMcpjsonServers` and `disabledMcpjsonServers` through its local-settings writer, so
+  §6.12's decline write is the engine's own path, and the per-project arrays in `.claude.json`
+  are a read location the engine also consults, never afleet's write target.
