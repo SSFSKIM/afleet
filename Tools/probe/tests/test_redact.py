@@ -389,6 +389,26 @@ class SecretKeyPredicateTests(unittest.TestCase):
                                "toolName": "Bash", "serverName": "afleet", "modelName": "opus",
                                "displayName": "Claude Opus 5 (1M context)"})
 
+    def test_prefixed_account_and_organization_keys_are_caught_anywhere(self):
+        """Rule 1 says "anywhere", and a prefix is how an exact-match set stops meaning it.
+
+        The record that motivated this is `bridge-session`, which the engine writes with
+        `ownerAccountUuid` and `ownerOrganizationUuid` holding a live account uuid and a live
+        organization uuid. An exact-match set walked past both and `verify` passed the fixture.
+        The invented identifiers below stand in for them, as REVIEW.md requires of a test input.
+        """
+        out = self.r.redact_json({"type": "bridge-session", "sessionId": "s-1",
+                                  "bridgeSessionId": "cse_0invented",
+                                  "lastSequenceNum": 0,
+                                  "ownerAccountUuid": "00000000-1111-2222-3333-444444444444",
+                                  "ownerOrganizationUuid": "55555555-6666-7777-8888-999999999999"})
+        self.assertEqual(out["ownerAccountUuid"], "<ownerAccountUuid>")
+        self.assertEqual(out["ownerOrganizationUuid"], "<ownerOrganizationUuid>")
+        # The structural neighbours on the same record are untouched: a rule that took the
+        # session ids with them would cost the fixture its only link back to the transcript.
+        self.assertEqual(out["sessionId"], "s-1")
+        self.assertEqual(out["lastSequenceNum"], 0)
+
     def test_hook_event_keys_are_structural_and_survive(self):
         hooks = {"hooks": {"UserPromptSubmit": [{"matcher": "*"}], "PreToolUse": []}}
         self.assertEqual(self.r.redact_json(hooks), hooks)

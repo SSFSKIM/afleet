@@ -132,6 +132,23 @@ final class LaunchConfigurationTests: XCTestCase {
         XCTAssertEqual(carrying, Self.optionsCarryingCallerText)
     }
 
+    /// `--max-turns` caps the number of agentic turns the engine runs for one prompt; nil omits it entirely.
+    func testMaxTurnsEmitsFlagWhenSetAndOmitsItWhenNil() throws {
+        let capped = try LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid), maxTurns: 3).arguments()
+        assertContainsSubsequence(capped, ["--max-turns", "3"], "max-turns")
+
+        let uncapped = try LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)).arguments()
+        XCTAssertFalse(uncapped.contains("--max-turns"))
+    }
+
+    func testMaxTurnsBelowOneThrows() {
+        let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid), maxTurns: 0)
+        XCTAssertThrowsError(try c.arguments()) { error in
+            guard case .invalidArgument(let option, _)? = error as? WireError else { return XCTFail("\(error)") }
+            XCTAssertEqual(option, "--max-turns")
+        }
+    }
+
     func testChildEnvironmentTableAndForbiddenVariables() {
         let base = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "HOME": "/Users/x", "CLAUDE_CODE_REMOTE": "1", "CLAUDE_CODE_CONTAINER_ID": "c", "CLAUDE_CODE_ENTRYPOINT": "cli"],
                                        shell: "/bin/zsh", capturedAt: .init(), mode: .login)

@@ -8,7 +8,7 @@ import WireTestSupport
 /// `JSONValue`; and the opaque count per fixture equals the census's count of unmodelled pairs.
 ///
 /// The gate is split three ways along `fixture.json`'s `synthetic` flag. Losslessness and the
-/// opaque counts are asserted over all eighteen fixtures, because both are meaningful for a
+/// opaque counts are asserted over all twenty fixtures, because both are meaningful for a
 /// constructed frame. "A modelled type decodes typed" is asserted over the recorded fixtures only:
 /// a recording is authoritative about what the engine sends, while a construction is authoritative
 /// only about the shape it was built to exercise, and its silence about a field says the
@@ -36,9 +36,9 @@ final class FixtureCorpusTests: XCTestCase {
     /// of them by checking nothing. A count floor here, the file-presence check in
     /// `fixtureDirectories()`, the per-fixture line accounting and the census pair-set equality are
     /// four independent places a corpus that silently went missing fails instead of passing.
-    private static let committedFixtureCount = 18
-    /// Of those eighteen, the ones `fixture.json` marks as recorded rather than synthetic.
-    private static let committedRecordedFixtureCount = 16
+    private static let committedFixtureCount = 20
+    /// Of those twenty, the ones `fixture.json` marks as recorded rather than synthetic.
+    private static let committedRecordedFixtureCount = 18
 
     /// Every subdirectory of `Fixtures/`, each required to carry both files. A directory missing
     /// one is a failure, not something to filter out: filtering is how a corpus disappears quietly.

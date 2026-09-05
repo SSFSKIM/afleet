@@ -1,0 +1,84 @@
+{
+ "census": false,
+ "cli_version": "2.1.259",
+ "cwd": "/tmp/afleet-fixtures/plain-two-turn",
+ "deterministic": false,
+ "exit_code": 0,
+ "hypothesis": false,
+ "isolation": "config-home",
+ "late_responses": [],
+ "launch": {
+  "argv": [
+   "~/.local/share/claude/versions/2.1.259",
+   "-p",
+   "--input-format",
+   "stream-json",
+   "--output-format",
+   "stream-json",
+   "--verbose",
+   "--include-partial-messages",
+   "--replay-user-messages",
+   "--forward-subagent-text",
+   "--include-hook-events",
+   "--permission-prompt-tool",
+   "stdio",
+   "--permission-prompts",
+   "host",
+   "--resume",
+   "8cc24a21-6251-4783-b526-3957214d26a6",
+   "--model",
+   "haiku",
+   "--permission-mode",
+   "default",
+   "--enable-auth-status",
+   "--session-mirror",
+   "--setting-sources",
+   "",
+   "--strict-mcp-config",
+   "--max-turns",
+   "4"
+  ],
+  "env": {
+   "CLAUDE_AUTO_BACKGROUND_TASKS": "1",
+   "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK": "1",
+   "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1",
+   "CLAUDE_CODE_FORK_SUBAGENT": "1",
+   "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown"
+  }
+ },
+ "mirror_identity_only": {},
+ "name": "compact-boundary",
+ "notes": [
+  "session 8cc24a21-6251-4783-b526-3957214d26a6; transcript found",
+  "records on disk before /compact: 66",
+  "result after /compact: subtype=success is_error=False num_turns=0 result=''",
+  "frames after /compact, in order: [('user', None), ('command_lifecycle', None), ('command_lifecycle', None), ('system', 'status'), ('transcript_mirror', None), ('rate_limit_event', None), ('transcript_mirror', None), ('transcript_mirror', None), ('transcript_mirror', None), ('transcript_mirror', None), ('transcript_mirror', None), ('system', 'status'), ('system', 'init'), ('system', 'compact_boundary'), ('user', None), ('user', None), ('user', None), ('transcript_mirror', None), ('result', 'success'), ('command_lifecycle', None)]",
+  "frames whose subtype names a compaction: 1; keys: [['compact_metadata', 'logical_parent_uuid', 'session_id', 'subtype', 'type', 'uuid']]",
+  "transcript_mirror frames after /compact: 7; record (type, subtype) they carried: [('queue-operation', None), ('queue-operation', None), ('ai-title', None), ('mode', None), ('permission-mode', None), ('atis-latch', None), ('bridge-session', None), ('system', 'compact_boundary'), ('user', None), ('user', None), ('user', None), ('user', None), ('attachment', None), ('attachment', None), ('attachment', None), ('attachment', None)]",
+  "records on disk after /compact: 82 (16 appended); the file grew",
+  "appended record shapes: [{\"type\": \"queue-operation\", \"subtype\": null, \"keys\": [\"content\", \"operation\", \"sessionId\", \"timestamp\", \"type\"]}, {\"type\": \"queue-operation\", \"subtype\": null, \"keys\": [\"operation\", \"sessionId\", \"timestamp\", \"type\"]}, {\"type\": \"ai-title\", \"subtype\": null, \"keys\": [\"aiTitle\", \"sessionId\", \"type\"]}, {\"type\": \"mode\", \"subtype\": null, \"keys\": [\"mode\", \"sessionId\", \"type\"]}, {\"type\": \"permission-mode\", \"subtype\": null, \"keys\": [\"permissionMode\", \"sessionId\", \"type\"]}, {\"type\": \"atis-latch\", \"subtype\": null, \"keys\": [\"atis\", \"sessionId\", \"type\"]}, {\"type\": \"bridge-session\", \"subtype\": null, \"keys\": [\"bridgeSessionId\", \"lastSequenceNum\", \"ownerAccountUuid\", \"ownerOrganizationUuid\", \"sessionId\", \"type\"]}, {\"type\": \"system\", \"subtype\": \"compact_boundary\", \"keys\": [\"compactMetadata\", \"content\", \"cwd\", \"entrypoint\", \"gitBranch\", \"isMeta\", \"isSidechain\", \"level\", \"logicalParentUuid\", \"parentUuid\", \"sessionId\", \"slug\", \"subtype\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"], \"compactMetadata_keys\": [\"cumulativeDroppedTokens\", \"durationMs\", \"postTokens\", \"preTokens\", \"preservedMessages\", \"preservedSegment\", \"trigger\"]}, {\"type\": \"user\", \"subtype\": null, \"keys\": [\"cwd\", \"entrypoint\", \"gitBranch\", \"isCompactSummary\", \"isSidechain\", \"isVisibleInTranscriptOnly\", \"message\", \"parentUuid\", \"promptId\", \"sessionId\", \"slug\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"], \"message_keys\": [\"content\", \"role\"]}, {\"type\": \"user\", \"subtype\": null, \"keys\": [\"cwd\", \"entrypoint\", \"gitBranch\", \"isMeta\", \"isSidechain\", \"message\", \"parentUuid\", \"promptId\", \"sessionId\", \"slug\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"], \"message_keys\": [\"content\", \"role\"]}, {\"type\": \"user\", \"subtype\": null, \"keys\": [\"cwd\", \"entrypoint\", \"gitBranch\", \"isSidechain\", \"message\", \"parentUuid\", \"promptId\", \"sessionId\", \"slug\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"], \"message_keys\": [\"content\", \"role\"]}, {\"type\": \"user\", \"subtype\": null, \"keys\": [\"cwd\", \"entrypoint\", \"gitBranch\", \"isSidechain\", \"message\", \"parentUuid\", \"promptId\", \"sessionId\", \"slug\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"], \"message_keys\": [\"content\", \"role\"]}, {\"type\": \"attachment\", \"subtype\": null, \"keys\": [\"attachment\", \"cwd\", \"entrypoint\", \"gitBranch\", \"isSidechain\", \"parentUuid\", \"rendered\", \"sessionId\", \"slug\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"]}, {\"type\": \"attachment\", \"subtype\": null, \"keys\": [\"attachment\", \"cwd\", \"entrypoint\", \"gitBranch\", \"isSidechain\", \"parentUuid\", \"rendered\", \"sessionId\", \"slug\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"]}, {\"type\": \"attachment\", \"subtype\": null, \"keys\": [\"attachment\", \"cwd\", \"entrypoint\", \"gitBranch\", \"isSidechain\", \"parentUuid\", \"rendered\", \"sessionId\", \"slug\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"]}, {\"type\": \"attachment\", \"subtype\": null, \"keys\": [\"attachment\", \"cwd\", \"entrypoint\", \"gitBranch\", \"isSidechain\", \"parentUuid\", \"rendered\", \"sessionId\", \"slug\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"versio",
+  "compact_boundary records on disk: 1; shapes: [{\"type\": \"system\", \"subtype\": \"compact_boundary\", \"keys\": [\"compactMetadata\", \"content\", \"cwd\", \"entrypoint\", \"gitBranch\", \"isMeta\", \"isSidechain\", \"level\", \"logicalParentUuid\", \"parentUuid\", \"sessionId\", \"slug\", \"subtype\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"], \"compactMetadata_keys\": [\"cumulativeDroppedTokens\", \"durationMs\", \"postTokens\", \"preTokens\", \"preservedMessages\", \"preservedSegment\", \"trigger\"]}]",
+  "records marked as a compaction summary: 1; shapes: [{\"type\": \"user\", \"subtype\": null, \"keys\": [\"cwd\", \"entrypoint\", \"gitBranch\", \"isCompactSummary\", \"isSidechain\", \"isVisibleInTranscriptOnly\", \"message\", \"parentUuid\", \"promptId\", \"sessionId\", \"slug\", \"timestamp\", \"type\", \"userType\", \"uuid\", \"version\"], \"message_keys\": [\"content\", \"role\"]}]"
+ ],
+ "prompts": [
+  "/compact"
+ ],
+ "purpose": "resume plain-two-turn and send /compact: the compact_boundary record, its compactMetadata, the summary record and whatever the wire carries",
+ "recorded_at": "2026-09-05T06:09:17Z",
+ "review": {
+  "checklist_version": 3,
+  "date": "2026-09-05",
+  "reviewer": "Claude reviewing agent (independent second pair of eyes, not the recording run)",
+  "tree_sha256": "614b870f1f841432ced701c73733789d355e54db153bbf4462c991a26a2a7dad"
+ },
+ "scenario": "compact-boundary",
+ "serves": [
+  "C3.G1",
+  "C3.G3"
+ ],
+ "session_id": "8cc24a21-6251-4783-b526-3957214d26a6",
+ "spikes": [],
+ "synthetic": false,
+ "unmirrored_prefix": 0,
+ "withdrawn_requests": []
+}

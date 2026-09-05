@@ -14,7 +14,12 @@ boundary and its summary, or it declines the slash command headless, in which ca
 say so and the fixture is evidence that a host cannot trigger a compaction this way. The
 scenario asserts nothing either way; it reports what the file and the wire hold afterwards.
 
-`unmirrored_prefix: 1` for the same reason `session-mirror-resume` declares it.
+No `unmirrored_prefix`. `session-mirror-resume` declares one because the resume it records
+appends a record at the head of its range that the mirror never carries; this resume appends
+none, and `verify` needed exactly zero on the recording. The count is a property of the run
+and not of resuming in general, which is why it is declared per scenario and checked for
+exactness in both directions -- a declaration nothing needs fails the gate just as a missing
+one does, and this scenario failed its first recording that way.
 """
 import glob
 import json
@@ -27,7 +32,7 @@ META = {"name": "compact-boundary",
                    "compactMetadata, the summary record and whatever the wire carries",
         "serves": ["C3.G1", "C3.G3"], "spikes": [], "census": False,
         "optional_pairs": ["system/thinking_tokens"], "deterministic": False,
-        "isolation": "config-home", "launch": {"max_turns": 4}, "unmirrored_prefix": 1,
+        "isolation": "config-home", "launch": {"max_turns": 4},
         "prompts": [COMPACT], "resume_of": "plain-two-turn", "setup": None}
 
 
