@@ -16,7 +16,9 @@
 > only the residue those sections leave to this child. `main` was merged into the child branch
 > on 2026-09-05 (merge `71a9999`, `main` at `b2ddd5d`), which brought the parent's X5 `id`
 > amendment from the plan review, C1's §6.12 spike (`Tools/probe/spikes/mcp-decline-files.md`)
-> and the C2 corrective `SessionStart.forkFrom`; v2.2 is written against that tree.
+> and the C2 corrective `SessionStart.forkFrom`; v2.2 is written against that tree. v2.4 also
+> reads `main` at `6994ff8`, which carries the C2 corrective `LaunchConfiguration.maxTurns`
+> (`1458568`, emitting `--max-turns <n>`) that G5's live budget depends on.
 
 ## Purpose
 
@@ -60,11 +62,11 @@ outcome added later without a test fails the build. The scenarios, grouped by ro
 - ready to dormant after 30 minutes dormant-eligible, and *not* while a task in the registry mirror is running or its heartbeat is uncertain (item 18's two halves; the mirror is a C3 type, so until C3 lands this test feeds the supervisor a stand-in that conforms to X4's mirror-entry shape, and G2 replaces the stand-in);
 - dormant to ready on send, same session id, one connecting glyph;
 - respawn on non-zero exit with backoff 1 s, 2 s, 4 s, three attempts, each behind the ownership check, then the system item with exit code, stderr tail and *Reopen* (item 20);
-- the cap of six: the seventh spawn reaps the least recently used dormant-eligible channel; with none eligible, no eviction and the header state carries the live count and *Send to background* (item 19). Acquiring a slot is a reservation the counter grants or refuses atomically, so two channels opened at the cap at the same moment evict two distinct victims or one of them is refused, never both spawning against one freed slot; an eviction returns the outcome the counter observed, and a victim that wedges mid-eviction frees no slot, so the counter moves to the next eligible victim or refuses. The counter counts every occupied slot, live, reserved, wedged and pending eviction, and decides from an eligibility snapshot the supervisors push, so its decision never awaits a supervisor and a victim leaves the live set the moment it is named. Three tests pin it: two concurrent opens at the cap; a victim whose `terminate()` returns `nil` during eviction, after which the seventh channel is refused or takes the next victim and never spawns on the ghost's slot; and a victim whose own release arrives while its eviction is still pending, which completes the eviction without freeing a seventh slot;
-- wedged when `terminate()` returns `nil`: no respawn under that session id, the escalation trace on a system item, *Reopen* spawning only after the ownership check finds no holder. No real child can produce this row, because SIGKILL cannot be refused (C2 recorded the same limit); the supervisor therefore drives its process through a `ProcessHandle` protocol whose live conformance is a thin `LiveProcessHandle` wrapper over `ClaudeProcess` and whose `events` is an existential `AsyncSequence<WireEvent, Never>` (ClaudeWire's `WireEventStream` can be neither constructed nor fed outside its module), and the row runs against a scripted handle whose `events` is an `AsyncStream` the test feeds and whose `terminate()` returns `nil`, stated as such in the test. The fault is injected through every action that terminates, not only the reap: reap, send to background, open in terminal, the quiescent restart, `/logout` and cap eviction each get a scenario in which `terminate()` returns `nil`, and each asserts that nothing that would have followed a real exit happens: no `PaneRequest` is returned, no `--bg --resume` or `stop` verb runs, `auth logout` does not run, no replacement process spawns, and the channel is wedged with the trace;
+- the cap of six: the seventh spawn reaps the least recently used dormant-eligible live channel, recency read from the counter's own fleet-wide activity clock (one stamp per send, engine frame and decision, never a per-supervisor sequence); a dormant channel holds no slot, so it is never a victim; with none eligible, no eviction and the header state carries the live count and *Send to background* (item 19). Acquiring a slot is a reservation the counter grants or refuses atomically, so two channels opened at the cap at the same moment evict two distinct victims or one of them is refused, never both spawning against one freed slot; an eviction returns the outcome the counter observed, and a victim that wedges mid-eviction frees no slot, so the counter moves to the next eligible victim or refuses. The counter counts every occupied slot, live, reserved, wedged and pending eviction, and decides from an eligibility snapshot the supervisors push, so its decision never awaits a supervisor and a victim leaves the live set the moment it is named. Three tests pin it: two concurrent opens at the cap; a victim whose termination report carries no exit during eviction, after which the seventh channel is refused or takes the next victim and never spawns on the ghost's slot; and a victim whose own release arrives while its eviction is still pending, which completes the eviction without freeing a seventh slot;
+- wedged when the handle's `terminate()` returns a `TerminationReport` whose `exit` is `nil` (its `steps` are the escalation trace, ClaudeWire's `terminateEscalated` diagnostics for the epoch as captured by the sink the process factory installs): no respawn under that session id, the escalation trace on a system item, *Reopen* spawning only after the ownership check finds no holder. No real child can produce this row, because SIGKILL cannot be refused (C2 recorded the same limit); the supervisor therefore drives its process through a `ProcessHandle` protocol whose live conformance is a thin `LiveProcessHandle` wrapper over `ClaudeProcess` and whose `events` is an existential `AsyncSequence<WireEvent, Never>` (ClaudeWire's `WireEventStream` can be neither constructed nor fed outside its module), and the row runs against a scripted handle whose `events` is an `AsyncStream` the test feeds and whose `terminate()` returns a scripted report with a `nil` exit and the scripted steps, stated as such in the test. The fault is injected through every action that terminates, not only the reap: reap, send to background, open in terminal, the quiescent restart, `/logout` and cap eviction each get a scenario in which the report's exit is `nil`, and each asserts that nothing that would have followed a real exit happens: no `PaneRequest` is returned, no `--bg --resume` or `stop` verb runs, `auth logout` does not run, no replacement process spawns, and the channel is wedged with the trace;
 - adopt: `claude stop <short>`, wait for exit and roster removal, spawn `--resume`;
-- send to background: `terminate()`, wait for exit and registry removal, `claude --bg --resume <id>`, the new job found in the roster by its `resumeSessionId` (item 16);
-- open in terminal: `terminate()`, wait, return a `PaneRequest` whose purpose is `.hatch(id)`, whose arguments are the interactive `--resume <id>` line and whose environment is composed through ClaudeWire's launch configuration so the hatch resumes under the same config home; keep mirroring; re-adopt when the panel reports the `PaneExit` and the record is gone (the test plays the panel: it takes the request and reports the exit);
+- send to background: `terminate()`, wait for exit and registry removal, the ownership check once more immediately before the launch, `claude --bg --resume <id>`, the new job found in the roster by its `resumeSessionId` (item 16); a holder that appears between the release and that recheck preempts the handoff: nothing launches, the origin resolves from the holder (foreign, job, or contended for an own pid), the banner is set and the caller gets `LifecycleError.heldElsewhere`;
+- open in terminal: `terminate()`, wait, the same recheck before the request is built (a holder means no request and `LifecycleError.heldElsewhere`), return a `PaneRequest` whose purpose is `.hatch(id)`, whose arguments are the interactive `--resume <id>` line and whose environment is composed through ClaudeWire's launch configuration so the hatch resumes under the same config home; keep mirroring; re-adopt when the panel reports the `PaneExit` and the record is gone (the test plays the panel: it takes the request and reports the exit);
 - foreign live in the user's terminal: send refused with the "running in your terminal" reason and *Fork* offered; record gone means archived;
 - Contended after a handoff wait exceeds 10 s; and, as a transition of its own with its own event, Contended whenever desired and observed disagree (a foreign holder named while `desired` is owned, from connecting, ready or dormant); back to the matching origin when the holder set settles to zero or one;
 - the quiescent restart: the values to carry come from the channel's runtime-state model, an actor-owned record of permission mode, model, effort, output style, cwd, agent, the cumulative `--add-dir` list, the environment options, the union of every `apply_flag_settings` payload the host sent and the fast-mode state the engine reported, that every control response and frame updates (a `set_model` answer, a `set_permission_mode` answer, `get_settings.applied`, an `apply_flag_settings` sent through the API, `fast_mode_state`, `set_cwd`, an accepted `add_directory`), not from the launch template; snapshot it, terminate, wait, spawn with every launch field from the snapshot and never `--agent`, re-send the flag union, verify every readback (`model` and `effort` from `applied`, permission mode and output style from the new handshake, every flag key present in `effective_keys`, fast mode from `effective_keys` when the host applied it and from the new handshake when it was only observed), `.ready` published only after the readbacks, composer disabled until each matches, a banner naming the setting that did not survive (items 58 and 63 at the API level, the mismatch half driven by `FAKE_CLAUDE_INIT` answering a different `current_permission_mode`). One end-to-end test routes `/model` and `/permissions` through the command router, then restarts, and asserts the relaunch carries the changed values, not the ones the channel was opened with.
@@ -81,13 +83,15 @@ the post-handshake check, asserted by a recording holder-reader that the tests i
 pre-spawn check refuses on *every* live holder of the session, our own children included (a
 second supervisor's process, an older epoch's ghost); the post-handshake check excludes
 exactly one pid, the child this spawn started, and treats any other pid of ours as a holder.
-Two tests pin that: two own processes on one session id (the second supervisor refuses before
-spawn; if a race slipped it through, its post-handshake check yields and the first keeps the
-session), and a fork whose resolved identity collides with a session another supervisor owns
-(the fork yields; the owner is untouched). Pane exits are matched to the pending hatch by
-`PaneRequest.id`, never by value: a test opens two hatches with identical fields in sequence
-and reports their exits in reverse order; the stale exit is discarded and the live one
-re-adopts.
+Two tests pin that: two own processes on one session id (the second supervisor refuses
+before spawn; if a race slipped it through, its post-handshake check yields and the first
+keeps the session), and a fork whose resolved identity collides with a session another
+supervisor owns (the fork yields; the owner is untouched; a fork never publishes `.ready`
+before its identity resolves, so the collision is the `connecting` row and the fork's slot
+moves from the provisional id to the resolved one only on a clean check). Pane exits are
+matched to the pending hatch by `PaneRequest.id`, never by value: a test opens two hatches
+with identical fields in sequence and reports their exits in reverse order; the stale exit
+is discarded and the live one re-adopts.
 
 **G2 — dormant eligibility reads the registry mirror (required, blocked-by C3.G3).** With
 C3's mirror driven by the `background-shell` fixture through `fake-claude`, a channel whose
@@ -132,15 +136,16 @@ under a project directory, asserted by a test that diffs the project tree across
 precondition path. The proof that the engine honours a decline is not a marker under
 `fake-claude`, which runs no server and so proves nothing; it is a zero-cost scenario in
 G5's suite against the installed CLI: in a directory the scratch config home already trusts,
-a `.mcp.json` declares one server whose command writes a marker file; launch A, with the
-marker accepted through the store-only accept and no decline recorded, and launch B, after a
-decline written through the §6.12 writer, differ in nothing else; each runs to the
-handshake, is asked `mcp_status` and `get_session_cost`, and is ended with no turn; the
-marker exists after A and not after B (the headless path promotes a pending project server
-to approved and spawns its command, parent §6.12), both `get_session_cost` answers read
-`total_cost_usd == 0`, and the two `mcp_status` answers are recorded as diagnostics counts,
-not asserted to a shape, because the answer for a rejected server is unrecorded in the
-corpus.
+a `.mcp.json` declares one stdio server whose command writes a marker file (stdio because
+only a spawned command leaves a marker; http and sse entries are listed and consent-gated
+the same way, with nothing to witness); launch A, with the marker accepted through the
+store-only accept and no decline recorded, and launch B, after a decline written through the
+§6.12 writer, differ in nothing else; each runs to the handshake, is asked `mcp_status` and
+`get_session_cost`, and is ended with no turn; the marker exists after A and not after B
+(the headless path promotes a pending project server to approved and spawns its command,
+parent §6.12), both `get_session_cost` answers read `total_cost_usd == 0`, and the two
+`mcp_status` answers are recorded as diagnostics counts, not asserted to a shape, because
+the answer for a rejected server is unrecorded in the corpus.
 
 **G4 — the router (required).** The router table is data; a test asserts that the set of
 local commands in the table equals the set the parent's §7.7 table names, with no
@@ -176,34 +181,43 @@ level, verbs through the scripted runner).
 with `AFLEET_LIVE_CLI=1`, under `/tmp/afleet-fixtures/config-home`, and touches only
 processes the test starts. The suite owns one serialised live budget: scenarios run one at a
 time through it; the model is pinned to `claude-haiku-4-5-20251001` on every turn-spending
-launch; every `ClaudeProcess` the suite launches carries `--max-turns` (1 for a
-handshake-only scenario, 2 for the composed turn); the suite's ceilings are two model turns
-and ten minutes of wall time in total, and the budget refuses a scenario that would cross
-either; C2's usage reader is consulted before the first scenario and again before each
-turn-spending one, and a spent window skips with its reason; every `result` frame any
-scenario observes has its `total_cost_usd` summed, and the sum is reported after the run.
-Zero-cost scenarios are witnessed, not assumed: a zero-turn launch emits no `result` frame,
-so each asks `get_session_cost` before ending its process and asserts `total_cost_usd == 0`.
-The foreign-session half spends no model turn: the test starts an interactive `claude` on a
-pseudo-terminal in a directory the scratch config home already trusts (recreated if absent;
-the test never writes trust), and within five seconds the fleet reports a foreign live
-channel with the record's `status`; the test then ends its own pty child and the channel
-turns archived when the record is gone. The job half prefers `claude --bg --exec "sleep
-60"`, which spends nothing: the roster lists it, the fleet reports a background job, `claude
-stop <short>` through the real runner removes it. The consent half is the two-launch marker
-scenario G3 names, zero cost, the marker accepted through the store-only accept before
-launch A so the consent gate does not stop A and the marker proves the engine's own
-promotion. Adoption of a job with a conversation costs one short `haiku` turn (`claude --bg
---model claude-haiku-4-5-20251001 "Reply with exactly: pong"`, with `--max-turns 1` added if
-`claude --bg --help` lists the flag, which the executor checks at zero cost and records),
-runs only when `AFLEET_LIVE_CLI_TURNS=1` is also set, and asserts that adopt stops the job,
-resumes the same session id owned, and that the next handshake is clean. One config-home
-witness spans the whole of G5, taken before the first live scenario and after the last, and
-a second reading brackets each scenario: the set of relative paths the engine created,
-modified or deleted is reported, never their contents, and compared against the allowlist
-that G5 widens (see *The write allowlist* below); any unexplained change in the suite-level
-reading or in any scenario's fails the gate with the path named, so a write between
-scenarios is caught as surely as a write inside one.
+launch; every `ClaudeProcess` the suite launches carries `--max-turns` with a cap the
+scenario states (1 for a handshake-only scenario and for adoption, 12 for the composed
+prompt), because the flag caps agentic turns inside one prompt, not prompts, and ends the
+turn with a `result` of subtype `error_max_turns` at the limit (bundle 36222
+`turnCount`/`maxTurns`; C1's `exit-plan-mode` fixture records the subtype), which every
+scenario treats as a failure naming it; the suite's ceilings are four model turns (two
+reserved for adoption, two for the composed scenario) and ten minutes of wall time in total,
+and the budget refuses a scenario that would cross either; C2's usage reader is consulted
+before the first scenario and again before each turn-spending one, and a spent window skips
+with its reason; every `result` frame any scenario observes has its `total_cost_usd` summed,
+and the sum is reported after the run. Zero-cost scenarios are witnessed, not assumed: a
+zero-turn launch emits no `result` frame, so each asks `get_session_cost` before ending its
+process and asserts `total_cost_usd == 0`. The foreign-session half spends no model turn:
+the test starts an interactive `claude` on a pseudo-terminal in a directory the scratch
+config home already trusts (recreated if absent; the test never writes trust), and within
+five seconds the fleet reports a foreign live channel with the record's `status`; the test
+then ends its own pty child and the channel turns archived when the record is gone. The job
+half prefers `claude --bg --exec "sleep 60"`, which spends nothing: the roster lists it,
+`jobs()` returns it with `sessionID == nil` recorded as the delegated unknown (an exec job
+is no channel, because channels are keyed by session), and `performJob(.stop, short)`
+through the real runner removes it. The consent half is the two-launch marker scenario G3
+names, zero cost, the marker accepted through the store-only accept before launch A so the
+consent gate does not stop A and the marker proves the engine's own promotion. Adoption of a
+job with a conversation reserves two short `haiku` turns (`claude --bg --model
+claude-haiku-4-5-20251001 --max-turns 1 "Reply with exactly: pong"`; `claude --bg` forwards
+`--max-turns`, bundle 824274's forwarded-flag set), runs only when `AFLEET_LIVE_CLI_TURNS=1`
+is also set, and asserts that adopt stops the job, resumes the same session id owned, that
+the next handshake is clean, and then that *Send to background* hands the owned channel
+back: `--bg --resume <id>` ran, the roster lists a new job for the session, the channel
+reads `.backgroundJob`, and the test stops that job through `performJob(.stop, short)`; the
+second turn is the reservation for a resumed job that runs one. One config-home witness
+spans the whole of G5, taken before the first live scenario and after the last, and a second
+reading brackets each scenario: the set of relative paths the engine created, modified or
+deleted is reported, never their contents, and compared against the allowlist that G5 widens
+(see *The write allowlist* below); any unexplained change in the suite-level reading or in
+any scenario's fails the gate with the path named, so a write between scenarios is caught as
+surely as a write inside one.
 
 ## Grounding
 
@@ -310,12 +324,13 @@ serialise mutable state; nothing is `@MainActor`.
 FleetKit/Sources/FleetSessions/
   Fleet/          FleetObserver (actor), HolderReader, RegistryRecord, JobRecord, AgentsRow, OriginResolver
   Ownership/      OwnershipCheck, HolderSet, ProcessLiveness
-  Lifecycle/      ChannelSupervisor (actor), LifecycleTable, DormantEligibility, RestartSnapshot, Readback
+  Lifecycle/      ChannelSupervisor (actor), LifecycleTable, DormantEligibility, RestartSnapshot, Readback, ProcessHandle (LiveProcessHandle, CapturingDiagnostics), FleetCapCounter
   Preconditions/  SpawnPreconditions, TrustReader, ProjectMCPConsent, LocalSettingsStore (the §6.12 write), ManagedSettingsReader
   Activity/       ActivityQuery, ActivityRow
   Router/         CommandRouter, RouterTable, LaunchSettingMatrix, RefusalInterceptor, LogoutPlan
   Store/          StateStore (protocol), FileStateStore, FleetKitState (the namespace's Codable types)
-  Verbs/          CLIVerbs (agents --json, stop, --bg --resume, --bg --exec, auth status, auth logout) over ProcessRunner
+  Support/        ContentHash (sha256Hex over CryptoKit: the .mcp.json entry hash and the managed-settings payload hash)
+  Verbs/          CLIVerbs (agents --json, stop, --bg --resume, --bg --exec, respawn, rm, auth status, auth logout) over ProcessRunner
 FleetKit/Tests/FleetSessionsTests/
   Support/        ScratchConfigHome, ScriptedHolderFiles, ScriptedProcessRunner, TestClock, FakeClaudeLaunch
   <one file per concern>, LifecycleRowTests (G1), PreconditionTests (G3), RouterTests (G4), LiveFleetTests (G5)
@@ -333,6 +348,7 @@ public struct Holder: Hashable, Sendable {                 // one observed holde
   public var pid: Int32; public var sessionID: SessionID; public var sources: Set<Source>
   public var kind: String; public var entrypoint: String?; public var jobShort: String?
   public var isOwnChild: Bool                                // pid equals a live ClaudeProcess of ours
+  public var isJob: Bool { sources.contains(.roster) || jobShort != nil }   // evidence, not branch order: OriginResolver classifies by it
   public var presence: ForeignPresence?                     // status, waitingFor, name when the record carries them
 }
 public struct HolderSet: Hashable, Sendable { public var holders: [Holder]; public var observedAt: Date
@@ -344,12 +360,15 @@ public struct ChannelState: Hashable, Sendable {
   public var desired: DesiredOwnership
   public var observed: HolderSet
   public var epoch: ProcessEpoch?
+  public var identity: SessionIdentity                       // ClaudeWire's: .known(id), or .awaitingFork(from:provisional:) until .sessionIdentityResolved
   public var wedged: EscalationTrace?                        // non-nil only in the wedged row
+  public var systemItem: SystemItem?                         // crashed(exit:reopenOffered:) after the respawn budget; wedged(trace, reopenOffered:)
   public var presence: Presence                              // idle, busy, waiting(for:), unknown
+  public var pendingDecisions: [PendingDecision]             // ask order; emptied on every exit; the Activity decision rows read it
   public var lastActivity: Date
   public var apiKeySource: String?                           // from the first system/init, kept per channel for the header
   public var liveCount: Int                                  // owned processes live across the fleet, for the cap header
-  public var banner: ChannelBanner?                          // releasedToTerminal, contended(HolderSet), settingDidNotSurvive(String), mcpDeclineRefused(String), managedSettingsPending, untrusted
+  public var banner: ChannelBanner?                          // releasedToTerminal, contended(HolderSet), settingDidNotSurvive(String), mcpDeclineRefused(String), managedSettingsPending, untrusted, heldElsewhere(HolderSet)
   public var headerNote: HeaderNote?                         // projectServersOff, capReached(live:)
   public var pendingChange: RestartRequest?                  // "applies when the current work finishes"
 }
@@ -357,7 +376,14 @@ public struct ChannelState: Hashable, Sendable {
 public enum Presence: Hashable, Sendable { case idle, busy, waiting(for: String?), unknown }
 public struct ForeignPresence: Hashable, Sendable { public var status: String; public var waitingFor: String?; public var name: String? }
 public struct EscalationTrace: Hashable, Sendable { public var steps: [String]; public var pid: Int32; public var epoch: ProcessEpoch }   // the terminate_escalated steps, in order
-public struct ProjectMCPServer: Hashable, Sendable { public var name: String; public var command: String; public var arguments: [String]; public var entryHash: String }
+public struct TerminationReport: Hashable, Sendable { public var exit: ExitStatus?; public var steps: [String] }   // ProcessHandle.terminate(); nil exit is the wedged row; steps are the captured terminate_escalated steps of the epoch
+public struct PendingDecision: Hashable, Sendable { public var id: RequestID; public var subtype: String; public var epoch: ProcessEpoch; public var askedAt: Date }   // from the InboundRequest; askedAt stamped by the supervisor
+public enum SystemItem: Hashable, Sendable { case crashed(exit: ExitStatus, reopenOffered: Bool); case wedged(EscalationTrace, reopenOffered: Bool) }   // ExitStatus is Hashable (ClaudeWire WireEvent.swift:47)
+public struct ProjectMCPServer: Hashable, Sendable {
+  public enum Transport: Hashable, Sendable { case stdio(command: String, arguments: [String]); case http(url: String); case sse(url: String); case other(type: String) }
+  public var name: String; public var transport: Transport   // parsed from the raw entry: no `type` and a `command` is stdio; `type` http/sse carries a url; anything else is other, still listed and gated
+  public var entryHash: String                               // SHA-256 (ContentHash.sha256Hex) over the canonical JSON of the whole raw entry, so any field change reopens consent
+}
 public struct RestartRequest: Hashable, Sendable {
   public var addDirectories: [URL]?; public var settingSources: [SettingSource]??; public var allowBypass: Bool?
   public var promptSuggestions: Bool?; public var worktree: Worktree??; public var environment: ChildEnvironmentOptions?   // nil = keep the current value
@@ -375,11 +401,22 @@ public struct AgentsRow: Hashable, Codable, Sendable {      // one element of `c
   public var sessionId: String?; public var name: String?; public var status: String?; public var waitingFor: String?; public var state: String?
 }
 public struct JobShort: Hashable, Codable, Sendable { public let rawValue: String }
+public struct JobEntry: Hashable, Sendable {                 // one roster job, reconciled with `agents --json` when read; an exec job has no session
+  public var short: JobShort; public var state: String; public var kind: String; public var sessionID: SessionID?; public var cwd: URL?; public var name: String?
+}
+public enum JobVerb: Hashable, Sendable { case stop, respawn, remove }
+public enum LifecycleError: Error, Hashable, Sendable {
+  case heldElsewhere(HolderSet), capReached(live: Int), precondition(SpawnPrecondition), wedged(EscalationTrace)
+  case handoffTimedOut(HolderSet), declineRefused(reason: String), notOwned, verbFailed(verb: String, exitCode: Int32)
+  case decisionGone(RequestID)                               // an answer for an id that is unknown, cancelled, already answered or from an older epoch
+  case answerFailed(RequestID, reason: String)               // the write to the process failed; the id was consumed first and is not restored
+  case logoutInProgress                                      // the spawn barrier while a LogoutPlan runs
+}
 
 public enum SpawnPrecondition: Hashable, Sendable {
   case ready
   case untrusted(root: URL)
-  case consentNeeded([ProjectMCPServer])                     // name, command, args summary, hash
+  case consentNeeded([ProjectMCPServer])                     // name, transport summary, hash
   case managedSettingsPending
   case contended(HolderSet)
   case wedged(EscalationTrace)
@@ -389,14 +426,13 @@ public enum LifecycleAction: Sendable {                                   // Sen
   case open, send(UserInput), reap, adopt, sendToBackground, fork(at: ForkPoint?)   // nil = plain fork; ForkPoint is ClaudeWire's {entryUUID, dropsTurn?}
   case quiescentRestart(RestartRequest), stopEverything, backgroundAll, logout, reopen
   case answer(RequestID, InboundAnswer)         // the one path a decision is answered through; LifecycleError.decisionGone when the id is gone
-  case stopJob(JobShort), respawnJob(JobShort), removeJob(JobShort)      // CLI verbs, no PTY (parent X5 as amended 2026-09-05)
-}
+}                                                 // the job verbs are LifecycleAPI.performJob(_:_:): a job is keyed by short, and an exec job has no session
 
 // Design inheritance from the parent's X5 as amended on 2026-09-05 (C7's decomposing run): the Terminal
 // panel never spawns `claude` for a session on its own initiative. X5 performs the ownership work of
 // §7.2 rule 5 and hands the panel a pane request; the panel runs it and reports the exit back through
 // X5, which owns the re-adoption of §7.4's hatch rows. `attach` and `logs` are panes; `stop`,
-// `respawn` and `rm` are verbs above.
+// `respawn` and `rm` are `performJob` verbs below (parent X5 as amended 2026-09-05), no PTY.
 public enum PanePurpose: Hashable, Sendable { case hatch(SessionID), attach(JobShort), logs(JobShort), shell, command }
 public struct PaneRequest: Hashable, Sendable {
   public var id: UUID                                        // opaque, fresh per request (parent X5 as amended after the plan review)
@@ -417,6 +453,8 @@ public protocol LifecycleAPI: Sendable {                     // what C5, C6 and 
   func attach(_ job: JobShort) async throws -> PaneRequest               // `claude attach <short>`; purpose .attach
   func logs(_ job: JobShort) async throws -> PaneRequest                 // `claude logs <short>`; purpose .logs
   func paneExited(_ exit: PaneExit) async                                // the panel's report; X5 re-adopts a hatch whose record is gone
+  func jobs() async -> [JobEntry]                                        // every roster job, conversation or exec, with or without a session
+  func performJob(_ verb: JobVerb, _ short: JobShort) async throws       // `claude stop|respawn|rm <short>` through the runner; no PTY
   func isDormantEligible(_ key: ChannelKey) async -> Bool
   func declineProjectServers(_ names: [String], project: URL) async throws        // the §6.12 write
   func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async   // store only
@@ -458,12 +496,18 @@ Origin per channel, in the parent's order: *owned* when `ChannelSupervisor` hold
 `ClaudeProcess` for the key; *foreign live* when a live registry holder names the session id
 and is not our child (`.ownTerminalTab` when the supervisor handed the session to a Terminal
 tab it is still tracking, else `.usersTerminal`); *background job* when a live job names it;
-otherwise *archived*. Presence for foreign channels comes from the record's `status` and
-`waitingFor` when present and is `.unknown` when absent, which is every headless holder.
-Presence for an owned channel is afleet's own turn state: `busy` from a send until its
-`result`, `waiting` while a decision is pending, `idle` otherwise; a `session_state_changed`
-frame, when one arrives, maps `requires_action` to `waiting` and is otherwise recorded and
-ignored, because the corpus has never shown one.
+otherwise *archived*. The resolver classifies a holder by evidence, not by which branch runs
+first: `Holder.isJob` is true when the holder's sources include the roster or it carries a
+`jobShort`; the foreign branch considers only holders with `isJob == false` and the job
+branch only those with it; the parent's precedence (owned, foreign, job, archived) still
+decides a session with several holders. The reader sets `jobShort` on a holder it merged
+from a registry record and a roster entry, so a conversation job's worker, present in both
+files, is a job and never a foreign terminal. Presence for foreign channels comes from the
+record's `status` and `waitingFor` when present and is `.unknown` when absent, which is
+every headless holder. Presence for an owned channel is afleet's own turn state: `busy` from
+a send until its `result`, `waiting` while a decision is pending, `idle` otherwise; a
+`session_state_changed` frame, when one arrives, maps `requires_action` to `waiting` and is
+otherwise recorded and ignored, because the corpus has never shown one.
 
 Watching: a dispatch vnode source on `sessions/`, `jobs/` and `daemon/`, plus a five-second
 poll that re-reads everything, because in-place edits of a registry record (a TUI's status
@@ -477,16 +521,23 @@ change) do not fire a directory source. Every read is a snapshot with `observedA
 supervisor holds no process, so any pid at all, foreign, a second supervisor's, or an older
 epoch's ghost, means no spawn, and the channel takes the origin the holder implies (a holder
 that is ours is Contended, not foreign live). `OwnershipCheck.afterHandshake(key,
-ownPID:epoch:)` re-reads, validates each holder's pid and `procStart` token, and excludes exactly one
-pid, the child this spawn started; any other holder, foreign or ours, means yield:
-`terminate()` our process, origin `.foreignLive` for a foreign holder or `.owned(.contended)`
-for one of ours, the "Opened in your terminal; afleet released this session" notice for the
-former. `isOwnChild` on a `Holder` is informational for the sidebar; the checks never use it
-to excuse a holder. Both are recorded on an
-injected `HolderReader` so G1 can assert they ran around every spawn. Rule 5's quiescent
-handoff is one function, `awaitRelease(previous holder, upTo: 10 s)`, that waits for the
-process exit *and* the record's disappearance and returns `.released` or `.timedOut`, on
-which the channel becomes Contended. Rule 6: `perform(.send)` on a held session throws
+ownPID:epoch:)` re-reads, validates each holder's pid and `procStart` token, and excludes
+exactly one pid, the child this spawn started; any other holder, foreign or ours, means
+yield: `terminate()` our process, origin `.foreignLive` for a foreign holder or
+`.owned(.contended)` for one of ours, the "Opened in your terminal; afleet released this
+session" notice for the former. `isOwnChild` on a `Holder` is informational for the sidebar;
+the checks never use it to excuse a holder. Both are recorded on an injected `HolderReader`
+so G1 can assert they ran around every spawn. Rule 5's quiescent handoff is one function,
+`awaitRelease(previous holder, upTo: 10 s)`, that waits for the process exit *and* the
+record's disappearance and returns `.released` or `.timedOut`, on which the channel becomes
+Contended. After `.released`, `sendToBackground` and `openInTerminal` run
+`beforeSpawn(session:)` once more, immediately before `--bg --resume` and before the
+`PaneRequest` is built, from ready and from dormant alike (dormant has no process and no
+wait, so there the recheck is the only check); any holder means no launch and no request:
+the origin resolves through `OriginResolver` (foreign, job, or contended for an own pid),
+the banner is set and the caller gets `LifecycleError.heldElsewhere(holders)`. The window
+between a returned `PaneRequest` and the panel's spawn remains and is accepted (Decision
+Log, 2026-09-05). Rule 6: `perform(.send)` on a held session throws
 `LifecycleError.heldElsewhere(HolderSet)` and the state offers `fork`.
 
 ### Lifecycle (`Lifecycle/`)
@@ -514,16 +565,22 @@ transcript (ruling of 2026-09-05). The mirror is C3's
 `RegistryMirrorEntry` (X4); until C3 lands, the supervisor takes it through a protocol,
 `TaskMirrorReading`, that G1's stand-in conforms to and G2 replaces with the real mirror.
 
-**Wedged.** When `terminate()` returns `nil` the channel enters `.owned(.dormant)` with
-`wedged` set to the escalation trace the diagnostics recorded and `liveCount` still counting
-the ghost; no respawn happens under that session id; `.reopen` runs the pre-spawn ownership
-check and spawns only when it finds no holder, clearing `wedged`. The wedged channel is
-released from the live count only when a later observation finds the ghost's registry record
-gone and its pid dead. Every action that terminates goes through one function,
-`terminateOrWedge()`, and stops at a `nil`: the reap does not mark the channel dormant, send
-to background does not run `--bg --resume`, open in terminal returns no `PaneRequest` and
-throws `LifecycleError.wedged`, the quiescent restart does not spawn, `/logout` does not run
-`auth logout` while any listed channel is wedged and reports it, and cap eviction reports the
+**Wedged.** When the handle's `terminate()` returns a `TerminationReport` whose `exit` is
+`nil` the channel enters `.owned(.dormant)` with `wedged` set to `EscalationTrace(steps:
+report.steps, pid:, epoch:)`, the steps being ClaudeWire's `terminateEscalated` diagnostics
+for the current epoch (`ClaudeProcess`'s vocabulary: `never_launched`,
+`graceful_phase_deadline_exceeded`, `end_session`, `stdin_close_requested`,
+`no_live_child_to_signal`, `SIGTERM`, `SIGKILL`, `exit_not_observed`) as captured by the
+`CapturingDiagnostics` sink the process factory installs on every `ClaudeProcess` and
+forwards to the fleet's ClaudeWire sink, and `liveCount` still counting the ghost; no
+respawn happens under that session id; `.reopen` runs the pre-spawn ownership check and
+spawns only when it finds no holder, clearing `wedged`. The wedged channel is released from
+the live count only when a later observation finds the ghost's registry record gone and its
+pid dead. Every action that terminates goes through one function, `terminateOrWedge()`, and
+stops at a `nil` exit: the reap does not mark the channel dormant, send to background does
+not run `--bg --resume`, open in terminal returns no `PaneRequest` and throws
+`LifecycleError.wedged`, the quiescent restart does not spawn, `/logout` does not run `auth
+logout` while any listed channel is wedged and reports it, and cap eviction reports the
 victim as wedged so the counter frees no slot. G1 injects the `nil` through each of those
 paths.
 
@@ -538,7 +595,10 @@ supervisor, counts every occupied slot, live, reserved, wedged and pending evict
 decides from an eligibility snapshot each supervisor pushes on every change to its turn,
 pending decisions, queued input, wedged flag or mirror reading: it either grants a
 reservation when the count is below six, or names the least recently used dormant-eligible
-channel as the victim, moves it out of the live set in the same turn and reserves the slot
+live channel as the victim, least by the counter's own `activityClock` (a fleet-wide
+`UInt64`; `noteActivity(key)` stamps `lru[key]` with it and advances it, and supervisors
+call it, fire-and-forget, on every send, engine frame and decision, so stamps from different
+supervisors compare), moves it out of the live set in the same turn and reserves the slot
 against that eviction, or refuses. The evicting supervisor re-evaluates the victim's
 eligibility at reap time, reaps it and reports the observed outcome back, `evicted`,
 `victimWedged` or `victimBecameIneligible`; only `evicted` turns the reservation into a live
@@ -553,7 +613,12 @@ decision ever counts fewer than six occupied slots while six exist. A wedged cha
 excluded from eviction as it is from eligibility, and the cap rule reads the same trace
 (ruling of 2026-09-05); none eligible means no eviction, the spawn is refused with
 `LifecycleError.capReached(live: 6)`, and every channel's `liveCount` reads six so the
-header can show it and offer *Send to background*.
+header can show it and offer *Send to background*. Dormant channels hold no slot: `reap()`
+released it, so a dormant channel is never a victim, and only a wedged ghost keeps a count
+without a process, until its record is gone and its pid dead. A fork holds its slot under
+the provisional key until its identity resolves, when `rekey(provisional, to: id)` moves the
+`reserved`, `live`, `lru`, `eligibility` and `wedged` entries in one counter turn; a
+collision found at that point rolls the provisional reservation back instead.
 
 **Runtime state.** The supervisor owns a `SessionRuntimeState` (permission mode, model,
 effort, output style, cwd, agent, the cumulative `--add-dir` list, the environment options,
@@ -588,31 +653,41 @@ banner naming the first setting that did not survive and keeps the composer disa
 the user picks a value. `apiKeySource` is re-read from the relaunch's first `system/init`.
 
 **Open in terminal, attach and logs** follow the parent's X5 as amended: `openInTerminal`
-runs `terminate()`, awaits release, marks the channel `.foreignLive(.ownTerminalTab)` with the
-pending hatch recorded, and returns a `PaneRequest` whose executable is the located binary,
-whose arguments are `["--resume", id]` (the interactive line, none of §6.1's print-mode
-flags), whose cwd is the channel's, and whose environment is
-`LaunchConfiguration.childEnvironment(over: resolved, configHome:)` for that channel, so the
-hatch resumes under the same config home and the same scrubbed, re-injected environment as
-the owned process did. `attach(job)` and `logs(job)` return requests for `claude attach
-<short>` and `claude logs <short>` with the job's cwd and the same environment, and change no
-ownership. The panel runs the request and calls `paneExited`; for a `.hatch` the supervisor
-then waits for the registry record to disappear (rule 5's release) and spawns `--resume <id>`
-owned, which is §7.4's re-adoption row; a `PaneExit` for a request the supervisor no longer
-tracks (an older epoch, a channel already re-adopted) is recorded and ignored. The panel
-never spawns `claude` for a session on its own initiative, and no other package receives a
-`PaneRequest` for a session.
+runs `terminate()`, awaits release, runs the ownership check once more (a holder now means
+no request, the holder's origin and `LifecycleError.heldElsewhere`), marks the channel
+`.foreignLive(.ownTerminalTab)` with the pending hatch recorded, and returns a `PaneRequest`
+whose executable is the located binary, whose arguments are `["--resume", id]` (the
+interactive line, none of §6.1's print-mode flags), whose cwd is the channel's, and whose
+environment is `LaunchConfiguration.childEnvironment(over: resolved, configHome:)` for that
+channel, so the hatch resumes under the same config home and the same scrubbed, re-injected
+environment as the owned process did. `attach(job)` and `logs(job)` return requests for
+`claude attach <short>` and `claude logs <short>` with the job's cwd and the same
+environment, and change no ownership. The panel runs the request and calls `paneExited`; for
+a `.hatch` the supervisor then waits for the registry record to disappear (rule 5's release)
+and spawns `--resume <id>` owned, which is §7.4's re-adoption row; a `PaneExit` for a
+request the supervisor no longer tracks (an older epoch, a channel already re-adopted) is
+recorded and ignored. The panel never spawns `claude` for a session on its own initiative,
+and no other package receives a `PaneRequest` for a session.
 
-**Fork** spawns a new channel whose key is provisional until `.sessionIdentityResolved`; the
-supervisor re-keys the channel on that event and publishes the new state, and captures follow
-C2's provisional-name rule on their own. A plain fork launches `SessionStart.resume(source,
-fork: true)`. *Fork from here* launches `SessionStart.forkFrom(source, at: ForkPoint(entryUUID:
-<the clicked record's uuid>, dropsTurn: <the discarded turn's prompt uuid>))`, the C2
-corrective's shape (parent Revision Note of 2026-09-05, `13c9ad4`), and C2's line composer
-emits `--resume-session-at` and `--resume-drops-turn`; FleetKit appends no argument of its
-own and the earlier contingency (an `extraArguments` field or a skipped test) is withdrawn.
-A fork whose resolved identity is a session another supervisor already owns yields to that
-owner through the post-handshake check.
+**Fork** spawns a new channel whose key is provisional until `.sessionIdentityResolved`, and
+the channel stays `.connecting` until then: while `identity == .awaitingFork` the supervisor
+does not apply `handshakeClean` when the spawn's handshake returns and skips the
+provisional-id ownership check (meaningless for a random id), though frames already fan out
+to subscribers. On the identity event for the current epoch, in order:
+`ownership.afterHandshake(session: id, ownPID:, epoch:)` against the resolved id, where a
+holder takes the existing `connectingFoundHolder` rows (terminate, `fleet.rollback`, foreign
+or contended, no re-index); clean: `fleet.rekey(provisional, to: id)`, the facade
+re-indexes, `identity = .known(id)`, `apply(.handshakeClean → .ready)`, publish. An identity
+not resolved within `handshakeTimeout` fails the spawn on the handshake-timeout path.
+Captures follow C2's provisional-name rule on their own. A plain fork launches
+`SessionStart.resume(source, fork: true)`. *Fork from here* launches
+`SessionStart.forkFrom(source, at: ForkPoint(entryUUID: <the clicked record's uuid>,
+dropsTurn: <the discarded turn's prompt uuid>))`, the C2 corrective's shape (parent Revision
+Note of 2026-09-05, `13c9ad4`), and C2's line composer emits `--resume-session-at` and
+`--resume-drops-turn`; FleetKit appends no argument of its own and the earlier contingency
+(an `extraArguments` field or a skipped test) is withdrawn. A fork whose resolved identity
+is a session another supervisor already owns yields to that owner through that check, from
+`.connecting`, never having published `.ready`.
 
 ### Preconditions (`Preconditions/`)
 
@@ -624,49 +699,53 @@ pending; untrusted; consent needed. Only `.ready` spawns.
   up to the first entry containing `.git` (file or directory), else the real path itself;
   read `projects[<root>].hasTrustDialogAccepted` from `<configHome>/.claude.json`; anything
   but `true` is untrusted. Read-only; re-read when the app asks after a terminal pane exits.
-- **Project MCP consent** (`ProjectMCPConsent`): parse `<root>/.mcp.json`; for each server
-  compute rejected, approved or pending from the merged settings sources only, read-only,
-  the way the engine does. The bundle settles the sources (2.1.257 `cli.pretty.js`, chunk
-  `1kg58a1a`, the project-server consent function at pretty lines 94640–94682): it reads the
-  merged effective settings that the settings loader returns from disk;
-  `disabledMcpjsonServers` naming the server is **rejected**; otherwise, when the project
-  root is trusted, `enabledMcpjsonServers` naming it or `enableAllProjectMcpServers` in the
-  merged settings is **approved**, and when untrusted the same two keys are consulted per
-  enabled source with the project-settings source skipped; anything else is **pending**. The
-  per-project arrays in `.claude.json` are not read there: they are a legacy location that
-  the startup migration (`migrateEnableAllProjectMcpServersToSettings`, pretty lines
-  503739–503785) copies into local settings when non-empty and clears, so the v2 rule that
-  read them was reading a file the engine had already emptied. C1's spike confirms the write
-  side: the terminal's decline writes exactly the local-settings store's
-  `disabledMcpjsonServers` and nothing in `.claude.json`. The same function's caller
-  promotes a *pending* server to approved on the non-interactive path when the
-  project-settings source is enabled, which is why the parent's §6.12 says a pending
-  server's command is spawned at startup and why the write must land before the child
-  exists. Precedence in afleet's reader, therefore: rejected wins over approved wins over
-  pending; the sources are the resolved local-settings store (plus the legacy overlay at the
-  cwd when the store moved to the git root), `<root>/.claude/settings.json` and
-  `<configHome>/settings.json`, each only when the launch's setting sources include it.
-  Pending servers with a hash of their entry that the FleetKit store has not recorded as
-  accepted yield `.consentNeeded`. *Accept* records `(project, name, hash)` in the store and
-  writes nothing. *Decline* is `LocalSettingsStore.decline(names, root)`: the parent's store
-  resolution and write policy line by line, executed only while no owned process for the
-  project is running, followed by a re-read through the same resolver before any spawn is
-  allowed. The writer works on directory descriptors, never on paths after resolution: it
-  opens the resolved root with `O_DIRECTORY|O_NOFOLLOW`, requires the descriptor's
-  `F_GETPATH` to equal the resolved path (an ancestor swapped in between is refused as a
-  symlink) and runs the config-home containment check on that `F_GETPATH` result rather than
-  on any string computed before the open, then opens `.claude` relative to it with
-  `O_DIRECTORY|O_NOFOLLOW`, `fstat`s it for type and ownership, `mkdirat`s and opens
-  `.cc-writes` the same way, creates the staging file with `openat` and `O_NOFOLLOW|O_EXCL`,
-  reads the existing target through `openat` with `O_NOFOLLOW`, `fchmod`s the staging file
-  to the target's mode, `fsync`s, `renameat`s within the one directory descriptor and
-  `fsync`s the directory. Fail closed: unparseable JSON, a symlink at the target, its
-  parent, the staging directory or any component swapped after resolution, a foreign uid on
-  the root, `.git`, `.claude` or `.cc-writes`, a store or staging directory inside the
-  ConfigHome, or any write error means `LifecycleError.declineRefused(reason)` and the
-  `/mcp` banner. When the launch's setting sources exclude `local` and `.mcp.json` declares
-  servers, the launch gains `strictMCPConfig = true` and the state carries `headerNote =
-  .projectServersOff`.
+- **Project MCP consent** (`ProjectMCPConsent`): parse `<root>/.mcp.json` (each entry's
+  transport from its raw shape: no `type` and a `command` is `.stdio(command:arguments:)`,
+  `type` `http` or `sse` is `.http(url:)` or `.sse(url:)`, anything else is `.other(type:)`,
+  still listed and still gated; `entryHash` is SHA-256 over the canonical JSON of the whole
+  raw entry, so a change to args, env, headers or url reopens consent, and the consent
+  file's arrays hold names, the same for every transport); for each server compute rejected,
+  approved or pending from the merged settings sources only, read-only, the way the engine
+  does. The bundle settles the sources (2.1.257 `cli.pretty.js`, chunk `1kg58a1a`, the
+  project-server consent function at pretty lines 94640–94682): it reads the merged
+  effective settings that the settings loader returns from disk; `disabledMcpjsonServers`
+  naming the server is **rejected**; otherwise, when the project root is trusted,
+  `enabledMcpjsonServers` naming it or `enableAllProjectMcpServers` in the merged settings
+  is **approved**, and when untrusted the same two keys are consulted per enabled source
+  with the project-settings source skipped; anything else is **pending**. The per-project
+  arrays in `.claude.json` are not read there: they are a legacy location that the startup
+  migration (`migrateEnableAllProjectMcpServersToSettings`, pretty lines 503739–503785)
+  copies into local settings when non-empty and clears, so the v2 rule that read them was
+  reading a file the engine had already emptied. C1's spike confirms the write side: the
+  terminal's decline writes exactly the local-settings store's `disabledMcpjsonServers` and
+  nothing in `.claude.json`. The same function's caller promotes a *pending* server to
+  approved on the non-interactive path when the project-settings source is enabled, which is
+  why the parent's §6.12 says a pending server's command is spawned at startup and why the
+  write must land before the child exists. Precedence in afleet's reader, therefore:
+  rejected wins over approved wins over pending; the sources are the resolved local-settings
+  store (plus the legacy overlay at the cwd when the store moved to the git root),
+  `<root>/.claude/settings.json` and `<configHome>/settings.json`, each only when the
+  launch's setting sources include it. Pending servers with a hash of their entry that the
+  FleetKit store has not recorded as accepted yield `.consentNeeded`. *Accept* records
+  `(project, name, hash)` in the store and writes nothing. *Decline* is
+  `LocalSettingsStore.decline(names, root)`: the parent's store resolution and write policy
+  line by line, executed only while no owned process for the project is running, followed by
+  a re-read through the same resolver before any spawn is allowed. The writer works on
+  directory descriptors, never on paths after resolution: it opens the resolved root with
+  `O_DIRECTORY|O_NOFOLLOW`, requires the descriptor's `F_GETPATH` to equal the resolved path
+  (an ancestor swapped in between is refused as a symlink) and runs the config-home
+  containment check on that `F_GETPATH` result rather than on any string computed before the
+  open, then opens `.claude` relative to it with `O_DIRECTORY|O_NOFOLLOW`, `fstat`s it for
+  type and ownership, `mkdirat`s and opens `.cc-writes` the same way, creates the staging
+  file with `openat` and `O_NOFOLLOW|O_EXCL`, reads the existing target through `openat`
+  with `O_NOFOLLOW`, `fchmod`s the staging file to the target's mode, `fsync`s, `renameat`s
+  within the one directory descriptor and `fsync`s the directory. Fail closed: unparseable
+  JSON, a symlink at the target, its parent, the staging directory or any component swapped
+  after resolution, a foreign uid on the root, `.git`, `.claude` or `.cc-writes`, a store or
+  staging directory inside the ConfigHome, or any write error means
+  `LifecycleError.declineRefused(reason)` and the `/mcp` banner. When the launch's setting
+  sources exclude `local` and `.mcp.json` declares servers, the launch gains
+  `strictMCPConfig = true` and the state carries `headerNote = .projectServersOff`.
 - **Managed settings** (`ManagedSettingsReader`): a payload is pending when
   `<configHome>/remote-settings.json` exists and `remote-settings-consent.json` does not
   record consent for it. The consent record's shape is unrecorded in the corpus; the reader
@@ -676,13 +755,15 @@ pending; untrusted; consent needed. Only `.ready` spawns.
 ### Activity (`Activity/`)
 
 `ActivityQuery.rows(states, mirrors, recentFrames)` is a pure function producing
-`ActivityRow`s in the parent's categories: pending decisions, notifications, failed results
-(`result` error subtypes and `is_error` tool results), permission denials
-(`result.permission_denials` and `system/permission_denied`), rate-limit banners (decided by
-`status` alone; `overageStatus: "rejected"` with `org_level_disabled` never renders as a
-refusal), auth state from `auth_status`, running and failed agent runs from the mirror. Each
-row carries its `ChannelKey` and, where one exists, the item uuid, so C6 links it; answering a
-decision from Activity goes through the same `answer` path as the channel.
+`ActivityRow`s in the parent's categories: pending decisions (one row per
+`ChannelState.pendingDecisions` entry, in ask order, carrying the request id and subtype),
+notifications, failed results (`result` error subtypes and `is_error` tool results),
+permission denials (`result.permission_denials` and `system/permission_denied`), rate-limit
+banners (decided by `status` alone; `overageStatus: "rejected"` with `org_level_disabled`
+never renders as a refusal), auth state from `auth_status`, running and failed agent runs
+from the mirror. Each row carries its `ChannelKey` and, where one exists, the item uuid, so
+C6 links it; answering a decision from Activity goes through the same `answer` path as the
+channel.
 
 ### Router (`Router/`, contract X10, owned)
 
@@ -783,13 +864,18 @@ that exercises it and its negation.
 `CLIVerbs` wraps `ProcessRunner` with the resolved environment, the located binary and a
 per-verb timeout: `agentsJSON() -> [AgentsRow]`, `stop(short)`, `backgroundResume(id, cwd)
 -> JobShort` (found by diffing `jobs/*/state.json` before and after for `resumeSessionId ==
-id`, then confirmed in the roster), `backgroundExec(command, cwd)`, `respawn(short)`, `remove(short)`, `authStatus()`,
-`authLogout()`; `attach` and `logs` are never run here, because they need a PTY and are pane
-requests (X5 as amended). Every verb call is a diagnostic event carrying the verb, exit code and
-duration and never its stdout. Tests inject `ScriptedProcessRunner`, which maps an argv
-pattern to `(stdout, exit)` and may mutate the scripted holder files so that `stop` removes a
-worker from the roster and marks the job stopped, and `--bg --resume` creates a job with the
-right `resumeSessionId`.
+id`, then confirmed in the roster), `backgroundExec(command, cwd)`, `respawn(short)`,
+`remove(short)`, `authStatus()`, `authLogout()`; `attach` and `logs` are never run here,
+because they need a PTY and are pane requests (X5 as amended). `LifecycleAPI.jobs()` reads
+the roster (reconciled with `agents --json` when read) into `JobEntry`s, exec jobs included
+with `sessionID == nil`, and `performJob(_:_:)` maps `.stop`, `.respawn` and `.remove` onto
+`stop`, `respawn` and `remove`; channels stay keyed by session, so a conversation job is
+both a `.backgroundJob` channel and a `JobEntry`, and an exec job is a `JobEntry` only.
+Every verb call is a diagnostic event carrying the verb, exit code and duration and never
+its stdout. Tests inject `ScriptedProcessRunner`, which maps an argv pattern to `(stdout,
+exit)` and may mutate the scripted holder files so that `stop` removes a worker from the
+roster and marks the job stopped, and `--bg --resume` creates a job with the right
+`resumeSessionId`.
 
 ### Diagnostics
 
@@ -814,17 +900,22 @@ child exercises: `sessions/`, `projects/`, `tasks/`, `jobs/`, `daemon/`, `todos/
 deliberate. An observed path outside the allowlist fails the gate with the path named,
 because either the allowlist or the never-write claim is wrong and both deserve a look. The
 turn-spending scenario behind `AFLEET_LIVE_CLI_TURNS=1` sends one `haiku` prompt asking for
-a background shell and an Explore subagent under a channel with the Notification hook
-registered, so hooks, a background shell and a subagent all write in one turn; session
-relocation is covered by `set_cwd` against a second trusted directory in the same turn's
-channel. The witness is read twice, once while the child is still live and once after it has
-ended, and both readings must be fully explained; the child's own `sessions/` record is the
-floor of the live reading and the transcript under `projects/` the floor of the final one,
-so the demonstration that the allowlist discriminates removes `projects/`. The test also
-asserts from the channel's own events that the prompt's actions ran: a `task_started` for
-the background shell, a `task_started` for the subagent and the Notification hook's
-callback, each named when missing. Editor integration is not reachable from afleet and is
-stated as untested.
+a five-second background shell and an Explore subagent under a channel with the Notification
+hook registered, so hooks, a background shell and a subagent all write in one prompt; the
+test answers the decisions itself, the Notification hook's callback first and the held
+`can_use_tool` after it, waits after the prompt's `result` for the shell's
+`task_notification` and the engine's automatic follow-up turn (the `background-shell`
+fixture shows that second `result`; a channel is never closed over a running task), and only
+then relocates with `set_cwd` against a second trusted directory in the same channel. The
+witness is read twice, once while the child is still live and once after it has ended, and
+both readings must be fully explained; the child's own `sessions/` record is the floor of
+the live reading and the transcript under `projects/` the floor of the final one, so the
+demonstration that the allowlist discriminates removes `projects/`. The test also asserts
+from the channel's own events that the prompt's actions ran: a `task_started` for the
+background shell, a `task_started` for the subagent and the Notification hook's callback,
+each named when missing, that the hook was answered before the permission, and that both
+`result`s are `success`. Editor integration is not reachable from afleet and is stated as
+untested.
 
 ## Contracts
 
@@ -860,12 +951,13 @@ the five-second poll rather than FSEvents (advisory means); the `TaskMirrorReadi
 through which C4 consumes X4's mirror, so C3's landing replaces a stand-in rather than an
 interface; and the `IndexStorage` seam between C3 and C4 as ruled (declared in
 `FleetTimeline`, implemented here), which needs no X2 change.
-`LifecycleAction.answer(RequestID, InboundAnswer)` and `LifecycleAPI.events(of:)` are a
-surface addition to X5 (the parent names only the state and action vocabulary); the parent's
-Revision Note at merge records them. Nothing about §6.12 flows back: the bundle read and
-C1's spike confirm the parent's rule that the local-settings store is the only source the
-rejection gate reads, and this document's v2 widening to the `.claude.json` project entry is
-withdrawn in v2.2.
+`LifecycleAction.answer(RequestID, InboundAnswer)`, `LifecycleAPI.events(of:)`,
+`LifecycleAPI.jobs()` and `LifecycleAPI.performJob(_:_:)` (the job verbs moved off
+`perform(on:)`, because an exec job has no session key) are surface additions to X5 (the
+parent names only the state and action vocabulary); the parent's Revision Note at merge
+records them. Nothing about §6.12 flows back: the bundle read and C1's spike confirm the
+parent's rule that the local-settings store is the only source the rejection gate reads, and
+this document's v2 widening to the `.claude.json` project entry is withdrawn in v2.2.
 
 ## Delegated unknowns
 
@@ -873,25 +965,27 @@ withdrawn in v2.2.
   bundle's chapter 48 §2.9 at plan time; fail closed; a real payload, if one is ever
   observed, becomes a C1 recording.
 - Whether `claude --bg --exec` produces a job with a `sessionId` that `--resume` accepts. G5
-  observes and records it; adoption of a conversation job is the turn-spending path.
+  lists the exec job through `jobs()` and records `sessionID == nil` as the observation;
+  adoption of a conversation job is the turn-spending path.
 - The `mcp_status` answer for a project server that was rejected through
   `disabledMcpjsonServers` (omitted, or listed with a status word). G5's consent scenario
   records the two answers' shapes as counts; the marker file is the assertion.
 - The completed answer of `claude_oauth_wait_for_completion`. The corpus records only the
   "No active claude_authenticate flow" error; the router's login strategy is tested to that
   point against the fixture and past it against a scripted answer, stated as such.
-- Whether `claude --bg` accepts `--max-turns`. The executor checks `--help` at zero cost
-  before the one conversation job and records the answer.
 - What a headless child writes under the config home across hooks, background shells,
   subagents and relocation, beyond the one turn C2 measured. G5's allowlist reading answers
-  it for one composed turn.
+  it for one composed prompt and the engine's follow-up turn after its background shell.
 
 ## Questions for the human gate
 
 Answered on 2026-09-05; kept as the record of what was asked. (1) Nothing moves to
 `AfleetCore`; C3's `IndexStorage` is implemented here over `FileStateStore`. (2) Yes to the
-one composed turn behind `AFLEET_LIVE_CLI_TURNS=1`, after the budget check; at most two short
-turns in total. (3) One document per namespace, filed on the parent's §7.8.
+one composed turn behind `AFLEET_LIVE_CLI_TURNS=1`, after the budget check; at most two
+short turns in total (raised to four in v2.4: adoption reserves two because a resumed job
+may run a turn, and the composed prompt reserves two because the engine follows a background
+shell's completion with a turn of its own). (3) One document per namespace, filed on the
+parent's §7.8.
 
 1. **Where does the store protocol live?** §7.3 says C3's transcript index caches into the
    store, but `FleetTimeline` cannot import `FleetSessions`. Recommendation: `StateStore`
@@ -902,7 +996,7 @@ turns in total. (3) One document per namespace, filed on the parent's §7.8.
 2. **Spend one live turn to widen the write allowlist?** Recommendation: yes, once, behind
    `AFLEET_LIVE_CLI_TURNS=1`, on `haiku`, after the budget check; the never-write claim is
    the project's central safety promise and one composed turn is the cheapest evidence that
-   exists. Total live spend for C4 is then at most two short turns.
+   exists. Total live spend for C4 is then at most four short turns (adoption two, composed two).
 3. **Store layout.** The parent's §7.8 names one `state.json`; this child chooses one document
    per namespace under the same directory so three packages never contend for one file. The
    file format is advisory inheritance; if the single file is preferred, the change is local.
@@ -1128,6 +1222,76 @@ turns in total. (3) One document per namespace, filed on the parent's §7.8.
   token inside the window is not a holder. Rejected: the window alone (accepts a reused pid
   whose record is fresh).
   Date/Author: 2026-09-05 / C4 plan review 2, ruling 9.
+- Decision: after `awaitRelease` returns `.released`, `sendToBackground` and
+  `openInTerminal` run the pre-spawn ownership check once more, immediately before `--bg
+  --resume` and before the `PaneRequest` is built; a holder found there preempts the handoff
+  (`handoffPreempted`, from ready and from dormant, to the holder's origin: foreign, job, or
+  contended for an own pid) with the banner set and `LifecycleError.heldElsewhere` thrown.
+  The window between a returned `PaneRequest` and the panel's spawn is accepted.
+  Rationale: nothing looked at the session between the release and the launch, so a holder
+  that appeared in that gap met a second writer; the recheck closes the gap FleetKit
+  controls. The residual window is IPC latency: the panel spawns on receipt, and the hatched
+  CLI's own post-handshake check is not ours to run. Rejected: a lease the panel returns
+  before spawning (a protocol for a window measured in milliseconds).
+  Date/Author: 2026-09-05 / C4 plan review 3, ruling 1.
+- Decision: a fork stays `.connecting` until `.sessionIdentityResolved`: while `identity ==
+  .awaitingFork` the handshake does not apply `handshakeClean` and the provisional-id
+  ownership check is skipped; on the identity event the check runs against the resolved id,
+  a holder takes the `connectingFoundHolder` rows, and a clean check rekeys the cap slot
+  (`FleetCapCounter.rekey(provisional, to: id)`), re-indexes, and only then applies
+  `handshakeClean` to `.ready`.
+  Rationale: a fork that published ready on the handshake had no row for the collision
+  (`handshakeFoundHolder` exists only from connecting, and the table records
+  `transitionNotInTable`), and its slot stayed under a provisional key no release could
+  name. Rejected: a `readyFoundHolder` row (a second collision path for one event).
+  Date/Author: 2026-09-05 / C4 plan review 3, ruling 3.
+- Decision: a dormant channel holds no cap slot and is never a cap victim; the `capReached`
+  dormant row is deleted; recency for the victim is the counter's fleet-wide
+  `activityClock`, stamped through `noteActivity(key)` on every send, engine frame and
+  decision, not a per-supervisor sequence.
+  Rationale: `reap()` releases the slot, so the row described the eviction of nothing and
+  contradicted the counter's own accounting; only a wedged ghost keeps a count without a
+  process. Per-supervisor sequences compared across supervisors ranked a channel by its own
+  event count, so a channel that had received ten frames outranked one touched a moment ago.
+  Rejected: keeping the row as a no-op transition (a scenario no test could drive honestly);
+  `Date` comparison for recency (the package compares no instants).
+  Date/Author: 2026-09-05 / C4 plan review 3, rulings 4 and 5.
+- Decision: `answer(id, answer)` consumes the id before the write: `decisionGone` when it is
+  not pending; the id removed and eligibility pushed; then `process.answer`. A failed write
+  is recorded as `answerWriteFailed` and thrown as `LifecycleError.answerFailed(id,
+  reason:)`, and the id is not restored; the scripted handle consumes on failure too.
+  Rationale: `ClaudeProcess.answer` removes `pendingInbound[id]` before `writeAnswer`
+  (ClaudeProcess.swift:396–399), so after a failed write every retry throws
+  `unknownRequest`; keeping the id pending on our side left the channel ineligible for
+  dormancy forever over a dialog the engine had already forgotten, and a failed write means
+  the pipe is gone and an exit follows. Rejected: restoring the id on failure (mirrors
+  nothing in ClaudeWire).
+  Date/Author: 2026-09-05 / C4 plan review 3, ruling 6.
+- Decision: jobs are listed and driven by short, not by session: `LifecycleAPI.jobs() ->
+  [JobEntry]` and `performJob(_ verb: JobVerb, _ short:)` replace the `stopJob`,
+  `respawnJob` and `removeJob` actions; `OriginResolver` classifies holders by
+  `Holder.isJob` (a roster source or a job short) rather than by branch order; the live
+  adoption scenario sends the adopted channel back to a job and stops it.
+  Rationale: an exec job has no session, so a session-keyed `perform(on:)` could not name
+  it, while the parent requires jobs listed, adopted and sent back; a conversation job's
+  worker appears in both the registry and the roster, and branch order alone read it as a
+  foreign terminal. Rejected: a synthetic session key for exec jobs (a channel with nothing
+  to open).
+  Date/Author: 2026-09-05 / C4 plan review 3, ruling 9.
+- Decision: every live launch states its `--max-turns` cap per scenario (consent 1, adoption
+  1, composed 12) through `budget.launch(_:maxTurns:)`; a `result` of subtype
+  `error_max_turns` fails the scenario naming it; `claude --bg` receives `--max-turns`
+  without a `--help` probe; the suite ceiling is four model turns.
+  Rationale: `--max-turns` caps agentic turns inside one prompt and ends the turn with
+  `error_max_turns` at the limit (bundle 36222 `turnCount`/`maxTurns`); it is not a prompt
+  count, so a composed prompt with Bash, a subagent and a reply needs room, and a cap hit
+  must fail rather than pass quietly. Bundle 824274's forwarded-flag set includes
+  `--max-turns` for `--bg`, so the probe answered a settled question. Adoption and the
+  composed prompt each reserve two turns because a resumed job may run one and the engine
+  follows a background shell's completion with a turn of its own. Rejected: one cap for
+  every launch (it either starves the composed prompt or lets a handshake-only launch run
+  twelve turns).
+  Date/Author: 2026-09-05 / C4 plan review 3, rulings 10 and 11.
 
 ## Surprises & Discoveries
 
@@ -1217,7 +1381,7 @@ Pending — written at finish.
   G1 coverage assertion moves to its final task as a gate so every checkpoint is green.
   Merged `main` at `6f3ea5a`; the WireEventPolicy corrective (`ca68f2e`) touches no internal
   this document cites.
-- - v2.3 (2026-09-05, after the plan's second adversarial review; twelve findings, all
+- v2.3 (2026-09-05, after the plan's second adversarial review; twelve findings, all
   folded): `ProcessHandle.events` is an existential with a `LiveProcessHandle` live
   conformance; the cap counter counts pending evictions and decides from pushed eligibility;
   the §6.12 writer verifies the root descriptor with `F_GETPATH`; `SessionRuntimeState`
@@ -1232,3 +1396,20 @@ Pending — written at finish.
   open-in-terminal gain from-dormant scenarios; the fork collision is scripted through
   `.sessionIdentityResolved`. Surface additions are recorded in the parent's Revision Note
   at merge.
+- v2.4 (2026-09-05, after the plan's third adversarial review; fifteen findings, all
+  folded): the handoffs recheck ownership before the launch and before the pane request
+  (`handoffPreempted`, six scenarios) and the residual pane window is accepted;
+  `ProjectMCPServer` carries a `Transport` (stdio, http, sse, other) and the entry hash
+  covers the whole raw entry; a fork stays connecting until its identity resolves and the
+  counter rekeys its slot; the dormant cap-victim row is deleted; recency is the counter's
+  fleet-wide activity clock; an answer consumes its id before the write and a failed write
+  is `answerFailed`; `terminate()` returns a `TerminationReport` whose steps are captured
+  `terminateEscalated` diagnostics; `ChannelState` gains `pendingDecisions`, `systemItem`
+  and `identity`, with `PendingDecision`, `SystemItem`, `TerminationReport` and
+  `LifecycleError` declared in the Types block; `LifecycleAPI` gains `jobs()` and
+  `performJob(_:_:)` with `JobEntry` and `JobVerb`, and `LifecycleAction` loses the three
+  job verbs; `Holder.isJob` drives the resolver; `--max-turns` is stated per live scenario,
+  forwarded to `--bg` unprobed, and the live ceiling is four turns; the composed scenario
+  answers its own decisions and waits for the shell's follow-up turn;
+  `ContentHash.sha256Hex` over CryptoKit with a pinned vector. Surface additions are
+  recorded in the parent's Revision Note at merge.
