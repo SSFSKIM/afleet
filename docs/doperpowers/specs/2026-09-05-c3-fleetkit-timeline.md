@@ -765,8 +765,11 @@ item that mentioned each, most recent first, and returns at most `limit`. It rea
 `ChannelTimeline.items`, never a frame or a record, which is what keeps it in agreement
 with the rendered timeline; C7's Browser leaf calls it and applies its own dev-server
 heuristic on top (parent §9.4, advisory). One recorded fact for the test: no recorded
-fixture carries a URL in tool output; the synthetic `dialog-refusal-fallback` carries two in
-assistant text, so `ChannelTimelineQueryTests` asserts extraction on that fixture's shape
+fixture carries a URL in tool output; the synthetic `dialog-refusal-fallback` carries **one distinct
+URL, sighted twice**, in assistant text (corrected 2026-09-05 during execution: an independent parse
+of its `frames.ndjson` finds seven out-direction assistant text blocks and two sightings of the same
+URL, so the earlier "two" was counting sightings, not distinct URLs), so `ChannelTimelineQueryTests`
+asserts extraction on that fixture's shape
 and on items constructed in the test for the other two kinds, and says so.
 
 ### The transcript index (`Index/`)
