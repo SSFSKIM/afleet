@@ -885,8 +885,10 @@ produced by the record reducer for the categories the wire carries, item for ite
 (streaming collapsed, timestamps within tolerance, identity by uuid, subagent items by
 agent id and source file). The test holds an explicit exclusion list of record kinds that
 never reach the wire and are therefore compared file-to-file only: attachment records
-(*A-11*) and the `system` records `turn_duration`, `stop_hook_summary`,
-`local_command`, `informational` and `compact_boundary`. The overlay is tested separately
+(*A-11*), the `system` records `turn_duration`, `stop_hook_summary`,
+`local_command`, `informational` and `compact_boundary`, and `user` records carrying `isMeta`
+(on disk with no wire counterpart across C1's corpus; added 2026-09-05 from C3's grounding).
+The overlay is tested separately
 against wire fixtures only. Both lists are explicit in the test and are reviewed whenever
 the baseline moves.
 
