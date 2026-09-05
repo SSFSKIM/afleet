@@ -37,12 +37,15 @@ public struct ChannelTimeline: Sendable, Hashable {
     }
 
     /// The URLs the channel has shown, most recent first and de-duplicated by the exact URL, at most `limit` of them.
+    /// "Most recent" is `items` order — the position of the last item that mentioned the URL — which is the same
+    /// order the renderer shows, so an item carrying no timestamp needs no separate rule here.
     ///
     /// It reads `items` and nothing else — never a frame, never a record — which is what keeps it from disagreeing
     /// with what the timeline renders. Only the kinds in `URLSources.contributing` are scanned.
     public func recentURLs(limit: Int) -> [SeenURL] {
         guard limit > 0 else { return [] }
-        var seen: [String: (url: URL, firstSeen: ItemID, firstSeenAt: Date?, lastSeen: ItemID, lastSeenAt: Date?, lastIndex: Int)] = [:]
+        var seen: [String: (url: URL, firstSeen: ItemID, firstSeenAt: Date?, lastSeen: ItemID, lastSeenAt: Date?,
+                            lastIndex: Int, sighting: Int)] = [:]
         var order: [String] = []
         for (index, item) in items.enumerated() {
             guard let source = URLSources.source(of: item), URLSources.contributing.contains(source.kind) else { continue }
@@ -54,15 +57,19 @@ public struct ChannelTimeline: Sendable, Hashable {
                     record.lastIndex = index
                     seen[key] = record
                 } else {
-                    seen[key] = (url, item.id, item.timestamp, item.id, item.timestamp, index)
+                    seen[key] = (url, item.id, item.timestamp, item.id, item.timestamp, index, order.count)
                     order.append(key)
                 }
             }
         }
+        // Recency is the position of the last item that mentioned the URL, not that item's timestamp: `items` is
+        // already in render order, so the index *is* the recency, and an item with no timestamp needs no second
+        // convention here to contradict the one the merge already applied. Two URLs last seen in the same item tie on
+        // that index, and the tie is broken by the order the scanner found them in, which makes the ordering total —
+        // `Array.sorted` is not stable, so an incomplete comparator would lose the appearance order the scanner keeps.
         let sorted = order.compactMap { seen[$0] }.sorted { a, b in
-            let left = a.lastSeenAt ?? .distantPast, right = b.lastSeenAt ?? .distantPast
-            if left != right { return left > right }
-            return a.lastIndex > b.lastIndex
+            if a.lastIndex != b.lastIndex { return a.lastIndex > b.lastIndex }
+            return a.sighting < b.sighting
         }
         return sorted.prefix(limit).map {
             SeenURL(url: $0.url, firstSeen: $0.firstSeen, firstSeenAt: $0.firstSeenAt,

@@ -145,6 +145,34 @@ final class ChannelTimelineQueryTests: XCTestCase {
         XCTAssertEqual(timeline.recentURLs(limit: 0), [], "a limit of zero asks for nothing")
     }
 
+    /// A missing timestamp must mean one thing in this file, not two. `items` renders an item with no timestamp
+    /// last — the newest position — so the query must return its URL first. `RecordReducer` yields a nil timestamp
+    /// whenever a record carries none it can parse (unlike `WireReducer`, which falls back to the arrival instant),
+    /// so this is a shape the durable half really produces.
+    ///
+    /// The second half pins the appearance-order tiebreak: two URLs last seen in the *same* item tie on recency by
+    /// construction, and the scanner's preserved order is what breaks the tie. `Array.sorted` is not stable, so
+    /// without a total comparator that order is not guaranteed to survive.
+    func testUndatedItemsRankByRenderOrderAndTiesKeepAppearanceOrder() throws {
+        let dated = Self.assistant(key: "a-dated", at: 10, text: "see https://example.test/dated")
+        let undated = TimelineItem.assistantMessage(AssistantMessageItem(
+            id: Self.id("a-undated"), timestamp: nil, provenance: Self.provenance(),
+            blocks: [try Self.textBlock("see https://example.test/undated")]))
+
+        let timeline = ChannelTimeline(durable: DurableProjection(items: [dated, undated]))
+        XCTAssertEqual(timeline.items.map(\.id.key), ["a-dated", "a-undated"],
+                       "an item with no timestamp renders last, which is the newest position")
+        XCTAssertEqual(timeline.recentURLs(limit: 10).map(\.url.absoluteString),
+                       ["https://example.test/undated", "https://example.test/dated"],
+                       "the query agrees with the merge: the item rendered last is the most recent one")
+
+        let together = Self.assistant(key: "a-together", at: 20,
+                                      text: "first https://example.test/one then https://example.test/two")
+        let both = ChannelTimeline(durable: DurableProjection(items: [together])).recentURLs(limit: 10)
+        XCTAssertEqual(both.map(\.url.absoluteString), ["https://example.test/one", "https://example.test/two"],
+                       "two URLs last seen in the same item keep the order the scanner found them in")
+    }
+
     // MARK: - The scanner itself
 
     func testScannerTrimsTrailingPunctuationAndClosingBrackets() {
