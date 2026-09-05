@@ -455,7 +455,11 @@ C2 — an MCP tool error's description, then the process exit path interpolating
 `ExitStatus` whose stderr tail is fifty raw lines from the CLI and its hooks. Event cases
 carry structured fields (an exit code, a signal, a tool name, an error type and domain); a
 message that must be text is drawn from a fixed set the type declares, never built at the
-call site.
+call site. The same discipline binds *test assertions*: an assertion that prints a value
+on failure publishes that value into a log the moment the value is an environment, a process
+table or a configuration blob — C2's version-probe demonstration printed the host's entire
+environment, API keys included, into a test log before the worker caught it. Assertions
+compare names, sets and shapes, never whole environments.
 
 ### 6.4 Inbound and outbound requests
 
@@ -949,6 +953,7 @@ with live tasks would silently destroy work the user was told was running.
 | Owned, ready | 30 min dormant-eligible | `terminate()` | Owned, dormant |
 | Owned, dormant | user sends | ownership check; spawn `--resume <id>` under the same session id; the send waits and then goes; only a brief connecting glyph | Owned, ready |
 | Owned, dormant | another holder appears | — | Foreign live or Background job |
+| Owned, any | `terminate()` returns with no exit observed (escalation exhausted) | mark the channel **wedged**: no respawn under this session id while a ghost may still hold its transcript; system item with the escalation trace and *Reopen*, which spawns only after the ownership check finds no holder | Owned, wedged |
 | Owned, any | process exits non-zero | respawn with backoff 1 s, 2 s, 4 s (three attempts), each preceded by the ownership check; then a system item with exit code, stderr tail and *Reopen* | Owned, ready or Archived |
 | Owned, ready | 6 owned processes live and a seventh is needed | reap the least recently used **dormant-eligible** channel; if none is eligible, no eviction: the header shows the live count and offers *Send to background* | that one: Owned, dormant |
 | Background job | *Adopt* | `claude stop <short>`; wait for exit and roster removal; spawn `--resume <id>` | Owned, connecting |
@@ -2263,7 +2268,12 @@ SwiftPM package or target that builds and tests without the children above it, p
   which is a first-turn frame on the event stream (§6.2). `sessionID` is known at
   construction for `.new` and `.resume` and is pending for a fork until the first
   `session_id`-bearing frame, `auth_status` in practice; the transport emits the
-  resolution as an event (§6.2). Owner: C2. Binds C3, C4 and the fixtures of C1.
+  resolution as an event (§6.2). `terminate()` returns a result that distinguishes an
+  observed exit from an exhausted escalation with no exit observed, and the event stream
+  ends only when the process is gone; what a wedged channel means is §7.4's. The handshake
+  value's `pending` list is a wire fact and nothing renders from it: re-armed pending
+  requests reach a consumer only as `.request` events after policy. Owner: C2. Binds C3,
+  C4 and the fixtures of C1.
 - **X4 Timeline model.** `TimelineItem` as §7.3; record identity is logical stream plus
   uuid or hash; the durable projection and overlay category lists and the wire exclusion
   list are named constants the differential test and the renderer both read; the
@@ -4031,6 +4041,13 @@ Pending — written at finish.
   Amended the same day: the project-directory name comes from the resolved record, not the
   capture, because always injecting the home opens the engine's gate for it unconditionally
   (raised by the Wave B worker, ruled from the bundle's `r.CLAUDE_CONFIG_DIR ? … : void 0`).
+- 2026-09-05: From C2's Wave B2 flags. X3 gains two contract lines — `terminate()` reports
+  whether an exit was observed, and `Handshake.pending` is a wire fact nothing renders from —
+  and §7.4's table gains the *wedged* row for a channel whose escalation exhausted without an
+  exit (C4's to implement). §6.3 extends the metadata discipline to test assertions after a
+  pre-fix demonstration printed the host environment into a test log; nothing reached a
+  commit. Flags C2 (closing), C4 (wedged row; pending-list surface), C6 (renders only from
+  events).
   §6.2 and X3 make a fork's `sessionID` pending until the first `session_id`-bearing frame
   (`auth_status`, frame 5) and forbid reading it off `system/init`. §11 records two
   `redact.py` gaps as a C1 follow-up on `main`. Raised by C2's whole-branch review panel
