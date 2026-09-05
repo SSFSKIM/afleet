@@ -65,6 +65,9 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
+        // 90 s is the sum of this scenario's own bounded waits: thirty seconds for the engine to write its
+        // registry record, five for the fleet to report it, ten for the channel to archive, and the twelve the
+        // child's four-step stop can take.
         try await Self.budget.run(turns: 0, wallTime: .seconds(90)) {
             let directory = try Self.trustedDirectory(0)
             let session = SessionID()
@@ -132,7 +135,11 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        try await Self.budget.run(turns: 0, wallTime: .seconds(240)) {
+        // 300 s is the sum of this scenario's own bounded waits: `backgroundExec` at the rig's 180 s verb timeout
+        // plus its three-second roster confirmation, a ten-second `jobs()` poll whose last call can itself take the
+        // fleet's twenty-second verb timeout, `performJob(.stop)` at twenty, a twenty-second poll on the same
+        // terms, and the twenty-second removal.
+        try await Self.budget.run(turns: 0, wallTime: .seconds(300)) {
             let directory = try Self.trustedDirectory(0)
             let short = try await rig.verbs.backgroundExec("sleep 60", cwd: directory)
             var removed = false
@@ -152,7 +159,7 @@ final class LiveFleetTests: XCTestCase {
             }
             XCTAssertEqual(gone, true, "the exec job \(short.rawValue) is still listed after stop")
 
-            try await rig.verbs.remove(short)
+            try await rig.fleet.performJob(.remove, short)
             removed = true
         }
     }
@@ -168,7 +175,11 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        try await Self.budget.run(turns: 0, wallTime: .seconds(120)) {
+        // 540 s is the sum of this scenario's own bounded waits: two launches, each a spawn (a twenty-second
+        // pre-spawn reconcile, a thirty-second handshake, a twenty-second post-handshake reconcile), a body wait
+        // (45 s for the marker in A, a ten-second grace in B), a sixty-second `mcp_status`, two thirty-second
+        // zero-cost readings and a termination escalation that can run to 45 s.
+        try await Self.budget.run(turns: 0, wallTime: .seconds(540)) {
             let directory = try Self.trustedDirectory(3)
             let markerName = "marker-\(UUID().uuidString)"
             let marker = directory.appending(path: markerName)
@@ -254,7 +265,12 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        try await Self.budget.run(turns: 2, wallTime: .seconds(240)) {
+        // 570 s is the sum of this scenario's own bounded waits: the 120 s `--bg` run, a sixty-second job poll and
+        // a twenty-second origin poll each able to overrun by one twenty-second `jobs()` call, the adopt (a
+        // twenty-second stop, the ten-second handoff budget, a seventy-second spawn), the send-to-background (a
+        // 45 s termination, the handoff budget, a pre-spawn reconcile, `--bg --resume` with its roster
+        // confirmation, and `agents --json`), and the stop-and-remove tail.
+        try await Self.budget.run(turns: 2, wallTime: .seconds(570)) {
             let directory = try Self.trustedDirectory(0)
             // No `--max-turns` on this line, and the spec was amended to match. `claude --bg` does forward the
             // flag, but `--max-turns 1` ends the session the moment it answers: the live run recorded the job
@@ -343,7 +359,10 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        try await Self.budget.run(turns: 2, wallTime: .seconds(300)) {
+        // 570 s is the sum of this scenario's own bounded waits: a seventy-second spawn, 240 s for the prompt's
+        // first `result`, the 120 s settle window, a sixty-second `set_cwd`, a termination escalation of up to
+        // 45 s and a thirty-second wait for the exit event.
+        try await Self.budget.run(turns: 2, wallTime: .seconds(570)) {
             let home = try Self.trustedDirectory(1)
             let elsewhere = try Self.trustedDirectory(2)
             let written = home.appending(path: "live-gate-\(UUID().uuidString).txt")
@@ -396,11 +415,16 @@ final class LiveFleetTests: XCTestCase {
             // automatic follow-up turns, so "two results and one notification" was satisfied while a third turn
             // was still running and the reap below cut it off. A settle window is correct for one notification or
             // for three.
-            let settled = await Self.settle(log, quietFor: .seconds(15), upTo: .seconds(120)) { events in
+            switch await Self.settle(log, quietFor: .seconds(15), upTo: .seconds(120), { events in
                 Self.results(in: events).count >= 2
+            }) {
+            case .settled:
+                break
+            case .conditionUnmet(let results):
+                XCTFail("only \(results) result frame(s) arrived in two minutes; the follow-up turn never ran")
+            case .stillBusy:
+                XCTFail("the channel never went quiet: reaping now would close it over a running task")
             }
-            XCTAssertTrue(settled,
-                          "the channel never went quiet: reaping now would close it over a running task")
 
             // `/cd` into a second trusted directory. The request goes to the channel's own process: the facade has
             // no generic control-request door, and Task 8's strategy executor takes a supervisor this test cannot
@@ -633,20 +657,34 @@ final class LiveFleetTests: XCTestCase {
         Set(ConfigHomeWitness(root: root).read().keys)
     }
 
+    /// Why a settle wait ended. The two failures are different facts and the caller reports them differently:
+    /// a channel that never produced what was asked of it is not a channel that would not go quiet.
+    private enum SettleOutcome {
+        case settled
+        /// The deadline passed and `condition` never held; carries the result count reached.
+        case conditionUnmet(results: Int)
+        /// `condition` held, but events kept arriving right up to the deadline.
+        case stillBusy
+    }
+
     /// Waits until the channel has gone quiet: `condition` holds and no new event has arrived for `quietFor`.
-    /// Answers false at `deadline` rather than throwing, so the caller decides what an unsettled channel means.
+    /// Never throws, so the caller decides what an unsettled channel means.
     private static func settle(_ log: LiveEventLog, quietFor: Duration, upTo deadline: Duration,
-                               _ condition: @Sendable ([WireEvent]) -> Bool) async -> Bool {
+                               _ condition: @Sendable ([WireEvent]) -> Bool) async -> SettleOutcome {
         let start = ContinuousClock.now
         var lastCount = -1
         var lastChange = ContinuousClock.now
+        var everHeld = false
         while ContinuousClock.now - start < deadline {
             let events = await log.events
             if events.count != lastCount { lastCount = events.count; lastChange = .now }
-            if condition(events), ContinuousClock.now - lastChange >= quietFor { return true }
+            if condition(events) {
+                everHeld = true
+                if ContinuousClock.now - lastChange >= quietFor { return .settled }
+            }
             try? await Task.sleep(for: .milliseconds(250))
         }
-        return false
+        return everHeld ? .stillBusy : .conditionUnmet(results: results(in: await log.events).count)
     }
 
     /// Polls `body` on wall time until it answers non-nil or the deadline passes. Wall time is right here: this

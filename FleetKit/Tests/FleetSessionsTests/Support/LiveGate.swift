@@ -257,7 +257,10 @@ actor LiveBudget {
     /// Every usage window read during the run, for the report.
     private(set) var readings: [LiveBudgetReading] = []
 
-    init(turnCeiling: Int = 4, wallCeiling: Duration = .seconds(600), probe: UsageProbe? = nil) {
+    /// Twenty minutes, per the spec's amendment: wall time is not the scarce resource here, turns are, and a
+    /// ten-minute ceiling did harm in both directions — it could not hold the sum of the scenarios' honest
+    /// declarations, and it would have refused the most valuable scenario last in alphabetical order.
+    init(turnCeiling: Int = 4, wallCeiling: Duration = .seconds(1200), probe: UsageProbe? = nil) {
         self.turnCeiling = turnCeiling; self.wallCeiling = wallCeiling; self.probe = probe
     }
 
