@@ -47,6 +47,8 @@ public struct LaunchConfiguration: Hashable, Sendable {
     public var promptSuggestions: Bool
     public var settingSources: [SettingSource]?      // nil = CLI default; [] = --setting-sources ""
     public var strictMCPConfig: Bool
+    /// Caps the number of agentic (assistant) turns the engine runs for one prompt; nil omits `--max-turns`.
+    public var maxTurns: Int?
     public var environment: ChildEnvironmentOptions
     /// Tests and recordings only: the config home to put in the child in place of the launch's own resolved
     /// one. `childEnvironment` sets `CLAUDE_CONFIG_DIR` on every launch (§6.9: one ConfigHome per launch, and
@@ -57,11 +59,11 @@ public struct LaunchConfiguration: Hashable, Sendable {
     public init(binary: URL, cwd: URL, session: SessionStart, model: String? = nil, permissionMode: PermissionMode? = nil, agent: String? = nil,
                 effort: String? = nil, name: String? = nil, addDirectories: [URL] = [], worktree: Worktree? = nil, allowBypass: Bool = false,
                 promptSuggestions: Bool = false, settingSources: [SettingSource]? = nil, strictMCPConfig: Bool = false,
-                environment: ChildEnvironmentOptions = .init(), configHomeOverride: URL? = nil) {
+                maxTurns: Int? = nil, environment: ChildEnvironmentOptions = .init(), configHomeOverride: URL? = nil) {
         self.binary = binary; self.cwd = cwd; self.session = session; self.model = model; self.permissionMode = permissionMode; self.agent = agent
         self.effort = effort; self.name = name; self.addDirectories = addDirectories; self.worktree = worktree; self.allowBypass = allowBypass
         self.promptSuggestions = promptSuggestions; self.settingSources = settingSources; self.strictMCPConfig = strictMCPConfig
-        self.environment = environment; self.configHomeOverride = configHomeOverride
+        self.maxTurns = maxTurns; self.environment = environment; self.configHomeOverride = configHomeOverride
     }
 
     /// A caller-supplied string reaches the child as one argv token, and a token beginning with `-` is read
@@ -91,6 +93,13 @@ public struct LaunchConfiguration: Hashable, Sendable {
             a += ["--resume", id.description, "--fork-session", "--resume-session-at",
                   try Self.token(point.entryUUID, for: "--resume-session-at")]
             if let dropsTurn = point.dropsTurn { a += ["--resume-drops-turn", try Self.token(dropsTurn, for: "--resume-drops-turn")] }
+        }
+        // Caps the number of agentic (assistant) turns the engine runs for this prompt.
+        if let maxTurns {
+            guard maxTurns >= 1 else {
+                throw WireError.invalidArgument(option: "--max-turns", reason: "must be at least 1: \(maxTurns)")
+            }
+            a += ["--max-turns", String(maxTurns)]
         }
         if let model { a += ["--model", try Self.token(model, for: "--model")] }
         if let permissionMode { a += ["--permission-mode", permissionMode.rawValue] }
