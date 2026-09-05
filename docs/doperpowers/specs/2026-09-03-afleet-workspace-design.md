@@ -2311,11 +2311,14 @@ SwiftPM package or target that builds and tests without the children above it, p
   holders); dormant eligibility as a query. The Terminal panel's attach and hatch and
   the composer's send go through it and nothing else spawns. Owner: C4. Binds C5, C6,
   C7. Amended 2026-09-05 from C7's cut (its W8): `openInTerminal` and `attach` perform the
-  ownership work and hand the Terminal panel a `PaneRequest {executable, arguments, cwd,
+  ownership work and hand the Terminal panel a `PaneRequest {id, executable, arguments, cwd,
   environment, purpose: .hatch(SessionID) | .attach(job) | .logs(job) | .shell | .command}`
   whose environment C4 composes through ClaudeWire's launch configuration (§6.1, X11); the
   panel runs it and reports `PaneExit {request, code, observedAt}` back through this API,
-  which owns the re-adoption. The panel never spawns `claude` for a session on its own
+  which owns the re-adoption. `id` is an opaque identifier fresh per request (amended
+  2026-09-05 from the C4 plan review): two hatches of one session are otherwise equal by
+  value, so the lifecycle accepts an exit only when its `request.id` is the one it is
+  waiting on, and a late exit from an older pane is discarded. The panel never spawns `claude` for a session on its own
   initiative. `stop`, `respawn` and `rm` are actions here with no PTY; `attach` and `logs`
   are panes.
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
@@ -4162,3 +4165,9 @@ Pending — written at finish.
   server*. Not settled: a project whose store resolves to a repository root above the session
   cwd, the multi-server dialog, the *all future servers* leg, and whether the write preserves
   unrecognised keys in an existing store, since this run created the file.
+- 2026-09-05 C4 plan review (Codex, adversarial): X5's `PaneRequest` gains an opaque `id` so a
+  stale pane exit cannot be mistaken for the current hatch; the recheck-before-launch the review
+  also asked for is not added: the panel is a plain executor by W8, the window is the handoff
+  itself, and the CLI does not refuse a second holder (S12), so the after-handshake check of
+  §7.2 rule 4 remains the backstop. The other findings are child-local and fold into C4's spec
+  and plan.
