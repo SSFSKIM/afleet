@@ -54,10 +54,18 @@ LS_USER, LS_GROUP = "<user>", "<group>"
 # overwrite its own value on the second pass.
 PLACEHOLDER_KEY_RE = re.compile(r"^<[^<>]*>(#\d+)?$")
 
-# Identity keys match *exactly* against the normalised key, never as a substring: `user`
-# as a substring would swallow the `UserPromptSubmit` hook-event name, which appears as a
-# dictionary key in the `hooks` object of the §6.2 initialize payload. `email` is the one
-# substring match, because no structural protocol key contains it innocuously.
+# Identity keys in `IDENTITY_KEYS` match *exactly* against the normalised key, never as a
+# substring: `user` as a substring would swallow the `UserPromptSubmit` hook-event name, which
+# appears as a dictionary key in the `hooks` object of the §6.2 initialize payload.
+# `IDENTITY_SUBSTRINGS` holds the three words that are safe to match anywhere in a key,
+# because no structural key in this protocol contains one innocuously. `email` was there from
+# the start; `account` and `organization` joined it after the exact-match set walked straight
+# past `ownerAccountUuid` and `ownerOrganizationUuid` on a `bridge-session` transcript record,
+# which carried a live account uuid and a live organization uuid into a fixture that `verify`
+# then passed. Spec §4.5 rule 1 says these fields are replaced *anywhere*, and an exact-match
+# set cannot deliver "anywhere": every prefix a future record puts in front of the word is a
+# new hole, and each one is silent. The prefixed forms already enumerated below are kept
+# because removing them would change nothing and re-open the reading that put them there.
 # `name`-suffixed entries are listed one by one for the same reason: `displayName` is
 # structural in this protocol -- it is a `list_models` / `initialize.models` row field
 # (parity 06-08-02 lines 21 and 26, evidence 2026-09-03-control-request-shapes line 15), a
@@ -68,6 +76,7 @@ IDENTITY_KEYS = frozenset(("account", "accountuuid", "accountid", "accountname",
                            "organization", "organizationuuid", "organizationid", "organizationname",
                            "user", "userid", "useruuid", "username",
                            "subscription", "subscriptiontype", "fullname"))
+IDENTITY_SUBSTRINGS = ("email", "account", "organization")
 SECRET_WORDS = ("token", "oauth", "key", "secret", "credential", "authorization", "cookie",
                 "password", "bearer")
 USAGE_COUNTERS = {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
@@ -224,7 +233,7 @@ def _secret_field(k, value, path):
 def _is_identity_key(nk):
     if PLACEHOLDER_KEY_RE.match(nk):
         return False
-    return nk in IDENTITY_KEYS or "email" in nk
+    return nk in IDENTITY_KEYS or any(w in nk for w in IDENTITY_SUBSTRINGS)
 
 
 class Redactor:
