@@ -206,8 +206,10 @@ is no channel, because channels are keyed by session), and `performJob(.stop, sh
 through the real runner removes it. The consent half is the two-launch marker scenario G3
 names, zero cost, the marker accepted through the store-only accept before launch A so the
 consent gate does not stop A and the marker proves the engine's own promotion. Adoption of a
-job with a conversation reserves two short `haiku` turns (`claude --bg --model
-claude-haiku-4-5-20251001 "Reply with exactly: pong"`; the recipe carried `--max-turns 1`
+job with a conversation reserves two short `haiku` turns as insurance but is expected to spend
+none: it opens a session through the fleet handshake-only, reaps it so a transcript exists, and
+backgrounds that session id with `claude --bg --resume <id>`, which reaches no model. The recipe
+sent a prompt (`claude --bg --model claude-haiku-4-5-20251001 "Reply with exactly: pong"`; the recipe carried `--max-turns 1`
 until 2026-09-06, when the gate showed it self-defeating: the job reaches a terminal state
 about three and a half seconds after creation and leaves the roster before `jobs()`, which
 filters terminal records, can list it. `claude --bg` does forward `--max-turns`, bundle
@@ -1395,6 +1397,26 @@ parent's §7.8.
   relying on accumulation alone (accumulation self-corrects the ceiling but says nothing about a
   scenario whose own waits have run away).
   Date/Author: 2026-09-06 / C4 Task 10 re-review.
+- Decision: G5's adoption scenario resumes a **promptless** session as its background job, and so
+  spends no model turn; its two-turn reservation stays as insurance and it asserts on the way out
+  that it really cost nothing.
+  Rationale: the recipe existed to give adoption a *conversation* job rather than an exec one —
+  that is, a job carrying a session id — and none of the assertions it makes depends on the
+  transcript having content: adopt stops the job, resumes the same session id owned, the next
+  handshake is clean, and *Send to background* hands the channel back. So the prompt was paying
+  two turns for a word. The scenario now opens a session through the fleet handshake-only, reaps
+  it so a transcript exists, and backgrounds it with `--bg --resume <id>`. Evidence, gathered at
+  zero cost after the capped recipe failed: an uncapped `--bg --resume` returned in 0.7 s and its
+  job record read `state: working, tempo: blocked, firstTerminalAt: None` from t+15 s through
+  t+90 s, settling only when it was stopped, while the capped `--bg --max-turns 1 "pong"` went
+  terminal in 3.5 s — and `Fleet.jobs()` filters terminal records, which is why the capped job
+  vanished before the first poll. The bundle agrees on the mechanism (`cli.pretty.js:36304`,
+  "Reached maximum number of turns"): a worker given a cap finishes its run and settles, one
+  without a cap has no reason to.
+  Rejected: keeping the prompt and dropping only the cap (it leaves the largest unevidenced
+  assumption in the gate — that a bg session which has *answered* stays resident — and pays two
+  turns to test something the scenario does not assert).
+  Date/Author: 2026-09-06 / C4 Task 10, the promptless adoption recipe.
 
 ## Surprises & Discoveries
 
