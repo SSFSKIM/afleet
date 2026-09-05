@@ -4194,3 +4194,17 @@ Pending — written at finish.
   `assistant` one. This compaction preserved a segment (`preservedSegment` names a head, an
   anchor and a tail) and nothing before the boundary was dropped, so §7.3's hard-truncation
   sentence is still unexercised. Fixture `compact-boundary`.
+- 2026-09-05 C1/compact-boundary, second reading: two facts the fixture's reviewer found that
+  the recording's own notes did not, both about *when* the engine writes rather than what.
+  **A turn's trailing `last-prompt` is written during shutdown**, after the `end_session`
+  exchange, and arrives in a `transcript_mirror` of its own after the response — seen in both
+  of this wave's recordings, so it is not particular to a compaction. A consumer that treats a
+  `result` as "the turn's records have landed" is a record short, and a scenario that reads the
+  file at `result` reports the newest turn as an abandoned branch; §7.3's source arbitration
+  already reads the file on open and on resume, which closes the gap, but the timing is worth
+  stating rather than rediscovering. **A compaction's `system/init` is displaced, not
+  duplicated**: the recording carries exactly one, the ordinary count, but it arrives late —
+  after the pre-compaction mirrors and immediately before the boundary frame — rather than at
+  the start of the turn where every other fixture puts it. Anything keyed on "init means a turn
+  is starting" fires at the moment the context is replaced instead, most of the way through the
+  prompt it belongs to.
