@@ -60,14 +60,14 @@ outcome added later without a test fails the build. The scenarios, grouped by ro
 - ready to dormant after 30 minutes dormant-eligible, and *not* while a task in the registry mirror is running or its heartbeat is uncertain (item 18's two halves; the mirror is a C3 type, so until C3 lands this test feeds the supervisor a stand-in that conforms to X4's mirror-entry shape, and G2 replaces the stand-in);
 - dormant to ready on send, same session id, one connecting glyph;
 - respawn on non-zero exit with backoff 1 s, 2 s, 4 s, three attempts, each behind the ownership check, then the system item with exit code, stderr tail and *Reopen* (item 20);
-- the cap of six: the seventh spawn reaps the least recently used dormant-eligible channel; with none eligible, no eviction and the header state carries the live count and *Send to background* (item 19). Acquiring a slot is a reservation the counter grants or refuses atomically, so two channels opened at the cap at the same moment evict two distinct victims or one of them is refused, never both spawning against one freed slot; an eviction returns the outcome the counter observed, and a victim that wedges mid-eviction frees no slot, so the counter moves to the next eligible victim or refuses. Two tests pin it: two concurrent opens at the cap, and a victim whose `terminate()` returns `nil` during eviction, after which the seventh channel is refused or takes the next victim and never spawns on the ghost's slot;
-- wedged when `terminate()` returns `nil`: no respawn under that session id, the escalation trace on a system item, *Reopen* spawning only after the ownership check finds no holder. No real child can produce this row, because SIGKILL cannot be refused (C2 recorded the same limit); the supervisor therefore drives its process through a `ProcessHandle` protocol that `ClaudeProcess` conforms to, and the row runs against a scripted handle whose `terminate()` returns `nil`, stated as such in the test. The fault is injected through every action that terminates, not only the reap: reap, send to background, open in terminal, the quiescent restart, `/logout` and cap eviction each get a scenario in which `terminate()` returns `nil`, and each asserts that nothing that would have followed a real exit happens: no `PaneRequest` is returned, no `--bg --resume` or `stop` verb runs, `auth logout` does not run, no replacement process spawns, and the channel is wedged with the trace;
+- the cap of six: the seventh spawn reaps the least recently used dormant-eligible channel; with none eligible, no eviction and the header state carries the live count and *Send to background* (item 19). Acquiring a slot is a reservation the counter grants or refuses atomically, so two channels opened at the cap at the same moment evict two distinct victims or one of them is refused, never both spawning against one freed slot; an eviction returns the outcome the counter observed, and a victim that wedges mid-eviction frees no slot, so the counter moves to the next eligible victim or refuses. The counter counts every occupied slot, live, reserved, wedged and pending eviction, and decides from an eligibility snapshot the supervisors push, so its decision never awaits a supervisor and a victim leaves the live set the moment it is named. Three tests pin it: two concurrent opens at the cap; a victim whose `terminate()` returns `nil` during eviction, after which the seventh channel is refused or takes the next victim and never spawns on the ghost's slot; and a victim whose own release arrives while its eviction is still pending, which completes the eviction without freeing a seventh slot;
+- wedged when `terminate()` returns `nil`: no respawn under that session id, the escalation trace on a system item, *Reopen* spawning only after the ownership check finds no holder. No real child can produce this row, because SIGKILL cannot be refused (C2 recorded the same limit); the supervisor therefore drives its process through a `ProcessHandle` protocol whose live conformance is a thin `LiveProcessHandle` wrapper over `ClaudeProcess` and whose `events` is an existential `AsyncSequence<WireEvent, Never>` (ClaudeWire's `WireEventStream` can be neither constructed nor fed outside its module), and the row runs against a scripted handle whose `events` is an `AsyncStream` the test feeds and whose `terminate()` returns `nil`, stated as such in the test. The fault is injected through every action that terminates, not only the reap: reap, send to background, open in terminal, the quiescent restart, `/logout` and cap eviction each get a scenario in which `terminate()` returns `nil`, and each asserts that nothing that would have followed a real exit happens: no `PaneRequest` is returned, no `--bg --resume` or `stop` verb runs, `auth logout` does not run, no replacement process spawns, and the channel is wedged with the trace;
 - adopt: `claude stop <short>`, wait for exit and roster removal, spawn `--resume`;
 - send to background: `terminate()`, wait for exit and registry removal, `claude --bg --resume <id>`, the new job found in the roster by its `resumeSessionId` (item 16);
 - open in terminal: `terminate()`, wait, return a `PaneRequest` whose purpose is `.hatch(id)`, whose arguments are the interactive `--resume <id>` line and whose environment is composed through ClaudeWire's launch configuration so the hatch resumes under the same config home; keep mirroring; re-adopt when the panel reports the `PaneExit` and the record is gone (the test plays the panel: it takes the request and reports the exit);
 - foreign live in the user's terminal: send refused with the "running in your terminal" reason and *Fork* offered; record gone means archived;
 - Contended after a handoff wait exceeds 10 s; and, as a transition of its own with its own event, Contended whenever desired and observed disagree (a foreign holder named while `desired` is owned, from connecting, ready or dormant); back to the matching origin when the holder set settles to zero or one;
-- the quiescent restart: the values to carry come from the channel's runtime-state model, an actor-owned record of permission mode, model, effort, fast mode, output style, cwd and agent that every control response and frame updates (a `set_model` answer, a `set_permission_mode` answer, `get_settings.applied`, `fast_mode_state`, `set_cwd`), not from the launch template; snapshot it, terminate, wait, spawn with the carried flags and never `--agent`, re-send `apply_flag_settings`, verify every readback, composer disabled until each matches, a banner naming the setting that did not survive (items 58 and 63 at the API level, the mismatch half driven by `FAKE_CLAUDE_INIT` answering a different `current_permission_mode`). One end-to-end test routes `/model` and `/permissions` through the command router, then restarts, and asserts the relaunch carries the changed values, not the ones the channel was opened with.
+- the quiescent restart: the values to carry come from the channel's runtime-state model, an actor-owned record of permission mode, model, effort, output style, cwd, agent, the cumulative `--add-dir` list, the environment options, the union of every `apply_flag_settings` payload the host sent and the fast-mode state the engine reported, that every control response and frame updates (a `set_model` answer, a `set_permission_mode` answer, `get_settings.applied`, an `apply_flag_settings` sent through the API, `fast_mode_state`, `set_cwd`, an accepted `add_directory`), not from the launch template; snapshot it, terminate, wait, spawn with every launch field from the snapshot and never `--agent`, re-send the flag union, verify every readback (`model` and `effort` from `applied`, permission mode and output style from the new handshake, every flag key present in `effective_keys`, fast mode from `effective_keys` when the host applied it and from the new handshake when it was only observed), `.ready` published only after the readbacks, composer disabled until each matches, a banner naming the setting that did not survive (items 58 and 63 at the API level, the mismatch half driven by `FAKE_CLAUDE_INIT` answering a different `current_permission_mode`). One end-to-end test routes `/model` and `/permissions` through the command router, then restarts, and asserts the relaunch carries the changed values, not the ones the channel was opened with.
 
 Forking is exercised beside the table because the parent's table has no fork row: a plain
 fork launches `SessionStart.resume(source, fork: true)`; *Fork from here* launches
@@ -110,8 +110,8 @@ project's local-settings store, the project settings file and the user settings 
 `enableAllProjectMcpServers`), never from the `.claude.json` project entry, because the
 engine's consent decision reads only the effective settings (*Preconditions* below cites the
 bundle); a decline writes `disabledMcpjsonServers` into the project's
-`.claude/settings.local.json`, the file and key C1's spike recorded the terminal's own dialog
-writing, through the parent's §6.12 resolver and write policy, with every other key
+`.claude/settings.local.json`, the file and key C1's spike recorded the terminal's own
+dialog writing, through the parent's §6.12 resolver and write policy, with every other key
 byte-for-byte untouched, the existing mode preserved, and every open, create and rename made
 relative to a directory descriptor the writer holds (`.claude` opened
 `O_DIRECTORY|O_NOFOLLOW` and `fstat`ed for type and ownership, the staging directory made
@@ -119,27 +119,28 @@ with `mkdirat` and opened the same way, the staging file created with `openat` a
 `O_NOFOLLOW|O_EXCL`, the target read with `openat` and `O_NOFOLLOW`, and `renameat` within
 the one directory descriptor), so a symlink placed anywhere on the path after resolution is
 refused rather than followed; the writer's tests cover a `.claude` that is a symlink to a
-directory outside the project, a `.cc-writes` that is a symlink, a `settings.local.json` that
-is a symlink, a path component swapped for a symlink between resolution and the open, mode
-preservation across the rename, and a staging directory that would resolve inside the
-ConfigHome, each writing nothing, leaving every symlink target unchanged, spawning nothing and
-reporting the `/mcp` banner; a project whose store resolves inside the ConfigHome (the
+directory outside the project, a `.cc-writes` that is a symlink, a `settings.local.json`
+that is a symlink, a path component swapped for a symlink between resolution and the open,
+mode preservation across the rename, and a staging directory that would resolve inside the
+ConfigHome, each writing nothing, leaving every symlink target unchanged, spawning nothing
+and reporting the `/mcp` banner; a project whose store resolves inside the ConfigHome (the
 `CLAUDE_CONFIG_DIR`-inside-project case) refuses the write the same way; isolated setting
 sources with a declared `.mcp.json` server add `--strict-mcp-config` to the launch and the
 header reason; a pending managed-settings pair under the scratch ConfigHome yields
 `.managedSettingsPending` and no spawn (item 55). Nothing else in the package ever writes
 under a project directory, asserted by a test that diffs the project tree across every other
 precondition path. The proof that the engine honours a decline is not a marker under
-`fake-claude`, which runs no server and so proves nothing; it is a zero-cost scenario in G5's
-suite against the installed CLI: in a directory the scratch config home already trusts, a
-`.mcp.json` declares one server whose command writes a marker file; launch A, with no decline
-recorded, and launch B, after a decline written through the §6.12 writer, differ in nothing
-else; each runs to the handshake, is asked `mcp_status` and `get_session_cost`, and is ended
-with no turn; the marker exists after A and not after B (the headless path promotes a pending
-project server to approved and spawns its command, parent §6.12), both `get_session_cost`
-answers read `total_cost_usd == 0`, and the two `mcp_status` answers are recorded as
-diagnostics counts, not asserted to a shape, because the answer for a rejected server is
-unrecorded in the corpus.
+`fake-claude`, which runs no server and so proves nothing; it is a zero-cost scenario in
+G5's suite against the installed CLI: in a directory the scratch config home already trusts,
+a `.mcp.json` declares one server whose command writes a marker file; launch A, with the
+marker accepted through the store-only accept and no decline recorded, and launch B, after a
+decline written through the §6.12 writer, differ in nothing else; each runs to the
+handshake, is asked `mcp_status` and `get_session_cost`, and is ended with no turn; the
+marker exists after A and not after B (the headless path promotes a pending project server
+to approved and spawns its command, parent §6.12), both `get_session_cost` answers read
+`total_cost_usd == 0`, and the two `mcp_status` answers are recorded as diagnostics counts,
+not asserted to a shape, because the answer for a rejected server is unrecorded in the
+corpus.
 
 **G4 — the router (required).** The router table is data; a test asserts that the set of
 local commands in the table equals the set the parent's §7.7 table names, with no
@@ -175,32 +176,34 @@ level, verbs through the scripted runner).
 with `AFLEET_LIVE_CLI=1`, under `/tmp/afleet-fixtures/config-home`, and touches only
 processes the test starts. The suite owns one serialised live budget: scenarios run one at a
 time through it; the model is pinned to `claude-haiku-4-5-20251001` on every turn-spending
-launch; every `ClaudeProcess` the suite launches carries `--max-turns` (1 for a handshake-only
-scenario, 2 for the composed turn); the suite's ceilings are two model turns and ten minutes
-of wall time in total, and the budget refuses a scenario that would cross either; C2's usage
-reader is consulted before the first scenario and again before each turn-spending one, and a
-spent window skips with its reason; every `result` frame any scenario observes has its
-`total_cost_usd` summed, and the sum is reported after the run. Zero-cost scenarios are
-witnessed, not assumed: a zero-turn launch emits no `result` frame, so each asks
-`get_session_cost` before ending its process and asserts `total_cost_usd == 0`. The
-foreign-session half spends no model turn: the test starts an interactive `claude` on a
+launch; every `ClaudeProcess` the suite launches carries `--max-turns` (1 for a
+handshake-only scenario, 2 for the composed turn); the suite's ceilings are two model turns
+and ten minutes of wall time in total, and the budget refuses a scenario that would cross
+either; C2's usage reader is consulted before the first scenario and again before each
+turn-spending one, and a spent window skips with its reason; every `result` frame any
+scenario observes has its `total_cost_usd` summed, and the sum is reported after the run.
+Zero-cost scenarios are witnessed, not assumed: a zero-turn launch emits no `result` frame,
+so each asks `get_session_cost` before ending its process and asserts `total_cost_usd == 0`.
+The foreign-session half spends no model turn: the test starts an interactive `claude` on a
 pseudo-terminal in a directory the scratch config home already trusts (recreated if absent;
 the test never writes trust), and within five seconds the fleet reports a foreign live
 channel with the record's `status`; the test then ends its own pty child and the channel
-turns archived when the record is gone. The job half prefers `claude --bg --exec "sleep 60"`,
-which spends nothing: the roster lists it, the fleet reports a background job, `claude stop
-<short>` through the real runner removes it. The consent half is the two-launch marker
-scenario G3 names, zero cost. Adoption of a job with a conversation costs one short `haiku`
-turn (`claude --bg --model claude-haiku-4-5-20251001 "Reply with exactly: pong"`, with
-`--max-turns 1` added if `claude --bg --help` lists the flag, which the executor checks at
-zero cost and records), runs only when `AFLEET_LIVE_CLI_TURNS=1` is also set, and asserts
-that adopt stops the job, resumes the same session id owned, and that the next handshake is
-clean. One config-home witness spans the whole of G5, taken before the first live scenario
-and after the last, and a second reading brackets each scenario: the set of relative paths
-the engine created, modified or deleted is reported, never their contents, and compared
-against the allowlist that G5 widens (see *The write allowlist* below); any unexplained
-change in the suite-level reading or in any scenario's fails the gate with the path named,
-so a write between scenarios is caught as surely as a write inside one.
+turns archived when the record is gone. The job half prefers `claude --bg --exec "sleep
+60"`, which spends nothing: the roster lists it, the fleet reports a background job, `claude
+stop <short>` through the real runner removes it. The consent half is the two-launch marker
+scenario G3 names, zero cost, the marker accepted through the store-only accept before
+launch A so the consent gate does not stop A and the marker proves the engine's own
+promotion. Adoption of a job with a conversation costs one short `haiku` turn (`claude --bg
+--model claude-haiku-4-5-20251001 "Reply with exactly: pong"`, with `--max-turns 1` added if
+`claude --bg --help` lists the flag, which the executor checks at zero cost and records),
+runs only when `AFLEET_LIVE_CLI_TURNS=1` is also set, and asserts that adopt stops the job,
+resumes the same session id owned, and that the next handshake is clean. One config-home
+witness spans the whole of G5, taken before the first live scenario and after the last, and
+a second reading brackets each scenario: the set of relative paths the engine created,
+modified or deleted is reported, never their contents, and compared against the allowlist
+that G5 widens (see *The write allowlist* below); any unexplained change in the suite-level
+reading or in any scenario's fails the gate with the path named, so a write between
+scenarios is caught as surely as a write inside one.
 
 ## Grounding
 
@@ -209,15 +212,17 @@ what exists rather than on the plan's picture of it.
 
 - **`ClaudeProcess` (C2, X3).** One instance per spawn with the epoch FleetKit assigns;
   `spawn()` returns a `Handshake` when the `initialize` response arrives and nothing from
-  `system/init`; `events` is a bounded lossless `WireEventStream<WireEvent>` with
-  `.handshakeCompleted`, `.sessionIdentityResolved` (a fork's real id, once), `.frame`,
-  `.request`, `.requestCancelled`, `.policyAnswered`, `.unansweredDialog`,
-  `.hostToolInvoked`, `.stderr`, `.exited`; `terminate()` returns `ExitStatus?` where `nil`
-  means the escalation exhausted with no exit observed, `status` stays `.terminating` and the
-  stream stays open; `sessionID` is `nil` for a fork until `.sessionIdentityResolved`;
-  `childProcessIdentifier` is the child's pid. `Handshake.pending` is a wire fact nothing
-  renders from. `LaunchConfiguration` composes the §6.1 line and the child environment,
-  rejects option-shaped values, and carries `configHomeOverride` for tests only.
+  `system/init`; `events` is a bounded lossless `WireEventStream<WireEvent>` (a struct with
+  an internal initialiser whose `next()` does not throw, so nothing outside ClaudeWire
+  constructs or feeds one; `BoundedChannel.swift:110-118`) with `.handshakeCompleted`,
+  `.sessionIdentityResolved` (a fork's real id, once), `.frame`, `.request`,
+  `.requestCancelled`, `.policyAnswered`, `.unansweredDialog`, `.hostToolInvoked`,
+  `.stderr`, `.exited`; `terminate()` returns `ExitStatus?` where `nil` means the escalation
+  exhausted with no exit observed, `status` stays `.terminating` and the stream stays open;
+  `sessionID` is `nil` for a fork until `.sessionIdentityResolved`; `childProcessIdentifier`
+  is the child's pid. `Handshake.pending` is a wire fact nothing renders from.
+  `LaunchConfiguration` composes the §6.1 line and the child environment, rejects
+  option-shaped values, and carries `configHomeOverride` for tests only.
 - **Typed frames C4 reads.** `SystemInit` (`apiKeySource`, `mcpServers`, `slashCommands`,
   `terminalSlashCommands`, `model`, `permissionMode`, `fastModeState`, `effort`),
   `SessionStateChanged` (`state`, a free `JSONValue`), `PermissionDenied`, the five task
@@ -241,11 +246,15 @@ what exists rather than on the plan's picture of it.
   including afleet's own headless children (`kind: "interactive"`, `entrypoint: "sdk-cli"`),
   unlinked on exit; fields `pid`, `sessionId`, `cwd`, `startedAt`, `procStart`, `version`,
   `peerProtocol`, `peerFeatures`, `kind` (`interactive` or `bg`), `entrypoint`, `pidDomain`,
-  `messagingSocketPath`, `name`, `nameSource`, `nameSince`, and for a `bg` process with a job
-  directory `jobId`; TUI processes add `status`, `waitingFor`, `state`, `detail`, `tempo`;
-  headless ones never do (parity 38.2, probes 12 and 12b, `spike-contention`). The CLI's own
-  reader validates a holder by pid liveness and its `procStart` token (bundle cleanup path
-  over `daemon/roster.json`). The scratch config home's `sessions/` is empty at rest.
+  `messagingSocketPath`, `name`, `nameSource`, `nameSince`, and for a `bg` process with a
+  job directory `jobId`; TUI processes add `status`, `waitingFor`, `state`, `detail`,
+  `tempo`; headless ones never do (parity 38.2, probes 12 and 12b, `spike-contention`). The
+  CLI's own reader validates a holder by pid liveness and its `procStart` token (bundle
+  12922/44087/44114, the `zm(pid, procStart)` comparison over the registry and
+  `daemon/roster.json`); the record is written with `procStart` as the trimmed `ps -o
+  lstart=` string under `LC_ALL=C TZ=UTC`, like `Fri Sep 5 03:12:41 2026` (bundle 515820),
+  beside `startedAt` in milliseconds (515624). The scratch config home's `sessions/` is
+  empty at rest.
 - **The roster and jobs.** `<configHome>/daemon/roster.json` is `{proto, supervisorPid,
   updatedAt, workers}` with `workers` keyed by job short, each carrying `pid` and
   `procStart` while live; `<configHome>/jobs/<short>/state.json` carries `state` (`starting`,
@@ -354,9 +363,11 @@ public struct RestartRequest: Hashable, Sendable {
   public var promptSuggestions: Bool?; public var worktree: Worktree??; public var environment: ChildEnvironmentOptions?   // nil = keep the current value
 }
 public struct SessionRuntimeState: Hashable, Sendable {  // actor-owned by the supervisor; every control response and frame that changes a value updates it
-  public var permissionMode: PermissionMode?; public var model: String?; public var effort: String?; public var fastMode: Bool
+  public var permissionMode: PermissionMode?; public var model: String?; public var effort: String?
   public var outputStyle: String?; public var cwd: URL; public var agent: String?
   public var addDirectories: [URL]; public var environment: ChildEnvironmentOptions
+  public var flagSettings: [String: JSONValue]   // the union of every apply_flag_settings payload sent through perform
+  public var fastModeObserved: Bool?             // fast_mode_state from the handshake and every result frame
 }
 public typealias RestartSnapshot = SessionRuntimeState      // the copy the quiescent restart takes at the moment it decides to restart
 public struct AgentsRow: Hashable, Codable, Sendable {      // one element of `claude agents --json`
@@ -374,9 +385,10 @@ public enum SpawnPrecondition: Hashable, Sendable {
   case wedged(EscalationTrace)
 }
 
-public enum LifecycleAction: Hashable, Sendable {
+public enum LifecycleAction: Sendable {                                   // Sendable only: InboundAnswer is not Hashable
   case open, send(UserInput), reap, adopt, sendToBackground, fork(at: ForkPoint?)   // nil = plain fork; ForkPoint is ClaudeWire's {entryUUID, dropsTurn?}
   case quiescentRestart(RestartRequest), stopEverything, backgroundAll, logout, reopen
+  case answer(RequestID, InboundAnswer)         // the one path a decision is answered through; LifecycleError.decisionGone when the id is gone
   case stopJob(JobShort), respawnJob(JobShort), removeJob(JobShort)      // CLI verbs, no PTY (parent X5 as amended 2026-09-05)
 }
 
@@ -408,6 +420,7 @@ public protocol LifecycleAPI: Sendable {                     // what C5, C6 and 
   func isDormantEligible(_ key: ChannelKey) async -> Bool
   func declineProjectServers(_ names: [String], project: URL) async throws        // the §6.12 write
   func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async   // store only
+  func events(of key: ChannelKey) async -> AsyncStream<WireEvent>?           // nil unless owned; a fresh unbounded fan-out per call, finished when the channel archives
   var updates: AsyncStream<ChannelState> { get }             // every transition, coalesced per channel
 }
 ```
@@ -423,9 +436,12 @@ between `desired` and `observed` is exactly the parent's rule 1 and is what the 
 `FleetObserver` is one actor per ConfigHome. It reads three sources and reconciles them by
 pid into one `HolderSet` per session id:
 
-- **registry**: every `<configHome>/sessions/<pid>.json` that parses; a record is *live* when
-  `kill(pid, 0)` succeeds and the process's start time, read through `proc_pidinfo`, lies
-  within sixty seconds of the record's `startedAt`; a dead record is ignored, never deleted;
+- **registry**: every `<configHome>/sessions/<pid>.json` that parses; a record is *live*
+  when `kill(pid, 0)` succeeds and the process's start time, read through `proc_pidinfo`,
+  matches the record's `procStart` token within one second (the token parsed as `EEE MMM d
+  HH:mm:ss yyyy`, `en_US_POSIX`, UTC, runs of spaces collapsed); when `procStart` is absent
+  or does not parse the sixty-second window around `startedAt` decides instead, each
+  fallback recorded as its own diagnostic; a dead record is ignored, never deleted;
 - **roster and jobs**: `daemon/roster.json`'s `workers` for live jobs (pid and short), and
   every `jobs/<short>/state.json` for state, `sessionId`, `resumeSessionId` and `cwd`; a job
   is *live* when its short is in the roster's workers with a live pid, and *terminal*
@@ -461,7 +477,7 @@ change) do not fire a directory source. Every read is a snapshot with `observedA
 supervisor holds no process, so any pid at all, foreign, a second supervisor's, or an older
 epoch's ghost, means no spawn, and the channel takes the origin the holder implies (a holder
 that is ours is Contended, not foreign live). `OwnershipCheck.afterHandshake(key,
-ownPID:epoch:)` re-reads, validates each holder's pid and start time, and excludes exactly one
+ownPID:epoch:)` re-reads, validates each holder's pid and `procStart` token, and excludes exactly one
 pid, the child this spawn started; any other holder, foreign or ours, means yield:
 `terminate()` our process, origin `.foreignLive` for a foreign holder or `.owned(.contended)`
 for one of ours, the "Opened in your terminal; afleet released this session" notice for the
@@ -517,41 +533,59 @@ check; the fourth failure produces the system item with the exit code, the stder
 series, else owned-ready with the item.
 
 **The cap.** A fleet-wide counter, `FleetCapCounter`, whose slots are reservations: a spawn
-asks `acquire(for:)`, and the counter, in one actor turn, either grants a reservation when
-live plus reserved plus wedged is below six, or names the least recently used dormant-eligible
-channel as the victim and reserves the slot against that eviction, or refuses. The evicting
-supervisor reaps the victim and reports the observed outcome back, `evicted`, `victimWedged`
-or `victimBecameIneligible`; only `evicted` turns the reservation into a live slot, a wedged
-victim frees nothing and the counter picks the next eligible victim or refuses, and any
-failure between reservation and handshake (a pre-spawn holder, a spawn error, a yield) rolls
-the reservation back. Two concurrent opens at the cap therefore take two distinct victims or
-one is refused; they never both spawn against one freed slot. A wedged channel is excluded
-from eviction as it is from eligibility, and the cap rule reads the same trace (ruling of
-2026-09-05); none eligible means no eviction, the spawn is refused with
-`LifecycleError.capReached(live: 6)`, and every channel's `liveCount` reads six so the header
-can show it and offer *Send to background*.
+asks `acquire(for:)`, and the counter, in one synchronous actor turn that awaits no
+supervisor, counts every occupied slot, live, reserved, wedged and pending eviction, and
+decides from an eligibility snapshot each supervisor pushes on every change to its turn,
+pending decisions, queued input, wedged flag or mirror reading: it either grants a
+reservation when the count is below six, or names the least recently used dormant-eligible
+channel as the victim, moves it out of the live set in the same turn and reserves the slot
+against that eviction, or refuses. The evicting supervisor re-evaluates the victim's
+eligibility at reap time, reaps it and reports the observed outcome back, `evicted`,
+`victimWedged` or `victimBecameIneligible`; only `evicted` turns the reservation into a live
+slot, a wedged victim frees nothing and the counter picks the next eligible victim or
+refuses, an ineligible victim returns to the live set and the same re-pick runs, a victim
+whose own release arrives while its eviction is pending completes that eviction into the
+waiting reservation without touching the live set, and any failure between reservation and
+handshake (a pre-spawn holder, a spawn error, a yield) rolls the reservation back and
+returns a pending victim to the live set. Two concurrent opens at the cap therefore take two
+distinct victims or one is refused; they never both spawn against one freed slot, and no
+decision ever counts fewer than six occupied slots while six exist. A wedged channel is
+excluded from eviction as it is from eligibility, and the cap rule reads the same trace
+(ruling of 2026-09-05); none eligible means no eviction, the spawn is refused with
+`LifecycleError.capReached(live: 6)`, and every channel's `liveCount` reads six so the
+header can show it and offer *Send to background*.
 
 **Runtime state.** The supervisor owns a `SessionRuntimeState` (permission mode, model,
-effort, fast mode, output style, cwd, agent, the cumulative `--add-dir` list and the
-environment options), seeded from the launch and the handshake and updated by every answer
-and frame that changes a value: a `set_model` answer, a `set_permission_mode` answer,
-`get_settings.applied` after an `apply_flag_settings`, `fast_mode_state` on the initialize
-response and on `result`, a `set_cwd` answer, the first `system/init`. The router's
-runtime-mutable commands change the model through it, so what a later restart carries is what
-the channel is running, not what it was opened with.
+effort, output style, cwd, agent, the cumulative `--add-dir` list, the environment options,
+`flagSettings`, the union of every `apply_flag_settings` payload the host sent through
+`perform`, and `fastModeObserved`, the `fast_mode_state` the engine last reported), seeded
+from the launch and the handshake and updated by every answer and frame that changes a
+value: a `set_model` answer, a `set_permission_mode` answer, `get_settings.applied` after an
+`apply_flag_settings`, the `settings` of every `apply_flag_settings` the host sent (the
+engine answers a bare success, so the payload is the record), `fast_mode_state` on the
+initialize response and on every `result` (no other frame carries it), a `set_cwd` answer,
+an accepted `add_directory`, the first `system/init`. The router's runtime-mutable commands
+change the model through it, so what a later restart carries is what the channel is running,
+not what it was opened with.
 
 **Quiescent restart** takes a `RestartRequest` (`addDirectories`, `settingSources`,
 `allowBypass`, `promptSuggestions`, `worktree`, environment options) and runs: wait for
 dormant eligibility (queueing with the "applies when the current work finishes" state);
-snapshot the runtime state; `terminate()` (a `nil` wedges and stops here); await
-release; spawn `--resume <id>` under the same key with `--permission-mode`, `--model`,
-`--effort` and every cumulative flag, never `--agent`; after the handshake re-send
-`apply_flag_settings` for the process-local values; `Readback` verifies model and effort from
-`get_settings.applied`, permission mode from the handshake's `current_permission_mode`, fast
-mode from the initialize response's `fast_mode_state`, output style from `output_style`; the
-state stays `.connecting` until every readback matches, and a mismatch sets
-`ChannelState.banner = .settingDidNotSurvive(name)` and keeps the composer disabled until the
-user picks a value. `apiKeySource` is re-read from the relaunch's first `system/init`.
+snapshot the runtime state; `terminate()` (a `nil` wedges and stops here); await release;
+spawn `--resume <id>` with every launch field from the snapshot, `cwd` as changed by
+`set_cwd`, `addDirectories` as the template's plus every accepted `add_directory` (or the
+request's list), `environment`, `model`, `permissionMode`, `effort`, and never `--agent`,
+the template supplying only the invariants (binary, setting sources, strict MCP config,
+worktree, bypass allowance, prompt suggestions) unless the request overrides one; the
+relaunch stops at the handshake without publishing `.ready`; then `apply_flag_settings` with
+the whole `flagSettings` union when it is non-empty, then `get_settings`; then verify every
+readback: `model` and `effort` from `applied`, permission mode and output style from the new
+handshake, every key of `flagSettings` present in `effective_keys`, and fast mode from
+`effective_keys` containing `fastMode` when the host applied it or from the new handshake's
+`fast_mode_state` against `fastModeObserved` when it was only observed. Only when every
+readback matches does the channel publish `.ready`; otherwise it stays `.connecting` with a
+banner naming the first setting that did not survive and keeps the composer disabled until
+the user picks a value. `apiKeySource` is re-read from the relaunch's first `system/init`.
 
 **Open in terminal, attach and logs** follow the parent's X5 as amended: `openInTerminal`
 runs `terminate()`, awaits release, marks the channel `.foreignLive(.ownTerminalTab)` with the
@@ -594,40 +628,45 @@ pending; untrusted; consent needed. Only `.ready` spawns.
   compute rejected, approved or pending from the merged settings sources only, read-only,
   the way the engine does. The bundle settles the sources (2.1.257 `cli.pretty.js`, chunk
   `1kg58a1a`, the project-server consent function at pretty lines 94640–94682): it reads the
-  merged effective settings that the settings loader returns from disk; `disabledMcpjsonServers`
-  naming the server is **rejected**; otherwise, when the project root is trusted,
-  `enabledMcpjsonServers` naming it or `enableAllProjectMcpServers` in the merged settings is
-  **approved**, and when untrusted the same two keys are consulted per enabled source with the
-  project-settings source skipped; anything else is **pending**. The per-project arrays in
-  `.claude.json` are not read there: they are a legacy location that the startup migration
-  (`migrateEnableAllProjectMcpServersToSettings`, pretty lines 503739–503785) copies into
-  local settings when non-empty and clears, so the v2 rule that read them was reading a file
-  the engine had already emptied. C1's spike confirms the write side: the terminal's decline
-  writes exactly the local-settings store's `disabledMcpjsonServers` and nothing in
-  `.claude.json`. The same function's caller promotes a *pending* server to approved on the
-  non-interactive path when the project-settings source is enabled, which is why the parent's
-  §6.12 says a pending server's command is spawned at startup and why the write must land
-  before the child exists. Precedence in afleet's reader, therefore: rejected wins over
-  approved wins over pending; the sources are the resolved local-settings store (plus the
-  legacy overlay at the cwd when the store moved to the git root), `<root>/.claude/settings.json`
-  and `<configHome>/settings.json`, each only when the launch's setting sources include it.
+  merged effective settings that the settings loader returns from disk;
+  `disabledMcpjsonServers` naming the server is **rejected**; otherwise, when the project
+  root is trusted, `enabledMcpjsonServers` naming it or `enableAllProjectMcpServers` in the
+  merged settings is **approved**, and when untrusted the same two keys are consulted per
+  enabled source with the project-settings source skipped; anything else is **pending**. The
+  per-project arrays in `.claude.json` are not read there: they are a legacy location that
+  the startup migration (`migrateEnableAllProjectMcpServersToSettings`, pretty lines
+  503739–503785) copies into local settings when non-empty and clears, so the v2 rule that
+  read them was reading a file the engine had already emptied. C1's spike confirms the write
+  side: the terminal's decline writes exactly the local-settings store's
+  `disabledMcpjsonServers` and nothing in `.claude.json`. The same function's caller
+  promotes a *pending* server to approved on the non-interactive path when the
+  project-settings source is enabled, which is why the parent's §6.12 says a pending
+  server's command is spawned at startup and why the write must land before the child
+  exists. Precedence in afleet's reader, therefore: rejected wins over approved wins over
+  pending; the sources are the resolved local-settings store (plus the legacy overlay at the
+  cwd when the store moved to the git root), `<root>/.claude/settings.json` and
+  `<configHome>/settings.json`, each only when the launch's setting sources include it.
   Pending servers with a hash of their entry that the FleetKit store has not recorded as
   accepted yield `.consentNeeded`. *Accept* records `(project, name, hash)` in the store and
   writes nothing. *Decline* is `LocalSettingsStore.decline(names, root)`: the parent's store
   resolution and write policy line by line, executed only while no owned process for the
   project is running, followed by a re-read through the same resolver before any spawn is
   allowed. The writer works on directory descriptors, never on paths after resolution: it
-  opens `<root>/.claude` with `O_DIRECTORY|O_NOFOLLOW`, `fstat`s it for type and ownership,
-  `mkdirat`s and opens `.cc-writes` the same way, creates the staging file with `openat` and
-  `O_NOFOLLOW|O_EXCL`, reads the existing target through `openat` with `O_NOFOLLOW`,
-  `fchmod`s the staging file to the target's mode, `fsync`s, `renameat`s within the one
-  directory descriptor and `fsync`s the directory. Fail closed: unparseable JSON, a symlink
-  at the target, its parent, the staging directory or any component swapped after resolution,
-  a foreign uid on the root, `.git`, `.claude` or `.cc-writes`, a store or staging directory
-  inside the ConfigHome, or any write error means `LifecycleError.declineRefused(reason)` and
-  the `/mcp` banner. When the launch's setting sources exclude `local` and `.mcp.json`
-  declares servers, the launch gains `strictMCPConfig = true` and the state carries
-  `headerNote = .projectServersOff`.
+  opens the resolved root with `O_DIRECTORY|O_NOFOLLOW`, requires the descriptor's
+  `F_GETPATH` to equal the resolved path (an ancestor swapped in between is refused as a
+  symlink) and runs the config-home containment check on that `F_GETPATH` result rather than
+  on any string computed before the open, then opens `.claude` relative to it with
+  `O_DIRECTORY|O_NOFOLLOW`, `fstat`s it for type and ownership, `mkdirat`s and opens
+  `.cc-writes` the same way, creates the staging file with `openat` and `O_NOFOLLOW|O_EXCL`,
+  reads the existing target through `openat` with `O_NOFOLLOW`, `fchmod`s the staging file
+  to the target's mode, `fsync`s, `renameat`s within the one directory descriptor and
+  `fsync`s the directory. Fail closed: unparseable JSON, a symlink at the target, its
+  parent, the staging directory or any component swapped after resolution, a foreign uid on
+  the root, `.git`, `.claude` or `.cc-writes`, a store or staging directory inside the
+  ConfigHome, or any write error means `LifecycleError.declineRefused(reason)` and the
+  `/mcp` banner. When the launch's setting sources exclude `local` and `.mcp.json` declares
+  servers, the launch gains `strictMCPConfig = true` and the state carries `headerNote =
+  .projectServersOff`.
 - **Managed settings** (`ManagedSettingsReader`): a payload is pending when
   `<configHome>/remote-settings.json` exists and `remote-settings-consent.json` does not
   record consent for it. The consent record's shape is unrecorded in the corpus; the reader
@@ -677,8 +716,10 @@ public protocol StateStore: Sendable {
 }
 public enum StoreNamespace: String, CaseIterable, Hashable, Codable, Sendable { case fleetKit, workbench, afleet }   // closed: a namespace is a package, and there are three
 public protocol StoreFileOperations: Sendable {             // the seam the atomicity tests inject faults through; production is Darwin's calls
-  func writeTemporary(_ data: Data, in directory: URL, named: String) throws -> URL
-  func fsync(_ file: URL) throws
+  func create(in directory: URL, named: String) throws -> (fd: Int32, url: URL)   // O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW, 0o600
+  func write(_ data: Data, to fd: Int32) throws
+  func fsync(_ fd: Int32) throws
+  func close(_ fd: Int32) throws
   func rename(_ from: URL, to: URL) throws
   func fsyncDirectory(_ directory: URL) throws
 }
@@ -690,31 +731,33 @@ public actor FileStateStore: StateStore {
 ```
 
 One JSON document per namespace, `<base>/state.<namespace>.json`, with an envelope
-`{schemaVersion, values: {key: json}}`; every write re-serialises the namespace document
-to a temporary file in the same directory and renames it into place through the file-ops
-seam, and the atomicity claim is tested by injecting a failure at the write, at the `fsync`
-and at the `rename` and asserting, after each, that a reader sees either the whole old
-document or the whole new one, never a partial file, and that no staging file remains. The
-schema version is handled per case: a missing document is an empty namespace; a document
-that does not parse, or parses without the envelope, is moved aside to
-`state.<namespace>.json.malformed-<timestamp>` with a diagnostic and the namespace starts
-empty; an older `schemaVersion` runs that namespace's migration chain on read and is
-rewritten at the current version on the next write; a newer `schemaVersion` is read for the
-keys this build understands, every write to that namespace is refused with
-`StoreError.schemaTooNew`, and the state carries a banner saying a newer afleet wrote it.
-Keys are non-empty strings in which dots are ordinary characters and imply no hierarchy;
-the schema version is per namespace and nothing else is versioned. This is design
-inheritance from the parent's X6 as amended on 2026-09-05: Workbench persists under
+`{schemaVersion, values: {key: json}}`; every write re-serialises the namespace document to
+a temporary file in the same directory and renames it into place through the file-ops seam,
+and the atomicity claim is tested by injecting a failure at the create, at the write (after
+part of the payload has landed), at the `fsync`, at the `close`, at the `rename` and at the
+directory `fsync`, and asserting, after each, that a reader sees the whole old document (the
+whole new one only after the rename), never a partial file, that the staging file was
+removed through the seam, and that a base directory reached through a real symlink alias of
+the config home is refused by the initialiser. The schema version is handled per case: a
+missing document is an empty namespace; a document that does not parse, or parses without
+the envelope, is moved aside to `state.<namespace>.json.malformed-<timestamp>` with a
+diagnostic and the namespace starts empty; an older `schemaVersion` runs that namespace's
+migration chain on read and is rewritten at the current version on the next write; a newer
+`schemaVersion` is read for the keys this build understands, every write to that namespace
+is refused with `StoreError.schemaTooNew`, and the state carries a banner saying a newer
+afleet wrote it. Keys are non-empty strings in which dots are ordinary characters and imply
+no hierarchy; the schema version is per namespace and nothing else is versioned. This is
+design inheritance from the parent's X6 as amended on 2026-09-05: Workbench persists under
 `workbench.browser` and `workbench.panel.<configHomeHash>.<sessionId>` in its own namespace,
 and a test writes and reads back both key shapes through the API. The app injects
 `baseDirectory` (`~/Library/Application Support/afleet/` in production, a temporary
 directory in tests) together with the config homes it knows; nothing about the store reads a
-ConfigHome, and a base directory inside one is rejected by the one constructor there is (X9).
-`FleetKitState` holds the namespace's
-own `Codable` types: channel grouping and pins, section order and collapse, unread cursors
-per session, `DesiredOwnership` per channel, project-server acceptances `(project, name,
-hash)`, afleet-launched job shorts, the bypass disclaimer acceptance, the fixture-recorded
-baseline and the last census. FleetKit never models Workbench or Afleet state.
+ConfigHome, and a base directory inside one is rejected by the one constructor there is
+(X9). `FleetKitState` holds the namespace's own `Codable` types: channel grouping and pins,
+section order and collapse, unread cursors per session, `DesiredOwnership` per channel,
+project-server acceptances `(project, name, hash)`, afleet-launched job shorts, the bypass
+disclaimer acceptance, the fixture-recorded baseline and the last census. FleetKit never
+models Workbench or Afleet state.
 
 ### C3's index storage
 
@@ -762,20 +805,26 @@ config home, or stdout.
 C2's live gate proved the never-write rule for one turn. G5 takes the same before-and-after
 reading of `/tmp/afleet-fixtures/config-home` across every live scenario it runs and reports
 the set of relative paths the engine created or modified. The allowlist C4 ships names, as
-top-level names, what the engine is known to write, C2's observed set plus the trees
-this child exercises: `sessions/`, `projects/`, `tasks/`, `jobs/`, `daemon/`, `todos/`,
+top-level names, what the engine is known to write, C2's observed set plus the trees this
+child exercises: `sessions/`, `projects/`, `tasks/`, `jobs/`, `daemon/`, `todos/`,
 `statsig/`, `shell-snapshots/`, `session-env/`, `file-history/`, `debug/`, `plugins/`,
 `cache/`, `backups/`, `plans/`, `ide/`, `logs/`, `history/`, `.claude.json`,
 `.credentials.json`, `.last-cleanup`, `.last-update-result.json`, `daemon.log`,
 `history.jsonl` and `settings.json`; a unit test pins the set exactly so an addition is
-deliberate. An observed path outside the
-allowlist fails the gate with the path named, because either the allowlist or the never-write
-claim is wrong and both deserve a look. The turn-spending scenario behind
-`AFLEET_LIVE_CLI_TURNS=1` sends one `haiku` prompt asking for a background shell and an
-Explore subagent under a channel with the Notification hook registered, so hooks, a
-background shell and a subagent all write in one turn; session relocation is covered by
-`set_cwd` against a second trusted directory in the same turn's channel. Editor integration
-is not reachable from afleet and is stated as untested.
+deliberate. An observed path outside the allowlist fails the gate with the path named,
+because either the allowlist or the never-write claim is wrong and both deserve a look. The
+turn-spending scenario behind `AFLEET_LIVE_CLI_TURNS=1` sends one `haiku` prompt asking for
+a background shell and an Explore subagent under a channel with the Notification hook
+registered, so hooks, a background shell and a subagent all write in one turn; session
+relocation is covered by `set_cwd` against a second trusted directory in the same turn's
+channel. The witness is read twice, once while the child is still live and once after it has
+ended, and both readings must be fully explained; the child's own `sessions/` record is the
+floor of the live reading and the transcript under `projects/` the floor of the final one,
+so the demonstration that the allowlist discriminates removes `projects/`. The test also
+asserts from the channel's own events that the prompt's actions ran: a `task_started` for
+the background shell, a `task_started` for the subagent and the Notification hook's
+callback, each named when missing. Editor integration is not reachable from afleet and is
+stated as untested.
 
 ## Contracts
 
@@ -807,19 +856,19 @@ the mirror entry and agent-run node shapes are C3's; C4 reads them through
 To file on the parent at merge, each as a dated Revision Note, unless the human gate decides
 otherwise: the store layout as one document per namespace under the parent's directory (the
 file format is advisory inheritance); the directory watcher as a dispatch vnode source plus
-the five-second poll rather than FSEvents (advisory means); the `TaskMirrorReading`
-protocol through which C4 consumes X4's mirror, so C3's landing replaces a stand-in rather
-than an interface; and the `IndexStorage` seam between C3 and C4 as ruled (declared in `FleetTimeline`,
-implemented here), which needs no X2 change. Nothing about §6.12 flows back: the bundle
-read and C1's spike confirm the parent's rule that the local-settings store is the only
-source the rejection gate reads, and this document's v2 widening to the `.claude.json`
-project entry is withdrawn in v2.2.
+the five-second poll rather than FSEvents (advisory means); the `TaskMirrorReading` protocol
+through which C4 consumes X4's mirror, so C3's landing replaces a stand-in rather than an
+interface; and the `IndexStorage` seam between C3 and C4 as ruled (declared in
+`FleetTimeline`, implemented here), which needs no X2 change.
+`LifecycleAction.answer(RequestID, InboundAnswer)` and `LifecycleAPI.events(of:)` are a
+surface addition to X5 (the parent names only the state and action vocabulary); the parent's
+Revision Note at merge records them. Nothing about §6.12 flows back: the bundle read and
+C1's spike confirm the parent's rule that the local-settings store is the only source the
+rejection gate reads, and this document's v2 widening to the `.claude.json` project entry is
+withdrawn in v2.2.
 
 ## Delegated unknowns
 
-- The registry record's `procStart` format. C4 validates a holder by pid liveness and process
-  start time within sixty seconds of `startedAt`, which needs no format; a C1 corrective
-  recording of a registry snapshot would let a later revision compare `procStart` exactly.
 - The `remote-settings.json` and `remote-settings-consent.json` shapes. Modelled from the
   bundle's chapter 48 §2.9 at plan time; fail closed; a real payload, if one is ever
   observed, becomes a C1 recording.
@@ -877,14 +926,16 @@ turns in total. (3) One document per namespace, filed on the parent's §7.8.
   processes' frames); wall-clock tests with shortened constants (the constants are the
   behaviour); skipping the wedged row (the one row whose bug would leave a ghost holding a
   transcript).
-  Date/Author: 2026-09-05 / C4 dispatch; seam added at planning.
+  Date/Author: 2026-09-05 / C4 dispatch; seam added at planning. v2.3: the conformance is a
+  `LiveProcessHandle` wrapper and `events` an existential, see the entry below.
 - Decision: holder liveness is pid liveness plus process start time within sixty seconds of
   the record's `startedAt`.
   Rationale: the CLI validates with `procStart`, whose format the corpus has not recorded,
   and inventing it is forbidden; start time from `proc_pidinfo` detects pid reuse just as
   well. Rejected: pid liveness alone (pid reuse would fabricate a holder); parsing
   `procStart` (unrecorded format).
-  Date/Author: 2026-09-05 / C4 dispatch.
+  Date/Author: 2026-09-05 / C4 dispatch. Superseded in v2.3: `procStart` is the comparison and
+  the window the fallback, see the entry below.
 - Decision: CLI verbs run through `WireEnvironment.ProcessRunner`, scripted in tests by an
   in-process `ScriptedProcessRunner`; `fake-claude` is not extended.
   Rationale: X8 scopes `fake-claude` to the stream-json process; verbs are separate
@@ -995,6 +1046,89 @@ turns in total. (3) One document per namespace, filed on the parent's §7.8.
   witness misses writes between tests. Rejected: per-test budget and witness.
   Date/Author: 2026-09-05 / C4 plan review, ruling 11.
 
+- Decision: `ProcessHandle.events` is `any AsyncSequence<WireEvent, Never> & Sendable`; the
+  live conformance is a `LiveProcessHandle` wrapper over `ClaudeProcess`; the scripted
+  handle's stream is an `AsyncStream` the test feeds.
+  Rationale: `WireEventStream` has an internal initialiser and a non-throwing `next()`
+  (`BoundedChannel.swift:110-118`); nothing outside ClaudeWire can construct or feed one, so
+  a scripted handle typed on it could never exist, and a retroactive conformance cannot
+  witness the existential with the actor's concrete stream. The wrapper exposes the same
+  stream value, so backpressure is untouched. Rejected: re-pumping the events through an
+  `AsyncStream` inside the live handle (loses the bounded channel's backpressure); making
+  `WireEventStream`'s initialiser public (a ClaudeWire change for a test seam).
+  Date/Author: 2026-09-05 / C4 plan review 2, ruling 1.
+- Decision: the cap counter counts `live + reserved + wedged + pendingEvictions`, takes
+  eligibility as a snapshot the supervisors push, decides synchronously, moves a victim out
+  of `live` at selection, re-checks the victim at reap time and lets the victim's own
+  `release` complete a pending eviction.
+  Rationale: with the victim still counted in `live` and eligibility pulled through an
+  `await`, a second `acquire` racing the first eviction could see the freed slot twice and a
+  seventh process could exist; a synchronous decision over every occupied slot closes the
+  window. Rejected: a global lock around open (serialises unrelated opens); counting the
+  victim twice.
+  Date/Author: 2026-09-05 / C4 plan review 2, ruling 2.
+- Decision: the §6.12 writer opens the resolved root, requires `fcntl(F_GETPATH)` to equal
+  the resolved path, and runs the config-home containment check on that result; two
+  ancestor-swap tests join the symlink suite (eight).
+  Rationale: a string check before the open guards a path the open no longer refers to when
+  an ancestor is swapped for a symlink in between; verifying the descriptor closes the race
+  the descriptor-relative design exists for. Rejected: `O_NOFOLLOW_ANY` (macOS 12+ only on
+  the final open, not the ancestors); re-resolving after the open (the same race one step
+  later).
+  Date/Author: 2026-09-05 / C4 plan review 2, ruling 3.
+- Decision: `SessionRuntimeState` records `flagSettings` (the union of every
+  `apply_flag_settings` payload) and `fastModeObserved`; the restart relaunches every launch
+  field from the snapshot, re-applies the union, verifies every key against `effective_keys`
+  and publishes `.ready` only after the readbacks.
+  Rationale: `get_settings.applied` carries no fast-mode key and `fast_mode_state` is
+  reported only by the initialize response and `result` frames; a single boolean could
+  neither be re-applied faithfully nor verified from one source. Relaunching `cwd` from the
+  template after a `set_cwd` would silently move the session back. Rejected: verifying fast
+  mode from the handshake alone (the engine reports a host toggle lazily); publishing
+  `.ready` at the handshake and revoking it.
+  Date/Author: 2026-09-05 / C4 plan review 2, ruling 4.
+- Decision: `LifecycleAction.answer(RequestID, InboundAnswer)` and
+  `LifecycleAPI.events(of:)` are the API's answer and live-event surface; `LifecycleAction`
+  is `Sendable` only.
+  Rationale: only the supervisor holds the process, so the channel, the overlay and the
+  Activity view had no path to answer a decision or observe a frame; `InboundAnswer` is not
+  `Hashable`, so the action enum cannot stay `Hashable` once it carries one. Rejected:
+  exposing the process handle (breaks the single-holder rule); a separate answer protocol
+  beside the API.
+  Date/Author: 2026-09-05 / C4 plan review 2, ruling 5.
+- Decision: `LiveBudget.run` reserves turns and projected wall time synchronously before
+  awaiting the body and serialises callers through a continuation queue.
+  Rationale: an actor method that awaits its body is reentrant; two scenarios could both
+  pass the ceiling check before either accounted its turns. Rejected: a Task-local flag
+  (does not survive the await).
+  Date/Author: 2026-09-05 / C4 plan review 2, ruling 6.
+- Decision: G5's consent scenario accepts the marker through the store-only accept before
+  launch A; the allowlist scenario reads the witness while the child is live and after it
+  ends, asserts the turn's actions from the channel's events, and its deliberate break
+  removes `projects/`.
+  Rationale: without the accept, Task 7's consent gate stops A at `.consentNeeded` and the
+  marker never proves the engine's promotion; the child's own `sessions/` record exists only
+  while it runs; a background shell writes under the engine's temp artifacts tree, not the
+  config home, so `tasks/` could never be the discriminating demonstration. Rejected:
+  bypassing the gate for the test (tests a path production never takes).
+  Date/Author: 2026-09-05 / C4 plan review 2, ruling 7.
+- Decision: the store's file-operations seam is `create`, `write`, `fsync`, `close`,
+  `rename`, `fsyncDirectory`, `remove`; the config-home alias test uses a real symlink.
+  Rationale: a whole-file `writeTemporary` could only fail before or after the payload,
+  never after a partial write, which is the case atomicity exists for; a `/tmp` versus
+  `/private/tmp` pair tests the platform's alias, not an arbitrary one. Rejected: faulting
+  inside Darwin's write through a custom `FileHandle`.
+  Date/Author: 2026-09-05 / C4 plan review 2, ruling 8.
+- Decision: holder liveness compares the process start time with the record's `procStart`
+  token within one second; the sixty-second `startedAt` window is the fallback only when the
+  token is absent or unparseable, each fallback its own diagnostic.
+  Rationale: the CLI writes `procStart` as the trimmed `ps -o lstart=` string under
+  `LC_ALL=C TZ=UTC` (bundle 515820) and validates holders with it (12922/44087/44114); a
+  one-second comparison on the same token is the reader's own rule, not a guess, and a wrong
+  token inside the window is not a holder. Rejected: the window alone (accepts a reused pid
+  whose record is fresh).
+  Date/Author: 2026-09-05 / C4 plan review 2, ruling 9.
+
 ## Surprises & Discoveries
 
 - Observation: `fake-claude` emulates no CLI verb. Evidence: `Tools/fake-claude/fake_claude.py`
@@ -1083,3 +1217,18 @@ Pending — written at finish.
   G1 coverage assertion moves to its final task as a gate so every checkpoint is green.
   Merged `main` at `6f3ea5a`; the WireEventPolicy corrective (`ca68f2e`) touches no internal
   this document cites.
+- - v2.3 (2026-09-05, after the plan's second adversarial review; twelve findings, all
+  folded): `ProcessHandle.events` is an existential with a `LiveProcessHandle` live
+  conformance; the cap counter counts pending evictions and decides from pushed eligibility;
+  the §6.12 writer verifies the root descriptor with `F_GETPATH`; `SessionRuntimeState`
+  gains `flagSettings` and `fastModeObserved` and the restart relaunches every field from
+  the snapshot and verifies against `effective_keys`; `LifecycleAction.answer` and
+  `LifecycleAPI.events(of:)` are added and `LifecycleAction` is `Sendable` only;
+  `LiveBudget.run` reserves synchronously; G3/G5 accept the marker through the store first
+  and the allowlist scenario reads twice, asserts the actions from events and breaks on
+  `projects/`; the store seam splits the staging write; `procStart` is the liveness
+  comparison with the window as the diagnosed fallback; the `/cd` continuation is replayed
+  from `session-mirror-relocation` and compared by full payload; send-to-background and
+  open-in-terminal gain from-dormant scenarios; the fork collision is scripted through
+  `.sessionIdentityResolved`. Surface additions are recorded in the parent's Revision Note
+  at merge.
