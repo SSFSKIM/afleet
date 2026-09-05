@@ -1108,6 +1108,30 @@ sidechain-root matcher selects exactly the three agent-stream opening prompts an
 record, every main root carrying `isSidechain: false`. Conversely (9), §7.3's compaction paragraph
 loses `compact_boundary` from that list, per the coordinator's amendment of the same date.
 
+**Evidence for (7) and (8), recorded here for the parent Revision Note written at merge.** Measured
+over the eighteen-fixture corpus on 2026-09-05 with a walk of every JSONL under `transcript/`.
+
+*Task-notification origin* — four `user` records, whose `origin` is exactly `{"kind":
+"task-notification"}`, in three fixtures: `background-shell` (uuid `376b0e02…`), `explore-depth-1`
+(`22351035…`) and `nested-depth-2` (`b0aa7b8e…` and `e6692000…`). All four carry `userType:
+"external"` and a `<task-notification>` content block. No other non-human `origin.kind` appears
+anywhere in the corpus. Each uuid was grepped across its fixture's `frames.ndjson`: every occurrence
+is an out-direction `transcript_mirror` frame, and none is a `user` frame in either direction.
+
+*Sidechain roots* — three `user` records with `isSidechain: true` and no `parentUuid`, one at the
+head of each of the corpus's three agent streams: `explore-depth-1`'s (`8f31e2f3…`) and
+`nested-depth-2`'s two (`82d93d14…`, `37cd16ad…`). The rule that makes the matcher safe is that
+**every sidechain root lies on an agent stream**: across all seventeen main files, every root `user`
+record carries `isSidechain: false`, so the matcher cannot reach a main-stream prompt. These three
+were grepped the same way, with the same result — mirror frames only, never a `user` frame. They
+reach the wire only as the spawning `Task` call's input, which is a different item on a different
+stream.
+
+Both classes are therefore file-only in the precise sense the constant means: the wire reducer does
+not reduce `transcript_mirror` frames — those belong to `StreamIngestion` — so no wire path can
+produce them. Check two's compared-item counts moved only where these records were being counted:
+`background-shell` 6 to 5, `explore-depth-1` 22 to 20, `nested-depth-2` 23 to 19.
+
 ## Questions for the human gate
 
 The first four were ruled on 2026-09-05; the rulings are in the Revision Note for v2 and
