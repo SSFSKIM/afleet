@@ -1935,5 +1935,9 @@ fake-claude injections above, not the clean live run.
   held against the counts computed from the fixture, with the unmatched ones read by hand.
 
 - 2026-09-05: follow-up wave for C3 and C4, on `worktree-agent-aaf78bf28064267d9`. Adds the
-  spike `spike-mcp-decline-files` with its finding under `Tools/probe/spikes/`, and the two
-  corrective recordings C3 asked for, `rewind-turn` and `compact-boundary`.
+  spike `spike-mcp-decline-files` with its finding under `Tools/probe/spikes/`, which cost
+  nothing, and the two scenarios C3's corrective recordings need, `rewind-turn` and
+  `compact-boundary`. The recordings themselves are not in this commit: the scratch account's
+  five-hour window read 98 per cent utilisation at the wave's usage check, which is the
+  condition this wave was dispatched to stop on, so the two model turns were not spent. Each
+  scenario is one `make record` away once the window resets.
