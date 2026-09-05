@@ -1393,7 +1393,13 @@ public actor ChannelSupervisor {
             return
         }
 
-        guard here == .dormant else { publish(); return }
+        // Every state in which this channel holds no process of its own: dormant, and both archived names. The
+        // origin rule is about the holder, not about whether afleet has ever owned the session — a channel a shell
+        // registered from C3's index has never been opened and is archived, and the user's terminal taking that
+        // session is the same fact as it taking a dormant one. Restricting this to dormant left an archived channel
+        // archived forever with a live foreign holder against its name, which is what G5's foreign-session scenario
+        // found.
+        guard here == .dormant || here == .archivedRecent || here == .archivedOlder else { publish(); return }
         let (origin, presence) = OriginResolver.resolve(key: key, ownedState: nil, holders: mine, pendingHatch: false)
         state.presence = presence
         switch origin {

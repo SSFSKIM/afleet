@@ -24,6 +24,11 @@ final class LifecycleRowTests: XCTestCase {
         "testReadyReapsAfterThirtyMinutesEligibleAndNotWhileATaskRuns": [T(.readyDormantEligible, .ready, .dormantTimerFired, .dormant)],
         "testDormantSendResumesUnderTheSameSessionID": [T(.dormantSent, .dormant, .userSent, .connecting), T(.connectingClean, .connecting, .handshakeClean, .ready)],
         "testDormantBecomesForeignOrJobWhenAHolderAppears": [T(.dormantHolderAppeared, .dormant, .holderAppeared, .foreignUsersTerminal), T(.dormantHolderAppeared, .dormant, .holderAppeared, .backgroundJob)],
+        "testArchivedBecomesForeignOrJobWhenAHolderAppears": [
+            T(.dormantHolderAppeared, .archivedRecent, .holderAppeared, .foreignUsersTerminal),
+            T(.dormantHolderAppeared, .archivedRecent, .holderAppeared, .backgroundJob),
+            T(.dormantHolderAppeared, .archivedOlder, .holderAppeared, .foreignUsersTerminal),
+            T(.dormantHolderAppeared, .archivedOlder, .holderAppeared, .backgroundJob)],
         "testNonZeroExitRespawnsWithBackoffThenOffersReopen": [
             T(.exitedNonZero, .ready, .exitedNonZero, .connecting), T(.exitedNonZero, .connecting, .exitedNonZero, .connecting),
             T(.exitedNonZero, .ready, .exitedNonZero, .ready), T(.exitedNonZero, .connecting, .exitedNonZero, .archivedOlder),
@@ -401,6 +406,43 @@ final class LifecycleRowTests: XCTestCase {
         try await foreignRig.waitUntil(foreignSide, "the foreign origin") { $0.origin == .foreignLive(.usersTerminal) }
         try await jobRig.waitUntil(jobSide, "the job origin") { $0.origin == .backgroundJob }
         foreignRig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
+    }
+
+    /// The same row from the two archived states, which is where a channel a shell registered from C3's index
+    /// actually sits: it has never been opened, so it has never been dormant, and until this landed a live foreign
+    /// holder against its session left it archived forever. G5's foreign-session scenario is the live half of this;
+    /// this half needs no CLI and no account.
+    ///
+    /// Deliberate break: narrow the guard in `holdersChanged` back to `here == .dormant` → all four waits time out.
+    func testArchivedBecomesForeignOrJobWhenAHolderAppears() async throws {
+        let recentForeign = try newRig()
+        let recentJob = try newRig(sharing: recentForeign.diagnostics)
+        let olderForeign = try newRig(sharing: recentForeign.diagnostics)
+        let olderJob = try newRig(sharing: recentForeign.diagnostics)
+        let session = try FakeClaudeLaunch.sessionID(of: Self.idleFixture)
+
+        // Never opened: `origin: .archived` with no spawn, which is exactly what `Fleet.register` leaves behind.
+        let sides = [(recentForeign, true, false), (recentJob, true, true),
+                     (olderForeign, false, false), (olderJob, false, true)]
+        var supervisors: [ChannelSupervisor] = []
+        for (rig, isRecent, isJob) in sides {
+            supervisors.append(rig.supervisor(session: session, fixture: Self.idleFixture, isRecent: isRecent))
+            if isJob {
+                try rig.files.writeJob(short: "j0001", state: "working", sessionID: session,
+                                       resumeSessionID: session, pid: ScriptedHolderFiles.livePID)
+            } else {
+                try rig.files.writeRegistry(pid: ScriptedHolderFiles.livePID, sessionID: session,
+                                            kind: "interactive", entrypoint: "cli")
+            }
+            await rig.startObserver()
+        }
+
+        for (index, (rig, isRecent, isJob)) in sides.enumerated() {
+            let expected: ChannelOrigin = isJob ? .backgroundJob : .foreignLive(.usersTerminal)
+            let label = "\(isRecent ? "archivedRecent" : "archivedOlder") → \(isJob ? "backgroundJob" : "foreignUsersTerminal")"
+            try await rig.waitUntil(supervisors[index], label) { $0.origin == expected }
+        }
+        recentForeign.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - exitedNonZero

@@ -42,8 +42,16 @@ public enum LifecycleTable {
         .init(.connectingFoundHolder, .connecting, .handshakeFoundHolder, .contended),              // one of our own pids: yield, contended
         .init(.readyDormantEligible, .ready, .dormantTimerFired, .dormant),
         .init(.dormantSent, .dormant, .userSent, .connecting),
+        // The row fires from every state in which afleet holds no process of its own, not from dormant alone: a
+        // channel registered from C3's index has never been opened and is archived, and a holder appearing against
+        // it is the same fact. The row keeps its name because `dormant` is where it was first enumerated; the three
+        // from-states below are what it actually admits.
         .init(.dormantHolderAppeared, .dormant, .holderAppeared, .foreignUsersTerminal),
         .init(.dormantHolderAppeared, .dormant, .holderAppeared, .backgroundJob),
+        .init(.dormantHolderAppeared, .archivedRecent, .holderAppeared, .foreignUsersTerminal),
+        .init(.dormantHolderAppeared, .archivedRecent, .holderAppeared, .backgroundJob),
+        .init(.dormantHolderAppeared, .archivedOlder, .holderAppeared, .foreignUsersTerminal),
+        .init(.dormantHolderAppeared, .archivedOlder, .holderAppeared, .backgroundJob),
     ] + TerminatingAction.allCases.flatMap { action -> [Transition] in
         // A dormant channel holds no process, so the terminating actions run from ready; a restart or a logout can
         // also catch a handshake, and the post-handshake yield fires *only* from connecting — `handshakeFoundHolder`
