@@ -337,9 +337,13 @@ pid into one `HolderSet` per session id:
   every `jobs/<short>/state.json` for state, `sessionId`, `resumeSessionId` and `cwd`; a job
   is *live* when its short is in the roster's workers with a live pid, and *terminal*
   otherwise; `exit-cause` and `exit-detail` are never opened;
-- **`claude agents --json`**: run through `CLIVerbs` before every spawn and on the five-second
-  poll, parsed as the array above; rows are matched to registry and job holders by pid, and a
-  row with no pid by `(id, sessionId)` to a job.
+- **`claude agents --json`**: run through `CLIVerbs` at the pre-spawn check, on adopt, on
+  send-to-background, at the `/logout` census, and on a sixty-second reconciliation, never on
+  the five-second poll, because each run boots the CLI (ruling of 2026-09-05); parsed as the
+  array above; rows are matched to registry and job holders by pid, and a row with no pid by
+  `(id, sessionId)` to a job. Five-second detection of a foreign session comes from the vnode
+  source and the file poll over `sessions/`, `daemon/` and `jobs/`, as the parent's §7.1
+  names.
 
 Origin per channel, in the parent's order: *owned* when `ChannelSupervisor` holds a live
 `ClaudeProcess` for the key; *foreign live* when a live registry holder names the session id
@@ -384,8 +388,10 @@ tests a manual clock, so the thirty-minute reap, the one-two-four-second backoff
 ten-second handoff and the five-second poll are all advanced by the test.
 
 **Dormant eligibility** is a pure function over `(turn state, pending decisions, queued
-input, mirror entries, last task frame time, heartbeat interval, now)`, exactly the parent's
-five conditions, with "uncertainty counts as running". The mirror is C3's
+input, mirror entries, last task frame time, heartbeat interval, wedged trace, now)`, exactly
+the parent's five conditions, with "uncertainty counts as running", and a wedged channel is
+never eligible: there is no live process of ours to reap and a ghost may still hold the
+transcript (ruling of 2026-09-05). The mirror is C3's
 `RegistryMirrorEntry` (X4); until C3 lands, the supervisor takes it through a protocol,
 `TaskMirrorReading`, that G1's stand-in conforms to and G2 replaces with the real mirror.
 
@@ -402,7 +408,9 @@ check; the fourth failure produces the system item with the exit code, the stder
 series, else owned-ready with the item.
 
 **The cap.** A fleet-wide counter of live owned processes; at six, a seventh spawn asks the
-fleet for its least recently used dormant-eligible channel and reaps it; none eligible means
+fleet for its least recently used dormant-eligible channel and reaps it; a wedged channel is
+excluded from eviction as it is from eligibility, and the cap rule reads the same trace
+(ruling of 2026-09-05); none eligible means
 no eviction, the spawn is refused with `LifecycleError.capReached(live: 6)`, and every
 channel's `liveCount` reads six so the header can show it and offer *Send to background*.
 
@@ -452,10 +460,15 @@ pending; untrusted; consent needed. Only `.ready` spawns.
   read `projects[<root>].hasTrustDialogAccepted` from `<configHome>/.claude.json`; anything
   but `true` is untrusted. Read-only; re-read when the app asks after a terminal pane exits.
 - **Project MCP consent** (`ProjectMCPConsent`): parse `<root>/.mcp.json`; for each server
-  compute rejected, approved or pending exactly as the parent's §6.12 states (rejected when
-  named in the local-settings store's `disabledMcpjsonServers`; approved when any settings
-  source lists it in `enabledMcpjsonServers` or sets `enableAllProjectMcpServers`; else
-  pending); pending servers with a hash of their entry that the FleetKit store has not
+  compute rejected, approved or pending from two locations read-only, as ruled on 2026-09-05
+  after the coordinator verified in the bundle that the engine's own decline dialog writes
+  through its local-settings writer and that the per-project entry in `.claude.json` is a
+  second location the engine consults: **rejected** when either the local-settings store's
+  `disabledMcpjsonServers` or the project entry's names the server; **approved** when any
+  settings source or the project entry lists it in `enabledMcpjsonServers` or sets
+  `enableAllProjectMcpServers`; else **pending**. The write goes only through §6.12's path
+  below; a C1 zero-cost probe (a TUI decline under the scratch home, diffing the files that
+  change) will make the read precedence recorded rather than inferred. Pending servers with a hash of their entry that the FleetKit store has not
   recorded as accepted yield `.consentNeeded`. *Accept* records `(project, name, hash)` in
   the store and writes nothing. *Decline* is `LocalSettingsStore.decline(names, root)`: the
   parent's store resolution and write policy line by line, executed only while no owned
@@ -531,6 +544,25 @@ per session, `DesiredOwnership` per channel, project-server acceptances `(projec
 hash)`, afleet-launched job shorts, the bypass disclaimer acceptance, the fixture-recorded
 baseline and the last census. FleetKit never models Workbench or Afleet state.
 
+### C3's index storage
+
+C3 declares `IndexStorage` in `FleetTimeline`, a two-function protocol that loads and saves an
+index snapshot. `FleetSessions` implements it as `StoreIndexStorage` over `FileStateStore`
+under the `fleetKit` namespace, key `timeline.index`, and the app injects that instance into
+C3's index. Nothing moves to `AfleetCore` (ruling of 2026-09-05).
+
+### Sidebar listing policy (contract X5)
+
+C3's index exposes `entrypoint`, `sessionKind`, `isSidechain`, `teamName` and `continuedIn`
+per transcript and applies none of the engine's picker drop rules; which transcripts become
+channels is C4's policy under X5 (ruling of 2026-09-05). `ListingPolicy.include(entry)` is a
+pure function: afleet's own `sdk-cli` sessions are listed; sidechains are not; a transcript
+with `continuedIn` set is listed under its continuation only; teammate transcripts
+(`teamName` set) are listed read-only under their project, never as owned candidates,
+because agent teams as members are out of scope; every other entry is listed. The policy is
+data the sidebar can show as an explanation, and a test enumerates each rule with an entry
+that exercises it and its negation.
+
 ### CLI verbs (`Verbs/`)
 
 `CLIVerbs` wraps `ProcessRunner` with the resolved environment, the located binary and a
@@ -601,9 +633,8 @@ otherwise: the store layout as one document per namespace under the parent's dir
 file format is advisory inheritance); the directory watcher as a dispatch vnode source plus
 the five-second poll rather than FSEvents (advisory means); the `TaskMirrorReading`
 protocol through which C4 consumes X4's mirror, so C3's landing replaces a stand-in rather
-than an interface; and, if question 1 below is answered as recommended, `StateStore` and
-`StoreNamespace` as X2 additions in `AfleetCore` with a `[parent-impact]` note on X6's
-ownership wording. The delegated unknown about `.claude.json`'s per-project server arrays is
+than an interface; and the `IndexStorage` seam between C3 and C4 as ruled (declared in `FleetTimeline`,
+implemented here), which needs no X2 change. The delegated unknown about `.claude.json`'s per-project server arrays is
 reported for the reconciling architect rather than acted on.
 
 ## Delegated unknowns
@@ -625,6 +656,11 @@ reported for the reconciling architect rather than acted on.
   it for one composed turn.
 
 ## Questions for the human gate
+
+Answered on 2026-09-05; kept as the record of what was asked. (1) Nothing moves to
+`AfleetCore`; C3's `IndexStorage` is implemented here over `FileStateStore`. (2) Yes to the
+one composed turn behind `AFLEET_LIVE_CLI_TURNS=1`, after the budget check; at most two short
+turns in total. (3) One document per namespace, filed on the parent's §7.8.
 
 1. **Where does the store protocol live?** §7.3 says C3's transcript index caches into the
    store, but `FleetTimeline` cannot import `FleetSessions`. Recommendation: `StateStore`
@@ -745,3 +781,11 @@ Pending — written at finish.
   verb actions) and X6's dotted keys with a per-namespace schema version, including
   Workbench's two key shapes. The parent's amended X5 and X6 text is the authority; this
   document's lineage check at recomposition compares against it.
+- 2026-09-05: v2 at acceptance, from the coordinator's rulings. The three questions are
+  answered as recorded above. `claude agents --json` leaves the five-second poll and runs at
+  the pre-spawn check, adopt, send-to-background, the `/logout` census and a sixty-second
+  reconciliation. A wedged channel is excluded from dormant eligibility and from cap
+  eviction, and both rules read the trace. Project MCP consent is computed read-only from
+  both the local-settings store and the project entry in `.claude.json`, written only
+  through §6.12; a C1 probe will record the precedence. The sidebar listing policy is C4's
+  under X5, over the fields C3's index exposes, and is added to the Design.
