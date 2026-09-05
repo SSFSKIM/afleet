@@ -158,3 +158,14 @@ not renumber anything above.
     support. Closer: canonicalise `temporaryDirectory` in `TempTree.init` and throw `XCTSkip` with a
     fixed message when it resolves inside either config home; C4's staging helpers take the same
     guard.
+25. **The wire's compact boundary loses its logical parent in C2's frame type.**
+    `ClaudeWire/Sources/WireFrames/SystemFrames.swift:130-133`: `CompactBoundaryFields` declares
+    `type, subtype, compact_metadata, uuid, session_id` and not `logical_parent_uuid`, which the
+    engine emits whenever the record carries one (2.1.258 `cli.pretty.js:147047`) and which the
+    `compact-boundary` fixture's out-direction frame carries; the key survives only in the lossless
+    extras, and `FleetTimeline/Reduce/WireReducer.swift:339` passes `logicalParentUUID: nil` for the
+    boundary row. No rendered field depends on it today and check two's compared shape excludes it,
+    so the live timeline shows the same rows either way. Found at the C3 merge. Owner: C2, with C3
+    as the consumer. Closer: declare `logicalParentUuid = "logical_parent_uuid"` as an optional
+    field on `CompactBoundaryFields`, pass it through in `WireReducer`, and pin the fixture's frame
+    decoding it.

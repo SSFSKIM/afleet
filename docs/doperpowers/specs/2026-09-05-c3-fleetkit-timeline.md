@@ -453,8 +453,12 @@ Rules, in the order they apply:
    absent. The tool input is typed through `ToolInput.parse` for the tools whose cards need
    fields. `mcp__afleet__send_user_file` calls become `SentFileItem`s (durable, because both
    halves are records).
-4. **Users and peers.** A `user` record with `isMeta` is hidden; a wire `user` frame with
-   `isSynthetic` is hidden by the wire reducer, and the two are one rule with two spellings.
+4. **Users and peers.** A `user` record with `isMeta`, `isCompactSummary` or
+   `isVisibleInTranscriptOnly` is hidden; a wire `user` frame with `isSynthetic` is hidden by
+   the wire reducer, and the two are one rule with two spellings: the engine's `lwe` (2.1.258
+   `cli.pretty.js:366496`) computes `isSynthetic` as exactly that union and stamps it on the
+   echoed frame (`:146777`, `:147019`). The corpus witnesses the two spellings meeting once, at
+   `compact-boundary`'s compaction summary (v2.7).
    A `user` record whose `origin.kind` is not `human` is a `PeerMessageItem`, authored from
    the origin.
 5. **Attachments** are hidden from the projection and kept in the raw view; they are
@@ -462,10 +466,17 @@ Rules, in the order they apply:
 6. **System records.** `compact_boundary` becomes a `CompactBoundaryItem`; one without a
    preserved segment or preserved messages is a hard truncation point and the reducer keeps
    only the boundary, the compaction summary and what follows (parent §7.3, stated
-   behaviour). `informational`, `local_command`, `turn_duration` and `stop_hook_summary`
-   become `NotificationItem`s marked file-only. No fixture carries any of these; the rules
-   are written from the bundle and parity §35.1 and are exercised only by mutation of a
-   recorded record's `type`, which is stated in the test.
+   behaviour). A boundary declares `parentUuid: null` and names the previous leaf in
+   `logicalParentUuid` (the writer, 2.1.258 `cli.pretty.js:430982`); the leaf chain continues
+   through that link when the file holds the record it names, so a soft boundary sits between
+   the two halves in chain order instead of splitting the file into two trees (v2.7; the
+   engine's own loader bridges the boundary too, by relinking in `hns`, `:432524`, though it
+   keeps only the preserved segment because it is rebuilding a context window, not rendering
+   a file). `informational`, `local_command`, `turn_duration` and `stop_hook_summary` become
+   `NotificationItem`s marked file-only. Only the boundary has a fixture (`compact-boundary`,
+   in the corpus since the 2026-09-05 landing); the four notification kinds have none, and
+   their rules are written from the bundle and parity §35.1 and exercised only by mutation of
+   a recorded record's `type`, which is stated in the test.
 7. **Subagent streams.** An agent stream reduces on its own; `merge` attaches its items to
    the `TaskRunItem` of the tool use that spawned it, orders agent items by timestamp among
    the main items, and stamps provenance with the agent id and source file. The mirror and
@@ -1572,6 +1583,67 @@ when a review finding is real but has no oracle, log it with the recording that 
 one; entry 23 is worth more to C1 than a guessed fix would have been to C6.
 
 ## Revision Notes
+
+- 2026-09-06: **v2.7, merged to `main`.** `main` at `1249c17` (twenty fixtures) was merged into
+  the branch at `681ec88` first, and the wider corpus turned 96 assertions red. Every failure was
+  classified before any repin: most were count pins, three were findings, and none was repinned
+  away. (i) **The compact boundary joins the chain.** `ConversationTree` read a boundary's
+  `parentUuid: null` as a root, so `compact-boundary` reduced to a 27-record branch and three
+  rendered prompts. The engine's writer sets `parentUuid: null, logicalParentUuid: <previous
+  leaf>` on a boundary (2.1.258 `cli.pretty.js:430982`); its loader never reads
+  `logicalParentUuid` (six occurrences in the bundle, none in the loader) but relinks across the
+  boundary in `hns` (`:432524`, called from the loader's `finish`, `:434195`), keeping only the
+  preserved segment and re-parenting it after the summary. afleet renders the durable file, so
+  the reducer takes the bridge and not the deletion: a record with no `parentUuid` that names a
+  `logicalParentUuid` present in the file continues the chain through it (rule 6). Red first at
+  `RecordReducerTests.testASoftCompactBoundaryContinuesTheChainThroughItsLogicalParent`.
+  (ii) **`isSynthetic` is a union.** The compaction summary is a `user` record carrying
+  `isCompactSummary` and `isVisibleInTranscriptOnly`, echoed on the wire with `isSynthetic:
+  true`; the wire reducer hid it and the record reducer did not, a presence difference. The
+  engine's `lwe` (`:366496`) defines `isSynthetic` as `isMeta || isVisibleInTranscriptOnly ||
+  isCompactSummary`; rule 4 now states that union and the record reducer hides on it. (iii) **A
+  recorded rewind truncates.** `FixtureWireReplay` mapped only in-direction frames to
+  `HostSignal`s, so the honoured `rewind_conversation` answer, an out-direction
+  `control_response` inside a `success` envelope, reached nothing and the abandoned turn stayed
+  on the wire half. The replay now records the host's `rewind_conversation` request ids and
+  emits `.rewound(toUUID: precedingAssistantUuid)` as its own step on the matching `rewound:
+  true` answer, exactly as a host does after reading its own answer; a `rewound: false` body
+  produces no signal. `truncate(afterRecordUUID:)` needed no change. Red first at
+  `WireReducerTests.testARecordedRewindTruncatesTheWireHalfAndARefusalDoesNot`. **Pins
+  re-derived from a walk of `Fixtures/`**, never from the failing assertion: 20 fixtures (18
+  recorded), 17 mirrored; check one over 20 streams and 518 entries; 760 file records and 521
+  mirror entries over 16 kinds; 22 transcript files, 19 main files, 15 logical sessions
+  (unchanged: the two new recordings resume the session `plain-two-turn` and `resume-no-replay`
+  already share, so the shadowed set grew and the index did not); 228 attachments, 3 `isMeta`,
+  75 plain, 238 matched by the file-only matchers; 63 echoed and 43 correlated control
+  responses; 40 leaf-path prompts; 26 result frames; 17 decision requests. **Check two is live
+  on the boundary** (X4: `.comparedWireToFile` includes `.compactBoundary`): `rewind-turn` is
+  clean at 8 compared items; `compact-boundary` compares 11 with two pinned differences,
+  `userMessage <order:>` (after the compaction the engine delivers the turn's attachment carrier
+  before its prompt, against the file's chain order, timestamps equal) and `compactBoundary
+  timestamp` (the frame carries no `timestamp`, and the replay harness has only the envelope's
+  millisecond offset to stamp it with; a recording with an absolute origin retires that half).
+  The compared shape stays `role, model, origin, toolDenialKind, contentBlocks`; the metadata's
+  two spellings and the logical parent are deliberately outside it, because they would state a
+  permanent difference that says nothing about whether the halves show the same conversation.
+  132 compared items across the twenty fixtures. The branch census is now exact: `rewind-turn`
+  and `compact-boundary` each carry one abandoned three-record branch and every other stream
+  none, and rendered prompts are counted on the leaf path, the first witness of the leaf-path
+  ruling (human-gate question 1). **Tracker 23** gained its test: `compact-boundary` is the
+  first file where physical and chain order part, and the exemption does go to an abandoned
+  record, but the record it would have protected is the boundary, which has no declared parent
+  and becomes a root outright rather than reaching the healing branch; the entry stays open for
+  the declared-parent shape. **Tracker 25** is new: the wire's boundary frame carries
+  `logical_parent_uuid` (the fixture's out-direction frame does, and the engine emits it at
+  `:147047`) but C2's `CompactBoundaryFields` does not declare it, so `WireReducer` passes `nil`.
+  **Leak-risk review at merge** (Codex adversarial, four findings): the recorded uuid prefixes
+  in Parent revisions became counts; the recorded instant in `TranscriptIndex.swift`'s comment
+  became invented digits; a failed staging in `LocalHomeIndexTests` now throws a fixed `XCTSkip`
+  instead of a Cocoa error carrying a path; test temp trees being unchecked against the config
+  home is tracker 24. Suite at the tip: `Executed 165 tests, with 4 tests skipped and 0
+  failures`, run twice in separate scratch paths (the worker's and the coordinator's). The nine
+  parent revisions listed under Parent revisions are filed in the parent's Revision Notes at the
+  merge.
 
 - 2026-09-06: **Outcomes & Retrospective written at finish, and the duplicate heading folded.**
   The section replaces "Pending — written at finish."; the stray second `Surprises & Discoveries`
