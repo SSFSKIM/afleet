@@ -136,6 +136,9 @@ public actor ChannelSupervisor {
     private let spawnSibling: SiblingSpawner
     /// The §6.12 gate every spawn passes first. nil in a rig that is driving a lifecycle row rather than a project.
     private let preconditions: SpawnPreconditions?
+    /// The fleet's one spawn barrier, raised while a `LogoutPlan` runs. A supervisor built without one holds its
+    /// own, permanently lowered, which is the right answer for a fleet with no router yet.
+    private let spawnBarrier: SpawnBarrier
     /// The launch's sources exclude `local` and the project declares `.mcp.json` servers, so `--strict-mcp-config`
     /// is on and the header says the project's servers are off. Re-applied wherever the header note is cleared.
     private var projectServersOff = false
@@ -157,6 +160,7 @@ public actor ChannelSupervisor {
                 ownership: OwnershipCheck, observer: FleetObserver, clock: any Clock<Duration>,
                 eligibilityInputs: @escaping @Sendable () async -> DormantEligibility.Input,
                 fleet: FleetCapCounter, diagnostics: any FleetDiagnosticsSink, isRecent: Bool,
+                spawnBarrier: SpawnBarrier = SpawnBarrier(),
                 environment: ResolvedEnvironment, configHome: ConfigHome, verbs: CLIVerbs,
                 store: (any StateStore)? = nil,
                 evictVictim: @escaping @Sendable (ChannelKey) async -> EvictionOutcome = { _ in .victimBecameIneligible },
@@ -169,7 +173,7 @@ public actor ChannelSupervisor {
         self.spawnSibling = spawnSibling; self.preconditions = preconditions
         self.ownership = ownership; self.observer = observer; self.clock = clock
         self.eligibilityInputs = eligibilityInputs; self.fleet = fleet; self.diagnostics = diagnostics
-        self.isRecent = isRecent; self.handshakeTimeout = handshakeTimeout
+        self.isRecent = isRecent; self.handshakeTimeout = handshakeTimeout; self.spawnBarrier = spawnBarrier
         self.environment = environment; self.configHome = configHome; self.verbs = verbs; self.store = store
         self.evictVictim = evictVictim; self.evictionBarrier = evictionBarrier
         // A fork's own id is minted by the engine and announced on `auth_status`, so the template's `--fork-session`
@@ -194,6 +198,16 @@ public actor ChannelSupervisor {
 
     /// The record a restart relaunches from.
     public func runtimeState() -> SessionRuntimeState { runtime }
+
+    /// The tasks this channel has running or armed, by id. `/logout`'s census lists a channel that is not eligible
+    /// together with the tasks that make it so, and *Stop* sends one `stop_task` per id.
+    public func liveTaskIDs() async -> [String] {
+        let input = await eligibilityInputs()
+        return input.mirror.filter { $0.isRunning || $0.isArmed }.map(\.taskID)
+    }
+
+    /// This channel's dormant eligibility right now, over the same inputs the reap consults.
+    public func currentEligibility() async -> DormantEligibility.Verdict { await currentVerdict() }
 
     /// True while this channel is a fork whose own session id has not arrived.
     private var isAwaitingFork: Bool { if case .awaitingFork = state.identity { return true }; return false }
@@ -366,13 +380,31 @@ public actor ChannelSupervisor {
 
     /// The thirty-minute reap, and `LifecycleAction.reap`.
     public func reap() async {
-        guard process != nil, state.wedged == nil else { return }   // a ghost has nothing left to reap
-        let outcome = await terminateOrWedge(during: .reap)
-        guard case .exited = outcome else { return }   // wedged: no dormant mark, no released slot
+        _ = await endProcess(during: .reap)
+    }
+
+    /// `/logout`'s terminate. A terminate with no replacement is a reap, and the plan invents no transition of its
+    /// own; what makes it a logout is the action name the wedged row records, so a ghost left by a logout and one
+    /// left by a reap are two different observations.
+    @discardableResult
+    public func terminateForLogout() async -> TerminateOutcome {
+        await endProcess(during: .logout)
+    }
+
+    /// Ends this channel's process and, when it really exited, marks the channel dormant and gives its slot back.
+    /// A `nil` exit stops here: no dormant mark and no released slot, because the ghost is still out there.
+    private func endProcess(during action: LifecycleTable.TerminatingAction) async -> TerminateOutcome {
+        // A ghost has nothing left to reap, and a channel with no process has already gone.
+        guard process != nil, state.wedged == nil else { return .exited(.code(0, stderrTail: "")) }
+        let outcome = await terminateOrWedge(during: action)
+        guard case .exited = outcome else { return outcome }
         process = nil
-        apply(.dormantTimerFired, to: .dormant)
+        // A restart takes the same step only from ready: the table has no `dormantTimerFired` out of connecting,
+        // and a handshake ended mid-flight leaves the channel where it was rather than in a state invented here.
+        if currentName == .ready { apply(.dormantTimerFired, to: .dormant) }
         await fleet.release(key)
         pushEligibility()
+        return outcome
     }
 
     /// The only call site of `ProcessHandle.terminate()`, and the only place a channel becomes wedged. Every
@@ -718,6 +750,9 @@ public actor ChannelSupervisor {
     /// `launch` overrides the template for this spawn only: the quiescent restart composes its line from the runtime
     /// snapshot, and nothing else does.
     func spawn(reason: SpawnReason, launch launchOverride: LaunchConfiguration? = nil) async throws {
+        // Before anything: a channel must not come up into a fleet that is signing out from under it. Nothing has
+        // changed yet, so the refusal leaves no state behind.
+        try spawnBarrier.check()
         spawning = true
         defer { spawning = false }
         unresolvedSettings = []   // whatever an earlier restart could not read back died with its process

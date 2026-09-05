@@ -62,6 +62,9 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     /// harness that put its own fixtures there would make the proof vacuous.
     let scratch: URL
     let runnerCalls: ScriptedProcessRunner.Recorder
+    /// The one barrier every supervisor this rig builds consults, and the one a `LogoutPlan` raises. Production has
+    /// exactly one per fleet for the same reason.
+    let spawnBarrier = SpawnBarrier()
     let verbs: CLIVerbs
     let store: FileStateStore
     /// `testNothingElseInThePackageWritesUnderAProject` as a whole-package property: the rig's own cwd is a project
@@ -349,7 +352,7 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
                                       onReleased: { [weak self] in await self?.onReleased?() }),
             observer: observer, clock: clock,
             eligibilityInputs: { eligibility.input() },
-            fleet: fleet, diagnostics: sink, isRecent: isRecent,
+            fleet: fleet, diagnostics: sink, isRecent: isRecent, spawnBarrier: spawnBarrier,
             environment: environment, configHome: home.configHome, verbs: verbs, store: store,
             evictVictim: { [weak self] victim in
                 guard let target = self?.supervisor(for: victim) else { return .victimBecameIneligible }

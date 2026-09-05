@@ -31,6 +31,7 @@ final class RecordingDiagnostics: FleetDiagnosticsSink, DiagnosticsSink, @unchec
     private var _handoffWaits: [(outcome: String, waitedMs: Int)] = []
     private var _wireSteps: [String] = []
     private var _forkIdentityDeadlines: [String] = []
+    private var _timeline: [String] = []
 
     init() {}
 
@@ -50,6 +51,13 @@ final class RecordingDiagnostics: FleetDiagnosticsSink, DiagnosticsSink, @unchec
     var forkIdentityDeadlines: [String] { lock.lock(); defer { lock.unlock() }; return _forkIdentityDeadlines }
     /// Every `terminate_escalated` step ClaudeWire reported through the capturing sink.
     var wireEscalationSteps: [String] { lock.lock(); defer { lock.unlock() }; return _wireSteps }
+    /// One short tag per event, across every kind, in the order the sink saw them. Ordering *between* kinds — a
+    /// terminate before a CLI verb — is a claim `/logout` makes and that no per-kind list can settle.
+    var timeline: [String] { lock.lock(); defer { lock.unlock() }; return _timeline }
+
+    /// A tag of the test's own, in the same order: how a test places something it did itself against what the
+    /// package recorded around it.
+    func mark(_ tag: String) { lock.lock(); _timeline.append(tag); lock.unlock() }
 
     /// The arrange/act boundary. A row test that has to build a ready or dormant channel before it can drive its own
     /// row forgets the arranging transitions here, so `assertObserved` still compares exactly.
@@ -58,8 +66,13 @@ final class RecordingDiagnostics: FleetDiagnosticsSink, DiagnosticsSink, @unchec
     func record(_ event: FleetDiagnosticEvent) {
         lock.lock(); defer { lock.unlock() }
         switch event {
+        case let .verb(name, _, _):
+            _timeline.append("verb:\(name)")
+        case let .logout(step, _):
+            _timeline.append("logout:\(step)")
         case let .transition(row, from, transitionEvent, to, _, _):
             _transitions.append(Observed(row: row, from: from, event: transitionEvent, to: to))
+            _timeline.append("transition:\(row):\(to)")
         case let .transitionNotInTable(transitionEvent, from, to, _):
             _notInTable.append(Observed(row: "-", from: from, event: transitionEvent, to: to))
         case let .answerWriteFailed(id, reason):

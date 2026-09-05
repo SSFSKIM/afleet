@@ -25,6 +25,21 @@ enum ReplayScript {
                 ["answer": ["type": "control_response", "response": response]]]
     }
 
+    /// The same, answered with the engine's error envelope: `{subtype: "error", request_id, error: <a bare string>}` —
+    /// no `response` key and a bare string, the shape the `control-shapes` recording confirmed on the wire.
+    static func failure(_ subtype: String, matching: [String: Any] = [:], error: String) -> [[String: Any]] {
+        var expect: [String: Any] = ["type": "control_request", "request.subtype": subtype]
+        for (key, value) in matching { expect[key] = value }
+        return [["expect": expect, "timeout_ms": 60_000],
+                ["answer": ["type": "control_response", "response": ["subtype": "error", "error": error]]]]
+    }
+
+    /// A `generic-success` rule: any host request of these subtypes that no `expect` is waiting for is answered with
+    /// a bare success rather than failing the replay as an unexpected frame.
+    static func genericSuccess(_ subtypes: [String]) -> [[String: Any]] {
+        [["rule": "generic-success", "subtypes": subtypes]]
+    }
+
     /// Writes the steps, behind the gate, into a fresh file under `directory`.
     static func write(_ steps: [[String: Any]], fixture: String, into directory: URL) throws -> URL {
         let script: [[String: Any]] = [try gate(fixture: fixture)] + steps

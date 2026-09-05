@@ -120,6 +120,12 @@ final class ScriptedHolderFiles: @unchecked Sendable {   // `lock` serialises ev
         }
     }
 
+    /// Takes a worker out of the roster on its own: the daemon's half of a `stop` the CLI has already returned
+    /// from, so a test can place the removal after something else it is watching for.
+    func removeRosterWorker(short: String) throws {
+        try mutateRoster { $0.removeValue(forKey: short) }
+    }
+
     /// What `claude stop <short>` does to the files: the job goes terminal and its worker leaves the roster.
     func stopJob(short: String) throws {
         let file = root.appending(path: "jobs/\(short)/state.json")

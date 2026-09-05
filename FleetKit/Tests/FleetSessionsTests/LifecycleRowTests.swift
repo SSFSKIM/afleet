@@ -96,7 +96,13 @@ final class LifecycleRowTests: XCTestCase {
         "testTerminateReturningNilDuringRestartSpawnsNothing": [
             T(.terminateExhausted, .ready, .terminateReturnedNil(during: .restart), .wedged),
             T(.terminateExhausted, .connecting, .terminateReturnedNil(during: .restart), .wedged)],
-        // Task 8 adds terminateExhausted during logout (two).
+        // Task 8's rows (the test lives in `LifecycleRowTests+Logout.swift`). The two `/logout` scenarios, plus the
+        // ordinary reap the channel that *did* go takes: a terminate with no replacement is a reap, and the plan
+        // invents no transition of its own.
+        "testTerminateReturningNilDuringLogoutRunsNoAuthLogout": [
+            T(.terminateExhausted, .ready, .terminateReturnedNil(during: .logout), .wedged),
+            T(.terminateExhausted, .connecting, .terminateReturnedNil(during: .logout), .wedged),
+            T(.readyDormantEligible, .ready, .dormantTimerFired, .dormant)],
     ]
 
     /// The six `handoffPreempted` scenarios: three holder kinds, from ready and from dormant. Both preempt tests
