@@ -218,15 +218,21 @@ struct ItemBuilder {
     mutating func addCompactBoundary(uuid: String, key: RecordKey?, timestamp: Date?,
                                      compactMetadata: JSONValue?, logicalParentUUID: String?) {
         closeRun()
-        let preservedKeys = ["preserved_segment", "preservedSegment", "preserved_messages", "preservedMessages"]
-        let preserved = preservedKeys.contains { compactMetadata?[$0] != nil }
-        if !preserved { discardEverything() }
+        let hard = Self.isHardTruncation(compactMetadata: compactMetadata)
+        if hard { discardEverything() }
         append(.compactBoundary(CompactBoundaryItem(
             id: id(uuid), timestamp: timestamp, provenance: provenance(key),
-            trigger: compactMetadata?["trigger"]?.stringValue, hardTruncation: !preserved,
+            trigger: compactMetadata?["trigger"]?.stringValue, hardTruncation: hard,
             preTokens: (compactMetadata?["pre_tokens"] ?? compactMetadata?["preTokens"])?.intValue.map(Int.init),
             postTokens: (compactMetadata?["post_tokens"] ?? compactMetadata?["postTokens"])?.intValue.map(Int.init),
             logicalParentUUID: logicalParentUUID)))
+    }
+
+    /// Whether a `compact_boundary`'s metadata preserves neither a segment nor a message list. Shared with the wire
+    /// reducer, whose durable half holds state outside this builder that the same boundary has to drop.
+    static func isHardTruncation(compactMetadata: JSONValue?) -> Bool {
+        let preservedKeys = ["preserved_segment", "preservedSegment", "preserved_messages", "preservedMessages"]
+        return !preservedKeys.contains { compactMetadata?[$0] != nil }
     }
 
     /// `informational`, `local_command`, `turn_duration`, `stop_hook_summary` and any other `system` subtype: a row the

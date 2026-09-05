@@ -107,6 +107,80 @@ final class TaskOutputTailerTests: XCTestCase {
         XCTAssertEqual(received.first?.offset, 0)
     }
 
+    /// A file longer than one read's bound. `maxBytesPerRead` bounds a `pread`, not the file: the engine's cap on a
+    /// task output file is 5 GB, and the 16 MiB constant beside it in the bundle is the size at which an *unwritten*
+    /// in-memory backlog is dropped after a failed disk write. A tailer that treated the bound as the file's total
+    /// size would stop at it and never deliver the later bytes or the exit trailer — which is the one thing the
+    /// consumer of a background command is waiting for.
+    func testOutputPastOneReadsBoundStillArrivesWithItsTrailer() async throws {
+        let tree = try TempTree()
+        let url = tree.root.appendingPathComponent("long.output")
+        let bound = 4096
+        var body = ""
+        for line in 0..<600 { body += "invented output line \(line)\n" }      // several times the bound
+        let whole = body + "[exited with code 3]\n"
+        try Data(whole.utf8).write(to: url)
+        XCTAssertGreaterThan(whole.utf8.count, bound * 3, "the file crosses the bound more than once")
+
+        let tailer = TaskOutputTailer(path: url, pollInterval: .milliseconds(10), maxBytesPerRead: bound)
+        let stream = await tailer.chunks()
+        let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
+        defer { watchdog.cancel() }
+
+        var received: [OutputChunk] = []
+        for await chunk in stream {
+            received.append(chunk)
+            if chunk.exitCode != nil { await tailer.stop() }
+        }
+
+        XCTAssertGreaterThan(received.count, 1, "the file was read in more than one bounded read")
+        XCTAssertTrue(received.allSatisfy { $0.text.utf8.count <= bound }, "no read exceeded the bound")
+        XCTAssertEqual(received.map(\.text).joined(), whole, "every byte of the file arrived, in order")
+        XCTAssertEqual(received.map(\.offset).first, 0)
+        XCTAssertEqual(received.dropFirst().map(\.offset),
+                       received.dropLast().map { $0.offset + $0.text.utf8.count },
+                       "the chunks are contiguous")
+        XCTAssertEqual(received.compactMap(\.exitCode), [3], "the trailer arrived exactly once, past the bound")
+
+        // The same file through the one-shot read: it is served from the end, so the verdict is still there.
+        let snapshot = try await tailer.snapshot()
+        XCTAssertEqual(snapshot.exitCode, 3, "a snapshot of a file longer than the bound still finds the trailer")
+        XCTAssertEqual(snapshot.offset, whole.utf8.count - snapshot.text.utf8.count)
+        XCTAssertLessThanOrEqual(snapshot.text.utf8.count, bound)
+    }
+
+    /// Restarting the tail. `chunks()` finishes the stream it replaces, and that finish runs the old continuation's
+    /// termination handler, whose `stop()` lands asynchronously — after the replacement's pump is already installed.
+    /// The replacement must survive its predecessor's termination.
+    func testASecondChunksCallSurvivesTheFirstStreamsTermination() async throws {
+        let tree = try TempTree()
+        let url = tree.root.appendingPathComponent("restarted.output")
+        try Data("first line\n".utf8).write(to: url)
+
+        let tailer = TaskOutputTailer(path: url, pollInterval: .milliseconds(10))
+        let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
+        defer { watchdog.cancel() }
+
+        var abandoned: AsyncStream<OutputChunk>? = await tailer.chunks()
+        let replacement = await tailer.chunks()
+        _ = abandoned                                       // held, then dropped: the finish already happened above
+        abandoned = nil
+
+        // The old handler's `Task` has to have run by now; if it could still stop this actor, it has.
+        try await Task.sleep(for: .milliseconds(120))
+        let polling = await tailer.isPolling
+        XCTAssertTrue(polling, "the replacement's pump outlives the stream it replaced")
+
+        var received: [OutputChunk] = []
+        for await chunk in replacement {
+            received.append(chunk)
+            if received.count == 1 { try tree.appendRaw(Data("[exited with code 0]\n".utf8), to: url) }
+            if chunk.exitCode != nil { await tailer.stop() }
+        }
+        XCTAssertEqual(received.map(\.exitCode).compactMap { $0 }, [0], "the replacement delivered the verdict")
+        XCTAssertEqual(received.map(\.text).joined(), "first line\n[exited with code 0]\n")
+    }
+
     /// The engine creates the output file after it announces the task, so the tailer waits rather than finishing.
     /// The consumer here abandons the stream with a `break` and never calls `stop()`: the pump must stop of its own
     /// accord, or a closed panel leaves the filesystem being polled for the rest of the tailer's life.

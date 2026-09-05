@@ -220,9 +220,10 @@ public struct WireReducer: Sendable {
 
         case .toolUseSummary(let f):
             guard let first = f.precedingToolUseIDs.first else { return }
-            let id = ItemID(stream: stream, key: first)
-            overlay.clusters[id] = ToolClusterItem(id: id, timestamp: now, provenance: provenance(),
-                                                   toolUseIDs: f.precedingToolUseIDs, label: f.summary)
+            let key = ItemID(stream: stream, key: first)
+            overlay.clusters[key] = ToolClusterItem(id: ItemID.cluster(stream: stream, leadToolUseID: first),
+                                                    timestamp: now, provenance: provenance(),
+                                                    toolUseIDs: f.precedingToolUseIDs, label: f.summary)
 
         case .commandLifecycle(let f):
             overlay.queue.apply(state: f.state, commandUUID: f.commandUUID)
@@ -326,6 +327,14 @@ public struct WireReducer: Sendable {
             }
 
         case .compactBoundary(let f):
+            // Rule 8 makes the boundary the *first* item of a hard truncation, and `ItemBuilder` can only speak for
+            // the builder it is. The durable half of this reducer is wider than that: the seed is the projection the
+            // file already held when the channel opened, and `rebuild()` prepends it unconditionally, so a boundary
+            // that only cleared `main` would leave the seed's history in front of it. Agent builders are deliberately
+            // left alone — `RecordReducer.merge` appends an agent stream whose spawning call is gone rather than
+            // dropping it, and the file half does the same after the engine's garbage collection, so clearing them
+            // here is what would make the two reducers disagree.
+            if ItemBuilder.isHardTruncation(compactMetadata: f.compactMetadata) { discardSeed() }
             main.addCompactBoundary(uuid: f.uuid, key: nil, timestamp: now,
                                     compactMetadata: f.compactMetadata, logicalParentUUID: nil)
 
@@ -461,13 +470,19 @@ public struct WireReducer: Sendable {
         agentOrder = survivors
     }
 
-    private mutating func clearConversation() {
+    /// The durable state this reducer holds that is not in a builder: the projection the channel opened with and the
+    /// records this process has hidden. A hard compact boundary and a `conversation_reset` both drop it.
+    private mutating func discardSeed() {
         seed = .empty
         seedItems = []
+        hiddenRecords = []
+    }
+
+    private mutating func clearConversation() {
+        discardSeed()
         main = ItemBuilder(stream: stream, sourceFile: nil, origin: .wire)
         agentBuilders = [:]
         agentOrder = []
-        hiddenRecords = []
         session = SessionState()
         session.leaf = nil
         preview = nil

@@ -51,7 +51,7 @@ public enum OutputTrailer {
 public actor TaskOutputTailer {
     public let path: URL
     private let pollInterval: Duration
-    private let readLimit: Int
+    private let maxBytesPerRead: Int
 
     private var offset = 0
     /// Bytes read but held back: a read that ends on the trailer is only believed once a second poll finds the file
@@ -62,17 +62,32 @@ public actor TaskOutputTailer {
     private var continuation: AsyncStream<OutputChunk>.Continuation?
     private var pump: Task<Void, Never>?
 
-    /// `readLimit` matches the engine's own 16 MiB cap on a task output file; beyond it the engine stops writing.
-    public init(path: URL, pollInterval: Duration = .milliseconds(250), readLimit: Int = 16 * 1024 * 1024) {
+    /// `maxBytesPerRead` bounds one `pread`, not the file. The engine's cap on a task output *file* is 5 GB
+    /// (`d1e = 5368709120`, spelled `_Gt = "5GB"`, at `~/claude-code-bundle/2.1.257/cli.pretty.js:180128`); the
+    /// 16 MiB constant nearby (`Zt` at 2.1.258 line 828404, used once at line 828525) is something else entirely —
+    /// the size at which the engine drops an *unwritten in-memory backlog* after a write to disk has already failed
+    /// and substitutes `OutputTrailer.omissionNotice`. Treating it as the file's total size would silently drop every
+    /// byte a longer-running command wrote past it, and with them the exit trailer the consumer is waiting for, so
+    /// each poll reads at most this many bytes and the next poll continues from where it stopped.
+    public init(path: URL, pollInterval: Duration = .milliseconds(250), maxBytesPerRead: Int = 16 * 1024 * 1024) {
         self.path = path
         self.pollInterval = pollInterval
-        self.readLimit = readLimit
+        self.maxBytesPerRead = maxBytesPerRead
     }
 
     /// Starts polling and yields each growth. An absent file is waited for; a file that disappears after it was seen
     /// ends the stream, as does a symlink, a non-regular file, or `stop()`.
     public func chunks() -> AsyncStream<OutputChunk> {
-        if let continuation { continuation.finish() }
+        // The old stream's termination handler is detached before it is finished, and the new one is stamped with a
+        // generation: `onTermination` runs synchronously but can only `stop()` this actor through a `Task`, so a
+        // handler left attached to the stream being replaced would land after the replacement's pump was installed
+        // and cancel it.
+        generation += 1
+        let mine = generation
+        if let continuation {
+            continuation.onTermination = nil
+            continuation.finish()
+        }
         let (stream, continuation) = AsyncStream<OutputChunk>.makeStream()
         self.continuation = continuation
         self.finished = false
@@ -80,16 +95,30 @@ public actor TaskOutputTailer {
         pump?.cancel()
         pump = Task { [weak self] in
             while true {
-                guard let self, await self.poll() else { return }
-                do { try await Task.sleep(for: interval) } catch { await self.stop(); return }
+                guard let self else { return }
+                switch await self.poll(generation: mine) {
+                case .ended: return
+                case .immediately: continue          // the last read stopped at the bound; the rest is already there
+                case .again: break
+                }
+                do { try await Task.sleep(for: interval) } catch { await self.stop(generation: mine); return }
             }
         }
         // A consumer that stops iterating — a cancelled task, a closed panel, a `break` — must not leave the pump
         // polling the filesystem for the rest of the tailer's life. Abandoning the stream is a stop.
         continuation.onTermination = { [weak self] _ in
-            Task { await self?.stop() }
+            Task { await self?.stop(generation: mine) }
         }
         return stream
+    }
+
+    /// The generation of the stream `chunks()` last handed out. A termination handler carries the generation it was
+    /// installed for and is ignored once a later `chunks()` has superseded it.
+    private var generation = 0
+
+    private func stop(generation: Int) {
+        guard generation == self.generation else { return }
+        stop()
     }
 
     /// Ends the stream. Every termination path routes through here — an unlinked file, a non-regular or unreadable
@@ -128,18 +157,28 @@ public actor TaskOutputTailer {
     /// polling offset, so a caller may snapshot a finished file without a stream at all.
     public func snapshot() throws -> OutputChunk {
         try withFile { fd, size in
-            let data = try Self.read(fd, from: 0, count: min(size, readLimit))
+            // One read, so a file longer than the bound is served from its end rather than its beginning: the
+            // trailer is the last line, and a snapshot that dropped it would answer "still running" about a finished
+            // command. `offset` says where the returned text begins, which is what it is for.
+            let start = max(0, size - maxBytesPerRead)
+            let data = try Self.read(fd, from: start, count: size - start)
             let text = String(decoding: data, as: UTF8.self)
             let trailer = OutputTrailer.parse(text)
-            return OutputChunk(text: text, exitCode: trailer.exitCode, truncatedByEngine: trailer.truncated, offset: 0)
+            return OutputChunk(text: text, exitCode: trailer.exitCode, truncatedByEngine: trailer.truncated,
+                               offset: start)
         }
     }
 
     // MARK: - Polling
 
-    /// One poll. Returns false when the stream is over.
-    private func poll() -> Bool {
-        guard !finished else { return false }
+    /// What the pump does next: end, sleep an interval, or read again at once because the last read stopped at
+    /// `maxBytesPerRead` with more of the file already written.
+    enum PollOutcome { case ended, again, immediately }
+
+    /// One poll. A pump from a superseded `chunks()` ends here rather than touching the replacement's state: it is
+    /// cancelled, but a cancelled task still finishes the `await` it is parked on.
+    private func poll(generation: Int) -> PollOutcome {
+        guard generation == self.generation, !finished else { return .ended }
         var openErrno: Int32 = 0
         let fd = path.withUnsafeFileSystemRepresentation { representation -> Int32 in
             guard let representation else { openErrno = ENOENT; return -1 }
@@ -149,31 +188,35 @@ public actor TaskOutputTailer {
         }
         guard fd >= 0 else {
             // Not yet created is not an end; created and then unlinked is.
-            if openErrno == ENOENT && !sawFile { return true }
+            if openErrno == ENOENT && !sawFile { return .again }
             stop()
-            return false
+            return .ended
         }
         defer { close(fd) }
         var info = stat()
-        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { stop(); return false }
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { stop(); return .ended }
         sawFile = true
 
-        let size = min(Int(info.st_size), readLimit)
+        let size = Int(info.st_size)
         var fresh = Data()
         if size > offset {
-            guard let read = try? Self.read(fd, from: offset, count: size - offset) else { stop(); return false }
+            guard let read = try? Self.read(fd, from: offset, count: min(size - offset, maxBytesPerRead))
+            else { stop(); return .ended }
             fresh = read
             offset += read.count
         }
+        // A read that stopped at the bound left bytes behind, so what it ends on is not the file's last line: the
+        // trailer check below must not believe it, and the next poll must not wait an interval for the rest.
+        let readWasBounded = size > offset
         var buffer = pending
         buffer.append(fresh)
         pending = Data()
-        guard !buffer.isEmpty else { return true }
+        guard !buffer.isEmpty else { return readWasBounded ? .immediately : .again }
 
-        let endsOnTrailer = buffer.suffix(2).elementsEqual([UInt8(ascii: "]"), UInt8(ascii: "\n")])
+        let endsOnTrailer = !readWasBounded && buffer.suffix(2).elementsEqual([UInt8(ascii: "]"), UInt8(ascii: "\n")])
         if endsOnTrailer && !fresh.isEmpty {
             pending = buffer          // believe it only if the next poll finds the file no longer growing
-            return true
+            return .again
         }
         let text = String(decoding: buffer, as: UTF8.self)
         let trailer = OutputTrailer.parse(text)
@@ -181,7 +224,7 @@ public actor TaskOutputTailer {
                                         exitCode: endsOnTrailer ? trailer.exitCode : nil,
                                         truncatedByEngine: trailer.truncated,
                                         offset: offset - buffer.count))
-        return true
+        return readWasBounded ? .immediately : .again
     }
 
     // MARK: - File access

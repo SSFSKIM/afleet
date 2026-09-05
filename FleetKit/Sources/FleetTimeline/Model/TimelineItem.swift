@@ -8,6 +8,15 @@ public struct ItemID: Hashable, Sendable, Codable {
     public let stream: LogicalStream
     public let key: String
     public init(stream: LogicalStream, key: String) { self.stream = stream; self.key = key }
+
+    /// The id of a cluster row. Every other key this projection assigns is an identifier the engine minted — a record
+    /// uuid, a `tool_use_id`, a task id, a request id, a hook id — and none of those carries a colon, so a cluster's
+    /// own id cannot collide with the row of the call it names. It has to be its own: a cluster is *keyed* in the
+    /// overlay by the first call it summarises, and if the payload took that key too, `ChannelTimeline.items` would
+    /// carry two rows with one `Identifiable` id and the change-diff's dictionary would collapse them.
+    public static func cluster(stream: LogicalStream, leadToolUseID: String) -> ItemID {
+        ItemID(stream: stream, key: "cluster:\(leadToolUseID)")
+    }
 }
 
 /// Where an item came from: which stream, which records built it, and by which route the host learned of them.

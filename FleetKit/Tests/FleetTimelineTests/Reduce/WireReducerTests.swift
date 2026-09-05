@@ -167,6 +167,110 @@ final class WireReducerTests: XCTestCase {
         XCTAssertEqual(reducer.overlay.clusters.count, 1)
     }
 
+    /// The cluster row's own identity. `overlay.clusters` is *keyed* by the first call the summary names — that is how
+    /// a renderer finds the cluster for a call — but the payload's `id` must not be that call's `ItemID` as well, or
+    /// `ChannelTimeline.items` carries two rows under one `Identifiable` id and the change diff's dictionary collapses
+    /// them into one. Same constructed frame as the test above, for the same reason: no fixture carries one.
+    func testAClusterRowDoesNotTakeTheIDOfTheCallItNames() throws {
+        let fixture = try FixtureCorpus.named("explore-depth-1")
+        var reducer = try FixtureWireReplay.replay(fixture)
+        let calls: [String] = reducer.durable.items.compactMap {
+            if case .toolCall(let call) = $0, call.provenance.agentID == nil { call.toolUseID } else { nil }
+        }
+        let lead = try XCTUnwrap(calls.first, "the main stream made at least one tool call to cluster")
+
+        let line = JSONValue.object([
+            "type": .string("tool_use_summary"),
+            "summary": .string("afleet invented cluster label"),
+            "preceding_tool_use_ids": .array(calls.map(JSONValue.string)),
+            "uuid": .string("00000000-0000-4000-8000-00000000c106"),
+            "session_id": .string("00000000-0000-4000-8000-0000000005e5"),
+        ])
+        _ = reducer.apply(.frame(FrameDecoder.decode(line: try line.canonicalData()), .first),
+                          at: Date(timeIntervalSince1970: 0))
+
+        let callID = ItemID(stream: reducer.stream, key: lead)
+        let cluster = try XCTUnwrap(reducer.overlay.clusters[callID], "the cluster is still keyed by the first call")
+        XCTAssertNotEqual(cluster.id, callID, "the cluster row's id is its own, not the call row's")
+        XCTAssertEqual(cluster.id, ItemID.cluster(stream: reducer.stream, leadToolUseID: lead))
+
+        let timeline = ChannelTimeline(durable: reducer.durable, overlay: reducer.overlay)
+        let ids = timeline.items.map(\.id)
+        var seen: Set<ItemID> = []
+        let duplicated = ids.filter { !seen.insert($0).inserted }
+        XCTAssertEqual(duplicated.map(\.key), [], "every row in the merged timeline has a distinct id")
+        XCTAssertEqual(Set(ids).count, ids.count)
+    }
+
+    // MARK: - Compaction
+
+    /// **Unwitnessed path**: no committed recording carries a `compact_boundary`, so the frame here is schema-shaped
+    /// with invented identifiers and nothing in it is an engine byte.
+    ///
+    /// Rule 8 makes a hard boundary — one whose metadata preserves neither a segment nor a message list — the *first*
+    /// item of the projection. This reducer's durable half is wider than its `main` builder: a resumed channel opens
+    /// with the seed `StreamIngestion.open` returned, and `rebuild()` prepends it. Clearing the builder alone would
+    /// leave that history in front of the boundary.
+    func testAHardCompactBoundaryDropsTheSeedAndIsTheFirstItem_unwitnessed() throws {
+        let fixture = try FixtureCorpus.named("session-mirror-resume")
+        XCTAssertTrue(try fixture.frames().allSatisfy {
+            if case .system(.compactBoundary) = $0.frame { false } else { true }
+        }, "the corpus is still free of compact_boundary frames; this test's frame is constructed")
+
+        let seed = try FixtureWireReplay.seed(for: fixture)
+        XCTAssertFalse(seed.items.isEmpty, "session-mirror-resume seeds the reducer from initial/")
+        var reducer = try FixtureWireReplay.reducer(for: fixture)
+        XCTAssertEqual(reducer.durable.items.count, seed.items.count, "the seed is the projection before any frame")
+
+        let line = JSONValue.object([
+            "type": .string("system"),
+            "subtype": .string("compact_boundary"),
+            "compact_metadata": .object(["trigger": .string("manual")]),
+            "uuid": .string("00000000-0000-4000-8000-00000000c0b1"),
+            "session_id": .string("00000000-0000-4000-8000-0000000005e5"),
+        ])
+        let frame = FrameDecoder.decode(line: try line.canonicalData())
+        guard case .system(.compactBoundary) = frame else {
+            return XCTFail("the constructed line did not decode to system/compact_boundary")
+        }
+        _ = reducer.apply(.frame(frame, .first), at: Date(timeIntervalSince1970: 0))
+
+        let items = reducer.durable.items
+        XCTAssertEqual(items.count, 1, "a hard boundary leaves the boundary and nothing else")
+        guard case .compactBoundary(let boundary) = try XCTUnwrap(items.first) else {
+            return XCTFail("the first item after a hard boundary is not the boundary: \(items.first!.category)")
+        }
+        XCTAssertTrue(boundary.hardTruncation)
+        XCTAssertEqual(items.map(\.category), [.compactBoundary])
+        XCTAssertTrue(reducer.durable.hidden.isEmpty, "the seed's hidden records went with its items")
+    }
+
+    /// The other direction, from the same constructed shape: a boundary that names a preserved segment keeps the seed
+    /// in front of it, so the clearing above is the hard case alone.
+    func testASoftCompactBoundaryKeepsTheSeed_unwitnessed() throws {
+        let fixture = try FixtureCorpus.named("session-mirror-resume")
+        let seed = try FixtureWireReplay.seed(for: fixture)
+        var reducer = try FixtureWireReplay.reducer(for: fixture)
+
+        let line = JSONValue.object([
+            "type": .string("system"),
+            "subtype": .string("compact_boundary"),
+            "compact_metadata": .object(["trigger": .string("auto"), "preserved_segment": .array([])]),
+            "uuid": .string("00000000-0000-4000-8000-00000000c0b2"),
+            "session_id": .string("00000000-0000-4000-8000-0000000005e5"),
+        ])
+        _ = reducer.apply(.frame(FrameDecoder.decode(line: try line.canonicalData()), .first),
+                          at: Date(timeIntervalSince1970: 0))
+
+        let items = reducer.durable.items
+        XCTAssertEqual(items.count, seed.items.count + 1, "the seed survives a preserving boundary")
+        XCTAssertEqual(items.prefix(seed.items.count).map(\.id), seed.items.map(\.id))
+        guard case .compactBoundary(let boundary) = try XCTUnwrap(items.last) else {
+            return XCTFail("the last item is not the boundary")
+        }
+        XCTAssertFalse(boundary.hardTruncation)
+    }
+
     // MARK: - Agent streams
 
     /// `explore-depth-1`: every frame carrying a `parent_tool_use_id` is attributed to the agent stream the run tree
