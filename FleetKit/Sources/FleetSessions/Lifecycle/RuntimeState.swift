@@ -30,7 +30,9 @@ public enum RuntimeStateUpdater {
                              to state: inout SessionRuntimeState) {
         switch subtype {
         case SetModel.subtype:
-            state.model = payload["model"]?.stringValue
+            // Present-and-null is the engine's "back to the default" and clears the value; *absent* is not a
+            // statement about the model at all and leaves it alone.
+            if let asked = payload["model"] { state.model = asked.stringValue }
         case SetPermissionMode.subtype:
             if let mode = payload["mode"]?.stringValue.flatMap(PermissionMode.init(rawValue:)) {
                 state.permissionMode = mode
@@ -50,9 +52,10 @@ public enum RuntimeStateUpdater {
             if let path = answer["cwd"]?.stringValue { state.cwd = URL(fileURLWithPath: path) }
         case "add_directory":
             // Accepted: the answer came back rather than throwing. The directory is the one the host asked for.
-            let asked = payload["directory"]?.stringValue ?? payload["path"]?.stringValue
-                ?? payload["mount_path"]?.stringValue
-            if let asked {
+            // `directory` is the key FleetKit sends. The corpus records no `add_directory` exchange at all — it
+            // is a cloud-container staging call with no local headless equivalent — so the request shape is the
+            // host's own and this reads back exactly what the host asked for rather than guessing at alternatives.
+            if let asked = payload["directory"]?.stringValue {
                 let url = URL(fileURLWithPath: asked)
                 if !state.addDirectories.contains(url) { state.addDirectories.append(url) }
             }

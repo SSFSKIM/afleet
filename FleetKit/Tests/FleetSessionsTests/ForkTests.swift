@@ -141,6 +141,43 @@ final class ForkTests: XCTestCase {
         XCTAssertEqual(stillLive, holderPID, "and so is its process")
     }
 
+    /// A fork whose engine never announces an id does not sit connecting forever. The spawn's own handshake timeout
+    /// cannot cover this: `ClaudeProcess.spawn` returns at the initialize response and cancels its timer there,
+    /// while a fork's id arrives much later off the frame reader. The deadline is the supervisor's own, on the
+    /// injected clock, and without it the channel would hold a live child and a cap slot the counter never reclaims.
+    ///
+    /// Scripted, not recorded: the whole child is scripted, because what the test needs is an engine that emits no
+    /// `auth_status` at all — which no recording of a real fork contains.
+    func testAForkWhoseIdentityNeverArrivesIsFailedOnTheIdentityDeadline() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        let provisional = try await supervisor.fork(at: nil)
+        let fork = try XCTUnwrap(rig.supervisor(for: provisional))
+        let forkHandle = try XCTUnwrap(rig.scriptedHandles.last)
+        let occupiedBefore = await rig.fleet.occupancy
+
+        try await rig.waitForSleeper(due: Self.handshakeTimeout)
+        await rig.clock.advance(by: Self.handshakeTimeout)
+
+        try await rig.waitFor("the identity deadline to fire") { forkHandle.terminateCount == 1 }
+        let occupiedAfter = await rig.fleet.occupancy
+        XCTAssertEqual(occupiedAfter, occupiedBefore - 1, "the provisional reservation went back")
+        let stillProvisional = await rig.fleet.isLive(provisional)
+        XCTAssertFalse(stillProvisional)
+        let state = await fork.state
+        XCTAssertEqual(state.origin, .owned(.connecting), "failed the way a spawn error fails a channel")
+        XCTAssertEqual(state.identity, .awaitingFork(from: supervisor.key.session,
+                                                     provisional: provisional.session))
+        try await rig.drainPublished(of: fork)
+        XCTAssertFalse(rig.published(of: fork).contains { $0.origin == .owned(.ready) },
+                       "the fork never published ready")
+    }
+
+    /// The supervisor's default handshake budget, which is the identity deadline's too.
+    private static let handshakeTimeout = Duration.seconds(30)
+
     /// The slot a fork reserved lands under the id the engine resolved, so the channel's own release frees it.
     func testAForkReleasesItsSlotUnderTheResolvedKey() async throws {
         let rig = try newRig()

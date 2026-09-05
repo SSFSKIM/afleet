@@ -47,7 +47,11 @@ public actor ChannelSupervisor {
     /// The channel's key. A fork's `session` is provisional until the identity event; nothing else ever rewrites it.
     public nonisolated var key: ChannelKey { keyBox.value }
 
-    private let launchTemplate: LaunchConfiguration
+    /// The line every spawn of this channel starts from. A quiescent restart *replaces* it with the line it
+    /// composed, so the next respawn continues from the restarted channel rather than reverting to the one the
+    /// channel was opened with — which would re-pass `--agent`, and re-passing it replays the agent's
+    /// `initialPrompt` as a user turn (parent §7.4). Nothing else writes it.
+    private var launchTemplate: LaunchConfiguration
     private let factory: ProcessFactory
     private let ownership: OwnershipCheck
     private let observer: FleetObserver
@@ -124,6 +128,11 @@ public actor ChannelSupervisor {
     /// `auth_status` immediately after the initialize response, so the pump can reach the event while `spawn` is
     /// still suspended inside `handle.spawn`; dropping it would leave the fork connecting forever.
     private var forkIdentityPending: SessionID?
+    /// The fork's identity deadline. `ClaudeProcess.spawn` returns at the initialize response and cancels its own
+    /// handshake timer there, while a fork's id arrives much later off the frame reader, so the spawn's timeout
+    /// cannot cover it: without this a fork whose engine never announces an id sits connecting forever, holding a
+    /// live child and a cap slot the counter can never reclaim.
+    private var forkIdentityTimer: Task<Void, Never>?
     private let spawnSibling: SiblingSpawner
 
     private let updatesContinuation: AsyncStream<ChannelState>.Continuation
@@ -136,6 +145,8 @@ public actor ChannelSupervisor {
     public static let backoffs: [Duration] = [.seconds(1), .seconds(2), .seconds(4)]
     /// Rule 5's quiescent handoff budget: past it the channel is Contended.
     public static let handoffBudget = Duration.seconds(10)
+    /// How long `perform` waits for a control answer before it gives up, on the injected clock.
+    public static let controlTimeout = Duration.seconds(30)
 
     public init(key: ChannelKey, launchTemplate: LaunchConfiguration, factory: @escaping ProcessFactory,
                 ownership: OwnershipCheck, observer: FleetObserver, clock: any Clock<Duration>,
@@ -667,6 +678,7 @@ public actor ChannelSupervisor {
     public func shutdown() {
         shuttingDown = true
         dormantTimer?.cancel(); dormantTimer = nil
+        forkIdentityTimer?.cancel(); forkIdentityTimer = nil
         respawnTask?.cancel(); respawnTask = nil
         pumpTask?.cancel(); pumpTask = nil
         for continuation in subscribers.values { continuation.finish() }
@@ -702,6 +714,7 @@ public actor ChannelSupervisor {
     func spawn(reason: SpawnReason, launch launchOverride: LaunchConfiguration? = nil) async throws {
         spawning = true
         defer { spawning = false }
+        unresolvedSettings = []   // whatever an earlier restart could not read back died with its process
         // A respawn continues the crash series; anything the user asked for starts a new one, which is what makes
         // *Reopen* mean something after the fourth failure.
         if reason != .respawn { crashCount = 0; wasReadyInThisSeries = false }
@@ -766,7 +779,9 @@ public actor ChannelSupervisor {
             if let resolved = forkIdentityPending {
                 forkIdentityPending = nil
                 await resolveForkIdentity(resolved, epoch: mine)
+                return
             }
+            armForkIdentityDeadline(epoch: mine)
             return
         }
 
@@ -831,10 +846,30 @@ public actor ChannelSupervisor {
     @discardableResult
     public func perform<R: ControlRequestSpec>(_ request: R) async throws -> R.Response {
         guard let handle = process else { throw LifecycleError.notOwned }
-        let answer = try await handle.request(request, timeout: nil)
+        let answer = try await bounded(request, on: handle)
         RuntimeStateUpdater.apply(answer: answer, for: request, to: &runtime)
         noteActivity()
         return answer
+    }
+
+    /// The wait is bounded on the *injected* clock rather than on `ProcessHandle.request`'s own timeout, which runs
+    /// on real time inside ClaudeWire: an engine that never answers must not be able to hang a restart in
+    /// `.connecting` with no banner and no way out, and a test must be able to reach that case without sleeping.
+    private func bounded<R: ControlRequestSpec>(_ request: R, on handle: any ProcessHandle) async throws -> R.Response {
+        let subtype = RuntimeStateUpdater.subtype(of: request)
+        let clock = self.clock, budget = Self.controlTimeout
+        return try await withThrowingTaskGroup(of: R.Response.self) { group in
+            group.addTask { try await handle.request(request, timeout: nil) }
+            group.addTask {
+                try await clock.sleep(for: budget)
+                throw WireError.controlError("timeout after \(budget) waiting for \(subtype)")
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw WireError.controlError("no answer for \(subtype)")
+            }
+            return first
+        }
     }
 
     // MARK: - Fork
@@ -863,6 +898,7 @@ public actor ChannelSupervisor {
     private func resolveForkIdentity(_ resolved: SessionID, epoch resolvedEpoch: ProcessEpoch) async {
         guard case .awaitingFork = state.identity, resolvedEpoch == epoch,
               let handle = process, let reservation = forkReservation else { return }
+        forkIdentityTimer?.cancel(); forkIdentityTimer = nil
         forkReservation = nil
 
         // Every question from here on is about the *resolved* session, the provisional key included: a holder set is
@@ -906,6 +942,37 @@ public actor ChannelSupervisor {
         await flushQueuedInput()
     }
 
+    /// The fork's identity deadline, on the injected clock. It is not the spawn's timeout — that one has already
+    /// returned — so this is the supervisor's own, armed when the fork's handshake lands and cancelled the moment the
+    /// identity arrives.
+    private func armForkIdentityDeadline(epoch deadlineEpoch: ProcessEpoch) {
+        forkIdentityTimer?.cancel()
+        let budget = handshakeTimeout
+        forkIdentityTimer = Task { [weak self] in
+            guard let self else { return }
+            guard (try? await self.sleepOnClock(budget)) != nil else { return }
+            await self.forkIdentityDeadlineExpired(epoch: deadlineEpoch)
+        }
+    }
+
+    /// No id within the budget. The channel is failed the way a spawn error fails it: the child is ended, the
+    /// reservation goes back, nothing is published ready, and the channel is left connecting with no process.
+    private func forkIdentityDeadlineExpired(epoch deadlineEpoch: ProcessEpoch) async {
+        forkIdentityTimer = nil
+        guard isAwaitingFork, deadlineEpoch == epoch, let reservation = forkReservation else { return }
+        forkReservation = nil
+        forkIdentityPending = nil
+        // The parent's wedged row is "Owned, any", and the yield of a spawn that cannot finish is the action this
+        // one is: `postHandshakeYield` fires only from connecting, which is where a fork without an id sits.
+        if case .wedged = await terminateOrWedge(during: .postHandshakeYield) {
+            await fleet.rollback(reservation)
+            return
+        }
+        process = nil
+        await fleet.rollback(reservation)
+        publish()
+    }
+
     // MARK: - The quiescent restart
 
     /// §7.4's quiescent restart. It carries the channel's runtime state and never the launch template: `--resume`
@@ -917,6 +984,15 @@ public actor ChannelSupervisor {
     /// release, relaunch every launch field from the snapshot with no `--agent`, re-send the whole flag union, ask
     /// `get_settings`, and publish `.ready` only once every readback matches.
     public func quiescentRestart(_ request: RestartRequest) async throws {
+        // The same door `handOff` and `reap` stand behind. Without it a wedged channel would take the queueing
+        // branch and be told the change "applies when the current work finishes" — a wedged channel is never
+        // eligible, so it never would — and a channel that owns nothing would terminate nothing and spawn anyway,
+        // leaving a live child on an origin that says the session is somebody else's.
+        guard case .owned(let owned) = state.origin,
+              owned == .ready || owned == .dormant || owned == .connecting else {
+            throw LifecycleError.notOwned
+        }
+        if let trace = state.wedged { throw LifecycleError.wedged(trace) }
         guard await currentVerdict().isEligible else {
             state.pendingChange = request
             publish()
@@ -948,7 +1024,8 @@ public actor ChannelSupervisor {
             guard apply(.userSent, to: .connecting) else { return }
         }
 
-        try await spawn(reason: .restart, launch: relaunch(from: snapshot, applying: request))
+        launchTemplate = relaunch(from: snapshot, applying: request)
+        try await spawn(reason: .restart, launch: launchTemplate)
         guard currentName == .connecting, process != nil else { return }   // the spawn yielded or wedged
 
         if !snapshot.flagSettings.isEmpty {
@@ -960,18 +1037,18 @@ public actor ChannelSupervisor {
             snapshot: snapshot, handshake: handshake,
             settingsApplied: settings["applied"] ?? .object([:]),
             effectiveKeys: settings["effective_keys"]?.arrayValue?.compactMap(\.stringValue) ?? [])
-        becomeReadyOrBanner()
+        await becomeReadyOrBanner()
     }
 
     /// The user picked a value for a setting that did not survive. The next unresolved one takes the banner; with
     /// none left the channel is finally ready.
-    public func resolveSetting(_ name: String) {
+    public func resolveSetting(_ name: String) async {
         guard unresolvedSettings.first == name else { return }
         unresolvedSettings.removeFirst()
-        becomeReadyOrBanner()
+        await becomeReadyOrBanner()
     }
 
-    private func becomeReadyOrBanner() {
+    private func becomeReadyOrBanner() async {
         guard unresolvedSettings.isEmpty else {
             state.banner = .settingDidNotSurvive(unresolvedSettings[0])
             publish()
@@ -981,6 +1058,7 @@ public actor ChannelSupervisor {
         guard apply(.handshakeClean, to: .ready) else { return }
         armDormantTimer()
         pushEligibility()
+        await flushQueuedInput()
     }
 
     /// Every launch field from the snapshot, the template's invariants, and never `--agent`: re-passing it replays
@@ -1125,6 +1203,7 @@ public actor ChannelSupervisor {
         state.pendingDecisions = []
         turnRunning = false
         process = nil
+        unresolvedSettings = []   // the process whose readbacks they were is gone
         pushEligibility()
 
         // Our own `terminateOrWedge()` ended this epoch. Whatever status the escalation produced is not a crash: a

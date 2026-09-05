@@ -56,7 +56,7 @@ extension LifecycleRowTests {
             // The parked spawn is unwound rather than resumed: the channel is wedged now, and letting a handshake
             // it has already moved past complete would be a transition the table rightly has no row for.
             handle.spawnError = ScriptedSpawnFailure()
-            await held.release()
+            held.release()
             _ = await parked?.value
             await rig.shutdown()
             await rig.tearDown()

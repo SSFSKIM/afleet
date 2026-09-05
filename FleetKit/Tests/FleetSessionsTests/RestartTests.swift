@@ -12,6 +12,11 @@ import ClaudeWire
 /// of it cannot serve a relaunch. These tests therefore replay `resume-no-replay` — the fixture that stays alive
 /// after the handshake — and answer the host's control requests from a `FAKE_CLAUDE_SCRIPT` whose answers take
 /// their *shape* from the `control-shapes` recording and their values from the test.
+///
+/// Four request shapes have no recorded counterpart anywhere under `Fixtures/` and are the host's own: `set_model`,
+/// `set_permission_mode`, `add_directory`, and a `get_settings` answer carrying an `output_style`. The first three
+/// are answered with the bare success every setter is answered with, and their payloads are composed by FleetKit,
+/// so no engine byte is invented in any of them; the fourth adds one key to the recorded `applied` object.
 final class RestartTests: XCTestCase {
     private var rigs: [Rig] = []
 
@@ -187,14 +192,26 @@ final class RestartTests: XCTestCase {
             try await supervisor.open()
             _ = try await supervisor.perform(SetPermissionMode(mode: .plan))
 
+            rig.forgetTransitions()
             try await rig.steppingClock { try await supervisor.quiescentRestart(RestartRequest()) }
 
+            // The restart's route is the reap plus the dormant resume, and the table has no row of its own for it:
+            // terminate with no replacement is `readyDormantEligible`, the relaunch is `dormantSent`, and the
+            // readbacks are what let `connectingClean` run. Pinned here so the composition cannot drift silently.
+            let composition: Set<LifecycleTable.Transition> = [
+                .init(.readyDormantEligible, .ready, .dormantTimerFired, .dormant),
+                .init(.dormantSent, .dormant, .userSent, .connecting),
+                .init(.connectingClean, .connecting, .handshakeClean, .ready),
+            ]
             let state = await supervisor.state
             if survives {
                 XCTAssertEqual(state.origin, .owned(.ready), "every readback matched")
                 XCTAssertNil(state.banner)
+                rig.assertObserved(composition)
                 continue
             }
+            rig.assertObserved(composition.subtracting([
+                .init(.connectingClean, .connecting, .handshakeClean, .ready)]))
             XCTAssertEqual(state.origin, .owned(.connecting), "the composer stays disabled")
             XCTAssertEqual(state.banner, .settingDidNotSurvive("permissionMode"))
             try await rig.drainPublished(of: supervisor)
@@ -206,6 +223,7 @@ final class RestartTests: XCTestCase {
             let resolved = await supervisor.state
             XCTAssertEqual(resolved.origin, .owned(.ready))
             XCTAssertNil(resolved.banner)
+            rig.assertObserved(composition)
         }
     }
 
@@ -483,6 +501,15 @@ final class RestartTests: XCTestCase {
         snapshot.fastModeObserved = true
         XCTAssertEqual(Readback.verify(snapshot: snapshot, handshake: handshake(fastMode: "off"),
                                        settingsApplied: applied, effectiveKeys: []), ["fastMode"])
+
+        // Two at once: the order is fixed, and it is what decides which setting the banner names.
+        snapshot.fastModeObserved = nil
+        snapshot.flagSettings = ["effortLevel": .string("low")]
+        XCTAssertEqual(Readback.verify(snapshot: snapshot, handshake: handshake(permissionMode: "default"),
+                                       settingsApplied: .object(["model": .string("sonnet"),
+                                                                 "effort": .string("low")]),
+                                       effectiveKeys: []),
+                       ["model", "permissionMode", "flagSettings.effortLevel"])
     }
 
     /// Fast mode has two sources and they must not be confused: `effective_keys` when the host applied it, the new
@@ -560,7 +587,7 @@ final class RestartTests: XCTestCase {
                 $0.epoch?.rawValue == 2 && $0.origin == .owned(.ready)
             }, "no ready state between the new handshake and the get_settings answer")
 
-            await held.release()
+            held.release()
             try await restart.value
 
             let state = await supervisor.state
@@ -572,6 +599,120 @@ final class RestartTests: XCTestCase {
                 }, "a mismatching answer never publishes ready")
             }
         }
+    }
+
+    // MARK: - The door a restart has to come through
+
+    /// A restart refuses what `handOff` refuses. A wedged channel is told so rather than being handed a change it
+    /// would queue forever — a wedged channel is never dormant-eligible, so "applies when the current work
+    /// finishes" would never come true — and a channel that owns nothing terminates nothing and spawns nothing.
+    ///
+    /// Scripted, not recorded: SIGKILL cannot be refused, so the wedged half runs on the scripted handle.
+    func testARestartIsRefusedOnAWedgedChannelAndOnOneThatOwnsNothing() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle(terminateReturns: TerminationReport(exit: nil, steps: ["exit_not_observed"]))
+        let wedged = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await wedged.spawn(reason: .open)
+        await wedged.reap()
+        let handle = rig.scriptedHandles[0]
+        XCTAssertEqual(handle.terminateCount, 1, "the reap is what wedged it")
+        let spawnsBefore = rig.spawnCount
+
+        var thrown: (any Error)?
+        do { try await wedged.quiescentRestart(RestartRequest()) } catch { thrown = error }
+        guard case .wedged? = thrown as? LifecycleError else {
+            return XCTFail("a wedged channel gave \(String(describing: thrown))")
+        }
+        let wedgedState = await wedged.state
+        XCTAssertNil(wedgedState.pendingChange, "no change is queued behind a ghost")
+        XCTAssertEqual(handle.terminateCount, 1, "nothing else was terminated")
+        XCTAssertEqual(rig.spawnCount, spawnsBefore)
+
+        let archived = rig.supervisor(session: SessionID(), origin: .archived)
+        var refusal: (any Error)?
+        do { try await archived.quiescentRestart(RestartRequest()) } catch { refusal = error }
+        XCTAssertEqual(refusal as? LifecycleError, .notOwned)
+        XCTAssertEqual(rig.spawnCount, spawnsBefore, "a channel that owns nothing spawns nothing")
+        let archivedState = await archived.state
+        XCTAssertEqual(archivedState.origin, .archived)
+        XCTAssertNil(archivedState.pendingChange)
+    }
+
+    // MARK: - What a crash after a restart respawns from
+
+    /// The line a restart composed becomes the channel's line: a crash after it respawns from the restarted values,
+    /// and still without `--agent` — re-passing it replays the agent's `initialPrompt` as a user turn, which is the
+    /// thing the restart's own rule exists to prevent, arriving one crash later.
+    ///
+    /// Scripted, not recorded: the channel runs on the scripted handle so the crash and the backoff are the test's.
+    func testACrashAfterARestartRespawnsFromTheRestartedLine() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        rig.configureScriptedHandles { handle in
+            handle.controlAnswers = ["get_settings": .object(["applied": .object(["model": .string("opus")]),
+                                                              "effective_keys": .array([])])]
+        }
+        let session = SessionID()
+        var template = FakeClaudeLaunch.launch(fixture: Self.idle, cwd: rig.cwd,
+                                               session: .resume(session, fork: false))
+        template.model = "sonnet"
+        template.agent = "reviewer"
+        let supervisor = rig.supervisor(session: session, origin: .owned(.connecting), template: template)
+        try await supervisor.spawn(reason: .open)
+        _ = try await supervisor.perform(SetModel(model: "opus"))
+        try await supervisor.quiescentRestart(RestartRequest(addDirectories: [URL(fileURLWithPath: "/tmp/b")]))
+        let ready = await supervisor.state
+        XCTAssertEqual(ready.origin, .owned(.ready))
+
+        let second = rig.scriptedHandles[1]
+        let published = await supervisor.publishedCount
+        second.push(.exited(.code(1, stderrTail: ""), second.epoch))
+        try await rig.waitForPublish(supervisor, above: published)
+        try await rig.waitForSleeper(due: ChannelSupervisor.backoffs[0])
+        await rig.clock.advance(by: ChannelSupervisor.backoffs[0])
+        try await rig.waitFor("the respawn") { rig.spawnCount == 3 }
+
+        let respawned = rig.launches[2]
+        XCTAssertEqual(respawned.model, "opus", "the respawn continues from the restarted line")
+        XCTAssertNil(respawned.agent, "and still never re-passes --agent")
+        XCTAssertEqual(respawned.addDirectories.map(\.path), [URL(fileURLWithPath: "/tmp/b").path])
+    }
+
+    // MARK: - A control answer that never arrives
+
+    /// `perform` is bounded on the injected clock, so an engine that never answers cannot hang a restart in
+    /// `.connecting` with no way out and no test can be made to sleep on wall time to reach that case.
+    ///
+    /// Scripted, not recorded: the channel runs on the scripted handle, whose `get_settings` answer never comes.
+    func testAControlAnswerThatNeverArrivesTimesOutOnTheInjectedClock() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let held = HeldAnswer()
+        rig.configureScriptedHandles { handle in
+            handle.controlGate = { subtype in
+                guard subtype == "get_settings" else { return }
+                await held.wait()
+            }
+        }
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+
+        let restart = Task { try await supervisor.quiescentRestart(RestartRequest()) }
+        try await rig.waitFor("the restart to reach get_settings") {
+            rig.scriptedHandles.count == 2 && rig.scriptedHandles[1].controlRequests.contains {
+                $0.subtype == "get_settings"
+            }
+        }
+        try await rig.waitForSleeper(due: ChannelSupervisor.controlTimeout)
+        await rig.clock.advance(by: ChannelSupervisor.controlTimeout)
+
+        var thrown: (any Error)?
+        do { try await restart.value } catch { thrown = error }
+        XCTAssertEqual(thrown as? WireError,
+                       .controlError("timeout after \(ChannelSupervisor.controlTimeout) waiting for get_settings"))
+        let state = await supervisor.state
+        XCTAssertEqual(state.origin, .owned(.connecting), "the restart did not become ready on no answer")
+        held.release()
     }
 
     // MARK: - Frames the updater table drives
@@ -602,18 +743,20 @@ final class RestartTests: XCTestCase {
 }
 
 /// A one-shot barrier a test parks an engine answer behind.
-actor HeldAnswer {
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+///
+/// The wait polls rather than parking on a continuation because it has to end on cancellation as well as on the
+/// release: a bounded `perform` cancels the request it gave up on, and a barrier that ignored that would hold the
+/// task group open forever. Polling here moves no part of the lifecycle — only the manual clock does that.
+final class HeldAnswer: @unchecked Sendable {   // `lock` serialises `released`
+    private let lock = NSLock()
     private var released = false
 
+    var isReleased: Bool { lock.lock(); defer { lock.unlock() }; return released }
+    func release() { lock.lock(); released = true; lock.unlock() }
+
     func wait() async {
-        guard !released else { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-    func release() {
-        released = true
-        let pending = waiters
-        waiters = []
-        for continuation in pending { continuation.resume() }
+        while !isReleased && !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
     }
 }
