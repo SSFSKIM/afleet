@@ -42,9 +42,10 @@ FleetKit/
     Records/RecordFields.swift                         UserRecordFields … SystemRecordFields, AgentMetadataFields, SessionStateFields
     Records/SessionStateVocabulary.swift               the engine's record-kind table, transcribed
     Reader/LineScanner.swift                           newline scanning over Data, torn-tail rule
-    Reader/TranscriptReader.swift                      readAll, readAppended(from:), readWindow(tailBytes:), readEarlier(before:), open rules
+    Reader/TranscriptReader.swift                      readAll, readAppended(from:), readWindow(policy:), readEarlier(before:), read(at:length:), open rules
+    Reader/WindowedTranscript.swift                    the channel-open read: readWindow, then readEarlier until the window is closed
     Reader/HeadTailReader.swift                        the picker's 64 KiB read and its substring helpers
-    Reduce/Projection.swift                            StreamProjection, DurableProjection, SessionState, Branch, ReadWarning, WindowMarker, TimelineChange
+    Reduce/Projection.swift                            StreamProjection, DurableProjection, HiddenRecord, RecordLocator, SessionState, Branch, ReadWarning, WindowMarker, TimelineChange
     Reduce/RecordReducer.swift                         tree, leaf, healing, merge rules
     Reduce/Overlay.swift                               Overlay, DecisionState, ClusterLabel, TurnAttribution, Banner
     Reduce/StreamingPreview.swift                      StreamingPreview from stream_event deltas
@@ -63,8 +64,11 @@ FleetKit/
     Support/FixtureCorpus.swift                        fixtures root from #filePath, per-fixture manifest, streams, transcript files, frames
     Support/TempTree.swift                             config-home-shaped temporary trees built from fixture snapshots
     Support/Breaks.swift                               in-memory mutation helpers used by the discrimination demonstrations
+    Support/SyntheticTranscript.swift                  invented linear transcripts for the window tests; never an engine byte
+    Support/FixtureWireReplay.swift                    what ClaudeProcess would have pushed for a recording, through C2's WireEventPolicy; host signals from the in-direction frames
     Records/RecordModelTests.swift
     Reader/TranscriptReaderTests.swift
+    Reader/WindowedTranscriptTests.swift
     Reader/HeadTailReaderTests.swift
     Invariant/MirrorFidelityTests.swift                check one
     Invariant/ProjectionEqualityTests.swift            check two and the overlay assertions
@@ -329,15 +333,18 @@ import ClaudeWire
 
 public enum TranscriptRecord: Sendable, Hashable {
     case user(UserRecord), assistant(AssistantRecord), attachment(AttachmentRecord), system(SystemRecord), progress(ProgressRecord)
-    case agentMetadata(AgentMetadataRecord)
-    case sessionState(SessionStateRecord)
+    /// The two uuid-less typed kinds carry the SHA-256 (hex) of the line's canonical JSON, computed by the decoder from the
+    /// stage-one `JSONValue` (`canonicalData()`: sorted keys, normalised numbers), so a file line and a mirror entry with the same
+    /// content in another key order are one key. `JSONEncoder` output is never hashed: its dictionary key order is per-process.
+    case agentMetadata(AgentMetadataRecord, canonicalHash: String)
+    case sessionState(SessionStateRecord, canonicalHash: String)
     case unknown(kind: String, JSONValue)
     case undecodable(raw: Data, byteOffset: Int, reason: String)
 
     public var kind: String {
         switch self {
         case .user: "user"; case .assistant: "assistant"; case .attachment: "attachment"; case .system: "system"; case .progress: "progress"
-        case .agentMetadata: "agent_metadata"; case .sessionState(let s): s.type; case .unknown(let k, _): k; case .undecodable: "<undecodable>"
+        case .agentMetadata: "agent_metadata"; case .sessionState(let s, _): s.type; case .unknown(let k, _): k; case .undecodable: "<undecodable>"
         }
     }
     public var uuid: String? {
@@ -348,14 +355,18 @@ public enum TranscriptRecord: Sendable, Hashable {
     }
     public var isConversation: Bool { uuid != nil && SessionStateVocabulary.conversationKinds.contains(kind) }
 
-    /// uuid when the record has one; otherwise SHA-256 of the canonical JSON, hex.
+    /// uuid when the record has one; otherwise the SHA-256 (hex) of the canonical JSON the decoder computed, or of the raw bytes
+    /// of a line that never decoded. Never derived from a re-encoding (main's `JSONValue.canonicalData` names the hashing bytes).
     public func key(in stream: LogicalStream) -> RecordKey {
         if let uuid { return RecordKey(stream: stream, identity: .uuid(uuid)) }
-        return RecordKey(stream: stream, identity: .hash(Self.hash(of: self)))
-    }
-    static func hash(of record: TranscriptRecord) -> String {
-        let data = (try? RecordDecoder.encode(record)) ?? Data()
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        switch self {
+        case .agentMetadata(_, let h), .sessionState(_, let h): return RecordKey(stream: stream, identity: .hash(h))
+        case .unknown(_, let v): return RecordKey(stream: stream, identity: .hash(RecordDecoder.canonicalHash(of: v)))
+        case .undecodable(let raw, _, _): return RecordKey(stream: stream, identity: .hash(RecordDecoder.hex(SHA256.hash(data: raw))))
+        default:   // a conversation kind without a uuid: canonical bytes of the lossless re-encoding, so even this key is stable
+            let v = (try? JSONDecoder().decode(JSONValue.self, from: RecordDecoder.encode(self))) ?? .null
+            return RecordKey(stream: stream, identity: .hash(RecordDecoder.canonicalHash(of: v)))
+        }
     }
 }
 
@@ -378,12 +389,15 @@ public enum RecordDecoder {
         case "attachment": return typed(AttachmentRecordFields.self, TranscriptRecord.attachment)
         case "system": return typed(SystemRecordFields.self, TranscriptRecord.system)
         case "progress": return typed(ProgressRecordFields.self, TranscriptRecord.progress)
-        case "agent_metadata": return typed(AgentMetadataFields.self, TranscriptRecord.agentMetadata)
+        case "agent_metadata": let h = canonicalHash(of: value); return typed(AgentMetadataFields.self) { .agentMetadata($0, canonicalHash: h) }
         default:
-            if SessionStateVocabulary.kinds[kind] != nil { return typed(SessionStateFields.self, TranscriptRecord.sessionState) }
+            if SessionStateVocabulary.kinds[kind] != nil { let h = canonicalHash(of: value); return typed(SessionStateFields.self) { .sessionState($0, canonicalHash: h) } }
             return .unknown(kind: kind, value)
         }
     }
+    /// The one hashing representation: SHA-256 (hex) of `value.canonicalData()` — sorted keys, normalised numbers.
+    public static func canonicalHash(of value: JSONValue) -> String { hex(SHA256.hash(data: (try? value.canonicalData()) ?? Data())) }
+    static func hex(_ digest: SHA256.Digest) -> String { digest.map { String(format: "%02x", $0) }.joined() }
     public static func decode(entry: JSONValue) -> TranscriptRecord {
         guard let data = try? entry.canonicalData() else { return .undecodable(raw: Data(), byteOffset: 0, reason: "invalid_json") }
         return decode(line: data)
@@ -394,8 +408,8 @@ public enum RecordDecoder {
         switch record {
         case .user(let r): return try enc.encode(r); case .assistant(let r): return try enc.encode(r)
         case .attachment(let r): return try enc.encode(r); case .system(let r): return try enc.encode(r)
-        case .progress(let r): return try enc.encode(r); case .agentMetadata(let r): return try enc.encode(r)
-        case .sessionState(let r): return try enc.encode(r)
+        case .progress(let r): return try enc.encode(r); case .agentMetadata(let r, _): return try enc.encode(r)
+        case .sessionState(let r, _): return try enc.encode(r)
         case .unknown(_, let v): return try v.canonicalData()
         case .undecodable(let raw, _, _): return raw
         }
@@ -439,12 +453,15 @@ enum FixtureCorpus {
         var framesURL: URL { dir.appendingPathComponent("frames.ndjson") }
         /// Every JSONL under transcript/, resolved to its stream; `_slug_` is a slug like any other.
         func transcriptFiles() throws -> [(LogicalStream, TranscriptPath, URL)]
+        /// Every JSONL under `initial/` — the file as it stood before a resume recording — resolved the same way; empty without the directory.
+        func initialFiles() throws -> [(LogicalStream, TranscriptPath, URL)]
+        var hasInitial: Bool { get }
         func metaFiles() throws -> [(LogicalStream, URL)]
         /// Offset for a stream: streams.json keys are `<slug>/<relative path>`; match on the path's suffix.
         func offset(for path: URL) -> Int
         func frames() throws -> [RecordedFrame]
     }
-    struct RecordedFrame { let index: Int; let t: Int; let direction: String; let value: JSONValue; let frame: Frame }
+    struct RecordedFrame { let index: Int; let t: Int; let direction: String /* the envelope's `dir`: "in" or "out" */; let value: JSONValue; let frame: Frame }
 
     static func all() throws -> [Fixture]       // sorted by name; asserts count == committedCount; fails on a dir missing frames.ndjson or fixture.json
     static func named(_ name: String) throws -> Fixture
@@ -492,6 +509,10 @@ final class RecordModelTests: XCTestCase {
                                "atis-latch", "last-prompt", "ai-title", "mode", "relocated", "agent_metadata"])
     }
     func testKeysUseUUIDForConversationRecordsAndAHashOtherwise() throws { /* a `user` record keys by uuid; an `ai-title` keys by hash; two equal ai-title lines key equal; one differing byte keys differently */ }
+    /// The same object in two key orders — the file's order and the mirror's — is one key, for an `ai-title` line and an
+    /// `agent_metadata` line written by the test with invented values; and across the corpus every mirrored uuid-less entry
+    /// keys equal to the file line it mirrors (the property check one relies on).
+    func testUUIDLessKeysAreCanonicalAcrossKeyOrderAndDelivery() throws { /* build `{"type":"ai-title","aiTitle":"t","sessionId":"s"}` and its reversed-key twin; `key(in:)` equal; same for agent_metadata; then for every fixture, every uuid-less mirror entry's key is in the set of the paired file's keys */ }
     func testLeafUuidDistinguishesAbsentFromExplicitNull() throws { /* `{"type":"last-prompt","leafUuid":null,"explicit":true}` → .some(nil); without the key → nil */ }
     func testAKnownKindWithABrokenShapeIsUndecodableNotUnknown() throws { /* `{"type":"user"}` (no message) → .undecodable with reason "decode_failure:user" */ }
     func testResolveReadsSessionFromFileNameNotSlug() throws { /* main, agent jsonl, meta.json, a memory/MEMORY.md → nil, a tool-results file → nil, a slug that is not the cwd's */ }
@@ -504,8 +525,8 @@ Write the bodies in full. The pinned counts 611 and 496 and the twelve-kind set 
 - [ ] **Step 7: Run, demonstrate, commit**
 
 Run: `swift test --package-path FleetKit --filter RecordModelTests 2>&1 | grep -E "Executed|error|failed"`
-Expected: `Executed 6 tests, with 0 failures`.
-Demonstrate red: in `RecordDecoder.decode`, temporarily route `"ai-title"` to `.unknown`; the round-trip test must fail with `unknown record kind ai-title`. Restore. Quote the failing line in the ledger.
+Expected: `Executed 7 tests, with 0 failures`.
+Demonstrate red: in `RecordDecoder.decode`, temporarily route `"ai-title"` to `.unknown`; the round-trip test must fail with `unknown record kind ai-title`. Then hash the raw line bytes instead of the canonical bytes → the reversed-key twin in `testUUIDLessKeysAreCanonicalAcrossKeyOrderAndDelivery` keys differently. Restore both. Quote the failing lines in the ledger.
 
 ```bash
 git rm -q FleetKit/Tests/FleetTimelineTests/Placeholder.swift
@@ -520,14 +541,17 @@ git commit -m "FleetTimeline: logical streams, record keys, the lossless record 
 **Files:**
 - Create: `FleetKit/Sources/FleetTimeline/Reader/LineScanner.swift`
 - Create: `FleetKit/Sources/FleetTimeline/Reader/TranscriptReader.swift`
+- Create: `FleetKit/Sources/FleetTimeline/Reader/WindowedTranscript.swift`
 - Create: `FleetKit/Sources/FleetTimeline/Reader/HeadTailReader.swift`
 - Create: `FleetKit/Tests/FleetTimelineTests/Support/TempTree.swift`
+- Create: `FleetKit/Tests/FleetTimelineTests/Support/SyntheticTranscript.swift`
+- Create: `FleetKit/Tests/FleetTimelineTests/Reader/WindowedTranscriptTests.swift`
 - Create: `FleetKit/Tests/FleetTimelineTests/Reader/TranscriptReaderTests.swift`
 - Create: `FleetKit/Tests/FleetTimelineTests/Reader/HeadTailReaderTests.swift`
 
 **Interfaces:**
 - Consumes: from Task 1: `TranscriptRecord`, `RecordDecoder.decode(line:byteOffset:)`, `FixtureCorpus`.
-- Produces: `TranscriptReader` (`readAll()`, `readAppended(from:)`, `readWindow(policy:)`, `readEarlier(before:)`, `ReadResult`, `WindowPolicy`, `ReaderError`), `LineScanner.lines(in:)`, `HeadTailReader` (`read(_:) -> HeadTail?`, `HeadTail`, the substring helpers `firstString(_:key:)`, `lastString(_:key:)`, `lastLineString(_:type:key:)`, `firstLineString(_:key:)`, `firstPrompt(_:)`), and the test support `TempTree` (a config-home-shaped tree under the temporary directory assembled from fixture snapshots, with `touch`, `append`, `remove`, `relocate`).
+- Produces: `TranscriptReader` (`readAll()`, `readAppended(from:)`, `readWindow(policy:)`, `readEarlier(before:)`, `read(at:length:)`, `ReadResult` with one `RecordLocator` per record, `WindowPolicy`, `ReaderError`), `WindowedTranscript.read(_:policy:)` (the channel-open read with the closure rule), `LineScanner.lines(in:)`, `HeadTailReader` (`read(_:) -> HeadTail?`, `HeadTail`, the substring helpers `firstString(_:key:)`, `lastString(_:key:)`, `lastLineString(_:type:key:)`, `firstLineString(_:key:)`, `firstPrompt(_:)`), and the test support `TempTree` (a config-home-shaped tree under the temporary directory assembled from fixture snapshots, with `touch`, `append`, `remove`, `relocate`), and `SyntheticTranscript.linear(turns:paddingBytes:)` (invented records, invented uuids, generated text — never an engine byte — for the tests that need a file above the whole-file threshold).
 
 - [ ] **Step 1: Line scanning with the torn-tail rule**
 
@@ -592,13 +616,38 @@ public struct TranscriptReader: Sendable {
     public func readAppended(from offset: Int) throws -> ReadResult             // bytes after `offset`; `length` is the new offset
     public func readWindow(policy: WindowPolicy = .init()) throws -> ReadResult // whole file under the threshold; else the tail window, aligned back to a line start
     public func readEarlier(before offset: Int, policy: WindowPolicy = .init()) throws -> ReadResult
+    public func read(at offset: Int, length: Int) throws -> Data                // one record's bytes, for `StreamIngestion.rawRecord(for:)`
     public func byteLength() throws -> Int
 }
 ```
 
-Decisions: `open(2)` with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, then `fstat` and refuse anything that is not `S_IFREG` (`ReaderError.notARegularFile`; `ELOOP` maps to `.symlinkRefused`); read with `pread` into a `Data` of the requested range; `readWindow` chooses the whole file when `byteLength() <= policy.wholeFileUpTo`, otherwise reads the last `policy.initialTail` bytes, drops everything before the first `\n` (a line start), and returns `WindowMarker(earlierAvailable: true, continueBefore: <offset of that line start>)`; `readEarlier(before:)` reads the `earlierStep` bytes ending at `before`, aligned the same way, with `earlierAvailable: false` when it reached offset 0. Leaf-path closure (the window extended backwards until the leaf chain is closed) is the reducer's job in Task 5, not the reader's: the reader deals in bytes and lines. The record decode passes `byteOffset` so `.undecodable` names where.
+Decisions: `open(2)` with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, then `fstat` and refuse anything that is not `S_IFREG` (`ReaderError.notARegularFile`; `ELOOP` maps to `.symlinkRefused`); read with `pread` into a `Data` of the requested range; `readWindow` chooses the whole file when `byteLength() <= policy.wholeFileUpTo`, otherwise reads the last `policy.initialTail` bytes, drops everything before the first `\n` (a line start), and returns `WindowMarker(earlierAvailable: true, continueBefore: <offset of that line start>)`; `readEarlier(before:)` reads the `earlierStep` bytes ending at `before`, aligned the same way, with `earlierAvailable: false` when it reached offset 0. `ReadResult` carries `locators: [RecordLocator]` parallel to `records` (stream-less here: byte offset and length; the caller adds the stream). `TranscriptReader` deals in bytes and lines; the *closure* of a window is `WindowedTranscript`'s (Step 3), which is record-aware and is what `StreamIngestion.open` calls. The record decode passes `byteOffset` so `.undecodable` names where.
 
-- [ ] **Step 3: The head-and-tail reader**
+- [ ] **Step 3: The windowed read and its closure rule**
+
+`FleetKit/Sources/FleetTimeline/Reader/WindowedTranscript.swift`:
+
+```swift
+import Foundation
+
+/// The channel-open read for one file: `readWindow`, then `readEarlier` until the window is *closed*, which means both
+/// (a) the leaf the file names (`last-prompt.leafUuid`, else the last conversation record) lies inside the window, and
+/// (b) the earliest record of the leaf's chain inside the window is a turn start — a `user` record that is neither a tool
+/// result nor `isMeta` — or the file's first record. A chain record whose parent lies before a still-open window is a window
+/// root, not an orphan; the reducer receives the marker and emits no orphan warning for it. Closure is bounded: every
+/// extension is one `earlierStep`, and it stops at offset 0.
+public enum WindowedTranscript {
+    public struct Result: Sendable { public var records: [TranscriptRecord]; public var locators: [RecordLocator]; public var length: Int; public var window: WindowMarker; public var extensions: Int }
+    public static func read(_ reader: TranscriptReader, policy: WindowPolicy = .init()) throws -> Result
+    /// The rule alone, over decoded records, testable without a file: nil when closed, else why not.
+    static func openReason(_ records: [TranscriptRecord]) -> OpenReason?
+    enum OpenReason: Equatable { case leafNotInWindow(String), chainStartsMidTurn(String) }
+}
+```
+
+Decisions: the loop is `readWindow(policy:)`, then `while window.earlierAvailable, let _ = openReason(records) { readEarlier(before: window.continueBefore); prepend; extensions += 1 }`. `openReason` walks parents from the leaf through the records it has; when the walk leaves the window it looks at the last record it reached — a turn start closes the window, anything else is `.chainStartsMidTurn`; a named leaf it never met is `.leafNotInWindow`. A whole-file read (`earlierAvailable == false`) is closed by definition. That a linear file is *not* read back to its root is deliberate: the leaf path of a never-rewound transcript is the whole file, and reading it whole would make the 4 MiB window a fiction on the 109 MB local maximum; the renderer's *Load earlier* continues from `continueBefore` by the same rule. The spec's phrase "until the leaf path is closed" is given this meaning in its v2.2 Revision Note.
+
+- [ ] **Step 4: The head-and-tail reader**
 
 `FleetKit/Sources/FleetTimeline/Reader/HeadTailReader.swift`:
 
@@ -627,21 +676,23 @@ public struct HeadTailReader: HeadTailReading {
 }
 ```
 
-- [ ] **Step 4: Temporary trees for tests**
+- [ ] **Step 5: Temporary trees for tests**
 
 `FleetKit/Tests/FleetTimelineTests/Support/TempTree.swift`: a class that creates `<tmp>/afleet-c3-<uuid>/projects/` and copies a fixture's `transcript/` under it, with `slug(for:)`, `touch(_:)` (append a newline-terminated record copied from the same file's last line with a fresh uuid — a *repeat*, never new content), `appendRaw(_:to:)`, `remove(_:)`, `relocate(session:from:to:)` (move the file and the sidecar directory), `symlink(_:to:)`, and `deinit` removing the tree. The root is `FileManager.default.temporaryDirectory`, never a config home.
 
-- [ ] **Step 5: Tests**
+- [ ] **Step 6: Tests**
 
 `TranscriptReaderTests`: `testReadAllDecodesEveryLineOfEveryCorpusFile` (records per file equal the line count of non-empty lines, asserted per file, and the total equals Task 1's 611 for the transcript files alone); `testATornTailIsHeldBackAndCompletedByTheNextAppend` (copy a file, append half a record without a newline → `readAppended` returns 0 records and does not advance past the partial; append the rest plus `\n` → 1 record, offset at the end); `testASealedTailIsSkipped` (a leading `\n` before a record yields no empty record); `testOneCorruptLineYieldsOneUndecodable` (insert a non-JSON line mid-file → exactly one `.undecodable` with that line's byte offset, every other record intact); `testWindowAlignsToALineStart` (policy with `wholeFileUpTo: 0`, `initialTail: 2000` on `nested-depth-2`'s main file: the first record is complete, `continueBefore` equals its byte offset, `readEarlier` from there returns the preceding records and reaches 0 with `earlierAvailable: false`, and the union equals `readAll`); `testSymlinkAndDirectoryAreRefused`.
 
 `HeadTailReaderTests`: `testReadsHeadAndTailAndStatOfEveryCorpusFile` (size equals the file's byte count; for a file under 64 KiB head equals tail equals the whole file); `testHelpersMatchTheEngineOnTheCorpus` (on `session-mirror-relocation`: `lastLineString(tail, type: "relocated", key: "relocatedCwd")` returns a string and `firstLineString(head, key: "cwd")` returns a different one; on `plain-two-turn`: `firstPrompt(head)` equals the first prompt in `fixture.json`'s `prompts[0]`; `lastString(tail, key: "aiTitle")` is non-nil where an `ai-title` record exists); `testFirstPromptSkipsToolResultsMetaAndCompactSummary` (mutate a copied head in memory: put a `tool_result` user line and an `isMeta` user line before the prompt → still the prompt).
 
-- [ ] **Step 6: Run, demonstrate, commit**
+`WindowedTranscriptTests`: `testAWholeFileReadIsClosed` (every corpus main file under the default policy: `extensions == 0`, `earlierAvailable == false`, records equal `readAll`); `testTheWindowExtendsBackToATurnStart` (on `nested-depth-2`'s main file, the test computes from `LineScanner`'s offsets an `initialTail` that cuts exactly at a tool-result `user` record; `read` with `wholeFileUpTo: 0` → the earliest chain record in the result is a human `user` record, `extensions >= 1`, and the records equal the `readAll` suffix from that record on); `testTheWindowExtendsUntilTheNamedLeafIsInside` (`SyntheticTranscript.linear(turns: 40, paddingBytes: 300_000)` — about 12 MiB, above the whole-file threshold — whose last record is a `last-prompt` naming a uuid from the tenth turn: the result contains that uuid, its chain start is a turn start, and `extensions` equals the number the generator's offsets predict, asserted exactly); `testClosureStopsAtOffsetZero` (`wholeFileUpTo: 0, initialTail: 1` on `plain-two-turn` → offset 0 reached, `earlierAvailable == false`, records equal `readAll`); `testLocatorsAddressEveryRecord` (for every corpus file, `read(at:length:)` on each locator returns bytes that decode to the same `JSONValue` as the record's line).
 
-Run: `swift test --package-path FleetKit --filter "TranscriptReaderTests|HeadTailReaderTests" 2>&1 | grep -E "Executed|failed"`
-Expected: `Executed 9 tests, with 0 failures`.
-Demonstrate red: make `LineScanner` return the partial as a line (drop the hold-back) → `testATornTailIsHeldBackAndCompletedByTheNextAppend` fails on the first assertion. Restore.
+- [ ] **Step 7: Run, demonstrate, commit**
+
+Run: `swift test --package-path FleetKit --filter "TranscriptReaderTests|HeadTailReaderTests|WindowedTranscriptTests" 2>&1 | grep -E "Executed|failed"`
+Expected: `Executed 14 tests, with 0 failures`.
+Demonstrate red: make `LineScanner` return the partial as a line (drop the hold-back) → `testATornTailIsHeldBackAndCompletedByTheNextAppend` fails on the first assertion. Make `openReason` return nil unconditionally → `testTheWindowExtendsBackToATurnStart` fails on the first chain record's kind (a tool result) and `testTheWindowExtendsUntilTheNamedLeafIsInside` fails on `contains(leaf)`. Restore both.
 
 ```bash
 git add FleetKit/Sources/FleetTimeline/Reader FleetKit/Tests/FleetTimelineTests
@@ -726,7 +777,7 @@ final class MirrorFidelityTests: XCTestCase {
                     XCTAssertTrue(diff.isEmpty, "\(fx.name)/\(stream.name.label): \(m.kind) differs at \(diff.sorted()) — not declared identity-only")
                     recordsCompared += 1
                 }
-                for case .agentMetadata(let meta) in entries {
+                for case .agentMetadata(let meta, _) in entries {
                     guard case .agent(let task) = stream.name else { XCTFail("\(fx.name): agent_metadata on the main stream"); continue }
                     let sidecar = try fx.metaFiles().first { $0.0 == stream }.map { try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: $0.1)) }
                     XCTAssertNotNil(sidecar, "\(fx.name): no .meta.json for agent \(task)")
@@ -802,9 +853,11 @@ public struct UserMessageItem: Hashable, Sendable, Codable { public var id: Item
     public var blocks: [ContentBlock]; public var text: String; public var isReplay: Bool; public var promptUUID: String; public init(...) }
 public struct AssistantMessageItem: Hashable, Sendable, Codable { …; public var messageID: String?; public var model: String?; public var blocks: [ContentBlock]
     public var stopReason: String?; public var isStreaming: Bool; public var supersededBy: String?; public var recordUUIDs: [String]; public init(...) }
-public struct ToolCallItem: Hashable, Sendable, Codable { …; public var toolUseID: String; public var name: String; public var input: ToolInput; public var rawInput: JSONValue
+public struct ToolCallItem: Hashable, Sendable, Codable { …; public var toolUseID: String; public var name: String; public var rawInput: JSONValue   // `input: ToolInput` is computed below: ToolInput is not Codable on main
     public var result: JSONValue?; public var isError: Bool?; public var structuredResult: JSONValue?; public var denialKind: String?
     public var messageID: String?; public var status: Status; public enum Status: String, Sendable, Codable { case running, completed, failed, denied }; public init(...) }
+extension ToolCallItem { /// Typed on demand from the stored raw input; never a stored field (`ToolInput` is `Hashable, Sendable` only).
+    public var input: ToolInput { ToolInput.parse(name: name, input: rawInput) } }
 public struct ToolClusterItem: Hashable, Sendable, Codable { …; public var toolUseIDs: [String]; public var label: String?; public init(...) }
 public struct TaskRunItem: Hashable, Sendable, Codable { …; public var taskID: String; public var kind: TaskKind; public var description: String
     public var status: TaskStatus; public var summary: String?; public var outputFile: URL?; public var usage: JSONValue?; public var toolUseID: String?
@@ -887,29 +940,40 @@ public struct SessionState: Hashable, Sendable, Codable {
     public var costState: JSONValue?; public var continuedIn: String?; public var tag: String?; public var atisLatch: String?
     public init()
 }
+/// Where one record's bytes lie: the stream and the byte range `TranscriptReader.read(at:length:)` returns.
+public struct RecordLocator: Hashable, Sendable, Codable { public var stream: LogicalStream; public var byteOffset: Int; public var length: Int; public init(...) }
+/// A record the projection does not render and the raw view may show. The payload stays on disk: `StreamIngestion.rawRecord(for:)`
+/// reads it through the locator on demand, so C6 never touches JSONL and memory stays bounded. `locator` is nil for a record
+/// the mirror delivered before the file held it; the ingestion serves that one from the record it retained until the file catches up.
+public struct HiddenRecord: Hashable, Sendable, Codable {
+    public var key: RecordKey; public var kind: String; public var timestamp: Date?; public var reason: Reason; public var locator: RecordLocator?
+    public enum Reason: String, Sendable, Codable { case attachment, isMeta, isSynthetic, progress, sessionState, unknownKind }
+    public init(...)
+}
 public struct Branch: Hashable, Sendable, Codable { public var head: String; public var tail: String; public var count: Int }   // record uuids
 public struct ReadWarning: Hashable, Sendable, Codable { public enum Kind: String, Sendable, Codable { case undecodable, orphanHealed, orphanUnhealed, unknownKind }
     public var kind: Kind; public var stream: StreamName; public var byteOffset: Int?; public var recordKind: String? }
 public struct StreamProjection: Hashable, Sendable {
-    public var stream: LogicalStream; public var items: [TimelineItem]; public var hidden: [RecordKey]; public var branches: [Branch]
+    public var stream: LogicalStream; public var items: [TimelineItem]; public var hidden: [HiddenRecord]; public var branches: [Branch]
     public var session: SessionState; public var warnings: [ReadWarning]; public var window: WindowMarker?; public var metadata: AgentMetadataRecord?
 }
 public struct DurableProjection: Hashable, Sendable {
-    public var items: [TimelineItem]; public var hidden: [RecordKey]; public var branches: [Branch]; public var session: SessionState
+    public var items: [TimelineItem]; public var hidden: [HiddenRecord]; public var branches: [Branch]; public var session: SessionState
     public var warnings: [ReadWarning]; public var window: WindowMarker?; public var streams: [LogicalStream]
     public init(...)
     public static let empty: DurableProjection
     public func items(in categories: Set<TimelineCategory>) -> [TimelineItem]
+    public func hidden(_ key: RecordKey) -> HiddenRecord?
 }
 public enum TimelineChange: Hashable, Sendable { case inserted(ItemID), updated(ItemID), removed(ItemID), previewChanged, overlayChanged, sessionStateChanged }
 ```
 
 - [ ] **Step 4: Tests**
 
-`TimelineModelTests`: `testCategorySetsPartitionAsTheSpecSays` (`durable ∩ overlay == []`, `durable ∪ overlay ∪ [.opaque] == all thirteen`, `comparedWireToFile ⊆ durable`); `testFileOnlyMatchersRecogniseTheCorpusAttachmentsAndMetaUsers` (every attachment record in the corpus matches; both `isMeta` user records match; no plain user record matches; the count of matching records equals 200 + 2); `testTaskKindAndStatusNormalisation` (`"local_bash"` → `.localBash`, `"killed"` → `.stopped`, an unknown kind round-trips through `.other`); `testItemsAreCodableAndHashable` (each payload struct encodes and decodes equal through `JSONEncoder`).
+`TimelineModelTests`: `testCategorySetsPartitionAsTheSpecSays` (`durable ∩ overlay == []`, `durable ∪ overlay ∪ [.opaque] == all thirteen`, `comparedWireToFile ⊆ durable`); `testFileOnlyMatchersRecogniseTheCorpusAttachmentsAndMetaUsers` (every attachment record in the corpus matches; both `isMeta` user records match; no plain user record matches; the count of matching records equals 200 + 2); `testTaskKindAndStatusNormalisation` (`"local_bash"` → `.localBash`, `"killed"` → `.stopped`, an unknown kind round-trips through `.other`); `testItemsAreCodableAndHashable` (each payload struct — a `ToolCallItem` whose `rawInput` is a `Bash` input among them — encodes and decodes equal through `JSONEncoder`/`JSONDecoder`, and `input` on the decoded copy is `.bash`; a `HiddenRecord` with and without a locator round-trips too).
 
 Run: `swift test --package-path FleetKit --filter TimelineModelTests 2>&1 | grep -E "Executed|failed"` → `Executed 4 tests, with 0 failures`.
-Demonstrate red: remove `.userWhere(.isMeta)` from `fileOnlyRecordKinds` → the matcher count test fails at 200 ≠ 202.
+Demonstrate red: remove `.userWhere(.isMeta)` from `fileOnlyRecordKinds` → the matcher count test fails at 200 ≠ 202. Store `ToolInput` as a field of `ToolCallItem` → the target does not compile (`ToolInput` is `Hashable, Sendable` only on main); that build failure is the red for the Codable test, quote it.
 
 ```bash
 git add FleetKit/Sources/FleetTimeline FleetKit/Tests/FleetTimelineTests
@@ -936,6 +1000,7 @@ public struct RecordReducer: Sendable {
         public var hideMeta = true
         public var healWindow: TimeInterval = 5            // parity §35.13; the bundle constant is read at execution and pinned here with its line
         public var window: WindowMarker? = nil
+        public var locators: [RecordKey: RecordLocator] = [:]      // from the reader; a mirror-delivered record has none yet
         public init() {}
     }
     public static func reduce(_ records: [TranscriptRecord], stream: LogicalStream, sourceFile: URL? = nil, origin: Provenance.Origin = .file, options: Options = .init()) -> StreamProjection
@@ -957,8 +1022,8 @@ Rules to implement, in this order (spec "The record reducer", 1–8):
 
 1. Partition: conversation records (`isConversation`) into the tree; `sessionState`, `agentMetadata`, `progress`, `unknown`, `undecodable` aside. Session state folds by `SessionStateVocabulary.kinds[kind]`: `.lastWins` overwrites the matching `SessionState` field; `.accumulate` appends (file-history and content-replacement are kept in `hidden` only); `.boundaryCleared` behaves as last-wins for `last-prompt` (the boundary clearing is the engine's compaction bookkeeping, not this reducer's).
 2. Leaf: the last `last-prompt` in file order sets `session.leaf` (its `leafUuid`) or `session.clearedToEmpty` (explicit null with `explicit: true`); `rewound: true` is recorded on the state; no `last-prompt` → the last conversation record's uuid.
-3. Tree and healing: a record whose `parentUuid` is missing is attached to the nearest earlier record in file order with the same `isSidechain` whose `timestamp` is within `healWindow`, and a `ReadWarning(.orphanHealed)` is emitted; failing that it becomes a root with `.orphanUnhealed`.
-4. Items are produced from the chain only; `branches` from the rest. `progress` records: `hidden`. `attachment`: `hidden`. `user` with `isMeta` (when `hideMeta`): `hidden`. `undecodable`: a `ReadWarning(.undecodable)` and an `OpaqueItem` with `reason: "undecodable"` so the channel shows a warning row (parent §10). `unknown`: `hidden` plus `.unknownKind`.
+3. Tree and healing: a record whose `parentUuid` is missing is attached to the nearest earlier record in file order with the same `isSidechain` whose `timestamp` is within `healWindow`, and a `ReadWarning(.orphanHealed)` is emitted; failing that it becomes a root with `.orphanUnhealed`. Under an open window (`options.window?.earlierAvailable == true`) the earliest conversation record of the window whose parent is missing is a *window root*: no healing and no warning, because its parent lies before the window and Task 2's closure rule put the window's start at a turn boundary.
+4. Items are produced from the chain only; `branches` from the rest. `progress` records, `attachment`s, `user` records with `isMeta` (when `hideMeta`), session-state records and `unknown` kinds become `HiddenRecord`s with the matching `Reason` and the locator `options.locators[key]` (nil when the mirror delivered the record before the file held it). `undecodable`: a `ReadWarning(.undecodable)` and an `OpaqueItem` with `reason: "undecodable"` so the channel shows a warning row (parent §10). `unknown` also emits `.unknownKind`.
 5. Assistant merge by `message.id` across consecutive records in the chain: one `AssistantMessageItem`, `id.key` = first record's uuid, `recordUUIDs` in order, blocks concatenated in record order, `model` from the first, `stopReason` from the last; `supersedes` (read from `additional["supersedes"]`) removes the named uuids' items and marks `supersededBy`.
 6. Tool calls: every `toolUse` block opens a `ToolCallItem` (`id.key` = tool-use id, `threadParent` = the assistant item's id); a `user` record whose content has a `toolResult` block with that id completes it (`result`, `isError`, `structuredResult` = `toolUseResult`, `denialKind` = `toolDenialKind`, `status` = denied when `toolDenialKind` is set, failed when `isError`, else completed); when the block id matches nothing, `sourceToolAssistantUUID` names the assistant record and the single open call in it is completed. A `user` record consisting only of tool results produces no `UserMessageItem`. `mcp__afleet__send_user_file` tool uses produce a `SentFileItem` instead of a `ToolCallItem` (`files` from `input.files`, `caption` from `input.caption`, `delivered` from the result's `isError == false`).
 7. Users: `origin.kind` absent or `"human"` → `UserMessageItem` (`promptUUID` = uuid, `text` = string content or concatenated text blocks); otherwise `PeerMessageItem`.
@@ -981,9 +1046,11 @@ Timestamps: ISO 8601 from the record's `timestamp`, parsed with `ISO8601DateForm
 - `testSupersedesRetractsItems_mutation`: add `supersedes: [<uuid>]` to a later assistant record → the named item disappears.
 - `testCompactBoundaryHardTruncates_mutation`: insert a `system`/`compact_boundary` record without preserved fields before the last exchange → only the boundary and the last exchange remain.
 - `testMergeAttachesAgentItemsUnderTheirSpawningCall`: `nested-depth-2` merged yields two `taskRun` items with `agentType` `general-purpose` and `Explore`, the second's provenance `agentID` equals the depth-2 task id, and its items sit after the depth-1 call in order.
+- `testHiddenRecordsCarryReasonsAndLocators`: `plain-two-turn` read with `readAll` and its locators passed in `options.locators`: every attachment is in `hidden` with `reason == .attachment` and a locator whose `read(at:length:)` bytes decode to a `JSONValue` with `type == "attachment"` and the record's uuid; the hidden count equals an independent walk of the file; `hidden(key)` finds each.
+- `testWindowRootsAreNotOrphans`: reduce the suffix of `nested-depth-2`'s main file from a turn start the test locates, with `options.window = WindowMarker(earlierAvailable: true, continueBefore: cut)` → no orphan warnings and the items equal the suffix of the whole-file items; the same suffix with `window = nil` yields orphan warnings — the discriminating half, inside one test.
 
-Run: `swift test --package-path FleetKit --filter RecordReducerTests 2>&1 | grep -E "Executed|failed"` → `Executed 11 tests, with 0 failures`.
-Demonstrate red: comment out the `sourceToolAssistantUUID` fallback → `testToolCallsJoinTheirResults` still passes on the corpus (every result has a block id) — so that fallback is *not* discriminated by recorded data; say so in the ledger and cover it by the mutation `testToolResultWithoutBlockIDJoinsBySourceAssistantUUID_mutation` (strip the block id in memory) added to the list above, making twelve tests. Then break the merge (key items by uuid instead of `message.id`) → `testAssistantRecordsMergeByMessageID` fails with four items instead of two.
+Run: `swift test --package-path FleetKit --filter RecordReducerTests 2>&1 | grep -E "Executed|failed"` → `Executed 13 tests, with 0 failures`.
+Demonstrate red: comment out the `sourceToolAssistantUUID` fallback → `testToolCallsJoinTheirResults` still passes on the corpus (every result has a block id) — so that fallback is *not* discriminated by recorded data; say so in the ledger and cover it by the mutation `testToolResultWithoutBlockIDJoinsBySourceAssistantUUID_mutation` (strip the block id in memory) added to the list above, making fourteen tests. Then break the merge (key items by uuid instead of `message.id`) → `testAssistantRecordsMergeByMessageID` fails with four items instead of two.
 
 ```bash
 git add FleetKit/Sources/FleetTimeline/Reduce FleetKit/Tests/FleetTimelineTests
@@ -1052,11 +1119,11 @@ Decisions: polling with `stat` + `pread` from the last offset (FSEvents is not u
 
 - [ ] **Step 3: Tests**
 
-`RegistryMirrorTests` (fold the `background-shell` system frames in `t` order with `now = Date(timeIntervalSince1970: t/1000)`): `testBackgroundShellRowByRow` — after the first `background_tasks_changed` + `task_started`: one entry, `.localBash`, `.background`, `.running`, `listedByEngine == true`, `notified == false`, in `liveWork`; after the Bash `tool_result` observe: `outputFile` non-nil; after the second `background_tasks_changed` (empty) + `task_updated(completed)` + `task_notification`: `status == .completed`, `notified == true`, `listedByEngine == false`, `outputFile` equals the notification's path, `endedAt` set, not in `liveWork`, in `evictable(asOf: endedAt + 31)` and not at `+ 29`; `testTaskStartedRepeatsAreTheSameEntry` (`nested-depth-2`: two distinct ids; replay one `task_started` twice → `startedCount == 2`, entries still two); `testKilledNormalisesToStopped` (a `task_updated` patch with `status: "killed"` → `.stopped`); `testLiveWorkIncludesStartedButNotNotified` (drop the notification from the fold → still live); `testAgentTasksAreRegistryEntriesToo` (`explore-depth-1`: one `.localAgent` entry with `spawn_depth`-bearing `task_started`).
+`RegistryMirrorTests` (fold the `background-shell` system frames in `t` order with `now = Date(timeIntervalSince1970: t/1000)`): `testBackgroundShellRowByRow` — after the first `background_tasks_changed` + `task_started`: one entry, `.localBash`, `.background`, `.running`, `listedByEngine == true`, `notified == false`, in `liveWork`; after the Bash `tool_result` observe: `outputFile` non-nil; after the second `background_tasks_changed` (empty) + `task_updated(completed)` + `task_notification`: `status == .completed`, `notified == true`, `listedByEngine == false`, `outputFile` equals the notification's path, `endedAt` set, not in `liveWork`, in `evictable(asOf: endedAt + 31)` and not at `+ 29`; `testTaskStartedRepeatsAreTheSameEntry` (`nested-depth-2`: two distinct ids; replay one `task_started` twice → `startedCount == 2`, entries still two); `testKilledNormalisesToStopped` (a `task_updated` patch with `status: "killed"` → `.stopped`); `testLiveWorkIncludesStartedButNotNotified` (drop the notification from the fold → still live); `testAgentTasksAreRegistryEntriesToo` (`explore-depth-1`: one `.localAgent` entry with `spawn_depth`-bearing `task_started`); `testToolProgressMovesLastFrameAtOnly` (a `tool_progress` frame built from an invented, schema-shaped line decoded through `FrameDecoder` — no fixture carries one; unwitnessed and named so — for the running shell: `lastFrameAt == now`, `status`, `notified` and `listedByEngine` unchanged, still in `liveWork(asOf: now + 1)`; the same frame for an unknown task id changes nothing).
 
 `TaskOutputTailerTests` (on a copy of the `background-shell` artifact under the temporary directory): `testSnapshotYieldsTheOutputAndTheExitCode` (`text` starts with `bg-done`, `exitCode == 0`); `testChunksFollowAppendsAndFinishOnDeletion` (write the file in three appends with the trailer last; three chunks; delete → stream ends); `testAbsentFileIsWaitedFor` (start before creating; first chunk arrives after creation); `testSymlinkIsRefused`; `testTrailerParserAcceptsOnlyTheExactShape` (`[exited with code 3]` → 3; `exited with code` mid-text → nil).
 
-Run: `swift test --package-path FleetKit --filter "RegistryMirrorTests|TaskOutputTailerTests" 2>&1 | grep -E "Executed|failed"` → `Executed 10 tests, with 0 failures`.
+Run: `swift test --package-path FleetKit --filter "RegistryMirrorTests|TaskOutputTailerTests" 2>&1 | grep -E "Executed|failed"` → `Executed 11 tests, with 0 failures`.
 Demonstrate red: make `task_notification` not set `notified` → `testBackgroundShellRowByRow` fails on `liveWork` still containing the task. Make the trailer parser accept any `exited with code` substring → `testTrailerParserAcceptsOnlyTheExactShape` fails.
 
 ```bash
@@ -1074,7 +1141,7 @@ git commit -m "FleetTimeline: the registry mirror folded from task frames, and t
 
 **Interfaces:**
 - Consumes: Task 1's `AgentMetadataRecord`, `LogicalStream`, `TranscriptPath.path(of:slug:)`; Task 4's `TaskStatus`; from `ClaudeWire`: `TaskStarted`, `TaskProgress`, `TaskUpdated`, `TaskNotification`, `AssistantFrame`.
-- Produces: `AgentRunNode`, `AgentRunNode.ParentSource`, `AgentRunTree` with `apply(taskStarted:at:)`, `apply(taskProgress:at:)`, `apply(taskUpdated:at:)`, `apply(taskNotification:at:)`, `apply(agentMetadata:for:)`, `apply(metaFile:)`, `observe(frame:)` (the two-step join input), `observe(assistantModel:agentID:)`, `node(_:)`, `roots`, `children(of:)`, `isParked(_:)`, `transcriptURL(for:slug:configHome:sessionID:)`.
+- Produces: `AgentRunNode`, `AgentRunNode.ParentSource`, `AgentRunTree` with `apply(taskStarted:at:)`, `apply(taskProgress:at:)`, `apply(taskUpdated:at:)`, `apply(taskNotification:at:)`, `apply(agentMetadata:for:)`, `apply(metaFile:)`, `apply(toolProgress:at:)`, `observe(parentToolUseID:carryingToolUseIDs:)` (the two-step join input), `observe(assistantModel:agentID:)`, `node(_:)`, `roots`, `children(of:)`, `isParked(_:)`, `transcriptURL(of:)` (computed from the tree's current `slug`), `relocate(slug:)`.
 
 - [ ] **Step 1: The tree**
 
@@ -1084,18 +1151,20 @@ public struct AgentRunNode: Hashable, Sendable, Identifiable, Codable {
     public var agentType: String?; public var description: String; public var model: String?
     public var status: TaskStatus; public var depth: Int; public var parent: String?; public var parentSource: ParentSource
     public var activityLine: String?; public var lastToolName: String?; public var elapsedOrigin: Date; public var endedAt: Date?
-    public var toolUseID: String?; public var transcript: URL?; public var children: [String]; public var startedCount: Int
+    public var toolUseID: String?; public var children: [String]; public var startedCount: Int          // no stored path: see transcriptURL(of:)
     public enum ParentSource: String, Sendable, Codable { case agentMetadata, metaFile, twoStepJoin, none }
     public init(...)
 }
 public struct AgentRunTree: Hashable, Sendable {
     public private(set) var nodes: [String: AgentRunNode]
     public var roots: [String] { get }                              // depth-1 nodes in start order
+    public private(set) var slug: String                            // the current alias; relocation replaces it
     public init(configHome: URL, sessionID: SessionID, slug: String)
     public mutating func apply(taskStarted f: TaskStarted, at now: Date)      // only task_type == "local_agent"; repeat → startedCount += 1
     public mutating func apply(taskProgress f: TaskProgress, at now: Date)
     public mutating func apply(taskUpdated f: TaskUpdated, at now: Date)
     public mutating func apply(taskNotification f: TaskNotification, at now: Date)
+    public mutating func apply(toolProgress f: ToolProgressFrame, at now: Date)   // lastToolName and activityLine of the node whose toolUseID == f.parentToolUseID; nothing else
     public mutating func apply(agentMetadata m: AgentMetadataRecord, for stream: LogicalStream)     // parentAgentId → parent (.agentMetadata) when unset
     public mutating func apply(metaFile url: URL) throws                                          // same, source .metaFile
     /// The two-step join's input: every frame's (parent_tool_use_id, the tool_use ids of its blocks). Records which tool-use id was
@@ -1103,17 +1172,21 @@ public struct AgentRunTree: Hashable, Sendable {
     public mutating func observe(parentToolUseID: String?, carryingToolUseIDs: [String])
     public mutating func observe(assistantModel model: String, agentID: String)
     public func isParked(_ id: String) -> Bool        // terminal status with a child still running
+    /// `<configHome>/projects/<slug>/<sessionId>/subagents/agent-<id>.jsonl` under the tree's *current* slug, computed on every call;
+    /// nil for an unknown id. Nothing stale can be stored because nothing is stored.
+    public func transcriptURL(of id: String) -> URL?
+    public mutating func relocate(slug: String)
 }
 ```
 
-Decisions: the parent link is set by the first source that answers, and a later source does not overwrite an earlier one but is checked: if it disagrees, the node keeps the first answer and a `ReadWarning`-shaped conflict is exposed as `conflicts: [String]` on the tree for the test to assert empty on the corpus. The two-step join: a node's `toolUseID` is the block that spawned it; find the frame that carried that block (`carryingToolUseIDs` contains it) and read its `parentToolUseID`; the node whose `toolUseID` equals that value is the parent. `transcript` is `TranscriptPath.path(of: LogicalStream(configHome:, sessionID:, name: .agent(taskID:)), slug:)`. Status from `task_updated`/`task_notification` through `TaskStatus(wire:)`.
+Decisions: the parent link is set by the first source that answers, and a later source does not overwrite an earlier one but is checked: if it disagrees, the node keeps the first answer and a `ReadWarning`-shaped conflict is exposed as `conflicts: [String]` on the tree for the test to assert empty on the corpus. The two-step join: a node's `toolUseID` is the block that spawned it; find the frame that carried that block (`carryingToolUseIDs` contains it) and read its `parentToolUseID`; the node whose `toolUseID` equals that value is the parent. `transcriptURL(of:)` is `TranscriptPath.path(of: LogicalStream(configHome:, sessionID:, name: .agent(taskID:)), slug: slug)` from the tree's current `slug`, so `relocate(slug:)` moves every node's path at once. `Provenance.sourceFile` on an item is the path at production time; the current alias is asked of the tree or of `StreamIngestion.paths`, never read from an item. Status from `task_updated`/`task_notification` through `TaskStatus(wire:)`.
 
 - [ ] **Step 2: Tests**
 
-`AgentRunTreeTests`: `testNestedDepth2FromTaskFramesAndMirrorMetadata` (fold `nested-depth-2`'s system frames and the `agent_metadata` mirror entries in `t` order: two nodes; the depth-2 node's `parent` equals the depth-1 id with `parentSource == .agentMetadata`; the depth-1 node has `parent == nil`, `.none`); `testMetaFileGivesTheSameParent` (fold task frames only, then `apply(metaFile:)` for both sidecars → same parent, `.metaFile`); `testTwoStepJoinGivesTheSameParentWhenBothAreWithheld` (fold task frames and `observe` every `assistant`/`user` frame's `parent_tool_use_id` and block ids → same parent, `.twoStepJoin`); `testAllThreeSourcesAgreeAndConflictsAreEmpty`; `testARepeatedTaskStartedIsTheSameNode`; `testAShellCreatesNoNode` (`background-shell`: zero nodes); `testModelComesFromTheRunsOwnFrames` (`explore-depth-1`: `observe(assistantModel:)` from the forwarded frames' `message.model` gives the node a model; before it, nil); `testTranscriptPathIsConstructedAtSpawn` (equals the fixture's agent file path under the recorded config home and the fixture's slug).
+`AgentRunTreeTests`: `testNestedDepth2FromTaskFramesAndMirrorMetadata` (fold `nested-depth-2`'s system frames and the `agent_metadata` mirror entries in `t` order: two nodes; the depth-2 node's `parent` equals the depth-1 id with `parentSource == .agentMetadata`; the depth-1 node has `parent == nil`, `.none`); `testMetaFileGivesTheSameParent` (fold task frames only, then `apply(metaFile:)` for both sidecars → same parent, `.metaFile`); `testTwoStepJoinGivesTheSameParentWhenBothAreWithheld` (fold task frames and `observe` every `assistant`/`user` frame's `parent_tool_use_id` and block ids → same parent, `.twoStepJoin`); `testAllThreeSourcesAgreeAndConflictsAreEmpty`; `testARepeatedTaskStartedIsTheSameNode`; `testAShellCreatesNoNode` (`background-shell`: zero nodes); `testModelComesFromTheRunsOwnFrames` (`explore-depth-1`: `observe(assistantModel:)` from the forwarded frames' `message.model` gives the node a model; before it, nil); `testTranscriptPathFollowsTheSlug` (`transcriptURL(of:)` equals the fixture's agent file path under the recorded config home and the fixture's slug; after `relocate(slug: "_other_")` every node's URL is under `_other_`, and ids, parents and statuses are unchanged; an unknown id is nil); `testToolProgressSetsTheAgentsLastTool` (a constructed `tool_progress` frame whose `parent_tool_use_id` is the depth-1 node's tool-use id → that node's `lastToolName`; the depth-2 node untouched; unwitnessed and named so).
 
-Run: `swift test --package-path FleetKit --filter AgentRunTreeTests 2>&1 | grep -E "Executed|failed"` → `Executed 8 tests, with 0 failures`.
-Demonstrate red: make `apply(agentMetadata:)` ignore `parentAgentId` → the first test fails with `parent == nil`; make the join read `parentToolUseID` of the spawning frame instead of the carrying frame → the third test fails.
+Run: `swift test --package-path FleetKit --filter AgentRunTreeTests 2>&1 | grep -E "Executed|failed"` → `Executed 9 tests, with 0 failures`.
+Demonstrate red: make `apply(agentMetadata:)` ignore `parentAgentId` → the first test fails with `parent == nil`; make the join read `parentToolUseID` of the spawning frame instead of the carrying frame → the third test fails; cache the URL on the node at spawn → the relocation half of `testTranscriptPathFollowsTheSlug` fails.
 
 ```bash
 git add FleetKit/Sources/FleetTimeline/Agents FleetKit/Tests/FleetTimelineTests
@@ -1128,11 +1201,14 @@ git commit -m "FleetTimeline: the agent-run tree with the metadata, sidecar and 
 - Create: `FleetKit/Sources/FleetTimeline/Reduce/Overlay.swift`
 - Create: `FleetKit/Sources/FleetTimeline/Reduce/StreamingPreview.swift`
 - Create: `FleetKit/Sources/FleetTimeline/Reduce/WireReducer.swift`
+- Create: `FleetKit/Tests/FleetTimelineTests/Support/FixtureWireReplay.swift`
 - Create: `FleetKit/Tests/FleetTimelineTests/Reduce/WireReducerTests.swift`
 
+**Depends on a C2 corrective:** `FixtureWireReplay` (Step 3) consumes `WireEventPolicy` from `ClaudeWire`'s `WireTransport` — the transport's frame-to-event policy extracted as a pure function that `ClaudeProcess` itself calls (a control request becomes `.request`, `.policyAnswered`, `.unansweredDialog`, an MCP route or a silent answer; a cancel becomes `.requestCancelled` when the id is pending; every other frame is `.frame`). On main today that logic is inlined in the actor (`handleInbound`, `apply(_:to:)`), and C3 does not duplicate it. If the corrective has not landed on `main` when the executor reaches this task, the executor stops here and reports; it does not write a copy.
+
 **Interfaces:**
-- Consumes: Task 4's items and projection values; Task 5's merge and tool-join rules (shared through internal helpers in `RecordReducer` — extract `ItemBuilder` into `Reduce/ItemBuilder.swift` if the two reducers would otherwise duplicate the block-to-item logic; the file is internal); Task 6's `RegistryMirror`; Task 7's `AgentRunTree`; from `ClaudeWire`: `WireEvent`, `Frame`, `SystemFrame`, `InboundRequest`, `StreamEventFrame`, `ToolUseSummaryFrame`, `ResultFrame`, `CommandLifecycleFrame`, `RequestID`, `ProcessEpoch`.
-- Produces: `WireReducer` (`init(stream:configHome:slug:)`, `apply(_: WireEvent) -> [TimelineChange]`, `apply(_: HostSignal) -> [TimelineChange]`, `durable`, `overlay`, `preview`, `registry`, `agents`), `HostSignal`, `Overlay` (`decisions: [RequestID: DecisionItem]`, `clusters: [ItemID: ToolClusterItem]`, `turns: [TurnSummaryItem]`, `notifications: [NotificationItem]`, `hooks: [String: HookRunItem]`, `banners: [Banner]`, `queue: QueueState`, `stale: Bool`), `StreamingPreview`, `Banner`, `DecisionOutcome`.
+- Consumes: Task 4's items and projection values; Task 5's merge and tool-join rules (shared through internal helpers in `RecordReducer` — extract `ItemBuilder` into `Reduce/ItemBuilder.swift` if the two reducers would otherwise duplicate the block-to-item logic; the file is internal); Task 6's `RegistryMirror`; Task 7's `AgentRunTree`; from `ClaudeWire`: `WireEvent`, `Frame`, `SystemFrame`, `InboundRequest`, `StreamEventFrame`, `ToolUseSummaryFrame`, `ResultFrame`, `CommandLifecycleFrame`, `ToolProgressFrame`, `RequestID`, `ProcessEpoch`; test-side, from `ClaudeWire` after the corrective: `WireEventPolicy`, `InboundPolicy`, `InboundRequest.parse(frame:epoch:receivedAt:)`.
+- Produces: `WireReducer` (`init(stream:slug:seed:)`, `apply(_: WireEvent) -> [TimelineChange]`, `apply(_: HostSignal) -> [TimelineChange]`, `durable`, `overlay`, `preview`, `registry`, `agents`), `HostSignal`, `Overlay` (`decisions: [RequestID: DecisionItem]`, `clusters: [ItemID: ToolClusterItem]`, `turns: [TurnSummaryItem]`, `notifications: [NotificationItem]`, `hooks: [String: HookRunItem]`, `banners: [Banner]`, `queue: QueueState`, `stale: Bool`), `StreamingPreview`, `Banner`, `DecisionOutcome`; test-side `FixtureWireReplay`.
 
 - [ ] **Step 1: Host signals and overlay values**
 
@@ -1142,6 +1218,7 @@ public enum HostSignal: Sendable, Hashable {
     case decisionAnswered(RequestID, outcome: DecisionOutcome)
     case rewound(toUUID: String)
     case processReplaced(ProcessEpoch)
+    case relocated(mainPath: URL)                   // set_cwd answered: the agent tree's slug follows; the host sends the same path to StreamIngestion.relocated(mainPath:)
 }
 public enum DecisionOutcome: Sendable, Hashable, Codable { case allowed, denied(message: String?), answered(summary: String), cancelled }
 public struct Banner: Sendable, Hashable, Codable { public enum Kind: String, Sendable, Codable { case rateLimit, auth, apiRetry, modelFallback, compatibility, mirrorFileOnly }
@@ -1156,7 +1233,8 @@ public struct Overlay: Sendable, Hashable { … as in Interfaces …; public sta
 
 ```swift
 public struct WireReducer: Sendable {
-    public init(stream: LogicalStream, slug: String)
+    /// `seed`: the durable projection the file already holds when the channel opens (a resume) — what `StreamIngestion.open` returned.
+    public init(stream: LogicalStream, slug: String, seed: DurableProjection = .empty)
     public private(set) var durable: DurableProjection
     public private(set) var overlay: Overlay
     public private(set) var preview: StreamingPreview?
@@ -1172,8 +1250,9 @@ Routing, by `WireEvent` case:
 - `.handshakeCompleted`, `.sessionIdentityResolved`, `.stderr`: no change (stderr is C4's).
 - `.frame(frame, epoch)`:
   - `.assistant(f)`: forwarded frames (`parentToolUseID != nil`) are attributed to the agent stream `.agent(taskID:)` resolved through the tree (`agents.node(withToolUse: parentToolUseID)`), else to the main stream; the item is built by the same block rules as Task 5 (merge by `message.id`, tool calls opened, `supersedes` applied, `mcp__afleet__send_user_file` → `SentFileItem`); `preview` for that `message.id` is dropped; `agents.observe(assistantModel:agentID:)` when forwarded; `agents.observe(parentToolUseID:carryingToolUseIDs:)` always.
-  - `.user(f)`: `isSynthetic == true` → hidden (a `RecordKey` in `durable.hidden`); tool-result content → completes calls; otherwise `UserMessageItem` (`isReplay` from the frame) or `PeerMessageItem` by `origin.kind`; `agents.observe(…)` for the join.
+  - `.user(f)`: `isSynthetic == true` → a `HiddenRecord(reason: .isSynthetic, locator: nil)` in `durable.hidden`; tool-result content → completes calls; otherwise `UserMessageItem` (`isReplay` from the frame) or `PeerMessageItem` by `origin.kind`; `agents.observe(…)` for the join.
   - `.streamEvent(f)`: `preview.apply(f.event)`; `.previewChanged`.
+  - `.toolProgress(f)`: `registry.apply(toolProgress: f, at: now)` (moves `lastFrameAt` of the entry for `f.taskID`, else of the entry whose tool-use id is `f.parentToolUseID ?? f.toolUseID`) and `agents.apply(toolProgress: f, at: now)`; no item and no change emitted. No fixture carries the frame: unwitnessed, tested on a constructed frame.
   - `.result(f)`: `TurnSummaryItem` with `attribution`: `.relocation` when `numTurns == 0`; `.prompted(uuid)` popping the oldest `outstandingPrompts` when non-empty; else `.unprompted`. Appended to `overlay.turns`.
   - `.system(.initialize)`: turn boundary only (no item). `.system(.taskStarted/.taskUpdated/.taskProgress/.taskNotification/.backgroundTasksChanged)`: `registry.apply`, `agents.apply`; a `task_notification` synthesises a `TaskRunItem(synthesised: true, provenance.origin: .synthesised)` into `durable.items` for a non-agent task and updates the existing agent `TaskRunItem` for an agent. `.system(.hookStarted/.hookProgress/.hookResponse)`: `overlay.hooks[hookID]`. `.system(.notification)`: `overlay.notifications`. `.system(.permissionDenied)`: marks the tool call `.denied` with `denialKind`. `.system(.compactBoundary)`: `CompactBoundaryItem` into `durable` (the wire side of the same record; compared file-to-file only per the constant, so it never enters check two). `.system(.status/.apiRetry/.modelRefusalFallback/.modelRefusalNoFallback/.modelConsentFallback)`: banners. `.system(.mirrorError)`: `Banner(.mirrorFileOnly)` — the ingestion switch itself is Task 10's. `.system(.localCommandOutput)`: `NotificationItem(key: "local_command_output", fileOnly: false)`. `.system(.sessionStateChanged)`: `overlay.sessionState`. `.system(.opaque)` and every other subtype: `OpaqueItem`.
   - `.toolUseSummary(f)`: `overlay.clusters[<id of the first preceding call>]` labelled.
@@ -1183,16 +1262,39 @@ Routing, by `WireEvent` case:
 - `.requestCancelled(id, _)`: state `.cancelled`. `.policyAnswered(r, error)`: `.policyAnswered(error:)`. `.unansweredDialog(r)`: `.inert`.
 - `.hostToolInvoked(inv, _)`: marks the matching `SentFileItem.delivered = true` when its tool-use id is known, else queues by name for the next `SentFileItem`.
 - `.exited`: `overlay.stale = true`, `preview = nil`, every `.pending` decision → `.inert`, running registry entries keep their state (C4 decides).
-- `HostSignal.promptSent`: push the uuid. `.decisionAnswered`: `.answered(outcome:)`. `.rewound(toUUID:)`: drop every durable item after the item whose record uuid equals `toUUID`, drop preview, mark `session.leaf`. `.processReplaced`: `overlay = .empty` with `stale = false`, `preview = nil`, prompts cleared; `durable` untouched.
+- `HostSignal.promptSent`: push the uuid. `.decisionAnswered`: `.answered(outcome:)`. `.rewound(toUUID:)`: drop every durable item after the item whose record uuid equals `toUUID`, drop preview, mark `session.leaf`. `.processReplaced`: `overlay = .empty` with `stale = false`, `preview = nil`, prompts cleared; `durable` untouched. `.relocated(mainPath:)`: `agents.relocate(slug:)` with the slug `TranscriptPath.resolve(mainPath, under: stream.configHome)` yields; a path that does not resolve to this session is ignored and counted in `overlay.banners` as a `.compatibility` banner.
 
 Timestamps: from the frame's `timestamp` when present, else `now`.
 
-- [ ] **Step 3: Tests**
+- [ ] **Step 3: The fixture replay (test support)**
 
-`WireReducerTests`, folding each fixture's frames as `WireEvent.frame(frame, .first)` in `t` order (in-direction `user` frames become `HostSignal.promptSent(uuid:)` first, since that is what the host did): `testStreamingPreviewAssemblesAndCollapses` (`plain-two-turn`: after the deltas of the first message the preview has the text; after the `assistant` frames it is nil and the item's text equals the preview's); `testResultAttributionOnRelocationAndNestedAgents` (`session-mirror-relocation`: five turns, attributions `[prompted, prompted, relocation, prompted, prompted]`; `nested-depth-2`: `[prompted, unprompted, unprompted]`); `testDecisionLifecycle` (`permission-allow`: the `can_use_tool` request → `.pending`; `HostSignal.decisionAnswered(.allowed)` → `.answered`; `permission-deny` with `.policyAnswered` event → `.policyAnswered`); `testToolUseSummaryLabelsTheCluster`; `testForwardedFramesLandOnTheAgentStream` (`explore-depth-1`: items with `provenance.agentID` equal to the task id exist and none of them is on the main stream's id); `testTaskNotificationSynthesisesACompletionItem` (`background-shell`: one `taskRun` with `synthesised == true` after the notification, none before); `testSyntheticUsersAreHidden_mutation` (set `isSynthetic: true` on a user frame in memory → hidden, no item; unwitnessed on the wire and named so); `testRewoundTruncatesTheDurableHalf_mutation`; `testProcessReplacedResetsOverlayNotProjection`; `testCommandLifecycleDrivesQueueState` (from `control-shapes` or any fixture that carries the frames; if none does, a constructed frame with the schema's five states and the test says so).
+`FleetKit/Tests/FleetTimelineTests/Support/FixtureWireReplay.swift`:
 
-Run: `swift test --package-path FleetKit --filter WireReducerTests 2>&1 | grep -E "Executed|failed"` → `Executed 10 tests, with 0 failures`.
-Demonstrate red: attribute every result `.prompted` when any prompt was ever sent (drop the pop) → the relocation attribution test fails at index 2. Route forwarded frames to the main stream → the agent-stream test fails.
+```swift
+/// What `ClaudeProcess` would have pushed for a recorded fixture, reproduced from the recording rather than by re-running it.
+/// Out-direction frames go through C2's `WireEventPolicy` — the same function the transport calls — so a control request is
+/// never a `.frame` here either; in-direction frames are what the host did and become `HostSignal`s.
+enum FixtureWireReplay {
+    struct Step { let t: Int; let events: [WireEvent]; let signal: HostSignal? }
+    /// `InboundPolicy.default(declaredDialogKinds:registeredHookCallbackIDs:)` from the fixture's own `initialize` request
+    /// (the first in-direction control_request: `supportedDialogKinds`, every `hooks.*[].hookCallbackIds`).
+    static func policy(for fx: FixtureCorpus.Fixture) throws -> InboundPolicy
+    static func steps(for fx: FixtureCorpus.Fixture, epoch: ProcessEpoch = .first) throws -> [Step]
+    /// A reducer seeded from `initial/` when the fixture has one — the record reducer's merged projection of those files,
+    /// which is what `StreamIngestion.open` hands the wire reducer on a resume — else empty.
+    static func reducer(for fx: FixtureCorpus.Fixture) throws -> WireReducer
+    static func replay(_ fx: FixtureCorpus.Fixture) throws -> WireReducer       // reducer(for:), then every step in `t` order
+}
+```
+
+The in-direction mapping (host side, C3's own): a `user` frame → `HostSignal.promptSent(uuid:at:)`; a `control_response` answering a request the replay surfaced → `HostSignal.decisionAnswered(id, outcome:)` (`behavior: allow` → `.allowed`, `deny` → `.denied(message:)`, a dialog, question or plan answer → `.answered(summary: <subtype>)`); the `initialize` request and interrupts → nothing. The out-direction mapping is `WireEventPolicy`'s, called with the pending and seen request ids the replay tracks exactly as the transport does; its answers are discarded, its events kept in order.
+
+- [ ] **Step 4: Tests**
+
+`WireReducerTests`, folding each fixture through `FixtureWireReplay.replay` (Step 3): `testStreamingPreviewAssemblesAndCollapses` (`plain-two-turn`: after the deltas of the first message the preview has the text; after the `assistant` frames it is nil and the item's text equals the preview's); `testResultAttributionOnRelocationAndNestedAgents` (`session-mirror-relocation`: five turns, attributions `[prompted, prompted, relocation, prompted, prompted]`; `nested-depth-2`: `[prompted, unprompted, unprompted]`); `testDecisionLifecycle` (`permission-allow`: the `can_use_tool` request → `.pending`; `HostSignal.decisionAnswered(.allowed)` → `.answered`; `permission-deny` with `.policyAnswered` event → `.policyAnswered`); `testToolUseSummaryLabelsTheCluster`; `testForwardedFramesLandOnTheAgentStream` (`explore-depth-1`: items with `provenance.agentID` equal to the task id exist and none of them is on the main stream's id); `testTaskNotificationSynthesisesACompletionItem` (`background-shell`: one `taskRun` with `synthesised == true` after the notification, none before); `testSyntheticUsersAreHidden_mutation` (set `isSynthetic: true` on a user frame in memory → hidden, no item; unwitnessed on the wire and named so); `testRewoundTruncatesTheDurableHalf_mutation`; `testProcessReplacedResetsOverlayNotProjection`; `testCommandLifecycleDrivesQueueState` (from `control-shapes` or any fixture that carries the frames; if none does, a constructed frame with the schema's five states and the test says so); `testToolProgressHeartbeatMovesLastFrameAt` (`background-shell` replayed up to the shell's `task_started`, then a constructed `tool_progress` frame for it at `now` → `registry` shows `lastFrameAt == now` and `liveWork(asOf: now + 1)` still lists it; unwitnessed on the corpus and named so); `testRelocationSignalRebindsAgentTranscriptPaths` (`nested-depth-2` replayed, then `.relocated(mainPath:)` under `_other_` → both nodes' `transcriptURL(of:)` under `_other_`, nothing else changed); `testASeededReducerContinuesTheFileProjection` (`session-mirror-resume`: `FixtureWireReplay.reducer(for:)` seeded from `initial/`, then the steps → the durable items in `comparedWireToFile` equal the record reducer's over `transcript/` — check two's shape on the one fixture where the seed matters; without the seed the first five assistant groups are missing, asserted as the counter-case).
+
+Run: `swift test --package-path FleetKit --filter WireReducerTests 2>&1 | grep -E "Executed|failed"` → `Executed 13 tests, with 0 failures`.
+Demonstrate red: attribute every result `.prompted` when any prompt was ever sent (drop the pop) → the relocation attribution test fails at index 2. Route forwarded frames to the main stream → the agent-stream test fails. Drop the `.toolProgress` route → the heartbeat test fails on `lastFrameAt`.
 
 ```bash
 git add FleetKit/Sources/FleetTimeline/Reduce FleetKit/Tests/FleetTimelineTests
@@ -1207,7 +1309,7 @@ git commit -m "FleetTimeline: the wire reducer — durable half, streaming previ
 - Create: `FleetKit/Tests/FleetTimelineTests/Invariant/ProjectionEqualityTests.swift`
 
 **Interfaces:**
-- Consumes: Task 3's `FixtureCorpus`, `Breaks`, `IdentityMask.differingPaths`; Task 5's `RecordReducer`; Task 8's `WireReducer`; Task 4's `ProjectionCategories`.
+- Consumes: Task 3's `FixtureCorpus`, `Breaks`, `IdentityMask.differingPaths`; Task 5's `RecordReducer`; Task 8's `WireReducer` and `FixtureWireReplay` (and, through it, the C2 corrective Task 8 names); Task 4's `ProjectionCategories`.
 - Produces: `ProjectionComparison.compare(wire:file:) -> [Difference]` (test-side), reused by Task 10's G4 test.
 
 - [ ] **Step 1: The comparison**
@@ -1231,17 +1333,16 @@ final class ProjectionEqualityTests: XCTestCase {
     /// Fill this set from the first run against the two dialogs and never loosen it without a Decision Log entry.
     private static let expectedSyntheticFindings: Set<String> = [ /* "<fixture> <category> <stream>/<key> at <field>" … */ ]
 
+    /// Every fixture's compared-item count, pinned by name so each outcome is stated: zero for `zero-cost`, the `initial/`
+    /// snapshot's items for `resume-no-replay`, and so on. Filled from the first run, cross-checked by `IndependentCount`,
+    /// and re-pinned only after a confirmed re-recording.
+    private static let expectedComparedItems: [String: Int] = [ /* eighteen names → counts */ ]
+
     func testWireAndRecordProjectionsAgreeOnEveryFixture() throws {
         var findings: Set<String> = []; var comparedPerFixture: [String: Int] = [:]
-        for fx in try FixtureCorpus.all() {
-            let frames = try fx.frames()
-            guard frames.contains(where: { if case .assistant = $0.frame { return true }; return false }) else { continue }   // zero-cost, resume-no-replay compare nothing and are counted below
-            var wire = WireReducer(stream: LogicalStream(configHome: FixtureCorpus.recordedConfigHome, sessionID: fx.sessionID, name: .main), slug: "_slug_")
-            for f in frames {
-                if f.direction == "in", case .user(let u) = f.frame, let uuid = u.uuid { _ = wire.apply(.promptSent(uuid: uuid, at: Date(timeIntervalSince1970: Double(f.t) / 1000))) ; continue }
-                if f.direction == "in" { continue }
-                _ = wire.apply(.frame(f.frame, .first), at: Date(timeIntervalSince1970: Double(f.t) / 1000))
-            }
+        let all = try FixtureCorpus.all()
+        for fx in all {                                                   // all eighteen: no skip, no exclusion list
+            let wire = try FixtureWireReplay.replay(fx)                   // seeded from initial/ when present; control requests through C2's policy
             var streams: [StreamProjection] = []
             for (stream, _, url) in try fx.transcriptFiles() {
                 streams.append(RecordReducer.reduce(try TranscriptReader(url: url).readAll().records, stream: stream, sourceFile: url))
@@ -1254,17 +1355,20 @@ final class ProjectionEqualityTests: XCTestCase {
         }
         XCTAssertEqual(findings, Self.expectedSyntheticFindings)
         // What was found: per fixture, the compared item count equals an independent walk of the file's records
-        // (assistant message.ids + non-tool-result non-meta users + tool_use blocks + send_user_file calls + agent runs).
-        for fx in try FixtureCorpus.all() where comparedPerFixture[fx.name] != nil {
-            XCTAssertEqual(comparedPerFixture[fx.name], try IndependentCount.comparedItems(fx), "\(fx.name): the comparison did not see every item")
-        }
-        XCTAssertEqual(Set(comparedPerFixture.keys), Set(FixtureCorpus.mirrored).union(["dialog-fable-overage", "dialog-refusal-fallback"]).subtracting(["resume-no-replay"]))
+        // (assistant message.ids + non-tool-result non-meta users + tool_use blocks + send_user_file calls + agent runs),
+        // and equals the pinned outcome for that name. A comparison that matched nothing cannot pass either assertion.
+        for fx in all { XCTAssertEqual(comparedPerFixture[fx.name], try IndependentCount.comparedItems(fx), "\(fx.name): the comparison did not see every item") }
+        XCTAssertEqual(comparedPerFixture, Self.expectedComparedItems)
+        XCTAssertEqual(Set(comparedPerFixture.keys), Set(all.map(\.name)))
     }
 
     func testOverlayRendersDecisionsClustersAndTurnCostFromWireFramesAlone() throws {
-        // permission-allow, permission-deny, ask-user-question, exit-plan-mode, dialog-*: every can_use_tool / request_user_dialog /
-        // elicitation request id has a DecisionItem; every tool_use_summary labelled a cluster whose ids equal preceding_tool_use_ids;
-        // every result frame has a TurnSummaryItem with its duration_ms and total_cost_usd (synthetic results lack them → pinned findings).
+        // Over all eighteen fixtures through FixtureWireReplay: every can_use_tool / request_user_dialog / elicitation request the policy
+        // surfaced (or left unanswered) has a DecisionItem in the state the recording implies (answered by the host's control_response,
+        // policyAnswered for a policy error, inert for an undeclared dialog, cancelled for a control_cancel_request); the count per fixture
+        // equals an independent count of out-direction control_request frames of those subtypes; every tool_use_summary labelled a
+        // cluster whose ids equal preceding_tool_use_ids; every result frame has a TurnSummaryItem with its duration_ms and
+        // total_cost_usd (synthetic results lack them → pinned findings).
     }
 }
 ```
@@ -1276,7 +1380,9 @@ final class ProjectionEqualityTests: XCTestCase {
 1. Change one `tool_result` block's `tool_use_id` in memory (wire side) on `background-shell` → a `<presence>` difference for the tool call.
 2. Edit one `text` block on the file side of `plain-two-turn` → a difference at `contentBlocks.text`.
 3. Make `WireReducer` skip forwarded `assistant` frames → `explore-depth-1` and `nested-depth-2` fail on agent-stream items.
-Also confirm the fourth: remove `.taskRun` from `comparedWireToFile` → the independent count no longer matches, proving the floor is bound to the constant.
+4. Make `FixtureWireReplay.reducer(for:)` ignore `initial/` → `session-mirror-resume` fails by presence on its first five assistant groups and `resume-no-replay` on every item.
+5. Deliver control requests as `.frame(.controlRequest)` instead of through `WireEventPolicy` → the overlay test finds no decision items on `permission-allow`.
+Also confirm the sixth: remove `.taskRun` from `comparedWireToFile` → the independent count no longer matches, proving the floor is bound to the constant.
 
 Run: `swift test --package-path FleetKit --filter ProjectionEqualityTests 2>&1 | grep -E "Executed|failed"` → `Executed 2 tests, with 0 failures`.
 
@@ -1296,7 +1402,7 @@ git commit -m "FleetTimeline: the invariant's second check — wire and record p
 
 **Interfaces:**
 - Consumes: Tasks 1, 2, 5; Task 9's `ProjectionComparison`; from `ClaudeWire`: `TranscriptMirrorFrame`, `MirrorError`, `ProcessEpoch`.
-- Produces: `TimelineNotice`, `TimelineDiagnosticsSink`, `NullTimelineDiagnostics`, `RecordingTimelineDiagnostics` (a lock-guarded test double, `@unchecked Sendable` documented), `StreamIngestion` (`Mode`, `State`, `open(mainPath:policy:)`, `apply(mirror:epoch:)`, `fileChanged(_:)`, `mirrorError(_:epoch:)`, `relocated(mainPath:)`, `processExited(_:)`, `projection`, `state`, `offsets`), `IngestionEffect`.
+- Produces: `TimelineNotice`, `TimelineDiagnosticsSink`, `NullTimelineDiagnostics`, `RecordingTimelineDiagnostics` (a lock-guarded test double, `@unchecked Sendable` documented), `StreamIngestion` (`Mode`, `State`, `open(mainPath:policy:)`, `apply(mirror:epoch:)`, `fileChanged(_:)`, `mirrorError(_:epoch:)`, `relocated(mainPath:)`, `processExited(_:)`, `rawRecord(for:)`, `projection`, `state`, `offsets`, `paths`), `IngestionEffect`, `RawRecordError`.
 
 - [ ] **Step 1: Notices**
 
@@ -1318,17 +1424,22 @@ public actor StreamIngestion {
     public func processExited(_ epoch: ProcessEpoch) async -> Effect
     public var projection: DurableProjection { get }
     public var state: State { get }
+    /// The raw view's read: the record's bytes through `TranscriptReader.read(at:length:)` at its locator, decoded to `JSONValue`;
+    /// a record the mirror delivered before the file held it is served from the retained record until `fileChanged` sees it on disk.
+    /// `RawRecordError.unknownKey` for a key this ingestion never applied. Nothing is cached; the projection stays payload-free.
+    public func rawRecord(for key: RecordKey) async throws -> JSONValue
     public var offsets: [LogicalStream: Int] { get }
+    public var paths: [LogicalStream: URL] { get }                 // the current aliases, for whoever needs a path (C6's Open transcript)
 }
 ```
 
-Internal state: `records: [LogicalStream: [TranscriptRecord]]` in application order, `applied: [LogicalStream: Set<RecordKey>]`, `paths: [LogicalStream: URL]`, `offsets`, `pendingFromFile: [LogicalStream: [(RecordKey, Date)]]` (file records seen by the watcher that no mirror delivered yet), `metadata: [LogicalStream: AgentMetadataRecord]`. The projection is recomputed by `RecordReducer.reduce` per stream and `merge` after every effect (the reducers are pure and the corpus is small; incremental reduction is a later optimisation and is *not* planned here). The arbitration table from the spec is the implementation, row by row:
+Internal state: `records: [LogicalStream: [TranscriptRecord]]` in application order, `applied: [LogicalStream: Set<RecordKey>]`, `paths: [LogicalStream: URL]`, `offsets`, `locators: [RecordKey: RecordLocator]` (every record the file has shown, from the reader's parallel array), `pendingFromFile: [LogicalStream: [(RecordKey, Date)]]` (file records seen by the watcher that no mirror delivered yet), `metadata: [LogicalStream: AgentMetadataRecord]`. The projection is recomputed by `RecordReducer.reduce` per stream and `merge` after every effect (the reducers are pure and the corpus is small; incremental reduction is a later optimisation and is *not* planned here). The arbitration table from the spec is the implementation, row by row:
 
-- `open`: read the main file (`readWindow(policy:)`), apply, set `offsets[main] = length`; discover `<sessionId>/subagents/agent-*.jsonl` beside it and open each whole; read every `.meta.json` into `metadata`.
+- `open`: read the main file through `WindowedTranscript.read(TranscriptReader(url: mainPath), policy:)` (Task 2's closure rule), apply, record each locator, set `offsets[main] = length`, and pass the window marker and `locators` in the reducer's options; discover `<sessionId>/subagents/agent-*.jsonl` beside it and open each whole; read every `.meta.json` into `metadata`.
 - `apply(mirror:)`: resolve `filePath` under `configHome`; a different session → `routedElsewhere += 1` and `TimelineNotice.mirrorRoutedElsewhere`; state `fileOnly` for this epoch → ignore; `agentMetadata` entries → `metadata[stream]`; each other entry: key already applied → `duplicates += 1`; else append and apply; a stream with no open file → create it with offset 0 (lazy agent stream). Under `mirrorPrimary` the mirror is applied first and the watcher's read confirms; under `filePrimary` the same code runs — the mode only decides which delivery the *renderer* waits for, which is a C6 concern, and here it decides whether a mirror gap counts as a fault (only under `mirrorPrimary`).
-- `fileChanged`: resolve; `readAppended(from: offsets[stream])`; each record: applied → skip; else apply and, under `mirrorPrimary`, remember it in `pendingFromFile`; a pending entry older than `mirrorGapWindow` that the mirror still has not delivered → switch to `.fileOnly(since:)` with `TimelineNotice.mirrorGap(missing:)`.
+- `fileChanged`: resolve; `readAppended(from: offsets[stream])`; each record: record its locator (this is what closes a mirror-delivered record's nil locator in the next projection); applied → skip; else apply and, under `mirrorPrimary`, remember it in `pendingFromFile`; a pending entry older than `mirrorGapWindow` that the mirror still has not delivered → switch to `.fileOnly(since:)` with `TimelineNotice.mirrorGap(missing:)`.
 - `mirrorError`: `.fileOnly(since: epoch)` + `TimelineNotice.mirrorErrorSwitchedToFileOnly`; idempotent within the epoch.
-- `relocated(mainPath:)`: rebind `paths[main]` and every agent stream's path under the new slug; offsets unchanged; `TimelineNotice.relocationFollowed`.
+- `relocated(mainPath:)`: rebind `paths[main]` and every agent stream's path under the new slug; offsets and locators unchanged (a locator is stream plus offset, and the stream did not change); `TimelineNotice.relocationFollowed`. The host sends `HostSignal.relocated(mainPath:)` to the channel's `WireReducer` in the same breath; this actor holds no reducer.
 - `processExited`: for every stream, `readAppended(from:)` and apply what is missing; a `.both` state stays; a `fileOnly` state persists until `processReplaced` (the caller constructs a new epoch; the actor resets `state = .both` when it sees an epoch greater than `since`).
 
 - [ ] **Step 3: Tests**
@@ -1343,9 +1454,10 @@ Internal state: `records: [LogicalStream: [TranscriptRecord]]` in application or
 - `testLazyAgentStreamsOpenFromTheMirror`: `nested-depth-2` mirror-only → three streams present, two agent `metadata` entries set.
 - `testProcessExitedReconcilesFromTheFile`: drop the last two mirror frames of `plain-two-turn`, call `processExited(.first)` with the complete file in place → applied, keys equal.
 - `testNoticesCarryNoPathsOrPayload`: encode every recorded notice's fields; assert no value contains `/` or a record uuid other than the session id — a shape check.
+- `testRawRecordReadsAnAttachmentByLocatorAndAMirrorOnlyMetaRecordFromMemory`: open a `TempTree` copy of `plain-two-turn`; `rawRecord(for:)` of an attachment's key equals the file's line decoded to `JSONValue` and the projection's `HiddenRecord` for it has a locator; deliver by mirror a synthetic `user` record with `isMeta: true` and an invented uuid → `rawRecord` serves it, its `HiddenRecord.locator` is nil; append the same line to the copy and `fileChanged` → the locator is set and `rawRecord` is unchanged; an unknown key throws `RawRecordError.unknownKey`.
 
-Run: `swift test --package-path FleetKit --filter IngestionTests 2>&1 | grep -E "Executed|failed"` → `Executed 9 tests, with 0 failures`.
-Demonstrate red: key `applied` by path instead of stream → the relocation test double-applies after the rebind; skip the epoch check in `mirrorError` handling → the epoch test fails on the next-epoch entry.
+Run: `swift test --package-path FleetKit --filter IngestionTests 2>&1 | grep -E "Executed|failed"` → `Executed 10 tests, with 0 failures`.
+Demonstrate red: key `applied` by path instead of stream → the relocation test double-applies after the rebind; skip the epoch check in `mirrorError` handling → the epoch test fails on the next-epoch entry; serve `rawRecord` from the locator one line off → the attachment half fails on `uuid`.
 
 ```bash
 git add FleetKit/Sources/FleetTimeline/Diagnostics FleetKit/Sources/FleetTimeline/Ingest FleetKit/Tests/FleetTimelineTests
@@ -1476,7 +1588,7 @@ git commit -m "FleetTimeline: the transcript index — head-and-tail entries, ti
 `LocalHomeIndexTests`: every test begins `guard ProcessInfo.processInfo.environment["AFLEET_LOCAL_INDEX"] == "1" else { throw XCTSkip("set AFLEET_LOCAL_INDEX=1 to measure the local config home; read-only") }`. The config home is `CLAUDE_CONFIG_DIR` from the environment when set, else `~/.claude`; it is opened read-only and nothing under it is created, touched or removed — the incremental-update measurement `touch`es a *copy* of one file placed under the temporary directory and passes that URL through a second index built over a temporary tree that holds only that copy, because touching the real home is forbidden.
 - `testColdBuildUnderHalfASecond`: five builds with `InMemoryIndexStorage`, each on a fresh actor; print `files=<n> median_ms=<m> min_ms=<a> max_ms=<b>`; assert median < 500.
 - `testIncrementalUpdateUnderFiftyMilliseconds`: on the temporary copy tree, one `touch`, `update(changed:)`; print and assert < 50 ms.
-- `testLargestTranscriptHistoryUnderOneSecond`: pick the entry with the largest `size`; `TranscriptReader(url:).readWindow()` then `RecordReducer.reduce` on it; print `size=<bytes> records=<n> window=<earlierAvailable> ms=<t>`; assert < 1000.
+- `testLargestTranscriptHistoryUnderOneSecond`: pick the entry with the largest `size`; `WindowedTranscript.read(TranscriptReader(url:))` then `RecordReducer.reduce` on it with the marker; print `size=<bytes> records=<n> window=<earlierAvailable> extensions=<e> ms=<t>`; assert < 1000.
 - `testWatcherDeliversOneEventForOneTouch`: on the temporary tree, start `TranscriptWatcher`, touch, await one batch containing the file within two seconds, stop.
 Output discipline: the four `print`s above are the only output; no path, title or record is printed.
 
@@ -1503,12 +1615,28 @@ Expected: `0 failures`, and by name: `testRelocationReplaysWithNoDuplicateAndNoM
 
 Run: `swift test --package-path FleetKit --filter ImportGraphTests 2>&1 | grep -E "Executed|failed"; git diff main -- FleetKit/Package.swift | grep -E '^[-+][^-+]' | grep -v 'C3' | head`
 Expected: `1 test, with 0 failures`; the manifest diff is empty (v1 adds no target) or confined to the C3 region.
-Run: `find ~/.claude -newer FleetKit/Package.swift -maxdepth 1 2>/dev/null | head; find /tmp/afleet-fixtures/config-home -newer FleetKit/Package.swift -maxdepth 1 2>/dev/null | head`
-Expected: no output from either.
+X9 is checked by a recursive fingerprint taken before and after the whole suite and reported as counts and digests only — never a path. C1's scratch config home is nobody else's, so any change there is ours; the author's real home is written legitimately by live Claude Code sessions while the suite runs, so for it the check is the count of files modified since the run started whose path carries a name only these tests use.
+
+Before `swift test` (Step 3):
+```bash
+x9()  { find "$1" -type f -exec stat -f '%m %z %N' {} + 2>/dev/null | sort | shasum -a 256 | cut -c1-16; }
+x9n() { find "$1" -type f 2>/dev/null | wc -l | tr -d ' '; }
+S=/tmp/afleet-fixtures/config-home; H="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+mkdir -p /tmp/afleet-review && touch /tmp/afleet-review/c3-x9-start
+echo "scratch before: files=$(x9n "$S") digest=$(x9 "$S")"
+```
+After the suite:
+```bash
+echo "scratch after:  files=$(x9n "$S") digest=$(x9 "$S")"
+IDS=$(python3 -c "import json,glob; print('|'.join(json.load(open(f))['session_id'] for f in glob.glob('Fixtures/*/fixture.json')))")
+echo "home files touched by test names since start: $(find "$H" -type f -newer /tmp/afleet-review/c3-x9-start 2>/dev/null | grep -c -E "_slug_|_other_|FleetTimelineTests|$IDS")"
+```
+Expected: the two scratch lines carry the same `files=` and `digest=`, and the last line ends in `0`.
+Demonstrate the check itself once, in a scratch config-home-shaped tree under the temporary directory: take the digest, write one file three levels down (`projects/x/y/z.jsonl`), take it again → the two digests differ (a depth-one `find` would have missed it). Quote both digests in the ledger; they are digests of a scratch tree, not paths.
 
 - [ ] **Step 7: The ledger of demonstrations**
 
-Confirm the plan's ledger holds one quoted red run per gate test named in Tasks 1 through 12 (the "Demonstrate red" steps). A test without a quoted demonstration is not accepted; write the demonstration now, restore, and only then proceed.
+Confirm the plan's ledger holds one quoted red run per gate test named in Tasks 1 through 12 (the "Demonstrate red" steps), plus Task 13's own: the fingerprint flip in Step 6. A test without a quoted demonstration is not accepted; write the demonstration now, restore, and only then proceed.
 
 - [ ] **Step 8: Record and commit**
 
@@ -1534,7 +1662,10 @@ Each was answered with the recommendation below and the plan proceeds on it; ove
 3. **The orphan-healing constant.** Written as five seconds from parity §35.13; Task 5's executor reads the bundle for the constant and pins it with a line number in the doc comment, and the spec's Delegated unknowns entry is closed in the same commit.
 4. **`ItemBuilder` extraction.** Task 8 may extract the shared block-to-item logic from Task 5 into an internal `Reduce/ItemBuilder.swift` so the two reducers cannot drift. Do it if the duplication would exceed a screen; the invariant test is what proves they agree either way.
 5. **Ten tests per task is a floor, not a target.** The counts in the "Run" lines are the plan's expectation; an executor who needs one more test to discriminate a rule adds it and reports the new count.
+6. **What "closed" means for the bounded window.** The spec's "extended backwards until the leaf path is closed" is given this meaning (Task 2, spec v2.2): the named leaf is inside the window and the window's earliest chain record is a turn start or the file's first record — not that the chain reaches its root, which for a never-rewound file is the whole file and would void the 4 MiB window. Records whose parent lies before an open window are window roots, not orphans. Overrule before Task 2 if the renderer should instead read to the root.
+7. **The C2 corrective the replay depends on.** Tasks 8 and 9 consume a pure `WireEventPolicy` from `WireTransport` — the frame-to-event policy `ClaudeProcess` inlines today, extracted so the transport calls it and the tests replay through it. C3 does not duplicate that logic; if the corrective has not landed when the executor reaches Task 8, the executor stops and reports.
 
 ## Revision Notes
 
+- 2026-09-05: v2, after the Codex adversarial review of v1 (eight findings, all accepted, two shaped by the coordinator's rulings) and a merge of `main` (C2's fork-point flags, X5's pane-request id, C1's rewind and compaction scenarios with recordings pending; the fixture set is still eighteen). Task 1: uuid-less records key by the SHA-256 of the line's canonical JSON computed at decode, never a `JSONEncoder` re-encoding, with a key-order test. Task 2: `WindowedTranscript.read` owns the window's closure with the turn-start rule (Questions 6), a `>8 MiB` synthetic-transcript test, and `read(at:length:)` plus per-record locators. Task 4: `ToolCallItem` stores `rawInput` and computes `input` (`ToolInput` is not Codable on main); `HiddenRecord` with a `Reason` and a `RecordLocator` replaces bare keys. Task 5: window roots are not orphans; hidden records carry locators. Tasks 6, 7, 8: `tool_progress` routed to the registry and the tree; agent transcript paths computed from the tree's current slug with `relocate(slug:)` and `HostSignal.relocated(mainPath:)`. Tasks 8, 9: the fixture replay goes through C2's `WireEventPolicy` (a corrective the coordinator dispatches; Questions 7), resume fixtures are seeded from `initial/`, all eighteen fixtures are compared with a per-name pinned outcome, and the reducer takes a `seed`. Task 10: `rawRecord(for:)` and `paths`. Task 13: the X9 check is a recursive before-and-after fingerprint reported as counts and digests. Test floors: 14 + 5 + 13 + 11 + 9 + 13 + 10 across the touched tasks.
 - 2026-09-05: v1, written from spec v2 at parent-pin `ee94449`. Thirteen tasks; the record model and reader first, the invariant's first check at Task 3 and its second at Task 9, the index and its opt-in measurement last, as ruled.
