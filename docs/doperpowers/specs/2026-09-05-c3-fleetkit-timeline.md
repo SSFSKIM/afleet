@@ -823,7 +823,11 @@ reaches into `ClaudeProcess`; `Handshake.pending` is never read (parent X3, a wi
 X8: the fixture loader reads `frames.ndjson`, `fixture.json`, `streams.json`, `transcript/`
 and the `mirror_identity_only` and `unmirrored_prefix` declarations in the forms C1 committed
 and asks nothing of `fake-claude`; no fixture is edited to pass a test, and a suspected
-fixture defect is the second hypothesis and escalates to the orchestrator. X9: nothing here
+fixture defect is the second hypothesis and escalates to the orchestrator. X6 (consumed through a seam, ruled 2026-09-05):
+`IndexStorage` is a protocol declared in `FleetTimeline` exactly as written above; nothing
+moves to `AfleetCore`; C4 implements it inside `FleetSessions`, which already depends on
+`FleetTimeline`, over its namespaced store, and C3's tests satisfy it in memory with
+`InMemoryIndexStorage`. C4's plan cites this line. X9: nothing here
 writes under any config home; every file is opened read-only with `O_NOFOLLOW`; the
 opt-in local test reads and prints counts. §6.3 as amended: notices and assertions carry
 names, counts and shapes, never a path, an environment or a record.
@@ -832,7 +836,9 @@ names, counts and shapes, never a path, an environment or a record.
 
 S4 is answered by G2's opt-in measurement and its protocol above; S9's harness is check one
 and check two. Paths the corpus does not witness, each stated as such in its test and each
-a candidate for a C1 corrective recording rather than for a synthetic frame: a rewind (leaf
+a candidate for a C1 corrective recording rather than for a synthetic frame (a rewind and a
+compaction are dispatched to C1 as a follow-up; C3 does not wait, and a later fixture
+converts the test, never the code): a rewind (leaf
 path, branches, `HostSignal.rewound`); a compaction (`compact_boundary` on disk and on the
 wire, the hard truncation); the five system record kinds; `tool_progress` heartbeats; a
 `user` frame with `isSynthetic`; a `mirror_error`; a `tool-results/` spill; a `cost-state`
@@ -843,7 +849,8 @@ window is right is empirical and advisory; it is a constant with a name.
 
 ## Parent revisions
 
-Candidates for the orchestrator to file on the parent, with evidence here: (1) §7.3's
+Filed on the parent by the orchestrator on 2026-09-05 (cited here as filed, for the lineage
+check at recomposition), with evidence here: (1) §7.3's
 file-only exclusion list gains `user` records with `isMeta`, observed on disk and absent on
 the wire across the corpus; (2) §7.3's head-and-tail read is 64 KiB each way, from the
 bundle; (3) a forked subagent's `system/init` and `result` frames carry the session's own
@@ -852,9 +859,12 @@ the `<taskId>.output` of an agent run is JSON-equal to the agent transcript and 
 byte-equal, and task output files live under the temporary directory, not the config home;
 (5) the engine's picker hides `entrypoint: sdk-cli`, which is afleet's own sessions, so the
 listing policy must not copy it; (6) §17.2's transcript count is 2,967 today. None of these
-contradicts binding content; (1) extends a binding list and is filed as such.
+contradicts binding content; (1) extends a binding list and was filed as such.
 
 ## Questions for the human gate
+
+All four were ruled on 2026-09-05; the rulings are in the Revision Note for v2 and the
+questions stand as the record of what was asked.
 
 1. **Leaf path or file order.** The record reducer renders the leaf path the engine's own
    loader renders and keeps abandoned branches in `DurableProjection.branches` unrendered.
@@ -950,6 +960,16 @@ Pending — written at finish.
 
 ## Revision Notes
 
+- 2026-09-05: v2, after the orchestrator's review. Rulings on the four questions: (1) the
+  leaf path is rendered and branches are kept unrendered; (2) a rewind and a compaction
+  recording are a C1 follow-up dispatched separately, C3 tests both paths by mutation, names
+  them unwitnessed and does not wait; (3) the opt-in read of the author's config home behind
+  `AFLEET_LOCAL_INDEX=1` is accepted, read-only, counts and timings only, never in the default
+  suite; (4) listing policy is C4's under X5, the index carries the inputs and applies no drop
+  rule. One ruling settling C4's store question: nothing moves to `AfleetCore`;
+  `IndexStorage` stays a protocol declared here, C4 implements it in `FleetSessions` over its
+  namespaced store, and C3's tests satisfy it in memory (Contracts, X6). The six parent
+  revisions are filed on `main` and cited as filed. The recent-URL query stays as inherited.
 - 2026-09-05: v1, written at dispatch against parent commit `ee94449`. Folds in, as design
   inheritance, the X4/X7 amendment C7's decomposing run filed the same day: the channel's
   recent-URL query (`ChannelTimeline.recentURLs(limit:)`) with `URLSources.contributing`.
