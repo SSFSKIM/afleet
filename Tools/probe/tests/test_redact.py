@@ -121,15 +121,18 @@ class RedactJsonTests(unittest.TestCase):
 
     def test_the_protocol_structure_under_secret_named_keys_survives_the_container_rule(self):
         """The three things that sit under keys the predicate matches and must not be redacted:
-        rule 5's own `effective_keys`/`sources_keys` output, the token counters the engine
-        reports in several name shapes, and a null under a secret-named key."""
-        body = {"effective_keys": ["env", "model"],
-                "sources_keys": [{"source": "userSettings", "keys": ["a", "b"]}],
+        the setting names rule 5 leaves in key position, the token counters the engine reports
+        in several name shapes, and a null under a secret-named key. A setting called
+        `apiKeyHelper` names the field the container rule replaces the *value* of, so the name
+        survives the rule that its own spelling would otherwise trip."""
+        body = {"effective": {"env": "<redacted>", "apiKeyHelper": "<redacted>"},
+                "sources": [{"source": "userSettings", "settings": {"a": "<redacted>", "token": "<redacted>"}}],
                 "rate_limits": {"seven_day_oauth_apps": None}}
         resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r2", "response": body}}
         out = self.r.redact_frame(resp, "in", {"r2": "get_settings"})["response"]["response"]
-        self.assertEqual(out["effective_keys"], ["env", "model"])
-        self.assertEqual(out["sources_keys"], [{"source": "userSettings", "keys": ["a", "b"]}])
+        self.assertEqual(out["effective"], {"env": "<redacted>", "apiKeyHelper": "<redacted>"})
+        self.assertEqual(out["sources"], [{"source": "userSettings",
+                                           "settings": {"a": "<redacted>", "token": "<redacted>"}}])
         self.assertIsNone(out["rate_limits"]["seven_day_oauth_apps"])
         counters = {"usage": {"output_tokens_details": {"thinking_tokens": 101}, "input_tokens": 5},
                     "estimated_tokens_delta": 35, "estimated_tokens": None,
@@ -207,16 +210,47 @@ class RedactFrameTests(unittest.TestCase):
         out2 = self.r.redact_frame(resp, "in", {"r1": "mcp_message"})
         self.assertIn("truncated", out2["response"]["response"]["mcp_response"])
 
-    def test_get_settings_values_are_dropped(self):
+    def test_a_settings_body_keeps_the_engines_shape_and_loses_its_values(self):
+        """Rule 5 replaces values and changes nothing else -- not a key name, not a shape.
+
+        The engine answers `get_settings` with `{effective: {<setting name>: <value>}, sources:
+        [{source, settings: {<setting name>: <value>}}], applied, errors?}` (2.1.258
+        `cli.pretty.js`, the handler and `aRn()`). A fixture is evidence of what the engine
+        sends, so a rule that invents a key name of its own writes evidence of something that
+        never happened and teaches a consumer to read a field no engine will ever send. Setting
+        *names* are not secrets and stay; every value goes, whatever its type.
+        """
         resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r2", "response": {
-            "effective": {"model": "opus", "env": {"SECRET": "x"}}, "sources": [{"source": "userSettings", "settings": {"a": 1}}],
+            "effective": {"model": "opus", "env": {"SECRET": "x"}},
+            "sources": [{"source": "userSettings", "settings": {"a": 1, "apiKeyHelper": "/bin/x"}}],
             "applied": {"model": "opus", "effort": "high"}}}}
         out = self.r.redact_frame(resp, "in", {"r2": "get_settings"})
         body = out["response"]["response"]
+        self.assertEqual(list(body), ["effective", "sources", "applied"])
+        self.assertEqual(body["effective"], {"model": "<redacted>", "env": "<redacted>"})
+        self.assertEqual(body["sources"], [{"source": "userSettings",
+                                            "settings": {"a": "<redacted>", "apiKeyHelper": "<redacted>"}}])
         self.assertEqual(body["applied"], {"model": "opus", "effort": "high"})
-        self.assertEqual(body["effective_keys"], ["env", "model"])
-        self.assertEqual(body["sources_keys"], [{"source": "userSettings", "keys": ["a"]}])
-        self.assertNotIn("effective", body); self.assertNotIn("sources", body)
+        self.assertEqual(redact.scan(body, home="/Users/probe", hostname="probe-mac"), [])
+
+    def test_the_shape_rule_5_used_to_write_is_upgraded_in_place(self):
+        """`make redact` over a fixture recorded under the older rule, which replaced the two
+        fields with `effective_keys` and `sources_keys` of its own invention. The names it kept
+        were the setting names, so the upgrade is lossless: they go back where the engine puts
+        them, with the values already gone. Idempotent, like every other rule: a second pass
+        finds `effective` and `sources` and leaves them alone."""
+        legacy = {"applied": {"model": "opus"}, "effective_keys": ["env", "model"],
+                  "sources_keys": [{"source": "userSettings", "keys": ["a", "apiKeyHelper"]}]}
+        resp = {"type": "control_response",
+                "response": {"subtype": "success", "request_id": "r2", "response": legacy}}
+        body = self.r.redact_frame(resp, "in", {"r2": "get_settings"})["response"]["response"]
+        self.assertEqual(list(body), ["applied", "effective", "sources"])
+        self.assertEqual(body["effective"], {"env": "<redacted>", "model": "<redacted>"})
+        self.assertEqual(body["sources"], [{"source": "userSettings",
+                                            "settings": {"a": "<redacted>", "apiKeyHelper": "<redacted>"}}])
+        again = {"type": "control_response",
+                 "response": {"subtype": "success", "request_id": "r2", "response": body}}
+        self.assertEqual(self.r.redact_frame(again, "in", {"r2": "get_settings"})["response"]["response"], body)
 
     def test_oauth_responses_keep_shape_and_drop_query(self):
         resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r3", "response": {
@@ -425,8 +459,7 @@ class FrameFailClosedTests(unittest.TestCase):
             "effective": {"env": {"P": "hunter2"}},
             "nested": {"manualUrl": "https://claude.ai/o?code_challenge=abc&state=xyz"}}}}
         body = self.r.redact_frame(resp, "in", {})["response"]["response"]
-        self.assertNotIn("effective", body)
-        self.assertEqual(body["effective_keys"], ["env"])
+        self.assertEqual(body["effective"], {"env": "<redacted>"})
         self.assertEqual(body["nested"]["manualUrl"], "https://claude.ai/o?<redacted>")
 
     def test_correlated_non_oauth_response_keeps_its_urls(self):
@@ -452,12 +485,13 @@ class FrameFailClosedTests(unittest.TestCase):
         out = self.r.redact_frame(resp, "in", {"r8": "list_models"})["response"]["response"]
         self.assertEqual(out, {"effective": {"model": "opus"}, "sources": ["a"]})
 
-    def test_non_dict_effective_is_still_dropped(self):
+    def test_a_non_map_effective_is_replaced_whole(self):
+        """Fail-closed on a body rule 5 does not recognise: there are no setting names to keep
+        in a string, so the field keeps its name and loses everything else."""
         resp = {"type": "control_response", "response": {"subtype": "success", "request_id": "r2",
                 "response": {"effective": "model=opus;env.SECRET=hunter2"}}}
         body = self.r.redact_frame(resp, "in", {"r2": "get_settings"})["response"]["response"]
-        self.assertNotIn("effective", body)
-        self.assertEqual(body["effective_keys"], [])
+        self.assertEqual(body["effective"], "<redacted>")
 
     def test_redact_frame_does_not_mutate_the_caller_frame(self):
         frames = [({"type": "control_request", "request_id": "r1", "request": {"subtype": "mcp_message",

@@ -662,14 +662,14 @@ class DriftReportTests(unittest.TestCase):
         # body key and an added `error` payload key. Three correct lines, one cause.
         lines = ["added pair system/invented",
                  "control_response/get_settings: removed required payload keys response",
-                 "control_response/get_settings: removed required body keys effective_keys",
+                 "control_response/get_settings: removed required body keys effective",
                  "control_response/get_settings: added payload keys error",
                  "flags: removed --resume"]
         self.assertEqual(probe.group_drift(lines), [
             "added pair system/invented",
             "control_response/get_settings:",
             "  removed required payload keys response",
-            "  removed required body keys effective_keys",
+            "  removed required body keys effective",
             "  added payload keys error",
             "flags: removed --resume",
         ])

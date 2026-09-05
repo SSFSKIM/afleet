@@ -2007,3 +2007,31 @@ fake-claude injections above, not the clean live run.
   twenty, and both were reviewed and signed by agents other than the recording run. The wave
   also found and fixed a redaction hole (`IDENTITY_SUBSTRINGS`, Surprises) and recorded a
   `[parent-impact]` on §7.3's file-only exclusion list, which should lose `compact_boundary`.
+- 2026-09-06: **rule 5 keeps the engine's shape.** Corrective on `main`. §4.5's rule 5 replaced
+  a `get_settings` answer's `effective` object with a synthesised list called `effective_keys`
+  and its `sources` list with `sources_keys: [{source, keys}]`. Neither name exists on the wire:
+  2.1.258 `cli.pretty.js` builds the answer in `aRn()` as `{effective: {<setting name>: <value>},
+  sources: [{source, settings: {<setting name>: <value>}}]}`, and the `get_settings` handler adds
+  `applied: {model, effort, advisor, ultracode}` and, when the settings files carry errors,
+  `errors`. Two committed fixtures therefore carried a key no engine sends, and a consumer that
+  learned to read it from the fixture would fail against a real engine — which is the whole
+  point of a fixture reversed. The principle the rule now states in one line: **redaction
+  replaces values and never changes a shape or a key name.** `effective` keeps its keys with
+  every value replaced by `<redacted>` whatever its type, `sources` keeps `source` and the
+  setting names under `settings`, and a value that is not a map has no shape to keep and is
+  replaced whole. The rule carries a one-time upgrade of the older shape, so `make redact`
+  migrated `control-shapes` and `zero-cost` in place and idempotently, losslessly: what the old
+  rule kept was the setting names, and the new shape carries the same names. `probe.py` carries
+  the same rename into `census.json`'s body key list, from the same shared map, so a migrated
+  fixture still matches `verify`'s recount of its own frames. The exemption these two paths used
+  to need in `SECRET_STRUCTURE_PATHS` is **gone**, and the reason is worth keeping: they needed
+  it only because the invented names contained "key" and carried lists of strings. A setting
+  name now sits in key position, where the secrets rule replaces a value and never a key, so
+  nothing has to be exempted to protect it — and the observation two entries above, about an
+  entry here being a claim about a name at any depth, applies to two fewer names. Both fixtures
+  are unsigned again by construction and await a reviewer's walk of `Fixtures/REVIEW.md`.
+  Witness, at no model cost: `make probe FIXTURE=zero-cost` against the pinned 2.1.259 the
+  corpus was recorded with reports `ok`, so the live answer's census matches the migrated
+  fixture exactly; the same run against the installed 2.1.261 also reports `ok`, so there is no
+  drift in this shape between the two versions.
+

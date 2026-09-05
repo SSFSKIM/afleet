@@ -9,7 +9,7 @@ The observed answers, in the order the scenario sends them:
 | Request | Answer |
 |---|---|
 | `apply_flag_settings {settings: {effortLevel}}` | `success` with **no `response` key at all** — not an empty object and not `null` |
-| `get_settings` | `success` `{applied: {model, effort, advisor, ultracode}, effective_keys, sources_keys: [{source, keys}]}`; the readback of the flag just applied is `effective_keys: ["effortLevel"]` with `source: "flagSettings"` |
+| `get_settings` | `success` `{applied: {model, effort, advisor, ultracode}, effective: {<setting name>: <value>}, sources: [{source, settings: {<setting name>: <value>}}]}`; the readback of the flag just applied is `effective: {"effortLevel": …}` with `source: "flagSettings"`. Every value is `<redacted>` in the fixture — rule 5 replaces a settings value and keeps the name |
 | `list_models` | `success` `{models: [{value, resolvedModel, displayName, description, supportsEffort, supportedEffortLevels, supportsAdaptiveThinking, supportsFastMode, supportsAutoMode}]}` |
 | `get_workspace_diff` | `success` `{diff: null}` in a directory that is not a repository |
 | `rewind_files {user_message_id, dry_run: true}` | `success` `{canRewind, filesChanged, insertions, deletions}` |
@@ -46,3 +46,13 @@ flow.
 
 Recorded on 2.1.259 under the scratch config home, model `haiku`, `--max-turns 2`; exit
 0. `initial/` and `artifacts/` are empty.
+
+**2026-09-06, re-redaction.** Until this date the frames recorded this answer as
+`effective_keys` and `sources_keys: [{source, keys}]`. Those two names were the fixture
+redactor's own invention, never the engine's: 2.1.258 `cli.pretty.js` builds the answer in
+`aRn()` as `{effective: {<setting name>: <value>}, sources: [{source, settings: {<setting
+name>: <value>}}]}` and the handler adds `applied` and, on a settings error, `errors`. Rule 5
+now replaces the values and leaves the shape and every key name alone, and `make redact`
+migrated the recorded frame in place. Nothing was lost: the names the old rule kept are the
+names the new shape carries. The frames, the census body key list and the `notes` line in
+`fixture.json` moved together; the recording itself was not re-run.

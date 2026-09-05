@@ -26,10 +26,10 @@
    "paths": {}
   },
   "settings_bodies": {
-   "count": 2,
+   "count": 4,
    "paths": {
-    "response.effective": 1,
-    "response.sources": 1
+    "response.effective": 2,
+    "response.sources": 2
    }
   }
  }

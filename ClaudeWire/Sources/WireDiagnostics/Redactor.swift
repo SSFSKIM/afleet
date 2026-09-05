@@ -41,9 +41,13 @@ public enum Redactor {
     /// redact.py SECRET_EXEMPT (line 81), normalised. Structural names that happen to contain a secret word:
     /// `projectKey` names the directory a GUI reads to replay history, so its value is load-bearing.
     static let secretExempt: Set<String> = ["apikeysource", "hookcallbackids", "projectkey"]
-    /// redact.py SECRET_STRUCTURE_PATHS (line 95). Rule 5's own output, whose keys all contain "key" and
-    /// whose values are lists of setting *names* — redacting them would leave a settings response saying nothing.
-    static let secretStructurePaths: Set<String> = ["effective_keys", "sources_keys", "sources_keys.keys", "rules.secrets", "rules.oauth_flow"]
+    /// redact.py SECRET_STRUCTURE_PATHS. A manifest keys its own record by rule *name*, two of which contain
+    /// a secret word, and a manifest is a legitimate thing to scan. Rule 5's output used to need an exemption
+    /// here too and no longer does: it keeps the engine's shape and replaces values only, so a setting name
+    /// stays in key position, where the secrets rule replaces a value and never a key.
+    static let secretStructurePaths: Set<String> = ["rules.secrets", "rules.oauth_flow"]
+    /// redact.py LEGACY_SETTINGS_KEYS. The one-time upgrade of the shape rule 5 itself used to write.
+    static let legacySettingsKeys = ["effective_keys": "effective", "sources_keys": "sources"]
     /// redact.py IDENTITY_COUNTER_PATHS (line 180). `killed.user` counts subagents the user killed; it sits
     /// beside `killed.parent` and `killed.system` and appears on every result frame.
     static let identityCounterPaths: Set<String> = ["subagent_stats.killed.user"]
@@ -310,6 +314,54 @@ public enum Redactor {
             return .object(kept)
         }
 
+        /// redact.py `_blank_settings`, rule 5's whole content. The engine answers `get_settings` with
+        /// `{effective: {<setting name>: <value>}, sources: [{source, settings: {<setting name>: <value>}}],
+        /// applied, errors?}` (2.1.258 `cli.pretty.js`, the handler and `aRn()`). §4.5 asks for the values,
+        /// so the answer is a map of the same names onto placeholders: redaction replaces values and never
+        /// renames a key. A fixture is evidence of what the engine sent, and an invented key name is evidence
+        /// of a frame that never travelled — one a consumer then learns to read and fails a real engine on.
+        ///
+        /// A value that is not a map has no shape to keep and is replaced whole, which is rule 5 staying
+        /// fail-closed on a body it does not recognise.
+        func blankSettings(_ node: JSONValue) -> JSONValue {
+            guard case .object(let o) = node else { return .string("<redacted>") }
+            return .object(o.mapValues { _ in .string("<redacted>") })
+        }
+
+        /// `sources` is `[{source, settings: {<setting name>: <value>}}]`. The source name says which file a
+        /// setting came from and is kept for the same reason the setting names are.
+        func blankSources(_ node: JSONValue) -> JSONValue {
+            guard case .array(let a) = node else { return blankSettings(node) }
+            return .array(a.map { s in
+                guard var o = s.objectValue else { return blankSettings(s) }
+                if let settings = o["settings"] { o["settings"] = blankSettings(settings) }
+                return .object(o)
+            })
+        }
+
+        /// redact.py `_upgrade_legacy_settings`. A committed fixture holds `effective_keys` and
+        /// `sources_keys`, which no engine ever sent — this redactor and C1's wrote them. What that older
+        /// rule kept was the setting names, so the upgrade is lossless: the names go back where the engine
+        /// puts them, values already gone. Applied only where the engine's own key is absent, so it runs once.
+        func upgradeLegacySettings(_ body: inout [String: JSONValue]) {
+            for (old, new) in Redactor.legacySettingsKeys where body[new] == nil {
+                guard let legacy = body.removeValue(forKey: old) else { continue }
+                guard let items = legacy.arrayValue else { body[new] = .string("<redacted>"); continue }
+                if new == "effective" {
+                    var eff: [String: JSONValue] = [:]
+                    for name in items.compactMap(\.stringValue) { eff[name] = .string("<redacted>") }
+                    body[new] = .object(eff)
+                } else {
+                    body[new] = .array(items.compactMap { s in
+                        guard let s = s.objectValue else { return nil }
+                        var settings: [String: JSONValue] = [:]
+                        for name in (s["keys"]?.arrayValue ?? []).compactMap(\.stringValue) { settings[name] = .string("<redacted>") }
+                        return .object(["source": s["source"] ?? .null, "settings": .object(settings)])
+                    })
+                }
+            }
+        }
+
         /// redact.py `_redact_oauth_state` (line 400), rule 6's other half. `claude_oauth_callback` hands its
         /// grant back as two bare strings: `authorizationCode`, which the `authorization` secret word already
         /// catches, and `state`, which no name rule reaches — it is too ordinary a field name to add to
@@ -393,16 +445,9 @@ public enum Redactor {
                         body["mcp_response"] = truncateMCP(body["mcp_response"]) ?? .null
                     }
                     if sub == nil || sub == "get_settings" {
-                        if let eff = body.removeValue(forKey: "effective") {
-                            body["effective_keys"] = .array((eff.objectValue?.keys.sorted() ?? []).map(JSONValue.string))
-                        }
-                        if let srcs = body.removeValue(forKey: "sources") {
-                            body["sources_keys"] = .array((srcs.arrayValue ?? []).compactMap { s in
-                                guard let s = s.objectValue else { return nil }
-                                return .object(["source": s["source"] ?? .null,
-                                                "keys": .array((s["settings"]?.objectValue?.keys.sorted() ?? []).map(JSONValue.string))])
-                            })
-                        }
+                        upgradeLegacySettings(&body)
+                        if let eff = body["effective"] { body["effective"] = blankSettings(eff) }
+                        if let srcs = body["sources"] { body["sources"] = blankSources(srcs) }
                     }
                     let oauth = sub == nil || Redactor.oauthSubtypes.contains(sub!)
                     resp["response"] = oauth ? urls(.object(body)) : .object(body)

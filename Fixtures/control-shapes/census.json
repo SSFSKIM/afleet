@@ -597,8 +597,8 @@
   "control_response/get_settings": {
    "body_keys": [
     "applied",
-    "effective_keys",
-    "sources_keys"
+    "effective",
+    "sources"
    ],
    "count": 1,
    "keys": [
@@ -612,8 +612,8 @@
    ],
    "required_body_keys": [
     "applied",
-    "effective_keys",
-    "sources_keys"
+    "effective",
+    "sources"
    ],
    "required_keys": [
     "response",
