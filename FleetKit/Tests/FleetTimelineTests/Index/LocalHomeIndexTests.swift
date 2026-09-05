@@ -39,7 +39,7 @@ final class LocalHomeIndexTests: XCTestCase {
         private var value = 0
         var files: Int { lock.lock(); defer { lock.unlock() }; return value }
         func record(_ notice: TimelineNotice) {
-            guard case .indexBuilt(let files, _) = notice else { return }
+            guard case .indexBuilt(let files, _, _) = notice else { return }
             lock.lock(); value = files; lock.unlock()
         }
     }

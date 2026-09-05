@@ -52,6 +52,14 @@ public enum TranscriptPath: Sendable, Hashable {
         }
     }
 
+    /// The session id a main transcript's file name carries, or nil when the name is not one. The same parse `resolve`
+    /// makes for a two-component path, without the path: a directory listing already knows the slug and the name, and
+    /// turning every listed entry into a `URL` and back into a path to learn what it is costs more than the read does.
+    public static func mainTranscript(fileName: String) -> SessionID? {
+        guard fileName.hasSuffix(".jsonl") else { return nil }
+        return SessionID(String(fileName.dropLast(6)))
+    }
+
     /// The path a stream lives at under a slug. Used at spawn to construct an agent's transcript path (parent §8.8) and by tests.
     public static func path(of stream: LogicalStream, slug: String) -> URL {
         let projects = stream.configHome.appendingPathComponent("projects").appendingPathComponent(slug)

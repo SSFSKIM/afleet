@@ -1299,6 +1299,42 @@ the questions stand as the record of what was asked. The fifth was added at v2.2
   winner would otherwise remove an entry whose older alias still exists. Rejected: stat-ing
   the named files and the entry's current path alone (v2.4; misses the alias); a rescan of
   the slug on every update (the budget).
+- Decision: A slug entry under `projects/` that is a symlink is **skipped**, not followed, and the
+  build reports how many it skipped (`indexBuilt(files:symlinkedProjectsSkipped:durationMs:)`).
+  Rationale: parity. The engine's own session-by-id lookup iterates `projects/` with `withFileTypes`
+  and drops any entry whose `Dirent.isDirectory()` is false (2.1.258 `cli.pretty.js:13753-13755`),
+  which a symlink's is; its per-project listing drops any entry whose `isFile()` is false (line
+  13937), which is the symlinked-transcript refusal the reader already makes with `O_NOFOLLOW`.
+  Listing sessions the CLI cannot itself find would offer channels that resume cannot open, which is
+  worse than not listing them; reporting the count lets the app say so rather than leaving the
+  difference invisible. On the machine this was measured on, fourteen slug entries are symlinked
+  directories and 1,306 main transcripts lie under them — and every one of those files is an alias
+  of a file already indexed under a real slug, because all fourteen resolve to sibling directories
+  inside the same `projects/`, so following them would have added no session at all. Rejected:
+  following a symlinked directory while still refusing a symlinked file (breaks parity for a gain
+  that this corpus shows to be zero).
+- Decision: The index scans a head-and-tail read's **UTF-8 bytes** (`BufferScan`), one pass per
+  buffer, and builds a `String` only for a field value it returns; `HeadTailReader`'s public `String`
+  helpers are wrappers around that one implementation. Rationale: the helpers reproduce the engine's
+  semantics and each scans a 64 KiB chunk; over a Swift `String` that is a dozen grapheme-aware
+  passes per file, measured at 19.8 ms per file and 66 s over a real home, which is the whole of the
+  G2 cold-build budget. A raw `"` cannot occur inside a JSON string value, so walking key-shaped
+  `"…":` positions in the bytes admits exactly the occurrences `range(of:options:.literal)` finds,
+  and `\n` cannot occur inside a multi-byte sequence, so byte lines are `split(separator: "\n")`
+  lines. Rejected: keeping the `String` helpers on the index path and widening the budget.
+- Decision: The cold build's per-file work — the read **and** the entry — runs in a detached task,
+  `concurrency` lanes wide, and the same for the per-directory discovery listing. Rationale: entry
+  building touches no actor state, so serialising it on the actor left nine of ten cores idle; and
+  awaited inline from a caller whose own task is bound to a serial executor (an XCTest method, any
+  `@MainActor` caller) the group ran at about a third of the machine's width. A cold index's
+  throughput should not depend on who asked for it. The caller's cancellation is forwarded.
+- Decision: `RecordDecoder.decode(line:)` takes a fast path for the five conversation kinds, probing
+  the line for its `type` alone instead of materialising a stage-one `JSONValue`. Rationale: no
+  conversation kind takes a canonical hash from that value and nothing downstream reads it, yet
+  building the whole tree to read one string was over a third of a channel-open read. The fast path
+  is entered only when the probe yields such a kind — exactly the case in which the two-stage path
+  would have reached the same typed decode — so every `unknown`/`undecodable` outcome and every
+  reason string is decided by the unchanged path.
 
 ## Surprises & Discoveries
 
@@ -1364,11 +1400,42 @@ the questions stand as the record of what was asked. The fifth was added at v2.2
   ten seconds. No engine emits mirror frames at that rate, so Task 10 is not threatened by it,
   and the time cap bounds `open` — but the residual cost is relocated, not removed.
 
+- Observation (closing the three above): the two missed budgets were implementation cost, not a
+  physical limit, and both now pass. The floor is ~96 ms — 43 ms to list `projects/` and 53 ms to
+  `pread` every head and tail sixteen lanes wide. Four things stood between that and 66 s: a dozen
+  grapheme-aware `String` scans per file (now one byte pass per buffer), entry building serialised on
+  the actor while nine of ten cores idled (now in the lanes), two `ISO8601DateFormatter`s per file
+  taking a process-wide ICU lock (now an arithmetic parse of the canonical shape, with the formatters
+  as the fallback), and a `URL` per listed directory entry taken apart again by `TranscriptPath.resolve`
+  (now the file name decides). The third budget was a doubled `pread` of the whole window to find one
+  newline, plus a stage-one `JSONValue` built for every record that had no use for one.
+- Observation: the same `build()` measured 870 ms awaited inline from an XCTest method and 403 ms from
+  a detached task in the same process, because a task group awaited from a task bound to a serial
+  executor ran at about a third of the machine's width. Impact: the index does its own parallel work
+  in a detached task, so its throughput does not depend on the caller's context; without that, the
+  gate would have measured a property of XCTest.
+- Observation: for three hours and forty-one minutes of this work ten orphaned `while :; do :; done`
+  shells, spawned as synthetic load by a sibling worktree's test whose `kill` never ran after its
+  own 300 s timeout, held every core of the machine. Every timing taken during that window is
+  inflated by roughly 2.3x. Impact: a timing gate needs the machine's load recorded beside the number;
+  the numbers below were taken after those ten processes were cleared, at a load average under six.
+
 ## Outcomes & Retrospective
 
 Pending — written at finish.
 
 ## Revision Notes
+
+- 2026-09-05 (G2 fix wave): **G2 now passes on all three budgets.** Measured over the local config
+  home, 3,032 main transcripts, median of five cold builds, twice: 372 ms and 376 ms against the
+  500 ms budget (was 66,412 ms); incremental update after one `touch` 1 ms against 50 ms (was 28 ms);
+  largest transcript, 109,427,514 bytes, 4 MiB window, 2,626 records, 0 extensions, read and reduced
+  in 676 ms and 700 ms against the 1,000 ms budget (was 1,158 ms). No budget was widened, no
+  assertion softened and the measured set was not shrunk. `FleetTimelineTests` runs 144 tests, 4
+  skipped without `AFLEET_LOCAL_INDEX`, 0 failures. The engine's substring semantics are unchanged:
+  the five helpers now have one byte-level implementation that the `String` entry points wrap, so
+  `HeadTailReaderTests` and `TranscriptIndexTests` pin it. A thirteenth index test covers the
+  symlinked slug and the symlinked transcript in a `TempTree`.
 
 - 2026-09-05: Plan executed; Task 13 run. **G1 passes** (check one over 18 mirrored streams
   and 493 mirrored entries compared against file records, plus 3 `agent_metadata` sidecars;

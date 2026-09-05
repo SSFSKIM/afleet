@@ -53,26 +53,51 @@ public enum RecordDecoder {
     /// Two stages, never throws: JSONValue first, typed model from the same bytes second. A mirror entry goes through the same
     /// function after `canonicalData()`, so the file and the mirror decode identically.
     public static func decode(line: Data, byteOffset: Int = 0) -> TranscriptRecord {
+        // A top-level object whose `type` is one of the five conversation kinds needs no stage-one `JSONValue`: nothing
+        // downstream asks for one, and no conversation kind takes a canonical hash from it. Materialising the whole tree
+        // to read one string was over a third of a channel-open read. The probe decodes that one field and the fast path
+        // is taken only when it yields such a kind — which is exactly the case in which the two-stage path below would
+        // have reached the same `typed` call — so every other outcome, and every reason string, is decided as before.
+        if let kind = try? JSONDecoder().decode(TypeProbe.self, from: line).type?.stringValue,
+           conversationKinds.contains(kind) {
+            return conversation(kind, line: line, byteOffset: byteOffset)
+        }
         let value: JSONValue
         do { value = try JSONDecoder().decode(JSONValue.self, from: line) }
         catch { return .undecodable(raw: line, byteOffset: byteOffset, reason: "invalid_json") }
         guard value.objectValue != nil else { return .undecodable(raw: line, byteOffset: byteOffset, reason: "not_an_object") }
         guard let kind = value["type"]?.stringValue else { return .unknown(kind: "<untyped>", value) }
         func typed<F: Codable & Sendable & DeclaredKeys>(_: F.Type, _ wrap: (Lossless<F>) -> TranscriptRecord) -> TranscriptRecord {
-            do { return wrap(try JSONDecoder().decode(Lossless<F>.self, from: line)) }
-            catch { return .undecodable(raw: line, byteOffset: byteOffset, reason: "decode_failure:\(kind)") }
+            Self.typed(F.self, line: line, byteOffset: byteOffset, kind: kind, wrap)
         }
+        if conversationKinds.contains(kind) { return conversation(kind, line: line, byteOffset: byteOffset) }
         switch kind {
-        case "user": return typed(UserRecordFields.self, TranscriptRecord.user)
-        case "assistant": return typed(AssistantRecordFields.self, TranscriptRecord.assistant)
-        case "attachment": return typed(AttachmentRecordFields.self, TranscriptRecord.attachment)
-        case "system": return typed(SystemRecordFields.self, TranscriptRecord.system)
-        case "progress": return typed(ProgressRecordFields.self, TranscriptRecord.progress)
         case "agent_metadata": let h = canonicalHash(of: value); return typed(AgentMetadataFields.self) { .agentMetadata($0, canonicalHash: h) }
         default:
             if SessionStateVocabulary.kinds[kind] != nil { let h = canonicalHash(of: value); return typed(SessionStateFields.self) { .sessionState($0, canonicalHash: h) } }
             return .unknown(kind: kind, value)
         }
+    }
+
+    /// The five kinds that carry a uuid and no canonical hash.
+    private static let conversationKinds: Set<String> = ["user", "assistant", "attachment", "system", "progress"]
+    private struct TypeProbe: Decodable { var type: JSONValue? }
+
+    private static func conversation(_ kind: String, line: Data, byteOffset: Int) -> TranscriptRecord {
+        switch kind {
+        case "user": typed(UserRecordFields.self, line: line, byteOffset: byteOffset, kind: kind, TranscriptRecord.user)
+        case "assistant": typed(AssistantRecordFields.self, line: line, byteOffset: byteOffset, kind: kind, TranscriptRecord.assistant)
+        case "attachment": typed(AttachmentRecordFields.self, line: line, byteOffset: byteOffset, kind: kind, TranscriptRecord.attachment)
+        case "system": typed(SystemRecordFields.self, line: line, byteOffset: byteOffset, kind: kind, TranscriptRecord.system)
+        default: typed(ProgressRecordFields.self, line: line, byteOffset: byteOffset, kind: kind, TranscriptRecord.progress)
+        }
+    }
+
+    private static func typed<F: Codable & Sendable & DeclaredKeys>(
+        _: F.Type, line: Data, byteOffset: Int, kind: String, _ wrap: (Lossless<F>) -> TranscriptRecord
+    ) -> TranscriptRecord {
+        do { return wrap(try JSONDecoder().decode(Lossless<F>.self, from: line)) }
+        catch { return .undecodable(raw: line, byteOffset: byteOffset, reason: "decode_failure:\(kind)") }
     }
     /// The one hashing representation: SHA-256 (hex) of `value.canonicalData()` — sorted keys, normalised numbers.
     public static func canonicalHash(of value: JSONValue) -> String { hex(SHA256.hash(data: (try? value.canonicalData()) ?? Data())) }

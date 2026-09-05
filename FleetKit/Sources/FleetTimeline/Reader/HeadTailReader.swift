@@ -3,8 +3,23 @@ import ClaudeWire
 
 /// The picker's read, exactly (2.1.258 `ihe`, line 13803; `od = 65536`): the first and last 64 KiB and the stat.
 public struct HeadTail: Sendable, Hashable {
-    public var mtime: Date; public var size: Int64; public var head: String; public var tail: String
-    public init(mtime: Date, size: Int64, head: String, tail: String) { self.mtime = mtime; self.size = size; self.head = head; self.tail = tail }
+    public var mtime: Date
+    public var size: Int64
+    /// The two chunks as they were read. The bytes are the storage, not the `String`s: building a `String` from 128 KiB
+    /// of UTF-8 validates it up front, and every scan over the result is then grapheme-aware. The index scans the bytes
+    /// (`BufferScan`) and decodes only the field values it returns; `head` and `tail` stay for a caller that wants text.
+    public var headBytes: [UInt8]
+    public var tailBytes: [UInt8]
+    /// One 64 KiB chunk decoded as UTF-8 with replacement, the way `Buffer.toString("utf8")` decodes a chunk that may
+    /// have cut a multi-byte sequence in half.
+    public var head: String { String(decoding: headBytes, as: UTF8.self) }
+    public var tail: String { String(decoding: tailBytes, as: UTF8.self) }
+    public init(mtime: Date, size: Int64, headBytes: [UInt8], tailBytes: [UInt8]) {
+        self.mtime = mtime; self.size = size; self.headBytes = headBytes; self.tailBytes = tailBytes
+    }
+    public init(mtime: Date, size: Int64, head: String, tail: String) {
+        self.init(mtime: mtime, size: size, headBytes: Array(head.utf8), tailBytes: Array(tail.utf8))
+    }
 }
 public protocol HeadTailReading: Sendable { func read(_ url: URL) throws -> HeadTail? }
 public struct HeadTailReader: HeadTailReading {
@@ -27,49 +42,39 @@ public struct HeadTailReader: HeadTailReading {
         var info = stat()
         guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
         let size = Int64(info.st_size)
-        guard let head = chunkText(fd, at: 0), !head.isEmpty else { return nil }
+        let wanted = size > 0 && size < Int64(Self.chunk) ? Int(size) : Self.chunk
+        guard let head = chunkBytes(fd, at: 0, upTo: wanted), !head.isEmpty else { return nil }
         let tailStart = max(0, size - Int64(Self.chunk))
-        let tail = tailStart > 0 ? (chunkText(fd, at: tailStart) ?? "") : head
+        let tail = tailStart > 0 ? (chunkBytes(fd, at: tailStart, upTo: Self.chunk) ?? []) : head
         let mtime = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9)
-        return HeadTail(mtime: mtime, size: size, head: head, tail: tail)
+        return HeadTail(mtime: mtime, size: size, headBytes: head, tailBytes: tail)
     }
 
-    /// One 64 KiB chunk decoded as UTF-8 with replacement, the way `Buffer.toString("utf8")` decodes a chunk that may
-    /// have cut a multi-byte sequence in half.
-    private func chunkText(_ fd: Int32, at offset: Int64) -> String? {
-        var buffer = [UInt8](repeating: 0, count: Self.chunk)
-        let n = buffer.withUnsafeMutableBytes { Foundation.pread(fd, $0.baseAddress!, Self.chunk, off_t(offset)) }
-        guard n >= 0 else { return nil }
-        return String(decoding: buffer[0..<n], as: UTF8.self)
+    /// One 64 KiB chunk, exactly the bytes `pread` returned and no more. The storage is left uninitialised until `pread`
+    /// fills it: zeroing 64 KiB twice per file was the single largest allocation cost in the cold build's profile.
+    private func chunkBytes(_ fd: Int32, at offset: Int64, upTo wanted: Int) -> [UInt8]? {
+        var read = 0
+        let buffer = [UInt8](unsafeUninitializedCapacity: max(1, wanted)) { storage, count in
+            read = Foundation.pread(fd, storage.baseAddress!, wanted, off_t(offset))
+            count = max(0, read)
+        }
+        return read >= 0 ? buffer : nil
     }
 
     // MARK: - The engine's substring helpers (2.1.258, lines 13341-13424 and 13464)
 
-    /// `G1`: first occurrence of `"key":"…"` (or `"key": "…"`) anywhere in `text`, JSON-unescaped.
-    /// The two spellings are tried in that order — the unspaced one wins even when it occurs later, as the engine's does.
+    /// Each helper is one `BufferScan` over the text's UTF-8. `BufferScan` carries the semantics and the comments that
+    /// pin them to the bundle; these five entry points are what a caller holding a `String` uses, and what the tests
+    /// that pin the engine's behaviour drive. The index path scans the read's bytes directly and never builds the text.
+
+    /// `G1`: first occurrence of `"key":"` (or `"key": "`) anywhere in `text`, JSON-unescaped.
     public static func firstString(_ text: String, key: String) -> String? {
-        for pattern in ["\"\(key)\":\"", "\"\(key)\": \""] {
-            guard let found = text.range(of: pattern, options: .literal) else { continue }
-            if let end = closingQuote(text, from: found.upperBound) { return unescape(String(text[found.upperBound..<end])) }
-        }
-        return nil
+        BufferScan(Array(text.utf8), keys: [key]).firstString(key)
     }
 
-    /// `Gf`: last occurrence, JSON-unescaped. "Last" is by start offset across both spellings, not by spelling order.
+    /// `Gf`: last occurrence, JSON-unescaped.
     public static func lastString(_ text: String, key: String) -> String? {
-        var best: String?
-        var bestStart: String.Index?
-        for pattern in ["\"\(key)\":\"", "\"\(key)\": \""] {
-            var from = text.startIndex
-            while let found = text.range(of: pattern, options: .literal, range: from..<text.endIndex) {
-                guard let end = closingQuote(text, from: found.upperBound) else { from = text.endIndex; break }
-                if bestStart == nil || found.lowerBound > bestStart! {
-                    best = unescape(String(text[found.upperBound..<end])); bestStart = found.lowerBound
-                }
-                from = text.index(after: end)
-            }
-        }
-        return best
+        BufferScan(Array(text.utf8), keys: [key]).lastString(key)
     }
 
     /// `Ose` (which is `V` with its arguments swapped): scanning lines from the end, the first line that contains `"key":`
@@ -79,28 +84,15 @@ public struct HeadTailReader: HeadTailReading {
     /// (`"type":"<type>"`, bundle line 13402), so it never matches a line spelled `"type": "<type>"`. The committed
     /// recordings are re-serialised with that space, so the engine's literal would find nothing in them. Both spellings
     /// are accepted here, exactly as `G1`/`Gf` already accept both. The widening cannot produce a false positive: this
-    /// is only a prefilter, and the post-parse guard below reproduces the engine's own `u.type === r` check (line 13405).
+    /// is only a prefilter, and the post-parse guard reproduces the engine's own `u.type === r` check (line 13405).
     /// It cannot produce a false negative on real engine bytes either, being a strict superset of the engine's literal.
     public static func lastLineString(_ text: String, type: String?, key: String) -> String? {
-        let typeMarks = type.map { ["\"type\":\"\($0)\"", "\"type\": \"\($0)\""] }
-        let keyMark = "\"\(key)\":"
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false).reversed() {
-            guard line.contains(keyMark), typeMarks.map({ marks in marks.contains { line.contains($0) } }) ?? true else { continue }
-            guard let object = object(String(line)) else { continue }
-            if let type, object["type"]?.stringValue != type { continue }
-            if let value = object[key]?.stringValue { return value }
-        }
-        return nil
+        BufferScan(Array(text.utf8), keys: [key, "type"]).lastLineString(type: type, key: key)
     }
 
     /// `VQ`: scanning lines from the start, the first line containing `"key":` that parses to an object whose `key` is a string.
     public static func firstLineString(_ text: String, key: String) -> String? {
-        let keyMark = "\"\(key)\":"
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            guard line.contains(keyMark), let object = object(String(line)) else { continue }
-            if let value = object[key]?.stringValue { return value }
-        }
-        return nil
+        BufferScan(Array(text.utf8), keys: [key]).firstLineString(key)
     }
 
     /// `Ett`: the first `user` line that is not a tool_result, not `isMeta`, not `isCompactSummary`; its content string or
@@ -108,23 +100,14 @@ public struct HeadTailReader: HeadTailReading {
     /// `<bash-input>` becomes `! <command>`, an opening XML tag or an interruption notice is skipped, and anything longer
     /// than 200 UTF-16 units is truncated with an ellipsis. `""` when nothing qualifies.
     public static func firstPrompt(_ head: String) -> String {
-        var commandFallback = ""
-        for line in head.split(separator: "\n", omittingEmptySubsequences: false) {
-            guard line.contains("\"type\":\"user\"") || line.contains("\"type\": \"user\"") else { continue }
-            if line.contains("\"tool_result\"") { continue }
-            if line.contains("\"isMeta\":true") || line.contains("\"isMeta\": true") { continue }
-            if line.contains("\"isCompactSummary\":true") || line.contains("\"isCompactSummary\": true") { continue }
-            guard let object = object(String(line)) else { continue }
-            if let prompt = prompt(from: object, commandFallback: &commandFallback) { return prompt }
-        }
-        return commandFallback
+        BufferScan(Array(head.utf8), keys: ["type"]).firstPrompt()
     }
 
     // MARK: - `F5` and the small string primitives it needs
 
     /// `F5` (chunk-bpk2rz0h). Returns nil when this record yields no prompt; `commandFallback` keeps the first
     /// `<command-name>` seen, which `Ett` returns when no record yields anything better.
-    private static func prompt(from object: [String: JSONValue], commandFallback: inout String) -> String? {
+    static func prompt(from object: [String: JSONValue], commandFallback: inout String) -> String? {
         guard object["type"]?.stringValue == "user" else { return nil }
         if object["isMeta"]?.boolValue == true || object["isCompactSummary"]?.boolValue == true { return nil }
         guard let message = object["message"]?.objectValue else { return nil }
@@ -141,7 +124,7 @@ public struct HeadTailReader: HeadTailReading {
         default: return nil
         }
         for raw in texts {
-            var text = raw.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            var text = newlinesAsSpaces(raw).trimmingCharacters(in: .whitespacesAndNewlines)
             if text.isEmpty { continue }
             if let name = between(text, "<command-name>", "</command-name>") {
                 if commandFallback.isEmpty { commandFallback = name }
@@ -151,7 +134,7 @@ public struct HeadTailReader: HeadTailReading {
                 return "! " + command.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             if skipsAsMarkup(text) { continue }
-            if text.utf16.count > 200 { text = truncate(text, 200).trimmingCharacters(in: .whitespacesAndNewlines) + "\u{2026}" }
+            if utf16Longer(text, than: 200) { text = truncate(text, 200).trimmingCharacters(in: .whitespacesAndNewlines) + "\u{2026}" }
             return text
         }
         return nil
@@ -171,14 +154,48 @@ public struct HeadTailReader: HeadTailReading {
         return terminator == ">" || terminator == " " || terminator == "\t" || terminator == "\n" || terminator == "\r"
     }
 
+    /// `replacingOccurrences(of: "\n", with: " ")`, over UTF-8. `U+000A` is one UTF-16 unit and one ASCII byte and can
+    /// be no part of any other character, so replacing the byte is the same replacement NSString makes — including on a
+    /// `\r\n`, where a `Character`-level replacement would differ.
+    private static func newlinesAsSpaces(_ text: String) -> String {
+        guard text.utf8.contains(0x0A) else { return text }
+        return String(decoding: text.utf8.map { $0 == 0x0A ? 0x20 : $0 }, as: UTF8.self)
+    }
+
+    /// The text between two ASCII markers, over UTF-8. A literal ASCII needle occurs at the same places in the bytes as
+    /// `range(of:options:.literal)` finds it, and both cuts land on ASCII bytes, so the slice is the same string — at a
+    /// fraction of the cost of two CFString searches over a prompt that can be tens of kilobytes.
     private static func between(_ text: String, _ open: String, _ close: String) -> String? {
-        guard let start = text.range(of: open, options: .literal), let end = text.range(of: close, options: .literal, range: start.upperBound..<text.endIndex) else { return nil }
-        return String(text[start.upperBound..<end.lowerBound])
+        var subject = text
+        subject.makeContiguousUTF8()
+        let opening = Array(open.utf8), closing = Array(close.utf8)
+        let found: String?? = subject.utf8.withContiguousStorageIfAvailable { buffer -> String? in
+            guard let base = buffer.baseAddress, !opening.isEmpty, !closing.isEmpty else { return nil }
+            guard let start = memmem(base, buffer.count, opening, opening.count) else { return nil }
+            let from = UnsafeRawPointer(start) - UnsafeRawPointer(base) + opening.count
+            guard from <= buffer.count, let end = memmem(base + from, buffer.count - from, closing, closing.count) else { return nil }
+            let to = UnsafeRawPointer(end) - UnsafeRawPointer(base)
+            return String(decoding: UnsafeBufferPointer(rebasing: buffer[from..<to]), as: UTF8.self)
+        }
+        return found ?? nil
+    }
+
+    /// `text.utf16.count > limit`, stopping as soon as it is known. Counting a whole large prompt's UTF-16 units builds
+    /// the string's breadcrumb cache, which showed up in the cold build's profile; the answer here is the same one.
+    private static func utf16Longer(_ text: String, than limit: Int) -> Bool {
+        var units = 0
+        for scalar in text.unicodeScalars {
+            units += scalar.value > 0xFFFF ? 2 : 1
+            if units > limit { return true }
+        }
+        return false
     }
 
     /// The engine's `le`: a prefix of `n` UTF-16 units that never ends on a lone high surrogate.
     private static func truncate(_ text: String, _ limit: Int) -> String {
-        let units = Array(text.utf16)
+        // Only the first `limit + 1` units are needed to answer both questions, and taking them by iteration keeps a long
+        // prompt from building the string's UTF-16 breadcrumb cache.
+        let units = Array(text.utf16.prefix(limit + 1))
         guard units.count > limit, limit > 0 else { return text }
         var prefix = Array(units[0..<limit])
         if let last = prefix.last, (0xD800...0xDBFF).contains(last) { prefix.removeLast() }
@@ -186,27 +203,13 @@ public struct HeadTailReader: HeadTailReading {
     }
 
     /// The engine's `gdr`: only a value carrying a backslash is JSON-unescaped, and a failure returns it untouched.
-    private static func unescape(_ text: String) -> String {
+    static func unescape(_ text: String) -> String {
         guard text.contains("\\") else { return text }
         guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data("\"\(text)\"".utf8)), let s = value.stringValue else { return text }
         return s
     }
 
-    /// The scan `G1`/`Gf` share: the next unescaped `"` at or after `from`.
-    private static func closingQuote(_ text: String, from: String.Index) -> String.Index? {
-        var i = from
-        while i < text.endIndex {
-            if text[i] == "\\" {
-                i = text.index(i, offsetBy: 2, limitedBy: text.endIndex) ?? text.endIndex
-                continue
-            }
-            if text[i] == "\"" { return i }
-            i = text.index(after: i)
-        }
-        return nil
-    }
-
-    private static func object(_ line: String) -> [String: JSONValue]? {
+    static func object(_ line: String) -> [String: JSONValue]? {
         guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8)) else { return nil }
         return value.objectValue
     }

@@ -20,7 +20,9 @@ public enum TimelineNotice: Sendable, Hashable {
     case relocationFollowed(session: SessionID)
     case tapAligned(session: SessionID, stream: StreamName, claimed: Int, unclaimed: Int)
     case fileRewritten(session: SessionID, stream: StreamName, previousLength: Int, newLength: Int)
-    case indexBuilt(files: Int, durationMs: Int)
+    /// `symlinkedProjectsSkipped` counts the slug entries under `projects/` that are symlinks. The build skips them
+    /// because the engine's own lookup does, and reports how many so the app can surface the difference.
+    case indexBuilt(files: Int, symlinkedProjectsSkipped: Int, durationMs: Int)
     case indexUpdated(changed: Int, durationMs: Int)
 
     public enum SkipReason: String, Sendable { case invalidJSON, tornTail, notAnObject }

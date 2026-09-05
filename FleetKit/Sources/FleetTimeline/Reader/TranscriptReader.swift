@@ -132,31 +132,42 @@ public struct TranscriptReader: Sendable {
         return try body(fd, Int(info.st_size))
     }
 
+    /// The storage is left uninitialised until `pread` fills it and the result is the buffer itself, not a copy of it: a
+    /// window read is four mebibytes, and zeroing it and then copying it were both plainly on the channel-open path.
     private func pread(_ fd: Int32, offset: Int, length: Int) throws -> Data {
         guard length > 0 else { return Data() }
-        var buffer = [UInt8](repeating: 0, count: length)
         var done = 0
-        while done < length {
-            var read = 0
-            var failure: Int32 = 0
-            buffer.withUnsafeMutableBytes { raw in
-                let n = Foundation.pread(fd, raw.baseAddress!.advanced(by: done), length - done, off_t(offset + done))
-                if n < 0 { failure = errno } else { read = n }
+        var failure: Int32 = 0
+        var buffer = [UInt8](unsafeUninitializedCapacity: length) { storage, count in
+            while done < length {
+                let n = Foundation.pread(fd, storage.baseAddress! + done, length - done, off_t(offset + done))
+                if n < 0 { if errno == EINTR { continue }; failure = errno; break }
+                if n == 0 { break }
+                done += n
             }
-            if failure != 0 { if failure == EINTR { continue }; throw ReaderError.unreadable(code: failure) }
-            if read == 0 { break }
-            done += read
+            count = done
         }
-        return Data(buffer[0..<done])
+        if failure != 0 { throw ReaderError.unreadable(code: failure) }
+        if buffer.count > done { buffer.removeLast(buffer.count - done) }
+        return Data(buffer)
     }
 
     /// The smallest line start at or after `from` and strictly inside `[from, before)` bounds, or nil when the region
     /// carries no terminator. Reading from `from - 1` is what makes `from` itself count when the byte before it is `\n`.
     private func firstLineStart(_ fd: Int32, from: Int, before: Int) throws -> Int? {
+        // In chunks, doubling: the answer is almost always in the first few kilobytes, and reading the whole region to
+        // find one byte meant a window read `pread`-ed and scanned its four mebibytes twice.
         let probe = max(0, from - 1)
-        let data = try pread(fd, offset: probe, length: before - probe)
-        guard let nl = data.firstIndex(of: UInt8(ascii: "\n")) else { return nil }
-        return probe + (nl - data.startIndex) + 1
+        var at = probe
+        var chunk = 64 * 1024
+        while at < before {
+            let data = try pread(fd, offset: at, length: min(chunk, before - at))
+            if data.isEmpty { return nil }
+            if let nl = data.firstIndex(of: UInt8(ascii: "\n")) { return at + (nl - data.startIndex) + 1 }
+            at += data.count
+            chunk = min(chunk * 2, 4 * 1024 * 1024)
+        }
+        return nil
     }
 
     /// Decode `[from, to)`. The scanner reports each line's raw start and its bytes after the engine's leading-whitespace

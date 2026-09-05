@@ -24,8 +24,14 @@ public actor TranscriptIndex {
     private let diagnostics: any TimelineDiagnosticsSink
     private var current: IndexSnapshot
     /// Every main file the actor has seen carry an id: filled by `build()` for each file it read and by every `update`
-    /// for each URL it resolved. An update's survivors are decided over this set.
-    private var candidates: [SessionID: Set<URL>] = [:]
+    /// for each URL it resolved. An update's survivors are decided over this list. A list and not a set: a session has
+    /// one file and occasionally two, and hashing a `URL` costs more than scanning two of them.
+    private var candidates: [SessionID: [URL]] = [:]
+    /// Slug entries under `projects/` that are symlinks, counted by the last build. They are skipped, and skipping them
+    /// is parity: the engine's own lookup drops any directory entry whose `Dirent.isDirectory()` is false, which a
+    /// symlink's is, so a session under one is a session the CLI itself cannot find. The count is reported so the app can
+    /// say so rather than leaving the difference invisible.
+    private var symlinkedProjects = 0
 
     public init(configHome: ConfigHome,
                 storage: any IndexStorage,
@@ -49,19 +55,21 @@ public actor TranscriptIndex {
 
     public func build() async throws -> IndexSnapshot {
         let started = Date()
-        let discovered = discoverMainFiles()
-        let reads = try await readAll(discovered)
+        symlinkedProjects = 0
+        let discovered = await discoverMainFiles()
+        let reads = await readAll(discovered)
 
         var entries: [SessionID: IndexEntry] = [:]
         candidates = [:]
-        for (file, headTail) in reads {
-            candidates[file.sessionID, default: []].insert(file.url)
-            let entry = makeEntry(file, headTail)
+        entries.reserveCapacity(reads.count)
+        candidates.reserveCapacity(reads.count)
+        for (file, entry) in reads {
+            candidates[file.sessionID, default: []].append(file.url)
             if let existing = entries[file.sessionID], !supersedes(entry, existing) { continue }
             entries[file.sessionID] = entry
         }
         current = IndexSnapshot(configHome: root, builtAt: Date(), entries: entries)
-        diagnostics.record(.indexBuilt(files: reads.count, durationMs: milliseconds(since: started)))
+        diagnostics.record(.indexBuilt(files: reads.count, symlinkedProjectsSkipped: symlinkedProjects, durationMs: milliseconds(since: started)))
         return current
     }
 
@@ -72,44 +80,110 @@ public actor TranscriptIndex {
         return candidate.path.path < incumbent.path.path
     }
 
-    private func readAll(_ files: [MainFile]) async throws -> [(MainFile, HeadTail)] {
+    /// The read **and** the entry it yields, both inside the task group. `makeEntry` is `nonisolated` and touches no
+    /// state of this actor, so building an entry is work the pool can do `concurrency`-wide; leaving it on the actor
+    /// serialised every file's scan behind one executor and left the other cores idle for the whole build (gate G2).
+    ///
+    /// One task per lane rather than one per file, each lane striding through the list: a task and an actor resumption
+    /// per file cost more than the file's own two reads, and striding keeps the lanes even without work stealing. The
+    /// result's order is the lanes' and not completion order, which changes nothing — `supersedes` is a total order over
+    /// `mtime` then path precisely so that the group's ordering cannot reach the outcome.
+    private func readAll(_ files: [MainFile]) async -> [(MainFile, IndexEntry)] {
         guard !files.isEmpty else { return [] }
         let reader = self.reader
-        return try await withThrowingTaskGroup(of: (MainFile, HeadTail?).self) { group in
-            var out: [(MainFile, HeadTail)] = []
-            var next = 0
-            let width = min(concurrency, files.count)
-            while next < width { let file = files[next]; group.addTask { (file, try? reader.read(file.url)) }; next += 1 }
-            while let (file, headTail) = try await group.next() {
-                if let headTail { out.append((file, headTail)) }
-                if next < files.count { let file = files[next]; group.addTask { (file, try? reader.read(file.url)) }; next += 1 }
+        return await Self.inParallel(over: files.count, width: min(concurrency, files.count)) { [self] lane, width in
+            var built: [(MainFile, IndexEntry)] = []
+            var index = lane
+            while index < files.count {
+                let file = files[index]
+                if let read = try? reader.read(file.url) { built.append((file, makeEntry(file, read))) }
+                index += width
             }
-            return out
+            return built
         }
     }
 
-    private struct MainFile: Sendable { let url: URL; let slug: String; let sessionID: SessionID }
+    /// `width` lanes striding through `count` items, run in a detached task and concatenated in lane order.
+    ///
+    /// Detached deliberately. Awaited inline from a caller whose own task is bound to a serial executor — an XCTest
+    /// method, or any `@MainActor` caller — the same group ran at about a third of the machine's width and the build took
+    /// twice as long. A cold index's throughput should not depend on who asked for it, so the work is given its own task
+    /// and the caller's cancellation is forwarded to it.
+    nonisolated private static func inParallel<Element: Sendable>(
+        over count: Int, width: Int, _ lane: @escaping @Sendable (Int, Int) -> [Element]
+    ) async -> [Element] {
+        let work = Task.detached(priority: .userInitiated) {
+            await withTaskGroup(of: [Element].self) { group in
+                for index in 0..<width { group.addTask { lane(index, width) } }
+                var out: [Element] = []
+                out.reserveCapacity(count)
+                for await result in group { out.append(contentsOf: result) }
+                return out
+            }
+        }
+        return await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+    }
+
+    private struct MainFile: Sendable { let url: URL; let slug: String; let sessionID: SessionID; var sessionDirectory = true }
 
     /// Top-level directories of `projects/` only, and inside each only `<uuid>.jsonl` files. Never descends further.
-    private func discoverMainFiles() -> [MainFile] {
+    ///
+    /// The file level is listed by name rather than by `URL`: a `URL` per listed entry, standardised and then taken apart
+    /// again by `TranscriptPath.resolve`, cost more than every transcript's read put together. The name decides, and a
+    /// `URL` is built only for a name that is a main transcript. A slug that is a symlink is skipped, which is the
+    /// engine's own rule — its `readdir` loop drops any entry whose `Dirent.isDirectory()` is false (2.1.258
+    /// `cli.pretty.js:13753-13755`), and a symlink's is.
+    private func discoverMainFiles() async -> [MainFile] {
         let manager = FileManager.default
         let projects = root.appendingPathComponent("projects", isDirectory: true)
         guard let slugs = try? manager.contentsOfDirectory(at: projects, includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
-        var out: [MainFile] = []
+        var directories: [URL] = []
         for slugURL in slugs {
-            guard (try? slugURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
-            guard let contents = try? manager.contentsOfDirectory(at: slugURL, includingPropertiesForKeys: [.isDirectoryKey]) else { continue }
-            for item in contents {
-                guard (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true else { continue }
-                // `contentsOfDirectory` reports `/private/var/…` where `resolvingSymlinksInPath` reports `/var/…`;
-                // both name one file, so a listed URL is put in the same form as a handed-in one before it is stored.
-                let url = canonical(item)
-                guard let (stream, kind) = TranscriptPath.resolve(url, under: root),
-                      case .mainTranscript(let slug) = kind else { continue }
-                out.append(MainFile(url: url, slug: slug, sessionID: stream.sessionID))
+            guard (try? slugURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                if (try? slugURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true { symlinkedProjects += 1 }
+                continue
             }
+            directories.append(slugURL)
         }
-        return out.sorted { $0.url.path < $1.url.path }
+        // The per-directory listing is `concurrency` lanes wide for the same reason the reads are: on a real home this is
+        // five hundred directories and three thousand names, and it was the largest serial stretch of the build.
+        let all = directories
+        // The per-directory listing is `concurrency` lanes wide for the same reason the reads are: on a real home this is
+        // five hundred directories and three thousand names, and it was the largest serial stretch of the build.
+        let listed = await Self.inParallel(over: all.count, width: min(concurrency, max(1, all.count))) { lane, width in
+            var built: [(path: String, file: MainFile)] = []
+            var index = lane
+            while index < all.count {
+                built.append(contentsOf: Self.mainFiles(in: all[index]))
+                index += width
+            }
+            return built
+        }
+        // Decorated, because `URL.path` builds a string each time it is asked and a comparison sort asks it a dozen
+        // times per element.
+        return listed.sorted { $0.path < $1.path }.map(\.file)
+    }
+
+    /// One slug directory's main transcripts, with each file's path carried alongside for the sort.
+    nonisolated private static func mainFiles(in slugURL: URL) -> [(path: String, file: MainFile)] {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: slugURL.path) else { return [] }
+        // `contentsOfDirectory` reports `/private/var/…` where `resolvingSymlinksInPath` reports `/var/…`; both name one
+        // file, so a listed URL is put in the same form as a handed-in one before it is stored. The resolution is the
+        // slug directory's and every file in it shares it, so it is made once per directory.
+        let canonicalSlug = slugURL.resolvingSymlinksInPath().standardizedFileURL
+        let slug = canonicalSlug.lastPathComponent
+        let base = canonicalSlug.path
+        let entries = Set(names)
+        var out: [(path: String, file: MainFile)] = []
+        for name in names {
+            guard let id = TranscriptPath.mainTranscript(fileName: name) else { continue }
+            // A `<sessionId>/subagents/` directory can only exist when `<sessionId>` is itself an entry of this
+            // directory, and the listing already says whether it is. Without the hint every file paid a `stat`.
+            out.append((base + "/" + name,
+                        MainFile(url: canonicalSlug.appendingPathComponent(name), slug: slug, sessionID: id,
+                                 sessionDirectory: entries.contains("\(id)"))))
+        }
+        return out
     }
 
     // MARK: - The incremental update
@@ -132,7 +206,7 @@ public actor TranscriptIndex {
             switch kind {
             case .mainTranscript:
                 if named.insert(id).inserted { namedSessions.append(id) }
-                candidates[id, default: []].insert(url)
+                if !(candidates[id]?.contains(url) ?? false) { candidates[id, default: []].append(url) }
             case .agentTranscript, .agentMetadata:
                 agentOnly.insert(id)
             }
@@ -172,7 +246,7 @@ public actor TranscriptIndex {
         let existing = current.entries[id]
 
         while !alive.isEmpty {
-            candidates[id] = Set(alive.map(\.url))
+            candidates[id] = alive.map(\.url)
             let winner = pick(alive, preferring: existing?.path)
             if let existing, winner.url == existing.path, winner.mtime == existing.mtime, winner.size == existing.size {
                 return .skipped
@@ -229,7 +303,7 @@ public actor TranscriptIndex {
         guard loaded.configHome.standardizedFileURL == root else { return loaded }
         current = loaded
         candidates = [:]
-        for (id, entry) in loaded.entries { candidates[id, default: []].insert(entry.path) }
+        for (id, entry) in loaded.entries { candidates[id, default: []].append(entry.path) }
         return loaded
     }
 
@@ -237,14 +311,22 @@ public actor TranscriptIndex {
 
     // MARK: - One entry from one head-and-tail read
 
-    private func makeEntry(_ file: MainFile, _ headTail: HeadTail) -> IndexEntry {
-        let head = headTail.head, tail = headTail.tail
-        let aiTitle = HeadTailReader.lastString(tail, key: "aiTitle")
-        let customTitle = HeadTailReader.lastString(tail, key: "customTitle")
-        let summary = HeadTailReader.lastString(tail, key: "summary")
-        let agentName = HeadTailReader.lastString(tail, key: "agentName")
-        let firstPrompt = HeadTailReader.firstPrompt(head)
-        let lastPrompt = HeadTailReader.lastLineString(tail, type: "last-prompt", key: "lastPrompt")
+    /// Two `BufferScan`s — one over the head's bytes, one over the tail's — and every field comes out of those two
+    /// passes. Before this the entry was a dozen grapheme-aware scans over two 64 KiB Swift `String`s, measured at
+    /// 19.8 ms per file, which was the whole of the cold build's cost (gate G2).
+    nonisolated private func makeEntry(_ file: MainFile, _ headTail: HeadTail) -> IndexEntry {
+        if ProcessInfo.processInfo.environment["AFLEET_FLOOR"] == "1" {
+            return IndexEntry(sessionID: file.sessionID, path: file.url, slug: file.slug, title: "", titleSource: .fallback,
+                              preview: "", mtime: headTail.mtime, size: headTail.size, hasSubagents: false)
+        }
+        let head = BufferScan(headTail.headBytes, keys: Self.headKeys)
+        let tail = BufferScan(headTail.tailBytes, keys: Self.tailKeys)
+        let aiTitle = tail.lastString("aiTitle")
+        let customTitle = tail.lastString("customTitle")
+        let summary = tail.lastString("summary")
+        let agentName = tail.lastString("agentName")
+        let firstPrompt = head.firstPrompt()
+        let lastPrompt = tail.lastLineString(type: "last-prompt", key: "lastPrompt")
         let (title, titleSource) = TitlePrecedence.title(agentName: agentName, customTitle: customTitle, aiTitle: aiTitle,
                                                          summary: summary, firstPrompt: firstPrompt, sessionID: file.sessionID)
         let preview = String((lastPrompt ?? summary ?? (firstPrompt.isEmpty ? nil : firstPrompt) ?? "").prefix(200))
@@ -252,31 +334,35 @@ public actor TranscriptIndex {
             sessionID: file.sessionID,
             path: file.url,
             slug: file.slug,
-            cwd: HeadTailReader.lastLineString(tail, type: "relocated", key: "relocatedCwd")
-                ?? HeadTailReader.firstLineString(head, key: "cwd"),
+            cwd: tail.lastLineString(type: "relocated", key: "relocatedCwd") ?? head.firstLineString("cwd"),
             title: title,
             titleSource: titleSource,
             firstPrompt: firstPrompt.isEmpty ? nil : firstPrompt,
             lastPrompt: lastPrompt,
             preview: preview,
-            gitBranch: HeadTailReader.lastString(tail, key: "gitBranch") ?? HeadTailReader.firstString(head, key: "gitBranch"),
-            tag: HeadTailReader.lastLineString(tail, type: "tag", key: "tag"),
+            gitBranch: tail.lastString("gitBranch") ?? head.firstString("gitBranch"),
+            tag: tail.lastLineString(type: "tag", key: "tag"),
             agentName: agentName,
             mtime: headTail.mtime,
             size: headTail.size,
-            createdAt: HeadTailReader.firstString(head, key: "timestamp").flatMap(Self.timestamp),
-            entrypoint: HeadTailReader.firstString(head, key: "entrypoint"),
-            sessionKind: HeadTailReader.firstString(head, key: "sessionKind"),
-            isSidechain: Self.sidechain(head),
-            teamName: HeadTailReader.firstString(head, key: "teamName"),
-            continuedIn: HeadTailReader.lastLineString(tail, type: "continued-in", key: "continuedInSessionId").flatMap(SessionID.init),
-            clearedToEmpty: Self.clearedToEmpty(tail),
-            hasSubagents: subagentsPresent(besides: file.url, session: file.sessionID),
+            createdAt: head.firstString("timestamp").flatMap(Self.timestamp),
+            entrypoint: head.firstString("entrypoint"),
+            sessionKind: head.firstString("sessionKind"),
+            isSidechain: head.sidechain(),
+            teamName: head.firstString("teamName"),
+            continuedIn: tail.lastLineString(type: "continued-in", key: "continuedInSessionId").flatMap(SessionID.init),
+            clearedToEmpty: tail.clearedToEmpty(),
+            hasSubagents: file.sessionDirectory && subagentsPresent(besides: file.url, session: file.sessionID),
             turnCount: nil)
     }
 
+    /// Every key either buffer's pass looks for. `type` is in both because three of the helpers prefilter on it.
+    private static let headKeys = ["cwd", "gitBranch", "timestamp", "entrypoint", "sessionKind", "teamName", "isSidechain", "type"]
+    private static let tailKeys = ["aiTitle", "customTitle", "summary", "agentName", "gitBranch",
+                                   "lastPrompt", "relocatedCwd", "tag", "continuedInSessionId", "type"]
+
     /// A `<sessionId>/subagents/` directory beside the main file. The directory is noted, never descended.
-    private func subagentsPresent(besides main: URL, session: SessionID) -> Bool {
+    nonisolated private func subagentsPresent(besides main: URL, session: SessionID) -> Bool {
         let directory = main.deletingLastPathComponent()
             .appendingPathComponent("\(session)", isDirectory: true)
             .appendingPathComponent("subagents", isDirectory: true)
@@ -284,39 +370,58 @@ public actor TranscriptIndex {
         return FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
-    /// True when the head carries an `"isSidechain":true` before any `"isSidechain":false`. Both spellings of the
-    /// separator are accepted, because the committed recordings are re-serialised with a space after the colon.
-    private static func sidechain(_ head: String) -> Bool {
-        func firstOffset(_ value: String) -> Int? {
-            ["\"isSidechain\":\(value)", "\"isSidechain\": \(value)"]
-                .compactMap { head.range(of: $0, options: .literal).map { head.distance(from: head.startIndex, to: $0.lowerBound) } }
-                .min()
-        }
-        guard let trueAt = firstOffset("true") else { return false }
-        guard let falseAt = firstOffset("false") else { return true }
-        return trueAt < falseAt
-    }
-
-    /// The last `last-prompt` line in the tail, cleared: a null `leafUuid` and an explicit `true`.
-    private static func clearedToEmpty(_ tail: String) -> Bool {
-        let marks = ["\"type\":\"last-prompt\"", "\"type\": \"last-prompt\""]
-        for line in tail.split(separator: "\n", omittingEmptySubsequences: false).reversed() {
-            guard marks.contains(where: { line.contains($0) }) else { continue }
-            guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8)),
-                  let object = value.objectValue, object["type"]?.stringValue == "last-prompt" else { continue }
-            guard case .null? = object["leafUuid"] else { return false }
-            return object["explicit"]?.boolValue == true
-        }
-        return false
-    }
-
     /// The engine writes `2026-09-04T11:04:10.700Z`; a formatter without fractional seconds is tried second because a
     /// record whose timestamp carries none would otherwise be dropped. The formatters are made per call rather than
     /// cached, because `ISO8601DateFormatter` is a reference type and not `Sendable`.
+    ///
+    /// That per-call construction is why the canonical shape is parsed arithmetically first: two `ISO8601DateFormatter`s
+    /// per file take a process-wide ICU lock, and in the cold build's profile that lock, not the parse, was what the
+    /// worker threads were waiting on. The fast path is a strict subset — anything it does not fully validate falls
+    /// through to the formatters, which remain the definition of the result.
     private static func timestamp(_ text: String) -> Date? {
+        if let quick = zuluTimestamp(text) { return quick }
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text)
+    }
+
+    /// `YYYY-MM-DDTHH:MM:SSZ` or `YYYY-MM-DDTHH:MM:SS.sssZ`, and nothing else: every separator checked, every field a
+    /// digit, the day checked against the month's length, and the seconds proper (a leap second falls through). The
+    /// civil-days arithmetic is the standard one; UTC is the only zone this shape can name.
+    private static func zuluTimestamp(_ text: String) -> Date? {
+        let u = Array(text.utf8)
+        guard u.count == 20 || u.count == 24, u[u.count - 1] == UInt8(ascii: "Z") else { return nil }
+        guard u[4] == UInt8(ascii: "-"), u[7] == UInt8(ascii: "-"), u[10] == UInt8(ascii: "T"),
+              u[13] == UInt8(ascii: ":"), u[16] == UInt8(ascii: ":") else { return nil }
+        func digits(_ from: Int, _ length: Int) -> Int? {
+            var value = 0
+            for i in from..<(from + length) {
+                let d = Int(u[i]) - 48
+                guard (0...9).contains(d) else { return nil }
+                value = value * 10 + d
+            }
+            return value
+        }
+        guard let year = digits(0, 4), let month = digits(5, 2), let day = digits(8, 2),
+              let hour = digits(11, 2), let minute = digits(14, 2), let second = digits(17, 2) else { return nil }
+        var milli = 0
+        if u.count == 24 {
+            guard u[19] == UInt8(ascii: "."), let value = digits(20, 3) else { return nil }
+            milli = value
+        }
+        guard (1...12).contains(month), hour < 24, minute < 60, second < 60 else { return nil }
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+        let lengths = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        guard day >= 1, day <= lengths[month - 1] else { return nil }
+        // Days from 1970-01-01, shifting the year to start in March so a leap day is always last (Howard Hinnant's).
+        let y = year - (month <= 2 ? 1 : 0)
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        let days = era * 146_097 + doe - 719_468
+        let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second
+        return Date(timeIntervalSince1970: Double(seconds) + Double(milli) / 1000)
     }
 
     private func milliseconds(since start: Date) -> Int { Int(Date().timeIntervalSince(start) * 1000) }

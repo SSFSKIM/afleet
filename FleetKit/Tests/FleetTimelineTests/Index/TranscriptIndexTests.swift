@@ -105,8 +105,59 @@ final class TranscriptIndexTests: XCTestCase {
         let expectedSubagents = Set(try ["explore-depth-1", "nested-depth-2"].map { try XCTUnwrap(tree.fixtures[$0]).sessionID })
         XCTAssertEqual(withSubagents, expectedSubagents)
 
-        XCTAssertTrue(notices.notices.contains { if case .indexBuilt(let files, _) = $0 { return files == 17 } else { return false } },
+        XCTAssertTrue(notices.notices.contains { if case .indexBuilt(let files, _, _) = $0 { return files == 17 } else { return false } },
                       "one indexBuilt notice naming the seventeen files read: \(notices.notices)")
+    }
+
+    // MARK: - Symlinks under `projects/`
+
+    /// A symlinked slug directory is skipped and counted; a symlinked transcript inside a real slug is refused.
+    ///
+    /// Skipping the directory is parity, not an omission: the engine's own session lookup iterates `projects/` with
+    /// `withFileTypes` and drops any entry whose `Dirent.isDirectory()` is false (2.1.258 `cli.pretty.js:13753-13755`),
+    /// which a symlink's is, so a session reached only through one is a session the CLI itself cannot find. Refusing the
+    /// file is the reader's `O_NOFOLLOW`, which is the engine's `isFile()` check at line 13937. Both targets are real and
+    /// readable here — asserted before the build — so neither absence can be an accident of the tree.
+    func testASymlinkedSlugIsSkippedAndCountedAndASymlinkedTranscriptIsRefused() async throws {
+        let manager = FileManager.default
+        let temp = try TempTree()
+        let all = try FixtureCorpus.all()
+        let visible = try XCTUnwrap(all.first { $0.name == "plain-two-turn" })
+        let behindDirectory = try XCTUnwrap(all.first { $0.name == "control-shapes" })
+        let behindFile = try XCTUnwrap(all.first { $0.name == "exit-plan-mode" })
+        _ = try temp.add(visible, slug: "visible")
+
+        // A real directory outside `projects/`, holding a real transcript, reachable only through a symlinked slug.
+        let outside = temp.root.appendingPathComponent("outside", isDirectory: true)
+        try manager.createDirectory(at: outside, withIntermediateDirectories: true)
+        let staged = try temp.add(behindDirectory, slug: "staging")
+        try manager.moveItem(at: staged, to: outside.appendingPathComponent("\(behindDirectory.sessionID).jsonl"))
+        try manager.removeItem(at: temp.projects.appendingPathComponent("staging", isDirectory: true))
+        let symlinkedSlug = temp.projects.appendingPathComponent("symlinked-slug", isDirectory: true)
+        try manager.createSymbolicLink(at: symlinkedSlug, withDestinationURL: outside)
+
+        // A real transcript outside `projects/`, reachable only through a symlink named like a main transcript.
+        let stagedFile = try temp.add(behindFile, slug: "staging")
+        let outsideFile = temp.root.appendingPathComponent("outside-transcript.jsonl")
+        try manager.moveItem(at: stagedFile, to: outsideFile)
+        try manager.removeItem(at: temp.projects.appendingPathComponent("staging", isDirectory: true))
+        let symlinkedTranscript = temp.projects.appendingPathComponent("visible", isDirectory: true)
+            .appendingPathComponent("\(behindFile.sessionID).jsonl")
+        try manager.createSymbolicLink(at: symlinkedTranscript, withDestinationURL: outsideFile)
+
+        // Neither absence below may be an absent file: both symlinks resolve to something real and readable.
+        XCTAssertNotNil(try? Data(contentsOf: symlinkedSlug.appendingPathComponent("\(behindDirectory.sessionID).jsonl")),
+                        "the symlinked slug resolves to a directory holding a readable transcript")
+        XCTAssertNotNil(try? Data(contentsOf: symlinkedTranscript), "the symlinked transcript resolves to a readable file")
+
+        let notices = RecordingTimelineDiagnostics()
+        let snapshot = try await makeIndex(temp, diagnostics: notices).build()
+
+        XCTAssertEqual(Set(snapshot.entries.keys), [visible.sessionID],
+                       "only the transcript under a real slug is indexed; the two behind symlinks are not")
+        XCTAssertTrue(notices.notices.contains {
+            if case .indexBuilt(let files, let skipped, _) = $0 { return files == 1 && skipped == 1 } else { return false }
+        }, "one file read and one symlinked slug counted: \(notices.notices)")
     }
 
     // MARK: - The two title fallbacks no fixture reaches
