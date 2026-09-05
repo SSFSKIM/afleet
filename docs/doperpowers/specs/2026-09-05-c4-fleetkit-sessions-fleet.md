@@ -187,7 +187,7 @@ prompt), because the flag caps agentic turns inside one prompt, not prompts, and
 turn with a `result` of subtype `error_max_turns` at the limit (bundle 36222
 `turnCount`/`maxTurns`; C1's `exit-plan-mode` fixture records the subtype), which every
 scenario treats as a failure naming it; the suite's ceilings are four model turns (two
-reserved for adoption, two for the composed scenario) and ten minutes of wall time in total,
+reserved for adoption, two for the composed scenario) and twenty minutes of wall time in total,
 and the budget refuses a scenario that would cross either; C2's usage reader is consulted
 before the first scenario and again before each turn-spending one, and a spent window skips
 with its reason; every `result` frame any scenario observes has its `total_cost_usd` summed,
@@ -1377,6 +1377,24 @@ parent's §7.8.
   Rejected: leaving detection to the facade by synthesising a channel outside the table (it puts
   a state change where the diagnostics and the coverage gate cannot see it).
   Date/Author: 2026-09-06 / C4 Task 10 live gate, G5 finding 2.
+- Decision: the live suite's wall-time ceiling is twenty minutes, not ten, each scenario declares
+  at least the sum of its own bounded waits, and the ceiling accumulates actual elapsed time
+  rather than the declaration.
+  Rationale: found by the Task 10 re-review. Wall time is not the scarce resource — model turns
+  are, and `--max-turns` plus the four-turn ceiling bound those independently — but the ten-minute
+  figure was tight enough to do harm in two directions at once. Declaring honestly pushed the five
+  scenarios past ten minutes, so the composed scenario, the most valuable one and last in
+  alphabetical order, would have been refused on admission after adoption had already spent its
+  two turns; declaring optimistically meant the ceiling refused nothing at all, and once an
+  overrun became a failure it meant a scenario that passed every substantive assertion could be
+  reddened for being slow, with its turns already gone. Twenty minutes covers the observed actuals
+  with room, and a declaration that is a fact about the code rather than a guess makes the overrun
+  failure informative instead of arbitrary.
+  Rejected: keeping ten minutes and shortening the scenarios' internal deadlines (it trades a
+  budget problem for flakiness against a real engine under load); dropping the overrun failure and
+  relying on accumulation alone (accumulation self-corrects the ceiling but says nothing about a
+  scenario whose own waits have run away).
+  Date/Author: 2026-09-06 / C4 Task 10 re-review.
 
 ## Surprises & Discoveries
 
