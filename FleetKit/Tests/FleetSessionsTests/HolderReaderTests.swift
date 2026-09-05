@@ -36,10 +36,11 @@ final class HolderReaderTests: XCTestCase {
         super.tearDown()
     }
 
-    private func read(ownPIDs: Set<Int32> = [], verbs: CLIVerbs? = nil,
-                      agentsJSON: Bool = false) async -> HolderSnapshot {
-        await FileHolderReader(verbs: verbs, diagnostics: sink)
-            .read(configHome: home.configHome, ownPIDs: ownPIDs, includeAgentsJSON: agentsJSON)
+    private func read(ownPIDs: Set<Int32> = [], verbs: CLIVerbs? = nil, agentsJSON: Bool = false,
+                      startTime: @escaping ProcessLiveness.StartTimeReader = ProcessLiveness.startTime(of:),
+                      label: String = OwnershipLabel.poll) async -> HolderSnapshot {
+        await FileHolderReader(verbs: verbs, diagnostics: sink, startTime: startTime)
+            .read(configHome: home.configHome, ownPIDs: ownPIDs, includeAgentsJSON: agentsJSON, label: label)
     }
 
     /// A live pid and a never-live one, side by side. The dead record is ignored, never deleted.
@@ -156,6 +157,41 @@ final class HolderReaderTests: XCTestCase {
         XCTAssertEqual(holder.sources, [.registry, .roster])
         XCTAssertEqual(holder.jobShort, "j00001")
         XCTAssertTrue(holder.isJob)
+    }
+
+    /// `kill(pid, 0)` has already said the process is live; only the start-time read failed, so neither the token
+    /// nor the window can be compared against anything. Answering "not a holder" there is the unsafe direction —
+    /// these checks exist to *refuse* a spawn — so an unreadable live pid counts as a holder and says why it had to.
+    /// The refusal is injected through the start-time seam: no test touches a process it did not start.
+    func testALivePIDWhoseStartTimeCannotBeReadIsStillAHolder() async throws {
+        let pid = ScriptedHolderFiles.livePID
+        let session = SessionID()
+        try files.writeRegistry(pid: pid, sessionID: session, procStart: .correct)
+
+        let snapshot = await read(startTime: { _ in nil })
+
+        XCTAssertEqual(snapshot.holders.holders.map(\.pid), [pid], "an unreadable live pid is still a holder")
+        XCTAssertEqual(snapshot.holders.holders.map(\.sessionID), [session])
+        XCTAssertEqual(sink.pids(of: "start_time_unreadable"), [Int64(pid)], "and the fallback is diagnosed")
+        XCTAssertEqual(ProcessLiveness.evaluate(pid: pid, startedAt: nil, procStart: nil,
+                                                startTime: { _ in nil }),
+                       .liveByWindow(.startTimeUnreadable))
+        // A pid that is not running is still not running: `kill(pid, 0)` decides that, and no seam changes it.
+        XCTAssertEqual(ProcessLiveness.evaluate(pid: ScriptedHolderFiles.deadPID, startedAt: nil, procStart: nil,
+                                                startTime: { _ in nil }),
+                       .dead)
+    }
+
+    /// A roster worker whose start time cannot be read is a holder for the same reason, and the job it belongs to
+    /// stays live.
+    func testARosterWorkerWhoseStartTimeCannotBeReadIsStillAHolder() async throws {
+        let session = SessionID()
+        try files.writeJob(short: "j00001", state: "working", sessionID: session, pid: ScriptedHolderFiles.livePID)
+
+        let snapshot = await read(startTime: { _ in nil })
+
+        XCTAssertEqual(snapshot.holders.holders.map(\.jobShort), ["j00001"])
+        XCTAssertEqual(sink.pids(of: "start_time_unreadable"), [Int64(ScriptedHolderFiles.livePID)])
     }
 
     private func verbs() -> CLIVerbs {

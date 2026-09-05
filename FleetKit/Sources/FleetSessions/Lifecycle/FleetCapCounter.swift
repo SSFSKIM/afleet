@@ -18,7 +18,7 @@ public enum CapDecision: Sendable {
     case refused(live: Int)
 }
 
-/// What the evicting supervisor observed. Task 5 reports it through `evictionOutcome`.
+/// What the evicting supervisor observed, reported back through `evictionOutcome`.
 public enum EvictionOutcome: Hashable, Sendable { case evicted, victimWedged, victimBecameIneligible }
 
 /// The fleet-wide cap of six owned processes, as reservations.
@@ -38,6 +38,10 @@ public actor FleetCapCounter {
     private var wedged: Set<ChannelKey> = []
     /// Reservation id -> the victim that left `live` for it.
     private var pendingEvictions: [UUID: ChannelKey] = [:]
+    /// Every victim already named for a reservation. The eligibility a pick reads is a snapshot the supervisors
+    /// push, and a victim that re-evaluates itself as running at reap time goes back into `live` with that snapshot
+    /// unchanged; without this the same channel would be named again, and again.
+    private var attempted: [UUID: Set<ChannelKey>] = [:]
     private var eligibility: [ChannelKey: DormantEligibility.Verdict] = [:]
     private var lru: [ChannelKey: UInt64] = [:]
     private var activityClock: UInt64 = 0
@@ -52,26 +56,75 @@ public actor FleetCapCounter {
 
     /// Decided in one turn, with no suspension point inside it.
     public func acquire(for key: ChannelKey) -> CapDecision {
+        let r = Reservation(key: key)
+        reserved[r.id] = r
+        return pick(for: r)
+    }
+
+    /// The evicting supervisor's report on the victim it was named. Runs in one turn, like `acquire`.
+    ///
+    /// `.evicted` is the only outcome that frees anything: the slot the victim left becomes this reservation's, and
+    /// the spawn goes ahead. A wedged victim frees nothing — its ghost still holds the session — and an ineligible
+    /// one goes back where it came from; both re-run the pick against the same reservation, so the caller either
+    /// gets a second victim or a refusal, and never a slot nobody vacated.
+    @discardableResult
+    public func evictionOutcome(_ r: Reservation, _ outcome: EvictionOutcome) -> CapDecision {
+        let victim = pendingEvictions.removeValue(forKey: r.id)
+        if let victim { attempted[r.id, default: []].insert(victim) }
+        diagnostics.record(.evictionOutcome(outcome: String(describing: outcome),
+                                            victim: victim?.session.description ?? "-"))
+        switch outcome {
+        case .evicted:
+            // The victim's own `release` may have completed this eviction already; either way the slot is the
+            // reservation's now. A reservation that was rolled back in between is gone and answers a refusal.
+            guard reserved[r.id] != nil else { return refuse() }
+            diagnostics.record(.capDecision(decision: "granted", live: holdingCount, reserved: reserved.count))
+            return .granted(r)
+        case .victimWedged:
+            if let victim { wedged.insert(victim) }
+            return pick(for: r)
+        case .victimBecameIneligible:
+            if let victim { live.insert(victim) }
+            return pick(for: r)
+        }
+    }
+
+    /// Names the least recently used eligible live channel for a reservation already held, moves it out of `live` in
+    /// the same turn — so a concurrent `acquire` counts its slot and cannot pick it — or gives the reservation back.
+    private func pick(for r: Reservation) -> CapDecision {
         let occupied = live.count + reserved.count + wedged.count + pendingEvictions.count
-        if occupied < capacity {
-            let r = Reservation(key: key)
-            reserved[r.id] = r
-            diagnostics.record(.capDecision(decision: "granted", live: live.count, reserved: reserved.count))
+        if occupied <= capacity {
+            diagnostics.record(.capDecision(decision: "granted", live: holdingCount, reserved: reserved.count))
             return .granted(r)
         }
-        let candidates = live.filter { $0 != key && eligibility[$0]?.isEligible == true }
+        let alreadyTried = attempted[r.id] ?? []
+        let candidates = live.filter {
+            $0 != r.key && !alreadyTried.contains($0) && eligibility[$0]?.isEligible == true
+        }
         if let victim = candidates.min(by: { (lru[$0] ?? 0) < (lru[$1] ?? 0) }) {
-            let r = Reservation(key: key)
-            reserved[r.id] = r
             live.remove(victim)
             pendingEvictions[r.id] = victim
-            diagnostics.record(.capDecision(decision: "evict", live: live.count, reserved: reserved.count))
+            diagnostics.record(.capDecision(decision: "evict", live: holdingCount, reserved: reserved.count))
             return .evict(victim: victim, r)
         }
-        let count = live.count + wedged.count + pendingEvictions.count
-        diagnostics.record(.capDecision(decision: "refused", live: count, reserved: reserved.count))
+        reserved.removeValue(forKey: r.id)
+        attempted.removeValue(forKey: r.id)
+        return refuse()
+    }
+
+    /// Called once the refused caller's own reservation is gone, so the count is every slot somebody *else* holds:
+    /// a reservation another supervisor is spawning against is as occupied as a live process, which is what makes the
+    /// eighth open at the cap read six rather than the five processes it can see.
+    private func refuse() -> CapDecision {
+        let count = holdingCount + reserved.count
+        diagnostics.record(.capDecision(decision: "refused", live: holdingCount, reserved: reserved.count))
         return .refused(live: count)
     }
+
+    /// Every slot that holds, or is still holding, a process of ours: a live channel, a ghost, and a victim whose
+    /// eviction has not completed. This is the number a decision records as `live`, so "how many processes' worth of
+    /// slots does the fleet hold" is one field in every `capDecision` and never has to be reassembled.
+    private var holdingCount: Int { live.count + wedged.count + pendingEvictions.count }
 
     /// A clean handshake turns the reservation into a live slot.
     ///
@@ -79,6 +132,7 @@ public actor FleetCapCounter {
     /// when a fork learns its own session id, and the caller is still holding the provisional key. Inserting that
     /// would take a live slot under a key nothing will ever release.
     public func confirm(_ r: Reservation) {
+        attempted.removeValue(forKey: r.id)
         guard let stored = reserved.removeValue(forKey: r.id) else { return }
         live.insert(stored.key)
         if lru[stored.key] == nil { activityClock += 1; lru[stored.key] = activityClock }
@@ -87,6 +141,7 @@ public actor FleetCapCounter {
     /// Any failure between `acquire` and `confirm`: the reservation is dropped and a named victim returns to `live`.
     public func rollback(_ r: Reservation) {
         reserved.removeValue(forKey: r.id)
+        attempted.removeValue(forKey: r.id)
         if let victim = pendingEvictions.removeValue(forKey: r.id) { live.insert(victim) }
     }
 
@@ -108,8 +163,12 @@ public actor FleetCapCounter {
         eligibility[key] = verdict
     }
 
+    /// A ghost keeps its slot occupied. A victim that wedges *mid-eviction* already occupies one as a pending
+    /// eviction, so it is not counted a second time here: the evicting supervisor's `.victimWedged` report is what
+    /// moves it across, in one turn, and until then `live + reserved + wedged + pendingEvictions` still reads six.
     public func markWedged(_ key: ChannelKey) {
         live.remove(key)
+        guard !pendingEvictions.values.contains(key) else { return }
         wedged.insert(key)
     }
 
@@ -127,7 +186,7 @@ public actor FleetCapCounter {
 
     // MARK: - Reading
 
-    public var liveCount: Int { live.count + wedged.count + pendingEvictions.count }
+    public var liveCount: Int { holdingCount }
     public var occupiedCount: Int { live.count + reserved.count + wedged.count + pendingEvictions.count }
     public func isLive(_ key: ChannelKey) -> Bool { live.contains(key) }
     public func recency(of key: ChannelKey) -> UInt64? { lru[key] }

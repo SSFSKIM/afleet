@@ -12,8 +12,12 @@ public enum LifecycleTable {
         case jobAdopt, ownedSendToBackground, ownedOpenInTerminal, ownTabExited
         case foreignRecordGone, foreignSendRefused, handoffTimedOut, desiredObservedDisagree, contendedSettled
     }
-    /// Every path that calls `terminateOrWedge()`; the wedged row has one scenario per action so G1 injects the `nil` through each.
-    public enum TerminatingAction: String, CaseIterable, Hashable, Sendable { case reap, sendToBackground, openInTerminal, restart, logout, capEviction }
+    /// Every path that calls `terminateOrWedge()`; the wedged row has one scenario per action so G1 injects the `nil`
+    /// through each. `postHandshakeYield` is the yield the parent's "Owned, any" wedged row already covers — Owned-connecting
+    /// is one of the states "any" admits — and which this enumeration used to omit.
+    public enum TerminatingAction: String, CaseIterable, Hashable, Sendable {
+        case reap, sendToBackground, openInTerminal, restart, logout, capEviction, postHandshakeYield
+    }
     public enum Event: Hashable, Sendable {
         case opened, userSent, handshakeClean, handshakeFoundHolder, dormantTimerFired, holderAppeared
         case terminateReturnedNil(during: TerminatingAction), exitedNonZero, seventhSpawnNeeded, adopt, sendToBackground, openInTerminal
@@ -38,10 +42,20 @@ public enum LifecycleTable {
         .init(.dormantSent, .dormant, .userSent, .connecting),
         .init(.dormantHolderAppeared, .dormant, .holderAppeared, .foreignUsersTerminal),
         .init(.dormantHolderAppeared, .dormant, .holderAppeared, .backgroundJob),
-    ] + TerminatingAction.allCases.flatMap { action in
-        // A dormant channel holds no process; the actions that terminate run from ready (all six) or connecting (a restart or logout can catch a handshake).
-        [Transition(.terminateExhausted, .ready, .terminateReturnedNil(during: action), .wedged)]
-        + (action == .restart || action == .logout ? [Transition(.terminateExhausted, .connecting, .terminateReturnedNil(during: action), .wedged)] : [])
+    ] + TerminatingAction.allCases.flatMap { action -> [Transition] in
+        // A dormant channel holds no process, so the terminating actions run from ready; a restart or a logout can
+        // also catch a handshake, and the post-handshake yield fires *only* from connecting — `handshakeFoundHolder`
+        // exists nowhere else — so it is one scenario, before the contended/foreign branch, and never a ready one.
+        let event = Event.terminateReturnedNil(during: action)
+        switch action {
+        case .postHandshakeYield:
+            return [Transition(.terminateExhausted, .connecting, event, .wedged)]
+        case .restart, .logout:
+            return [Transition(.terminateExhausted, .ready, event, .wedged),
+                    Transition(.terminateExhausted, .connecting, event, .wedged)]
+        case .reap, .sendToBackground, .openInTerminal, .capEviction:
+            return [Transition(.terminateExhausted, .ready, event, .wedged)]
+        }
     } + [
         .init(.exitedNonZero, .ready, .exitedNonZero, .connecting),          // crash after ready: respawn with backoff
         .init(.exitedNonZero, .connecting, .exitedNonZero, .connecting),     // crash during the handshake: respawn with backoff

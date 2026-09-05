@@ -22,6 +22,8 @@ public enum FleetDiagnosticEvent: Sendable {
     case procStartAbsent(pid: Int32)
     /// Liveness fell back to the `startedAt` window because the record's `procStart` did not parse.
     case procStartUnparseable(pid: Int32)
+    /// `kill(pid, 0)` said live but `proc_pidinfo` refused, so the pid counts as a holder with nothing compared.
+    case startTimeUnreadable(pid: Int32)
     case capDecision(decision: String, live: Int, reserved: Int)
     case evictionOutcome(outcome: String, victim: String)
     case logout(step: String, count: Int)
@@ -69,6 +71,8 @@ public enum FleetDiagnosticEvent: Sendable {
             return .object(["event": .string("proc_start_absent"), "pid": .integer(Int64(pid))])
         case let .procStartUnparseable(pid):
             return .object(["event": .string("proc_start_unparseable"), "pid": .integer(Int64(pid))])
+        case let .startTimeUnreadable(pid):
+            return .object(["event": .string("start_time_unreadable"), "pid": .integer(Int64(pid))])
         case let .capDecision(decision, live, reserved):
             return .object(["event": .string("cap_decision"), "decision": .string(decision),
                             "live": .integer(Int64(live)), "reserved": .integer(Int64(reserved))])

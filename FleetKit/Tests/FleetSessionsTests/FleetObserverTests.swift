@@ -22,6 +22,22 @@ final class FleetObserverTests: XCTestCase {
         try await super.tearDown()
     }
 
+    /// The label travels as an argument from the check to the reader. It is what G1's spawn assertions read, so a
+    /// mechanism that could silently leave it blank would weaken the central safety property to nothing.
+    func testEveryReadCarriesTheLabelOfTheCheckItServes() async throws {
+        let recording = RecordingHolderReader(base: FileHolderReader(verbs: nil))
+        observer = FleetObserver(configHome: home.configHome, reader: recording, clock: clock, ownPIDs: { [] })
+
+        await observer.start()
+        await settle()
+        _ = await observer.reconcileNow(label: OwnershipLabel.beforeSpawn)
+        _ = await observer.reconcileNow()
+
+        XCTAssertEqual(recording.labels,
+                       [OwnershipLabel.poll, OwnershipLabel.beforeSpawn, OwnershipLabel.poll])
+        XCTAssertEqual(recording.checkLabels, [OwnershipLabel.beforeSpawn])
+    }
+
     private func start(verbs: CLIVerbs? = nil) async {
         observer = FleetObserver(configHome: home.configHome, reader: FileHolderReader(verbs: verbs),
                                  clock: clock, ownPIDs: { [] })

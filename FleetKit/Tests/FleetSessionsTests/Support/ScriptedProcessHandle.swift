@@ -20,6 +20,8 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
     private var _pid: Int32
     private var _session: SessionID?
     private var _spawnCount = 0
+    private var _terminateCount = 0
+    private var _spawnError: (any Error)?
 
     init(epoch: ProcessEpoch, session: SessionID?, pid: Int32 = 424_242,
          terminateReturns: TerminationReport = TerminationReport(exit: .code(0, stderrTail: ""), steps: [])) {
@@ -42,7 +44,15 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
     /// which removes `pendingInbound[id]` before it writes.
     var consumed: [RequestID] { lock.lock(); defer { lock.unlock() }; return _consumed }
     var spawnCount: Int { lock.lock(); defer { lock.unlock() }; return _spawnCount }
+    /// How many times this handle was asked to terminate. "Nothing terminated" is an assertion several rows make and
+    /// it is invisible in the state.
+    var terminateCount: Int { lock.lock(); defer { lock.unlock() }; return _terminateCount }
 
+    /// Makes `spawn` throw, which is how a test parks a channel in connecting with no process and no handshake.
+    var spawnError: (any Error)? {
+        get { lock.lock(); defer { lock.unlock() }; return _spawnError }
+        set { lock.lock(); _spawnError = newValue; lock.unlock() }
+    }
     var answerError: (any Error)? {
         get { lock.lock(); defer { lock.unlock() }; return _answerError }
         set { lock.lock(); _answerError = newValue; lock.unlock() }
@@ -67,7 +77,8 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
     var sessionID: SessionID? { get async { locked { _session } } }
 
     func spawn(handshakeTimeout: Duration) async throws -> Handshake {
-        locked { _spawnCount += 1 }
+        let failure = locked { () -> (any Error)? in _spawnCount += 1; return _spawnError }
+        if let failure { throw failure }
         return Handshake(initialize: InitializeResponse(raw: .object([:])), pending: [])
     }
 
@@ -91,7 +102,7 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
         if let failure { throw failure }
     }
 
-    func terminate() async -> TerminationReport { locked { _terminateReturns } }
+    func terminate() async -> TerminationReport { locked { _terminateCount += 1; return _terminateReturns } }
 }
 
 /// What a test scripts an answer write to fail with.

@@ -4,6 +4,10 @@ import AfleetCore
 import ClaudeWire
 @testable import FleetSessions
 
+struct ScriptedSpawnFailure: Error, CustomStringConvertible {
+    var description: String { "the scripted handle refused to spawn" }
+}
+
 /// The eligibility inputs a test can change while a channel runs: the mirror reading, the last task frame's age and
 /// the heartbeat. Everything else in `DormantEligibility.Input` is the supervisor's own count and it overrides these.
 final class EligibilityBox: @unchecked Sendable {   // `lock` serialises every field
@@ -47,8 +51,33 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     let observer: FleetObserver
     let fleet: FleetCapCounter
     let cwd: URL
+    let runnerCalls: ScriptedProcessRunner.Recorder
+    let verbs: CLIVerbs
+    let store: FileStateStore
+    private let storeDirectory: URL
+    /// The `OwnershipCheck` seam every supervisor this rig builds shares: it runs once a release has been observed
+    /// and before the caller's recheck, which is the window the preempt rows are about.
+    var onReleased: (@Sendable () async -> Void)? {
+        get { locked { _onReleased } }
+        set { lock.lock(); _onReleased = newValue; lock.unlock() }
+    }
 
     private let lock = NSLock()
+    private var _onReleased: (@Sendable () async -> Void)?
+    private var _byKey: [ChannelKey: ChannelSupervisor] = [:]
+    private var _helpers: [Int32: Process] = [:]
+    private var _mirrored: [Int32: Task<Void, Never>] = [:]
+    private var _reapers: [DispatchSemaphore] = []
+    private var _heldVictim: ChannelKey?
+    private var _heldEviction: [CheckedContinuation<Void, Never>] = []
+    private var _extraOwnPIDs: Set<Int32> = []
+
+    /// Pids the fleet counts as its own beside its live children. A holder that is ours is Contended rather than
+    /// foreign live, and this is the one fact that decides it; a test that needs that branch claims a pid here.
+    var extraOwnPIDs: Set<Int32> {
+        get { locked { _extraOwnPIDs } }
+        set { lock.lock(); _extraOwnPIDs = newValue; lock.unlock() }
+    }
     private var _launches: [LaunchConfiguration] = []
     private var _liveHandles: [LiveProcessHandle] = []
     private var _scriptedHandles: [ScriptedProcessHandle] = []
@@ -56,6 +85,7 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     private var _published: [ObjectIdentifier: [ChannelState]] = [:]
     private var _scriptedTermination: TerminationReport?
     private var _useScripted = false
+    private var _scriptedSpawnError: (any Error)?
     private var tasks: [Task<Void, Never>] = []
 
     /// A rig with its own diagnostics sink, or one sharing another rig's so a two-rig test still asserts one
@@ -69,10 +99,15 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
 
         let runner = ScriptedProcessRunner(rules: ScriptedProcessRunner.defaultRules(files))
-        let verbs = CLIVerbs(runner: runner, binary: FakeClaudeLaunch.binary, configHome: home.configHome,
-                             environment: [:], diagnostics: diagnostics)
+        runnerCalls = runner.calls
+        verbs = CLIVerbs(runner: runner, binary: FakeClaudeLaunch.binary, configHome: home.configHome,
+                         environment: [:], diagnostics: diagnostics)
         reader = RecordingHolderReader(base: FileHolderReader(verbs: verbs, diagnostics: diagnostics))
         fleet = FleetCapCounter(diagnostics: diagnostics)
+        // Outside every config home, which is what the store's one validating initialiser insists on.
+        storeDirectory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appending(path: "afleet-c4-store-\(UUID().uuidString)")
+        store = try FileStateStore(baseDirectory: storeDirectory, configHomes: [home.url])
 
         let box = OwnPIDBox()
         observer = FleetObserver(configHome: home.configHome, reader: reader, clock: clock,
@@ -85,7 +120,7 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         weak var rig: Rig?
         func pids() async -> Set<Int32> {
             guard let rig else { return [] }
-            var out: Set<Int32> = []
+            var out = rig.extraOwnPIDs
             for supervisor in rig.supervisors { if let pid = await supervisor.livePID() { out.insert(pid) } }
             return out
         }
@@ -112,17 +147,153 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         return _published[ObjectIdentifier(supervisor)] ?? []
     }
 
-    /// Swaps the factory for one that hands out a fresh `ScriptedProcessHandle` per spawn.
-    func useScriptedHandle(terminateReturns: TerminationReport) {
+    /// Swaps the factory for one that hands out a fresh `ScriptedProcessHandle` per spawn. The report each handle
+    /// starts with can be changed afterwards, per handle, which is how one channel of six wedges.
+    func useScriptedHandle(terminateReturns: TerminationReport = TerminationReport(exit: .code(0, stderrTail: ""),
+                                                                                   steps: [])) {
         lock.lock(); _useScripted = true; _scriptedTermination = terminateReturns; lock.unlock()
+    }
+
+    func supervisor(for key: ChannelKey) -> ChannelSupervisor? { locked { _byKey[key] } }
+
+    /// Scripted handles built from now on spawn normally again.
+    func clearScriptedSpawnFailure() { lock.lock(); _scriptedSpawnError = nil; lock.unlock() }
+
+    /// Every scripted handle built from now on throws out of `spawn`, which parks a channel in connecting with no
+    /// process — the state a channel is genuinely in between `open()` and a handshake.
+    func failScriptedSpawns(with error: any Error = ScriptedSpawnFailure()) {
+        lock.lock(); _scriptedSpawnError = error; lock.unlock()
+    }
+
+    // MARK: - Real processes the test started
+
+    /// A real child of the test, standing in for a job worker or a terminal tab: a pid that can genuinely die, which
+    /// is what `awaitRelease` waits for. `/bin/sleep` is started and reaped by this rig and nothing else.
+    @discardableResult
+    func startHelper() throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sleep")
+        process.arguments = ["3600"]
+        try process.run()
+        let pid = process.processIdentifier
+        lock.lock(); _helpers[pid] = process; lock.unlock()
+        return pid
+    }
+
+    /// Signals the helper and *reaps* it: a zombie still answers `kill(pid, 0)`, so a release wait would never end.
+    ///
+    /// The reap runs off the caller's thread. This is called from inside a holder read, and a read runs on the
+    /// cooperative pool; blocking one of its threads on `waitUntilExit` starves whatever else the wait needs.
+    func killHelper(_ pid: Int32) {
+        lock.lock(); let process = _helpers.removeValue(forKey: pid); lock.unlock()
+        guard let process else { return }
+        if process.isRunning { process.terminate() }
+        let reaped = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { process.waitUntilExit(); reaped.signal() }
+        lock.lock(); _reapers.append(reaped); lock.unlock()
+    }
+
+    /// Waits for every helper this rig killed to have been reaped, so teardown leaves no zombie behind.
+    private func awaitReapers() {
+        lock.lock(); let reapers = _reapers; _reapers = []; lock.unlock()
+        for reaper in reapers { _ = reaper.wait(timeout: .now() + .seconds(10)) }
+    }
+
+    /// Stands in for what the real CLI does with its own registry record: writes `sessions/<pid>.json` for a child of
+    /// ours and removes it once that pid is gone. `fake-claude` writes no record, so the rig writes one for it.
+    func mirrorOwnRegistryRecord(pid: Int32, session: SessionID) throws {
+        try files.writeRegistry(pid: pid, sessionID: session, kind: "interactive", entrypoint: "sdk-cli")
+        let files = self.files
+        let task = Task.detached {
+            while !Task.isCancelled {
+                if !ProcessLiveness.isRunning(pid: pid) { files.removeRegistry(pid: pid); return }
+                try? await Task.sleep(for: .milliseconds(3))
+            }
+        }
+        lock.lock(); _mirrored[pid] = task; lock.unlock()
+    }
+
+    // MARK: - Holding an eviction open
+
+    /// Parks the evicting supervisor between the victim's observed outcome and its report of it, so a test can run
+    /// another decision while one eviction is still pending.
+    func holdEviction(of victim: ChannelKey) { lock.lock(); _heldVictim = victim; lock.unlock() }
+
+    func releaseEviction() {
+        lock.lock()
+        _heldVictim = nil
+        let waiting = _heldEviction
+        _heldEviction = []
+        lock.unlock()
+        for continuation in waiting { continuation.resume() }
+    }
+
+    /// True once the evicting supervisor is actually parked, so a test never races the barrier it means to hold.
+    var evictionIsHeld: Bool { locked { !_heldEviction.isEmpty } }
+
+    private func barrier(for victim: ChannelKey) async {
+        let held = locked { _heldVictim == victim }
+        guard held else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            guard _heldVictim == victim else { lock.unlock(); continuation.resume(); return }
+            _heldEviction.append(continuation)
+            lock.unlock()
+        }
+    }
+
+    // MARK: - Moving the manual clock while something waits on it
+
+    /// Steps the manual clock in the release wait's own 500 ms poll interval while `body` runs, up to `limit` of test
+    /// time, so a clock-driven wait makes progress. Nothing here sleeps on wall time to move the lifecycle: every
+    /// step is the test moving the clock, and the wall-clock race is only a failure guard.
+    func steppingClock<T: Sendable>(upTo limit: Duration = .seconds(5),
+                                    file: StaticString = #filePath, line: UInt = #line,
+                                    _ body: @escaping @Sendable () async throws -> T) async throws -> T {
+        let done = LockedFlag()
+        let clock = self.clock
+        let interval = OwnershipCheck.releasePollInterval
+        let stepper = Task {
+            var stepped = Duration.zero
+            while !done.value && stepped < limit {
+                // Only a parked sleeper is stepped past, so `limit` counts the wait's own polls and not the wall
+                // time this loop happened to spend: ten seconds of limit is exactly the ten-second handoff budget,
+                // and a budget any larger than that does not expire.
+                guard clock.sleeperCount(due: interval) >= 1 else {
+                    try? await Task.sleep(for: .milliseconds(1))
+                    continue
+                }
+                await clock.advance(by: interval)
+                stepped += interval
+            }
+        }
+        let work = Task { try await body() }
+        // A wall-clock guard, not a race: whatever `body` throws is what the caller sees, so a break shows up as the
+        // error the code produced rather than as a timeout.
+        let watchdog = Task {
+            try? await Task.sleep(for: .seconds(60))
+            guard !Task.isCancelled, !done.value else { return }
+            XCTFail("the clock-stepped call never returned", file: file, line: line)
+            work.cancel()
+        }
+        defer { done.set(); stepper.cancel(); watchdog.cancel() }
+        return try await work.value
+    }
+
+    final class LockedFlag: @unchecked Sendable {   // `lock` serialises `flag`
+        private let lock = NSLock()
+        private var flag = false
+        var value: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+        func set() { lock.lock(); flag = true; lock.unlock() }
     }
 
     // MARK: - Building supervisors
 
     @discardableResult
     func supervisor(session: SessionID, fixture: String = "resume-no-replay", isRecent: Bool = true,
-                    origin: ChannelOrigin = .archived, speed: Double = 50, dropFixture: Bool = false,
-                    eligibility: EligibilityBox = EligibilityBox(), records: Bool = true) -> ChannelSupervisor {
+                    origin: ChannelOrigin = .archived, desired: DesiredOwnership = .none, speed: Double = 50,
+                    dropFixture: Bool = false, eligibility: EligibilityBox = EligibilityBox(),
+                    records: Bool = true) -> ChannelSupervisor {
         let environment: ResolvedEnvironment = {
             var e = FakeClaudeLaunch.environment(fixture: fixture, speed: speed)
             if dropFixture { e.variables["FAKE_CLAUDE_FIXTURE"] = nil }
@@ -138,13 +309,22 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
                 guard let self else { fatalError("the rig went away while a supervisor was still spawning") }
                 return self.makeHandle(epoch: epoch, launch: launch, environment: environment, session: session)
             },
-            ownership: OwnershipCheck(observer: observer, clock: clock, diagnostics: sink),
+            ownership: OwnershipCheck(observer: observer, clock: clock, diagnostics: sink,
+                                      onReleased: { [weak self] in await self?.onReleased?() }),
             observer: observer, clock: clock,
             eligibilityInputs: { eligibility.input() },
-            fleet: fleet, diagnostics: sink, isRecent: isRecent, initialOrigin: origin)
+            fleet: fleet, diagnostics: sink, isRecent: isRecent,
+            environment: environment, configHome: home.configHome, verbs: verbs, store: store,
+            evictVictim: { [weak self] victim in
+                guard let target = self?.supervisor(for: victim) else { return .victimBecameIneligible }
+                return await target.evict()
+            },
+            evictionBarrier: { [weak self] victim in await self?.barrier(for: victim) },
+            initialOrigin: origin, initialDesired: desired)
 
         lock.lock()
         _supervisors.append(supervisor)
+        _byKey[key] = supervisor
         lock.unlock()
 
         let id = ObjectIdentifier(supervisor)
@@ -168,12 +348,14 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         _launches.append(launch)
         let scripted = _useScripted
         let termination = _scriptedTermination ?? TerminationReport(exit: .code(0, stderrTail: ""), steps: [])
+        let spawnError = _scriptedSpawnError
         lock.unlock()
 
         if scripted {
             let handle = ScriptedProcessHandle(epoch: epoch, session: session,
                                                pid: 400_000 + Int32(epoch.rawValue),
                                                terminateReturns: termination)
+            handle.spawnError = spawnError
             lock.lock(); _scriptedHandles.append(handle); lock.unlock()
             return handle
         }
@@ -216,6 +398,21 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         }
         XCTFail("timed out waiting for \(description); state was \(await supervisor.state.origin)",
                 file: file, line: line)
+        struct Timeout: Error {}
+        throw Timeout()
+    }
+
+    /// Waits for any condition the test can read, on wall time. It moves no part of the lifecycle: only the manual
+    /// clock does that, and this is how a test waits for work already in flight to reach a point it can observe.
+    func waitFor(_ description: String, timeout: Duration = .seconds(30),
+                 file: StaticString = #filePath, line: UInt = #line,
+                 _ predicate: @Sendable () async -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if await predicate() { return }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        XCTFail("timed out waiting for \(description)", file: file, line: line)
         struct Timeout: Error {}
         throw Timeout()
     }
@@ -268,6 +465,32 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         for supervisor in supervisors { await supervisor.drainActivity() }
     }
 
+    /// Pushes one engine frame into a scripted channel and waits until the fleet's activity clock has stamped it.
+    /// Recency is driven through the supervisor, never by assigning a value, and one frame at a time is what makes
+    /// the order of the stamps the order of the frames rather than the order the pump happened to drain them in.
+    func pushFrameAndAwaitStamp(_ handle: ScriptedProcessHandle, of supervisor: ChannelSupervisor,
+                                file: StaticString = #filePath, line: UInt = #line) async throws {
+        let before = await fleet.recency(of: supervisor.key)
+        handle.push(.frame(.keepAlive, handle.epoch))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        while ContinuousClock.now < deadline {
+            if await fleet.recency(of: supervisor.key) != before {
+                await supervisor.drainActivity()
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        XCTFail("the activity clock never stamped the frame", file: file, line: line)
+        struct Timeout: Error {}
+        throw Timeout()
+    }
+
+    /// The environment the rig hands every child of this fixture, so a test can recompose a pane request's
+    /// environment from the same inputs the supervisor used.
+    func environment(fixture: String, speed: Double = 50) -> ResolvedEnvironment {
+        FakeClaudeLaunch.environment(fixture: fixture, speed: speed)
+    }
+
     /// The arrange/act boundary: everything the test had to build before it could drive its own row is forgotten,
     /// so `assertObserved` still compares exactly.
     func forgetTransitions() { diagnostics.forgetTransitions() }
@@ -287,10 +510,16 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     }
 
     func tearDown() async {
+        releaseEviction()
         for supervisor in supervisors { await supervisor.reap() }
         await observer.stop()
         for task in tasks { task.cancel() }
+        let (mirrors, helpers) = locked { (Array(_mirrored.values), Array(_helpers.keys)) }
+        for mirror in mirrors { mirror.cancel() }
+        for pid in helpers { killHelper(pid) }
+        awaitReapers()
         home.removeAll()
         try? FileManager.default.removeItem(at: cwd)
+        try? FileManager.default.removeItem(at: storeDirectory)
     }
 }

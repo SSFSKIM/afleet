@@ -2,7 +2,7 @@ import Foundation
 import AfleetCore
 @testable import FleetSessions
 
-/// Wraps `FileHolderReader` and records every read with the label the ownership check set on `OwnershipLabel`
+/// Wraps `FileHolderReader` and records every read with the label the ownership check passed
 /// (`beforeSpawn`, `afterHandshake`, `release`) or `poll` when no check did, so a test can assert the sequence
 /// `[beforeSpawn, afterHandshake]` around a spawn by set and by order.
 ///
@@ -18,6 +18,7 @@ final class RecordingHolderReader: HolderReader, @unchecked Sendable {   // `loc
     }
 
     private let base: FileHolderReader
+
     private let lock = NSLock()
     private var _calls: [Call] = []
     private var hooks: [(label: String, once: Bool, body: @Sendable () -> Void)] = []
@@ -42,11 +43,12 @@ final class RecordingHolderReader: HolderReader, @unchecked Sendable {   // `loc
         locked { hidden.append((label, pid, once)) }
     }
 
-    func read(configHome: ConfigHome, ownPIDs: Set<Int32>, includeAgentsJSON: Bool) async -> HolderSnapshot {
-        let label = OwnershipLabel.current ?? OwnershipLabel.poll
+    func read(configHome: ConfigHome, ownPIDs: Set<Int32>, includeAgentsJSON: Bool,
+              label: String) async -> HolderSnapshot {
         locked { _calls.append(Call(label: label, includeAgentsJSON: includeAgentsJSON, ownPIDs: ownPIDs)) }
 
-        var snapshot = await base.read(configHome: configHome, ownPIDs: ownPIDs, includeAgentsJSON: includeAgentsJSON)
+        var snapshot = await base.read(configHome: configHome, ownPIDs: ownPIDs,
+                                       includeAgentsJSON: includeAgentsJSON, label: label)
 
         let (pids, due) = locked { () -> (Set<Int32>, [(label: String, once: Bool, body: @Sendable () -> Void)]) in
             let pids = Set(hidden.filter { $0.label == label }.map(\.pid))

@@ -7,7 +7,12 @@ import Darwin
 /// `daemon/roster.json`), and so does afleet, because a reused pid must never look like a holder.
 public enum ProcessLiveness {
     /// Why the sixty-second window had to decide instead of the token.
-    public enum Fallback: Hashable, Sendable { case procStartAbsent, procStartUnparseable }
+    public enum Fallback: Hashable, Sendable {
+        case procStartAbsent, procStartUnparseable
+        /// `kill(pid, 0)` said the process is live but `proc_pidinfo` would not describe it, so no comparison of
+        /// any kind could be made.
+        case startTimeUnreadable
+    }
 
     public enum Verdict: Hashable, Sendable {
         /// No such process.
@@ -44,15 +49,28 @@ public enum ProcessLiveness {
     /// runs of spaces: within one second is `.live`, anything else `.startMismatch`. Only when `procStart` is absent
     /// or does not parse does the sixty-second window around `startedAt` (milliseconds since the epoch) decide.
     public static func evaluate(pid: Int32, startedAt: Double?, procStart: String?,
-                                window: Duration = .seconds(60)) -> Verdict {
-        evaluateInDetail(pid: pid, startedAt: startedAt, procStart: procStart, window: window).verdict
+                                window: Duration = .seconds(60),
+                                startTime: StartTimeReader = ProcessLiveness.startTime(of:)) -> Verdict {
+        evaluateInDetail(pid: pid, startedAt: startedAt, procStart: procStart, window: window,
+                         startTime: startTime).verdict
     }
+
+    /// How the evaluation learns a pid's start time. Production is `ProcessLiveness.startTime(of:)`; a test injects
+    /// one that refuses, which is the only way to exercise a `proc_pidinfo` refusal without touching a process the
+    /// test did not start.
+    public typealias StartTimeReader = @Sendable (Int32) -> Date?
 
     /// The same answer with the fallback named, for the reader's diagnostics.
     public static func evaluateInDetail(pid: Int32, startedAt: Double?, procStart: String?,
-                                        window: Duration = .seconds(60)) -> Evaluation {
-        guard pid > 0, exists(pid: pid) else { return Evaluation(verdict: .dead) }
-        guard let actual = startTime(of: pid) else { return Evaluation(verdict: .unverifiable) }
+                                        window: Duration = .seconds(60),
+                                        startTime: StartTimeReader = ProcessLiveness.startTime(of:)) -> Evaluation {
+        guard pid > 0, isRunning(pid: pid) else { return Evaluation(verdict: .dead) }
+        // `kill(pid, 0)` has already said this process is live; only the start-time read failed, so neither the
+        // token nor the window can be compared against anything. The checks exist to *refuse* a spawn, so an
+        // unreadable live pid counts as a holder — the safe direction — and says why it had to.
+        guard let actual = startTime(pid) else {
+            return Evaluation(verdict: .liveByWindow(.startTimeUnreadable), fallback: .startTimeUnreadable)
+        }
         if let token = procStart?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
             if let parsed = parse(token: token) {
                 let matches = abs(parsed.timeIntervalSince1970 - actual.timeIntervalSince1970) <= 1
@@ -68,8 +86,9 @@ public enum ProcessLiveness {
     }
 
     public static func isLive(pid: Int32, startedAt: Double?, procStart: String?,
-                              window: Duration = .seconds(60)) -> Bool {
-        evaluate(pid: pid, startedAt: startedAt, procStart: procStart, window: window).isLive
+                              window: Duration = .seconds(60),
+                              startTime: StartTimeReader = ProcessLiveness.startTime(of:)) -> Bool {
+        evaluate(pid: pid, startedAt: startedAt, procStart: procStart, window: window, startTime: startTime).isLive
     }
 
     /// The process's own start time, or nil when the kernel will not describe it.
@@ -109,7 +128,8 @@ public enum ProcessLiveness {
         return f
     }
 
-    private static func exists(pid: Int32) -> Bool {
+    /// `kill(pid, 0)` succeeding, or failing with `EPERM`, both mean a live process; anything else is dead.
+    public static func isRunning(pid: Int32) -> Bool {
         if kill(pid, 0) == 0 { return true }
         return errno == EPERM
     }
@@ -144,20 +164,31 @@ public struct HolderSnapshot: Sendable {
 public protocol HolderReader: Sendable {
     /// Every holder under the config home right now: registry, roster+jobs, and (when `includeAgentsJSON`) the
     /// CLI listing, reconciled by pid into one holder each.
-    func read(configHome: ConfigHome, ownPIDs: Set<Int32>, includeAgentsJSON: Bool) async -> HolderSnapshot
+    ///
+    /// `label` names the check this read is serving — `beforeSpawn`, `afterHandshake`, `release`, or `poll` for the
+    /// observer's own. It is an explicit parameter rather than ambient context because the label assertions are how
+    /// G1 proves the ownership checks ran around every spawn, and a mechanism that can silently blank them is not
+    /// good enough for that.
+    func read(configHome: ConfigHome, ownPIDs: Set<Int32>, includeAgentsJSON: Bool,
+              label: String) async -> HolderSnapshot
 }
 
 /// The real reader: three sources off the filesystem and the CLI, reconciled by pid.
 public struct FileHolderReader: HolderReader {
     private let verbs: CLIVerbs?
     private let diagnostics: any FleetDiagnosticsSink
+    private let startTime: ProcessLiveness.StartTimeReader
 
     /// `verbs: nil` never runs `agents --json`, whatever the caller asks for; the sink receives the liveness fallbacks.
-    public init(verbs: CLIVerbs?, diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics()) {
-        self.verbs = verbs; self.diagnostics = diagnostics
+    /// `startTime` is the seam a test uses to make `proc_pidinfo` refuse.
+    public init(verbs: CLIVerbs?, diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics(),
+                startTime: @escaping ProcessLiveness.StartTimeReader = ProcessLiveness.startTime(of:)) {
+        self.verbs = verbs; self.diagnostics = diagnostics; self.startTime = startTime
     }
 
-    public func read(configHome: ConfigHome, ownPIDs: Set<Int32>, includeAgentsJSON: Bool) async -> HolderSnapshot {
+    public func read(configHome: ConfigHome, ownPIDs: Set<Int32>, includeAgentsJSON: Bool,
+                     label: String = OwnershipLabel.poll) async -> HolderSnapshot {
+        _ = label
         var skipped = 0
         var byPID: [Int32: Holder] = [:]
 
@@ -165,12 +196,13 @@ public struct FileHolderReader: HolderReader {
         for record in registryRecords(under: configHome, skipped: &skipped) {
             guard let session = SessionID(record.sessionId) else { skipped += 1; continue }
             let evaluation = ProcessLiveness.evaluateInDetail(pid: record.pid, startedAt: record.startedAt,
-                                                              procStart: record.procStart)
+                                                              procStart: record.procStart, startTime: startTime)
             // The fallback is diagnosed whenever it was taken, live or not: "the token was missing and the window
             // said no" is exactly as much of a warning as "the window said yes".
             switch evaluation.fallback {
             case .procStartAbsent: diagnostics.record(.procStartAbsent(pid: record.pid))
             case .procStartUnparseable: diagnostics.record(.procStartUnparseable(pid: record.pid))
+            case .startTimeUnreadable: diagnostics.record(.startTimeUnreadable(pid: record.pid))
             case nil: break
             }
             guard evaluation.verdict.isLive else { continue }
@@ -187,7 +219,10 @@ public struct FileHolderReader: HolderReader {
         let roster = RosterRecord.decode(contents(of: configHome.root.appending(path: "daemon/roster.json")) ?? Data())
         for (short, worker) in roster?.workers ?? [:] {
             guard let pid = worker.pid else { continue }
-            guard ProcessLiveness.evaluate(pid: pid, startedAt: nil, procStart: worker.procStart).isLive else { continue }
+            let evaluation = ProcessLiveness.evaluateInDetail(pid: pid, startedAt: nil,
+                                                              procStart: worker.procStart, startTime: startTime)
+            if evaluation.fallback == .startTimeUnreadable { diagnostics.record(.startTimeUnreadable(pid: pid)) }
+            guard evaluation.verdict.isLive else { continue }
             if var merged = byPID[pid] {
                 // The same worker seen twice: keep both sources, and take the roster's short so the resolver reads
                 // a conversation job as a job and never as a foreign terminal.
@@ -227,7 +262,8 @@ public struct FileHolderReader: HolderReader {
                     continue
                 }
                 guard let pid = row.pid, let id = row.sessionId, let session = SessionID(id),
-                      ProcessLiveness.isLive(pid: pid, startedAt: row.startedAt, procStart: nil) else { continue }
+                      ProcessLiveness.isLive(pid: pid, startedAt: row.startedAt, procStart: nil,
+                                             startTime: startTime) else { continue }
                 byPID[pid] = Holder(pid: pid, sessionID: session, sources: [.agentsJSON], kind: row.kind,
                                     entrypoint: nil, jobShort: row.id, isOwnChild: ownPIDs.contains(pid),
                                     presence: presence(status: row.status, waitingFor: row.waitingFor, name: row.name))

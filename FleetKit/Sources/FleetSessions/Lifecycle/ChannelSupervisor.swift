@@ -39,6 +39,19 @@ public actor ChannelSupervisor {
     private let fleet: FleetCapCounter
     private let diagnostics: any FleetDiagnosticsSink
     private let handshakeTimeout: Duration
+    /// The environment every child and every pane request is composed over, so a hatch resumes under exactly the
+    /// environment the owned process ran in.
+    private let environment: ResolvedEnvironment
+    private let configHome: ConfigHome
+    private let verbs: CLIVerbs
+    /// Where the shorts afleet itself sent to the background are remembered (`FleetKitKeys.ownJobShorts`).
+    private let store: (any StateStore)?
+    /// Reaps the channel the cap counter named and answers what it observed. The facade routes it to that
+    /// supervisor's `evict()`; the default frees nothing, which is the safe answer for a fleet with no router yet.
+    private let evictVictim: @Sendable (ChannelKey) async -> EvictionOutcome
+    /// Awaited between the victim's observed outcome and the report of it. Nothing in production; the rig parks here
+    /// to hold an eviction open while another decision runs.
+    private let evictionBarrier: @Sendable (ChannelKey) async -> Void
 
     /// Whether this channel counts as recently active, which is what tells `archivedRecent` from `archivedOlder`.
     /// It is held here rather than derived inside `ChannelState` because it is the supervisor's own fact: C3's index
@@ -46,6 +59,8 @@ public actor ChannelSupervisor {
     private var isRecent: Bool
 
     public private(set) var state: ChannelState
+    /// The hatch this channel is waiting on an exit for, matched by `id` and never by value.
+    public var pendingPaneRequest: PaneRequest? { pendingHatch }
     /// Zero until the first spawn, which takes `ProcessEpoch.first`; every later spawn takes `.next()`. No event can
     /// carry epoch zero, so the pump's "discard anything older" filter is correct before there is a process.
     private var epoch = ProcessEpoch(rawValue: 0)
@@ -53,6 +68,9 @@ public actor ChannelSupervisor {
     private var turnRunning = false
     private var queuedInput: [UserInput] = []
     private var pendingHatch: PaneRequest?
+    /// Where the channel was when it became Contended, so a holder set that settles to nothing goes back there
+    /// rather than to a state the table would refuse.
+    private var contendedFrom: LifecycleTable.StateName?
     private var crashCount = 0
     private var wasReadyInThisSeries = false
     /// The epochs this supervisor deliberately ended. Keyed on the epoch and not on a flag held across one `await`,
@@ -77,17 +95,26 @@ public actor ChannelSupervisor {
     public static let dormantAfter = Duration.seconds(1800)
     /// Three attempts, then the system item.
     public static let backoffs: [Duration] = [.seconds(1), .seconds(2), .seconds(4)]
+    /// Rule 5's quiescent handoff budget: past it the channel is Contended.
+    public static let handoffBudget = Duration.seconds(10)
 
     public init(key: ChannelKey, launchTemplate: LaunchConfiguration, factory: @escaping ProcessFactory,
                 ownership: OwnershipCheck, observer: FleetObserver, clock: any Clock<Duration>,
                 eligibilityInputs: @escaping @Sendable () async -> DormantEligibility.Input,
                 fleet: FleetCapCounter, diagnostics: any FleetDiagnosticsSink, isRecent: Bool,
-                initialOrigin: ChannelOrigin = .archived, handshakeTimeout: Duration = .seconds(30)) {
+                environment: ResolvedEnvironment, configHome: ConfigHome, verbs: CLIVerbs,
+                store: (any StateStore)? = nil,
+                evictVictim: @escaping @Sendable (ChannelKey) async -> EvictionOutcome = { _ in .victimBecameIneligible },
+                evictionBarrier: @escaping @Sendable (ChannelKey) async -> Void = { _ in },
+                initialOrigin: ChannelOrigin = .archived, initialDesired: DesiredOwnership = .none,
+                handshakeTimeout: Duration = .seconds(30)) {
         self.key = key; self.launchTemplate = launchTemplate; self.factory = factory
         self.ownership = ownership; self.observer = observer; self.clock = clock
         self.eligibilityInputs = eligibilityInputs; self.fleet = fleet; self.diagnostics = diagnostics
         self.isRecent = isRecent; self.handshakeTimeout = handshakeTimeout
-        self.state = ChannelState(key: key, origin: initialOrigin, desired: .none,
+        self.environment = environment; self.configHome = configHome; self.verbs = verbs; self.store = store
+        self.evictVictim = evictVictim; self.evictionBarrier = evictionBarrier
+        self.state = ChannelState(key: key, origin: initialOrigin, desired: initialDesired,
                                   observed: HolderSet(holders: [], observedAt: Date()),
                                   identity: .known(key.session), lastActivity: Date())
         (updates, updatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
@@ -195,7 +222,12 @@ public actor ChannelSupervisor {
     @discardableResult
     public func send(_ input: UserInput) async throws -> UUID {
         switch state.origin {
-        case .foreignLive, .backgroundJob:
+        case .foreignLive(.usersTerminal):
+            // Rule 6: the send is refused where the user can see why, and *Fork* is what the banner offers.
+            state.banner = .heldElsewhere(state.observed)
+            apply(.sendRefused, to: .foreignUsersTerminal)
+            throw LifecycleError.heldElsewhere(state.observed)
+        case .foreignLive(.ownTerminalTab), .backgroundJob:
             throw LifecycleError.heldElsewhere(state.observed)
         case .owned(.ready):
             return try await deliver(input)
@@ -256,19 +288,20 @@ public actor ChannelSupervisor {
 
     /// The thirty-minute reap, and `LifecycleAction.reap`.
     public func reap() async {
-        guard process != nil else { return }
+        guard process != nil, state.wedged == nil else { return }   // a ghost has nothing left to reap
         let outcome = await terminateOrWedge(during: .reap)
-        guard case .exited = outcome else { return }   // wedged: Task 5 fills the wedged state
+        guard case .exited = outcome else { return }   // wedged: no dormant mark, no released slot
         process = nil
         apply(.dormantTimerFired, to: .dormant)
         await fleet.release(key)
         pushEligibility()
     }
 
-    /// The only call site of `ProcessHandle.terminate()`. `action` is nil on the one terminating path the parent's
-    /// table does not model — the post-handshake yield — where a wedge is recorded and the caller still stops.
+    /// The only call site of `ProcessHandle.terminate()`, and the only place a channel becomes wedged. Every
+    /// terminating action names itself, the post-handshake yield included: the parent's wedged row is "Owned, any",
+    /// and Owned-connecting is one of the states "any" admits.
     @discardableResult
-    public func terminateOrWedge(during action: LifecycleTable.TerminatingAction? = nil) async -> TerminateOutcome {
+    public func terminateOrWedge(during action: LifecycleTable.TerminatingAction) async -> TerminateOutcome {
         guard let handle = process else { return .exited(.code(0, stderrTail: "")) }
         let pid = await handle.childProcessIdentifier
         terminatedEpochs.insert(handle.epoch)
@@ -276,23 +309,254 @@ public actor ChannelSupervisor {
         guard let exit = report.exit else {
             let trace = EscalationTrace(steps: report.steps, pid: pid, epoch: handle.epoch)
             state.wedged = trace
+            state.systemItem = .wedged(trace, reopenOffered: true)
             diagnostics.record(.wedged(session: key.session.description, steps: report.steps.count))
-            if let action {
-                apply(.terminateReturnedNil(during: action), to: .wedged)
-            } else {
-                // The one terminating path the parent's table does not model. The trace still has to be *findable*:
-                // `currentName` reads `state.wedged` only under `.owned(.dormant)`, so the state name is entered
-                // directly — through `enter`, which stays the only writer of `state.origin` — and no table
-                // transition is applied.
-                enter(.wedged)
-                publish()
-            }
+            // `process` stays: the ghost is still out there and `livePID()` must keep naming its pid so the fleet's
+            // own-pid set does not read it as a stranger.
+            apply(.terminateReturnedNil(during: action), to: .wedged)
             await fleet.markWedged(key)
             pushEligibility()
             return .wedged(trace)
         }
         process = nil
         return .exited(exit)
+    }
+
+    // MARK: - Reopen
+
+    /// The *Reopen* a wedged channel offers. It spawns only when the pre-spawn check finds no holder: the ghost may
+    /// still be holding the transcript, and a second writer under one session id is the thing the checks exist to
+    /// prevent. The table has no transition out of `wedged`, and none is invented: clearing the trace makes the
+    /// channel the dormant channel it structurally is, and the user's request is then the ordinary dormant resume.
+    public func reopen() async throws {
+        guard state.wedged != nil else { return }
+        let holders = await ownership.beforeSpawn(session: key.session)
+        guard holders.isEmpty else {
+            // Nothing changes state: the ghost is still the channel's situation and *Reopen* is still what is
+            // offered. All the user learns is that somebody else has the session right now.
+            let set = HolderSet(holders: holders, observedAt: Date())
+            state.observed = set
+            state.banner = .contended(set)
+            publish()
+            throw LifecycleError.heldElsewhere(set)
+        }
+        let ghost = state.wedged
+        let item = state.systemItem
+        state.wedged = nil
+        state.systemItem = nil
+        process = nil
+        await fleet.clearWedged(key)
+        state.desired = .owned
+        guard apply(.userSent, to: .connecting) else {
+            state.wedged = ghost
+            state.systemItem = item
+            return
+        }
+        try await spawn(reason: .reopen)
+    }
+
+    // MARK: - Adopt
+
+    /// §7.4's job-adoption row: stop the job, wait for its worker to leave the roster and die, then resume it owned.
+    public func adopt() async throws {
+        let holders = await observer.holders(for: key.session)
+        guard let job = holders.first(where: { $0.isJob }), let short = job.jobShort else {
+            throw LifecycleError.notOwned
+        }
+        try await verbs.stop(JobShort(rawValue: short))
+        switch await ownership.awaitRelease(previous: job, upTo: Self.handoffBudget) {
+        case .timedOut:
+            enterContended(holders, via: .handoffTimedOut)
+            throw LifecycleError.handoffTimedOut(state.observed)
+        case .released:
+            state.desired = .owned
+            guard apply(.adopt, to: .connecting) else { return }
+            try await spawn(reason: .adopt)
+        }
+    }
+
+    // MARK: - The two handoffs
+
+    /// `terminate()`, wait for the release, run the pre-spawn check once more, then `claude --bg --resume <id>`.
+    @discardableResult
+    public func sendToBackground() async throws -> JobShort {
+        try await handOff(during: .sendToBackground, event: .sendToBackground, to: .backgroundJob) {
+            let short = try await verbs.backgroundResume(key.session, cwd: launchTemplate.cwd)
+            try await rememberOwnJob(short)
+            try await confirmListed(short)
+            return short
+        }
+    }
+
+    /// The terminal hatch. The window between the returned request and the panel's spawn is accepted (spec Decision
+    /// Log, 2026-09-05); everything before it is not.
+    public func openInTerminal() async throws -> PaneRequest {
+        try await handOff(during: .openInTerminal, event: .openInTerminal, to: .foreignOwnTab) {
+            let request = paneRequest(arguments: ["--resume", key.session.description],
+                                      cwd: launchTemplate.cwd, purpose: .hatch(key.session))
+            pendingHatch = request
+            diagnostics.record(.paneRequest(id: request.id, purpose: "hatch", session: key.session.description))
+            return request
+        }
+    }
+
+    /// The shape both handoffs share: an owned channel lets go of its process, waits for the release, and only then
+    /// — from ready and from dormant alike — asks once more whether anybody else has taken the session.
+    ///
+    /// A `nil` from `terminate()` stops here with nothing else run: no verb, no request, no replacement process.
+    private func handOff<T>(during action: LifecycleTable.TerminatingAction, event: LifecycleTable.Event,
+                            to target: LifecycleTable.StateName,
+                            _ launch: () async throws -> T) async throws -> T {
+        guard case .owned(let owned) = state.origin, owned == .ready || owned == .dormant else {
+            throw LifecycleError.notOwned
+        }
+        if let trace = state.wedged { throw LifecycleError.wedged(trace) }
+
+        if let handle = process {
+            let ownPID = await handle.childProcessIdentifier
+            if case .wedged(let trace) = await terminateOrWedge(during: action) {
+                throw LifecycleError.wedged(trace)
+            }
+            process = nil
+            await fleet.release(key)
+            // The record our own child wrote, waited out by pid: `awaitRelease` wants the record gone *and* the pid
+            // dead, and a child with no record still has to be dead before anyone else may write the transcript.
+            let own = Holder(pid: ownPID, sessionID: key.session, sources: [.registry], kind: "own",
+                             isOwnChild: true)
+            if case .timedOut = await ownership.awaitRelease(previous: own, upTo: Self.handoffBudget) {
+                enterContended(await observer.holders(for: key.session), via: .handoffTimedOut)
+                throw LifecycleError.handoffTimedOut(state.observed)
+            }
+        } else if let ghost = (await observer.holders(for: key.session)).first(where: { $0.isOwnChild }) {
+            // No process of ours is running, but a record of ours is still live: an older epoch's ghost, or a child
+            // the registry has not caught up with. Rule 5 waits that out too before anybody else writes the
+            // transcript. With no such record — the ordinary dormant case — there is no process and no wait.
+            if case .timedOut = await ownership.awaitRelease(previous: ghost, upTo: Self.handoffBudget) {
+                enterContended(await observer.holders(for: key.session), via: .handoffTimedOut)
+                throw LifecycleError.handoffTimedOut(state.observed)
+            }
+        }
+
+        // From dormant with nothing of ours left, this is the only check there is.
+        let holders = await ownership.beforeSpawn(session: key.session)
+        guard holders.isEmpty else { throw preempted(by: holders) }
+
+        let result = try await launch()
+        state.banner = nil
+        apply(event, to: target)
+        return result
+    }
+
+    /// A holder found in the window between the release and the launch: nothing launches, the channel takes the
+    /// origin the holder implies, and the caller is told who has it.
+    private func preempted(by holders: [Holder]) -> LifecycleError {
+        let set = HolderSet(holders: holders, observedAt: Date())
+        state.observed = set
+        let (origin, presence) = OriginResolver.resolve(key: key, ownedState: nil, holders: holders,
+                                                        pendingHatch: false)
+        state.presence = presence
+        if case .owned(.contended) = origin {
+            state.banner = .contended(set)
+            contendedFrom = currentName
+        } else {
+            state.banner = .heldElsewhere(set)
+        }
+        apply(.holderAppearedBeforeLaunch, to: Self.name(of: origin, isRecent: isRecent))
+        return LifecycleError.heldElsewhere(set)
+    }
+
+    private func rememberOwnJob(_ short: JobShort) async throws {
+        guard let store else { return }
+        var shorts = (try? await store.read([String].self, namespace: .fleetKit,
+                                            key: FleetKitKeys.ownJobShorts)) ?? []
+        guard !shorts.contains(short.rawValue) else { return }
+        shorts.append(short.rawValue)
+        try await store.write(shorts, namespace: .fleetKit, key: FleetKitKeys.ownJobShorts)
+    }
+
+    /// The CLI exiting zero is not the confirmation; the job being listed is. `backgroundResume` already waited for
+    /// the roster, and this is the other half of item 16: the listing the sidebar will read names it too.
+    private func confirmListed(_ short: JobShort) async throws {
+        let rows = (try? await verbs.agentsJSON()) ?? []
+        guard rows.contains(where: { $0.id == short.rawValue }) else {
+            diagnostics.record(.jobNotListedAfterBackground(session: key.session.description))
+            throw LifecycleError.verbFailed(verb: "--bg --resume", exitCode: 0)
+        }
+    }
+
+    // MARK: - Panes
+
+    /// `claude attach <short>` in a pane. It changes no ownership: the job keeps the session.
+    public func attach(job: JobEntry) -> PaneRequest {
+        paneRequest(arguments: ["attach", job.short.rawValue], cwd: job.cwd ?? launchTemplate.cwd,
+                    purpose: .attach(job.short))
+    }
+
+    /// `claude logs <short>` in a pane. It changes no ownership.
+    public func logs(job: JobEntry) -> PaneRequest {
+        paneRequest(arguments: ["logs", job.short.rawValue], cwd: job.cwd ?? launchTemplate.cwd,
+                    purpose: .logs(job.short))
+    }
+
+    /// Every pane this channel asks for runs the located binary under the same config home and the same scrubbed,
+    /// re-injected environment the owned process ran under — composed by ClaudeWire, never assembled here.
+    private func paneRequest(arguments: [String], cwd: URL, purpose: PanePurpose) -> PaneRequest {
+        PaneRequest(executable: launchTemplate.binary, arguments: arguments, cwd: cwd,
+                    environment: launchTemplate.childEnvironment(over: environment, configHome: configHome),
+                    purpose: purpose)
+    }
+
+    // MARK: - Cap eviction
+
+    /// The reap the cap counter asked for. Eligibility is re-evaluated *here*, at reap time, because the snapshot
+    /// the counter decided from is as old as the last push; a channel that started a turn in between is not a victim.
+    ///
+    /// It never releases the slot: the counter is holding it as this eviction, and the evicting supervisor's report
+    /// is what moves it. A release arriving from this channel's own lifecycle completes the same eviction.
+    public func evict() async -> EvictionOutcome {
+        guard process != nil, state.wedged == nil else { return .victimBecameIneligible }
+        guard await currentVerdict().isEligible else { return .victimBecameIneligible }
+        if case .wedged = await terminateOrWedge(during: .capEviction) { return .victimWedged }
+        process = nil
+        apply(.seventhSpawnNeeded, to: .dormant)
+        pushEligibility()
+        return .evicted
+    }
+
+    // MARK: - Contended
+
+    private func enterContended(_ holders: [Holder], via event: LifecycleTable.Event) {
+        let mine = holders.filter { $0.sessionID == key.session }
+        let set = HolderSet(holders: mine, observedAt: Date())
+        state.observed = set
+        state.banner = .contended(set)
+        contendedFrom = currentName
+        apply(event, to: .contended)
+    }
+
+    /// The holder set settled. Zero holders means the session is nobody's — unless this channel still owns a process,
+    /// or was dormant when the disagreement arrived, in which case it goes back to being that. One holder means the
+    /// origin that holder implies. Two or more is still contended.
+    private func resolveContended(_ mine: [Holder]) {
+        let foreign = mine.filter { !$0.isOwnChild }
+        if foreign.isEmpty {
+            let target: LifecycleTable.StateName = {
+                if process != nil { return .ready }
+                if contendedFrom == .dormant { return .dormant }
+                return .archivedRecent
+            }()
+            state.banner = nil
+            contendedFrom = nil
+            apply(.holdersSettled, to: target)
+            return
+        }
+        guard foreign.count == 1 else { publish(); return }
+        let (origin, presence) = OriginResolver.resolve(key: key, ownedState: nil, holders: foreign,
+                                                        pendingHatch: false)
+        state.presence = presence
+        state.banner = nil
+        contendedFrom = nil
+        apply(.holdersSettled, to: Self.name(of: origin, isRecent: isRecent))
     }
 
     /// A fresh unbounded fan-out per call. This is the only way a wire frame leaves the supervisor.
@@ -333,30 +597,41 @@ public actor ChannelSupervisor {
     /// Awaits the tail of the eligibility chain, so a caller can read the verdict the counter now holds.
     public func drainEligibility() async { await eligibilityTask?.value }
 
+    /// The registry mirror is C3's, not this actor's, so a change in it can only arrive from outside. The facade
+    /// calls this when a mirror entry for this channel arms, updates or completes; the verdict is re-evaluated and
+    /// pushed to the counter, which never asks for it.
+    public func mirrorChanged() async {
+        pushEligibility()
+        await eligibilityTask?.value
+    }
+
     // MARK: - Spawning
 
     func spawn(reason: SpawnReason) async throws {
         // A respawn continues the crash series; anything the user asked for starts a new one, which is what makes
         // *Reopen* mean something after the fourth failure.
         if reason != .respawn { crashCount = 0; wasReadyInThisSeries = false }
-        let decision = await fleet.acquire(for: key)
-        let reservation: Reservation
-        switch decision {
-        case .refused(let live):
-            state.headerNote = .capReached(live: live)
-            publish()
-            throw LifecycleError.capReached(live: live)
-        case .evict(_, let r):
-            // Task 5 owns the eviction path: it terminates the victim and reports what it observed. Until then a
-            // spawn that would evict gives the slot straight back rather than spawning on a slot nobody freed.
-            await fleet.rollback(r)
-            let live = await fleet.liveCount
-            state.headerNote = .capReached(live: live)
-            publish()
-            throw LifecycleError.capReached(live: live)
-        case .granted(let r):
-            reservation = r
+        // The eviction loop. A victim that wedged or that turned out to be running frees nothing, so the counter
+        // names the next one against the same reservation; the loop ends at a grant or a refusal, never at a slot
+        // nobody vacated.
+        var decision = await fleet.acquire(for: key)
+        var granted: Reservation?
+        while granted == nil {
+            switch decision {
+            case .refused(let live):
+                state.headerNote = .capReached(live: live)
+                state.liveCount = live
+                publish()
+                throw LifecycleError.capReached(live: live)
+            case .granted(let r):
+                granted = r
+            case .evict(let victim, let r):
+                let outcome = await evictVictim(victim)
+                await evictionBarrier(victim)
+                decision = await fleet.evictionOutcome(r, outcome)
+            }
         }
+        guard let reservation = granted else { return }
 
         let before = await ownership.beforeSpawn(session: key.session)
         if !before.isEmpty {
@@ -387,7 +662,7 @@ public actor ChannelSupervisor {
         let after = await ownership.afterHandshake(session: key.session, ownPID: ownPID, epoch: mine)
         if !after.isEmpty {
             let holders = HolderSet(holders: after, observedAt: Date())
-            if case .wedged = await terminateOrWedge() {
+            if case .wedged = await terminateOrWedge(during: .postHandshakeYield) {
                 // Our own child would not end, so nothing was released to anyone. Announcing `.releasedToTerminal`
                 // here would tell the user afleet let go of a session its own ghost is still holding.
                 await fleet.rollback(reservation)
@@ -515,13 +790,27 @@ public actor ChannelSupervisor {
         }
     }
 
-    /// A pane exit is matched to the pending hatch by `PaneRequest.id`, never by value equality (Task 5 exercises it).
+    /// A pane exit is matched to the pending hatch by `PaneRequest.id`, never by value equality: two requests with
+    /// identical fields are two requests, and an exit from the older one must not re-adopt the newer one's channel.
+    ///
+    /// The tab closing is not the release. The record it wrote is, so the re-adoption waits for that record to go
+    /// and for its pid to die, exactly as every other handoff does.
     public func paneExited(_ exit: PaneExit) async {
         guard let pending = pendingHatch, pending.id == exit.request.id else {
             diagnostics.record(.staleExit(id: exit.request.id, purpose: String(describing: exit.request.purpose)))
             return
         }
-        pendingHatch = nil   // Task 5 runs the re-adoption
+        pendingHatch = nil
+        let holders = await observer.holders(for: key.session)
+        if let tab = holders.first {
+            if case .timedOut = await ownership.awaitRelease(previous: tab, upTo: Self.handoffBudget) {
+                enterContended(holders, via: .handoffTimedOut)
+                return
+            }
+        }
+        state.desired = .owned
+        guard apply(.paneExitedAndRecordGone, to: .connecting) else { return }
+        try? await spawn(reason: .ownTabExited)
     }
 
     // MARK: - Exits
@@ -567,8 +856,32 @@ public actor ChannelSupervisor {
     public func holdersChanged(_ set: HolderSet) async {
         let mine = set.holders.filter { $0.sessionID == key.session }
         state.observed = HolderSet(holders: mine, observedAt: set.observedAt)
+
+        // A ghost stops costing a slot when its record is gone and its pid is dead — and only then.
+        if let ghost = state.wedged, !mine.contains(where: { $0.pid == ghost.pid }),
+           !ProcessLiveness.isRunning(pid: ghost.pid) {
+            await fleet.clearWedged(key)
+        }
+
+        let here = currentName
+        if here == .contended { resolveContended(mine); return }
+        if here == .foreignUsersTerminal {
+            guard mine.isEmpty else { publish(); return }
+            apply(.recordDisappeared, to: .archivedRecent)
+            return
+        }
         guard !mine.isEmpty else { publish(); return }
-        guard currentName == .dormant else { publish(); return }
+
+        // Rule 1: afleet wants this channel and somebody else has it. Its own event, never a handoff timeout — the
+        // two are raised from different places and G1 has to see both fire. A channel afleet does not want owned
+        // takes the dormant `holderAppeared` row below instead.
+        if state.desired == .owned, here == .connecting || here == .ready || here == .dormant,
+           mine.contains(where: { !$0.isOwnChild }) {
+            enterContended(mine, via: .desiredObservedDisagree)
+            return
+        }
+
+        guard here == .dormant else { publish(); return }
         let (origin, presence) = OriginResolver.resolve(key: key, ownedState: nil, holders: mine, pendingHatch: false)
         state.presence = presence
         switch origin {

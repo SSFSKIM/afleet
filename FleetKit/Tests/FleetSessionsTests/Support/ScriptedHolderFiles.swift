@@ -23,8 +23,23 @@ final class ScriptedHolderFiles: @unchecked Sendable {   // `lock` serialises ev
 
     let home: ScratchConfigHome
     private let lock = NSLock()
+    private var _onStopJob: (@Sendable (String) -> Void)?
+    private var _stopRemovesWorker = true
 
     init(home: ScratchConfigHome) { self.home = home }
+
+    /// Runs after `stop <short>` has rewritten the files, so a test can kill the helper process standing in for the
+    /// worker the CLI would have ended.
+    var onStopJob: (@Sendable (String) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onStopJob }
+        set { lock.lock(); _onStopJob = newValue; lock.unlock() }
+    }
+
+    /// A `stop` that leaves the worker named in the roster: the handoff that never completes.
+    var stopRemovesWorker: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _stopRemovesWorker }
+        set { lock.lock(); _stopRemovesWorker = newValue; lock.unlock() }
+    }
 
     var root: URL { home.url }
 
@@ -103,7 +118,8 @@ final class ScriptedHolderFiles: @unchecked Sendable {   // `lock` serialises ev
         var record = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any] ?? [:]
         record["state"] = "stopped"
         try write(record, to: file)
-        try mutateRoster { $0.removeValue(forKey: short) }
+        if stopRemovesWorker { try mutateRoster { $0.removeValue(forKey: short) } }
+        onStopJob?(short)
     }
 
     func jobShorts() -> [String] {

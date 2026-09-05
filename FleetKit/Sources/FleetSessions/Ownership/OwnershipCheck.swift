@@ -2,13 +2,14 @@ import Foundation
 import AfleetCore
 import ClaudeWire
 
-/// Which check a `HolderReader.read` is serving. It travels as a task-local rather than as a parameter because
-/// `HolderReader.read` is C4's published protocol and a Swift protocol requirement may carry no default argument:
-/// adding a label to the requirement would have rewritten every conformance and every call site of Task 3's reader
-/// for a value only the recording reader in the tests ever looks at.
+/// Which check a `HolderReader.read` is serving. The label is an explicit argument threaded from the check through
+/// `FleetObserver` to the reader: G1's proof that the ownership checks ran around every spawn is the label sequence,
+/// and ambient context that can silently go blank is not good enough for that.
 public enum OwnershipLabel {
-    @TaskLocal public static var current: String?
-    /// The label a read carries when no check set one: the observer's own poll or reconciliation.
+    public static let beforeSpawn = "beforeSpawn"
+    public static let afterHandshake = "afterHandshake"
+    public static let release = "release"
+    /// The label a read carries when no check asked for it: the observer's own poll or reconciliation.
     public static let poll = "poll"
 }
 
@@ -25,43 +26,55 @@ public struct OwnershipCheck: Sendable {
     private let observer: FleetObserver
     private let clock: any Clock<Duration>
     private let diagnostics: any FleetDiagnosticsSink
+    /// Runs once, on the actor of the caller, at the moment `awaitRelease` has observed `.released` and before the
+    /// caller's recheck. nil in production; the preempt rows use it to make a holder appear in exactly that window.
+    private let onReleased: (@Sendable () async -> Void)?
 
     public init(observer: FleetObserver, clock: any Clock<Duration>,
-                diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics()) {
+                diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics(),
+                onReleased: (@Sendable () async -> Void)? = nil) {
         self.observer = observer; self.clock = clock; self.diagnostics = diagnostics
+        self.onReleased = onReleased
     }
 
     /// Every live holder naming the session, foreign or ours. A holder that is one of our own children — a second
     /// supervisor's, or an older epoch's ghost — is returned too, and the caller reads it as Contended rather than
     /// as a foreign live channel.
     public func beforeSpawn(session: SessionID) async -> [Holder] {
-        let holders = await reconcile(label: "beforeSpawn").filter { $0.sessionID == session }
-        record("beforeSpawn", holders, session)
+        let holders = await reconcile(label: OwnershipLabel.beforeSpawn).filter { $0.sessionID == session }
+        record(OwnershipLabel.beforeSpawn, holders, session)
         return holders
     }
 
     /// Every live holder naming the session except the one pid this spawn started.
     public func afterHandshake(session: SessionID, ownPID: Int32, epoch: ProcessEpoch) async -> [Holder] {
         _ = epoch
-        let holders = await reconcile(label: "afterHandshake")
+        let holders = await reconcile(label: OwnershipLabel.afterHandshake)
             .filter { $0.sessionID == session && $0.pid != ownPID }
-            // Re-validated here as well as in the read: the record may name a pid that died between the two.
-            .filter { ProcessLiveness.startTime(of: $0.pid) != nil }
-        record("afterHandshake", holders, session)
+            // Re-validated here as well as in the read: the record may name a pid that died between the two. The
+            // question is liveness alone, so it is `kill(pid, 0)`: a live pid the kernel will not describe is still
+            // a holder, and dropping it here would be the unsafe direction.
+            .filter { ProcessLiveness.isRunning(pid: $0.pid) }
+        record(OwnershipLabel.afterHandshake, holders, session)
         return holders
     }
 
     /// Rule 5's quiescent handoff. `.released` only when the pid is dead *and* the record that named it is gone;
     /// `.timedOut` after `upTo`, on which the channel becomes Contended.
+    /// How often the wait re-reads. Public so a test that drives the manual clock steps by the wait's own interval
+    /// rather than by a number it invented.
+    public static let releasePollInterval = Duration.milliseconds(500)
+
     public func awaitRelease(previous: Holder, upTo budget: Duration) async -> ReleaseOutcome {
-        let interval = Duration.milliseconds(500)
+        let interval = Self.releasePollInterval
         var waited = Duration.zero
         while true {
-            let holders = await reconcile(label: "release")
+            let holders = await reconcile(label: OwnershipLabel.release)
             let recordGone = !holders.contains { $0.pid == previous.pid && $0.sessionID == previous.sessionID }
-            if recordGone && ProcessLiveness.startTime(of: previous.pid) == nil {
+            if recordGone && !ProcessLiveness.isRunning(pid: previous.pid) {
                 diagnostics.record(.handoffWait(outcome: "released", waitedMs: milliseconds(waited),
                                                 session: previous.sessionID.description))
+                await onReleased?()
                 return .released
             }
             if waited >= budget {
@@ -77,9 +90,7 @@ public struct OwnershipCheck: Sendable {
     // MARK: - Internals
 
     private func reconcile(label: String) async -> [Holder] {
-        await OwnershipLabel.$current.withValue(label) {
-            await observer.reconcileNow().holders
-        }
+        await observer.reconcileNow(label: label).holders
     }
 
     /// The count is every holder the check is about to hand back, not only the foreign ones: the pre-spawn check

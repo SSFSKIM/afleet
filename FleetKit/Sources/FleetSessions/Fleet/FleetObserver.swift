@@ -48,8 +48,8 @@ public actor FleetObserver {
 
     /// A read that includes `claude agents --json`, awaited to completion. The ownership checks call this.
     @discardableResult
-    public func reconcileNow() async -> HolderSet {
-        await refresh(agentsJSON: true)
+    public func reconcileNow(label: String = OwnershipLabel.poll) async -> HolderSet {
+        await refresh(agentsJSON: true, label: label)
         return last.holders
     }
 
@@ -57,21 +57,21 @@ public actor FleetObserver {
 
     public func start() async {
         guard timers.isEmpty, sources.isEmpty else { return }   // idempotent: a second start must not double up
-        await refresh(agentsJSON: false)
+        await refresh(agentsJSON: false, label: OwnershipLabel.poll)
         arm(["sessions", "jobs", "daemon"])
         timers = [
             Task { [weak self, clock, pollInterval] in
                 while !Task.isCancelled {
                     guard (try? await clock.sleep(for: pollInterval)) != nil else { return }
                     guard let self else { return }   // the observer went away without stop(); stop sleeping
-                    await self.refresh(agentsJSON: false)
+                    await self.refresh(agentsJSON: false, label: OwnershipLabel.poll)
                 }
             },
             Task { [weak self, clock, reconcileInterval] in
                 while !Task.isCancelled {
                     guard (try? await clock.sleep(for: reconcileInterval)) != nil else { return }
                     guard let self else { return }
-                    await self.refresh(agentsJSON: true)
+                    await self.refresh(agentsJSON: true, label: OwnershipLabel.poll)
                 }
             },
         ]
@@ -87,19 +87,20 @@ public actor FleetObserver {
 
     // MARK: - Internals
 
-    private func refresh(agentsJSON: Bool) async {
+    private func refresh(agentsJSON: Bool, label: String) async {
         let previous = refreshing
         let task = Task { [weak self] in
             await previous?.value
-            await self?.perform(agentsJSON: agentsJSON)
+            await self?.perform(agentsJSON: agentsJSON, label: label)
         }
         refreshing = task
         await task.value
     }
 
-    private func perform(agentsJSON: Bool) async {
+    private func perform(agentsJSON: Bool, label: String) async {
         let pids = await ownPIDs()
-        let snapshot = await reader.read(configHome: configHome, ownPIDs: pids, includeAgentsJSON: agentsJSON)
+        let snapshot = await reader.read(configHome: configHome, ownPIDs: pids, includeAgentsJSON: agentsJSON,
+                                         label: label)
         // `observedAt` stamps every read, so compare the holders themselves: an unchanged fleet publishes nothing.
         let changed = !published || snapshot.holders.holders != last.holders.holders
         last = snapshot
@@ -117,7 +118,7 @@ public actor FleetObserver {
             let source = DispatchSource.makeFileSystemObjectSource(
                 fileDescriptor: fd, eventMask: [.write, .delete, .rename, .link], queue: .global())
             source.setEventHandler { [weak self] in
-                Task { await self?.refresh(agentsJSON: false) }
+                Task { await self?.refresh(agentsJSON: false, label: OwnershipLabel.poll) }
             }
             source.setCancelHandler { close(fd) }
             source.resume()

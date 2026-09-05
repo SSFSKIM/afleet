@@ -50,3 +50,8 @@ durable index.
     counts and G2's count clause is weaker than it reads. The field name promises a tally.
     Owner: C1 follow-up. Closer: rename the field or document the semantic, and restate the
     G2 clause as set equality over kinds.
+11. **`ChannelSupervisor.terminatedEpochs` entries are never consumed for an epoch whose exit
+    the pump filters out.** One `UInt64` stays in the set per wedge, and per exit that lands
+    after a respawn has already moved the epoch on. It is tidiness, not a leak, and it is
+    deliberately not being fixed; it is logged so the whole-branch review does not rediscover
+    it. Owner: C4. Closer: none planned.
