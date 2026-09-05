@@ -49,7 +49,7 @@
  "name": "control-shapes",
  "notes": [
   "apply_flag_settings -> success None",
-  "get_settings -> success ['applied', 'effective_keys', 'sources_keys']",
+  "get_settings -> success ['applied', 'effective', 'sources']",
   "list_models -> success ['models']",
   "get_workspace_diff -> success ['diff']",
   "rewind_files dry_run -> success ['canRewind', 'deletions', 'filesChanged', 'insertions']",

@@ -135,14 +135,29 @@ final class RedactorTests: XCTestCase {
 
     // MARK: - Frame-scoped rules 5 and 6
 
-    /// A `get_settings` answer has its values dropped and replaced by the setting *names*. The keys that
-    /// produces all contain "key" and all carry lists of strings — exactly the shape the secret rule eats —
-    /// so C1 exempts them by path, and so does this.
-    func testGetSettingsBodyReducedToNamesWhichSurviveTheSecretRule() throws {
+    /// A `get_settings` answer keeps the shape the engine sends — `{effective: {<setting name>: <value>},
+    /// sources: [{source, settings: {<setting name>: <value>}}]}` (2.1.258 `cli.pretty.js`, `aRn()`) — and
+    /// loses every value. Redaction replaces values; it never renames a key, because a fixture is evidence
+    /// of what the engine sent and an invented key name is evidence of something that never happened.
+    /// Setting *names* are not secrets, so a setting called `apiKeyHelper` keeps its name.
+    func testGetSettingsBodyKeepsItsShapeAndLosesItsValues() throws {
         let r = try responseBody(#"{"effective":{"model":"haiku","apiKeyHelper":"/bin/x"},"sources":[{"source":"user","settings":{"theme":"dark","token":"t"}}]}"#)
-        XCTAssertNil(r["effective"]); XCTAssertNil(r["sources"])
-        XCTAssertEqual(r["effective_keys"], .array([.string("apiKeyHelper"), .string("model")]))
-        XCTAssertEqual(r["sources_keys"], .array([.object(["source": .string("user"), "keys": .array([.string("theme"), .string("token")])])]))
+        XCTAssertEqual(r["effective"], .object(["model": .string("<redacted>"), "apiKeyHelper": .string("<redacted>")]))
+        XCTAssertEqual(r["sources"], .array([.object(["source": .string("user"),
+                                                      "settings": .object(["theme": .string("<redacted>"),
+                                                                           "token": .string("<redacted>")])])]))
+        XCTAssertNil(r["effective_keys"]); XCTAssertNil(r["sources_keys"])
+    }
+
+    /// The upgrade of the shape this redactor itself used to write. C1's `redact.py` carries the same one,
+    /// so `make redact` migrates a committed fixture; the names it kept were the setting names, so the
+    /// upgrade is lossless and idempotent.
+    func testTheShapeThisRedactorUsedToWriteIsUpgradedInPlace() throws {
+        let r = try responseBody(#"{"effective_keys":["apiKeyHelper","model"],"sources_keys":[{"source":"user","keys":["theme"]}]}"#)
+        XCTAssertNil(r["effective_keys"]); XCTAssertNil(r["sources_keys"])
+        XCTAssertEqual(r["effective"], .object(["apiKeyHelper": .string("<redacted>"), "model": .string("<redacted>")]))
+        XCTAssertEqual(r["sources"], .array([.object(["source": .string("user"),
+                                                      "settings": .object(["theme": .string("<redacted>")])])]))
     }
     /// Rule 6 strips a URL query wholesale, and a callback URL is not always top-level.
     func testOAuthCallbackURLQueriesStripped() throws {
@@ -220,7 +235,7 @@ final class RedactorTests: XCTestCase {
         let mcp = try answer(to: "mcp_message")
         XCTAssertNotNil(mcp["mcp_response"]?["truncated"]); XCTAssertNotNil(mcp["effective"])
         let settings = try answer(to: "get_settings")
-        XCTAssertNotNil(settings["effective_keys"]); XCTAssertNotNil(settings["mcp_response"]?["result"])
+        XCTAssertEqual(settings["effective"]?["model"], .string("<redacted>")); XCTAssertNotNil(settings["mcp_response"]?["result"])
         let oauth = try answer(to: "claude_authenticate")
         XCTAssertEqual(oauth["link"], .string("https://claude.ai/oauth/cb?<redacted>"))
         XCTAssertNotNil(oauth["effective"])
@@ -230,7 +245,7 @@ final class RedactorTests: XCTestCase {
         // the request-side gate is subtype-only because a request always states its own subtype.
         let unknown = try answer(to: nil)
         XCTAssertNotNil(unknown["mcp_response"]?["truncated"])
-        XCTAssertNotNil(unknown["effective_keys"])
+        XCTAssertEqual(unknown["effective"]?["model"], .string("<redacted>"))
         XCTAssertEqual(unknown["link"], .string("https://claude.ai/oauth/cb?<redacted>"))
     }
 

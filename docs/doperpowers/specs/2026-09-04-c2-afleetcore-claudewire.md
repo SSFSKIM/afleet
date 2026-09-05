@@ -1282,3 +1282,12 @@ turn was spent outside the live gate and its one wasted retry.
   belong to C5 and C6. Parent revisions to file at merge are unchanged. Full command-by-command
   evidence:
   `.doperpowers/sde/2026-09-04-c2-afleetcore-claudewire/task-14-report.md`.
+- 2026-09-06: `WireDiagnostics.Redactor`'s rule 5 follows C1's corrective of the same date.
+  It replaced a `get_settings` body's `effective` and `sources` with `effective_keys` and
+  `sources_keys`, names the engine never sends (2.1.258 `cli.pretty.js`, `aRn()`), so a captured
+  diagnostic line described a frame that never travelled. Redaction replaces values and never
+  changes a shape or a key name: `effective` keeps its setting names with every value replaced,
+  `sources` keeps `source` and the names under `settings`. The one-time upgrade of the older
+  shape is carried here too, so parity with `redact.py` holds line for line, and
+  `secretStructurePaths` loses the two entries that existed only to protect the invented names.
+

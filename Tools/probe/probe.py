@@ -695,6 +695,34 @@ def _redact_in_place(path):
         prior = json.load(fh)
     with open(os.path.join(path, "redaction.json"), "w", encoding="utf-8") as fh:
         json.dump(r.manifest(prior), fh, indent=1, sort_keys=True)
+    _upgrade_census_body_keys(path)
+
+
+def _upgrade_census_body_keys(path):
+    """Carry rule 5's one-time key rename into `census.json`, which names a body by its keys.
+
+    The census is left alone by the pass above and stays that way: its pair names sit in key
+    position and the structural rules would eat them. This is not a redaction pass over it --
+    it renames exactly the body keys `redact.LEGACY_SETTINGS_KEYS` renames in the frames, from
+    the same map, so a migrated fixture still matches `verify`'s recount of its own frames. It
+    rewrites nothing when there is nothing to rename, which is every fixture but the two.
+    """
+    p = os.path.join(path, "census.json")
+    with open(p, encoding="utf-8") as fh:
+        c = json.load(fh)
+    changed = False
+    for rec in (c.get("pairs") or {}).values():
+        for field in ("body_keys", "required_body_keys"):
+            keys = rec.get(field)
+            if not isinstance(keys, list):
+                continue
+            renamed = sorted({redact.LEGACY_SETTINGS_KEYS.get(k, k) for k in keys})
+            if renamed != keys:
+                rec[field] = renamed
+                changed = True
+    if changed:
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(c, fh, indent=1, sort_keys=True)
 
 
 def main(argv=None):

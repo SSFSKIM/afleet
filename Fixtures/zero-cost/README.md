@@ -15,7 +15,9 @@ the fixture is `deterministic: true`.
 
 - All ten zero-cost subtypes answer `success`: `get_context_usage`, `get_session_cost`,
   `get_binary_version`, `mcp_status`, `background_tasks`, `get_settings`, `get_usage`,
-  `list_models`, `get_plan`, `file_suggestions`.
+  `list_models`, `get_plan`, `file_suggestions`. `get_settings` answers
+  `{applied, effective: {}, sources: []}` here: `--setting-sources ""` leaves no settings
+  file in scope, so the two maps the engine builds are empty rather than redacted away.
 - One `auth_status` frame arrives unprompted after the handshake.
 - Three CLI-originated `mcp_message` round trips complete before any turn: the in-process
   `afleet` SDK server is initialised straight out of the §6.2 handshake, under
@@ -47,3 +49,10 @@ the CLI reports it. It comes from the scratch config home's own `plugins/` and
 `settings.json`, not from a real project, and the redaction rules leave it alone because it
 is neither identity, secret, path nor settings body. It is committed as recorded; a reviewer
 should know it is there.
+
+**2026-09-06, re-redaction.** The `get_settings` frame used to read `effective_keys: []` and
+`sources_keys: []`. Those two names were the fixture redactor's own invention, never the
+engine's: 2.1.258 `cli.pretty.js` builds the answer in `aRn()` as `{effective: {<setting
+name>: <value>}, sources: [{source, settings: {<setting name>: <value>}}]}`, with `applied`
+added by the handler. Rule 5 now replaces values and keeps the shape, and `make redact`
+migrated the frame and the census body key list in place. The recording was not re-run.

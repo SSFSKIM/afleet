@@ -88,21 +88,23 @@ USAGE_COUNTERS = {"input_tokens", "output_tokens", "cache_read_input_tokens", "c
 # search of docs/tui-parity and probes turned up no record of it, against bundle
 # occurrences in credential-shaped positions, so it is redacted like any other key.
 SECRET_EXEMPT = frozenset(("apikeysource", "hookcallbackids", "projectkey"))
-# Rule 5's own output, and the one structure the widened secrets rule below would otherwise eat
-# on its way past. A `get_settings` answer has its values dropped and replaced by
-# `effective_keys` (the setting *names*) and `sources_keys` (`[{"source": .., "keys": [names]}]`),
-# so all three of those keys contain "key" and all three carry lists of strings -- exactly the
-# shape the widened rule redacts. Replacing them would leave a settings response that says
-# nothing whatever, the values having already gone. Written as paths, like the two exemptions
-# further down and for the same reason: it is the position that makes them safe, so a `keys`
-# field anywhere else is redacted like any other.
-# `rules.secrets` and `rules.oauth_flow` are the same case one file over: `Redactor.manifest`
-# keys its own record by *rule name*, two of which contain a secret word, and the value is a
-# count and a set of field paths. A manifest is a legitimate thing to hand `scan` -- §4.4
-# commits it and REVIEW item 4 has a reviewer read it -- so the exemption belongs here and not
-# only in `verify`'s names-only reshaping of the file.
-SECRET_STRUCTURE_PATHS = frozenset(("effective_keys", "sources_keys", "sources_keys.keys",
-                                    "rules.secrets", "rules.oauth_flow"))
+# `Redactor.manifest` keys its own record by *rule name*, two of which contain a secret word,
+# and the value is a count and a set of field paths. A manifest is a legitimate thing to hand
+# `scan` -- §4.4 commits it and REVIEW item 4 has a reviewer read it -- so the exemption
+# belongs here and not only in `verify`'s names-only reshaping of the file.
+#
+# Rule 5's output used to need an exemption of its own and no longer does, which is worth
+# saying because the reason is the principle the rule now follows. It replaced a `get_settings`
+# answer's `effective` and `sources` with `effective_keys` and `sources_keys` of its own
+# invention: names containing "key", carrying lists of strings, which is exactly the shape the
+# widened secrets rule eats. Rule 5 keeps the engine's shape now and replaces values only, so a
+# setting *name* stays where it always was -- in key position, where the secrets rule replaces
+# a value and never a key -- and nothing has to be exempted to protect it.
+SECRET_STRUCTURE_PATHS = frozenset(("rules.secrets", "rules.oauth_flow"))
+# The one-time upgrade rule 5 applies to a fixture recorded under that older shape, so
+# `make redact` migrates it. Shared with `probe._redact_in_place`, which carries the same
+# rename into `census.json`: a census names a body by its keys.
+LEGACY_SETTINGS_KEYS = {"effective_keys": "effective", "sources_keys": "sources"}
 OAUTH_SUBTYPES = ("claude_authenticate", "claude_oauth_callback", "claude_oauth_wait_for_completion",
                   "mcp_authenticate", "mcp_oauth_callback_url")
 MCP_LIMIT = 4096
@@ -406,6 +408,81 @@ class Redactor:
             return new
         return node
 
+    def _blank_settings(self, node, path):
+        """A settings map with every key kept and every value replaced, whatever its type.
+
+        Rule 5's whole content. §4.5 asks for a `get_settings` answer's values to go, and the
+        engine sends them as `{<setting name>: <value>}` (2.1.258 `cli.pretty.js`, `aRn()`), so
+        the answer is a map of the same names onto placeholders. A setting name is not a secret
+        and a fixture is evidence of what the engine sent: a rule that renames a field writes
+        evidence of a frame that never travelled, and a consumer that learns the invented name
+        from the fixture fails against a real engine. Redaction replaces values and nothing else.
+
+        A value that is not a map at all cannot keep a shape it does not have; it is replaced
+        outright, which is rule 5 staying fail-closed on a body it does not recognise.
+        """
+        if isinstance(node, dict):
+            out = {k: "<redacted>" for k in node}
+            if out != node:
+                self._hit("settings_bodies", path,
+                          subtree=any(isinstance(v, (dict, list)) for v in node.values()))
+            return out
+        if node == "<redacted>":
+            return node
+        self._hit("settings_bodies", path, subtree=isinstance(node, list))
+        return "<redacted>"
+
+    def _blank_sources(self, node, path):
+        """`sources` is `[{source, settings: {<setting name>: <value>}}]`. The source name says
+        which file a setting came from and is kept for the same reason the setting names are."""
+        if not isinstance(node, list):
+            return self._blank_settings(node, path)
+        out = []
+        for i, s in enumerate(node):
+            p = "%s[%d]" % (path, i)
+            if isinstance(s, dict):
+                entry = dict(s)
+                if "settings" in entry:
+                    entry["settings"] = self._blank_settings(entry["settings"], p + ".settings")
+                out.append(entry)
+            else:
+                out.append(self._blank_settings(s, p))
+        return out
+
+    def _upgrade_legacy_settings(self, body):
+        """Rewrite a body carrying the shape rule 5 itself used to write into the engine's.
+
+        A committed fixture holds `effective_keys` and `sources_keys`, which no engine ever
+        sent. What that older rule kept was the setting names, so the upgrade is lossless: the
+        names go back where the engine puts them, values already gone. In place, so the body's
+        key order survives and the migration diff reads as the rename it is, and only where the
+        engine's own key is absent, so a second `make redact` finds nothing to do.
+        """
+        if not any(old in body and new not in body for old, new in LEGACY_SETTINGS_KEYS.items()):
+            return
+        rebuilt = {}
+        for k, v in body.items():
+            new = LEGACY_SETTINGS_KEYS.get(k)
+            if new and new not in body:
+                rebuilt[new] = self._from_legacy_settings(new, v)
+                # Recorded against the engine's key, not the invented one: it is the same field,
+                # and the manifest a reviewer reads should name the position the engine names.
+                self._hit("settings_bodies", "response.%s" % new)
+            else:
+                rebuilt[k] = v
+        body.clear()
+        body.update(rebuilt)
+
+    @staticmethod
+    def _from_legacy_settings(new, v):
+        if not isinstance(v, list):
+            return "<redacted>"
+        if new == "effective":
+            return {k: "<redacted>" for k in v if isinstance(k, str)}
+        return [{"source": s.get("source"),
+                 "settings": {k: "<redacted>" for k in (s.get("keys") or []) if isinstance(k, str)}}
+                for s in v if isinstance(s, dict)]
+
     def _redact_oauth_state(self, node, path):
         """Rule 6's other half. `claude_oauth_callback` hands back its grant as two bare
         strings: `authorizationCode`, which the `authorization` secret word already catches,
@@ -475,15 +552,11 @@ class Redactor:
                 if sub in (None, "mcp_message") and "mcp_response" in body:
                     body["mcp_response"] = self._truncate_mcp(body["mcp_response"], "response.mcp_response")
                 if sub in (None, "get_settings"):
+                    self._upgrade_legacy_settings(body)
                     if "effective" in body:
-                        eff = body.pop("effective")
-                        body["effective_keys"] = sorted(eff.keys()) if isinstance(eff, dict) else []
-                        self._hit("settings_bodies", "response.effective")
+                        body["effective"] = self._blank_settings(body["effective"], "response.effective")
                     if "sources" in body:
-                        srcs = body.pop("sources")
-                        body["sources_keys"] = [{"source": s.get("source"), "keys": sorted((s.get("settings") or {}).keys())}
-                                                for s in srcs if isinstance(s, dict)] if isinstance(srcs, list) else []
-                        self._hit("settings_bodies", "response.sources")
+                        body["sources"] = self._blank_sources(body["sources"], "response.sources")
                 if sub is None or sub in OAUTH_SUBTYPES:
                     self._redact_urls(body, "response")
             return self.redact_json(f)
