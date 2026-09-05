@@ -79,6 +79,117 @@ final class LogoutPlanTests: XCTestCase {
         XCTAssertEqual(rig.spawnCount, 3)
     }
 
+    /// A channel that was **already** wedged before the plan started is not a channel that has gone: the ghost is
+    /// still out there holding the transcript. The plan is blocked before it acts — nothing else is terminated and
+    /// `claude auth logout` does not run — because signing out behind a live process is the one thing this plan
+    /// exists to prevent.
+    ///
+    /// Scripted, not recorded: SIGKILL cannot be refused, so the wedge is produced on the scripted handle.
+    func testAChannelAlreadyWedgedBeforeThePlanBlocksItBeforeItActs() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle(terminateReturns: TerminationReport(exit: nil, steps: ["SIGKILL", "exit_not_observed"]))
+        let ghost = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await ghost.spawn(reason: .open)
+        let healthy = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await healthy.spawn(reason: .open)
+        rig.scriptedHandles[1].terminateReturns = TerminationReport(exit: .code(0, stderrTail: ""), steps: [])
+
+        // The wedge happens before the plan exists, which is the case the plan's own terminate never sees.
+        await ghost.reap()
+        let wedged = await ghost.state
+        XCTAssertNotNil(wedged.wedged, "the arrangement did not wedge the channel")
+
+        let fleet = context(rig, channels: [ghost, healthy])
+        let census = await LogoutPlan.build(fleet: fleet)
+        XCTAssertEqual(Set(census.owned), [ghost.key, healthy.key], "a wedged channel is still owned")
+
+        let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
+        XCTAssertEqual(outcome, .blocked(wedged: [ghost.key], jobsStillListed: []))
+        XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 0,
+                       "a live ghost must not lose its credentials")
+        XCTAssertEqual(rig.scriptedHandles[1].terminateCount, 0,
+                       "a plan that cannot finish tears nothing else down")
+        let healthyState = await healthy.state
+        XCTAssertEqual(healthyState.origin, .owned(.ready))
+        XCTAssertFalse(rig.spawnBarrier.isRaised, "a blocked plan lifts its barrier")
+    }
+
+    /// The same ghost, wedged *after* the census was taken. The plan's list says the channel can be ended, so the
+    /// only thing standing between a live ghost and `claude auth logout` here is the terminate's own answer — a
+    /// channel that is already wedged must answer `.wedged` and never `.exited`.
+    ///
+    /// Scripted, not recorded: SIGKILL cannot be refused, so the wedge is produced on the scripted handle.
+    func testAChannelWedgedAfterTheCensusStillBlocksTheLogout() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle(terminateReturns: TerminationReport(exit: nil, steps: ["SIGKILL", "exit_not_observed"]))
+        let ghost = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await ghost.spawn(reason: .open)
+
+        let fleet = context(rig, channels: [ghost])
+        let census = await LogoutPlan.build(fleet: fleet)
+        XCTAssertEqual(census.wedged, [], "the census saw a channel it could still have ended")
+
+        // Between the census and the plan running, the channel wedges on somebody else's terminate.
+        await ghost.reap()
+        let wedged = await ghost.state
+        XCTAssertNotNil(wedged.wedged)
+
+        let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
+        XCTAssertEqual(outcome, .blocked(wedged: [ghost.key], jobsStillListed: []))
+        XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 0,
+                       "a live ghost must not lose its credentials")
+        XCTAssertFalse(rig.spawnBarrier.isRaised)
+    }
+
+    /// A job whose worker never leaves the roster is a live process, exactly like a ghost, and gets the same answer:
+    /// the plan stops, names the job, terminates no channel and does not sign out.
+    func testAJobWhoseWorkerNeverLeavesTheRosterBlocksTheLogout() async throws {
+        let rig = try newRig()
+        let short = JobShort(rawValue: "jstuck1")
+        let channel = rig.supervisor(session: SessionID(), fixture: Self.idle)
+        try await channel.open()
+        try rig.files.writeJob(short: short.rawValue, state: "working", sessionID: SessionID(),
+                               pid: ScriptedHolderFiles.livePID)
+        rig.files.stopRemovesWorker = false          // the daemon never drops it
+
+        let fleet = context(rig, channels: [channel], ownJobShorts: [short])
+        let census = await LogoutPlan.build(fleet: fleet)
+        XCTAssertEqual(census.ownJobs, [short])
+
+        let outcome = try await rig.steppingClock(upTo: .seconds(20)) {
+            await LogoutPlan.execute(census, choice: .stop, fleet: fleet)
+        }
+        XCTAssertEqual(outcome, .blocked(wedged: [], jobsStillListed: [short]))
+        XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 0,
+                       "a running worker must not be signed out from under")
+        let state = await channel.state
+        XCTAssertEqual(state.origin, .owned(.ready), "a plan that cannot finish terminates nothing")
+        XCTAssertFalse(rig.spawnBarrier.isRaised)
+    }
+
+    /// Every channel went and the CLI then refused to sign out. The terminations stand and are reported; the
+    /// sign-out is reported as what it was.
+    func testASignOutTheCLIRefusesIsNotReportedAsSuccess() async throws {
+        let rig = try newRig()
+        let channel = rig.supervisor(session: SessionID(), fixture: Self.idle)
+        try await channel.open()
+        rig.files.authLogoutExitCode = 1
+
+        let fleet = context(rig, channels: [channel])
+        let census = await LogoutPlan.build(fleet: fleet)
+        let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
+
+        guard case .signOutFailed(let exited, let reason) = outcome else {
+            return XCTFail("a refused sign-out gave \(outcome)")
+        }
+        XCTAssertEqual(exited, [channel.key], "the channel did go, and the report says so")
+        XCTAssertTrue(reason.contains("auth logout"), "the report names the verb that failed; got \(reason)")
+        XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 1, "it was attempted")
+        let state = await channel.state
+        XCTAssertEqual(state.origin, .owned(.dormant))
+        XCTAssertFalse(rig.spawnBarrier.isRaised)
+    }
+
     /// One channel with a running mirror task and one afleet-launched job: the plan lists both, *Wait* holds without
     /// acting, and *Stop* interrupts the turn, stops the task, stops the job and waits for the roster to drop its
     /// worker before `claude auth logout` runs. A foreign registry record keeps its token and is named.

@@ -93,16 +93,21 @@ public enum CommandRouter {
         let argument = arguments.first
         switch command.strategy {
         case .setModel:
-            guard let argument else { return .native("modelPicker") }
+            guard let argument else { return .native(picker(for: command)) }
             return .controlRequest(AnyControlRequest(SetModel(model: argument)))
         case .setPermissionMode:
-            // Bare `/permissions` is the read-only rules view; a mode the engine does not know is not sent at all.
-            guard let argument, let mode = PermissionMode(rawValue: argument) else {
-                return .strategy(.permissionsView, arguments: [])
+            // Bare `/permissions` is the read-only rules view. A mode the engine does not know is a typo, and a typo
+            // must not look like the bare form: it is refused here rather than sent or silently reinterpreted.
+            guard let argument else { return .strategy(.permissionsView, arguments: []) }
+            guard let mode = PermissionMode(rawValue: argument) else {
+                return .refusedLocally(explanation: RouterTable.explanation(forUnknownMode: argument))
             }
             return .controlRequest(AnyControlRequest(SetPermissionMode(mode: mode)))
         case .applyFlagSetting(let key):
-            return .controlRequest(AnyControlRequest(ApplyFlagSettings(settings: .object([key: flagValue(key, argument, runtime)]))))
+            // `/fast` is a toggle and needs no argument; every other flag takes a value, and sending an empty one
+            // would write "" into the session's flag settings. With no argument the surface picks instead.
+            guard let value = flagValue(key, argument, runtime) else { return .native(picker(for: command)) }
+            return .controlRequest(AnyControlRequest(ApplyFlagSettings(settings: .object([key: value]))))
         case .renameSession:
             guard let argument else { return .text(original) }
             return .controlRequest(AnyControlRequest(RenameSession(title: argument)))
@@ -131,12 +136,18 @@ public enum CommandRouter {
         }
     }
 
-    /// `/fast` is a toggle over what the channel is running; every other flag takes the word the user typed.
-    private static func flagValue(_ key: String, _ argument: String?, _ runtime: SessionRuntimeState?) -> JSONValue {
-        guard key == "fastMode" else { return .string(argument ?? "") }
+    /// `/fast` is a toggle over what the channel is running, so it always has a value; every other flag takes the
+    /// word the user typed, and nil when they typed none.
+    private static func flagValue(_ key: String, _ argument: String?, _ runtime: SessionRuntimeState?) -> JSONValue? {
+        guard key == "fastMode" else { return argument.map(JSONValue.string) }
         if let argument { return .bool(argument == "on" || argument == "true") }
         let current = runtime?.flagSettings["fastMode"]?.boolValue ?? runtime?.fastModeObserved ?? false
         return .bool(!current)
+    }
+
+    /// The surface a command with no argument opens: `/model` -> `modelPicker`, `/effort` -> `effortPicker`.
+    private static func picker(for command: LocalCommand) -> String {
+        String(command.name.dropFirst()) + "Picker"
     }
 
     private static func lifecycleAction(_ name: LifecycleActionName) -> LifecycleAction {
@@ -194,10 +205,19 @@ public enum LoginOutcome: Hashable, Sendable {
     case noActiveFlow(reason: String)
 }
 
-/// Bare `/permissions`: the read-only view over what `get_settings` reports as applied.
+/// Bare `/permissions`: the read-only view built from the `get_settings` answer.
+///
+/// It carries the **whole** answer rather than a `rules` field, because no answer anywhere in the corpus lists a
+/// permission rule: `zero-cost`'s `get_settings.applied` is `{model, effort, advisor, ultracode}`, which are flag
+/// settings. Naming a field `rules` and filling it from `applied` would have the surface render the model and the
+/// effort level under a permissions heading. When a recording that carries allow and deny rules exists, the view
+/// reads them out of this same body and nothing here changes shape.
 public struct PermissionsView: Hashable, Sendable {
-    public var rules: [String: JSONValue]
-    public init(rules: [String: JSONValue]) { self.rules = rules }
+    /// The engine's `get_settings` answer, verbatim.
+    public var settings: JSONValue
+    /// What the engine reports as applied — the only settings state the corpus records.
+    public var applied: [String: JSONValue] { settings["applied"]?.objectValue ?? [:] }
+    public init(settings: JSONValue) { self.settings = settings }
 }
 
 public struct MCPPopover: Hashable, Sendable {
@@ -276,7 +296,7 @@ public enum StrategyExecutor {
 
         case .permissionsView:
             let settings = try await supervisor.perform(GetSettings())
-            return .permissions(PermissionsView(rules: settings["applied"]?.objectValue ?? [:]))
+            return .permissions(PermissionsView(settings: settings))
 
         case .mcpPopover:
             let status = try await supervisor.perform(MCPStatus())
@@ -311,13 +331,17 @@ public struct Intercepted: Hashable, Sendable {
 /// The match is against the *whole* assistant text and nothing less. The same sentence inside a longer answer is the
 /// model talking about the command, and replacing that would rewrite an answer the engine meant.
 public actor RefusalInterceptor {
+    /// `bareRefusalPattern` is a literal in this package, so its compiling is a fact about the source and not about
+    /// anything at run time. A `try?` here would turn a broken pattern into an interceptor that silently never
+    /// intercepts and a drift counter that reads zero for ever, which is the failure this whole mechanism exists to
+    /// notice.
+    private static let expression = try! NSRegularExpression(pattern: RouterTable.bareRefusalPattern)
+
     private let diagnostics: any FleetDiagnosticsSink
-    private let expression: NSRegularExpression?
     private var drift = 0
 
     public init(diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics()) {
         self.diagnostics = diagnostics
-        self.expression = try? NSRegularExpression(pattern: RouterTable.bareRefusalPattern)
     }
 
     /// How many refusals have been intercepted since the fleet started: the drift signal that says the engine and
@@ -326,9 +350,8 @@ public actor RefusalInterceptor {
 
     public func intercept(_ text: String) -> Intercepted? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let expression else { return nil }
         let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
-        guard let match = expression.firstMatch(in: trimmed, range: range), match.numberOfRanges == 2,
+        guard let match = Self.expression.firstMatch(in: trimmed, range: range), match.numberOfRanges == 2,
               let nameRange = Range(match.range(at: 1), in: trimmed) else { return nil }
         let command = "/" + String(trimmed[nameRange])
         drift += 1

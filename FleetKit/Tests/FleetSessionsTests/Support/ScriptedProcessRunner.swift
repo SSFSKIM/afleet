@@ -70,7 +70,7 @@ struct ScriptedProcessRunner: ProcessRunner {
                      try files.writeJob(short: newShort(), state: "working", pid: ScriptedHolderFiles.livePID)
                      return .exit(0)
                  }),
-            Rule(match: { $0 == ["auth", "logout"] }, respond: { _ in .exit(0) }),
+            Rule(match: { $0 == ["auth", "logout"] }, respond: { _ in .exit(files.authLogoutExitCode) }),
             Rule(match: { $0 == ["auth", "status"] }, respond: { _ in .exit(0, stdout: #"{"loggedIn": false}"#) }),
         ]
     }

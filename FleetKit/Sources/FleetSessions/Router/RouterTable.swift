@@ -70,6 +70,13 @@ public enum RouterTable {
     /// afleet's copy for a command the engine reports in `terminal_slash_commands`: the router refuses it here
     /// rather than sending it for the engine to refuse, and `RefusalInterceptor` puts the same sentence in place of
     /// the engine's bare refusal when one gets through anyway.
+    /// afleet's copy for `/permissions <something that is not a mode>`. The modes are named so the user can see
+    /// what they meant to type; they are `PermissionMode`'s own cases, so this list cannot drift from the engine's.
+    public static func explanation(forUnknownMode mode: String) -> String {
+        "\(mode) is not a permission mode. The modes are " + PermissionMode.allCases.map(\.rawValue).joined(separator: ", ")
+            + ". Send /permissions on its own to see the current settings."
+    }
+
     public static func explanation(forTerminalOnly name: String) -> String {
         "\(name) belongs to Claude Code's terminal interface and has no effect here. Open this session in your terminal to use it."
     }

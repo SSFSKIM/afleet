@@ -48,7 +48,8 @@ extension LifecycleRowTests {
                 await LogoutPlan.execute(census, choice: .stop, fleet: fleet)
             }
 
-            XCTAssertEqual(outcome, .blocked(wedged: [ghost.key]), "the plan names the channel that would not go")
+            XCTAssertEqual(outcome, .blocked(wedged: [ghost.key], jobsStillListed: []),
+                           "the plan names the channel that would not go")
             XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 0,
                            "a live process must not lose its credentials mid-turn")
             XCTAssertEqual(ghostHandle.terminateCount, 1)

@@ -6,8 +6,10 @@ import ClaudeWire
 /// G4: the command router as data, the typed strategies and their executor, the flag matrix and refusal
 /// interception (contract X10).
 ///
-/// Every engine byte these tests assert against is read out of a reviewed fixture under `Fixtures/` at run time by
-/// `FixtureAnswers` and handed to the replay as the engine's own answer; nothing is transcribed into a literal here.
+/// Every engine byte these tests assert against comes from a reviewed fixture under `Fixtures/`: `FixtureAnswers`
+/// reads it out of `frames.ndjson` at run time and hands it to the replay as the engine's own answer. One recorded
+/// value is also written out as a literal to be compared against — `/rewind`'s `prefillText` — which §11 permits
+/// because it is a reviewed fixture's own byte; everything else is read rather than transcribed.
 /// The replays run against `resume-no-replay`, the one fixture that stays alive after the handshake, because the
 /// fixtures that recorded these answers each recorded them inside a longer scripted sequence whose remaining host
 /// inputs a router test does not send — the replayer walks its recorded `in` lines in order and would block on the
@@ -190,15 +192,35 @@ final class RouterTests: XCTestCase {
         let ui = ScriptedStrategyUI(confirms: true)
         let outcome = try await StrategyExecutor.run(strategy, on: supervisor, ui: ui)
         guard case .permissions(let view) = outcome else { return XCTFail("bare /permissions gave \(outcome)") }
+        XCTAssertEqual(view.settings, Self.json(settings), "the whole answer, verbatim")
         let applied = try XCTUnwrap(settings["applied"] as? [String: Any])
-        XCTAssertEqual(Set(view.rules.keys), Set(applied.keys))
-        XCTAssertFalse(view.rules.isEmpty)
+        XCTAssertEqual(Set(view.applied.keys), Set(applied.keys))
+        XCTAssertFalse(view.applied.isEmpty)
 
         guard case .controlRequest(let request) = CommandRouter.route("/permissions plan") else {
             return XCTFail("/permissions plan did not route to a control request")
         }
         XCTAssertEqual(request.subtype, SetPermissionMode.subtype)
         XCTAssertEqual(request.payload, .object(["mode": .string("plan")]))
+
+        // "and nothing else" on the host side, not only through the replay refusing an unexpected frame: the same
+        // strategy on the scripted handle, whose ordered request list the test can read directly.
+        let scriptedRig = try newRig()
+        scriptedRig.useScriptedHandle()
+        let recorded = Self.json(settings)
+        scriptedRig.configureScriptedHandles { handle in handle.controlAnswers = ["get_settings": recorded] }
+        let scripted = scriptedRig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await scripted.spawn(reason: .open)
+        _ = try await StrategyExecutor.run(.permissionsView, on: scripted, ui: ScriptedStrategyUI(confirms: true))
+        XCTAssertEqual(scriptedRig.scriptedHandles[0].controlRequests.map(\.subtype), ["get_settings"],
+                       "the bare form reads and changes nothing")
+
+        // A typo in the mode is refused with the modes named, not quietly turned into the bare form.
+        guard case .refusedLocally(let explanation) = CommandRouter.route("/permissions paln") else {
+            return XCTFail("an unknown permission mode was not refused")
+        }
+        XCTAssertTrue(explanation.contains("paln"), "the explanation names what was typed; got \(explanation)")
+        XCTAssertTrue(explanation.contains("plan"), "and the modes that exist; got \(explanation)")
     }
 
     /// `/mcp` builds the popover from `mcp_status`: one row per recorded server, with its name and its status word.
@@ -386,6 +408,29 @@ final class RouterTests: XCTestCase {
         let completions = CommandRouter.autocomplete(systemInit: systemInit)
         XCTAssertFalse(completions.contains("/vim"), "a terminal-only command is not offered")
         XCTAssertTrue(completions.contains("/model"))
+    }
+
+    /// A command whose value the user did not type opens the surface's picker. Nothing is sent: an
+    /// `apply_flag_settings` carrying an empty string would write `""` into the session's flag settings, and the
+    /// engine would have no way to tell that from a value the user chose.
+    func testCommandsWithNoArgumentOpenAPickerAndSendNothing() {
+        for (line, surface) in [("/model", "modelPicker"), ("/effort", "effortPicker"), ("/agent", "agentPicker")] {
+            guard case .native(let opened) = CommandRouter.route(line) else {
+                return XCTFail("bare \(line) did not open a picker")
+            }
+            XCTAssertEqual(opened, surface)
+        }
+        // `/fast` is the exception and is right to be: it is a toggle over what the channel is already running.
+        guard case .controlRequest(let toggled) = CommandRouter.route("/fast") else {
+            return XCTFail("bare /fast did not route to a control request")
+        }
+        XCTAssertEqual(toggled.payload, .object(["settings": .object(["fastMode": .bool(true)])]))
+        var running = SessionRuntimeState(cwd: URL(fileURLWithPath: "/tmp"))
+        running.fastModeObserved = true
+        guard case .controlRequest(let off) = CommandRouter.route("/fast", runtime: running) else {
+            return XCTFail("bare /fast did not route to a control request")
+        }
+        XCTAssertEqual(off.payload, .object(["settings": .object(["fastMode": .bool(false)])]))
     }
 
     /// Anything the table does not name and the engine does not call terminal-only goes to the engine as text.

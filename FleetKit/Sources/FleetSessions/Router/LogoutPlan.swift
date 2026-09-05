@@ -49,9 +49,14 @@ public enum LogoutOutcome: Hashable, Sendable {
     /// *Wait*: the plan is holding, and these are the task ids it is holding on.
     case waiting(on: [String])
     case success(exited: [ChannelKey], foreignLeftRunning: [SessionID])
-    /// A channel's `terminate()` answered no exit. `claude auth logout` did not run: taking the token out from
-    /// under a process that is still alive is exactly what the wedged row exists to prevent.
-    case blocked(wedged: [ChannelKey])
+    /// Something afleet started is still alive: a channel whose `terminate()` answered no exit, or a job whose
+    /// worker never left the roster. `claude auth logout` did not run in either case — taking the token out from
+    /// under a live process is the one thing this plan exists to prevent, and a job's worker is as live as a
+    /// channel's child.
+    case blocked(wedged: [ChannelKey], jobsStillListed: [JobShort])
+    /// Every channel and job went, and the CLI then refused to sign out. The terminations stand; the sign-out did
+    /// not happen, and the surface must not be told it did.
+    case signOutFailed(exited: [ChannelKey], reason: String)
 }
 
 /// The parent's `/logout`: raise the barrier, census, *Wait* or *Stop*, stop the jobs, terminate the channels, and
@@ -68,10 +73,14 @@ public enum LogoutPlan {
         /// Live holders that are neither a channel of ours nor a job of ours: somebody else's session, which keeps
         /// its token because afleet may not stop it.
         public var foreign: [Holder]
+        /// Channels already wedged when the census was taken. Each is a ghost afleet cannot end, so the plan cannot
+        /// finish, and the user is told which ones before being offered *Stop* rather than after.
+        public var wedged: [ChannelKey]
 
         public init(owned: [ChannelKey], nonEligible: [(key: ChannelKey, tasks: [String])],
-                    ownJobs: [JobShort], foreign: [Holder]) {
+                    ownJobs: [JobShort], foreign: [Holder], wedged: [ChannelKey] = []) {
             self.owned = owned; self.nonEligible = nonEligible; self.ownJobs = ownJobs; self.foreign = foreign
+            self.wedged = wedged
         }
     }
 
@@ -88,14 +97,20 @@ public enum LogoutPlan {
 
         var owned: [ChannelKey] = []
         var nonEligible: [(key: ChannelKey, tasks: [String])] = []
+        var wedged: [ChannelKey] = []
         for channel in fleet.channels {
-            guard case .owned = await channel.state.origin else { continue }
+            let state = await channel.state
+            guard case .owned = state.origin else { continue }
             owned.append(channel.key)
+            // A wedged channel is `.owned(.dormant)` with a trace, so origin alone does not tell it from a channel
+            // that can be ended. It is listed as owned *and* named here.
+            if state.wedged != nil { wedged.append(channel.key) }
             let tasks = await channel.liveTaskIDs()
             if await !channel.currentEligibility().isEligible { nonEligible.append((channel.key, tasks)) }
         }
         owned.sort { $0.session.description < $1.session.description }
         nonEligible.sort { $0.key.session.description < $1.key.session.description }
+        wedged.sort { $0.session.description < $1.session.description }
 
         let ourSessions = Set(fleet.channels.map(\.key.session))
         let ourShorts = Set(fleet.ownJobShorts.map(\.rawValue))
@@ -107,7 +122,7 @@ public enum LogoutPlan {
             .sorted { $0.pid < $1.pid }
 
         fleet.diagnostics.record(.logout(step: "census", count: owned.count))
-        return Census(owned: owned, nonEligible: nonEligible, ownJobs: ownJobs, foreign: foreign)
+        return Census(owned: owned, nonEligible: nonEligible, ownJobs: ownJobs, foreign: foreign, wedged: wedged)
     }
 
     /// Lowers the barrier without running anything: the user changed their mind.
@@ -119,6 +134,13 @@ public enum LogoutPlan {
     /// Runs the plan in the parent's order. The barrier stays up for a `.waiting` — the plan has not finished, and
     /// a channel opened in the meantime would be caught by the same logout — and is lowered on every other outcome.
     public static func execute(_ census: Census, choice: LogoutChoice, fleet: LogoutContext) async -> LogoutOutcome {
+        // A ghost the census already found is a plan that cannot finish. Stopping first and discovering it after
+        // would tear the user's other channels and jobs down for a sign-out that was never going to run.
+        guard census.wedged.isEmpty else {
+            fleet.diagnostics.record(.logout(step: "blocked", count: census.wedged.count))
+            fleet.barrier.lower()
+            return .blocked(wedged: census.wedged, jobsStillListed: [])
+        }
         let blocking = census.nonEligible.flatMap(\.tasks)
         if choice == .wait, !blocking.isEmpty {
             fleet.diagnostics.record(.logout(step: "waiting", count: blocking.count))
@@ -142,7 +164,15 @@ public enum LogoutPlan {
             try? await fleet.verbs.stop(short)
         }
         if !census.ownJobs.isEmpty {
-            await awaitRosterRemoval(of: census.ownJobs, fleet: fleet)
+            let stillListed = await awaitRosterRemoval(of: census.ownJobs, fleet: fleet)
+            // The same invariant as the wedge, and the same answer: a worker still named in the roster is a live
+            // process, and `auth logout` behind it would sign a running job out mid-turn. The plan stops here
+            // rather than terminating the channels for a sign-out it cannot run.
+            guard stillListed.isEmpty else {
+                fleet.diagnostics.record(.logout(step: "blocked", count: stillListed.count))
+                fleet.barrier.lower()
+                return .blocked(wedged: [], jobsStillListed: stillListed)
+            }
             fleet.diagnostics.record(.logout(step: "jobsStopped", count: census.ownJobs.count))
         }
 
@@ -160,10 +190,18 @@ public enum LogoutPlan {
         guard wedged.isEmpty else {
             fleet.diagnostics.record(.logout(step: "blocked", count: wedged.count))
             fleet.barrier.lower()
-            return .blocked(wedged: wedged)
+            return .blocked(wedged: wedged, jobsStillListed: [])
         }
 
-        try? await fleet.verbs.authLogout()
+        do {
+            try await fleet.verbs.authLogout()
+        } catch {
+            // The channels went; the sign-out did not. Reporting success here would be the one value the surface
+            // renders saying the opposite of what happened.
+            fleet.diagnostics.record(.logout(step: "signOutFailed", count: exited.count))
+            fleet.barrier.lower()
+            return .signOutFailed(exited: exited, reason: String(describing: error))
+        }
         fleet.diagnostics.record(.logout(step: "loggedOut", count: exited.count))
         fleet.barrier.lower()
 
@@ -176,21 +214,25 @@ public enum LogoutPlan {
         return .success(exited: exited, foreignLeftRunning: left)
     }
 
-    /// Re-reads the roster until none of these shorts names a worker, bounded on the injected clock.
-    private static func awaitRosterRemoval(of shorts: [JobShort], fleet: LogoutContext) async {
+    /// Re-reads the roster until none of these shorts names a worker, bounded on the injected clock, and answers
+    /// with the ones still listed when it gave up — empty on the path where every worker left.
+    private static func awaitRosterRemoval(of shorts: [JobShort], fleet: LogoutContext) async -> [JobShort] {
         var waited = Duration.zero
         var announced = false
+        var remaining = shorts
         while waited <= rosterBudget {
             let snapshot = await fleet.observer.reconcileNow(label: "logout")
             let live = Set(snapshot.holders.compactMap(\.jobShort))
-            if shorts.allSatisfy({ !live.contains($0.rawValue) }) { return }
+            remaining = shorts.filter { live.contains($0.rawValue) }
+            if remaining.isEmpty { return [] }
             if !announced {
                 announced = true
                 fleet.diagnostics.record(.logout(step: "jobRosterWait", count: shorts.count))
             }
-            guard (try? await fleet.clock.sleep(for: rosterInterval)) != nil else { return }
+            guard (try? await fleet.clock.sleep(for: rosterInterval)) != nil else { return remaining }
             waited += rosterInterval
         }
-        fleet.diagnostics.record(.logout(step: "jobRosterTimedOut", count: shorts.count))
+        fleet.diagnostics.record(.logout(step: "jobRosterTimedOut", count: remaining.count))
+        return remaining
     }
 }

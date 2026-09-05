@@ -394,8 +394,12 @@ public actor ChannelSupervisor {
     /// Ends this channel's process and, when it really exited, marks the channel dormant and gives its slot back.
     /// A `nil` exit stops here: no dormant mark and no released slot, because the ghost is still out there.
     private func endProcess(during action: LifecycleTable.TerminatingAction) async -> TerminateOutcome {
-        // A ghost has nothing left to reap, and a channel with no process has already gone.
-        guard process != nil, state.wedged == nil else { return .exited(.code(0, stderrTail: "")) }
+        // A channel that is *already* wedged is not a channel that has gone: `terminateOrWedge` deliberately keeps
+        // `process` non-nil because the ghost is still out there. The two early exits must not answer the same way,
+        // or a caller that reads this outcome — `/logout` does — would take a live ghost for an exited channel and
+        // do what only an exit permits.
+        if let trace = state.wedged { return .wedged(trace) }
+        guard process != nil else { return .exited(.code(0, stderrTail: "")) }
         let outcome = await terminateOrWedge(during: action)
         guard case .exited = outcome else { return outcome }
         process = nil

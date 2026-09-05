@@ -1,4 +1,5 @@
 import Foundation
+import XCTest
 
 /// A Clock whose time moves only when a test says so. `advance(by:)` resumes every sleeper whose deadline has passed,
 /// in deadline order, and yields between resumptions so a resumed task can arm its next sleep before the clock moves on.
@@ -14,7 +15,7 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
     private typealias Waiter = (deadline: Instant, id: UUID, continuation: CheckedContinuation<Void, any Error>)
     private var waiters: [Waiter] = []
     private var _requested: [Duration] = []
-    private typealias CountWaiter = (threshold: Int, continuation: CheckedContinuation<Void, Never>)
+    private typealias CountWaiter = (threshold: Int, id: UUID, continuation: CheckedContinuation<Void, Never>)
     /// Parties waiting for `waiters.count` to reach a threshold, registered and checked under `lock` so the
     /// registration cannot straddle the moment the count actually gets there.
     private var countWaiters: [CountWaiter] = []
@@ -49,13 +50,37 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
     /// registered under the same lock that governs `waiters` so the check-and-register cannot straddle the count
     /// actually reaching `n`. No polling, no wall time: a genuine synchronisation point on the clock's own state,
     /// the thing tests that need both of the observer's timers armed are actually waiting on.
-    func waitForSleeperCount(atLeast n: Int) async {
+    ///
+    /// Bounded by a wall-clock guard that is never reached on a correct path: the count is normally there within
+    /// microseconds. It exists so a misuse — waiting for timers that will never be armed, say after `stop()` — fails
+    /// with the count it was waiting for and the count it got, rather than hanging until XCTest's global timeout
+    /// with nothing said. The guard moves no part of the lifecycle; only `advance(by:)` does that.
+    func waitForSleeperCount(atLeast n: Int, within limit: Duration = .seconds(30),
+                             file: StaticString = #filePath, line: UInt = #line) async {
+        let id = UUID()
+        let guardTask = Task { [weak self] in
+            try? await Task.sleep(for: limit)
+            guard let self, !Task.isCancelled, self.expireCountWaiter(id) else { return }
+            XCTFail("the clock never parked \(n) sleepers; \(self.sleeperCount) are parked", file: file, line: line)
+        }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             lock.lock()
             if waiters.count >= n { lock.unlock(); continuation.resume(); return }
-            countWaiters.append((n, continuation))
+            countWaiters.append((n, id, continuation))
             lock.unlock()
         }
+        guardTask.cancel()
+    }
+
+    /// Removes the count-waiter with this id and resumes it, answering whether it was still registered. The guard
+    /// only reports when this says yes, so a wait that was satisfied a moment earlier reports nothing.
+    private func expireCountWaiter(_ id: UUID) -> Bool {
+        lock.lock()
+        guard let index = countWaiters.firstIndex(where: { $0.id == id }) else { lock.unlock(); return false }
+        let waiter = countWaiters.remove(at: index)
+        lock.unlock()
+        waiter.continuation.resume()
+        return true
     }
 
     /// Removes and returns every registered count-waiter now satisfied by the current waiter count. Must be called

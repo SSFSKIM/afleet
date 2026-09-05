@@ -26,6 +26,7 @@ final class ScriptedHolderFiles: @unchecked Sendable {   // `lock` serialises ev
     private var _onStopJob: (@Sendable (String) -> Void)?
     private var _stopRemovesWorker = true
     private var _agentsListsJobs = true
+    private var _authLogoutExitCode: Int32 = 0
 
     init(home: ScratchConfigHome) { self.home = home }
 
@@ -40,6 +41,13 @@ final class ScriptedHolderFiles: @unchecked Sendable {   // `lock` serialises ev
     var stopRemovesWorker: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _stopRemovesWorker }
         set { lock.lock(); _stopRemovesWorker = newValue; lock.unlock() }
+    }
+
+    /// What `claude auth logout` exits with. The CLI refusing to sign out is a case with no other way in: it
+    /// touches none of the scripted files, so nothing else in this harness can produce it.
+    var authLogoutExitCode: Int32 {
+        get { lock.lock(); defer { lock.unlock() }; return _authLogoutExitCode }
+        set { lock.lock(); _authLogoutExitCode = newValue; lock.unlock() }
     }
 
     /// An `agents --json` that omits the jobs: the CLI exited zero and the roster names the worker, but the listing
