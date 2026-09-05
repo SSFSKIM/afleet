@@ -2252,6 +2252,12 @@ SwiftPM package or target that builds and tests without the children above it, p
   §5's table; each package builds and tests without the ones above it. Owner: C2 for
   the two bottom packages, C4 for FleetKit's manifest, C5 for the app target, C7 for
   Workbench's manifest. Binds every child; a CI check in C5 rejects a violating import.
+  FleetKit's manifest skeleton is on `main` since 2026-09-05 with two target groups under
+  one `FleetKit` umbrella: `FleetTimeline` (C3) and `FleetSessions` (C4, depends on
+  `FleetTimeline` because dormant eligibility reads the registry mirror). Each child adds
+  targets only inside its own marked region of the manifest; C4 owns the rest of the file.
+  Binding, because two children build one package in parallel worktrees and the split is
+  what makes their merges independent; the target names inside a group are the child's.
 - **X2 Core value types.** `WorkspaceLink` exactly as §9.6; `ResolvedEnvironment`
   (variables, PATH, shell, capture time); `ConfigHome` (root URL, source: env or
   default); `SessionID` (UUID); `DiffRef` as §9.6; `ChannelOrigin` as
@@ -4071,3 +4077,7 @@ Pending — written at finish.
   write allowlist rests on one turn's writes and is untested against hooks, plugins, background
   shells, subagents and session relocation. That is a gate for C4 to widen, not a C2 defect.
   Flags C3, C4 and C7 (dispatch), C1 (census count).
+- 2026-09-05: X1 gains FleetKit's manifest skeleton: two target groups, `FleetTimeline`
+  (C3) and `FleetSessions` (C4), one umbrella, each child confined to its marked region.
+  Written by the orchestrator before wave 2 dispatch so the two children never contend for
+  one manifest; the empty targets build and test on `main`. Flags C3 and C4 (dispatch).
