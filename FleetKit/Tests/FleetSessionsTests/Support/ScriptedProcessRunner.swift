@@ -82,7 +82,7 @@ struct ScriptedProcessRunner: ProcessRunner {
         var rows: [[String: Any]] = []
         let workers = files.rosterWorkers()
         var jobPIDs: Set<Int32> = []
-        for short in files.jobShorts().sorted() {
+        for short in (files.agentsListsJobs ? files.jobShorts().sorted() : []) {
             guard let job = files.job(short) else { continue }
             var row: [String: Any] = ["id": short, "cwd": job.cwd ?? "", "kind": "background",
                                       "startedAt": 0, "state": job.state]

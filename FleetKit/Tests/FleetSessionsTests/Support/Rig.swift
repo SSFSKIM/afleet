@@ -66,9 +66,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     private var _onReleased: (@Sendable () async -> Void)?
     private var _byKey: [ChannelKey: ChannelSupervisor] = [:]
     private var _helpers: [Int32: Process] = [:]
-    private var _mirrored: [Int32: Task<Void, Never>] = [:]
     private var _reapers: [DispatchSemaphore] = []
-    private var _heldVictim: ChannelKey?
+    private var _heldVictims: Set<ChannelKey> = []
     private var _heldEviction: [CheckedContinuation<Void, Never>] = []
     private var _extraOwnPIDs: Set<Int32> = []
 
@@ -199,44 +198,32 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         for reaper in reapers { _ = reaper.wait(timeout: .now() + .seconds(10)) }
     }
 
-    /// Stands in for what the real CLI does with its own registry record: writes `sessions/<pid>.json` for a child of
-    /// ours and removes it once that pid is gone. `fake-claude` writes no record, so the rig writes one for it.
-    func mirrorOwnRegistryRecord(pid: Int32, session: SessionID) throws {
-        try files.writeRegistry(pid: pid, sessionID: session, kind: "interactive", entrypoint: "sdk-cli")
-        let files = self.files
-        let task = Task.detached {
-            while !Task.isCancelled {
-                if !ProcessLiveness.isRunning(pid: pid) { files.removeRegistry(pid: pid); return }
-                try? await Task.sleep(for: .milliseconds(3))
-            }
-        }
-        lock.lock(); _mirrored[pid] = task; lock.unlock()
-    }
-
     // MARK: - Holding an eviction open
 
     /// Parks the evicting supervisor between the victim's observed outcome and its report of it, so a test can run
     /// another decision while one eviction is still pending.
-    func holdEviction(of victim: ChannelKey) { lock.lock(); _heldVictim = victim; lock.unlock() }
+    /// Holds one victim's eviction open. Several may be held at once, which is how a test pins two concurrent
+    /// acquisitions to the moment both have been decided and neither has completed.
+    func holdEviction(of victim: ChannelKey) { lock.lock(); _heldVictims.insert(victim); lock.unlock() }
 
     func releaseEviction() {
         lock.lock()
-        _heldVictim = nil
+        _heldVictims = []
         let waiting = _heldEviction
         _heldEviction = []
         lock.unlock()
         for continuation in waiting { continuation.resume() }
     }
 
-    /// True once the evicting supervisor is actually parked, so a test never races the barrier it means to hold.
-    var evictionIsHeld: Bool { locked { !_heldEviction.isEmpty } }
+    /// How many evicting supervisors are actually parked, so a test never races the barrier it means to hold.
+    var heldEvictionCount: Int { locked { _heldEviction.count } }
+    var evictionIsHeld: Bool { heldEvictionCount > 0 }
 
     private func barrier(for victim: ChannelKey) async {
-        let held = locked { _heldVictim == victim }
-        guard held else { return }
+        guard locked({ _heldVictims.contains(victim) }) else { return }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             lock.lock()
-            guard _heldVictim == victim else { lock.unlock(); continuation.resume(); return }
+            guard _heldVictims.contains(victim) else { lock.unlock(); continuation.resume(); return }
             _heldEviction.append(continuation)
             lock.unlock()
         }
@@ -514,8 +501,7 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         for supervisor in supervisors { await supervisor.reap() }
         await observer.stop()
         for task in tasks { task.cancel() }
-        let (mirrors, helpers) = locked { (Array(_mirrored.values), Array(_helpers.keys)) }
-        for mirror in mirrors { mirror.cancel() }
+        let helpers = locked { Array(_helpers.keys) }
         for pid in helpers { killHelper(pid) }
         awaitReapers()
         home.removeAll()

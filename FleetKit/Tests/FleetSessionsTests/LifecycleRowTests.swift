@@ -662,6 +662,29 @@ final class LifecycleRowTests: XCTestCase {
 
     // MARK: - capReached
 
+    /// The cap's actual safety property, asserted at **every** decision from the three numbers each one carries.
+    ///
+    /// `live` is every slot holding a process — a live channel, a ghost, or a victim whose eviction has not
+    /// completed — `reserved` is every claim on a slot, and `pendingEvictions` is how many of the holding slots are
+    /// victims. Each victim is the slot one reservation is waiting for, because the incoming process replaces it
+    /// rather than joining it, so the occupancy is `live + reserved - pendingEvictions` and it may never exceed six.
+    /// No exception per decision kind: a grant, an eviction and a refusal are all bound by the same number, which is
+    /// the one `pick` tests. A counter that granted while holding four live channels and three unbacked
+    /// reservations breaks this and satisfies any assertion made on `live` alone.
+    private func assertNoDecisionOverGranted(_ rig: Rig, file: StaticString = #filePath, line: UInt = #line) {
+        for decision in rig.diagnostics.capDecisions {
+            let occupancy = decision.live + decision.reserved - decision.pendingEvictions
+            XCTAssertLessThanOrEqual(occupancy, FleetCapCounter.capacity,
+                                     "a \(decision.decision) decision was taken against \(decision.live) holding "
+                                     + "slots, \(decision.reserved) reservations and \(decision.pendingEvictions) "
+                                     + "pending evictions", file: file, line: line)
+            XCTAssertLessThanOrEqual(decision.pendingEvictions, decision.reserved,
+                                     "a pending eviction with no reservation waiting on it", file: file, line: line)
+        }
+        XCTAssertFalse(rig.diagnostics.capDecisions.isEmpty, "no cap decision was recorded at all",
+                       file: file, line: line)
+    }
+
     /// Six ready channels on scripted handles, with one channel's box so a test can make it ineligible.
     private func sixReady(_ rig: Rig) async throws -> (supervisors: [ChannelSupervisor], boxes: [EligibilityBox]) {
         var boxes: [EligibilityBox] = []
@@ -758,8 +781,16 @@ final class LifecycleRowTests: XCTestCase {
         rig.scriptedHandles[2].terminateReturns = Self.wedgingReport
         rig.forgetTransitions()
 
+        // Parked between the victim wedging and the report of it: the one window where the ghost could be counted
+        // both as a pending eviction and as a wedged slot, which would make the fleet look full when it is not.
+        rig.holdEviction(of: sups[2].key)
         let seventh = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
-        try await seventh.spawn(reason: .open)
+        let spawning = Task { try await seventh.spawn(reason: .open) }
+        try await rig.waitFor("the wedged victim to reach the barrier") { rig.evictionIsHeld }
+        let midWedge = await rig.fleet.occupancy
+        XCTAssertEqual(midWedge, 6, "the ghost occupies the slot it was already occupying, and not a second one")
+        rig.releaseEviction()
+        try await spawning.value
 
         let ghost = await sups[2].state
         XCTAssertEqual(ghost.wedged?.steps, Self.wedgedSteps)
@@ -772,8 +803,7 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(seventhState.origin, .owned(.ready))
         let holding = await rig.fleet.liveCount
         XCTAssertEqual(holding, 6, "the ghost still counts; the fleet never holds seven processes' worth of slots")
-        XCTAssertTrue(rig.diagnostics.capDecisions.allSatisfy { $0.live <= 6 },
-                      "a decision saw more than six process-holding slots: \(rig.diagnostics.capDecisions)")
+        assertNoDecisionOverGranted(rig)
 
         // With no other eligible channel there is nothing to move to, so the spawn is refused and builds nothing.
         let lone = try newRig(sharing: rig.diagnostics)
@@ -804,14 +834,31 @@ final class LifecycleRowTests: XCTestCase {
         for i in 2..<6 { await makeIneligible(sups[i], boxes[i], "t-\(i)") }
         rig.forgetTransitions()
 
+        // Both evictions are held open, so the two acquisitions are pinned to the moment each has been decided and
+        // neither has completed. Without the barrier the test only discriminates when the two `acquire` calls happen
+        // to interleave; with it, "the second acquirer saw the first one's claim" is what is actually asserted.
+        rig.holdEviction(of: sups[0].key)
+        rig.holdEviction(of: sups[1].key)
+
         let a = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         let b = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         var failures: [any Error] = []
-        await withTaskGroup(of: (any Error)?.self) { group in
-            group.addTask { do { try await a.spawn(reason: .open); return nil } catch { return error } }
-            group.addTask { do { try await b.spawn(reason: .open); return nil } catch { return error } }
-            for await outcome in group { if let outcome { failures.append(outcome) } }
+        let opens = Task {
+            var thrown: [any Error] = []
+            await withTaskGroup(of: (any Error)?.self) { group in
+                group.addTask { do { try await a.spawn(reason: .open); return nil } catch { return error } }
+                group.addTask { do { try await b.spawn(reason: .open); return nil } catch { return error } }
+                for await outcome in group { if let outcome { thrown.append(outcome) } }
+            }
+            return thrown
         }
+        // Either both opens reached an eviction of their own — the healthy shape — or one of them got a slot with no
+        // eviction at all, which is the break this test exists to catch and which shows up as a seventh process.
+        try await rig.waitFor("both opens to be decided") {
+            rig.heldEvictionCount == 2 || rig.spawnCount > 6
+        }
+        rig.releaseEviction()
+        failures = await opens.value
 
         let victims = [0, 1].filter { rig.scriptedHandles[$0].terminateCount == 1 }.count
         let aState = await a.state, bState = await b.state
@@ -822,8 +869,7 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertTrue((victims == 2 && newcomersReady == 2 && refusals == 0)
                       || (victims == 1 && newcomersReady == 1 && refusals == 1),
                       "victims: \(victims), ready: \(newcomersReady), refused: \(refusals)")
-        XCTAssertTrue(rig.diagnostics.capDecisions.allSatisfy { $0.live <= 6 },
-                      "a decision saw more than six process-holding slots: \(rig.diagnostics.capDecisions)")
+        assertNoDecisionOverGranted(rig)
         let holding = await rig.fleet.liveCount
         XCTAssertEqual(holding, 6)
         rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
@@ -872,8 +918,7 @@ final class LifecycleRowTests: XCTestCase {
         let after = await rig.fleet.liveCount
         XCTAssertEqual(after, before, "a second release of the same key is a no-op")
         XCTAssertEqual(after, 6)
-        XCTAssertTrue(rig.diagnostics.capDecisions.allSatisfy { $0.live <= 6 },
-                      "a decision saw more than six process-holding slots: \(rig.diagnostics.capDecisions)")
+        assertNoDecisionOverGranted(rig)
         rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
@@ -974,6 +1019,49 @@ final class LifecycleRowTests: XCTestCase {
         let dormantState = await fromDormant.state
         XCTAssertEqual(dormantState.origin, .backgroundJob)
         readyRig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
+    }
+
+    /// The CLI exiting zero is not the confirmation; the job being listed is. When the listing does not have it the
+    /// handoff has failed, and the channel must not be left presenting as owned: its child is already gone and its
+    /// slot already released, so "owned" would name a process that does not exist.
+    ///
+    /// This declares no scenario of its own. The claim is that a failed launch takes the one row that describes what
+    /// happened — the channel let go of its process and got no replacement — and nothing else.
+    func testAJobTheListingDoesNotNameFailsTheHandoffAndLeavesNoOwnedChannelBehind() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = try await readyScripted(rig)
+        // `--bg --resume` succeeds and the roster names the worker, so the verb's own confirmation passes; the
+        // listing the sidebar reads is what does not have it.
+        rig.files.agentsListsJobs = false
+        rig.forgetTransitions()
+
+        var thrown: (any Error)?
+        do { _ = try await rig.steppingClock { try await supervisor.sendToBackground() } } catch { thrown = error }
+
+        guard case .verbFailed(let verb, let exitCode)? = thrown as? LifecycleError else {
+            return XCTFail("the handoff gave \(String(describing: thrown))")
+        }
+        XCTAssertEqual(verb, "--bg --resume")
+        XCTAssertEqual(exitCode, 0, "the CLI succeeded; it is the confirmation that failed")
+        XCTAssertEqual(rig.diagnostics.jobNotListed, [supervisor.key.session.description])
+
+        let state = await supervisor.state
+        XCTAssertEqual(state.origin, .owned(.dormant),
+                       "the channel let go of its process and got no replacement, so it is dormant, not owned-ready")
+        XCTAssertNil(state.wedged, "nothing wedged: the child ended when it was asked to")
+        let holding = await rig.fleet.liveCount
+        XCTAssertEqual(holding, 0, "and it holds no slot")
+
+        // And it is an ordinary dormant channel, not a special one: nothing blocks it, so the cap counter may reap
+        // its slot away and a later send may resume it. A channel left presenting as owned would have gone on
+        // holding an eligibility verdict for a process that does not exist.
+        await supervisor.drainEligibility()
+        let verdict = await rig.fleet.verdict(of: supervisor.key)
+        XCTAssertEqual(verdict, .eligible)
+        XCTAssertEqual(rig.spawnCount, 1, "no replacement process was built for the failed handoff")
+
+        rig.assertObserved([T(.readyDormantEligible, .ready, .dormantTimerFired, .dormant)])
     }
 
     // MARK: - ownedOpenInTerminal
@@ -1177,12 +1265,19 @@ final class LifecycleRowTests: XCTestCase {
         // The "terminal" is a real process this test started, so its pid can genuinely stop being alive.
         let tab = try rig.startHelper()
         try rig.files.writeRegistry(pid: tab, sessionID: session, kind: "interactive", entrypoint: "cli")
+        // A background job on the same session, sorted ahead of the tab by pid. The re-adoption must wait for the
+        // record *the tab wrote*: waiting out whichever holder came first would be waiting for a process that was
+        // never the tab's, and this one's pid is the test runner's and never dies.
+        try rig.files.writeJob(short: "j00001", state: "working", sessionID: session, resumeSessionID: session,
+                               pid: ScriptedHolderFiles.livePID)
+        XCTAssertLessThan(ScriptedHolderFiles.livePID, tab, "the decoy holder sorts first")
         _ = await rig.observer.reconcileNow()
         rig.forgetTransitions()
         let labelsBefore = rig.reader.checkLabels.count
         rig.reader.onLabel(OwnershipLabel.release) { [weak rig] in
             rig?.files.removeRegistry(pid: tab)
             rig?.killHelper(tab)
+            try? rig?.files.stopJob(short: "j00001")   // the job ends too, so the pre-spawn check is clean
         }
 
         try await rig.steppingClock {
@@ -1417,6 +1512,56 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(state.banner, .contended(state.observed), file: file, line: line)
         XCTAssertEqual(state.observed.holders.map(\.pid), [pid], file: file, line: line)
         XCTAssertEqual(rig.runnerCalls.count(prefix: ["--bg"]), 0, "no verb ran", file: file, line: line)
+    }
+
+    /// Not a §7.4 row: the window between a spawn taking its reservation and applying its own outcome.
+    ///
+    /// A holder update that arrives in that window must not raise the disagreement. If it did, the channel would be
+    /// Contended by the time the post-handshake check applied `handshakeClean` or `handshakeFoundHolder`, neither of
+    /// which the table admits from `contended` — a `transitionNotInTable`, which Task 12's gate reads as a
+    /// programming error. The holder belongs to the pre-spawn and post-handshake checks, which have rows for it.
+    ///
+    /// The eviction barrier is what makes this deterministic: it parks the seventh channel *inside* `spawn`, after
+    /// the reservation and before the pre-spawn check, which is exactly the window.
+    func testAHolderArrivingWhileASpawnIsInFlightIsLeftToTheOwnershipChecks() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let (sups, boxes) = try await sixReady(rig)
+        for i in 1..<6 { await makeIneligible(sups[i], boxes[i], "t-\(i)") }
+        rig.forgetTransitions()
+
+        rig.holdEviction(of: sups[0].key)
+        let session = SessionID()
+        let seventh = rig.supervisor(session: session, isRecent: true)
+        let opening = Task { try await seventh.open() }
+        try await rig.waitFor("the seventh to park inside its spawn") { rig.evictionIsHeld }
+        let connecting = await seventh.state
+        XCTAssertEqual(connecting.origin, .owned(.connecting))
+        XCTAssertEqual(connecting.desired, .owned, "the intent is set, so the disagreement rule would otherwise fire")
+
+        // The holder appears mid-spawn, and is also on disk so the pre-spawn check will find it.
+        try rig.files.writeRegistry(pid: ScriptedHolderFiles.livePID, sessionID: session,
+                                    kind: "interactive", entrypoint: "cli")
+        await seventh.holdersChanged(HolderSet(holders: [foreignHolder(session)], observedAt: Date()))
+
+        let duringSpawn = await seventh.state
+        XCTAssertEqual(duringSpawn.origin, .owned(.connecting), "the spawn in flight still owns the transition")
+        XCTAssertEqual(rig.diagnostics.notInTable, [])
+
+        rig.releaseEviction()
+        var refusal: (any Error)?
+        do { try await opening.value } catch { refusal = error }
+        guard case .heldElsewhere? = refusal as? LifecycleError else {
+            return XCTFail("the pre-spawn check gave \(String(describing: refusal))")
+        }
+        let refused = await seventh.state
+        XCTAssertEqual(refused.origin, .foreignLive(.usersTerminal), "the check took the holder's origin, as it does")
+        XCTAssertEqual(rig.spawnCount, 6, "no seventh process was built")
+        XCTAssertEqual(rig.diagnostics.notInTable, [], "and no transition the table refuses was recorded")
+
+        rig.assertObserved([T(.archivedRecentOpened, .archivedRecent, .opened, .connecting),
+                            T(.capReached, .ready, .seventhSpawnNeeded, .dormant)])
+        assertNoDecisionOverGranted(rig)
     }
 
     // MARK: - desiredObservedDisagree

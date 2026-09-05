@@ -39,6 +39,7 @@ final class HolderReaderTests: XCTestCase {
     private func read(ownPIDs: Set<Int32> = [], verbs: CLIVerbs? = nil, agentsJSON: Bool = false,
                       startTime: @escaping ProcessLiveness.StartTimeReader = ProcessLiveness.startTime(of:),
                       label: String = OwnershipLabel.poll) async -> HolderSnapshot {
+        // The concrete reader has no default of its own; the test's convenience default is here, at the call site.
         await FileHolderReader(verbs: verbs, diagnostics: sink, startTime: startTime)
             .read(configHome: home.configHome, ownPIDs: ownPIDs, includeAgentsJSON: agentsJSON, label: label)
     }

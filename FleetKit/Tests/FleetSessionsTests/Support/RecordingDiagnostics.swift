@@ -23,7 +23,7 @@ final class RecordingDiagnostics: FleetDiagnosticsSink, DiagnosticsSink, @unchec
     private var _notInTable: [Observed] = []
     private var _answerWriteFailures: [(id: String, reason: String)] = []
     private var _wedged: [(session: String, steps: Int)] = []
-    private var _capDecisions: [(decision: String, live: Int, reserved: Int)] = []
+    private var _capDecisions: [(decision: String, live: Int, reserved: Int, pendingEvictions: Int)] = []
     private var _evictions: [(outcome: String, victim: String)] = []
     private var _paneRequests: [(id: UUID, purpose: String)] = []
     private var _staleExits: [UUID] = []
@@ -37,7 +37,9 @@ final class RecordingDiagnostics: FleetDiagnosticsSink, DiagnosticsSink, @unchec
     var notInTable: [Observed] { lock.lock(); defer { lock.unlock() }; return _notInTable }
     var answerWriteFailures: [(id: String, reason: String)] { lock.lock(); defer { lock.unlock() }; return _answerWriteFailures }
     var wedged: [(session: String, steps: Int)] { lock.lock(); defer { lock.unlock() }; return _wedged }
-    var capDecisions: [(decision: String, live: Int, reserved: Int)] { lock.lock(); defer { lock.unlock() }; return _capDecisions }
+    var capDecisions: [(decision: String, live: Int, reserved: Int, pendingEvictions: Int)] {
+        lock.lock(); defer { lock.unlock() }; return _capDecisions
+    }
     var evictions: [(outcome: String, victim: String)] { lock.lock(); defer { lock.unlock() }; return _evictions }
     var paneRequests: [(id: UUID, purpose: String)] { lock.lock(); defer { lock.unlock() }; return _paneRequests }
     var staleExits: [UUID] { lock.lock(); defer { lock.unlock() }; return _staleExits }
@@ -61,8 +63,8 @@ final class RecordingDiagnostics: FleetDiagnosticsSink, DiagnosticsSink, @unchec
             _answerWriteFailures.append((id.rawValue, reason))
         case let .wedged(session, steps):
             _wedged.append((session, steps))
-        case let .capDecision(decision, live, reserved):
-            _capDecisions.append((decision, live, reserved))
+        case let .capDecision(decision, live, reserved, pendingEvictions):
+            _capDecisions.append((decision, live, reserved, pendingEvictions))
         case let .evictionOutcome(outcome, victim):
             _evictions.append((outcome, victim))
         case let .paneRequest(id, purpose, _):

@@ -24,7 +24,12 @@ public enum FleetDiagnosticEvent: Sendable {
     case procStartUnparseable(pid: Int32)
     /// `kill(pid, 0)` said live but `proc_pidinfo` refused, so the pid counts as a holder with nothing compared.
     case startTimeUnreadable(pid: Int32)
-    case capDecision(decision: String, live: Int, reserved: Int)
+    /// `live` is every slot holding a process — a live channel, a ghost, or a victim whose eviction has not
+    /// completed. `pendingEvictions` is how many of those are victims, and each of those is the slot one of the
+    /// `reserved` claims is waiting for: the incoming process replaces the victim's rather than joining it. So the
+    /// occupancy a decision was taken against is `live + reserved - pendingEvictions`, and that is what the cap
+    /// bounds. Three numbers rather than two, because the invariant cannot be stated from any two of them.
+    case capDecision(decision: String, live: Int, reserved: Int, pendingEvictions: Int)
     case evictionOutcome(outcome: String, victim: String)
     case logout(step: String, count: Int)
     case driftRefusalIntercepted(command: String)
@@ -73,9 +78,10 @@ public enum FleetDiagnosticEvent: Sendable {
             return .object(["event": .string("proc_start_unparseable"), "pid": .integer(Int64(pid))])
         case let .startTimeUnreadable(pid):
             return .object(["event": .string("start_time_unreadable"), "pid": .integer(Int64(pid))])
-        case let .capDecision(decision, live, reserved):
+        case let .capDecision(decision, live, reserved, pendingEvictions):
             return .object(["event": .string("cap_decision"), "decision": .string(decision),
-                            "live": .integer(Int64(live)), "reserved": .integer(Int64(reserved))])
+                            "live": .integer(Int64(live)), "reserved": .integer(Int64(reserved)),
+                            "pending_evictions": .integer(Int64(pendingEvictions))])
         case let .evictionOutcome(outcome, victim):
             return .object(["event": .string("eviction_outcome"), "outcome": .string(outcome), "victim": .string(victim)])
         case let .logout(step, count):

@@ -86,6 +86,9 @@ public actor ChannelSupervisor {
     private var eligibilityTask: Task<Void, Never>?
     private var subscribers: [UUID: AsyncStream<WireEvent>.Continuation] = [:]
     private var shuttingDown = false
+    /// True from the moment a spawn takes its reservation until it has applied its own outcome. The holder updates
+    /// that arrive in that window belong to the post-handshake check, not to the disagreement rule.
+    private var spawning = false
 
     private let updatesContinuation: AsyncStream<ChannelState>.Continuation
     /// Every transition, published after the state has changed.
@@ -412,12 +415,14 @@ public actor ChannelSupervisor {
         }
         if let trace = state.wedged { throw LifecycleError.wedged(trace) }
 
+        var terminated = false
         if let handle = process {
             let ownPID = await handle.childProcessIdentifier
             if case .wedged(let trace) = await terminateOrWedge(during: action) {
                 throw LifecycleError.wedged(trace)
             }
             process = nil
+            terminated = true
             await fleet.release(key)
             // The record our own child wrote, waited out by pid: `awaitRelease` wants the record gone *and* the pid
             // dead, and a child with no record still has to be dead before anyone else may write the transcript.
@@ -427,11 +432,13 @@ public actor ChannelSupervisor {
                 enterContended(await observer.holders(for: key.session), via: .handoffTimedOut)
                 throw LifecycleError.handoffTimedOut(state.observed)
             }
-        } else if let ghost = (await observer.holders(for: key.session)).first(where: { $0.isOwnChild }) {
-            // No process of ours is running, but a record of ours is still live: an older epoch's ghost, or a child
-            // the registry has not caught up with. Rule 5 waits that out too before anybody else writes the
-            // transcript. With no such record — the ordinary dormant case — there is no process and no wait.
-            if case .timedOut = await ownership.awaitRelease(previous: ghost, upTo: Self.handoffBudget) {
+        } else if let ours = (await observer.holders(for: key.session)).first(where: { $0.isOwnChild }) {
+            // This channel has no process, but a *live child of the fleet's* still names the session — another
+            // supervisor's, on the same session id. `isOwnChild` is computed from the set of live child pids, so an
+            // older epoch's ghost is not one of these: a ghost is caught one step later, by the recheck. Rule 5
+            // waits this one out before anybody else writes the transcript. With no such holder — the ordinary
+            // dormant case — there is no process and no wait, and the recheck is the only check.
+            if case .timedOut = await ownership.awaitRelease(previous: ours, upTo: Self.handoffBudget) {
                 enterContended(await observer.holders(for: key.session), via: .handoffTimedOut)
                 throw LifecycleError.handoffTimedOut(state.observed)
             }
@@ -441,7 +448,16 @@ public actor ChannelSupervisor {
         let holders = await ownership.beforeSpawn(session: key.session)
         guard holders.isEmpty else { throw preempted(by: holders) }
 
-        let result = try await launch()
+        let result: T
+        do {
+            result = try await launch()
+        } catch {
+            // The child is already gone and its slot already released, so presenting the channel as owned would be
+            // a lie: there is nothing behind it. What actually happened is a reap — terminate, then no replacement —
+            // so that is the row it takes, and the caller still gets the failure.
+            if terminated { apply(.dormantTimerFired, to: .dormant) }
+            throw error
+        }
         state.banner = nil
         apply(event, to: target)
         return result
@@ -543,7 +559,10 @@ public actor ChannelSupervisor {
             let target: LifecycleTable.StateName = {
                 if process != nil { return .ready }
                 if contendedFrom == .dormant { return .dormant }
-                return .archivedRecent
+                // The table admits only `archivedRecent` here, but `enter` reads that name as a *statement* about
+                // recency, so naming it unconditionally would make a channel recent merely by passing through
+                // Contended. The name is derived from the flag the channel already has.
+                return Self.name(of: .archived, isRecent: isRecent)
             }()
             state.banner = nil
             contendedFrom = nil
@@ -608,6 +627,8 @@ public actor ChannelSupervisor {
     // MARK: - Spawning
 
     func spawn(reason: SpawnReason) async throws {
+        spawning = true
+        defer { spawning = false }
         // A respawn continues the crash series; anything the user asked for starts a new one, which is what makes
         // *Reopen* mean something after the fourth failure.
         if reason != .respawn { crashCount = 0; wasReadyInThisSeries = false }
@@ -802,7 +823,10 @@ public actor ChannelSupervisor {
         }
         pendingHatch = nil
         let holders = await observer.holders(for: key.session)
-        if let tab = holders.first {
+        // The tab wrote a registry record of its own: a foreign one, because the pane is not a child of ours and is
+        // not a job. A job holder or one of our own children naming the same session is somebody else's business,
+        // and waiting out its pid would be waiting for the wrong process to end.
+        if let tab = holders.first(where: { !$0.isOwnChild && !$0.isJob }) {
             if case .timedOut = await ownership.awaitRelease(previous: tab, upTo: Self.handoffBudget) {
                 enterContended(holders, via: .handoffTimedOut)
                 return
@@ -875,7 +899,11 @@ public actor ChannelSupervisor {
         // Rule 1: afleet wants this channel and somebody else has it. Its own event, never a handoff timeout — the
         // two are raised from different places and G1 has to see both fire. A channel afleet does not want owned
         // takes the dormant `holderAppeared` row below instead.
-        if state.desired == .owned, here == .connecting || here == .ready || here == .dormant,
+        // Not while a spawn of ours is in flight: the post-handshake check is about to read the very same holders
+        // and take `connectingFoundHolder`, the row that exists for a holder found during a spawn. Raising the
+        // disagreement here instead would move the channel to Contended and leave that check's own transition with
+        // no candidate — `transitionNotInTable`, which Task 12's gate reads as a programming error.
+        if state.desired == .owned, !spawning, here == .connecting || here == .ready || here == .dormant,
            mine.contains(where: { !$0.isOwnChild }) {
             enterContended(mine, via: .desiredObservedDisagree)
             return

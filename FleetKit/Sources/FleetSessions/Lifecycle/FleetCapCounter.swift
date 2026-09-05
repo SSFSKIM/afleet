@@ -78,7 +78,7 @@ public actor FleetCapCounter {
             // The victim's own `release` may have completed this eviction already; either way the slot is the
             // reservation's now. A reservation that was rolled back in between is gone and answers a refusal.
             guard reserved[r.id] != nil else { return refuse() }
-            diagnostics.record(.capDecision(decision: "granted", live: holdingCount, reserved: reserved.count))
+            record("granted")
             return .granted(r)
         case .victimWedged:
             if let victim { wedged.insert(victim) }
@@ -94,7 +94,7 @@ public actor FleetCapCounter {
     private func pick(for r: Reservation) -> CapDecision {
         let occupied = live.count + reserved.count + wedged.count + pendingEvictions.count
         if occupied <= capacity {
-            diagnostics.record(.capDecision(decision: "granted", live: holdingCount, reserved: reserved.count))
+            record("granted")
             return .granted(r)
         }
         let alreadyTried = attempted[r.id] ?? []
@@ -104,7 +104,7 @@ public actor FleetCapCounter {
         if let victim = candidates.min(by: { (lru[$0] ?? 0) < (lru[$1] ?? 0) }) {
             live.remove(victim)
             pendingEvictions[r.id] = victim
-            diagnostics.record(.capDecision(decision: "evict", live: holdingCount, reserved: reserved.count))
+            record("evict")
             return .evict(victim: victim, r)
         }
         reserved.removeValue(forKey: r.id)
@@ -117,8 +117,14 @@ public actor FleetCapCounter {
     /// eighth open at the cap read six rather than the five processes it can see.
     private func refuse() -> CapDecision {
         let count = holdingCount + reserved.count
-        diagnostics.record(.capDecision(decision: "refused", live: holdingCount, reserved: reserved.count))
+        record("refused")
         return .refused(live: count)
+    }
+
+    /// One decision, with the three numbers it was taken against.
+    private func record(_ decision: String) {
+        diagnostics.record(.capDecision(decision: decision, live: holdingCount, reserved: reserved.count,
+                                        pendingEvictions: pendingEvictions.count))
     }
 
     /// Every slot that holds, or is still holding, a process of ours: a live channel, a ghost, and a victim whose
@@ -188,6 +194,11 @@ public actor FleetCapCounter {
 
     public var liveCount: Int { holdingCount }
     public var occupiedCount: Int { live.count + reserved.count + wedged.count + pendingEvictions.count }
+    /// What the cap actually bounds. Every pending eviction is the slot one reservation is waiting for — the
+    /// incoming process replaces the victim's rather than joining it — so it is counted once, not twice, and this
+    /// is at most `capacity` at every moment. `occupiedCount` is deliberately the more conservative number `pick`
+    /// compares, which reads one higher for the duration of each eviction.
+    public var occupancy: Int { holdingCount + reserved.count - pendingEvictions.count }
     public func isLive(_ key: ChannelKey) -> Bool { live.contains(key) }
     public func recency(of key: ChannelKey) -> UInt64? { lru[key] }
     /// The last verdict this key's supervisor pushed. The counter never asks a supervisor for it.

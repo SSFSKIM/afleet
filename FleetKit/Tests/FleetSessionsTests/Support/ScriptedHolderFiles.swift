@@ -25,6 +25,7 @@ final class ScriptedHolderFiles: @unchecked Sendable {   // `lock` serialises ev
     private let lock = NSLock()
     private var _onStopJob: (@Sendable (String) -> Void)?
     private var _stopRemovesWorker = true
+    private var _agentsListsJobs = true
 
     init(home: ScratchConfigHome) { self.home = home }
 
@@ -39,6 +40,13 @@ final class ScriptedHolderFiles: @unchecked Sendable {   // `lock` serialises ev
     var stopRemovesWorker: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _stopRemovesWorker }
         set { lock.lock(); _stopRemovesWorker = newValue; lock.unlock() }
+    }
+
+    /// An `agents --json` that omits the jobs: the CLI exited zero and the roster names the worker, but the listing
+    /// the sidebar reads does not have it.
+    var agentsListsJobs: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _agentsListsJobs }
+        set { lock.lock(); _agentsListsJobs = newValue; lock.unlock() }
     }
 
     var root: URL { home.url }

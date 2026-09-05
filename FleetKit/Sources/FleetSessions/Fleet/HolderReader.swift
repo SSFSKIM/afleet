@@ -186,8 +186,11 @@ public struct FileHolderReader: HolderReader {
         self.verbs = verbs; self.diagnostics = diagnostics; self.startTime = startTime
     }
 
+    /// `label` carries no default here either. Through the protocol every caller must pass one; a default on the
+    /// concrete type would let a direct caller omit it and silently read as a poll, which is the crack the explicit
+    /// label was introduced to close.
     public func read(configHome: ConfigHome, ownPIDs: Set<Int32>, includeAgentsJSON: Bool,
-                     label: String = OwnershipLabel.poll) async -> HolderSnapshot {
+                     label: String) async -> HolderSnapshot {
         _ = label
         var skipped = 0
         var byPID: [Int32: Holder] = [:]
