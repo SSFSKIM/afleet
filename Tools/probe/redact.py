@@ -397,6 +397,28 @@ class Redactor:
             return new
         return node
 
+    def _redact_oauth_state(self, node, path):
+        """Rule 6's other half. `claude_oauth_callback` hands back its grant as two bare
+        strings: `authorizationCode`, which the `authorization` secret word already catches,
+        and `state`, which no name rule reaches. Adding `state` to SECRET_WORDS would reach it
+        and a great deal else -- `session_state`, a dialog's state -- so the OAuth subtype is
+        the gate instead, exactly as it is for the URL half. Nested for the same reason the URL
+        rule is nested, and idempotent so a `redact` re-run over a committed fixture does not
+        inflate the manifest.
+        """
+        if isinstance(node, dict):
+            for k, v in list(node.items()):
+                p = "%s.%s" % (path, k)
+                if k.lower() == "state" and v is not None and v != "<redacted>":
+                    node[k] = "<redacted>"
+                    self._hit("oauth_flow", p, subtree=isinstance(v, (dict, list)))
+                else:
+                    node[k] = self._redact_oauth_state(v, p)
+            return node
+        if isinstance(node, list):
+            return [self._redact_oauth_state(v, "%s[%d]" % (path, i)) for i, v in enumerate(node)]
+        return node
+
     def redact_frame(self, frame, direction, request_subtypes):
         """`direction` is unused here by design: the caller owns the tombstone line that
         records it (`{"t":..,"dir":"out","dropped":..}`), and only the caller knows the
@@ -416,6 +438,17 @@ class Redactor:
             f = dict(frame)
             if sub == "mcp_message":
                 req = dict(f["request"]); req["message"] = self._truncate_mcp(req.get("message"), "request.message"); f["request"] = req
+            if sub in OAUTH_SUBTYPES:
+                # The grant travels outbound as well: `mcp_oauth_callback_url.callbackUrl` and
+                # `mcp_authenticate.redirectUri` carry `?code=..&state=..`, and rule 6 used to
+                # run only over responses. A request states its own subtype, so unlike a
+                # response there is no correlation to lose and no fail-open case to cover: the
+                # gate is the subtype and nothing else. Scanning every string for a URL instead
+                # would rewrite a `can_use_tool` argument that merely happens to be one.
+                req = json.loads(json.dumps(f["request"]))
+                self._redact_urls(req, "request")
+                self._redact_oauth_state(req, "request")
+                f["request"] = req
             return self.redact_json(f)
         if t == "control_response":
             rid = (frame.get("response") or {}).get("request_id")
