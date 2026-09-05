@@ -84,7 +84,8 @@ final class LaunchConfigurationTests: XCTestCase {
     /// The options whose value the caller writes, and which therefore reach the child as caller-chosen argv
     /// text. `testEveryCallerSuppliedArgvTokenIsAValidatedOne` asserts this set is complete; the test below
     /// asserts every member of it rejects an option-shaped value. Neither is worth much without the other.
-    private static let optionsCarryingCallerText: Set<String> = ["--model", "--agent", "--effort", "-n", "--add-dir", "-w"]
+    private static let optionsCarryingCallerText: Set<String> = ["--model", "--agent", "--effort", "-n", "--add-dir", "-w",
+                                                                  "--resume-session-at", "--resume-drops-turn"]
 
     /// `-w` declares an optional value, so `worktree: .named("--allow-dangerously-skip-permissions")` used to
     /// put a real permission-bypass flag on the command line with `allowBypass` false and never consulted.
@@ -98,6 +99,10 @@ final class LaunchConfigurationTests: XCTestCase {
         var n = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)); n.name = evil; configs["-n"] = n
         var d = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)); d.addDirectories = [URL(fileURLWithPath: "/tmp/a")]; configs["--add-dir"] = d
         var w = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)); w.worktree = .named(evil); configs["-w"] = w
+        let entry = LaunchConfiguration(binary: bin, cwd: cwd, session: .forkFrom(sid, at: .init(entryUUID: evil, dropsTurn: droppedPrompt)))
+        configs["--resume-session-at"] = entry
+        let drops = LaunchConfiguration(binary: bin, cwd: cwd, session: .forkFrom(sid, at: .init(entryUUID: forkEntry, dropsTurn: evil)))
+        configs["--resume-drops-turn"] = drops
         XCTAssertEqual(Set(configs.keys), Self.optionsCarryingCallerText)
         for (option, config) in configs where option != "--add-dir" {
             XCTAssertThrowsError(try config.arguments(), option) { error in
@@ -119,7 +124,10 @@ final class LaunchConfigurationTests: XCTestCase {
                                     agent: "MARKagent", effort: "MARKeffort", name: "MARKname",
                                     addDirectories: [URL(fileURLWithPath: "/MARKdir")], worktree: .named("MARKworktree"),
                                     allowBypass: true, promptSuggestions: true, settingSources: [.user], strictMCPConfig: true)
-        let argv = try c.arguments()
+        // `session` is a single field, so the fork-point marks need their own config alongside `c`'s.
+        let fork = LaunchConfiguration(binary: bin, cwd: cwd,
+                                       session: .forkFrom(sid, at: .init(entryUUID: "MARKentry", dropsTurn: "MARKdropsturn")))
+        let argv = try c.arguments() + fork.arguments()
         let carrying = Set(argv.indices.filter { argv[$0].contains("MARK") }.map { argv[$0 - 1] })
         XCTAssertEqual(carrying, Self.optionsCarryingCallerText)
     }
