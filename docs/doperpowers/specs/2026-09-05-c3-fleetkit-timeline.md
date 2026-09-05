@@ -1,0 +1,955 @@
+# C3: `FleetKit` timeline — reducers, transcript index, agent tree, registry mirror (2026-09-05)
+
+> **Parent:** `docs/doperpowers/specs/2026-09-03-afleet-workspace-design.md §17 C3`.
+> **Parent-pin:** that path at commit `ee94449` ("FleetKit: manifest skeleton with the C3 and
+> C4 target groups; X1 records the split"). **Level name:** child, wave 2 of the v1 roadmap.
+> **Track:** controlled. **Branch:** `child/c3-timeline`, worktree `../afleet-c3`; merges to
+> `main` when G1 through G4 pass. C1 has merged, so G1's blocker (C1.G1) is discharged and
+> every gate is evaluable now; where a gate names a recording the corpus does not hold, this
+> document says so and the gate is stated against the corpus that exists (parent §17.6's
+> pending-gate rule applies to the missing recording, never to a substitute). This document
+> treats the parent's §17 C3 section and its binding inheritance (§7.3 in full, §8.8's tree
+> data model, X4's field list, X4 and X7 as amended on 2026-09-05 by C7's decomposing run,
+> §5's package edges) as landed; it records only the residue
+> those sections leave to this child.
+
+## Purpose
+
+Everything afleet shows about a session is either a transcript record or a wire frame, and
+the parent's one non-negotiable is that a channel looks the same whether its history came
+from disk, from `transcript_mirror` frames, or from a live process (Decision Log, "The wire
+reducer and the transcript reader must produce identical timeline items"). C3 is the pure
+data half of `FleetKit` that makes that true: the `TimelineItem` model and its identity; the
+transcript record model and the reader that turns a JSONL file into records without ever
+guessing; the record reducer that folds records into the durable projection, with the
+source arbitration that lets the file and the mirror feed one idempotent ingestion; the wire
+reducer that folds the remaining frames into the streaming preview and the ephemeral
+overlay; the transcript index that lists thousands of sessions from a head-and-tail read
+in the time a click takes; the agent-run tree with its two-step join and sidecar
+enrichment; the background-task registry mirror and the output-file tail; and the
+differential invariant, written as a test that runs against every fixture C1 recorded; and
+the queries the panels ask of a channel's timeline, beginning with the recent URLs the
+Browser panel's quick-open lists. No process is spawned here. Input is files and frame streams; output is value types. When C3
+is done, C4 can decide dormancy from the registry mirror, C6 can render a channel from
+`DurableProjection` plus `Overlay` and an `AgentRunTree` without reading a byte of JSONL,
+and the corpus stands guard over all three.
+
+## Acceptance
+
+The parent's gates, restated as observable behaviour. Each gate names the test target that
+proves it. All of them run under `swift test --package-path FleetKit`; C3's tests live in
+`FleetTimelineTests`.
+
+- **G1 (required) — the invariant holds on every fixture, both checks, explicit exclusion
+  lists.** `DifferentialInvariantTests` runs over every directory under `Fixtures/` (the
+  count is asserted equal to the committed eighteen, not floored) and asserts, per fixture:
+  *check one* — for every stream a `transcript_mirror` frame names, the entries delivered
+  in frame order equal, by record identity, the records of the paired file under
+  `transcript/` in the byte range appended during the recording (from that stream's
+  `streams.json` offset to end of file), after skipping exactly the number of file records
+  `fixture.json` declares as `unmirrored_prefix`; field-for-field equality holds except at
+  the paths `mirror_identity_only` declares for a matching stream scope; `agent_metadata`
+  entries are compared against the stream's `.meta.json`, field for field; and the set of
+  fixtures that carry at least one mirrored stream equals a pinned set of fifteen names, so
+  a fixture that silently loses its mirror fails rather than passing vacuously. *Check
+  two* — the durable projection the wire reducer produces from the fixture's conversational
+  frames equals, item for item, the durable projection the record reducer produces from the
+  fixture's transcript files, for the categories the wire carries
+  (`ProjectionCategories.comparedWireToFile`), with identity by record uuid, subagent items
+  by agent id and source file, streaming collapsed, and timestamps compared within one
+  second only where both sides carry one. The record kinds compared file-to-file only are
+  the named constant `ProjectionCategories.fileOnlyRecordKinds`; the overlay is asserted
+  separately, from wire frames alone, for decisions, cluster labels and per-turn cost. Both
+  lists are constants the renderer reads too (X4). Every record kind the corpus contains is
+  either modelled or in the session-state vocabulary; a kind outside both is a named finding
+  that fails the test, because an unknown kind is exactly the drift this gate exists to
+  catch. The two synthetic fixtures are run through both checks and their results are
+  pinned as an exact set of named findings, not asserted as passes: a synthetic fixture is
+  authoritative about the shapes it was built to exercise and about nothing else (parent
+  §11, §17.7). This is parent item 31.
+- **G2 (required) — the index is fast enough to be the sidebar.** Two layers, because the
+  parent's numbers are about the author's machine and the default suite must not read it.
+  *Default suite*: `TranscriptIndexTests` assembles the corpus's transcript snapshots into a
+  config-home-shaped tree under the system temporary directory and asserts the index's
+  correctness — one entry per session file, the title precedence of §35.19.7, the relocated
+  cwd overriding the recorded one, subagent files counted but not listed, `.meta.json`
+  ignored, a `memory/` directory ignored — and that `update(changed:)` after touching one
+  file re-reads that file alone (asserted by a counting file reader, not by timing).
+  *Opt-in*, behind `AFLEET_LOCAL_INDEX=1`: `LocalHomeIndexTests` reads the config home the
+  environment resolves (never writes, opens with `O_NOFOLLOW`), builds the index with an
+  in-memory storage so no persisted snapshot exists, and asserts the median of five cold
+  builds under 500 ms, an incremental update after one `touch` under 50 ms, and the
+  channel history of the largest local transcript produced in under one second through the
+  reader's bounded window. Its output is counts, sizes and timings, never a path, a title
+  or a record (parent §6.3). The 2,989 files of parent §17.2 are 2,967 today (grounding
+  below); the test prints its count rather than asserting the parent's. This is S4 and
+  item 1's data half.
+- **G3 (required) — the three fixtures the data half is named for replay correctly.**
+  `session-mirror-relocation` and `session-mirror-resume` fold through `StreamIngestion`
+  with no duplicate and no missing record (asserted as the record-key sequence of the final
+  file), with the stream's path rebound at `transcript_relocated` and the byte offset
+  carried across the resume (item 64's reducer half). `nested-depth-2` yields a two-level
+  `AgentRunTree` whose depth-2 node's parent is the depth-1 task id, with the parent read
+  from the `agent_metadata` mirror entry before the sidecar exists and again from the
+  `.meta.json` on disk, and whose two-step join returns the same answer when both are
+  withheld (item 49's data half). `background-shell` yields a `RegistryEntry` of kind
+  `local_bash` that is listed by the engine while it runs and unlisted after, a synthesised
+  `TaskRunItem` completion from `task_notification`, and a `TaskOutputTailer` over the
+  artifact that yields the command's output and then the parsed exit code from the trailer
+  (item 61's data half). Each of these assertions was demonstrated failing against a
+  deliberately broken reducer before it was accepted (parent §17.7, the discriminating-test
+  rule), and the demonstrations are recorded in the plan's ledger.
+- **G4 (required) — mirror frames alone drive the reducer; `mirror_error` switches to
+  file-only.** With no `TranscriptWatcher` attached and no file read after the open,
+  `StreamIngestion` fed only the fixture's `transcript_mirror` frames produces the same
+  durable projection as the file read (item 56's data half; the recorded fixtures whose
+  mirror is complete are the evidence, and `session-mirror-resume` is the counter-case
+  where the file read is load-bearing and the test says so). Fed a `system/mirror_error`
+  frame, the ingestion reports `.fileOnly` for the rest of that process epoch, ignores later
+  mirror entries for that stream, and emits exactly one `TimelineNotice`; there is no
+  recorded `mirror_error` in the corpus, so this path is exercised with C2's committed,
+  bundle-modelled sample (`ClaudeWire/Tests/Support/Samples/system_mirror_error.json`) and
+  is stated as shape-verified, not engine-verified.
+
+Parent items C3 touches but does not close: 1, 31, 49, 56, 61, 64 (their UI halves belong
+to C6 and C4's lifecycle to C4).
+
+## Grounding
+
+Measured 2026-09-05 in the worktree, against C1's corpus at `ee94449`, the local config home
+(read only, counts only) and the extracted 2.1.258 bundle (`~/claude-code-bundle/2.1.258/cli.pretty.js`).
+
+**The corpus.** Eighteen fixtures, sixteen recorded, two synthetic. Seventeen carry a
+transcript snapshot; `zero-cost` carries none. Fifteen carry at least one mirrored stream
+(the two synthetic dialogs and `zero-cost` carry none); `explore-depth-1` mirrors two
+streams and `nested-depth-2` three; `session-mirror-relocation` mirrors one stream under two
+paths. Across the twenty JSONL files (seventeen main, three subagent) there are 611 records
+of eleven kinds — `user` 71, `assistant` 119, `attachment` 200, `queue-operation` 64,
+`file-history-snapshot` 26, `file-history-delta` 4, `atis-latch` 46, `last-prompt` 46,
+`ai-title` 29, `mode` 2, `relocated` 4 — and 496 mirrored entries of those eleven plus
+`agent_metadata` (3), which the mirror carries and no JSONL receives. **No `system` record
+of any subtype appears in the corpus**, so the five system kinds the parent's §7.3 names
+(`turn_duration`, `stop_hook_summary`, `local_command`, `informational`, `compact_boundary`)
+are promised by the bundle and by the author's local transcripts, not witnessed here.
+`user` records carrying `isMeta` (2) are file-only: no `user` frame on the wire carries
+`isSynthetic` anywhere in the corpus. Attachment records come in thirteen `attachment.type`
+values (`total_tokens_reminder`, `prompt_snapshot`, `skill_listing`,
+`deferred_tools_delta`, `environment`, `session_context`, `date`, `agent_listing_delta`,
+`model`, `deferred_tools_record`, `plan_mode`, `plan_mode_exit`, `max_turns_reached`); every
+one has a `parentUuid` naming a conversation record. Conversation records form a single
+rooted chain in every main file (one root, no orphan, no branch point); the depth-2 agent
+file has one branch point (two records sharing a parent: parallel tool results). No fixture
+contains a rewind, a compaction, a `progress` record, a `tool_progress` frame, a
+`tool-results/` spill or a `mirror_error`.
+
+**Wire and file agree by uuid.** In every recorded fixture the set of top-level `assistant`
+frame uuids equals the set of the main file's `assistant` record uuids, and the wire's
+`message.id` groups equal the file's; the host's own `user` frames (direction `in`) carry a
+uuid that is the file record's uuid, and `--replay-user-messages` echoes each with
+`isReplay`; a `user` frame with a `tool_result` block is a `user` record on disk with
+`toolUseResult`. Forwarded subagent frames (`parent_tool_use_id` set) belong to the agent
+stream's file, which is why the out-direction `user` set is not a subset of the main file
+in `explore-depth-1` and `nested-depth-2`. `assistant` and out-direction `user` frames carry
+`timestamp`; `system`, `result` and in-direction frames do not. A forked subagent's
+`system/init` and `result` frames carry the **session's own `session_id`** and no
+`parent_tool_use_id`, so nothing on the frame distinguishes an agent's result from the
+session's; `session-mirror-relocation` also emits a `result` with `num_turns: 0` for the
+relocation itself. Streaming arrives as `stream_event` with `message_start`,
+`content_block_start`, `content_block_delta` (`text_delta`, `thinking_delta`,
+`signature_delta`, `input_json_delta`), `content_block_stop`, `message_delta`,
+`message_stop`.
+
+**Sidecars and task files.** A subagent's `.meta.json` holds `agentType`, `description`,
+`toolUseId`, `spawnDepth` and, at depth 2, `parentAgentId`; the mirror's `agent_metadata`
+entry is that object plus `type`. The `<taskId>.output` artifact of an agent run holds the
+same records as the agent's transcript, line for line and JSON-equal, but not the same
+bytes (31,079 against 31,590; 34,705 against 35,640), so the two are one record sequence
+under two serialisations, never to be compared as bytes. A background shell's output file
+is the command's stdout followed by `\n[exited with code N]\n`. Task output files live at
+`<realpath(tmpdir)>/claude-<uid>/<slug>/<sessionId>/tasks/<taskId>.output` (parity area 20
+§20.9; bundle `H(yR(), Q(), "tasks")` at line 828391), capped at 16 MiB with an omission
+notice, and for an agent the entry is a symlink into the transcript sidecar. The local
+config home holds no `tasks/` directory at all: the files are outside it and ephemeral.
+
+**The local config home** (read only): 639 project slugs; 2,967 top-level session files;
+3,479 subagent transcripts beside 3,480 `.meta.json`; 442 sidecar directories, 76 of them
+with `subagents/`; a `memory/MEMORY.md` under sixty slugs and PDF page renders under a few.
+Session file sizes: median 99 KB, p90 364 KB, p99 5.5 MB, maximum 109 MB, 1.39 GB in all.
+A full parse of the set is out of the question for a 500 ms budget; a head-and-tail read of
+2,967 files is about 47 MB of reads and three system calls per file.
+
+**The engine's own reader.** The picker reads `od = 65536` bytes from the head and the same
+from the tail (`ihe`, line 13803) and returns `{mtime, size, head, tail}`; it extracts fields
+by substring search, never by parsing the whole line (`Gf`, `G1`, `Ose`, `VQ`, lines 13341
+to 13408); the first prompt skips `user` lines that contain `tool_result`, `isMeta` or
+`isCompactSummary` (`Ett`, line 13464); title precedence is `agentName → customTitle →
+aiTitle → summary → firstPrompt → "Autonomous session" → sessionId.slice(0,8)` (parity
+§35.19.7). The loader keeps as conversation only records whose type is in
+`Vr = {user, assistant, attachment, system, progress}` and which carry a string `uuid`
+(`Qr`/`os`, line 250499); every other kind is session state, folded by the policy tables at
+lines 428922 (`transcript`, `boundary-cleared`, `accumulate`, `last-wins`) and 429460
+(`dedup-transcript`, `always`, `route-by-agent`), which together enumerate the engine's full
+record vocabulary of forty-one kinds. The picker's drop rules hide sessions whose
+`entrypoint` is `sdk-cli`, `sdk-ts` or `sdk-py` (`ckt`, line 13317) — which is every session
+afleet itself spawns.
+
+## Design
+
+### Package and target layout
+
+One target, `FleetTimeline`, inside the `FleetKit` package on `main`, added only inside the
+manifest's C3 region (parent X1); one test target, `FleetTimelineTests`. The target depends
+on `AfleetCore` and the `ClaudeWire` product and imports `ClaudeWire`; it reuses
+`Lossless`, `DeclaredKeys`, `JSONValue`, `ContentBlock`, `Message`, `UserMessage`,
+`MessageOrigin`, `Frame`, `SystemFrame`, `TranscriptMirrorFrame`, `WireEvent`,
+`InboundRequest`, `ProcessEpoch` and `SessionID` rather than redefining any of them. Folders
+inside the target mark the concerns without a compile-time wall between them: `Model/`
+(items, identity, categories), `Records/` (record model and decoding), `Reader/` (files,
+line scanning, head-and-tail, bounded windows), `Reduce/` (record reducer, wire reducer,
+projection and overlay), `Ingest/` (source arbitration), `Index/` (the index, title
+precedence, watcher, storage protocol), `Agents/` (the run tree), `Registry/` (the mirror and
+the output tailer), `Diagnostics/` (typed notices). A second target is cut only when a
+compile-time boundary earns it; none does today, and the umbrella `FleetKit` re-exports the
+target so a consumer writes `import FleetKit`. Every public type is `Sendable`; the reducers
+are value types with pure functions; the three long-lived things are actors
+(`StreamIngestion` per channel, `TranscriptIndex` per config home, `TaskOutputTailer` per
+file). Nothing is `@MainActor`. `@unchecked Sendable` follows C2's stated property (a
+single-owner box whose every access is serialised by one named mechanism), and each use
+names the mechanism.
+
+### Vocabulary
+
+- **Record**: one JSONL line of a transcript, or one entry of a `transcript_mirror` frame.
+  Both are the same object; the mirror is a second delivery of the file's append.
+- **Logical stream**: config home root, session id and stream name (`main` or
+  `agent-<taskId>`). The path of the file is an alias of the stream and changes under
+  relocation; the slug is derived from a cwd and is not identity.
+- **Record key**: logical stream plus record identity — the record's `uuid`, or, for a kind
+  that carries none, the SHA-256 of its canonical JSON. One key is applied once, whatever
+  delivered it and however many times.
+- **Conversation record**: a record whose kind is `user`, `assistant`, `attachment`,
+  `system` or `progress` and which carries a `uuid` — the engine's own definition.
+  Everything else is a **session-state record**.
+- **Durable projection**: the items reconstructible from conversation records alone.
+  **Overlay**: the items and state only the wire carries. **Streaming preview**: the partial
+  assistant message assembled from `stream_event` deltas until its frames arrive.
+- **Leaf path**: the chain of conversation records from the root to the leaf the transcript
+  names, which is what the engine renders on resume. A **branch** is a chain the leaf path
+  does not include.
+
+### The record model (`Records/`)
+
+Records are decoded with the two-stage pattern C2 uses for frames: a line parses once into
+`JSONValue`; `type` (and `subtype` for `system`) selects the model; the typed model decodes
+from the same bytes wrapped in `Lossless`, so every undeclared key and every explicit null
+survives a round trip and nothing in a record is ever dropped.
+
+```swift
+public enum TranscriptRecord: Sendable, Hashable {
+  case user(UserRecord)                       // Lossless<UserRecordFields>
+  case assistant(AssistantRecord)             // Lossless<AssistantRecordFields>
+  case attachment(AttachmentRecord)           // Lossless<AttachmentRecordFields>
+  case system(SystemRecord)                   // subtype-modelled where the reducer reads it, else lossless generic
+  case progress(ProgressRecord)               // never stored as a message by the engine; kept, never rendered
+  case agentMetadata(AgentMetadataRecord)     // mirror-only: the .meta.json body plus `type`
+  case sessionState(SessionStateRecord)       // the engine's forty-one-kind vocabulary minus the five above
+  case unknown(kind: String, JSONValue)       // a kind outside the vocabulary: kept, counted, a finding
+  case undecodable(raw: Data, byteOffset: Int, reason: String) // a torn or corrupt line: kept as opaque, never fatal
+
+  public var kind: String { get }             // the wire `type`, e.g. "user", "last-prompt"
+  public var uuid: String? { get }
+  public func key(in stream: LogicalStream) -> RecordKey
+}
+```
+
+`UserRecordFields` declares `type, uuid, parentUuid, logicalParentUuid, isSidechain,
+isMeta, isCompactSummary, agentId, sessionId, cwd, timestamp, version, gitBranch, slug,
+entrypoint, userType, promptId, promptSource, permissionMode, toolUseResult,
+sourceToolAssistantUUID, toolDenialKind, origin, queueSkipAttachments, message`;
+`AssistantRecordFields` declares `type, uuid, parentUuid, logicalParentUuid, isSidechain,
+agentId, sessionId, cwd, timestamp, version, gitBranch, slug, entrypoint, userType,
+requestId, isApiErrorMessage, apiErrorStatus, error, effort, quotaLimits, apiBlockIndex,
+attributionAgent, attributionMcpServer, attributionMcpTool, message`;
+`AttachmentRecordFields` declares `type, uuid, parentUuid, isSidechain, agentId, sessionId,
+cwd, timestamp, version, gitBranch, slug, entrypoint, userType, rendered, attachment` with
+`attachment.type` read through `JSONValue`; `SystemRecordFields` declares `type, subtype,
+uuid, parentUuid, logicalParentUuid, isSidechain, agentId, sessionId, cwd, timestamp,
+content, level, durationMs, toolUseID, preventContinuation, compactMetadata, isMeta`.
+`SessionStateRecord` is `Lossless<SessionStateFields>` with `type, sessionId` declared and
+typed accessors for the fields the reducer and the index read: `lastPrompt`, `leafUuid`,
+`explicit`, `rewound` (kind `last-prompt`); `aiTitle`, `customTitle`, `summary`; `relocatedCwd`;
+`mode`; `atis`; `continuedIn`; `agentName`; `tag`; `messageId` and `snapshot` (the two
+`file-history-*` kinds); `operation` (`queue-operation`); the `cost-state` body as
+`JSONValue`. `SessionStateVocabulary.kinds` is the engine's list from the two bundle tables,
+pinned as a constant with the line numbers in its doc comment, and a kind absent from it
+decodes as `.unknown`. `progress` is modelled only so it is recognised: the engine never
+stores it as a message and remaps its uuid to its parent (parity §35.1), and the reducer
+drops it from every projection while keeping it in the raw view.
+
+Decoding never throws and never skips a line silently: a line that fails both stages
+becomes `.undecodable` carrying its byte offset, the reducer emits a warning row for it
+(parent §10), and `TimelineNotice.recordSkipped(kind:reason:)` records the fact without the
+bytes.
+
+### Logical streams and path aliasing
+
+```swift
+public struct LogicalStream: Hashable, Sendable, Codable {
+  public let configHome: URL              // ConfigHome.root, standardised
+  public let sessionID: SessionID
+  public let name: StreamName
+  public enum StreamName: Hashable, Sendable, Codable { case main, agent(taskID: String) }
+  public init(configHome: URL, sessionID: SessionID, name: StreamName)
+}
+public enum TranscriptPath: Sendable, Hashable {
+  case mainTranscript(slug: String), agentTranscript(slug: String, taskID: String), agentMetadata(slug: String, taskID: String)
+  /// A path under `<configHome>/projects/` names a stream, or it does not name a transcript at all.
+  public static func resolve(_ path: URL, under configHome: URL) -> (LogicalStream, TranscriptPath)?
+  public static func path(of stream: LogicalStream, slug: String) -> URL
+}
+public struct RecordKey: Hashable, Sendable, Codable {
+  public let stream: LogicalStream
+  public let identity: Identity
+  public enum Identity: Hashable, Sendable, Codable { case uuid(String), hash(String) }
+}
+```
+
+`resolve` is the only place a path becomes a stream. A `transcript_mirror.filePath` is
+resolved through it; a watcher event is resolved through it; the fixture loader resolves the
+`_slug_` placeholder through it because the placeholder is a slug like any other. The
+session id is read from the file name (`<sessionId>.jsonl`) or the directory
+(`<sessionId>/subagents/agent-<taskId>.jsonl`), never from the slug. A relocation therefore
+changes nothing about identity: `StreamIngestion.relocated(to:)` rebinds the alias and
+carries the byte offset, and the two `filePath` values `session-mirror-relocation` records
+resolve to one stream.
+
+### The transcript reader (`Reader/`)
+
+`TranscriptReader` is a value type over one file URL with three entry points. `readAll()`
+returns every record and the file's byte length; `readAppended(from offset:)` returns the
+records after an offset and the new length, sealing a torn tail the way the engine does (a
+final line without a terminator is held back and re-read on the next call, and a leading
+`\n` the engine writes to seal a torn tail is skipped); `readWindow(tailBytes:)` returns a
+bounded window from the end, aligned back to a record boundary and then extended
+backwards until the leaf path is closed, with `earlierAvailable: true` and the offset the
+next `readEarlier(before:)` continues from. Files are opened `O_RDONLY | O_NOFOLLOW`; a
+symlink or a non-regular file is refused with a typed error. Lines are scanned for `\n` in
+the raw bytes and decoded individually, so one corrupt line costs one `.undecodable` record.
+The window rule for a channel open: a file up to 8 MiB (above the local p99) is read whole;
+beyond that the initial window is the last 4 MiB, and the item list carries an
+`earlierAvailable` marker the renderer turns into *Load earlier*. The differential test
+always reads whole files.
+
+`HeadTailReader` is the picker's read, exactly: the first and last 64 KiB, `{mtime, size,
+head, tail}`, fields by substring search with the engine's helper semantics (`G1` first
+occurrence in the head, `Gf` last occurrence in the tail, `Ose` last line of a type carrying
+a key, `VQ` first line carrying a key, `Ett`'s three skips for the first prompt). It is what
+the index uses and nothing else does.
+
+### The record reducer (`Reduce/RecordReducer`)
+
+A pure function from records to a `DurableProjection`, run over one logical stream at a
+time and then merged across a session's streams:
+
+```swift
+public struct RecordReducer: Sendable {
+  public struct Options: Sendable { public var hideMeta = true; public var window: WindowMarker? = nil; public init() }
+  public static func reduce(_ records: [TranscriptRecord], stream: LogicalStream, options: Options = .init()) -> StreamProjection
+  public static func merge(_ streams: [StreamProjection], main: LogicalStream) -> DurableProjection   // agent items ordered by timestamp among main items
+}
+public struct DurableProjection: Sendable, Hashable {
+  public var items: [TimelineItem]
+  public var hidden: [RecordKey]            // isMeta users, attachments, progress, session state: kept for the raw view
+  public var branches: [Branch]             // chains the leaf path excludes; not rendered in v1
+  public var session: SessionState          // title candidates, leaf, relocatedCwd, mode, clearedToEmpty, costState, continuedIn
+  public var warnings: [ReadWarning]        // undecodable lines, healed orphans
+  public var window: WindowMarker?          // earlierAvailable and the continuation offset
+}
+```
+
+Rules, in the order they apply:
+
+1. **Tree, then leaf.** Conversation records are placed by `parentUuid`. The leaf is the
+   `leafUuid` of the last `last-prompt` record in the stream; `leafUuid: null` with
+   `explicit: true` means *cleared to empty* and the projection is empty with
+   `session.clearedToEmpty` set; without a `last-prompt` the leaf is the last conversation
+   record. A `parentUuid` that names no record is healed to the nearest earlier record with
+   the same `isSidechain` within five seconds of its timestamp (parity §35.13); an
+   unhealable orphan starts its own chain and is reported in `warnings`. The rendered list
+   is the leaf path; the other chains are `branches`. On the corpus every main file is one
+   chain, so the leaf path is the file order — the rule matters after a rewind, which no
+   fixture exercises (delegated unknown below).
+2. **Assistant merging.** Records sharing `message.id` fold into one `AssistantMessageItem`
+   whose id is the first record's uuid and whose provenance lists every folded key; parallel
+   `Agent` tool uses in one message stay one group with the message id as the group key.
+   `supersedes` on a record retracts the listed uuids from the projection.
+3. **Tool calls.** A `tool_use` block opens a `ToolCallItem` keyed by its tool-use id; the
+   `user` record whose `tool_result` block names that id completes it, with
+   `toolUseResult` as the structured result and `toolDenialKind` as the denial; a
+   `sourceToolAssistantUUID` on the result is honoured as the join when the block id is
+   absent. The tool input is typed through `ToolInput.parse` for the tools whose cards need
+   fields. `mcp__afleet__send_user_file` calls become `SentFileItem`s (durable, because both
+   halves are records).
+4. **Users and peers.** A `user` record with `isMeta` is hidden; a wire `user` frame with
+   `isSynthetic` is hidden by the wire reducer, and the two are one rule with two spellings.
+   A `user` record whose `origin.kind` is not `human` is a `PeerMessageItem`, authored from
+   the origin.
+5. **Attachments** are hidden from the projection and kept in the raw view; they are
+   file-only by construction and are on `fileOnlyRecordKinds`.
+6. **System records.** `compact_boundary` becomes a `CompactBoundaryItem`; one without a
+   preserved segment or preserved messages is a hard truncation point and the reducer keeps
+   only the boundary, the compaction summary and what follows (parent §7.3, stated
+   behaviour). `informational`, `local_command`, `turn_duration` and `stop_hook_summary`
+   become `NotificationItem`s marked file-only. No fixture carries any of these; the rules
+   are written from the bundle and parity §35.1 and are exercised only by mutation of a
+   recorded record's `type`, which is stated in the test.
+7. **Subagent streams.** An agent stream reduces on its own; `merge` attaches its items to
+   the `TaskRunItem` of the tool use that spawned it, orders agent items by timestamp among
+   the main items, and stamps provenance with the agent id and source file. The mirror and
+   the file of an agent stream may disagree in `message.stop_reason` and `message.usage`
+   only; the projection's assistant item does not carry either as identity-bearing content.
+8. **Session state** folds by the engine's policy: last-wins kinds keep the last, the
+   `file-history-*` kinds accumulate, `relocated` overrides cwd everywhere.
+
+### The wire reducer (`Reduce/WireReducer`)
+
+```swift
+public struct WireReducer: Sendable {
+  public init(stream: LogicalStream)
+  public mutating func apply(_ event: WireEvent) -> [TimelineChange]
+  public mutating func apply(_ signal: HostSignal) -> [TimelineChange]
+  public var durable: DurableProjection { get }      // the categories the wire carries, built from assistant/user frames
+  public var overlay: Overlay { get }
+  public var preview: StreamingPreview? { get }
+  public var registry: RegistryMirror { get }
+  public var agents: AgentRunTree { get }
+}
+public enum HostSignal: Sendable {                     // what only the host knows
+  case promptSent(uuid: String, at: Date)
+  case decisionAnswered(RequestID, outcome: DecisionOutcome)
+  case rewound(toUUID: String)
+  case processReplaced(ProcessEpoch)                    // a respawn: overlay resets, projection stays
+}
+```
+
+The wire reducer consumes `WireEvent` exactly as `ClaudeProcess` publishes it. From
+`.frame`: `assistant` and `user` frames build the durable half with the same merge, join
+and hiding rules as the record reducer, keyed by the frame's uuid so check two can compare
+them; `stream_event` deltas assemble the `StreamingPreview` for the current `message.id`
+and are discarded when the corresponding `assistant` frames arrive (streaming collapsed);
+`tool_use_summary` labels the cluster of its `preceding_tool_use_ids`; `result` becomes a
+`TurnSummaryItem` whose attribution is `.prompted` when a `promptSent` is outstanding,
+`.relocation` when `num_turns == 0`, and `.unprompted` otherwise — a forked agent's result
+and the auto-turn after a `task_notification` both land there, because the frame itself
+cannot tell them apart (grounding); `system/init` mid-session marks a turn boundary and
+never a new prompt; `command_lifecycle` drives the queue state; `session_state_changed`,
+`rate_limit_event`, `auth_status`, `system/notification`, `system/api_retry`, hook frames,
+`permission_denied`, the model-fallback frames and `system/status` become overlay items or
+banners; task frames feed the `RegistryMirror` and the `AgentRunTree` and synthesise the
+completion `TaskRunItem` from `task_notification`; `transcript_mirror` frames are not
+reduced here at all — they go to `StreamIngestion`; `.opaque` frames become `OpaqueItem`s.
+From `.request`: a decision item in state `pending`, keyed by request id, labelled from the
+payload, mirrored to the agent node when the request carries an agent id; `.policyAnswered`
+and `.requestCancelled` settle it; `HostSignal.decisionAnswered` settles it with the
+outcome. `.exited` closes the epoch: the overlay is kept for display and marked stale, the
+preview is dropped, and a `processReplaced` on respawn resets it. `HostSignal.rewound`
+truncates the wire reducer's durable half to the named uuid, which is the wire side's only
+way to follow a rewind, since wire frames carry no `parentUuid`.
+
+### Source arbitration (`Ingest/StreamIngestion`)
+
+```swift
+public actor StreamIngestion {
+  public enum Mode: Sendable { case filePrimary, mirrorPrimary }       // the parent's build flag
+  public enum State: Sendable, Hashable { case both, fileOnly(since: ProcessEpoch), mirrorOnly }
+  public init(session: SessionID, configHome: URL, mode: Mode, diagnostics: any TimelineDiagnosticsSink)
+  public func open(mainPath: URL, window: TranscriptReader.WindowPolicy) async throws -> DurableProjection
+  public func apply(mirror frame: TranscriptMirrorFrame, epoch: ProcessEpoch) async -> IngestionEffect
+  public func fileChanged(_ path: URL) async -> IngestionEffect
+  public func mirrorError(_ error: MirrorError, epoch: ProcessEpoch) async -> IngestionEffect
+  public func relocated(mainPath: URL) async
+  public func processExited(_ epoch: ProcessEpoch) async -> IngestionEffect     // re-read each stream, reconcile by key
+  public var projection: DurableProjection { get }
+  public var state: State { get }
+}
+public struct IngestionEffect: Sendable { public var applied: [RecordKey]; public var duplicates: Int; public var changes: [TimelineChange]; public var stateChange: StreamIngestion.State? }
+```
+
+One ingestion per channel holds every stream of the session, a set of applied record keys
+per stream and a byte offset per file. The arbitration table:
+
+| Delivery | Applied when | Not applied when |
+|---|---|---|
+| file record, on open | always; sets the stream's offset to the file length | — |
+| mirror entry | its key is not yet applied and the resolved stream is this session's | key already applied (a duplicate, counted); path resolves to another session (a routing fault, a notice); state is `fileOnly` for this epoch |
+| file record, on watcher change | its key is not yet applied | key already applied by the mirror |
+| `agent_metadata` entry | always, as the stream's metadata (not a timeline record) | — |
+| mirror entry naming a stream with no open file | opens the stream lazily (an agent starting) | — |
+
+On open the file is read first and mirror entries apply past that read, because a resumed
+mirror carries only later appends. The one record a resume writes and never mirrors is
+closed by the file read, which is why the watcher stays attached under `mirrorPrimary` and
+why G4's `session-mirror-resume` case is stated as the counter-example. A `mirror_error`
+for a stream, or a record the watcher delivers that no mirror frame delivered within a
+short window (two seconds, the same order as the engine's own write-stability windows,
+advisory), switches the ingestion to `fileOnly(since:)` for the process epoch and emits one
+`TimelineNotice.mirrorErrorSwitchedToFileOnly` or `.mirrorGap`. On process exit every
+stream's file is re-read from its offset and reconciled by key; a record the file has and
+the projection lacks is applied, a record the projection has and the file lacks is kept and
+counted in a notice, never dropped. `relocated(mainPath:)` rebinds the main stream's path
+and the sidecar directory, keeps every offset, and reopens nothing.
+
+### The timeline model and its constants (`Model/`, contract X4)
+
+```swift
+public enum TimelineItem: Identifiable, Hashable, Sendable {
+  case userMessage(UserMessageItem), assistantMessage(AssistantMessageItem), toolCall(ToolCallItem)
+  case cluster(ToolClusterItem), taskRun(TaskRunItem), decision(DecisionItem), hookRun(HookRunItem)
+  case notification(NotificationItem), peerMessage(PeerMessageItem), compactBoundary(CompactBoundaryItem)
+  case sentFile(SentFileItem), turnSummary(TurnSummaryItem), opaque(OpaqueItem)
+  public var id: ItemID { get }; public var timestamp: Date? { get }; public var threadParent: ItemID? { get }
+  public var provenance: Provenance { get }; public var category: TimelineCategory { get }
+}
+public struct ItemID: Hashable, Sendable, Codable { public let stream: LogicalStream; public let key: String }
+  // key: first record uuid of a message; tool-use id; task id; request id; hook id; record uuid otherwise
+public struct Provenance: Hashable, Sendable {
+  public var stream: LogicalStream; public var agentID: String?; public var sourceFile: URL?
+  public var epoch: ProcessEpoch?; public var records: Set<RecordKey>; public var origin: Origin
+  public enum Origin: Sendable, Hashable { case file, mirror, wire, synthesised }
+}
+public enum TimelineCategory: String, CaseIterable, Sendable, Codable { case userMessage, assistantMessage, toolCall, cluster, taskRun, decision, hookRun, notification, peerMessage, compactBoundary, sentFile, turnSummary, opaque }
+
+public enum ProjectionCategories {
+  /// Reconstructible from conversation records (parent §7.3, "the durable projection").
+  public static let durable: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .compactBoundary, .taskRun]
+  /// Only the wire carries these; rendered live, not expected on reopen.
+  public static let overlay: Set<TimelineCategory> = [.cluster, .decision, .hookRun, .notification, .turnSummary]
+  /// Check two compares these item for item; `.taskRun` only for subagent runs, by agent id and source file.
+  public static let comparedWireToFile: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun]
+  /// Record kinds that never reach the wire as conversational frames and are compared file-to-file only.
+  public static let fileOnlyRecordKinds: Set<RecordKindMatcher> = [
+    .kind("attachment"), .system("turn_duration"), .system("stop_hook_summary"), .system("local_command"),
+    .system("informational"), .system("compact_boundary"), .userWhere(.isMeta)]
+  /// Fields compared inside an item under check two; everything else is display or timing.
+  public static let comparedItemFields: ItemFieldSet = [.role, .model, .contentBlocks(.text, .thinking, .toolUse(id: true, name: true, input: true), .toolResult(content: true, isError: true), .image, .document), .origin, .toolDenialKind]
+}
+```
+
+The three category sets and the field set are the constants the parent's X4 promises: the
+differential test reads them and C6's renderer reads them, so an edit to one is visible to
+both. `URLSources.contributing` below is the fifth, named the same way for the same reason. `fileOnlyRecordKinds` is the parent's list plus one grounded entry, `user` records
+with `isMeta`, which the corpus shows on disk and never on the wire (filed below as a
+parent revision). Item payload structs (`UserMessageItem` and the rest) carry the fields
+the parent's §7.3 comment lists per case, all public with public initialisers, and every
+one is `Codable` so C4's store can persist a projection snapshot if it chooses to.
+
+### Timeline queries (`Model/ChannelTimeline`) — inherited from X4 and X7 as amended
+
+Design inheritance, not this child's decision: the parent's X4 and X7 were amended on
+2026-09-05 by C7's decomposing run. The Browser panel's quick-open lists the URLs seen in
+the current channel's tool output; X1 forbids Workbench from parsing timeline items, so the
+host needs a FleetKit query for them. The rule as inherited: URL extraction from tool output
+is a FleetTimeline concern, exposed as a query over the channel's timeline, computed from
+the same reduced items the renderer reads so it can never disagree with what the timeline
+shows. Which item kinds contribute is this child's to decide and is named as a constant like
+the other lists in X4.
+
+```swift
+/// The read model the renderer holds: the durable projection, the overlay and the preview, merged in order.
+public struct ChannelTimeline: Sendable, Hashable {
+  public var durable: DurableProjection; public var overlay: Overlay; public var preview: StreamingPreview?
+  public var items: [TimelineItem] { get }                       // merged, ordered; what the renderer reads
+  public func recentURLs(limit: Int) -> [SeenURL]                // most recent first, de-duplicated
+}
+public struct SeenURL: Hashable, Sendable, Codable {
+  public let url: URL
+  public let firstSeen: ItemID; public let firstSeenAt: Date?
+  public let lastSeen: ItemID; public let lastSeenAt: Date?
+}
+public enum URLSources {
+  /// The item kinds whose text is scanned for URLs. Tool results carry dev-server and
+  /// documentation URLs; assistant text carries the ones the model names; local command
+  /// output carries what a slash command printed. User messages are excluded because the
+  /// person typed them; thinking blocks, attachments, hidden records and captions are excluded.
+  public static let contributing: Set<URLSourceKind> = [.toolResultText, .assistantText, .localCommandOutput]
+}
+public enum URLSourceKind: String, Sendable, Codable, CaseIterable { case toolResultText, assistantText, localCommandOutput }
+```
+
+`recentURLs(limit:)` scans the text of every item whose kind is in `URLSources.contributing`,
+in `items` order, for `http` and `https` URLs (a conservative scanner: the scheme, then
+characters up to whitespace or a closing quote, bracket or angle bracket, with trailing
+sentence punctuation trimmed), de-duplicates by the exact URL string, orders by the last
+item that mentioned each, most recent first, and returns at most `limit`. It reads
+`ChannelTimeline.items`, never a frame or a record, which is what keeps it in agreement
+with the rendered timeline; C7's Browser leaf calls it and applies its own dev-server
+heuristic on top (parent §9.4, advisory). One recorded fact for the test: no recorded
+fixture carries a URL in tool output; the synthetic `dialog-refusal-fallback` carries two in
+assistant text, so `ChannelTimelineQueryTests` asserts extraction on that fixture's shape
+and on items constructed in the test for the other two kinds, and says so.
+
+### The transcript index (`Index/`)
+
+```swift
+public actor TranscriptIndex {
+  public init(configHome: ConfigHome, storage: any IndexStorage, reader: any HeadTailReading = HeadTailReader(), concurrency: Int = 16)
+  public func build() async throws -> IndexSnapshot                  // cold: scan projects/*/*.jsonl, one head-and-tail read each
+  public func update(changed: [URL]) async -> IndexDelta             // re-read only files whose stat changed; add/remove entries
+  public func entry(_ id: SessionID) -> IndexEntry?
+  public var snapshot: IndexSnapshot { get }
+}
+public struct IndexEntry: Hashable, Sendable, Codable {
+  public let sessionID: SessionID; public var path: URL; public var slug: String
+  public var cwd: String?            // `relocated.relocatedCwd` if present, else the head's `cwd`
+  public var title: String; public var titleSource: TitleSource   // agentName, customTitle, aiTitle, summary, firstPrompt, fallback
+  public var firstPrompt: String?; public var lastPrompt: String?; public var preview: String
+  public var gitBranch: String?; public var tag: String?; public var agentName: String?
+  public var mtime: Date; public var size: Int64; public var createdAt: Date?
+  public var entrypoint: String?; public var sessionKind: String?; public var isSidechain: Bool
+  public var teamName: String?; public var continuedIn: SessionID?; public var clearedToEmpty: Bool
+  public var hasSubagents: Bool; public var turnCount: Int?     // nil until a full read has happened
+}
+public struct IndexSnapshot: Sendable, Codable, Hashable { public var configHome: URL; public var builtAt: Date; public var entries: [SessionID: IndexEntry]; public var schemaVersion: Int }
+public protocol IndexStorage: Sendable { func load() async throws -> IndexSnapshot?; func save(_ snapshot: IndexSnapshot) async throws }
+public struct InMemoryIndexStorage: IndexStorage { public init() }
+public protocol TranscriptWatching: Sendable { var changes: AsyncStream<[URL]> { get }; func start() throws; func stop() }
+public final class TranscriptWatcher: TranscriptWatching   // FSEvents over <configHome>/projects, 100 ms latency, coalesced per path
+```
+
+The cold build lists `projects/*/` and reads every top-level `*.jsonl` with the head-and-tail
+reader in a task group of bounded width; `<sessionId>/` directories are noted for
+`hasSubagents` and not descended; `memory/`, `tool-results/` and anything that is not a
+session file are ignored. Discovery is a full listing every time rather than the picker's
+fan-out by cwd, because afleet lists every project and because a relocated session's file
+lives under a slug that its cwd no longer produces. The stamps kept per entry are `mtime`
+and `size`; `update(changed:)` stats the named files and re-reads only those whose stamp
+moved, adds files that appeared and removes files that vanished; it never re-reads the rest.
+`turnCount` is nil until the channel is opened and a full read has counted it, because the
+picker itself shows bytes, not a message count, and a count would cost the full parse the
+budget forbids. The snapshot persists through `IndexStorage`, a two-function protocol C4
+implements over its namespaced store (X6) and tests satisfy in memory; the index never
+writes a file itself. The watcher is a separate unit the app starts, and a Developer toggle
+that leaves it stopped is what item 56 turns off; the index and the ingestion take changes
+through `update(changed:)` and `fileChanged(_:)` alone, so every test drives them without
+FSEvents. The engine's picker drop rules are **not** applied here: the entry carries
+`entrypoint`, `sessionKind`, `isSidechain`, `teamName` and `continuedIn`, and the sidebar
+policy (C4, X5) decides what to list — afleet's own sessions are `entrypoint: sdk-cli`, which
+the terminal's picker hides and afleet must show.
+
+### The agent-run tree (`Agents/`)
+
+```swift
+public struct AgentRunNode: Hashable, Sendable, Identifiable, Codable {
+  public let id: String                                   // task id == agent id
+  public var agentType: String?; public var description: String; public var model: String?
+  public var status: TaskStatus; public var depth: Int; public var parent: String?; public var parentSource: ParentSource
+  public var activityLine: String?; public var lastToolName: String?; public var elapsedOrigin: Date
+  public var toolUseID: String?; public var transcript: URL; public var children: [String]
+  public var startedCount: Int                            // task_started seen for this id; a repeat is the same node
+  public enum ParentSource: String, Sendable, Codable { case agentMetadata, metaFile, twoStepJoin, none }
+}
+public struct AgentRunTree: Hashable, Sendable {
+  public var nodes: [String: AgentRunNode]; public var roots: [String]
+  public mutating func apply(taskStarted:), apply(taskProgress:), apply(taskUpdated:), apply(taskNotification:)
+  public mutating func apply(agentMetadata: AgentMetadataRecord, stream: LogicalStream)
+  public mutating func apply(metaFile: URL) throws
+  public mutating func observe(frameParentToolUse: String?, carryingToolUseIDs: [String])   // the two-step join's input
+  public mutating func observe(assistantModel: String, agentID: String)
+}
+```
+
+A node is created at the first `task_started` whose `task_type` is `local_agent` (a shell's
+`task_started` carries no `spawn_depth` and no `subagent_type` and creates no node), keyed by
+`task_id`; a repeat for the same id increments `startedCount` and re-arms status. The parent
+link is set from the first source that answers and recorded as such: the `agent_metadata`
+mirror entry at the head of the agent stream, then the `.meta.json` when read, then the
+two-step join (a frame's `parent_tool_use_id` names the `tool_use` block that spawned it;
+the frame that carried that block has its own `parent_tool_use_id`, which is the
+grandparent), and `none` at depth 1 where no parent exists. The transcript path is
+constructed at spawn from the channel's cwd slug, session id and task id and rebound on
+relocation. Elapsed is ticked by the consumer from `elapsedOrigin`; the activity line is
+`task_progress.description` and `last_tool_name`, replaced by `summary` when present; the
+model badge comes from the run's own `assistant` frames or records, because neither the
+frame nor the sidecar carries it on 2.1.259. Status normalises `killed` to `stopped`.
+Parking — a finished node with running children — is a derived property the renderer asks
+for, not a stored status.
+
+### The registry mirror and output tailing (`Registry/`)
+
+```swift
+public struct RegistryEntry: Hashable, Sendable, Identifiable, Codable {
+  public let id: String; public var kind: TaskKind; public var placement: Placement
+  public var description: String; public var toolUseID: String?; public var outputFile: URL?
+  public var status: TaskStatus; public var startedAt: Date; public var endedAt: Date?; public var lastFrameAt: Date
+  public var notified: Bool; public var listedByEngine: Bool; public var epoch: ProcessEpoch
+  public enum Placement: String, Sendable, Codable { case foreground, background }
+}
+public enum TaskKind: Hashable, Sendable, Codable { case localBash, localAgent, remoteAgent, inProcessTeammate, localWorkflow, monitorMCP, monitorWS, mcpTask, dream, autoModeScan, other(String) }
+public enum TaskStatus: String, Sendable, Codable { case running, completed, failed, stopped }
+public struct RegistryMirror: Hashable, Sendable {
+  public var entries: [String: RegistryEntry]
+  public mutating func apply(_ frame: SystemFrame, at: Date, epoch: ProcessEpoch)          // task_* and background_tasks_changed
+  public mutating func apply(toolProgress: ToolProgressFrame, at: Date)                    // lastFrameAt only
+  public mutating func observe(bashToolResult text: String, toolUseID: String)              // "Output is being written to: <path>"
+  public func liveWork(asOf now: Date) -> [RegistryEntry]                                    // running, or started and not yet notified
+  public func evictable(asOf now: Date) -> [String]                                          // notified terminal entries older than the grace
+}
+public actor TaskOutputTailer {
+  public init(path: URL, pollInterval: Duration = .milliseconds(250))
+  public func chunks() -> AsyncStream<OutputChunk>            // appended text; absence and deletion tolerated
+  public func stop()
+}
+public struct OutputChunk: Sendable, Hashable { public var text: String; public var exitCode: Int32?; public var truncatedByEngine: Bool }
+```
+
+The mirror folds `task_started` (rich), `task_updated` (status from the patch), and
+`task_notification` (terminal, `notified`, `outputFile` when non-empty), and uses
+`background_tasks_changed` only as the liveness cross-check `listedByEngine`, because the
+payload is thinner than the registry and excludes foregrounded rows (parity §20.8). Every
+frame for a task, including `tool_progress` heartbeats, moves `lastFrameAt`, which is the
+fact C4's dormant-eligibility rule reads; the heartbeat threshold itself is C4's (parent
+§7.4). The Bash `tool_result` text names the output file before any task frame does, so
+`observe(bashToolResult:)` binds it early. `liveWork(asOf:)` is the query C4.G2 depends on:
+an entry is live while `running`, or while started and not yet `notified`; C4 adds its
+uncertainty rule on top. The tailer reads bytes appended to a path, tolerates the file not
+existing yet and disappearing (task files are outside the config home and ephemeral),
+parses the trailing `[exited with code N]` into `exitCode` when it is at end of file, and
+reports the engine's omission notice as `truncatedByEngine`. For a `localAgent` entry the
+output file is a symlink to the agent transcript, so a consumer opens the agent stream
+through `StreamIngestion` instead of tailing bytes; the tailer refuses a symlink for the
+same reason the reader does.
+
+### Diagnostics (`Diagnostics/`)
+
+```swift
+public protocol TimelineDiagnosticsSink: Sendable { func record(_ notice: TimelineNotice) }
+public enum TimelineNotice: Sendable, Hashable {
+  case mirrorErrorSwitchedToFileOnly(session: SessionID, stream: LogicalStream.StreamName, epoch: ProcessEpoch)
+  case mirrorGap(session: SessionID, stream: LogicalStream.StreamName, missing: Int, epoch: ProcessEpoch)
+  case mirrorRoutedElsewhere(session: SessionID, epoch: ProcessEpoch)
+  case recordSkipped(session: SessionID, stream: LogicalStream.StreamName, kind: String?, reason: SkipReason, byteOffset: Int)
+  case unknownRecordKind(session: SessionID, kind: String)
+  case orphanHealed(session: SessionID, stream: LogicalStream.StreamName)
+  case relocationFollowed(session: SessionID)
+  case indexBuilt(files: Int, durationMs: Int)
+  case indexUpdated(changed: Int, durationMs: Int)
+  public enum SkipReason: String, Sendable { case invalidJSON, tornTail, notAnObject }
+}
+```
+
+Every case carries identifiers, counts and fixed vocabulary; no path, no title, no record
+byte. `LogicalStream` itself is not logged because it carries the config home path. C2's
+`DiagnosticEvent` is a closed enum in a package below this one, so FleetKit owns its own
+notice type; the app composes both sinks into the one metadata log under
+`~/Library/Logs/afleet/` (parent §11's owned-files table), which is C5's to wire. `NullTimelineDiagnostics` is the default.
+
+### The differential invariant as a test (`FleetTimelineTests/Invariant/`)
+
+`FixtureCorpus` is the test-side loader: the fixtures root found from `#filePath`; per
+fixture, `fixture.json` (name, `synthetic`, `session_id`, `unmirrored_prefix`,
+`mirror_identity_only`), `streams.json`, every file under `transcript/` resolved to a
+stream through `TranscriptPath.resolve` with the fixture's config-home root
+`/tmp/afleet-fixtures/config-home` and the `_slug_` placeholder, and `frames.ndjson` decoded
+line by line with `FrameDecoder` into `(t, direction, Frame)`.
+
+*Check one* replays the mirror: entries of every `transcript_mirror` frame, in frame
+order, grouped by resolved stream, become record keys and are compared with the appended
+range of the paired file as an ordered sequence, exactly; then field for field with the
+declared identity-only paths masked for matching scopes; then every `agent_metadata` entry
+against the stream's `.meta.json`. The pinned set of fifteen mirrored fixtures is asserted
+as a set, not a count.
+
+*Check two* runs `WireReducer` over the out-direction frames (the in-direction `user`
+frames are what the host sent, and their `isReplay` echoes are the wire's own record of
+them) and `RecordReducer` over every transcript file, merges, filters both projections to
+`comparedWireToFile`, and compares item for item by `ItemID`, category and
+`comparedItemFields`, printing the first difference with item ids and field names only.
+The overlay assertions read the same frames and check that every `can_use_tool`,
+`request_user_dialog` and `elicitation` request produced a decision item, every
+`tool_use_summary` labelled a cluster, and every `result` produced a turn summary with
+cost and duration.
+
+*Discrimination.* Before the gate is accepted, each of these is demonstrated red against
+a deliberate break and the run is quoted in the ledger: a mirror entry dropped from one
+fixture in memory fails check one by identity; a `message.usage` mutated in a main-stream
+mirror entry fails check one by field, while the same mutation in an agent stream passes
+because the scope declares it; a `tool_result` uuid changed in memory fails check two by
+identity; a `text` block edited in memory fails check two by field; a record's `type`
+rewritten to an invented kind fails the vocabulary assertion; removing one fixture from the
+listing fails the count. The tests also assert what they found — items compared per
+fixture, streams compared per fixture — against per-fixture floors derived from the
+fixture's own record counts, so a filter that matched nothing cannot pass.
+
+### Tests outside the invariant
+
+`ReaderTests` (torn tail held back and re-read; sealed tail skipped; window alignment on the
+largest fixture; symlink refused; one corrupt line yields one `.undecodable`),
+`RecordModelTests` (every record in the corpus round-trips key for key through `Lossless`;
+the vocabulary constant equals the bundle's two tables, transcribed), `RecordReducerTests`
+(leaf selection on a file with a `last-prompt`; `clearedToEmpty`; orphan healing by deleting
+a parent record from a recorded stream; `supersedes`; merge by `message.id`; tool join by
+block id and by `sourceToolAssistantUUID`; `isMeta` hidden), `WireReducerTests` (streaming
+preview assembled and collapsed; result attribution for the relocation's `num_turns: 0` and
+for `nested-depth-2`'s three results; decision lifecycle through request, policy answer and
+host answer; `processReplaced`), `IngestionTests` (the arbitration table row by row, using
+`session-mirror-relocation` for the rebind, `session-mirror-resume` for the offset and the
+unmirrored record, `nested-depth-2` for lazy agent streams, and the `mirror_error` sample for
+the switch), `IndexTests` and `LocalHomeIndexTests` as G2 states, `AgentRunTreeTests`
+(depth-2 parent from each of the three sources and the same answer from all; the repeated
+`task_started`; a shell creates no node), `RegistryMirrorTests` (`background-shell` row by
+row; `killed` normalised; `liveWork` before and after notification; the tailer on the
+artifact with its trailer), `ChannelTimelineQueryTests` (`recentURLs` on the synthetic
+dialog's assistant text, on constructed tool-result and local-command items, de-duplication
+and most-recent-first order, and a user message that is not scanned). The plan's test names are the ledger's index.
+
+## Contracts
+
+**Owned by C3.** X4 Timeline model: `TimelineItem` with its thirteen cases and payload
+structs, `ItemID`, `Provenance`, `TimelineCategory`, `ProjectionCategories` with its four
+constants, `RecordKey`, `LogicalStream`, `TranscriptRecord`, `DurableProjection`,
+`Overlay`, `AgentRunNode` and `AgentRunTree`, `RegistryEntry` and `RegistryMirror`,
+`TranscriptIndex` with `IndexEntry`, `IndexSnapshot` and `IndexStorage`, `StreamIngestion`,
+`TranscriptReader`, `TaskOutputTailer`, `TimelineNotice`, `ChannelTimeline` with
+`recentURLs(limit:)`, `SeenURL` and `URLSources.contributing` — all public with public
+initialisers. Binds C4 (`liveWork(asOf:)`, `IndexStorage`, `IndexEntry`'s listing flags),
+C6 and every leaf of its cut (the item model, the category constants, the overlay, the tree
+and the transcript path of a run), and C7's Browser leaf (`recentURLs(limit:)`, under X7 as
+amended).
+
+**Bound by C3.** X1: `FleetTimeline` depends on `AfleetCore` and `ClaudeWire` alone and is
+added inside the manifest's C3 region only; a test greps its imports. X3 (consumed):
+`WireReducer.apply(_: WireEvent)` takes the event enum as C2 publishes it and nothing
+reaches into `ClaudeProcess`; `Handshake.pending` is never read (parent X3, a wire fact).
+X8: the fixture loader reads `frames.ndjson`, `fixture.json`, `streams.json`, `transcript/`
+and the `mirror_identity_only` and `unmirrored_prefix` declarations in the forms C1 committed
+and asks nothing of `fake-claude`; no fixture is edited to pass a test, and a suspected
+fixture defect is the second hypothesis and escalates to the orchestrator. X9: nothing here
+writes under any config home; every file is opened read-only with `O_NOFOLLOW`; the
+opt-in local test reads and prints counts. §6.3 as amended: notices and assertions carry
+names, counts and shapes, never a path, an environment or a record.
+
+## Delegated unknowns
+
+S4 is answered by G2's opt-in measurement and its protocol above; S9's harness is check one
+and check two. Paths the corpus does not witness, each stated as such in its test and each
+a candidate for a C1 corrective recording rather than for a synthetic frame: a rewind (leaf
+path, branches, `HostSignal.rewound`); a compaction (`compact_boundary` on disk and on the
+wire, the hard truncation); the five system record kinds; `tool_progress` heartbeats; a
+`user` frame with `isSynthetic`; a `mirror_error`; a `tool-results/` spill; a `cost-state`
+record; a `progress` record. The exact orphan-healing constant is read from the bundle at
+plan time (parity §35.13 states five seconds; the constant was not located in this
+grounding pass and the rule is written from parity). Whether the two-second mirror-gap
+window is right is empirical and advisory; it is a constant with a name.
+
+## Parent revisions
+
+Candidates for the orchestrator to file on the parent, with evidence here: (1) §7.3's
+file-only exclusion list gains `user` records with `isMeta`, observed on disk and absent on
+the wire across the corpus; (2) §7.3's head-and-tail read is 64 KiB each way, from the
+bundle; (3) a forked subagent's `system/init` and `result` frames carry the session's own
+id and no parent id, so result attribution is a host-state question, not a frame field; (4)
+the `<taskId>.output` of an agent run is JSON-equal to the agent transcript and not
+byte-equal, and task output files live under the temporary directory, not the config home;
+(5) the engine's picker hides `entrypoint: sdk-cli`, which is afleet's own sessions, so the
+listing policy must not copy it; (6) §17.2's transcript count is 2,967 today. None of these
+contradicts binding content; (1) extends a binding list and is filed as such.
+
+## Questions for the human gate
+
+1. **Leaf path or file order.** The record reducer renders the leaf path the engine's own
+   loader renders and keeps abandoned branches in `DurableProjection.branches` unrendered.
+   On every recorded fixture the two are identical; they differ only after a rewind, which
+   no fixture holds. Recommendation: leaf path, with branches kept for a later affordance.
+2. **Corrective recordings.** A `rewind` and a `compact` fixture would turn two promised
+   paths into witnessed ones before C6 renders them. Recommendation: ask C1 for both now;
+   the other unwitnessed paths as they arise.
+3. **Reading the author's config home in an opt-in test.** G2's numbers are only measurable
+   there; the test is read-only and prints counts and timings. Recommendation: accept,
+   behind `AFLEET_LOCAL_INDEX=1`, never in the default suite.
+4. **Listing policy ownership.** The index carries the engine's drop-rule inputs and applies
+   none; C4's sidebar policy decides. Recommendation: confirm C4 owns it, so afleet's own
+   `sdk-cli` sessions are never hidden by an inherited rule.
+
+## Decision Log
+
+- Decision: One `FleetTimeline` target with folders per concern, not a target per concern.
+  Rationale: nothing here needs a compile-time wall, and every extra target is a manifest
+  edit inside a region two children share. Rejected: `Timeline`, `WireReducer`,
+  `TranscriptReader` as separate targets (parent §5's list is an example, and graded advisory).
+- Decision: Records are `Lossless` wrappers decoded from the line's own bytes, with an
+  `.unknown` case for kinds outside the engine's vocabulary and an `.undecodable` case for
+  torn lines. Rationale: the invariant is only provable when nothing is dropped; the
+  vocabulary is the engine's own table, so drift is a named finding. Rejected: a
+  `[String: JSONValue]` bag per record (no typed reducer); dropping unknown kinds.
+- Decision: The record reducer renders the leaf path, heals orphans as parity §35.13
+  describes, and keeps branches unrendered. Rationale: it is what the engine renders on
+  resume; on the corpus it equals the file order. Rejected: flat file order (renders an
+  abandoned branch after a rewind); rendering branches inline (a product call, deferred).
+- Decision: The wire reducer follows a rewind through `HostSignal.rewound`, not by
+  inference. Rationale: wire frames carry no `parentUuid`; the host that sent
+  `rewind_conversation` knows the target. Rejected: inferring from `conversation_reset`
+  alone (that frame is `/clear`, not rewind).
+- Decision: Result attribution is `.prompted`, `.relocation` or `.unprompted`, decided by
+  `HostSignal.promptSent` and `num_turns`. Rationale: forked agents' results and auto-turns
+  carry the session's own id and no parent; only host state knows whether a prompt is
+  outstanding. Rejected: counting turns off `result` frames.
+- Decision: `StreamIngestion` keys everything by `RecordKey` and treats paths as aliases.
+  Rationale: relocation moves the file and the mirror names two paths for one stream.
+  Rejected: keying by path; two reducers reconciled after the fact.
+- Decision: The index reads 64 KiB head and tail with substring extraction, lists every
+  slug, applies no drop rules, and leaves `turnCount` nil until a full read. Rationale:
+  the picker's technique is what makes 3,000 files fit in 500 ms; afleet's own sessions
+  would be dropped by the picker's rules; a count costs the parse. Rejected: full parse;
+  the picker's cwd fan-out; a synthetic large file for the perf gate.
+- Decision: The index persists through an injected `IndexStorage`, the watcher is a
+  separate unit, and both are exercised in tests without FSEvents or a file. Rationale: the
+  store is C4's (X6) and lands after C3; item 56's toggle needs the watcher detachable.
+  Rejected: the index writing its own cache file; the index starting FSEvents implicitly.
+- Decision: FleetKit owns `TimelineNotice`; the app composes it with C2's sink.
+  Rationale: `DiagnosticEvent` is a closed enum below this package; a free-form string case
+  would be the bypass shape §6.3 forbids. Rejected: asking C2 for a generic case.
+- Decision: The registry mirror exposes `liveWork(asOf:)` and `lastFrameAt`; the heartbeat
+  threshold stays with C4. Rationale: parent §7.4 states the rule on C4's table; C3 supplies
+  the facts. Rejected: a threshold constant here.
+- Decision: The tailer refuses symlinks and consumers open an agent's stream through the
+  ingestion. Rationale: the agent `.output` is the transcript under another name and another
+  serialisation. Rejected: tailing the symlink as text.
+- Decision: `URLSources.contributing` is tool-result text, assistant text and local command
+  output. Rationale: those are where dev-server, documentation and command-printed URLs
+  appear; the person already knows what they typed. Rejected: user messages; thinking
+  blocks; attachments and hidden records; sent-file captions. (The query itself is inherited
+  from X4 and X7 as amended 2026-09-05, not decided here.)
+- Decision: G2's real-machine measurement is opt-in and read-only; the default suite
+  measures nothing it cannot ground. Rationale: parent §6.3 and X9. Rejected: asserting the
+  parent's numbers over the fixture snapshots (meaningless at that size).
+
+## Surprises & Discoveries
+
+- Observation: The corpus holds no `system` transcript record of any subtype, no
+  `tool_progress` frame, no `isSynthetic` user frame and no `mirror_error`. Impact: five
+  reducer rules and the heartbeat fold are written from the bundle and parity, tested by
+  mutation, and named as unwitnessed.
+- Observation: `user` records with `isMeta` exist on disk (two) with no wire counterpart.
+  Impact: a grounded addition to the file-only list; filed as a parent revision.
+- Observation: A forked subagent's `system/init` and `result` carry the session's own id.
+  Impact: result attribution moved to host state.
+- Observation: The agent `.output` and the agent transcript are the same records under two
+  serialisations. Impact: identity comparison only; the tailer never reads it.
+- Observation: The engine's picker would hide every afleet-spawned session. Impact: the
+  index exposes the inputs and applies no rule.
+- Observation: No recorded fixture carries a URL in tool output; the only URLs in the corpus
+  are two in a synthetic dialog's assistant text. Impact: the URL query is tested on that
+  shape and on constructed items, and stated as such.
+- Observation: The local set is 2,967 session files, 1.39 GB, with a 109 MB maximum.
+  Impact: the reader's bounded window and the index's head-and-tail read are both
+  load-bearing, not optimisations.
+
+## Outcomes & Retrospective
+
+Pending — written at finish.
+
+## Revision Notes
+
+- 2026-09-05: v1, written at dispatch against parent commit `ee94449`. Folds in, as design
+  inheritance, the X4/X7 amendment C7's decomposing run filed the same day: the channel's
+  recent-URL query (`ChannelTimeline.recentURLs(limit:)`) with `URLSources.contributing`.
