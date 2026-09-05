@@ -12,6 +12,18 @@ final class TimelineModelTests: XCTestCase {
 
     func testCategorySetsPartitionAsTheSpecSays() {
         let durable = ProjectionCategories.durable, overlay = ProjectionCategories.overlay
+        // The regression guard: each set equals its spec literal exactly. The structural assertions below say
+        // what the spec cares about, but they hold under real violations too — moving `.cluster` from overlay
+        // into durable keeps disjointness, coverage and the subset property all intact.
+        XCTAssertEqual(durable,
+                       [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .compactBoundary, .taskRun],
+                       "durable is exactly the spec's seven categories")
+        XCTAssertEqual(overlay,
+                       [.cluster, .decision, .hookRun, .notification, .turnSummary],
+                       "overlay is exactly the spec's five categories")
+        XCTAssertEqual(ProjectionCategories.comparedWireToFile,
+                       [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun],
+                       "check one compares exactly the spec's six categories")
         XCTAssertTrue(durable.isDisjoint(with: overlay),
                       "a category is durable or overlay, never both: \(durable.intersection(overlay).map(\.rawValue).sorted())")
         XCTAssertEqual(durable.union(overlay).union([.opaque]), Set(TimelineCategory.allCases),
@@ -24,7 +36,47 @@ final class TimelineModelTests: XCTestCase {
         XCTAssertFalse(ProjectionCategories.comparedWireToFile.contains(.compactBoundary))
         XCTAssertFalse(ProjectionCategories.fileOnlyRecordKinds.contains(.system("compact_boundary")))
         XCTAssertEqual(ProjectionCategories.excludedItemFields, ["stop_reason", "usage", "signature", "timestamp"])
-        XCTAssertEqual(ProjectionCategories.comparedItemFields.fields.count, 5)
+        // Set equality against the full literal, every `contentBlocks` flag spelled out: a count alone would
+        // survive flipping any one of the nine booleans, so check one could silently stop comparing a field.
+        XCTAssertEqual(ProjectionCategories.comparedItemFields.fields,
+                       [.role, .model, .origin, .toolDenialKind,
+                        .contentBlocks(text: true, thinking: true, toolUseID: true, toolUseName: true, toolUseInput: true,
+                                       toolResultContent: true, toolResultIsError: true, image: true, document: true)],
+                       "comparedItemFields is exactly the spec's four scalars plus all nine content-block flags on")
+    }
+
+    // MARK: - The .system matchers
+
+    /// The corpus holds no `system` record on disk, so the four `.system(...)` matchers are only proved
+    /// negatively there. This exercises them against an invented system record built in Swift — no fixture,
+    /// no engine byte — and pins that the arm keys off the record's `subtype`, never its `type`.
+    func testSystemMatchersKeyOffSubtypeOfAnInventedSystemRecord() {
+        func systemRecord(subtype: String?) -> TranscriptRecord {
+            .system(SystemRecord(fields: SystemRecordFields(
+                type: "system", subtype: subtype, uuid: "c4d0a1e6-0000-4000-8000-0000000000f1",
+                parentUuid: nil, sessionId: "3f6e2a55-0000-4000-8000-0000000000f2",
+                timestamp: "2026-09-05T00:00:00.000Z")))
+        }
+        let record = systemRecord(subtype: "turn_duration")
+
+        XCTAssertTrue(RecordKindMatcher.system("turn_duration").matches(record),
+                      ".system(\"turn_duration\") must match a system record of that subtype")
+        XCTAssertFalse(RecordKindMatcher.system("informational").matches(record),
+                       ".system(\"informational\") must not match a record of another subtype")
+        XCTAssertTrue(ProjectionCategories.fileOnlyRecordKinds.contains(where: { $0.matches(record) }),
+                      "a turn_duration system record is file-only")
+
+        let noSubtype = systemRecord(subtype: nil)
+        for matcher in ProjectionCategories.fileOnlyRecordKinds {
+            if case .system(let subtype) = matcher {
+                XCTAssertFalse(matcher.matches(noSubtype),
+                               ".system(\"\(subtype)\") must not match a system record with no subtype")
+            }
+        }
+
+        XCTAssertFalse(RecordKindMatcher.kind("turn_duration").matches(record),
+                       "the subtype is not the record's kind: .kind(\"turn_duration\") must not match")
+        XCTAssertTrue(RecordKindMatcher.kind("system").matches(record), "the record's kind is \"system\"")
     }
 
     // MARK: - The file-only matchers, against the corpus
