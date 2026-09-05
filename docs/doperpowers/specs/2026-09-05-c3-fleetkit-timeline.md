@@ -1424,7 +1424,33 @@ the questions stand as the record of what was asked. The fifth was added at v2.2
 
 Pending — written at finish.
 
+## Surprises & Discoveries
+
+- 2026-09-05: **The cold index was 130x over its budget, and none of it was I/O.** The first G2
+  measurement, taken at `835a8d2`, put the cold build at a median of 66,412 ms against its 500 ms
+  budget (min 66,249, max 69,206 over five builds) over 3,031 main transcripts, and the largest
+  transcript's history at 1,158 ms against 1,000 ms. Incremental update passed at 28 ms. The cost
+  was not the reads: the same 3,031 head-and-tail reads took about 1.3 s, and the pure floor — both
+  chunks `pread` into reused byte buffers at the build's concurrency, no `String`, no scanning —
+  measured 96 ms (43 ms discovery, 53 ms reads sixteen lanes wide). The other 60 s was
+  `makeEntry` scanning: the entry was built by about a dozen grapheme-aware searches over two 64 KiB
+  Swift `String`s, 19.8 ms per file, and constructing those strings UTF-8-validated roughly 380 MB
+  across the set. Two further costs surfaced once that was removed: the `ISO8601DateFormatter`s took
+  a process-wide ICU lock, and `RecordDecoder` was decoding a stage-one `JSONValue` for conversation
+  records that never needed it. Fixing all four brought the cold build to 365 ms and the history to
+  667 ms. The lesson worth carrying: on this workload Swift `String` is the wrong representation for
+  a scan, and a budget that looks unreachable should be measured against its own floor before it is
+  believed — the floor here was a twentieth of the budget.
+
 ## Revision Notes
+
+- 2026-09-05: **What "cold" means in G2.** The gate's cold build means a fresh `TranscriptIndex`
+  actor with no persisted snapshot — `InMemoryIndexStorage`, nothing loaded — which is what
+  `LocalHomeIndexTests` constructs per build. It does **not** mean a cold page cache: five
+  back-to-back builds are warm from the second onwards, and the floor figures quoted below (43 ms
+  discovery, 53 ms reads) are warm too. So 365 ms is warm steady state, which is the number the
+  sidebar actually experiences on a session's second and later launches, not first-launch-after-boot.
+  Stated here because the word "cold" invites the other reading.
 
 - 2026-09-05 (G2 fix wave, numbers re-taken after review): **G2 now passes on all three budgets.**
   Measured over the local config home, 3,032 main transcripts, median of five cold builds, twice:
@@ -1450,12 +1476,8 @@ Pending — written at finish.
   and 493 mirrored entries compared against file records, plus 3 `agent_metadata` sidecars;
   check two over 113 compared items across all 18 fixtures; 143 tests in
   `FleetTimelineTests`, 4 skipped without `AFLEET_LOCAL_INDEX`, 0 failures).
-  **G2 FAILS on two of its three budgets** and is reported, not relaxed. Measured on the
-  local config home: 3,031 main transcripts indexed, cold-build median 66,412 ms against a
-  500 ms budget (min 66,249, max 69,206 over five builds), incremental update after one
-  `touch` 28 ms against a 50 ms budget (passes), largest transcript 109,427,514 bytes read
-  and reduced in 1,158 ms against a 1,000 ms budget (4 MiB window, 2,626 records, 0
-  extensions). The cost is not I/O: the same 3,031 head-and-tail reads take about 1.3 s.
+  **G2's first measurement is recorded as a Surprise below, not as an acceptance verdict**;
+  the acceptance result for G2 is the one stated in the note above, which supersedes it.
   **G3 and G4 pass** by the twelve tests named in the plan's Task 13 (45 tests across
   `IngestionTests`, `AgentRunTreeTests`, `RegistryMirrorTests` and `TaskOutputTailerTests`,
   0 failures). **X1 passes**: `ImportGraphTests` is green and `FleetKit/Package.swift` is

@@ -50,6 +50,11 @@ durable index.
     counts and G2's count clause is weaker than it reads. The field name promises a tally.
     Owner: C1 follow-up. Closer: rename the field or document the semantic, and restate the
     G2 clause as set equality over kinds.
+## From C3 (`child/c3-timeline`)
+
+Appended by C3. C4 also appends to this file; keep each child's entries under its own heading and do
+not renumber anything above.
+
 11. **`AgentRunTree.link` drops a self-parent answer without trace.** The guard rejects
     `parentID == id` before `parentAnswers` is written, so a source claiming a node is its own
     parent leaves no record at all — the one case where the conflict/answers structure goes
