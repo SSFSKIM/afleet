@@ -267,7 +267,11 @@ The child environment carries **no variable beginning with `CLAUDE`** from the r
 environment (§6.9); the table's own entries and `CLAUDE_CONFIG_DIR` — set to the resolved
 ConfigHome root on **every** spawn, not only when a test override is chosen, so the child's
 home equals afleet's view by construction — are added back on purpose, with
-`CLAUDE_CODE_PROJECT_DIR_NAME` passed through beside it when the capture carried it. A
+`CLAUDE_CODE_PROJECT_DIR_NAME` set beside it exactly when the resolved ConfigHome record
+carries it, never read from the capture directly: the engine honours that name only when
+`CLAUDE_CONFIG_DIR` is present in its environment (§6.9), and since afleet now always
+injects the home, the engine's gate is always open inside an afleet child, so afleet's
+record must be the single source or the two views split again one field over. A
 prefix rule, not a list: every marker the CLI sets on its own children changes its
 behaviour somewhere — `CLAUDE_CODE_REMOTE`
 disables auto-memory and changes compaction, `CLAUDE_CODE_CONTAINER_ID` auto-backgrounds
@@ -4024,6 +4028,9 @@ Pending — written at finish.
   every spawn after the prefix scrub, pass `CLAUDE_CODE_PROJECT_DIR_NAME` through beside it,
   and add a pinned pass-through set for provider configuration; the prefix rule itself
   stands, with the bundle count as the reason a marker list was rejected a second time.
+  Amended the same day: the project-directory name comes from the resolved record, not the
+  capture, because always injecting the home opens the engine's gate for it unconditionally
+  (raised by the Wave B worker, ruled from the bundle's `r.CLAUDE_CONFIG_DIR ? … : void 0`).
   §6.2 and X3 make a fork's `sessionID` pending until the first `session_id`-bearing frame
   (`auth_status`, frame 5) and forbid reading it off `system/init`. §11 records two
   `redact.py` gaps as a C1 follow-up on `main`. Raised by C2's whole-branch review panel
