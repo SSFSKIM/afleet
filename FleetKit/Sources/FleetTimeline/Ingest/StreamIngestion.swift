@@ -194,7 +194,12 @@ public actor StreamIngestion {
             }
 
             // The suspension is what lets the consuming task run: the buffer stops growing once the tap is quiet.
-            while true {
+            // The wait is capped at `settleRounds` of `tapSettle` in total, because C6 awaits this call before it can
+            // render anything and an engine emitting mirror frames faster than `tapSettle` would otherwise stall the
+            // channel for as long as the turn runs. Giving up early costs nothing: the alignment is already correct
+            // over a partial buffer, and every entry it does not claim is claimed live against `fileUnclaimed` by the
+            // ordinary occurrence rule, which is the documented backstop.
+            for _ in 0..<Self.settleRounds {
                 let before = buffer?.count ?? 0
                 try await Task.sleep(for: tapSettle)
                 if (buffer?.count ?? 0) == before { break }
@@ -217,6 +222,9 @@ public actor StreamIngestion {
             throw error
         }
     }
+
+    /// The most `tapSettle` intervals `open` will wait for the tap to fall quiet before it aligns regardless.
+    static let settleRounds = 50
 
     /// Set by `alignBuffer`: buffered frame index → the entry indices the alignment claimed against the read.
     private var claimedEntries: [Int: Set<Int>] = [:]
@@ -568,10 +576,10 @@ public actor StreamIngestion {
     }
 
     private func readAppend(from offset: Int, stream: LogicalStream, into st: inout StreamState, now: Date,
-                            effect: inout Effect) {
+                            effect: inout Effect, trackPending: Bool? = nil) {
         guard let result = try? TranscriptReader(url: st.path).readAppended(from: offset) else { return }
         apply(fileRecords: result.records, ranges: result.ranges, stream: stream, into: &st,
-              seedUnclaimed: true, trackPending: mode == .mirrorPrimary, now: now,
+              seedUnclaimed: true, trackPending: trackPending ?? (mode == .mirrorPrimary), now: now,
               applied: &effect.applied, duplicates: &effect.duplicates)
         st.offset = result.length
         refreshAnchor(&st, ranges: result.ranges)
@@ -736,7 +744,14 @@ public actor StreamIngestion {
         var effect = Effect()
         for (stream, var st) in streams {
             guard st.fileIdentity != nil, Self.identity(of: st.path) != nil else { continue }
-            readAppend(from: st.offset, stream: stream, into: &st, now: Date(), effect: &effect)
+            // `trackPending: false`, unconditionally. Under `mirrorPrimary` an ordinary watcher read remembers each
+            // record until the mirror confirms it, but the process this reconciliation closes out has already exited
+            // and will mirror nothing ever again: every record applied here would sit pending until the next
+            // `fileChanged` armed the sweep, and then expire together and switch the state to `fileOnly` for a gap
+            // that is not one. The mirror being definitionally gone is why nothing is remembered rather than why
+            // everything is forgotten afterwards.
+            readAppend(from: st.offset, stream: stream, into: &st, now: Date(), effect: &effect,
+                       trackPending: false)
             st.fileUnclaimed = [:]
             st.mirrorUnclaimed = [:]
             st.cursor = st.offset

@@ -676,6 +676,85 @@ final class IngestionTests: XCTestCase {
         await ingestion.close()
     }
 
+    /// Under `mirrorPrimary`, the exit reconciliation must leave nothing pending: the process it closes out will never
+    /// mirror anything again, so a record it applies is not a mirror gap. Without that, the entries sit until the next
+    /// `fileChanged` arms the sweep and then expire together, switching the state for a gap that is not one.
+    func testProcessExitedLeavesNothingPendingForTheMirrorGap() async throws {
+        let fx = try FixtureCorpus.named("plain-two-turn")
+        let source = try XCTUnwrap(try fx.transcriptFiles().first?.2)
+        let complete = try Data(contentsOf: source)
+
+        let tree = try TempTree()
+        let mainPath = try mirroredMainPath(fx, in: tree)
+        try place(Data(), at: mainPath)
+        let notices = RecordingTimelineDiagnostics()
+        let ingestion = StreamIngestion(session: fx.sessionID, configHome: tree.root, mode: .mirrorPrimary,
+                                        diagnostics: notices, mirrorGapWindow: .milliseconds(50))
+        let log = EffectLog(ingestion)
+        let tap = SyntheticTap()
+        try await ingestion.open(file: mainPath, events: tap.events)
+
+        // The whole file arrives with no mirror frame at all, and the exit reconciles it.
+        try append(complete, to: mainPath)
+        tap.exited(epoch: .first)
+        let reconciled = try await next(log, "the exit's reconciliation")
+        XCTAssertGreaterThan(reconciled.applied.count, 0, "the exit applied what the mirror never delivered")
+
+        // A later watcher change is what arms the sweep. Its own record is confirmed inside the window, so the only
+        // thing a sweep could find is what the exit left behind.
+        let line = SyntheticTranscript.queuedTurnLines(turn: 9)[1]
+        try append(line, to: mainPath)
+        _ = await ingestion.fileChanged(mainPath)
+        _ = try await next(log, "the watcher change after the exit")
+        let confirmed = try await send(tap, try mirrorFrame(path: mainPath, entries: [try entry(line)]), log,
+                                       "the mirror confirming that one record")
+        XCTAssertEqual(confirmed.duplicates, 1)
+
+        try await Task.sleep(for: .milliseconds(120))       // well past the window
+        await expectEqual(await ingestion.state, .both, "the exited process's records are not a mirror gap")
+        XCTAssertFalse(notices.notices.contains { if case .mirrorGap = $0 { return true } else { return false } },
+                       "no gap notice for a process that has already exited")
+        await ingestion.close()
+    }
+
+    /// `open` awaits the tap falling quiet, and C6 awaits `open`. An engine emitting mirror frames faster than
+    /// `tapSettle` must therefore not stall the channel: the settle wait is capped and the alignment runs on whatever
+    /// is buffered.
+    func testOpenReturnsWhileTheTapKeepsGrowing() async throws {
+        let turn = SyntheticTranscript.queuedTurnLines(turn: 1)
+        let session = try XCTUnwrap(SessionID(SyntheticTranscript.sessionID))
+        let tree = try TempTree()
+        let mainPath = try tree.write(Data(), session: session, slug: "synthetic")
+
+        let ingestion = StreamIngestion(session: session, configHome: tree.root, mode: .filePrimary,
+                                        tapSettle: .milliseconds(5))
+        _ = EffectLog(ingestion)
+        let tap = SyntheticTap()
+        let frame = try mirrorFrame(path: mainPath, entries: [try entry(turn[0])])
+
+        let stop = SyntheticTap.Flag()
+        let feeder = Task {
+            // Five times faster than `tapSettle`, so the tap never falls quiet for a whole round and the cap is the
+            // only thing that can let `open` go — but not so fast that the buffer grows to a size no engine produces.
+            while !stop.isSet {
+                tap.send(frame)
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
+        let returned = SyntheticTap.Flag()
+        let opener = Task {
+            _ = try? await ingestion.open(file: mainPath, events: tap.events)
+            returned.set()
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while !returned.isSet, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        stop.set()
+        feeder.cancel()
+        opener.cancel()
+        XCTAssertTrue(returned.isSet, "open returned rather than waiting for a tap that never falls quiet")
+        await ingestion.close()
+    }
+
     // MARK: - Notices
 
     func testNoticesCarryNoPathsOrPayload() async throws {
@@ -1010,7 +1089,8 @@ final class IngestionTests: XCTestCase {
         let fx = try FixtureCorpus.named("plain-two-turn")
 
         // Each variant is its own run: its own tree, its own ingestion, its own rewrite shape.
-        for variant in ["rename-over", "truncate-in-place", "engine-remove-by-uuid", "no-fileChanged"] {
+        for variant in ["rename-over", "truncate-in-place", "engine-remove-by-uuid", "same-bytes-new-inode",
+                        "no-fileChanged"] {
             let tree = try TempTree()
             let mainPath = try tree.add(fx, slug: "plain")
             let main = stream(tree, fx.sessionID)
@@ -1035,7 +1115,7 @@ final class IngestionTests: XCTestCase {
             _ = earlyBefore
 
             var survivor = lateKey
-            var dropped = earlyKey
+            var dropped: RecordKey? = earlyKey
             switch variant {
             case "rename-over", "no-fileChanged":
                 // Without the first `earlyIndex + 1` lines. A rename brings a new inode; the in-place truncate keeps it.
@@ -1051,6 +1131,14 @@ final class IngestionTests: XCTestCase {
                     try handle.write(contentsOf: rewritten)
                     try handle.close()
                 }
+            case "same-bytes-new-inode":
+                // The one shape the tail anchor cannot see: identical bytes at a new inode, so the length is the same
+                // and the anchor's range reads back its own digest. Only the `st_ino` half of the `fstat` check can
+                // catch it, which is what makes that half of the predicate discriminating.
+                dropped = nil
+                let staging = mainPath.deletingLastPathComponent().appendingPathComponent("staging.jsonl")
+                try Data(contentsOf: mainPath).write(to: staging)
+                _ = try FileManager.default.replaceItemAt(mainPath, withItemAt: staging)
             case "truncate-in-place":
                 var rewritten = Data()
                 for line in original.dropFirst(earlyIndex + 1) { rewritten.append(line); rewritten.append(UInt8(ascii: "\n")) }
@@ -1097,6 +1185,10 @@ final class IngestionTests: XCTestCase {
             XCTAssertEqual(rewrites.count, 1, "\(variant): exactly one fileRewritten notice")
             XCTAssertEqual(rewrites.first?.0, previousLength, "\(variant): the old length")
             XCTAssertEqual(rewrites.first?.1, try Data(contentsOf: mainPath).count, "\(variant): the new length")
+            if variant == "same-bytes-new-inode" {
+                XCTAssertEqual(rewrites.first?.0, rewrites.first?.1,
+                               "same-bytes-new-inode: nothing but the inode changed, so the two lengths are equal")
+            }
             await expectEqual(await ingestion.state, .both, "\(variant): a rewrite says nothing about the sources")
 
             let expected = RecordReducer.reduce(try TranscriptReader(url: mainPath).readAll().records, stream: main,
@@ -1106,6 +1198,13 @@ final class IngestionTests: XCTestCase {
                            "\(variant): the projection is the rebuilt file's")
             let served = try await ingestion.rawRecord(for: survivor)
             XCTAssertEqual(served["type"]?.stringValue, "attachment", "\(variant): the survivor reads back")
+            guard let dropped else {
+                // Nothing was dropped: both attachments survive the rebuild and both read back through fresh locators.
+                let early = try await ingestion.rawRecord(for: earlyKey)
+                XCTAssertEqual(early["type"]?.stringValue, "attachment", "\(variant): the early attachment reads back")
+                await ingestion.close()
+                continue
+            }
             do {
                 _ = try await ingestion.rawRecord(for: dropped)
                 XCTFail("\(variant): the dropped record's key must be unknown")
