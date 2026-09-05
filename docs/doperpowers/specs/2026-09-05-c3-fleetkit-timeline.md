@@ -1428,12 +1428,6 @@ the questions stand as the record of what was asked. The fifth was added at v2.2
   inflated by roughly 2.3x. Impact: a timing gate needs the machine's load recorded beside the number;
   the numbers below were taken after those ten processes were cleared, at a load average under six.
 
-## Outcomes & Retrospective
-
-Pending — written at finish.
-
-## Surprises & Discoveries
-
 - 2026-09-05: **The cold index was 130x over its budget, and none of it was I/O.** The first G2
   measurement, taken at `835a8d2`, put the cold build at a median of 66,412 ms against its 500 ms
   budget (min 66,249, max 69,206 over five builds) over 3,031 main transcripts, and the largest
@@ -1450,7 +1444,139 @@ Pending — written at finish.
   a scan, and a budget that looks unreachable should be measured against its own floor before it is
   believed — the floor here was a twentieth of the budget.
 
+## Outcomes & Retrospective
+
+Written at finish, 2026-09-06, at branch tip `681ec88` (the merge of `main` into
+`child/c3-timeline`). Final suite: `swift test --package-path FleetKit` executed 162 tests,
+4 skipped, 0 failures, in 67.617 s. The four skips are `LocalHomeIndexTests` without
+`AFLEET_LOCAL_INDEX=1`, which is the design of G2's second layer, not a gap.
+
+**Against the Purpose.** The pure data half of `FleetKit` exists and the parent's
+non-negotiable is a test, not a claim: `TimelineItem` and its identity; `TranscriptRecord` as
+`Lossless` wrappers with `.unknown` and `.undecodable`; `TranscriptReader` and
+`WindowedTranscript` with the bounded window; `RecordReducer`; `WireReducer` with `Overlay` and
+`StreamingPreview`; `StreamIngestion` as the one idempotent path for file and mirror;
+`TranscriptIndex` with `IndexStorage` injected; `AgentRunTree` with its three parent sources;
+`RegistryMirror` and `TaskOutputTailer`; `ChannelTimeline` with `recentURLs(limit:)`; and
+`TimelineNotice` with its eleven cases. No process is spawned, input is files and frames, output
+is value types. C4 can decide dormancy from the registry mirror and C6 can render a channel from
+`DurableProjection`, `Overlay` and an `AgentRunTree` without reading a byte of JSONL — the
+no-JSONL rule is kept by `HiddenRecord` plus `StreamIngestion.rawRecord(for:)` rather than by
+convention.
+
+**What each gate measured.**
+
+- **G1 — passes, no fixture excluded.** Check one compared 18 mirrored streams and 493 mirrored
+  entries against the paired file records, plus 3 `agent_metadata` sidecars — the census's 496
+  exactly. Check two compared 113 items across all 18 fixtures, pinned per fixture
+  (`ask-user-question` 4, `background-shell` 5, `control-shapes` 2, `dialog-fable-overage` 1,
+  `dialog-refusal-fallback` 1, `exit-plan-mode` 11, `explore-depth-1` 20, `nested-depth-2` 19,
+  `notification-hook` 4, `permission-allow` 4, `permission-deny` 4, `plain-two-turn` 4,
+  `rate-limited-turn` 4, `resume-no-replay` 4, `send-user-file` 6, `session-mirror-relocation` 8,
+  `session-mirror-resume` 12, `zero-cost` 0), identical at `ebf25e3` and at `c0d3638`, so the
+  decoder's conversation fast path is corpus-neutral. The comparison is ordered as well as
+  set-equal since the whole-branch wave (finding A1); all 18 fixtures already agreed in order, so
+  no pin moved.
+- **G2 — passes on all three budgets, after failing two of them by two orders of magnitude.**
+  Over the local config home, 3,032 main transcripts, median of five cold builds, taken twice:
+  365 ms and 366 ms against the 500 ms budget, from 66,412 ms at `835a8d2`. Incremental update
+  after one `touch`: 1 ms against 50 ms, from 28 ms. Largest transcript, 109,427,514 bytes,
+  4 MiB window, 2,626 records, 0 window extensions: 667 ms and 679 ms against the 1,000 ms
+  budget, from 1,158 ms. The floor of the machine is about 96 ms (43 ms discovery, 53 ms of
+  `pread` sixteen lanes wide). No budget was widened, no assertion softened, and the measured set
+  was not shrunk — it grew by one file while the work was under way.
+- **G3 and G4 — pass**, by the twelve tests the plan's Task 13 names, inside 45 tests across
+  `IngestionTests`, `AgentRunTreeTests`, `RegistryMirrorTests` and `TaskOutputTailerTests`, 0
+  failures. `mirror_error` remains shape-verified rather than engine-verified: the corpus holds
+  none, so the path is driven by C2's committed bundle-modelled sample and the test says so.
+- **X1 — passes.** `ImportGraphTests` is green and `FleetKit/Package.swift` is byte-identical to
+  `main` outside the C3 region; the manifest comparison is its own test since finding P2-7, so a
+  missing base ref skips rather than failing the import assertions.
+- **X9 — passes.** The scratch config home's recursive fingerprint is `files=7498
+  digest=d1e260432bf761f1` before and after the whole suite, and every read of a real config home
+  went through `O_NOFOLLOW`.
+
+**What was overturned, and why it mattered.** Nine parent revisions were filed, six at v2 and
+three during execution: the file-only exclusion list gains `user` records with `isMeta`, `user`
+records whose `origin.kind` is `task-notification` (exactly four records in three fixtures) and
+the root `user` record of an agent stream (exactly three, one per agent stream, every main root
+carrying `isSidechain: false`), and loses `compact_boundary`, which the engine does mirror.
+Record identity moved twice: a uuid-less record's key is its canonical hash plus an occurrence
+ordinal, because the engine writes byte-identical state records repeatedly (30 duplicate-hash
+groups across 14 corpus files, 48 later occurrences) and its own dedup table covers conversation
+kinds only; then the ordinal became an *application*-order ordinal, because file-order numbering
+renumbered a published key on every `loadEarlier` and made the projection name different bytes
+than the actor did (finding A2). The v2.3 precondition that `open` precede the epoch's first
+mirror entry was withdrawn as unenforceable and replaced by `StreamIngestion.open` owning the
+tap-versus-file ordering itself. Window closure was defined at a turn start rather than at the
+chain's root, and then given a byte budget (`WindowPolicy.closureBudget`, 20 MiB) after a
+synthetic twelve-megabyte transcript took 39 extensions and read whole. The record vocabulary is
+38 kinds, not the 41 v2.2 stated. And G2's own 130x miss turned out to be four implementation
+costs, none of them I/O — the Surprise above records it.
+
+**Two lessons about measurement**, both cheap to repeat and both nearly fatal here. A timing gate
+measures the machine as much as the code: ten orphaned busy-loop shells from a sibling worktree
+held every core for three hours and forty-one minutes and inflated every timing taken in that
+window by roughly 2.3x, and a task group awaited inline from XCTest's serial executor ran at
+about a third of the machine's width (870 ms against 403 ms for the same call), so the load
+average belongs beside the number and the parallel work belongs in a detached task. And a
+performance commit must be diff-reviewed for its own instrumentation: a temporary `AFLEET_FLOOR`
+switch survived a restore-from-copy into the first G2 fix commit, and although no run ever set
+it, a budget measured by a binary that carries an undisclosed way to skip the measured work is
+not evidence. It was removed, every number re-taken, and no shipped source in the package reads
+the environment at all.
+
+**Review.** Three adversarial passes shaped the spec before code (v2.2 eight findings, v2.3 eight
+findings, v2.5 ten findings — nine folded, one half-dismissed), and a final whole-branch wave
+worked two reviews as one: three P1s (a cluster row taking the id of the call it names; a hard
+compact boundary not discarding the resume seed; the output tailer's 16 MiB clamp losing the exit
+code), seven P2s and six adversarial findings. Every fix was demonstrated red first. One contract
+moved: `.compactBoundary` joins `ProjectionCategories.comparedWireToFile`, which touches X4; the
+comparison is vacuous on this branch's corpus and becomes live at merge. Suite went 148 → 159 →
+162 across the wave.
+
+**What is left open, and where it lives.** Tracker entries 11, 12 and 13 hold the agent tree's
+residue (a self-parent answer dropped without trace; `resolveJoins` quadratic in agent runs;
+`roots` meaning `parent == nil` rather than "depth-1", which C6 must be told at recomposition).
+Entry 14 holds incremental reduction in `StreamIngestion.publish`, deliberately deferred by the
+plan's Question 2 and owned by C6 if live rendering needs it. Entries 15 and 16 are closed by
+entry 17 — the symlinked-slug question by a parity ruling, the budget by measurement. Entries 18
+and 19 are small index and reader cleanups; entry 20 is `ClaudeWire`'s throw-per-type
+`JSONValue.init(from:)`, the largest remaining cost in the read path and C2's file, not C3's;
+entry 21 records that G2's "cold" means a fresh actor with no persisted snapshot, not a cold page
+cache, and belongs to C4 when a sidebar's first paint is measured for real. Entry 22 (a same-uuid
+cross-source conflict counted as a duplicate without comparing content) and entry 23
+(window-root suppression attaching a rewound branch to abandoned history) were dismissed
+deliberately: the first is the arbitration table's stated design, the second has no oracle,
+because no fixture holds a rewind. Human-gate question 5 is answered by the reader section and
+stands unless the renderer must read to the root. The delegated unknowns owed to C1 stand as
+written, with one change of status: `main` now carries the `rewind-turn` and `compact-boundary`
+recordings that questions 2 and 23 were waiting for.
+
+**The corpus pins move at merge, and that is the orchestrator's work, not this child's.** Every
+count in this document and in `FleetTimelineTests` is stated against an eighteen-fixture corpus:
+`FixtureCorpus.committedCount = 18`, the pinned set of fifteen fixtures carrying a mirrored
+stream, check one's 18 streams and 493 entries and 3 sidecars, check two's 113 items across
+eighteen names, and the index test's fifteen logical sessions across seventeen main files. `main`
+now carries two fixtures this branch never saw, so each of those pins is due for re-derivation at
+merge, together with the first live exercise of the `.compactBoundary` comparison and of the
+rewind paths this child could only test by mutation. C3 does not re-derive them here; a child
+that re-pins against a corpus it did not verify would be asserting someone else's measurement.
+
+**For the next child.** Pin counts to a named constant and state the corpus they were taken
+against, so a merge shows you exactly what to re-derive. Prove a budget against its own floor
+before believing it unreachable — the floor here was a twentieth of the budget while the
+measurement was 130x over it. Write the unwitnessed path as a mutation test that names itself
+unwitnessed rather than as a synthetic fixture, and let the recording convert the test later. And
+when a review finding is real but has no oracle, log it with the recording that would give it
+one; entry 23 is worth more to C1 than a guessed fix would have been to C6.
+
 ## Revision Notes
+
+- 2026-09-06: **Outcomes & Retrospective written at finish, and the duplicate heading folded.**
+  The section replaces "Pending — written at finish."; the stray second `Surprises & Discoveries`
+  heading that followed it is gone and its one entry now sits at the end of the real section, so the
+  tail reads `Surprises & Discoveries`, `Outcomes & Retrospective`, `Revision Notes`.
 
 - 2026-09-05: **What "cold" means in G2.** The gate's cold build means a fresh `TranscriptIndex`
   actor with no persisted snapshot — `InMemoryIndexStorage`, nothing loaded — which is what
