@@ -40,8 +40,8 @@ The parent's gates, restated as observable behaviour. Each gate names the test t
 proves it. All of them run under `swift test --package-path FleetKit`; C3's tests live in
 `FleetTimelineTests`.
 
-- **G1 (required) — the invariant holds on every fixture, both checks, explicit exclusion
-  lists.** `DifferentialInvariantTests` runs over every directory under `Fixtures/` (the
+- **G1 (required) — the invariant holds on every fixture, both checks, no fixture
+  excluded.** `DifferentialInvariantTests` runs over every directory under `Fixtures/` (the
   count is asserted equal to the committed eighteen, not floored) and asserts, per fixture:
   *check one* — for every stream a `transcript_mirror` frame names, the entries delivered
   in frame order equal, by record identity, the records of the paired file under
@@ -52,8 +52,9 @@ proves it. All of them run under `swift test --package-path FleetKit`; C3's test
   entries are compared against the stream's `.meta.json`, field for field; and the set of
   fixtures that carry at least one mirrored stream equals a pinned set of fifteen names, so
   a fixture that silently loses its mirror fails rather than passing vacuously. *Check
-  two* — the durable projection the wire reducer produces from the fixture's conversational
-  frames equals, item for item, the durable projection the record reducer produces from the
+  two* — the durable projection the wire reducer produces from the fixture's frames,
+  delivered as the transport delivers them (control requests through C2's `WireEventPolicy`,
+  never as bare frames) and seeded from `initial/` on a resume, equals, item for item, the durable projection the record reducer produces from the
   fixture's transcript files, for the categories the wire carries
   (`ProjectionCategories.comparedWireToFile`), with identity by record uuid, subagent items
   by agent id and source file, streaming collapsed, and timestamps compared within one
@@ -251,8 +252,10 @@ public enum TranscriptRecord: Sendable, Hashable {
   case attachment(AttachmentRecord)           // Lossless<AttachmentRecordFields>
   case system(SystemRecord)                   // subtype-modelled where the reducer reads it, else lossless generic
   case progress(ProgressRecord)               // never stored as a message by the engine; kept, never rendered
-  case agentMetadata(AgentMetadataRecord)     // mirror-only: the .meta.json body plus `type`
-  case sessionState(SessionStateRecord)       // the engine's forty-one-kind vocabulary minus the five above
+  case agentMetadata(AgentMetadataRecord, canonicalHash: String)   // mirror-only: the .meta.json body plus `type`
+  case sessionState(SessionStateRecord, canonicalHash: String)     // the engine's forty-one-kind vocabulary minus the five above
+  // the uuid-less kinds carry the SHA-256 of the line's canonical JSON (`JSONValue.canonicalData`: sorted keys, normalised
+  // numbers), computed by the decoder from the stage-one value; a key is never derived from a re-encoding, whose key order is per-process
   case unknown(kind: String, JSONValue)       // a kind outside the vocabulary: kept, counted, a finding
   case undecodable(raw: Data, byteOffset: Int, reason: String) // a torn or corrupt line: kept as opaque, never fatal
 
@@ -325,14 +328,22 @@ resolve to one stream.
 
 ### The transcript reader (`Reader/`)
 
-`TranscriptReader` is a value type over one file URL with three entry points. `readAll()`
+`TranscriptReader` is a value type over one file URL with five entry points. `readAll()`
 returns every record and the file's byte length; `readAppended(from offset:)` returns the
 records after an offset and the new length, sealing a torn tail the way the engine does (a
 final line without a terminator is held back and re-read on the next call, and a leading
 `\n` the engine writes to seal a torn tail is skipped); `readWindow(policy:)` returns a
 bounded window from the end, aligned back to a record boundary and then extended
 backwards until the leaf path is closed, with `earlierAvailable: true` and the offset the
-next `readEarlier(before:)` continues from. Files are opened `O_RDONLY | O_NOFOLLOW`; a
+next `readEarlier(before:)` continues from; `read(at:length:)` returns one record's bytes,
+and every read returns one `RecordLocator` (byte offset, length) per record. A window is
+*closed* when the leaf the file names lies inside it and the earliest record of the leaf's
+chain inside it is a turn start — a `user` record that is neither a tool result nor
+`isMeta` — or the file's first record; not when the chain reaches its root, which for a
+never-rewound file is the whole file and would void the bound. A chain record whose parent
+lies before an open window is a window root, not an orphan. `WindowedTranscript.read(_:policy:)`
+owns that loop and is what `StreamIngestion.open` calls; the reader itself deals in bytes and
+lines. Files are opened `O_RDONLY | O_NOFOLLOW`; a
 symlink or a non-regular file is refused with a typed error. Lines are scanned for `\n` in
 the raw bytes and decoded individually, so one corrupt line costs one `.undecodable` record.
 The window rule for a channel open: a file up to 8 MiB (above the local p99) is read whole;
@@ -353,13 +364,19 @@ time and then merged across a session's streams:
 
 ```swift
 public struct RecordReducer: Sendable {
-  public struct Options: Sendable { public var hideMeta = true; public var window: WindowMarker? = nil; public init() }
+  public struct Options: Sendable { public var hideMeta = true; public var window: WindowMarker? = nil; public var locators: [RecordKey: RecordLocator] = [:]; public init() }
   public static func reduce(_ records: [TranscriptRecord], stream: LogicalStream, options: Options = .init()) -> StreamProjection
   public static func merge(_ streams: [StreamProjection], main: LogicalStream) -> DurableProjection   // agent items ordered by timestamp among main items
 }
+public struct RecordLocator: Sendable, Hashable, Codable { public var stream: LogicalStream; public var byteOffset: Int; public var length: Int }
+public struct HiddenRecord: Sendable, Hashable, Codable {   // the payload stays on disk; `StreamIngestion.rawRecord(for:)` reads it on demand
+  public var key: RecordKey; public var kind: String; public var timestamp: Date?; public var reason: Reason
+  public var locator: RecordLocator?                        // nil: delivered by the mirror before the file held it; the ingestion serves it meanwhile
+  public enum Reason: String, Sendable, Codable { case attachment, isMeta, isSynthetic, progress, sessionState, unknownKind }
+}
 public struct DurableProjection: Sendable, Hashable {
   public var items: [TimelineItem]
-  public var hidden: [RecordKey]            // isMeta users, attachments, progress, session state: kept for the raw view
+  public var hidden: [HiddenRecord]         // isMeta users, attachments, progress, session state: key, kind, reason, locator — never the payload
   public var branches: [Branch]             // chains the leaf path excludes; not rendered in v1
   public var session: SessionState          // title candidates, leaf, relocatedCwd, mode, clearedToEmpty, costState, continuedIn
   public var warnings: [ReadWarning]        // undecodable lines, healed orphans
@@ -429,6 +446,7 @@ public enum HostSignal: Sendable {                     // what only the host kno
   case decisionAnswered(RequestID, outcome: DecisionOutcome)
   case rewound(toUUID: String)
   case processReplaced(ProcessEpoch)                    // a respawn: overlay resets, projection stays
+  case relocated(mainPath: URL)                         // set_cwd answered: the agent tree's slug follows
 }
 ```
 
@@ -446,7 +464,9 @@ never a new prompt; `command_lifecycle` drives the queue state; `session_state_c
 `rate_limit_event`, `auth_status`, `system/notification`, `system/api_retry`, hook frames,
 `permission_denied`, the model-fallback frames and `system/status` become overlay items or
 banners; task frames feed the `RegistryMirror` and the `AgentRunTree` and synthesise the
-completion `TaskRunItem` from `task_notification`; `transcript_mirror` frames are not
+completion `TaskRunItem` from `task_notification`; `tool_progress` moves the registry
+entry's `lastFrameAt` and the agent node's last tool and makes no item (no fixture carries
+it: unwitnessed, tested on a constructed frame); `transcript_mirror` frames are not
 reduced here at all — they go to `StreamIngestion`; `.opaque` frames become `OpaqueItem`s.
 From `.request`: a decision item in state `pending`, keyed by request id, labelled from the
 payload, mirrored to the agent node when the request carries an agent id; `.policyAnswered`
@@ -454,7 +474,8 @@ and `.requestCancelled` settle it; `HostSignal.decisionAnswered` settles it with
 outcome. `.exited` closes the epoch: the overlay is kept for display and marked stale, the
 preview is dropped, and a `processReplaced` on respawn resets it. `HostSignal.rewound`
 truncates the wire reducer's durable half to the named uuid, which is the wire side's only
-way to follow a rewind, since wire frames carry no `parentUuid`.
+way to follow a rewind, since wire frames carry no `parentUuid`. `HostSignal.relocated(mainPath:)`
+re-slugs the agent tree, whose transcript paths are computed from its current slug.
 
 ### Source arbitration (`Ingest/StreamIngestion`)
 
@@ -470,7 +491,9 @@ public actor StreamIngestion {
   public func mirrorError(_ error: MirrorError, epoch: ProcessEpoch) -> Effect
   public func relocated(mainPath: URL) async
   public func processExited(_ epoch: ProcessEpoch) async -> Effect     // re-read each stream, reconcile by key
+  public func rawRecord(for key: RecordKey) async throws -> JSONValue  // the raw view's read: the hidden record's bytes at its locator, decoded
   public var offsets: [LogicalStream: Int] { get }
+  public var paths: [LogicalStream: URL] { get }                        // the current aliases
   public var projection: DurableProjection { get }
   public var state: State { get }
 }
@@ -498,7 +521,12 @@ advisory), switches the ingestion to `fileOnly(since:)` for the process epoch an
 stream's file is re-read from its offset and reconciled by key; a record the file has and
 the projection lacks is applied, a record the projection has and the file lacks is kept and
 counted in a notice, never dropped. `relocated(mainPath:)` rebinds the main stream's path
-and the sidecar directory, keeps every offset, and reopens nothing.
+and the sidecar directory, keeps every offset, and reopens nothing. `rawRecord(for:)` is
+how the raw view sees a hidden record: the projection carries only the `HiddenRecord`'s
+locator, the actor reads those bytes on demand through its own reader (`read(at:length:)`),
+and a record the mirror delivered before the file held it is served from the record the
+actor retained until `fileChanged` sees it on disk. Memory stays bounded and no consumer
+touches JSONL.
 
 ### The timeline model and its constants (`Model/`, contract X4)
 
@@ -543,6 +571,9 @@ with `isMeta`, which the corpus shows on disk and never on the wire (filed below
 parent revision). Item payload structs (`UserMessageItem` and the rest) carry the fields
 the parent's §7.3 comment lists per case, all public with public initialisers, and every
 one is `Codable` so C4's store can persist a projection snapshot if it chooses to.
+`ToolCallItem` stores `rawInput: JSONValue` and exposes `input: ToolInput` as a computed
+property through `ToolInput.parse(name:input:)`, because `ToolInput` is `Hashable, Sendable`
+and not `Codable` on `main`.
 
 ### Timeline queries (`Model/ChannelTimeline`) — inherited from X4 and X7 as amended
 
@@ -645,17 +676,20 @@ public struct AgentRunNode: Hashable, Sendable, Identifiable, Codable {
   public var agentType: String?; public var description: String; public var model: String?
   public var status: TaskStatus; public var depth: Int; public var parent: String?; public var parentSource: ParentSource
   public var activityLine: String?; public var lastToolName: String?; public var elapsedOrigin: Date
-  public var toolUseID: String?; public var transcript: URL; public var children: [String]
+  public var toolUseID: String?; public var children: [String]          // no stored path: `AgentRunTree.transcriptURL(of:)`
   public var startedCount: Int                            // task_started seen for this id; a repeat is the same node
   public enum ParentSource: String, Sendable, Codable { case agentMetadata, metaFile, twoStepJoin, none }
 }
 public struct AgentRunTree: Hashable, Sendable {
-  public var nodes: [String: AgentRunNode]; public var roots: [String]
+  public var nodes: [String: AgentRunNode]; public var roots: [String]; public private(set) var slug: String
   public mutating func apply(taskStarted:), apply(taskProgress:), apply(taskUpdated:), apply(taskNotification:)
   public mutating func apply(agentMetadata: AgentMetadataRecord, stream: LogicalStream)
   public mutating func apply(metaFile: URL) throws
   public mutating func observe(parentToolUseID: String?, carryingToolUseIDs: [String])   // the two-step join's input
   public mutating func observe(assistantModel: String, agentID: String)
+  public mutating func apply(toolProgress: ToolProgressFrame, at: Date)   // lastToolName, activityLine of the node whose toolUseID is the frame's parentToolUseID
+  public func transcriptURL(of id: String) -> URL?                         // under the tree's current slug, computed on every call; nil for an unknown id
+  public mutating func relocate(slug: String)
 }
 ```
 
@@ -760,9 +794,15 @@ declared identity-only paths masked for matching scopes; then every `agent_metad
 against the stream's `.meta.json`. The pinned set of fifteen mirrored fixtures is asserted
 as a set, not a count.
 
-*Check two* runs `WireReducer` over the out-direction frames (the in-direction `user`
-frames are what the host sent, and their `isReplay` echoes are the wire's own record of
-them) and `RecordReducer` over every transcript file, merges, filters both projections to
+*Check two* replays each fixture as the transport would have delivered it: out-direction
+frames go through C2's `WireEventPolicy` — `ClaudeProcess`'s frame-to-event policy,
+extracted as a pure function by a C2 corrective so the transport and this test call the
+same code — so a control request arrives as `.request`, `.policyAnswered` or
+`.unansweredDialog` and never as a `.frame`; in-direction frames are what the host did and
+become `HostSignal`s (`promptSent` for a `user` frame, `decisionAnswered` for a
+`control_response`). A fixture with an `initial/` snapshot seeds the `WireReducer` with the
+record reducer's projection of that snapshot, which is what `StreamIngestion.open` gives it
+on a resume. It then runs `RecordReducer` over every transcript file, merges, filters both projections to
 `comparedWireToFile`, and compares item for item by `ItemID`, category and
 `comparedItemFields`, printing the first difference with item ids and field names only.
 The overlay assertions read the same frames and check that every `can_use_tool`,
@@ -778,13 +818,17 @@ because the scope declares it; a `tool_result` uuid changed in memory fails chec
 identity; a `text` block edited in memory fails check two by field; a record's `type`
 rewritten to an invented kind fails the vocabulary assertion; removing one fixture from the
 listing fails the count. The tests also assert what they found — items compared per
-fixture, streams compared per fixture — against per-fixture floors derived from the
-fixture's own record counts, so a filter that matched nothing cannot pass.
+fixture, streams compared per fixture — against an independent count from the fixture's
+own records and against an outcome pinned by fixture name for all eighteen (zero for
+`zero-cost`, the snapshot's items for `resume-no-replay`), so a filter that matched nothing
+cannot pass and no fixture is excluded.
 
 ### Tests outside the invariant
 
 `ReaderTests` (torn tail held back and re-read; sealed tail skipped; window alignment on the
-largest fixture; symlink refused; one corrupt line yields one `.undecodable`),
+largest fixture; the window closes at a turn start on `nested-depth-2`, extends until a
+named leaf is inside on a synthetic transcript above 8 MiB, and every locator reads back
+its record; symlink refused; one corrupt line yields one `.undecodable`),
 `RecordModelTests` (every record in the corpus round-trips key for key through `Lossless`;
 the vocabulary constant equals the bundle's two tables, transcribed), `RecordReducerTests`
 (leaf selection on a file with a `last-prompt`; `clearedToEmpty`; orphan healing by deleting
@@ -864,8 +908,8 @@ contradicts binding content; (1) extends a binding list and was filed as such.
 
 ## Questions for the human gate
 
-All four were ruled on 2026-09-05; the rulings are in the Revision Note for v2 and the
-questions stand as the record of what was asked.
+The first four were ruled on 2026-09-05; the rulings are in the Revision Note for v2 and
+the questions stand as the record of what was asked. The fifth was added at v2.2 and is open.
 
 1. **Leaf path or file order.** The record reducer renders the leaf path the engine's own
    loader renders and keeps abandoned branches in `DurableProjection.branches` unrendered.
@@ -880,6 +924,13 @@ questions stand as the record of what was asked.
 4. **Listing policy ownership.** The index carries the engine's drop-rule inputs and applies
    none; C4's sidebar policy decides. Recommendation: confirm C4 owns it, so afleet's own
    `sdk-cli` sessions are never hidden by an inherited rule.
+5. **What "closed" means for the bounded window.** The reader section now defines it: the
+   named leaf is inside the window and the window's earliest chain record is a turn start or
+   the file's first record — not that the chain reaches its root, which for a never-rewound
+   file is the whole file and would make the 4 MiB bound a fiction on the 109 MB local
+   maximum. Records whose parent lies before an open window are window roots, not orphans.
+   Recommendation: accept; overrule before the plan's Task 2 if the renderer should read to
+   the root instead.
 
 ## Decision Log
 
@@ -934,6 +985,28 @@ questions stand as the record of what was asked.
   measures nothing it cannot ground. Rationale: parent §6.3 and X9. Rejected: asserting the
   parent's numbers over the fixture snapshots (meaningless at that size).
 
+- Decision: A bounded window is closed at a turn start, not at the chain's root, and the
+  loop that closes it (`WindowedTranscript.read`) sits above the byte-level reader.
+  Rationale: the leaf path of a never-rewound transcript is the whole file; closure to the
+  root would read the 109 MB local maximum whole on every channel open. A turn boundary is
+  where the engine's own rendering can start without a dangling tool result. Rejected:
+  closure to the root; treating pre-window parents as orphans (they would be healed to the
+  wrong root and warned about on every open).
+- Decision: Hidden records are `HiddenRecord`s — key, kind, reason and a byte locator —
+  and the raw view reads a payload on demand through `StreamIngestion.rawRecord(for:)`.
+  Rationale: the projection must not hold every hidden payload (a long session's attachments
+  and meta users are most of its bytes), and C6 must never touch JSONL; the locator plus
+  one read through C3's own reader gives both. A mirror-delivered record not yet on disk is
+  served from the retained record until the file catches up. Rejected: bare `RecordKey`s
+  (the raw view had nothing to show); payloads in the projection (unbounded memory).
+- Decision: Check two replays a fixture through C2's `WireEventPolicy` and seeds resume
+  fixtures from `initial/`, and C3 duplicates none of the transport's frame-to-event policy.
+  Rationale: the policy is inlined in `ClaudeProcess` on `main`; a copy in C3's tests would
+  drift from it silently. Extracting it as a pure function the transport calls is a small
+  C2 corrective the coordinator dispatches; until it lands the plan's Task 8 stops rather
+  than copying. Rejected: feeding control requests as `.frame`s (the transport never does);
+  excluding the resume fixtures (the seed is exactly what `StreamIngestion.open` provides).
+
 ## Surprises & Discoveries
 
 - Observation: The corpus holds no `system` transcript record of any subtype, no
@@ -961,6 +1034,25 @@ Pending — written at finish.
 
 ## Revision Notes
 
+- 2026-09-05: v2.2, after the Codex adversarial review of plan v1 (eight findings, all
+  accepted, two shaped by the coordinator) and a merge of `main` at `7a51d56` (C2's
+  `SessionStart.forkFrom(SessionID, at: ForkPoint)`, X5's `PaneRequest.id`, C1's rewind-turn
+  and compact-boundary scenarios written with recordings pending the usage reset; the corpus
+  is still eighteen). Surface changes: `DurableProjection.hidden` is `[HiddenRecord]` — key,
+  kind, reason and a `RecordLocator` — and `StreamIngestion.rawRecord(for:)` reads a hidden
+  payload on demand, so the projection holds no payloads and C6 never touches JSONL;
+  `StreamIngestion.paths`; `HostSignal.relocated(mainPath:)`; `AgentRunNode` loses its stored
+  `transcript` for `AgentRunTree.transcriptURL(of:)` and `relocate(slug:)`;
+  `AgentRunTree.apply(toolProgress:at:)` and `tool_progress` routed to the registry and the
+  tree; `TranscriptRecord.agentMetadata` and `.sessionState` carry the canonical hash the
+  decoder computed (v2.1 keyed uuid-less records by a `JSONEncoder` re-encoding, whose key
+  order is per-process); `ToolCallItem.input` is computed because `ToolInput` is not
+  `Codable`; `TranscriptReader.read(at:length:)` and per-record locators;
+  `RecordReducer.Options.locators`. The bounded window's "closed" is defined — turn-start
+  rule, window roots are not orphans — and filed as gate question 5. Check two is restated:
+  replayed through C2's `WireEventPolicy` (a corrective the coordinator dispatches; C3
+  duplicates nothing), seeded from `initial/`, all eighteen fixtures compared with a per-name
+  pinned outcome; G1 says "no fixture excluded".
 - 2026-09-05: v2.1, at planning. Signatures aligned with the plan's: `readWindow(policy:)`,
   `StreamIngestion.Effect` nested with a `routedElsewhere` count and an `offsets` view,
   `WireReducer.init(stream:slug:)`, `AgentRunTree.observe(parentToolUseID:carryingToolUseIDs:)`.
