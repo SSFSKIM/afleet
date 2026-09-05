@@ -910,18 +910,16 @@ public actor ChannelSupervisor {
     /// banners the reason word and changes nothing else — the channel is still consent-blocked and the sheet is
     /// still the way out.
     ///
-    /// **Weaker than the spec's precondition, deliberately and temporarily.** §6.12 says the write runs only while
-    /// no owned process *for the project* is running; what is checked here is only this channel's own. Two channels
-    /// in one project — ordinary for this app — would let the idle one write while the other's child is live.
-    /// Answering the spec's question needs a project-to-channel index, which arrives with Task 9's facade; the check
-    /// belongs there and is carried to it, not built here.
-    public func declineProjectServers(_ names: [String]) async throws {
+    /// §6.12's precondition is about the *project*, not about this channel: two channels in one project — ordinary
+    /// for this app — must not let the idle one write while the other's child is live. Only the facade holds the
+    /// project-to-channel index, so it answers `projectHasLiveProcess` and this supervisor ors its own process in.
+    public func declineProjectServers(_ names: [String], projectHasLiveProcess: Bool) async throws {
         guard let preconditions else { throw LifecycleError.notOwned }
         do {
             // The runtime cwd, not the template's: a `set_cwd` moves the project the channel is in, and the store
             // resolves from where the channel actually is.
             try preconditions.decline(names: names, cwd: runtime.cwd, configHome: key.configHome,
-                                      processIsLive: process != nil)
+                                      processIsLive: projectHasLiveProcess || process != nil)
             diagnostics.record(.declineWrite(outcome: "written", servers: names.count))
         } catch let error as LifecycleError {
             guard case .declineRefused(let reason) = error else { throw error }

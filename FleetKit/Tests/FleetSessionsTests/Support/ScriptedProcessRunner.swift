@@ -8,7 +8,7 @@ import WireEnvironment
 /// `fake-claude` emulates no CLI verb — no `agents --json`, `stop`, `--bg` or `auth` — so the verbs are exercised
 /// here instead, and a rule may mutate the scripted holder files so that `stop` really does remove a worker from the
 /// roster and `--bg --resume` really does create a job with the right `resumeSessionId`.
-struct ScriptedProcessRunner: ProcessRunner {
+struct ScriptedProcessRunner: DirectoryProcessRunner {
     struct Rule: Sendable {
         var match: @Sendable ([String]) -> Bool
         var respond: @Sendable ([String]) throws -> ProcessOutput
@@ -24,12 +24,17 @@ struct ScriptedProcessRunner: ProcessRunner {
         private let lock = NSLock()
         private var storage: [[String]] = []
         private var envs: [[String: String]] = []
+        private var directories: [URL?] = []
         init() {}
         var invocations: [[String]] { lock.lock(); defer { lock.unlock() }; return storage }
         var environments: [[String: String]] { lock.lock(); defer { lock.unlock() }; return envs }
-        @discardableResult func add(_ a: [String], environment: [String: String] = [:]) -> Int {
+        /// The working directory each invocation asked for, nil for a verb that named none: "where did the verb
+        /// run" is a claim a caller has to be able to assert, and it is invisible in the arguments.
+        var directoriesUsed: [URL?] { lock.lock(); defer { lock.unlock() }; return directories }
+        @discardableResult func add(_ a: [String], environment: [String: String] = [:],
+                                    cwd: URL? = nil) -> Int {
             lock.lock(); defer { lock.unlock() }
-            storage.append(a); envs.append(environment); return storage.count - 1
+            storage.append(a); envs.append(environment); directories.append(cwd); return storage.count - 1
         }
         /// How many invocations began with this prefix.
         func count(prefix: [String]) -> Int {
@@ -44,7 +49,17 @@ struct ScriptedProcessRunner: ProcessRunner {
 
     func run(_ executable: URL, arguments: [String], environment: [String: String],
              timeout: Duration) async throws -> ProcessOutput {
-        calls.add(arguments, environment: environment)
+        try answer(arguments, environment: environment, cwd: nil)
+    }
+
+    func run(_ executable: URL, arguments: [String], environment: [String: String], cwd: URL,
+             timeout: Duration) async throws -> ProcessOutput {
+        try answer(arguments, environment: environment, cwd: cwd)
+    }
+
+    private func answer(_ arguments: [String], environment: [String: String],
+                        cwd: URL?) throws -> ProcessOutput {
+        calls.add(arguments, environment: environment, cwd: cwd)
         for rule in rules where rule.match(arguments) { return try rule.respond(arguments) }
         return .exit(1)
     }

@@ -3,13 +3,51 @@ import AfleetCore
 import WireEnvironment
 import WireFrames
 
-/// Every `claude` subcommand afleet runs without a PTY, over C2's `ProcessRunner`. `attach` and `logs` are never
-/// here: they need a terminal and are pane requests (X5 as amended).
+/// A runner that can also start a child in a named working directory.
+///
+/// C2's `ProcessRunner` has no working-directory parameter and `ClaudeWire` is C2's, so this is FleetKit's own seam
+/// *over* that protocol rather than a change to it: a `DirectoryProcessRunner` is a `ProcessRunner` everywhere one
+/// is wanted, and the extra method is what the two `--bg` verbs need — a job created for a project has to be
+/// created *in* that project rather than in whatever directory afleet itself was started from.
+public protocol DirectoryProcessRunner: ProcessRunner {
+    func run(_ executable: URL, arguments: [String], environment: [String: String], cwd: URL,
+             timeout: Duration) async throws -> ProcessOutput
+}
+
+/// The production conformance, over C2's runner.
+///
+/// `/usr/bin/env -C <directory>` changes directory and then `exec`s the binary, so the child *is* the binary — its
+/// exit status, its stdout and its stderr are its own — and C2's tested spawn, pipe draining and timeout keep
+/// owning the process. Reimplementing all of that here to gain one `chdir` would be the larger risk by far.
+public struct FoundationDirectoryRunner: DirectoryProcessRunner {
+    private let base: any ProcessRunner
+    private let env: URL
+
+    public init(base: any ProcessRunner = FoundationProcessRunner(), env: URL = URL(filePath: "/usr/bin/env")) {
+        self.base = base; self.env = env
+    }
+
+    public func run(_ executable: URL, arguments: [String], environment: [String: String],
+                    timeout: Duration) async throws -> ProcessOutput {
+        try await base.run(executable, arguments: arguments, environment: environment, timeout: timeout)
+    }
+
+    public func run(_ executable: URL, arguments: [String], environment: [String: String], cwd: URL,
+                    timeout: Duration) async throws -> ProcessOutput {
+        try await base.run(env,
+                           arguments: ["-C", cwd.path(percentEncoded: false),
+                                       executable.path(percentEncoded: false)] + arguments,
+                           environment: environment, timeout: timeout)
+    }
+}
+
+/// Every `claude` subcommand afleet runs without a PTY, over the working-directory seam above. `attach` and `logs`
+/// are never here: they need a terminal and are pane requests (X5 as amended).
 ///
 /// Each call records one diagnostic carrying the verb, its exit code and its duration, and never its stdout; a
 /// non-zero exit throws `LifecycleError.verbFailed`.
 public struct CLIVerbs: Sendable {
-    private let runner: any ProcessRunner
+    private let runner: any DirectoryProcessRunner
     private let binary: URL
     /// The home the verbs act on. The environment pins the same home through `CLAUDE_CONFIG_DIR`; the value is here
     /// too because `backgroundResume` has to read `jobs/` to find the job the CLI just created.
@@ -21,7 +59,8 @@ public struct CLIVerbs: Sendable {
     /// Drives the roster confirmation's bounded re-read. Production passes `ContinuousClock`.
     private let clock: any Clock<Duration>
 
-    public init(runner: any ProcessRunner, binary: URL, configHome: ConfigHome, environment: [String: String],
+    public init(runner: any DirectoryProcessRunner, binary: URL, configHome: ConfigHome,
+                environment: [String: String],
                 diagnostics: any FleetDiagnosticsSink, timeout: Duration = .seconds(20),
                 clock: any Clock<Duration> = ContinuousClock()) {
         self.runner = runner; self.binary = binary; self.configHome = configHome; self.environment = environment
@@ -66,38 +105,40 @@ public struct CLIVerbs: Sendable {
     /// Sends a session to the background and returns the short of the job the CLI created, found by diffing
     /// `jobs/*/state.json` for `resumeSessionId == id` and then confirmed in the roster.
     ///
-    /// - Warning: `cwd` does **not** set the job's working directory. `ProcessRunner` has no working-directory
-    ///   parameter, so the child inherits afleet's own directory; Task 9 closes that with a FleetSessions-local
-    ///   working-directory seam over C2's protocol. Until then `cwd` only disambiguates between candidate job
-    ///   records.
+    /// `cwd` is the job's working directory — the CLI runs there through the seam above — and is also the
+    /// tie-breaker between candidate job records.
     public func backgroundResume(_ id: SessionID, cwd: URL) async throws -> JobShort {
         let before = Set(jobShorts())
-        _ = try await run("--bg --resume", ["--bg", "--resume", id.description])
+        _ = try await run("--bg --resume", ["--bg", "--resume", id.description], cwd: cwd)
         return try await confirmed(matching: { $0.resumeSessionId == id.description }, notIn: before,
                                    disambiguatingWith: cwd, verb: "--bg --resume", session: id.description)
     }
 
-    /// Runs one command as a background job. An exec job carries no session, so the short is found by its newness
-    /// alone.
-    ///
-    /// - Warning: `cwd` does **not** set the job's working directory, for the reason on `backgroundResume`. The
-    ///   child inherits afleet's own directory until Task 9's working-directory seam lands.
+    /// Runs one command as a background job in `cwd`. An exec job carries no session, so the short is found by its
+    /// newness alone.
     public func backgroundExec(_ command: String, cwd: URL) async throws -> JobShort {
         let before = Set(jobShorts())
-        _ = try await run("--bg --exec", ["--bg", "--exec", command])
+        _ = try await run("--bg --exec", ["--bg", "--exec", command], cwd: cwd)
         return try await confirmed(matching: { _ in true }, notIn: before, disambiguatingWith: cwd,
                                    verb: "--bg --exec", session: "")
     }
 
     // MARK: - Internals
 
-    private func run(_ verb: String, _ arguments: [String]) async throws -> ProcessOutput {
+    /// `cwd` nil is a verb that acts on the config home and cares nothing for where it runs; a verb that names one
+    /// runs there.
+    private func run(_ verb: String, _ arguments: [String], cwd: URL? = nil) async throws -> ProcessOutput {
         // A monotonic counter, not a Clock instant: this measures a call that already happened rather than driving
         // a timer, and the package's clocks stay injected.
         let start = DispatchTime.now().uptimeNanoseconds
         let out: ProcessOutput
         do {
-            out = try await runner.run(binary, arguments: arguments, environment: environment, timeout: timeout)
+            if let cwd {
+                out = try await runner.run(binary, arguments: arguments, environment: environment, cwd: cwd,
+                                           timeout: timeout)
+            } else {
+                out = try await runner.run(binary, arguments: arguments, environment: environment, timeout: timeout)
+            }
         } catch {
             diagnostics.record(.verb(name: verb, exitCode: -1, durationMs: elapsedMs(since: start)))
             throw error

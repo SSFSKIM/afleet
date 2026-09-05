@@ -110,3 +110,59 @@ public struct NullFleetDiagnostics: FleetDiagnosticsSink {
     public init() {}
     public func record(_ event: FleetDiagnosticEvent) {}
 }
+
+/// FleetKit's events as one JSON line each, in the app's diagnostics directory beside C2's `diagnostics.log`.
+///
+/// The same shape and the same rotation as ClaudeWire's `FileDiagnostics`, because a reader looking at both files
+/// should not have to learn two formats: the file is `fleet.log`, it rotates once into `fleet.log.1`, and every
+/// line is `FleetDiagnosticEvent.jsonValue` — an `event` name and structural fields, never a payload, a path under
+/// a config home, an environment or stdout.
+public final class FileFleetDiagnostics: FleetDiagnosticsSink, @unchecked Sendable {   // `queue` owns the handle
+    private let queue = DispatchQueue(label: "afleet.fleet-diagnostics")
+    private let directory: URL
+    private let rotateAt: Int
+    private var handle: FileHandle?
+    private var size = 0
+
+    public init(directory: URL, rotateAt: Int = 25 * 1024 * 1024) {
+        self.directory = directory
+        self.rotateAt = rotateAt
+        queue.sync { open() }
+    }
+
+    private var logURL: URL { directory.appendingPathComponent("fleet.log") }
+
+    private func open() {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: directory, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+        if !fm.fileExists(atPath: logURL.path) {
+            fm.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
+        handle = try? FileHandle(forWritingTo: logURL)
+        _ = try? handle?.seekToEnd()
+        size = (try? fm.attributesOfItem(atPath: logURL.path)[.size] as? Int) ?? 0
+    }
+
+    public func record(_ event: FleetDiagnosticEvent) {
+        queue.async { [self] in
+            guard var data = try? event.jsonValue.canonicalData() else { return }
+            data.append(0x0A)
+            if size + data.count > rotateAt { rotate() }
+            try? handle?.write(contentsOf: data)
+            size += data.count
+        }
+    }
+
+    private func rotate() {
+        try? handle?.close(); handle = nil
+        let old = directory.appendingPathComponent("fleet.log.1")
+        try? FileManager.default.removeItem(at: old)
+        try? FileManager.default.moveItem(at: logURL, to: old)
+        open()
+    }
+
+    /// Every line written so far is on disk when this returns. The facade exposes it so a caller reading the file
+    /// is reading the events it just caused rather than racing the queue.
+    public func flush() { queue.sync { try? handle?.synchronize() } }
+}

@@ -374,7 +374,7 @@ final class PreconditionTests: XCTestCase {
         try project.writeMCPJSON(["d": ["command": "/usr/bin/true"]])
         let supervisor = rig.supervisor(session: SessionID(), cwdOverride: project.root,
                                         preconditions: SpawnPreconditions())
-        await XCTAssertThrowsErrorAsync(try await supervisor.declineProjectServers(["d"])) { error in
+        await XCTAssertThrowsErrorAsync(try await supervisor.declineProjectServers(["d"], projectHasLiveProcess: false)) { error in
             XCTAssertEqual(error as? LifecycleError, .declineRefused(reason: "symlink"))
         }
         let banner = await supervisor.state.banner

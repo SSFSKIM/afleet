@@ -77,8 +77,10 @@ public enum LogoutPlan {
         /// finish, and the user is told which ones before being offered *Stop* rather than after.
         public var wedged: [ChannelKey]
 
+        /// `wedged` carries no default. It is the guard that keeps `claude auth logout` off a live ghost, and a
+        /// census built by hand without it would opt out of that guard while looking complete.
         public init(owned: [ChannelKey], nonEligible: [(key: ChannelKey, tasks: [String])],
-                    ownJobs: [JobShort], foreign: [Holder], wedged: [ChannelKey] = []) {
+                    ownJobs: [JobShort], foreign: [Holder], wedged: [ChannelKey]) {
             self.owned = owned; self.nonEligible = nonEligible; self.ownJobs = ownJobs; self.foreign = foreign
             self.wedged = wedged
         }
