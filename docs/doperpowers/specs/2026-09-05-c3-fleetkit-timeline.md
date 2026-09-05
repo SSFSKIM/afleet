@@ -1123,15 +1123,15 @@ loses `compact_boundary` from that list, per the coordinator's amendment of the 
 over the eighteen-fixture corpus on 2026-09-05 with a walk of every JSONL under `transcript/`.
 
 *Task-notification origin* — four `user` records, whose `origin` is exactly `{"kind":
-"task-notification"}`, in three fixtures: `background-shell` (uuid `376b0e02…`), `explore-depth-1`
-(`22351035…`) and `nested-depth-2` (`b0aa7b8e…` and `e6692000…`). All four carry `userType:
+"task-notification"}`, in three fixtures: `background-shell` (one), `explore-depth-1`
+(one) and `nested-depth-2` (two). All four carry `userType:
 "external"` and a `<task-notification>` content block. No other non-human `origin.kind` appears
 anywhere in the corpus. Each uuid was grepped across its fixture's `frames.ndjson`: every occurrence
 is an out-direction `transcript_mirror` frame, and none is a `user` frame in either direction.
 
 *Sidechain roots* — three `user` records with `isSidechain: true` and no `parentUuid`, one at the
-head of each of the corpus's three agent streams: `explore-depth-1`'s (`8f31e2f3…`) and
-`nested-depth-2`'s two (`82d93d14…`, `37cd16ad…`). The rule that makes the matcher safe is that
+head of each of the corpus's three agent streams: `explore-depth-1`'s one and
+`nested-depth-2`'s two. The rule that makes the matcher safe is that
 **every sidechain root lies on an agent stream**: across all seventeen main files, every root `user`
 record carries `isSidechain: false`, so the matcher cannot reach a main-stream prompt. These three
 were grepped the same way, with the same result — mirror frames only, never a `user` frame. They

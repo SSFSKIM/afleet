@@ -147,3 +147,14 @@ not renumber anything above.
     chain's boundary uuid explicitly in `WindowMarker` and exempt only that record, plus a rewound
     fixture above 8 MiB whose tail begins on an abandoned branch, compared against the whole-file
     leaf chain.
+24. **Test temp trees are never checked against the config home.**
+    `Tests/FleetTimelineTests/Support/TempTree.swift:15-16`: every test config home is created under
+    `FileManager.default.temporaryDirectory` without confirming that the resolved location lies
+    outside `~/.claude` and `CLAUDE_CONFIG_DIR`, so a shell whose `TMPDIR` points inside a config
+    home would make the suite write there against X9. Raised by the merge-time leak-risk review; not
+    fixed now because the environment is contrived (macOS sets `TMPDIR` under `/var/folders`, the
+    live-test config home is a scratch tree under `/tmp`) and X9 is verified empirically by the
+    recursive fingerprint taken before and after the suite. Owner: C3, and every child's test
+    support. Closer: canonicalise `temporaryDirectory` in `TempTree.init` and throw `XCTSkip` with a
+    fixed message when it resolves inside either config home; C4's staging helpers take the same
+    guard.
