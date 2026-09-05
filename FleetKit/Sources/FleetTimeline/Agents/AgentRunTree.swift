@@ -107,7 +107,7 @@ public struct AgentRunTree: Hashable, Sendable {
         nodes[f.taskID]!.activityLine = f.description
         if let tool = f.lastToolName { nodes[f.taskID]!.lastToolName = tool }
         if let type = f.subagentType { nodes[f.taskID]!.agentType = type }
-        if let use = f.toolUseID, nodes[f.taskID]!.toolUseID == nil { nodes[f.taskID]!.toolUseID = use }
+        if let use = f.toolUseID, nodes[f.taskID]!.toolUseID == nil { nodes[f.taskID]!.toolUseID = use; resolveJoins() }
     }
 
     public mutating func apply(taskUpdated f: TaskUpdated, at now: Date) {
@@ -120,7 +120,7 @@ public struct AgentRunTree: Hashable, Sendable {
     public mutating func apply(taskNotification f: TaskNotification, at now: Date) {
         guard nodes[f.taskID] != nil else { return }
         nodes[f.taskID]!.status = TaskStatus(wire: f.status)
-        if let use = f.toolUseID, nodes[f.taskID]!.toolUseID == nil { nodes[f.taskID]!.toolUseID = use }
+        if let use = f.toolUseID, nodes[f.taskID]!.toolUseID == nil { nodes[f.taskID]!.toolUseID = use; resolveJoins() }
         if nodes[f.taskID]!.endedAt == nil { nodes[f.taskID]!.endedAt = now }
     }
 
@@ -209,9 +209,18 @@ public struct AgentRunTree: Hashable, Sendable {
         guard nodes[taskID] != nil else { return }
         if nodes[taskID]!.agentType == nil { nodes[taskID]!.agentType = m.agentType }
         if nodes[taskID]!.description.isEmpty { nodes[taskID]!.description = m.description }
+        // The sidecar can be the first to name the spawning block, and the block is the join's key, so learning it
+        // here has to re-run the join; nothing else does it for us.
+        let learnedToolUse = nodes[taskID]!.toolUseID == nil && m.toolUseId != nil
         if nodes[taskID]!.toolUseID == nil { nodes[taskID]!.toolUseID = m.toolUseId }
+        // `depth` is written whenever the metadata states one, unlike the optional fields above, which are written
+        // only when unset. It has to be: `depth` is not optional, its default (1) is also a legal value, so "unset"
+        // is not representable and a write-if-unset rule would silently keep the default for a run whose
+        // `task_started` carried no `spawn_depth`. Both sources carry the engine's own spawn depth for the same run
+        // and the corpus shows them equal, so this is a no-op wherever both are present.
         if let depth = m.spawnDepth { nodes[taskID]!.depth = depth }
         if let parent = m.parentAgentId { link(taskID, to: parent, from: source) }
+        if learnedToolUse { resolveJoins() }
     }
 
     /// Every node without a parent whose spawning block has been observed. Runs after each fold step that could
@@ -226,11 +235,17 @@ public struct AgentRunTree: Hashable, Sendable {
 
     /// First source wins; a later source that agrees is recorded and changes nothing; a later source that disagrees
     /// is recorded as a conflict and still changes nothing.
+    ///
+    /// The record is **idempotent**. `resolveJoins()` re-offers every node's join answer after every observation, so a
+    /// standing disagreement is re-offered once per message frame for the life of the session; appending each time
+    /// would grow this value without bound. A source repeating an answer it has already given is therefore a no-op,
+    /// and only a genuinely new answer — a source speaking for the first time, or changing its mind — is recorded.
     private mutating func link(_ id: String, to parentID: String, from source: AgentRunNode.ParentSource) {
         guard nodes[id] != nil, parentID != id else { return }
+        let alreadySaid = parentAnswers[id]?[source]
         parentAnswers[id, default: [:]][source] = parentID
         if let existing = nodes[id]!.parent {
-            guard existing != parentID else { return }
+            guard existing != parentID, alreadySaid != parentID else { return }
             conflicts.append("agent \(id): \(source.rawValue) says parent \(parentID), kept \(existing) from \(nodes[id]!.parentSource.rawValue)")
             return
         }

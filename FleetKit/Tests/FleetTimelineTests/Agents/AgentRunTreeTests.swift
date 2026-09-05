@@ -207,6 +207,70 @@ final class AgentRunTreeTests: XCTestCase {
         XCTAssertEqual(tree.children(of: one.id), [two.id])
         XCTAssertEqual(tree.children(of: two.id), [])
         XCTAssertFalse(tree.isParked(one.id), "both runs finished, so neither branch is parked")
+
+        // Parked is the other branch of the same predicate: the parent is terminal and a child is still running.
+        // Re-arming the child through the recorded `task_started` is the only way to reach it through the API.
+        for event in try Self.events(fx) {
+            guard case .system(.taskStarted(let f), let at) = event, f.taskID == two.id else { continue }
+            tree.apply(taskStarted: f, at: at)
+        }
+        XCTAssertEqual(try XCTUnwrap(tree.node(two.id)).status, .running)
+        XCTAssertEqual(try XCTUnwrap(tree.node(one.id)).status, .completed)
+        XCTAssertTrue(tree.isParked(one.id), "the parent is finished and its child is running")
+        XCTAssertFalse(tree.isParked(two.id), "a running node is never parked")
+    }
+
+    // MARK: - A source that disagrees
+
+    /// The conflict record is the only thing that distinguishes a silent overwrite from a silent drop, so it needs a
+    /// disagreement to be tested against, and the corpus has none: all three sources agree everywhere. The wrong
+    /// parent below is an **invented** identifier applied through the public API; no fixture is edited and no engine
+    /// byte is written into this file.
+    ///
+    /// It also pins the record as idempotent. `resolveJoins()` re-offers every node's join answer after every single
+    /// observation, so a standing disagreement is re-offered once per message frame; without idempotence `conflicts`
+    /// would grow by one entry per frame for the life of the session.
+    func testADisagreeingSourceIsRecordedOnceAndTheFirstAnswerIsKept() throws {
+        let fx = try FixtureCorpus.named("nested-depth-2")
+        let events = try Self.events(fx)
+        var tree = Self.tree(fx)
+        Self.fold(events, into: &tree)                       // task frames only: no parent yet
+        let (one, two) = try depths(tree, fx)
+        XCTAssertNil(two.parent)
+
+        // An invented mirror entry that names the wrong parent, applied to the depth-2 run's stream.
+        let wrongParent = "an-invented-parent-task-id"
+        XCTAssertFalse(tree.nodes.keys.contains(wrongParent), "the invented parent must not be a real node")
+        let invented = AgentMetadataRecord(fields: AgentMetadataFields(
+            type: "agent_metadata", agentType: "InventedAgentType", description: "an invented run",
+            toolUseId: two.toolUseID, spawnDepth: 2, parentAgentId: wrongParent))
+        tree.apply(agentMetadata: invented,
+                   for: LogicalStream(configHome: FixtureCorpus.recordedConfigHome, sessionID: fx.sessionID,
+                                      name: .agent(taskID: two.id)))
+        XCTAssertEqual(try XCTUnwrap(tree.node(two.id)).parent, wrongParent, "the first source to answer sets the link")
+        XCTAssertEqual(try XCTUnwrap(tree.node(two.id)).parentSource, .agentMetadata)
+        XCTAssertEqual(tree.conflicts, [], "one source alone cannot disagree with anything")
+
+        // Now the two-step join answers, and it disagrees. It is re-offered on every one of the fixture's frames.
+        Self.fold(events, into: &tree, joins: true)
+        XCTAssertEqual(try XCTUnwrap(tree.node(two.id)).parent, wrongParent, "the first answer is kept, not overwritten")
+        XCTAssertEqual(try XCTUnwrap(tree.node(two.id)).parentSource, .agentMetadata, "the source of record does not move")
+        XCTAssertEqual(tree.conflicts.count, 1, "the disagreement is recorded exactly once")
+        let sentence = try XCTUnwrap(tree.conflicts.first)
+        XCTAssertTrue(sentence.contains(two.id), "the conflict names the node")
+        XCTAssertTrue(sentence.contains(AgentRunNode.ParentSource.twoStepJoin.rawValue), "and the source that disagreed")
+        XCTAssertTrue(sentence.contains(one.id), "and the parent that source proposed")
+        XCTAssertTrue(sentence.contains(wrongParent), "and the answer that was kept")
+        XCTAssertFalse(sentence.contains("/"), "a conflict sentence carries identifiers, never a path")
+        XCTAssertEqual(tree.parentAnswers[two.id], [.agentMetadata: wrongParent, .twoStepJoin: one.id],
+                       "both answers are kept, so the disagreement is inspectable and not merely counted")
+
+        // Folding exactly the same disagreement again must not grow the record.
+        let recorded = tree.conflicts
+        Self.fold(events, into: &tree, joins: true)
+        Self.fold(events, into: &tree, joins: true)
+        XCTAssertEqual(tree.conflicts, recorded, "a repeated disagreement is recorded once, not once per frame")
+        XCTAssertEqual(try XCTUnwrap(tree.node(two.id)).parent, wrongParent)
     }
 
     // MARK: - Node identity
@@ -297,7 +361,9 @@ final class AgentRunTreeTests: XCTestCase {
         }
         XCTAssertEqual(Set(expected.keys), Set(tree.nodes.keys), "every folded node has a recorded agent transcript")
         for (id, url) in expected {
-            XCTAssertEqual(tree.transcriptURL(of: id)?.standardizedFileURL, url, "agent \(id) is not at its recorded path")
+            // Not XCTAssertEqual: a mismatch would print two paths under the recorded config home, and an assertion
+            // may name identifiers only (C3 constraints, parent §12).
+            XCTAssertTrue(tree.transcriptURL(of: id)?.standardizedFileURL == url, "agent \(id) is not at its recorded path")
         }
 
         let before = tree.nodes
