@@ -1292,6 +1292,37 @@ parent's §7.8.
   every launch (it either starves the composed prompt or lets a handshake-only launch run
   twelve turns).
   Date/Author: 2026-09-05 / C4 plan review 3, rulings 10 and 11.
+- Decision: the cap counter's bounded quantity is `live + reserved - pendingEvictions`, not
+  `live + reserved + wedged + pendingEvictions`, and `capDecision` carries `pendingEvictions`
+  so the invariant can be asserted at every decision with no per-kind exception.
+  Rationale: found in execution, when two evictions are pinned open at once. A pending
+  eviction is not an extra occupant: it is precisely the slot that one outstanding
+  reservation is waiting for, so counting both double-counts one slot and the naive sum
+  reads seven at the moment a victim is named. The earlier formulation held only because no
+  test pinned two evictions open simultaneously. Subtracting the pending evictions states
+  what the counter actually enforces, so the cap tests assert the invariant itself rather
+  than the weaker consequence "process-holding slots never exceed six". This is a child
+  means, not a parent impact: the parent says only that six channels may be live and that a
+  seventh spawn evicts the least recently used dormant-eligible channel, and both still hold.
+  Rejected: asserting `live + reserved <= 6` on granted decisions only and tolerating seven
+  on an evict decision (a per-kind exception that hides the one case worth watching).
+  Date/Author: 2026-09-05 / C4 Task 5 review, architect ruling.
+- Decision: `contendedSettled` enumerates six scenarios, not five; the sixth is
+  `(.contended, .holdersSettled, .archivedOlder)`.
+  Rationale: the parent's row is `| Contended | holder set settles to zero or one |
+  re-evaluate | the matching origin |`, and an archived channel older than the recency
+  cutoff is a matching origin, so the target was already inside the parent's wildcard; C4's
+  concrete enumeration had under-covered it. Found in execution: deriving the settle target
+  from the channel's own recency instead of hardcoding `archivedRecent` made the missing row
+  reachable, and a refused transition left the channel contended with its banner already
+  cleared and no way out. Two changes follow: the row exists, and `resolveContended` clears
+  `banner` and `contendedFrom` only after `apply` returns true, so a refused transition
+  leaves no partial state — the same discipline `handleExit` was given in Task 4. This is a
+  child means, not a parent impact; the same under-enumeration pattern as
+  `TerminatingAction.postHandshakeYield`.
+  Rejected: hardcoding `archivedRecent` (it silently promotes an old channel's recency
+  merely for having passed through Contended).
+  Date/Author: 2026-09-05 / C4 Task 5 second review, architect ruling.
 
 ## Surprises & Discoveries
 
