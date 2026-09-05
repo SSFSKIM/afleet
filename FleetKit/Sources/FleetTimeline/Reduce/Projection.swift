@@ -15,10 +15,14 @@ public struct SessionState: Hashable, Sendable, Codable {
     public var continuedIn: String?
     public var tag: String?
     public var atisLatch: String?
+    /// The session has been rewound at least once: some `last-prompt` record carried `rewound: true` (rule 2). It is a
+    /// latch rather than a current state, and the corpus is what decides that — see `RecordReducer.fold`.
+    public var rewound: Bool
     public init() {
         self.customTitle = nil; self.aiTitle = nil; self.agentName = nil; self.summary = nil
         self.leaf = nil; self.clearedToEmpty = false; self.relocatedCwd = nil; self.mode = nil
         self.costState = nil; self.continuedIn = nil; self.tag = nil; self.atisLatch = nil
+        self.rewound = false
     }
 }
 

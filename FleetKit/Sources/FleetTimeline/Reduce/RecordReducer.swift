@@ -128,6 +128,22 @@ public struct RecordReducer: Sendable {
             }
         }
 
+        // Rule 4 governs which records produce *items*, and a `tool_result` block produces none: it completes an item
+        // another record already produced. Rule 3 states the join with no chain qualification — "the `user` record
+        // whose `tool_result` block names that id completes it" — and the engine agrees, re-attaching off-chain results
+        // in `kns` (2.1.258 cli.pretty.js:432693, called from `buildConversationChain` right after the leaf walk). So a
+        // result completes its call by `tool_use_id` wherever the record carrying it lies. Only the id join runs here:
+        // the `sourceToolAssistantUUID` fallback resolves an id the engine rewrote on the chain, and guessing across a
+        // branch could complete the wrong call.
+        let onChain = Set(chain)
+        for uuid in tree.order where !onChain.contains(uuid) {
+            guard case .user(let user) = tree.byUUID[uuid] else { continue }
+            builder.joinToolResults(message: user.fields.message, key: keyByUUID[uuid],
+                                    toolUseResult: user.fields.toolUseResult,
+                                    toolDenialKind: user.fields.toolDenialKind,
+                                    sourceToolAssistantUUID: nil)
+        }
+
         return StreamProjection(stream: stream, items: builder.items + opaque, hidden: hidden, branches: branches,
                                 session: session, warnings: warnings, window: options.window, metadata: metadata)
     }
@@ -233,7 +249,11 @@ public struct RecordReducer: Sendable {
     private static func fold(_ state: SessionStateRecord, into session: inout SessionState, clearedToEmpty: inout Bool) {
         switch state.fields.type {
         case "last-prompt":
-            break       // rule 2 reads the last one alone, above; folding record by record would keep a stale clear
+            // The leaf reads the last such record alone, above; folding it record by record would keep a stale clear.
+            // `rewound` is the exception, and the corpus is why: `control-shapes` records the rewind on the *third*
+            // of its four `last-prompt` records and the fourth is silent about it, so last-wins would lose the fact
+            // the engine wrote. A rewind is something that happened, not a current state, so it latches.
+            if state.rewound { session.rewound = true }
         case "continued-in":
             // The destination, never this record's own `sessionId`, which is the source (2.1.258 line 246351).
             if let destination = state.continuedInSessionId { session.continuedIn = destination }

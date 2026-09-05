@@ -98,6 +98,9 @@ final class RecordReducerTests: XCTestCase {
                 XCTAssertEqual(projected, reachable,
                                "\(fixture.name)/\(stream.name.label): the projection opens exactly the chain's tool uses")
 
+                // `walk.answered` is every id some `tool_result` block names anywhere in the file, on the leaf path or
+                // off it, because a result completes its call wherever its record lies. So a projected call is open
+                // exactly when the file holds no result for it at all.
                 let open = Set(Self.toolCalls(projection).filter { $0.status == .running }.map(\.toolUseID))
                     .union(Self.sentFiles(projection).filter { $0.delivered == nil }.map(\.toolUseID))
                 XCTAssertEqual(open, projected.subtracting(walk.answered),
@@ -115,7 +118,10 @@ final class RecordReducerTests: XCTestCase {
             }
         }
         // Grounded by the walk above: 26 tool uses on disk, 2 of them on the two agent files' off-chain parallel
-        // branch, so 24 reach the projection — 23 tool cards and the one `send_user_file`.
+        // branch, so 24 reach the projection — 23 tool cards and the one `send_user_file`. The off-chain result join
+        // leaves these totals where they were, and that is a corpus fact rather than a coincidence: the corpus's only
+        // two off-chain results answer those same two off-chain calls, so no on-chain call was ever left open by the
+        // chain-only reading. `testAnOffChainToolResultStillCompletesItsCall_mutation` is what discriminates the rule.
         XCTAssertEqual(projectedTotal, 24)
         XCTAssertEqual([completed, denied, failed, running], [22, 1, 0, 0],
                        "every recorded call is answered; only permission-deny's is denied")
@@ -213,6 +219,62 @@ final class RecordReducerTests: XCTestCase {
         XCTAssertEqual(projection.items, [])
         XCTAssertTrue(projection.session.clearedToEmpty)
         XCTAssertNil(projection.session.leaf)
+    }
+
+    /// Rule 2's `rewound` clause. `control-shapes` writes four `last-prompt` records; the third carries
+    /// `"rewound": true` and the fourth is silent about it, so the fact only survives as a latch — a rewind is
+    /// something that happened, not a current state. `plain-two-turn` records no rewind anywhere and is the half that
+    /// stops the assertion being a constant.
+    func testRewoundIsLatchedOntoTheSessionState() throws {
+        let (shapes, shapesStream, shapesURL) = try Self.mainStream(of: "control-shapes")
+        let recorded = shapes.filter { record in
+            guard case .sessionState(let state, _) = record else { return false }
+            return state.fields.type == "last-prompt" && state.rewound
+        }
+        XCTAssertEqual(recorded.count, 1, "control-shapes records the rewind on exactly one of its last-prompt records")
+        XCTAssertTrue(RecordReducer.reduce(shapes, stream: shapesStream, sourceFile: shapesURL).session.rewound)
+
+        let (plain, plainStream, plainURL) = try Self.mainStream(of: "plain-two-turn")
+        XCTAssertFalse(plain.contains { record in
+            guard case .sessionState(let state, _) = record else { return false }
+            return state.fields.type == "last-prompt" && state.rewound
+        }, "plain-two-turn records no rewind")
+        XCTAssertFalse(RecordReducer.reduce(plain, stream: plainStream, sourceFile: plainURL).session.rewound)
+    }
+
+    /// A `tool_result` completes its call by `tool_use_id` wherever its record lies: rule 4 decides which records
+    /// produce items, and a result produces none — it completes an item another record already made. No recording
+    /// carries an on-chain call whose only result is off-chain (checked: the corpus's two off-chain results answer
+    /// off-chain calls), so the path is reached by naming an earlier leaf, which drops `background-shell`'s recorded
+    /// result record off the chain while leaving the `Bash` call on it.
+    func testAnOffChainToolResultStillCompletesItsCall_mutation() throws {
+        let (records, stream, url) = try Self.mainStream(of: "background-shell")
+        let opener = try XCTUnwrap(records.compactMap { record -> String? in
+            guard case .assistant(let assistant) = record else { return nil }
+            let opens = assistant.fields.message.fields.content.contains { if case .toolUse = $0 { true } else { false } }
+            return opens ? assistant.fields.uuid : nil
+        }.first, "background-shell's main transcript opens a tool call")
+        let promptIndex = try XCTUnwrap(records.lastIndex { record in
+            guard case .sessionState(let state, _) = record else { return false }
+            return state.fields.type == "last-prompt"
+        })
+        var shortened = records
+        shortened[promptIndex] = try Breaks.setting(path: "leafUuid", in: records[promptIndex], to: .string(opener))
+
+        let projection = RecordReducer.reduce(shortened, stream: stream, sourceFile: url)
+        XCTAssertEqual(projection.session.leaf, opener)
+        let call = try XCTUnwrap(Self.toolCalls(projection).first { $0.name == "Bash" })
+        XCTAssertEqual(call.status, .completed, "the result record is off the chain and still completes its call")
+        XCTAssertNotNil(call.structuredResult)
+        let answering = try XCTUnwrap(records.compactMap { record -> String? in
+            guard case .user(let user) = record, case .blocks(let blocks) = user.fields.message.fields.content,
+                  blocks.contains(where: { if case .toolResult = $0 { true } else { false } }) else { return nil }
+            return user.fields.uuid
+        }.first)
+        XCTAssertTrue(projection.branches.contains { $0.head == answering },
+                      "the answering record really did leave the chain")
+        XCTAssertFalse(projection.items.contains { $0.id.key == answering },
+                       "an off-chain record still produces no item of its own")
     }
 
     /// `continued-in` names its *destination* in `continuedInSessionId`; the record's own `sessionId` is this file's

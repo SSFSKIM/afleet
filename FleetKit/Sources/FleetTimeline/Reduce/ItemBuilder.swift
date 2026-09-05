@@ -129,19 +129,8 @@ struct ItemBuilder {
                           sourceToolAssistantUUID: String?) {
         closeRun()
         let content = message.fields.content
-        if case .blocks(let blocks) = content {
-            for block in blocks {
-                guard case .toolResult(let result) = block else { continue }
-                if complete(result.fields.toolUseID, with: result, structured: toolUseResult,
-                            denialKind: toolDenialKind, key: key) { continue }
-                // The block id named no call this builder opened. `sourceToolAssistantUUID` names the assistant
-                // record the result belongs to; when exactly one of that record's calls is still open, it is the one.
-                if let source = sourceToolAssistantUUID, let only = soleOpenCall(of: source) {
-                    _ = complete(only, with: result, structured: toolUseResult, denialKind: toolDenialKind, key: key)
-                }
-            }
-            if !blocks.isEmpty, blocks.allSatisfy({ if case .toolResult = $0 { true } else { false } }) { return }
-        }
+        if joinToolResults(message: message, key: key, toolUseResult: toolUseResult,
+                           toolDenialKind: toolDenialKind, sourceToolAssistantUUID: sourceToolAssistantUUID) { return }
         let kind = messageOrigin?.fields.kind
         if kind == nil || kind == "human" {
             append(.userMessage(UserMessageItem(id: id(uuid), timestamp: timestamp, provenance: provenance(key),
@@ -153,6 +142,27 @@ struct ItemBuilder {
                                                 name: messageOrigin?.fields.name, blocks: Self.blocks(of: content),
                                                 text: Self.text(of: content))))
         }
+    }
+
+    /// The `tool_result` half of a `user` record: every block completes the call its id names. Returns true when the
+    /// record is nothing but tool results and therefore renders no message of its own (rule 6). Separated from
+    /// `addUser` because a result completes a call wherever its record lies — the reducer replays off-leaf-path
+    /// results through this entry point, which produces no item and so leaves rule 4 alone.
+    @discardableResult
+    mutating func joinToolResults(message: UserMessage, key: RecordKey?, toolUseResult: JSONValue?,
+                                  toolDenialKind: String?, sourceToolAssistantUUID: String?) -> Bool {
+        guard case .blocks(let blocks) = message.fields.content else { return false }
+        for block in blocks {
+            guard case .toolResult(let result) = block else { continue }
+            if complete(result.fields.toolUseID, with: result, structured: toolUseResult,
+                        denialKind: toolDenialKind, key: key) { continue }
+            // The block id named no call this builder opened. `sourceToolAssistantUUID` names the assistant
+            // record the result belongs to; when exactly one of that record's calls is still open, it is the one.
+            if let source = sourceToolAssistantUUID, let only = soleOpenCall(of: source) {
+                _ = complete(only, with: result, structured: toolUseResult, denialKind: toolDenialKind, key: key)
+            }
+        }
+        return !blocks.isEmpty && blocks.allSatisfy { if case .toolResult = $0 { true } else { false } }
     }
 
     /// A result whose block id matched nothing joins by the assistant record it names, but only when that record left
