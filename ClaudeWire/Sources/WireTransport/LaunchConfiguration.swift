@@ -2,7 +2,22 @@ import Foundation
 import AfleetCore
 import WireFrames
 
-public enum SessionStart: Hashable, Sendable { case new(SessionID), resume(SessionID, fork: Bool) }
+/// Where a *Fork from here* truncates the source's records: `entryUUID` is the last record the fork keeps,
+/// **inclusive**, and `dropsTurn` names the prompt uuid of the turn the truncation discards so the CLI can
+/// refuse a fork point that swallows more (§7.4). Record uuids are plain wire strings.
+public struct ForkPoint: Hashable, Sendable {
+    public var entryUUID: String
+    public var dropsTurn: String?
+    public init(entryUUID: String, dropsTurn: String? = nil) { self.entryUUID = entryUUID; self.dropsTurn = dropsTurn }
+}
+
+/// `.forkFrom` keeps the source's records up to and including the named entry and drops everything after it;
+/// the source session is left untouched.
+public enum SessionStart: Hashable, Sendable {
+    case new(SessionID)
+    case resume(SessionID, fork: Bool)
+    case forkFrom(SessionID, at: ForkPoint)
+}
 public enum Worktree: Hashable, Sendable { case unnamed, named(String) }
 public enum SettingSource: String, Hashable, Sendable { case user, project, local }
 
@@ -72,6 +87,9 @@ public struct LaunchConfiguration: Hashable, Sendable {
         switch session {
         case .new(let id): a += ["--session-id", id.description]
         case .resume(let id, let fork): a += ["--resume", id.description]; if fork { a.append("--fork-session") }
+        case .forkFrom(let id, let point):
+            a += ["--resume", id.description, "--fork-session", "--resume-session-at", point.entryUUID]
+            if let dropsTurn = point.dropsTurn { a += ["--resume-drops-turn", dropsTurn] }
         }
         if let model { a += ["--model", try Self.token(model, for: "--model")] }
         if let permissionMode { a += ["--permission-mode", permissionMode.rawValue] }
