@@ -224,8 +224,11 @@ public struct RecordReducer: Sendable {
         } else {
             status = .running
         }
+        // The spawning call, not the agent's own first item: the run belongs where the call is in the main stream's
+        // timestamp order (parent §7.3), and both halves of the invariant hold that call while only the file half
+        // holds the agent's opening prompt, which `fileOnlyRecordKinds` now excludes.
         return TaskRunItem(id: ItemID(stream: agent.stream, key: taskID),
-                           timestamp: agent.items.first?.timestamp ?? call?.timestamp,
+                           timestamp: call?.timestamp ?? agent.items.first?.timestamp,
                            threadParent: call?.id,
                            provenance: Provenance(stream: agent.stream, agentID: taskID,
                                                   sourceFile: agent.items.first?.provenance.sourceFile,

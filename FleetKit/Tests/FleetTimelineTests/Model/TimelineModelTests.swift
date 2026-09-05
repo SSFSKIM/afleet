@@ -81,15 +81,23 @@ final class TimelineModelTests: XCTestCase {
 
     // MARK: - The file-only matchers, against the corpus
 
-    /// Every attachment in the corpus and both `isMeta` user records match a file-only matcher; no other record does.
-    /// The count is pinned as an equality against the census (200 attachments + 2 meta users = 202) and grounded by
-    /// the two per-kind equalities beside it, so a matcher that over- or under-matches cannot pass.
+    /// Every attachment in the corpus, both `isMeta` user records, the four engine-injected task notifications and
+    /// the three subagent opening prompts match a file-only matcher; no other record does. The total is pinned as an
+    /// equality against the census (200 + 2 + 4 + 3 = 209) and grounded by a per-shape equality for each of the four
+    /// user shapes beside it, so a matcher that over- or under-matches cannot pass. The negative that matters most is
+    /// the last one: no main-stream root matches `.sidechainRoot`, which is what makes that flag expressible at all.
+    ///
+    /// The two user matchers were added on 2026-09-05 by parent revisions 7 and 8, after check two found both shapes
+    /// present in the transcript and absent from every `user` frame.
     func testFileOnlyMatchersRecogniseTheCorpusAttachmentsAndMetaUsers() throws {
         let matchers = ProjectionCategories.fileOnlyRecordKinds
-        var matched = 0, attachments = 0, matchedAttachments = 0, metaUsers = 0, plainUsers = 0, records = 0
+        var matched = 0, attachments = 0, matchedAttachments = 0, records = 0
+        var metaUsers = 0, taskNotifications = 0, sidechainRoots = 0, plainUsers = 0, mainRoots = 0
         var matchedKinds: Set<String> = []
+        var byFixture: [String: Int] = [:]
         for fx in try FixtureCorpus.all() {
-            for (_, _, url) in try fx.transcriptFiles() {
+            for (_, kind, url) in try fx.transcriptFiles() {
+                let isAgentStream: Bool = if case .agentTranscript = kind { true } else { false }
                 for line in try Data(contentsOf: url).split(separator: UInt8(ascii: "\n")) where !line.isEmpty {
                     let record = RecordDecoder.decode(line: Data(line))
                     records += 1
@@ -103,9 +111,29 @@ final class TimelineModelTests: XCTestCase {
                         if r.isMeta == true {
                             metaUsers += 1
                             XCTAssertTrue(hit, "\(fx.name): an isMeta user record is file-only and must match")
+                        } else if r.fields.origin?.fields.kind == "task-notification" {
+                            taskNotifications += 1
+                            byFixture[fx.name, default: 0] += 1
+                            XCTAssertTrue(RecordKindMatcher.userOrigin("task-notification").matches(record),
+                                          "\(fx.name): an engine-injected task notification is file-only and must match")
+                        } else if r.fields.isSidechain == true && r.fields.parentUuid == nil {
+                            sidechainRoots += 1
+                            XCTAssertTrue(isAgentStream,
+                                          "\(fx.name): a sidechain root must lie on an agent stream, not the main one")
+                            XCTAssertTrue(RecordKindMatcher.userWhere(.sidechainRoot).matches(record),
+                                          "\(fx.name): a subagent's opening prompt is file-only and must match")
                         } else {
                             plainUsers += 1
                             XCTAssertFalse(hit, "\(fx.name): a plain user record must not match a file-only matcher")
+                            // The negative the `.sidechainRoot` flag rests on: a main-stream root is a root too, and
+                            // must not be swept up. Every main-stream root in the corpus carries `isSidechain: false`.
+                            if !isAgentStream, r.fields.parentUuid == nil {
+                                mainRoots += 1
+                                XCTAssertNotEqual(r.fields.isSidechain, true,
+                                                  "\(fx.name): a main-stream root must not read as a sidechain root")
+                                XCTAssertFalse(RecordKindMatcher.userWhere(.sidechainRoot).matches(record),
+                                               "\(fx.name): .sidechainRoot must not match a main-stream root")
+                            }
                         }
                     default: break
                     }
@@ -116,8 +144,14 @@ final class TimelineModelTests: XCTestCase {
         XCTAssertEqual(attachments, 200)
         XCTAssertEqual(matchedAttachments, attachments, "every attachment record must match .kind(\"attachment\")")
         XCTAssertEqual(metaUsers, 2)
-        XCTAssertEqual(plainUsers, 69)
-        XCTAssertEqual(matched, 202, "the file-only matchers must select exactly the 200 attachments and 2 isMeta users")
+        XCTAssertEqual(taskNotifications, 4)
+        XCTAssertEqual(byFixture, ["background-shell": 1, "explore-depth-1": 1, "nested-depth-2": 2],
+                       "the four task notifications are these fixtures' and no others'")
+        XCTAssertEqual(sidechainRoots, 3, "one opening prompt per agent transcript: explore-depth-1 has one, nested-depth-2 two")
+        XCTAssertEqual(plainUsers, 62)
+        XCTAssertGreaterThan(mainRoots, 0, "the .sidechainRoot negative would be vacuous with no main-stream root")
+        XCTAssertEqual(matched, 209,
+                       "the file-only matchers must select exactly the 200 attachments, 2 isMeta users, 4 task notifications and 3 sidechain roots")
         XCTAssertEqual(matchedKinds, ["attachment", "user"], "no other kind on disk is file-only in this corpus")
     }
 

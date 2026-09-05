@@ -178,8 +178,9 @@ public struct WireReducer: Sendable {
             }
             withBuilder(agent: node?.id) {
                 $0.addUser(uuid: uuid, key: nil, message: f.message, timestamp: stamp,
-                           messageOrigin: f.origin, toolUseResult: f.toolUseResult, toolDenialKind: nil,
-                           sourceToolAssistantUUID: nil, isReplay: f.isReplay == true)
+                           messageOrigin: f.origin, toolUseResult: f.toolUseResult,
+                           toolDenialKind: Self.denialKind(of: f), sourceToolAssistantUUID: nil,
+                           isReplay: f.isReplay == true)
             }
             agents.observe(parentToolUseID: f.parentToolUseID,
                            carryingToolUseIDs: Self.toolUseIDs(of: f.message.fields.content))
@@ -553,6 +554,27 @@ public struct WireReducer: Sendable {
 
     private mutating func banner(_ kind: Banner.Kind, text: String, at now: Date) {
         overlay.banners.append(Banner(kind: kind, text: text, epoch: epoch, at: now))
+    }
+
+    /// The denial the engine refused a call with. The transcript writes it as the record-level `toolDenialKind`;
+    /// the wire writes it per tool-use id inside `tool_result_meta`, which `UserFields` does not declare and which
+    /// therefore arrives in the frame's lossless extras. Reading it here is what makes a denied call read `.denied`
+    /// on both halves of the invariant; `ItemBuilder.addUser` applies it exactly as the record reducer's value is
+    /// applied, so there is no second denial path.
+    private static func denialKind(of frame: UserFrame) -> String? {
+        guard let meta = frame.additional["tool_result_meta"]?.arrayValue else { return nil }
+        let answered = Set(Self.toolResultIDs(of: frame.message.fields.content))
+        for entry in meta {
+            guard let id = entry["id"]?.stringValue, answered.contains(id),
+                  let kind = entry["non_execution_kind"]?.stringValue else { continue }
+            return kind
+        }
+        return nil
+    }
+
+    private static func toolResultIDs(of content: UserContent) -> [String] {
+        guard case .blocks(let blocks) = content else { return [] }
+        return blocks.compactMap { if case .toolResult(let r) = $0 { r.fields.toolUseID } else { nil } }
     }
 
     private static func metadata(of node: AgentRunNode) -> AgentMetadataRecord {

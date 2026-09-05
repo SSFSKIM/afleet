@@ -6,8 +6,13 @@ import ClaudeWire
 public enum RecordKindMatcher: Hashable, Sendable {
     case kind(String)
     case system(String)
+    /// A `user` record by its `message.origin.kind` — the engine's own injected messages, which reach the host
+    /// through the transcript and the mirror but never as a `user` frame.
+    case userOrigin(String)
     case userWhere(UserFlag)
-    public enum UserFlag: String, Sendable { case isMeta }
+    /// `sidechainRoot`: an agent stream's opening prompt — `isSidechain` with no `parentUuid`. Every main-stream
+    /// root carries `isSidechain: false`, which is what makes the flag safe to express this way.
+    public enum UserFlag: String, Sendable { case isMeta, sidechainRoot }
 
     public func matches(_ record: TranscriptRecord) -> Bool {
         switch self {
@@ -15,9 +20,15 @@ public enum RecordKindMatcher: Hashable, Sendable {
         case .system(let subtype):
             guard case .system(let r) = record else { return false }
             return r.subtype == subtype
+        case .userOrigin(let kind):
+            guard case .user(let r) = record else { return false }
+            return r.fields.origin?.fields.kind == kind
         case .userWhere(let flag):
             guard case .user(let r) = record else { return false }
-            switch flag { case .isMeta: return r.isMeta == true }
+            switch flag {
+            case .isMeta: return r.isMeta == true
+            case .sidechainRoot: return r.fields.isSidechain == true && r.fields.parentUuid == nil
+            }
         }
     }
 }
@@ -45,9 +56,16 @@ public enum ProjectionCategories {
     /// 2026-09-05 after the `compact-boundary` recording showed the engine emitting the boundary
     /// on the wire as a `system` frame of that subtype and mirroring the record, so it is compared
     /// like any other record rather than file-to-file only.
+    /// `.userOrigin("task-notification")` and `.userWhere(.sidechainRoot)` were added on 2026-09-05 after check two
+    /// found them (parent revisions 7 and 8). Both name a record the engine writes to the transcript and mirrors,
+    /// and that no `user` frame ever carries: an engine-injected task notification, and the prompt the `Task` tool
+    /// hands a subagent. Every uuid of both was grepped across the recordings and appears on the wire only inside
+    /// `transcript_mirror`. The wire reducer does not reduce mirror frames — that is `StreamIngestion`'s — so the
+    /// two are file-only by exactly the definition this constant names.
     public static let fileOnlyRecordKinds: Set<RecordKindMatcher> = [
         .kind("attachment"), .system("turn_duration"), .system("stop_hook_summary"), .system("local_command"),
-        .system("informational"), .userWhere(.isMeta)]
+        .system("informational"), .userWhere(.isMeta),
+        .userOrigin("task-notification"), .userWhere(.sidechainRoot)]
     public static let comparedItemFields: ItemFieldSet = [.role, .model, .origin, .toolDenialKind,
         .contentBlocks(text: true, thinking: true, toolUseID: true, toolUseName: true, toolUseInput: true,
                        toolResultContent: true, toolResultIsError: true, image: true, document: true)]
