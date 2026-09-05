@@ -78,9 +78,16 @@ final class LocalHomeIndexTests: XCTestCase {
 
         let temp = try TempTree()
         let directory = temp.projects.appendingPathComponent(largest.slug, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let copy = directory.appendingPathComponent("\(largest.sessionID).jsonl")
-        try FileManager.default.copyItem(at: largest.path, to: copy)
+        // Staged inside a `do`/`catch` that drops the underlying error: a Cocoa file error's description carries the
+        // path it failed on, which here is a path under the author's own config home (§6.3, no environment blob in
+        // test output). A staging that cannot happen is not a failure of the budget this test measures.
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: largest.path, to: copy)
+        } catch {
+            throw XCTSkip("staging the largest local transcript failed")
+        }
 
         let index = TranscriptIndex(configHome: ConfigHome(root: temp.root, source: .environment),
                                     storage: InMemoryIndexStorage())

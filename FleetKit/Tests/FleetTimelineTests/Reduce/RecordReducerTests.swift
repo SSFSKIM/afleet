@@ -739,6 +739,59 @@ final class RecordReducerTests: XCTestCase {
                           "the call is the recorded one, joined by the assistant record and not by the block id")
     }
 
+    /// Tech-debt entry 23, against the first transcript in the corpus where physical order and chain order part.
+    ///
+    /// For an open window `ConversationTree` exempts the *first* record with a missing parent in physical file order
+    /// as the window root, on the ground that Task 2's closure put the window's start at a turn boundary. A resume
+    /// after a rewind breaks that ground: `compact-boundary`'s file is the pre-rewind chain, then the abandoned turn
+    /// the rewind left behind, then the new turn's records — so a tail short enough to begin inside the abandoned
+    /// turn hands the one exemption to a record the leaf path does not contain. The entry's worry is that the live
+    /// chain's own boundary is then eligible for five-second orphan healing and attaches to the abandoned branch,
+    /// putting discarded turns ahead of the active ones in a window closure declared valid.
+    ///
+    /// The tail below begins inside the abandoned turn, which the assertions establish before they test anything, and
+    /// the hazard does not fire — for a reason particular to this file rather than a general one, which is why entry
+    /// 23 stays open. The abandoned record does take the one exemption, exactly as the entry says. The record it
+    /// would otherwise have protected is the `compact_boundary`, and a boundary declares no `parentUuid` at all: with
+    /// its `logicalParentUuid` lying before the window it becomes a root outright and never reaches the five-second
+    /// healing branch that the entry's closer exists to keep it away from. So the corpus still holds no oracle for
+    /// the shape the entry describes — a live chain whose boundary declares a `parentUuid` the window does not hold —
+    /// and this test is the regression witness for the one shape it does hold. `rewind-turn` cannot produce the
+    /// other: its file ends with the abandoned turn, so no window that reaches it holds any later live record.
+    func testABoundedTailBeginningInsideAnAbandonedBranchKeepsTheLiveChainOffIt() throws {
+        let fixture = try FixtureCorpus.named("compact-boundary")
+        let url = try XCTUnwrap(try fixture.transcriptFiles().first { if case .mainTranscript = $0.1 { true } else { false } }).2
+        let stream = try XCTUnwrap(try fixture.transcriptFiles().first { if case .mainTranscript = $0.1 { true } else { false } }).0
+        let reader = TranscriptReader(url: url)
+        let whole = try reader.readAll().records
+        let abandoned = Set(whole.compactMap(\.uuid)).subtracting(Self.leafChain(whole))
+        XCTAssertEqual(abandoned.count, 3, "the file carries the rewind's abandoned turn and nothing else off the path")
+
+        // A tail that starts partway through the abandoned turn: the byte budget is expressed as a fraction of the
+        // file rather than as a recorded offset, and the premise is asserted rather than assumed.
+        let length = try reader.byteLength()
+        let policy = WindowPolicy(wholeFileUpTo: 0, initialTail: length / 12, earlierStep: 512)
+        let result = try WindowedTranscript.read(reader, policy: policy)
+        XCTAssertTrue(result.window.earlierAvailable, "the window must be open for the exemption to exist at all")
+        let inWindow = result.records.compactMap(\.uuid)
+        XCTAssertTrue(abandoned.contains(where: inWindow.contains),
+                      "the premise: the window reaches into the abandoned turn")
+        XCTAssertFalse(abandoned.allSatisfy(inWindow.contains),
+                       "and begins inside it rather than before it")
+
+        var options = RecordReducer.Options()
+        options.window = result.window
+        let projection = RecordReducer.reduce(result.records, stream: stream, sourceFile: url, options: options)
+
+        XCTAssertEqual(projection.warnings.filter { $0.kind == .orphanHealed || $0.kind == .orphanUnhealed }, [],
+                       "the abandoned record took the exemption and the live chain's boundary needed none")
+        let rendered = Set(projection.items.map { $0.id.key })
+        XCTAssertTrue(rendered.isDisjoint(with: abandoned),
+                      "and no abandoned record is rendered ahead of the active ones")
+        XCTAssertTrue(rendered.contains { Self.leafChain(whole).contains($0) },
+                      "while the live chain inside the window still is")
+    }
+
     // MARK: - Helpers
 
     private static func mainStream(of name: String) throws -> ([TranscriptRecord], LogicalStream, URL) {

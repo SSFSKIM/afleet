@@ -368,7 +368,9 @@ public actor TranscriptIndex {
         return FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
-    /// The engine writes `2026-09-04T11:04:10.700Z`; a formatter without fractional seconds is tried second because a
+    /// The engine writes an ISO 8601 instant in UTC with milliseconds and a `Z` suffix (the shape
+    /// `2026-01-02T03:04:05.678Z` has, spelled here with invented digits); a formatter without fractional seconds is
+    /// tried second because a
     /// record whose timestamp carries none would otherwise be dropped. The formatters are made per call rather than
     /// cached, because `ISO8601DateFormatter` is a reference type and not `Sendable`.
     ///
