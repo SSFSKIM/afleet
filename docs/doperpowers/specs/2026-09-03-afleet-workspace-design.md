@@ -4176,3 +4176,13 @@ Pending — written at finish.
   and, when set, `--resume-drops-turn <uuid>`; the shape makes the CLI's refusal without
   `--resume` unrepresentable. §6.1's usage line now shows the two hidden flags under
   `--fork-session`. C4's fork-from-a-message task builds on it; its planned skip is withdrawn.
+- 2026-09-05 C2 corrective (`ca68f2e`): the frame-to-event mapping inside
+  `ClaudeProcess.receive(line:)` is extracted into `WireEventPolicy`, a pure value
+  (`effects(for:in:receivedAt:)`, `effects(deciding:)`) that the actor performs and a fixture
+  replay can drive without a process; `WireEvent` gains a payload-free `kind`. Five pure
+  fixture tests pin the mapping against recordings (ClaudeWire 227 → 232 tests, six live
+  skips unchanged). Three behaviours the extraction made visible and the C3 replay must
+  model: the engine echoes every host-written `control_response` on its own stdout and those
+  are dropped as uncorrelated with no event; a correlated response carrying an error body
+  settles its waiter as a normal settlement; every cancel frame yields a cancel effect and
+  the no-task case is a no-op. C3's G1 replay (its Task 8) depends on this merge and pins it.

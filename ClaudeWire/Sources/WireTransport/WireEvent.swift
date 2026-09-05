@@ -102,4 +102,25 @@ public enum WireEvent: Sendable {
     case hostToolInvoked(HostToolInvocation, ProcessEpoch)
     case stderr(String, ProcessEpoch)
     case exited(ExitStatus, ProcessEpoch)
+
+    /// Which event this is, without its payload. A test — or a replay compared against a live run —
+    /// can assert on these without naming anything the engine sent.
+    public var kind: Kind {
+        switch self {
+        case .handshakeCompleted: .handshakeCompleted
+        case .sessionIdentityResolved: .sessionIdentityResolved
+        case .frame: .frame
+        case .request: .request
+        case .requestCancelled: .requestCancelled
+        case .policyAnswered: .policyAnswered
+        case .unansweredDialog: .unansweredDialog
+        case .hostToolInvoked: .hostToolInvoked
+        case .stderr: .stderr
+        case .exited: .exited
+        }
+    }
+    public enum Kind: String, Hashable, Sendable, CaseIterable {
+        case handshakeCompleted, sessionIdentityResolved, frame, request, requestCancelled
+        case policyAnswered, unansweredDialog, hostToolInvoked, stderr, exited
+    }
 }

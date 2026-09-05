@@ -13,6 +13,9 @@ public actor ClaudeProcess {
     public let configHome: ConfigHome
     public let initialize: InitializeConfiguration
     public let policy: InboundPolicy
+    /// What an engine-to-host frame means, as a pure value. The actor owns the state and the I/O; this
+    /// owns the rules, so a replay of a recording can reduce to the same events without a second copy.
+    public let wireEvents: WireEventPolicy
     public let mcpServer: AfleetMCPServer
     public let diagnostics: any DiagnosticsSink
     public let capture: RawCapture?
@@ -48,6 +51,7 @@ public actor ClaudeProcess {
                 diagnostics: any DiagnosticsSink, capture: RawCapture?, eventBufferCapacity: Int = 4096) {
         self.epoch = epoch; self.launch = launch; self.environment = environment; self.configHome = configHome; self.initialize = initialize
         self.policy = policy ?? .default(declaredDialogKinds: Set(initialize.supportedDialogKinds), registeredHookCallbackIDs: initialize.registeredHookCallbackIDs)
+        self.wireEvents = WireEventPolicy(policy: self.policy, handshakeRequestID: Self.handshakeRequestID)
         self.mcpServer = mcpServer; self.diagnostics = diagnostics; self.capture = capture
         switch launch.session {
         case .new(let id): identity = .known(id)
@@ -68,6 +72,9 @@ public actor ClaudeProcess {
     private var isExited: Bool { if case .exited = status { return true }; return false }
 
     // MARK: spawn and handshake
+
+    /// The id the handshake's `initialize` is sent under, and the one its response is recognised by.
+    private static let handshakeRequestID = WireEventPolicy.defaultHandshakeRequestID
 
     public func spawn(handshakeTimeout: Duration = .seconds(30)) async throws -> Handshake {
         guard status == .launching else { throw WireError.notInRunningState(status) }
@@ -100,8 +107,8 @@ public actor ClaudeProcess {
         defer { timer.cancel() }
         let initializeResponse: ControlSuccess
         do {
-            let line = try initialize.requestLine(requestID: RequestID(rawValue: "init-1"))
-            try await writeLine(line, type: "control_request", subtype: "initialize", requestID: RequestID(rawValue: "init-1"))
+            let line = try initialize.requestLine(requestID: Self.handshakeRequestID)
+            try await writeLine(line, type: "control_request", subtype: "initialize", requestID: Self.handshakeRequestID)
             initializeResponse = try await handshakeWaiter.value()
         } catch {
             let tail = stderrTail()
@@ -131,7 +138,7 @@ public actor ClaudeProcess {
                 // Pushed straight out as `.request` — as this did — those three bypass §6.3 entirely, and
                 // their live retransmissions, which *would* have gone through it, are then discarded here as
                 // duplicates. The whole class went unanswered.
-                await apply(policy.decide(r), to: r)
+                await perform(wireEvents.effects(deciding: r))
             }
         }
         return handshake
@@ -200,34 +207,63 @@ public actor ClaudeProcess {
         diagnostics.record(.frame(direction: .inbound, type: frame.typeName, subtype: subtype(of: frame), bytes: line.count, epoch: epoch, requestID: requestID(of: frame)))
         await resolveForkIdentity(from: line)
         await capture?.write(line: line, session: identity.captureKey)
-        switch frame {
-        case .controlResponse(let resp):
-            if resp.requestID.rawValue == "init-1" {
-                switch resp.body {
+        await perform(wireEvents.effects(for: frame, in: policyContext, receivedAt: .now))
+    }
+    /// The actor state `WireEventPolicy` reads, snapshotted. Taken synchronously, immediately before the
+    /// effects it feeds are computed and performed, so nothing can move between the read and the use.
+    private var policyContext: WireEventPolicy.Context {
+        .init(pendingOutbound: Set(pendingOutbound.keys), pendingInbound: Set(pendingInbound.keys),
+              seenInbound: seenInboundIDs, epoch: epoch)
+    }
+    /// The mapping's effects, carried out in order. This is the only place actor state changes in
+    /// response to an inbound frame; what each effect means is documented on `WireEventPolicy.Effect`.
+    private func perform(_ effects: [WireEventPolicy.Effect]) async {
+        for effect in effects {
+            switch effect {
+            case .settleHandshake(let body):
+                switch body {
                 case .success(let s): registerPending(s); handshakeWaiter.settle(.success(s))
                 case .error(let e): handshakeWaiter.settle(.failure(WireError.handshakeRejected(e.error)))
                 }
-                return
-            }
-            guard let waiter = pendingOutbound.removeValue(forKey: resp.requestID) else {
+            case .settleOutbound(let id, let body):
+                pendingOutbound.removeValue(forKey: id)?.settle(.success(body))
+            case .dropUncorrelated(let id):
                 // Ordinary traffic, not drift. After honouring a `control_cancel_request` the engine still
                 // emits an error response for the cancelled id ("mcp_call cancelled by client: <server>",
                 // "Side question cancelled"), and its own schema says a requester ignores responses for ids
                 // it is not waiting on. Dropped with a diagnostic: never an error, never an event, never an
                 // opaque-census entry.
-                diagnostics.record(.lifecycle(.uncorrelatedControlResponse(requestID: resp.requestID), epoch: epoch))
-                return
+                diagnostics.record(.lifecycle(.uncorrelatedControlResponse(requestID: id), epoch: epoch))
+            case .markSeen(let id):
+                seenInboundIDs.insert(id)
+            case .markPending(let request):
+                pendingInbound[request.id] = request
+            case .clearPending(let id):
+                pendingInbound.removeValue(forKey: id)
+            case .writeAnswer(let id, let answer, let subtype):
+                try? await writeAnswer(id, answer, subtype: subtype)
+            case .recordPolicyAnswer(let id, let subtype):
+                diagnostics.record(.answer(requestID: id, subtype: subtype, behavior: "policy", classification: nil, epoch: epoch))
+            case .routeToMCP(let request, let offReader):
+                await route(request, offReader: offReader)
+            case .cancelMCPTask(let id):
+                mcpTasks.removeValue(forKey: id)?.cancel()
+            case .publish(let event):
+                await channel.push(event)
             }
-            waiter.settle(.success(resp.body))
-            await channel.push(.frame(frame, epoch))
-        case .controlRequest(let req):
-            await handleInbound(req)
-        case .controlCancelRequest(let cancel):
-            if pendingInbound.removeValue(forKey: cancel.requestID) != nil { await channel.push(.requestCancelled(cancel.requestID, epoch)) }
-            if let running = mcpTasks.removeValue(forKey: cancel.requestID) { running.cancel() }
-            await channel.push(.frame(frame, epoch))
-        default:
-            await channel.push(.frame(frame, epoch))
+        }
+    }
+    private func route(_ request: InboundRequest, offReader: Bool) async {
+        guard case .mcpMessage(let m) = request.payload else { return }
+        if offReader {
+            let id = request.id
+            mcpTasks[id] = Task { [mcpServer] in
+                let (reply, invocation, failure) = await mcpServer.handle(m.message)
+                await self.deliverTrackedMCP(id, reply: reply, invocation: invocation, failure: failure)
+            }
+        } else {
+            let (reply, invocation, failure) = await mcpServer.handle(m.message)
+            await deliverMCP(request.id, reply: reply, invocation: invocation, failure: failure)
         }
     }
     /// A fork's own id, taken from the first inbound frame that carries a `session_id`.
@@ -251,42 +287,6 @@ public actor ClaudeProcess {
         await channel.push(.sessionIdentityResolved(id, epoch))
     }
 
-    private func handleInbound(_ req: ControlRequestFrame) async {
-        let request = InboundRequest.parse(frame: req, epoch: epoch, receivedAt: .now)
-        if seenInboundIDs.contains(request.id) { return }              // a live duplicate of a pending request re-armed at handshake
-        seenInboundIDs.insert(request.id)
-        await apply(policy.decide(request), to: request)
-    }
-    /// §6.3's decision, carried out. The one place a decision becomes an event or an answer, so that a
-    /// request re-armed at the handshake and the same request arriving live cannot be treated differently.
-    private func apply(_ decision: PolicyDecision, to request: InboundRequest) async {
-        switch decision {
-        case .surface:
-            pendingInbound[request.id] = request
-            await channel.push(.request(request))
-        case .answer(let answer):
-            try? await writeAnswer(request.id, answer, subtype: request.subtype)
-            if case .error(let message) = answer { await channel.push(.policyAnswered(request, error: message)) }
-            else { diagnostics.record(.answer(requestID: request.id, subtype: request.subtype, behavior: "policy", classification: nil, epoch: epoch)) }
-        case .leaveUnanswered:
-            pendingInbound[request.id] = request
-            await channel.push(.unansweredDialog(request))
-        case .routeToMCP:
-            guard case .mcpMessage(let m) = request.payload else { return }
-            switch m.message {
-            case .request:
-                // Off the reader: a long tools/call must not stall stdout, and notifications/cancelled must reach the server while it runs.
-                let id = request.id
-                mcpTasks[id] = Task { [mcpServer] in
-                    let (reply, invocation, failure) = await mcpServer.handle(m.message)
-                    await self.deliverTrackedMCP(id, reply: reply, invocation: invocation, failure: failure)
-                }
-            default:
-                let (reply, invocation, failure) = await mcpServer.handle(m.message)
-                await deliverMCP(request.id, reply: reply, invocation: invocation, failure: failure)
-            }
-        }
-    }
     /// Delivery for a `tools/call` that was routed to a task, and only while that task is still the
     /// registered in-flight one.
     ///
