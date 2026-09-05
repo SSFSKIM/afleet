@@ -12,25 +12,20 @@ extension LifecycleRowTests {
     /// no change queued behind the ghost, and no readback banner — nothing got far enough to read anything back.
     ///
     /// Scripted, not recorded: SIGKILL cannot be refused, so no real child can produce a `TerminationReport` whose
-    /// `exit` is `nil`. The connecting half parks the channel in connecting *with* a live process by holding the
-    /// scripted handle's `spawn` open, which is the state a scripted spawn that throws cannot produce.
+    /// `exit` is `nil`.
+    ///
+    /// The connecting half is Task 6's own doing. `spawn(reason: .restart)` returns before `.ready` so the readbacks
+    /// can run first, which leaves the channel connecting *with* a live process and no operation of its own in
+    /// flight — and a readback that does not match leaves it there behind a banner. A second restart arriving on
+    /// that channel is what this half drives; a restart asked for while the first is still running merges into the
+    /// pending change instead and terminates nothing, which is a different claim with its own test.
     func testTerminateReturningNilDuringRestartSpawnsNothing() async throws {
         for from in [LifecycleTable.StateName.ready, .connecting] {
             let rig = try Rig()
             rig.useScriptedHandle(terminateReturns: TerminationReport(exit: nil, steps: Self.wedgedSteps))
             let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
 
-            let held = HeldAnswer()
-            var parked: Task<Void, Never>?
-            if from == .ready {
-                try await supervisor.spawn(reason: .open)
-            } else {
-                // The handle is built and the pump started before `spawn` awaits the handshake, so the channel is
-                // genuinely connecting with a process of its own while this task is parked.
-                rig.holdNextSpawn { await held.wait() }
-                parked = Task { try? await supervisor.spawn(reason: .open) }
-                try await rig.waitFor("the parked spawn") { rig.scriptedHandles.count == 1 }
-            }
+            try await supervisor.spawn(reason: from == .ready ? .open : .restart)
             let handle = rig.scriptedHandles[0]
             let spawnsBefore = rig.spawnCount
             rig.forgetTransitions()
@@ -53,11 +48,6 @@ extension LifecycleRowTests {
             rig.assertObserved([LifecycleTable.Transition(.terminateExhausted, from,
                                                           .terminateReturnedNil(during: .restart), .wedged)])
 
-            // The parked spawn is unwound rather than resumed: the channel is wedged now, and letting a handshake
-            // it has already moved past complete would be a transition the table rightly has no row for.
-            handle.spawnError = ScriptedSpawnFailure()
-            held.release()
-            _ = await parked?.value
             await rig.shutdown()
             await rig.tearDown()
         }

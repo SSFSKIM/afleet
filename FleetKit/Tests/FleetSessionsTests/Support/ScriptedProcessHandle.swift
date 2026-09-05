@@ -27,6 +27,9 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
     private var _controlRequests: [(subtype: String, payload: JSONValue)] = []
     private var _controlGate: (@Sendable (String) async -> Void)?
     private var _spawnGate: (@Sendable () async -> Void)?
+    private var _sendGate: (@Sendable () async -> Void)?
+    private var _terminateGate: (@Sendable () async -> Void)?
+    private var _sent: [UserInput] = []
 
     init(epoch: ProcessEpoch, session: SessionID?, pid: Int32 = 424_242,
          terminateReturns: TerminationReport = TerminationReport(exit: .code(0, stderrTail: ""), steps: [])) {
@@ -102,6 +105,20 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
         get { lock.lock(); defer { lock.unlock() }; return _spawnGate }
         set { lock.lock(); _spawnGate = newValue; lock.unlock() }
     }
+    /// Awaited inside `send`, before the uuid: how a test holds one turn's write open and asks what the reap and the
+    /// eviction make of a channel whose send has started but not finished.
+    var sendGate: (@Sendable () async -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _sendGate }
+        set { lock.lock(); _sendGate = newValue; lock.unlock() }
+    }
+    /// Awaited inside `terminate`, before the report: how a test parks a reap between taking the channel and ending
+    /// the child, which is the window a second action must be refused in.
+    var terminateGate: (@Sendable () async -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _terminateGate }
+        set { lock.lock(); _terminateGate = newValue; lock.unlock() }
+    }
+    /// Every input this handle was asked to write, in order.
+    var sent: [UserInput] { lock.lock(); defer { lock.unlock() }; return _sent }
 
     // MARK: - ProcessHandle
 
@@ -118,7 +135,11 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
         return Handshake(initialize: InitializeResponse(raw: locked { _initialize }), pending: [])
     }
 
-    func send(_ input: UserInput) async throws -> UUID { UUID() }
+    func send(_ input: UserInput) async throws -> UUID {
+        let gate = locked { () -> (@Sendable () async -> Void)? in _sent.append(input); return _sendGate }
+        await gate?()
+        return UUID()
+    }
 
     func request<R: ControlRequestSpec>(_ spec: R, timeout: Duration?) async throws -> R.Response {
         let subtype = (spec as? RawControlRequest)?.wireSubtype ?? R.subtype
@@ -146,7 +167,11 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
         if let failure { throw failure }
     }
 
-    func terminate() async -> TerminationReport { locked { _terminateCount += 1; return _terminateReturns } }
+    func terminate() async -> TerminationReport {
+        let gate = locked { () -> (@Sendable () async -> Void)? in _terminateCount += 1; return _terminateGate }
+        await gate?()
+        return locked { _terminateReturns }
+    }
 }
 
 /// What a test scripts an answer write to fail with.

@@ -72,6 +72,13 @@ public enum LifecycleAction: Sendable {
     case answer(RequestID, InboundAnswer)
 }
 
+/// The lifecycle operations a channel runs one at a time. The supervisor holds at most one in flight and refuses a
+/// second entrant with `LifecycleError.busy`; nothing waits on the marker, so nothing can deadlock on it. An X5
+/// addition: C5 and C6 see `busy` where they previously saw two entrants both proceed.
+public enum LifecycleOperation: String, Hashable, Sendable {
+    case spawn, handOff, restart, reopen, adopt, evict, reap
+}
+
 public enum LifecycleError: Error, Hashable, Sendable {
     case heldElsewhere(HolderSet)
     case capReached(live: Int)
@@ -88,4 +95,8 @@ public enum LifecycleError: Error, Hashable, Sendable {
     case answerFailed(RequestID, reason: String)
     /// The spawn barrier while a `LogoutPlan` runs.
     case logoutInProgress
+    /// Another lifecycle operation on this channel is already in flight. The two documented exceptions never raise
+    /// it: a send while a spawn is in flight queues, and a restart asked for while one runs merges into the
+    /// pending change.
+    case busy(LifecycleOperation)
 }

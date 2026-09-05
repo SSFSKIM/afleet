@@ -107,11 +107,15 @@ public actor ChannelSupervisor {
     private var eligibilityTask: Task<Void, Never>?
     private var subscribers: [UUID: AsyncStream<WireEvent>.Continuation] = [:]
     private var shuttingDown = false
-    /// True from the moment a spawn takes its reservation until it has applied its own outcome. The holder updates
-    /// that arrive in that window belong to the post-handshake check, not to the disagreement rule.
-    private var spawning = false
-    /// A handoff — send to background, or the terminal hatch — is between its terminate and its launch.
-    private var handingOff = false
+    /// The one lifecycle operation this channel is running. Taken synchronously after a public entry's pure guards
+    /// and cleared by `defer`; a second entrant is refused with `LifecycleError.busy` rather than queued, and
+    /// nothing ever waits on it, so nothing can deadlock on it. The two exceptions are documented where they are
+    /// taken: a send while a spawn is in flight queues, and a restart asked for while one runs merges. The
+    /// observer-driven entries read it and never take it.
+    private var inFlight: LifecycleOperation?
+    /// The resting state this channel was in when it last entered `.connecting`, so a spawn that does not complete
+    /// can put it back there. No table row: nothing of ours changed, the attempt did not happen.
+    private var restingOrigin: LifecycleTable.StateName = .dormant
 
     /// What the channel is *running*: every value here arrived from an engine answer or an engine frame, and the
     /// quiescent restart relaunches from a copy of it rather than from the launch template.
@@ -253,7 +257,10 @@ public actor ChannelSupervisor {
         switch name {
         case .archivedRecent: state.origin = .archived; isRecent = true
         case .archivedOlder: state.origin = .archived; isRecent = false
-        case .connecting: state.origin = .owned(.connecting)
+        case .connecting:
+            // Read before the origin moves: `currentName` is still the state this channel is leaving.
+            restingOrigin = restingName(leaving: currentName)
+            state.origin = .owned(.connecting)
         case .ready: state.origin = .owned(.ready); wasReadyInThisSeries = true
         case .dormant: state.origin = .owned(.dormant)
         case .wedged: state.origin = .owned(.dormant)          // the trace on `state.wedged` is what makes it wedged
@@ -263,6 +270,31 @@ public actor ChannelSupervisor {
         case .contended: state.origin = .owned(.contended)
         }
         state.presence = presenceNow()
+    }
+
+    /// The resting state a channel entering `.connecting` is leaving. An owned channel with no process of its own
+    /// rests in dormant, so ready and both handoff origins map there; dormant and the two archived names are
+    /// already resting states and map to themselves. A respawn inside a crash series — connecting to connecting —
+    /// takes the answer that series' own exhaustion row takes: dormant when it had owned the session, and
+    /// archived-older when it never reached ready at all.
+    private func restingName(leaving from: LifecycleTable.StateName) -> LifecycleTable.StateName {
+        switch from {
+        case .dormant, .archivedRecent, .archivedOlder: from
+        case .connecting: wasReadyInThisSeries ? .dormant : .archivedOlder
+        default: .dormant
+        }
+    }
+
+    /// Puts the channel back in the resting state it left, and answers whether it did. This is `adoptOrigin`'s
+    /// idiom and not a transition: the attempt did not happen, so no row describes it. The guard keeps it out of a
+    /// crash series `handleExit` has already continued, out of an attempt a newer epoch has replaced, and out of a
+    /// channel that is not connecting in the first place.
+    @discardableResult
+    private func restoreResting(ifEpochIs mine: ProcessEpoch) -> Bool {
+        guard epoch == mine, currentName == .connecting, respawnTask == nil else { return false }
+        enter(restingOrigin)
+        publish()
+        return true
     }
 
     /// An owned channel's presence is afleet's own turn state. Every other origin's presence is whatever the holder's
@@ -308,6 +340,9 @@ public actor ChannelSupervisor {
             // is signing out has to be left exactly as it was, and the `apply` below would already have moved it to
             // connecting with no process behind it. Nothing else in this method can fail, so nothing is half done.
             try spawnBarrier.check()
+            if let inFlight { throw LifecycleError.busy(inFlight) }
+            self.inFlight = .spawn
+            defer { self.inFlight = nil }
             state.desired = .owned
             apply(.opened, to: .connecting)
             try await spawn(reason: .open)
@@ -319,6 +354,10 @@ public actor ChannelSupervisor {
     /// Every send. A dormant or older-archived channel spawns first; a held one refuses.
     @discardableResult
     public func send(_ input: UserInput) async throws -> UUID {
+        // The one operation a send is admitted behind is a spawn: the channel is connecting and the input queues
+        // until the handshake lands. Behind anything else — a reap, a handoff, a restart — the channel has already
+        // been taken, and writing into a child on its way out is what the marker exists to stop.
+        if let inFlight, inFlight != .spawn { throw LifecycleError.busy(inFlight) }
         switch state.origin {
         case .foreignLive(.usersTerminal):
             // Rule 6: the send is refused where the user can see why, and *Fork* is what the banner offers.
@@ -331,20 +370,14 @@ public actor ChannelSupervisor {
             return try await deliver(input)
         case .owned(.dormant):
             if let trace = state.wedged { throw LifecycleError.wedged(trace) }
-            state.desired = .owned
-            apply(.userSent, to: .connecting)
-            try await spawn(reason: .userSent)
-            return try await deliver(input)
+            return try await resume(input)
         case .archived:
-            state.desired = .owned
-            apply(.userSent, to: .connecting)
-            try await spawn(reason: .userSent)
-            return try await deliver(input)
+            return try await resume(input)
         case .owned(.connecting):
-            // A send while a spawn this supervisor did not start is still in flight. The input is queued and goes out
-            // when the handshake lands; the uuid returned here is not the one the engine will echo, because
-            // `ProcessHandle.send` mints its own. Task 9's facade serialises the actions of one channel, which is
-            // where that gap closes; nothing in this task's rows reaches this case.
+            // A send while a spawn is in flight. The input is queued and goes out when the handshake lands; the
+            // uuid returned here is not the one the engine will echo, because `ProcessHandle.send` mints its own.
+            // This supervisor serialises its own operations and the facade adds nothing on top of that: this is the
+            // one place a second caller is admitted rather than refused, because queueing is what the user means.
             queuedInput.append(input)
             pushEligibility()
             return UUID()
@@ -353,10 +386,34 @@ public actor ChannelSupervisor {
         }
     }
 
+    /// The dormant and archived resume: one spawn and then the input, under one marker, so nothing may reap the
+    /// channel or hand it off in between.
+    private func resume(_ input: UserInput) async throws -> UUID {
+        inFlight = .spawn
+        defer { inFlight = nil }
+        state.desired = .owned
+        apply(.userSent, to: .connecting)
+        try await spawn(reason: .userSent)
+        return try await deliver(input)
+    }
+
+    /// The turn is marked running *before* the write, not after it. The reap, the eviction and the restart each
+    /// re-evaluate eligibility at the moment they act, and a turn that has started but not returned has to be
+    /// visible to them; marking it afterwards leaves a window in which the channel looks idle while the user's
+    /// input is already on its way to the engine.
     private func deliver(_ input: UserInput) async throws -> UUID {
         guard let handle = process else { throw LifecycleError.notOwned }
-        let uuid = try await handle.send(input)
+        let wasRunning = turnRunning
         turnRunning = true
+        pushEligibility()
+        let uuid: UUID
+        do {
+            uuid = try await handle.send(input)
+        } catch {
+            turnRunning = wasRunning
+            pushEligibility()
+            throw error
+        }
         noteActivity()
         pushEligibility()
         publish()
@@ -384,8 +441,12 @@ public actor ChannelSupervisor {
         }
     }
 
-    /// The thirty-minute reap, and `LifecycleAction.reap`.
+    /// The thirty-minute reap, and `LifecycleAction.reap`. A channel already running an operation of its own is
+    /// left alone: the reap has nothing to report, so the refusal is silence rather than an error.
     public func reap() async {
+        guard inFlight == nil else { return }
+        inFlight = .reap
+        defer { inFlight = nil }
         _ = await endProcess(during: .reap)
     }
 
@@ -405,6 +466,16 @@ public actor ChannelSupervisor {
         // or a caller that reads this outcome — `/logout` does — would take a live ghost for an exited channel and
         // do what only an exit permits.
         if let trace = state.wedged { return .wedged(trace) }
+        // A channel whose only claim to a process is a respawn parked on its backoff. Cancelling that task is what
+        // ends the attempt, and an attempt that did not happen leaves the channel in the state it left — the same
+        // non-row a refused spawn takes, seen from the other side.
+        if process == nil, respawnTask != nil, currentName == .connecting {
+            respawnTask?.cancel(); respawnTask = nil
+            enter(restingOrigin)
+            publish()
+            pushEligibility()
+            return .exited(.code(0, stderrTail: ""))
+        }
         guard process != nil else { return .exited(.code(0, stderrTail: "")) }
         let outcome = await terminateOrWedge(during: action)
         guard case .exited = outcome else { return outcome }
@@ -444,12 +515,21 @@ public actor ChannelSupervisor {
 
     // MARK: - Reopen
 
-    /// The *Reopen* a wedged channel offers. It spawns only when the pre-spawn check finds no holder: the ghost may
-    /// still be holding the transcript, and a second writer under one session id is the thing the checks exist to
-    /// prevent. The table has no transition out of `wedged`, and none is invented: clearing the trace makes the
-    /// channel the dormant channel it structurally is, and the user's request is then the ordinary dormant resume.
+    /// The *Reopen* every offered item carries — a crash series' item, a fork whose identity never arrived, and the
+    /// ghost of a wedged channel. It spawns only when the pre-spawn check finds no holder: the ghost may still be
+    /// holding the transcript, and a second writer under one session id is the thing the checks exist to prevent.
+    ///
+    /// No new event and no new row. Clearing the item makes the channel the resting channel it structurally is, and
+    /// the user's request is then that state's own ordinary resume: the dormant send row, the archived-older send
+    /// row, or the archived-recent open row.
     public func reopen() async throws {
-        guard state.wedged != nil else { return }
+        guard let item = state.systemItem, Self.offersReopen(item) else { return }
+        // A wedged channel is the dormant channel it structurally is once the trace goes.
+        let resting = state.wedged == nil ? currentName : LifecycleTable.StateName.dormant
+        guard let event = Self.resumeEvent(from: resting) else { return }
+        if let inFlight { throw LifecycleError.busy(inFlight) }
+        self.inFlight = .reopen
+        defer { self.inFlight = nil }
         let holders = await ownership.beforeSpawn(session: key.session)
         guard holders.isEmpty else {
             // Nothing changes state: the ghost is still the channel's situation and *Reopen* is still what is
@@ -461,13 +541,16 @@ public actor ChannelSupervisor {
             throw LifecycleError.heldElsewhere(set)
         }
         let ghost = state.wedged
-        let item = state.systemItem
         state.wedged = nil
         state.systemItem = nil
-        process = nil
-        await fleet.clearWedged(key)
+        if ghost != nil {
+            // Only the wedged row keeps a `process` behind a channel that has none; every other offered item is on
+            // a channel whose process is already gone.
+            process = nil
+            await fleet.clearWedged(key)
+        }
         state.desired = .owned
-        guard apply(.userSent, to: .connecting) else {
+        guard apply(event, to: .connecting) else {
             state.wedged = ghost
             state.systemItem = item
             return
@@ -475,10 +558,30 @@ public actor ChannelSupervisor {
         try await spawn(reason: .reopen)
     }
 
+    /// Whether an item offers *Reopen*. All three carry the flag, because what the user needs from each is the same.
+    private static func offersReopen(_ item: SystemItem) -> Bool {
+        switch item {
+        case .crashed(_, let offered), .wedged(_, let offered), .forkIdentityTimedOut(_, let offered): offered
+        }
+    }
+
+    /// The row a resting state comes back through. Anything else is a channel that is not resting, and *Reopen* has
+    /// nothing to do on one.
+    private static func resumeEvent(from resting: LifecycleTable.StateName) -> LifecycleTable.Event? {
+        switch resting {
+        case .dormant, .archivedOlder: .userSent
+        case .archivedRecent: .opened
+        default: nil
+        }
+    }
+
     // MARK: - Adopt
 
     /// §7.4's job-adoption row: stop the job, wait for its worker to leave the roster and die, then resume it owned.
     public func adopt() async throws {
+        if let inFlight { throw LifecycleError.busy(inFlight) }
+        self.inFlight = .adopt
+        defer { self.inFlight = nil }
         let holders = await observer.holders(for: key.session)
         guard let job = holders.first(where: { $0.isJob }), let short = job.jobShort else {
             throw LifecycleError.notOwned
@@ -531,8 +634,9 @@ public actor ChannelSupervisor {
             throw LifecycleError.notOwned
         }
         if let trace = state.wedged { throw LifecycleError.wedged(trace) }
-        handingOff = true
-        defer { handingOff = false }
+        if let inFlight { throw LifecycleError.busy(inFlight) }
+        self.inFlight = .handOff
+        defer { self.inFlight = nil }
 
         var terminated = false
         if let handle = process {
@@ -650,6 +754,12 @@ public actor ChannelSupervisor {
     /// is what moves it. A release arriving from this channel's own lifecycle completes the same eviction.
     public func evict() async -> EvictionOutcome {
         guard process != nil, state.wedged == nil else { return .victimBecameIneligible }
+        // The marker before the eligibility check, and held across the terminate: a channel already running an
+        // operation of its own is not a victim, and taking it here is what keeps a send from starting between the
+        // verdict and the child ending.
+        guard inFlight == nil else { return .victimBecameIneligible }
+        inFlight = .evict
+        defer { inFlight = nil }
         guard await currentVerdict().isEligible else { return .victimBecameIneligible }
         if case .wedged = await terminateOrWedge(during: .capEviction) { return .victimWedged }
         process = nil
@@ -764,9 +874,14 @@ public actor ChannelSupervisor {
     func spawn(reason: SpawnReason, launch launchOverride: LaunchConfiguration? = nil) async throws {
         // Before anything: a channel must not come up into a fleet that is signing out from under it. Nothing has
         // changed yet, so the refusal leaves no state behind.
-        try spawnBarrier.check()
-        spawning = true
-        defer { spawning = false }
+        let entry = epoch
+        do { try spawnBarrier.check() } catch { restoreResting(ifEpochIs: entry); throw error }
+        // `spawn` is internal, and is reached either with the marker already held by the public entry that led here
+        // or with nothing in flight at all — a respawn, a pane exit, a rig driving a row. It therefore adopts the
+        // marker when it is free and clears only what it took.
+        let ownsMarker = inFlight == nil
+        if ownsMarker { inFlight = .spawn }
+        defer { if ownsMarker { inFlight = nil } }
         unresolvedSettings = []   // whatever an earlier restart could not read back died with its process
 
         // The §6.12 gate, before the cap and before the pre-spawn check: a project afleet may not spawn into must
@@ -786,7 +901,7 @@ public actor ChannelSupervisor {
                 case .contended(let holders): state.banner = .contended(holders)
                 case .ready, .consentNeeded, .wedged: break
                 }
-                publish()
+                if !restoreResting(ifEpochIs: entry) { publish() }
                 throw LifecycleError.precondition(verdict)
             }
             template = resolved
@@ -805,7 +920,7 @@ public actor ChannelSupervisor {
             case .refused(let live):
                 state.headerNote = .capReached(live: live)
                 state.liveCount = live
-                publish()
+                if !restoreResting(ifEpochIs: entry) { publish() }
                 throw LifecycleError.capReached(live: live)
             case .granted(let r):
                 granted = r
@@ -826,6 +941,16 @@ public actor ChannelSupervisor {
             throw LifecycleError.heldElsewhere(state.observed)
         }
 
+        // The barrier again, after the last await and before the epoch this line advances. Three awaits stand
+        // between the check at the top of this method and here, and `/logout`'s census runs in exactly that window:
+        // it reports the channel as processless, `claude auth logout` runs, and a child launched behind it loses
+        // its credentials mid-handshake. The reservation goes back on the refusal.
+        do { try spawnBarrier.check() } catch {
+            await fleet.rollback(reservation)
+            restoreResting(ifEpochIs: entry)
+            throw error
+        }
+
         epoch = epoch.next()
         state.epoch = epoch
         let mine = epoch
@@ -841,7 +966,17 @@ public actor ChannelSupervisor {
             }
         } catch {
             await fleet.rollback(reservation)
-            if epoch == mine { process = nil; forkIdentityPending = nil }
+            if epoch == mine {
+                process = nil
+                forkIdentityPending = nil
+                // The channel is put back only when this supervisor ended the epoch itself — a `/logout` terminate
+                // caught the handshake — because that is the one case in which nothing else will act. Every other
+                // failure here has an exit on its way: `ClaudeProcess` settles the handshake waiter from its exit
+                // path and pushes `.exited` immediately after, and `handleExit` owns that outcome. It continues the
+                // crash series and rests the channel when the series is exhausted, and restoring here as well would
+                // take the from-state that exit's own row needs out from under it.
+                if terminatedEpochs.contains(mine) { restoreResting(ifEpochIs: mine) }
+            }
             throw error
         }
         guard epoch == mine else { return }   // an exit already respawned past this attempt
@@ -1086,11 +1221,12 @@ public actor ChannelSupervisor {
         }
         process = nil
         await fleet.rollback(reservation)
-        // Something the user can see. The channel is left connecting with no process, exactly as a spawn error
-        // leaves it, and the item is what offers the way back — its own case, because this is not a crash: afleet
-        // ended a child whose engine would not say which session it was.
+        // Something the user can see. Its own case, because this is not a crash: afleet ended a child whose engine
+        // would not say which session it was. The channel goes back to the resting state the spawn left, exactly as
+        // a refused spawn leaves it — nothing rests in connecting with no process — and the item is what offers the
+        // way forward from there.
         state.systemItem = .forkIdentityTimedOut(exit: status, reopenOffered: true)
-        publish()
+        if !restoreResting(ifEpochIs: deadlineEpoch) { publish() }
     }
 
     // MARK: - The quiescent restart
@@ -1113,8 +1249,25 @@ public actor ChannelSupervisor {
             throw LifecycleError.notOwned
         }
         if let trace = state.wedged { throw LifecycleError.wedged(trace) }
+        // The second exception to the marker: two restart-required changes are one restart, so a change asked for
+        // while one runs merges into the pending change rather than terminating the channel a second time.
+        if inFlight == .restart {
+            state.pendingChange = Self.merge(state.pendingChange, request)
+            publish()
+            return
+        }
+        if let inFlight { throw LifecycleError.busy(inFlight) }
+        self.inFlight = .restart
+        defer { self.inFlight = nil }
+        try await restartNow(request)
+    }
+
+    /// The restart itself, with the marker already held. The dormant timer takes the marker before the eligibility
+    /// check it shares with the eviction and then comes in here, so the check and the terminate it authorises are
+    /// one window rather than two.
+    private func restartNow(_ request: RestartRequest) async throws {
         guard await currentVerdict().isEligible else {
-            state.pendingChange = request
+            state.pendingChange = Self.merge(state.pendingChange, request)
             publish()
             return
         }
@@ -1158,6 +1311,23 @@ public actor ChannelSupervisor {
             settingsApplied: settings["applied"] ?? .object([:]),
             effectiveKeys: settings["effective_keys"]?.arrayValue?.compactMap(\.stringValue) ?? [])
         await becomeReadyOrBanner()
+    }
+
+    /// Two restart-required changes, folded into one. Directories accumulate — a second `/add-dir` must not lose
+    /// the first — and every other field is a value the later request replaces.
+    private static func merge(_ existing: RestartRequest?, _ incoming: RestartRequest) -> RestartRequest {
+        guard var merged = existing else { return incoming }
+        if let directories = incoming.addDirectories {
+            var union = merged.addDirectories ?? []
+            for directory in directories where !union.contains(directory) { union.append(directory) }
+            merged.addDirectories = union
+        }
+        if let sources = incoming.settingSources { merged.settingSources = sources }
+        if let allowBypass = incoming.allowBypass { merged.allowBypass = allowBypass }
+        if let suggestions = incoming.promptSuggestions { merged.promptSuggestions = suggestions }
+        if let worktree = incoming.worktree { merged.worktree = worktree }
+        if let environment = incoming.environment { merged.environment = environment }
+        return merged
     }
 
     /// The user picked a value for a setting that did not survive. The next unresolved one takes the banner; with
@@ -1338,7 +1508,14 @@ public actor ChannelSupervisor {
         // Our own `terminateOrWedge()` ended this epoch. Whatever status the escalation produced is not a crash: a
         // SIGTERM or SIGKILL exit is never `.code(0)`, so a clean-exit test alone would respawn a reaped channel.
         if terminatedEpochs.remove(exited) != nil { publish(); return }
-        if status.isClean { await fleet.release(key); publish(); return }
+        // A child that ended on its own with a clean status is not a crash: no item and no *Reopen*, the slot goes
+        // back, and the channel is left where a processless owned channel rests. Leaving it in ready would name a
+        // process that has gone, and the next send would throw `notOwned`.
+        if status.isClean {
+            await fleet.release(key)
+            if currentName == .ready, apply(.exitedClean, to: .dormant) { return }
+            publish(); return
+        }
         guard !shuttingDown else { publish(); return }
 
         crashCount += 1
@@ -1351,14 +1528,23 @@ public actor ChannelSupervisor {
             respawnTask = Task { [weak self] in
                 guard let self else { return }
                 guard (try? await self.sleepOnClock(delay)) != nil else { return }
+                // The channel stops being "connecting on the strength of a parked respawn" here: from now on the
+                // attempt is the spawn itself, and the spawn's own failure paths are what rest the channel.
+                await self.beginRespawn()
                 try? await self.spawn(reason: .respawn)
             }
             return
         }
-        let target: LifecycleTable.StateName = wasReadyInThisSeries ? .ready : .archivedOlder
+        // Exhaustion rests where a processless owned channel rests: a series that reached ready owns the session
+        // and is dormant, one that never did is archived. Both carry the item that offers *Reopen*.
+        let target: LifecycleTable.StateName = wasReadyInThisSeries ? .dormant : .archivedOlder
         state.systemItem = .crashed(exit: status, reopenOffered: true)
         guard apply(.exitedNonZero, to: target) else { state.systemItem = nil; publish(); return }
     }
+
+    /// Clears the respawn handle as the backoff ends. A `Task` keeps itself alive while it runs, so dropping the
+    /// reference here cancels nothing; what it changes is the answer to "is a respawn still waiting".
+    private func beginRespawn() { respawnTask = nil }
 
     private func sleepOnClock(_ duration: Duration) async throws { try await clock.sleep(for: duration) }
 
@@ -1387,19 +1573,17 @@ public actor ChannelSupervisor {
         // Rule 1: afleet wants this channel and somebody else has it. Its own event, never a handoff timeout — the
         // two are raised from different places and G1 has to see both fire. A channel afleet does not want owned
         // takes the dormant `holderAppeared` row below instead.
-        // Not while a spawn of ours is in flight: the post-handshake check is about to read the very same holders
-        // and take `connectingFoundHolder`, the row that exists for a holder found during a spawn. Raising the
-        // disagreement here instead would move the channel to Contended and leave that check's own transition with
-        // no candidate — `transitionNotInTable`, which Task 12's gate reads as a programming error.
-        // Nor while a handoff of ours is between its terminate and its launch, and for the same reason the spawn
-        // is excluded. Our own child's registry record outlives its process — the CLI removes it, and the release
-        // wait exists precisely to wait for that — and once `process` is nil the fleet's own-pid set no longer
-        // claims it, so a poll landing in that window reads our own dying child as a stranger. The handoff runs
-        // its own recheck a moment later and takes `holderAppearedBeforeLaunch` if a holder is genuinely there;
-        // raising the disagreement here instead moves the channel to Contended, from which the handoff's own
-        // transition has no candidate, and it ends holding a job it cannot show. G5's adoption scenario found
-        // this: send-to-background ran, the job was on the roster, and the channel read `owned(contended)`.
-        if state.desired == .owned, !spawning, !handingOff,
+        // Not while an operation of ours is in flight. A spawn is about to read the very same holders in its
+        // post-handshake check and take `connectingFoundHolder`, the row that exists for a holder found during a
+        // spawn; raising the disagreement here instead would move the channel to Contended and leave that check's
+        // own transition with no candidate — `transitionNotInTable`, which Task 12's gate reads as a programming
+        // error. A handoff between its terminate and its launch is excluded for the same reason. Our own child's
+        // registry record outlives its process — the CLI removes it, and the release wait exists precisely to wait
+        // for that — and once `process` is nil the fleet's own-pid set no longer claims it, so a poll landing in
+        // that window reads our own dying child as a stranger. The handoff runs its own recheck a moment later and
+        // takes `holderAppearedBeforeLaunch` if a holder is genuinely there. G5's adoption scenario found this:
+        // send-to-background ran, the job was on the roster, and the channel read `owned(contended)`.
+        if state.desired == .owned, inFlight == nil,
            here == .connecting || here == .ready || here == .dormant,
            mine.contains(where: { !$0.isOwnChild }) {
             enterContended(mine, via: .desiredObservedDisagree)
@@ -1437,14 +1621,20 @@ public actor ChannelSupervisor {
 
     private func dormantTimerFired() async {
         guard currentName == .ready else { return }
+        // The marker before the eligibility check, and held across what the check authorises: a send arriving in
+        // between would otherwise start a turn on a channel already decided against.
+        guard inFlight == nil else { armDormantTimer(); return }
+        // A change the user asked for while work was running is what "applies when the current work finishes"
+        // means: the channel restarts into it rather than being reaped out from under it.
+        let queued = state.pendingChange
+        inFlight = queued == nil ? .reap : .restart
+        defer { inFlight = nil }
         guard await currentVerdict().isEligible else { armDormantTimer(); return }
-        // A change the user asked for while work was running is what "applies when the current work finishes" means:
-        // the channel restarts into it rather than being reaped out from under it.
-        if let queued = state.pendingChange {
-            try? await quiescentRestart(queued)
+        if let queued {
+            try? await restartNow(queued)
             return
         }
-        await reap()
+        _ = await endProcess(during: .reap)
     }
 
     // MARK: - Eligibility, pushed and never pulled

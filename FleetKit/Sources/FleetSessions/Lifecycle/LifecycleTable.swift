@@ -7,7 +7,7 @@ public enum LifecycleTable {
     public enum Row: String, CaseIterable, Hashable, Sendable {
         case archivedRecentOpened, archivedOlderOpened, archivedOlderSent
         case connectingClean, connectingFoundHolder
-        case readyDormantEligible, dormantSent, dormantHolderAppeared
+        case readyDormantEligible, readyExitedClean, dormantSent, dormantHolderAppeared
         case terminateExhausted, exitedNonZero, capReached, handoffPreempted
         case jobAdopt, ownedSendToBackground, ownedOpenInTerminal, ownTabExited
         case foreignRecordGone, foreignSendRefused, handoffTimedOut, desiredObservedDisagree, contendedSettled
@@ -21,7 +21,7 @@ public enum LifecycleTable {
         case reap, sendToBackground, openInTerminal, restart, logout, capEviction, postHandshakeYield
     }
     public enum Event: Hashable, Sendable {
-        case opened, userSent, handshakeClean, handshakeFoundHolder, dormantTimerFired, holderAppeared
+        case opened, userSent, handshakeClean, handshakeFoundHolder, dormantTimerFired, holderAppeared, exitedClean
         case terminateReturnedNil(during: TerminatingAction), exitedNonZero, seventhSpawnNeeded, adopt, sendToBackground, openInTerminal
         case paneExitedAndRecordGone, recordDisappeared, sendRefused, handoffTimedOut, desiredObservedDisagree, holdersSettled, holderAppearedBeforeLaunch
     }
@@ -41,6 +41,9 @@ public enum LifecycleTable {
         .init(.connectingFoundHolder, .connecting, .handshakeFoundHolder, .foreignUsersTerminal),   // a foreign holder: yield, released notice
         .init(.connectingFoundHolder, .connecting, .handshakeFoundHolder, .contended),              // one of our own pids: yield, contended
         .init(.readyDormantEligible, .ready, .dormantTimerFired, .dormant),
+        // A child that ended on its own with a clean status is not a crash and carries no item: the channel simply
+        // has no process any more, and dormant is where a processless owned channel rests.
+        .init(.readyExitedClean, .ready, .exitedClean, .dormant),
         .init(.dormantSent, .dormant, .userSent, .connecting),
         // The row fires from every state in which afleet holds no process of its own, not from dormant alone: a
         // channel registered from C3's index has never been opened and is archived, and a holder appearing against
@@ -69,7 +72,11 @@ public enum LifecycleTable {
     } + [
         .init(.exitedNonZero, .ready, .exitedNonZero, .connecting),          // crash after ready: respawn with backoff
         .init(.exitedNonZero, .connecting, .exitedNonZero, .connecting),     // crash during the handshake: respawn with backoff
-        .init(.exitedNonZero, .ready, .exitedNonZero, .ready),               // fourth crash of a channel that had been ready: item with Reopen
+        // Crash exhaustion rests where a processless owned channel rests. A series that had reached ready owns the
+        // session and rests dormant, from ready and from connecting alike; one that never did has nothing owned to
+        // rest on and is archived. The crash item with *Reopen* rides on all three.
+        .init(.exitedNonZero, .ready, .exitedNonZero, .dormant),             // fourth crash from ready: item with Reopen
+        .init(.exitedNonZero, .connecting, .exitedNonZero, .dormant),        // fourth crash mid-handshake of a series that had been ready
         .init(.exitedNonZero, .connecting, .exitedNonZero, .archivedOlder),  // fourth crash of a channel never ready in this series
         .init(.capReached, .ready, .seventhSpawnNeeded, .dormant),           // the victim; a refusal is no transition (header note only)
         .init(.jobAdopt, .backgroundJob, .adopt, .connecting),

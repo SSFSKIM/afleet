@@ -12,8 +12,9 @@ import XCTest
 /// declare no scenarios of their own — `testTheExitThatFollowsADeliberateTerminationIsNotACrash`,
 /// `testAReservationConfirmedAfterARekeyTakesTheResolvedKey`,
 /// `testAHolderArrivingWhileASpawnIsInFlightIsLeftToTheOwnershipChecks`,
-/// `testAJobTheListingDoesNotNameFailsTheHandoffAndLeavesNoOwnedChannelBehind` and
-/// `testAttachAndLogsAreParallelPaneRequestsThatChangeNoOwnership` — and a bidirectional check would fail on them.
+/// `testAJobTheListingDoesNotNameFailsTheHandoffAndLeavesNoOwnedChannelBehind`,
+/// `testAttachAndLogsAreParallelPaneRequestsThatChangeNoOwnership` and
+/// `testLogoutTerminatingAConnectingChannelLeavesItResting` — and a bidirectional check would fail on them.
 final class LifecycleCoverageTests: XCTestCase {
     /// The gate: the union of every declared scenario set equals the table, both ways, and every declaring method exists.
     func testEveryScenarioInTheTableIsDeclaredByARowTest() {

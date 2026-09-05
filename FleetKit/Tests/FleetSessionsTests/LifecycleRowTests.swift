@@ -31,7 +31,24 @@ final class LifecycleRowTests: XCTestCase {
             T(.dormantHolderAppeared, .archivedOlder, .holderAppeared, .backgroundJob)],
         "testNonZeroExitRespawnsWithBackoffThenOffersReopen": [
             T(.exitedNonZero, .ready, .exitedNonZero, .connecting), T(.exitedNonZero, .connecting, .exitedNonZero, .connecting),
-            T(.exitedNonZero, .ready, .exitedNonZero, .ready), T(.exitedNonZero, .connecting, .exitedNonZero, .archivedOlder),
+            T(.exitedNonZero, .ready, .exitedNonZero, .dormant), T(.exitedNonZero, .connecting, .exitedNonZero, .archivedOlder),
+            T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        // Ruling 1's rows (the tests live in `LifecycleRowTests+Resting.swift`). A processless owned channel rests
+        // in dormant: on a clean exit, and at the end of a crash series that had owned the session.
+        "testACleanExitFromReadyRestsDormantAndASendResumesIt": [
+            T(.readyExitedClean, .ready, .exitedClean, .dormant),
+            T(.dormantSent, .dormant, .userSent, .connecting), T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        "testARefusedSpawnReturnsADormantOrArchivedChannelToWhereItWas": [
+            T(.dormantSent, .dormant, .userSent, .connecting),
+            T(.archivedOlderSent, .archivedOlder, .userSent, .connecting),
+            T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        "testACrashSeriesThatHadBeenReadyRestsDormantWhenTheLastFailureIsMidHandshake": [
+            T(.exitedNonZero, .ready, .exitedNonZero, .connecting),
+            T(.exitedNonZero, .connecting, .exitedNonZero, .connecting),
+            T(.exitedNonZero, .connecting, .exitedNonZero, .dormant)],
+        "testReopenSpawnsAgainForACrashedChannelFromDormantAndFromArchived": [
+            T(.dormantSent, .dormant, .userSent, .connecting),
+            T(.archivedOlderSent, .archivedOlder, .userSent, .connecting),
             T(.connectingClean, .connecting, .handshakeClean, .ready)],
         // Task 5's rows.
         "testTerminateReturningNilMarksTheChannelWedgedAndReopenWaitsForNoHolder": [
@@ -474,7 +491,8 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(readyRig.reader.checkLabels.filter { $0 == "beforeSpawn" }.count, 4,
                        "every respawn ran behind the pre-spawn check")
         let crashed = await ready.state
-        XCTAssertEqual(crashed.origin, .owned(.ready))
+        XCTAssertEqual(crashed.origin, .owned(.dormant),
+                       "the series owned the session and has no process left, so it rests dormant")
         guard case .crashed(let exit, let reopenOffered)? = crashed.systemItem else {
             return XCTFail("no crashed system item")
         }

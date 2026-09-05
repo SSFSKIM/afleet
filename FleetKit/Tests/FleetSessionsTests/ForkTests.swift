@@ -173,7 +173,9 @@ final class ForkTests: XCTestCase {
         let stillProvisional = await rig.fleet.isLive(provisional)
         XCTAssertFalse(stillProvisional)
         let state = await fork.state
-        XCTAssertEqual(state.origin, .owned(.connecting), "failed the way a spawn error fails a channel")
+        XCTAssertEqual(state.origin, .archived,
+                       "failed the way a spawn that does not complete fails a channel: back where it started, "
+                       + "because nothing rests in connecting with no process")
         XCTAssertEqual(state.identity, .awaitingFork(from: supervisor.key.session,
                                                      provisional: provisional.session))
         try await rig.drainPublished(of: fork)

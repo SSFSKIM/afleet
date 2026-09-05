@@ -5,10 +5,12 @@ final class LifecycleTableTests: XCTestCase {
     func testTheTableHasOneRowPerParentRowAndEveryRowHasAScenario() {
         // The parent's §7.4 table, in its order; its combined "handoff wait exceeds 10 s, or desired and observed disagree"
         // row is two rows here because the two are raised from different places and G1 must see both fire.
+        // `readyExitedClean` is a parent revision: §7.4 has no row for a child that ends cleanly on its own, and a
+        // processless owned channel has to rest somewhere (ruling 1, listed under Parent revisions).
         let expected: Set<LifecycleTable.Row> = [
             .archivedRecentOpened, .archivedOlderOpened, .archivedOlderSent,
             .connectingClean, .connectingFoundHolder,
-            .readyDormantEligible, .dormantSent, .dormantHolderAppeared,
+            .readyDormantEligible, .readyExitedClean, .dormantSent, .dormantHolderAppeared,
             .terminateExhausted, .exitedNonZero, .capReached,
             .jobAdopt, .ownedSendToBackground, .ownedOpenInTerminal, .ownTabExited,
             .foreignRecordGone, .foreignSendRefused, .handoffTimedOut, .desiredObservedDisagree, .contendedSettled,
