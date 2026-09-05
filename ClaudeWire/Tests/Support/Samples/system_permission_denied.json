@@ -1,0 +1,1 @@
+{"type":"system","subtype":"permission_denied","tool_name":"Write","tool_use_id":"toolu_02","message":"Write to /tmp/scratch/out.txt was denied.","agent_id":"agent_01","decision_reason_type":"rule","decision_reason":"Deny rule Write(/tmp/scratch/**) matched","uuid":"6d1d4b1e-0000-4000-8000-000000000032","session_id":"1b2c3d4e-0000-4000-8000-00000000abcd"}

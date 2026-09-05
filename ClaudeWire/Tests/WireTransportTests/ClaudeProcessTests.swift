@@ -1,0 +1,658 @@
+import XCTest
+import AfleetCore
+import WireFrames
+import WireMCP
+import WireDiagnostics
+import WireTransport
+import WireTestSupport
+
+/// Collects events from a process in the background; tests await specific ones with a deadline.
+actor EventLog {
+    private(set) var events: [WireEvent] = []
+    func append(_ e: WireEvent) { events.append(e) }
+    func first(where pred: @escaping @Sendable (WireEvent) -> Bool, within: Duration = .seconds(5)) async throws -> WireEvent {
+        let start = ContinuousClock.now
+        while ContinuousClock.now - start < within {
+            if let e = events.first(where: pred) { return e }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw XCTSkip("timeout waiting for event")   // replaced by XCTFail at the call site
+    }
+}
+
+/// Keeps every diagnostic's canonical JSON so a test can assert on text the event stream deliberately does not carry.
+final class RecordingDiagnostics: DiagnosticsSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    func record(_ event: DiagnosticEvent) {
+        let line = (try? event.jsonValue.canonicalData()).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        lock.lock(); stored.append(line); lock.unlock()
+    }
+    var entries: [String] { lock.lock(); defer { lock.unlock() }; return stored }
+    /// The escalation trace, in order. `terminate()` records a step immediately before each signalling call
+    /// and nowhere else, so this is the record of what was actually signalled.
+    var terminateSteps: [String] {
+        entries.compactMap { line in
+            guard line.contains("\"event\":\"terminate_escalated\""),
+                  let o = (try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8)))?.objectValue else { return nil }
+            return o["step"]?.stringValue
+        }
+    }
+}
+
+/// Runs `work` and returns its value, or `nil` if it had not finished by `limit`.
+///
+/// For the tests whose subject is *liveness*: a fix that is missing makes the work hang rather than return a
+/// wrong answer, so the failure has to be a deadline expiring, not an assertion on a value that never arrived.
+/// The work is deliberately not stopped when the deadline passes — a `terminate()` parked inside a blocking
+/// pipe write cannot be cancelled — so this bounds the test, not the work. A `TaskGroup` would not do: it
+/// awaits its remaining children at scope exit and would hang on the very task it is meant to outlive.
+func completes<T: Sendable>(within limit: Duration, _ work: @escaping @Sendable () async -> T) async -> T? {
+    let box = ResultBox<T>()
+    let runner = Task { box.set(await work()) }
+    let deadline = ContinuousClock.now + limit
+    while ContinuousClock.now < deadline {
+        if let v = box.value { return v }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    runner.cancel()
+    return nil
+}
+final class ResultBox<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: T?
+    func set(_ v: T) { lock.lock(); stored = v; lock.unlock() }
+    var value: T? { lock.lock(); defer { lock.unlock() }; return stored }
+}
+
+final class Harness {
+    let cwd: URL; let env: ResolvedEnvironment; let log = EventLog()
+    init() throws {
+        cwd = FileManager.default.temporaryDirectory.appendingPathComponent("afleet-wire-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        try Data("hi".utf8).write(to: cwd.appendingPathComponent("hello.txt"))
+        var vars = ProcessInfo.processInfo.environment
+        vars["SCRIPTED_CLAUDE_SCENARIO"] = ""
+        env = ResolvedEnvironment(variables: vars, shell: "/bin/zsh", capturedAt: .init(), mode: .processFallback)
+    }
+    func make(scenario: String, epoch: ProcessEpoch = .first, bufferCapacity: Int = 4096, capture: RawCapture? = nil,
+              diagnostics: any DiagnosticsSink = NullDiagnostics(), extraTools: [any MCPTool] = [],
+              session: SessionStart = .new(SessionID())) -> ClaudeProcess {
+        var e = env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = scenario
+        let launch = LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: cwd, session: session)
+        let p = ClaudeProcess(epoch: epoch, launch: launch, environment: e, configHome: ConfigHome(root: cwd.appendingPathComponent("cfg"), source: .environment),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: cwd, tools: [SendUserFileTool()] + extraTools),
+                              diagnostics: diagnostics, capture: capture, eventBufferCapacity: bufferCapacity)
+        let log = self.log      // capture the actor, not the non-Sendable Harness
+        Task { for await ev in p.events { await log.append(ev) } }
+        return p
+    }
+    func expect(_ pred: @escaping @Sendable (WireEvent) -> Bool, _ message: String, within: Duration = .seconds(5), file: StaticString = #filePath, line: UInt = #line) async -> WireEvent? {
+        do { return try await log.first(where: pred, within: within) } catch { XCTFail("missing event: \(message)", file: file, line: line); return nil }
+    }
+    func stderrLines() async -> [String] { await log.events.compactMap { if case .stderr(let s, _) = $0 { return s }; return nil } }
+}
+
+/// A tool that finishes what it started whatever anyone asks of it, and claims a delivery when it does.
+///
+/// `Task.sleep` would not do: it throws on cancellation, which would make the tool cancellation-*sensitive*
+/// and let the tests above pass without the fixes they exist for. The point is a tool the cancellation cannot
+/// reach, because that is the tool the guarantee is about.
+struct CancellationDeafTool: MCPTool {
+    var name: String { "slow_send" }
+    var description: String { "sleeps through cancellation, then reports a sent file" }
+    var inputSchema: JSONValue { .object(["type": .string("object"), "properties": .object([:])]) }
+    func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { c.resume() }
+        }
+        return .text("sent", invocation: .sentFile(paths: [context.cwd.appendingPathComponent("hello.txt")],
+                                                   caption: nil, status: "normal", display: nil))
+    }
+}
+
+final class ClaudeProcessTests: XCTestCase {
+    func testHandshakeAndEcho() async throws {
+        let h = try Harness(); let p = h.make(scenario: "")
+        let hs = try await p.spawn()
+        XCTAssertEqual(hs.initialize.pid != nil, true)
+        // The handshake carries no system/init, and — given time to arrive — none does: the engine opens each
+        // *turn* with that frame, and the stand-in models the engine.
+        //
+        // The settle is load-bearing. Reading the log the instant `spawn()` returns proves nothing: the reader
+        // pushes frames onto the channel and the collector drains it, both asynchronously, so the log is empty
+        // at that moment whatever the child emitted. Half a second is several orders of magnitude more than the
+        // stand-in needs to write the frame it used to write here.
+        try await Task.sleep(for: .milliseconds(500))
+        let systemFramesBeforeAnyTurn = await h.log.events.filter { if case .frame(.system, _) = $0 { return true }; return false }
+        XCTAssertEqual(systemFramesBeforeAnyTurn.count, 0, "a system frame arrived before any user message: \(systemFramesBeforeAnyTurn)")
+        let running = await p.status; XCTAssertEqual(running, .running)
+        _ = await h.expect({ if case .handshakeCompleted(_, let e) = $0 { return e == .first }; return false }, "handshakeCompleted with epoch")
+        let uuid = try await p.send(UserInput(text: "ping"))
+        // The tool list, model and version reach a consumer here — off the event stream, with the turn.
+        guard case .frame(.system(.initialize(let sysInit)), .first)? = await h.expect({
+            if case .frame(.system(.initialize), _) = $0 { return true }; return false
+        }, "system/init opening the first turn") else { return }
+        XCTAssertEqual(sysInit.claudeCodeVersion, "2.1.259")
+        XCTAssertTrue(sysInit.tools.contains("mcp__afleet__send_user_file"))
+        let reply = await h.expect({ if case .frame(.assistant(let a), _) = $0 { return a.userMessageUUID == uuid.uuidString.lowercased() }; return false }, "assistant echo bound by user_message_uuid")
+        XCTAssertNotNil(reply)
+        _ = await h.expect({ if case .frame(.result, .first) = $0 { return true }; return false }, "result frame tagged with epoch")
+        await p.terminate()
+        guard case .exited(let status, .first)? = await h.expect({ if case .exited = $0 { return true }; return false }, "exited") else { return }
+        XCTAssertTrue(status.isClean)
+        let final = await p.status; XCTAssertEqual(final, .exited(status))
+    }
+    func testRequestResponseCorrelationAndControlError() async throws {
+        let h = try Harness(); let p = h.make(scenario: "")
+        _ = try await p.spawn()
+        let r: JSONValue = try await p.request(GetSettings())
+        XCTAssertEqual(r, .object([:]))
+        // Awaited rather than sampled: stdout and stderr are separate pipes read by separate tasks, so
+        // the stand-in's log line is not ordered against the response the request already returned.
+        _ = await h.expect({ if case .stderr("HOST get_settings", _) = $0 { return true }; return false }, "stand-in logged HOST get_settings")
+        let raw = try await p.requestRaw(subtype: "future_thing", payload: .object(["k": .integer(1)]))
+        XCTAssertEqual(raw, .object([:]))
+        await p.terminate()
+    }
+    func testUnknownRequestAnsweredWithinOneSecondAndSurfacedAsPolicyEvent() async throws {
+        let h = try Harness(); let p = h.make(scenario: "unknown_request")
+        _ = try await p.spawn()
+        let start = ContinuousClock.now
+        guard case .policyAnswered(let req, let error)? = await h.expect({ if case .policyAnswered = $0 { return true }; return false }, "policyAnswered") else { return }
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(1))
+        XCTAssertEqual(req.subtype, "afleet_never_heard"); XCTAssertEqual(error, "subtype afleet_never_heard not supported by afleet 0.1.0")
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("ANSWER u1 ") && s.contains("\"subtype\":\"error\"") && s.contains("not supported by afleet") }; return false }, "stand-in saw the error response")
+        let surfacedUnknown = await h.log.events.contains { if case .request(let r) = $0 { return r.subtype == "afleet_never_heard" }; return false }
+        XCTAssertFalse(surfacedUnknown)
+        await p.terminate()
+    }
+    func testMalformedKnownRequestNamesTheField() async throws {
+        let h = try Harness(); let p = h.make(scenario: "malformed_can_use_tool")
+        _ = try await p.spawn()
+        guard case .policyAnswered(let req, let error)? = await h.expect({ if case .policyAnswered = $0 { return true }; return false }, "policyAnswered") else { return }
+        guard case .malformed(_, let field, _) = req.payload else { return XCTFail() }
+        XCTAssertEqual(field, "input"); XCTAssertEqual(error, "can_use_tool: cannot decode field input")
+        await p.terminate()
+    }
+    func testDeclaredDialogSurfacesUndeclaredIsLeftUnanswered() async throws {
+        let h = try Harness(); let p = h.make(scenario: "declared_dialog,undeclared_dialog")
+        _ = try await p.spawn()
+        guard case .request(let d1)? = await h.expect({ if case .request(let r) = $0 { return r.id.rawValue == "d1" }; return false }, "declared dialog surfaced") else { return }
+        try await p.answer(d1.id, .dialog(.completed(result: .string("retry_fallback"))))
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("ANSWER d1 ") && s.contains("retry_fallback") }; return false }, "dialog answer delivered")
+        _ = await h.expect({ if case .unansweredDialog(let r) = $0 { return r.id.rawValue == "d2" }; return false }, "undeclared dialog event")
+        _ = await h.expect({ if case .requestCancelled(let id, _) = $0 { return id.rawValue == "d2" }; return false }, "CLI cancelled d2 after its deadline")
+        let d2Answered = await h.stderrLines().contains { $0.hasPrefix("ANSWER d2") }
+        XCTAssertFalse(d2Answered)
+        await p.terminate()
+    }
+    func testCancelRemovesPendingAndLateAnswerThrows() async throws {
+        let h = try Harness(); let p = h.make(scenario: "cancel_request")
+        _ = try await p.spawn()
+        guard case .request(let c1)? = await h.expect({ if case .request(let r) = $0 { return r.id.rawValue == "c1" }; return false }, "c1 surfaced") else { return }
+        _ = await h.expect({ if case .requestCancelled(let id, _) = $0 { return id.rawValue == "c1" }; return false }, "requestCancelled")
+        do { try await p.answer(c1.id, .permission(.deny(message: "late", interrupt: false, classification: nil))); XCTFail("late answer accepted") }
+        catch let e as WireError { XCTAssertEqual(e, .unknownRequest(c1.id)) }
+        await p.terminate()
+    }
+    func testHookCallbacksRegisteredSurfaceUnregisteredAutoContinue() async throws {
+        let h = try Harness(); let p = h.make(scenario: "hook_unregistered,hook_registered")
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("ANSWER h1 ") && s.contains("\"response\":{}") }; return false }, "unregistered hook answered with empty continue")
+        guard case .request(let h2)? = await h.expect({ if case .request(let r) = $0 { return r.id.rawValue == "h2" }; return false }, "registered hook surfaced") else { return }
+        try await p.answer(h2.id, .hookContinue(.empty))
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("ANSWER h2 ") }; return false }, "registered hook answered by host")
+        await p.terminate()
+    }
+    func testMCPSequenceIsAnsweredInsideTheTransport() async throws {
+        let h = try Harness(); let p = h.make(scenario: "mcp_sequence")
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("MCP m1 ") && s.contains("\"serverInfo\"") }; return false }, "initialize answered")
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("MCP m1n ") && s.contains("\"mcp_response\":{\"id\":0,\"jsonrpc\":\"2.0\",\"result\":{}}") }; return false }, "notification acked with id 0 empty result")
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("MCP m3 ") && s.contains("send_user_file") }; return false }, "tools/list answered")
+        guard case .hostToolInvoked(.sentFile(let paths, _, let status, _), .first)? = await h.expect({ if case .hostToolInvoked = $0 { return true }; return false }, "hostToolInvoked") else { return }
+        XCTAssertEqual(paths.map(\.lastPathComponent), ["hello.txt"]); XCTAssertEqual(status, "normal")
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("MCP m5 ") && s.contains("-32601") }; return false }, "unknown method error")
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("MCP m6 ") }; return false }, "cancelled notification acked")
+        let mcpSurfaced = await h.log.events.contains { if case .request(let r) = $0 { return r.subtype == "mcp_message" }; return false }
+        XCTAssertFalse(mcpSurfaced, "mcp_message must never surface")
+        await p.terminate()
+    }
+    func testPendingRequestsReArmedOnceAndDeduplicated() async throws {
+        let h = try Harness(); let p = h.make(scenario: "pending")
+        let hs = try await p.spawn()
+        XCTAssertEqual(hs.pending.map(\.id.rawValue), ["p1"])
+        try await Task.sleep(for: .milliseconds(300))
+        let surfaced = await h.log.events.filter { if case .request(let r) = $0 { return r.id.rawValue == "p1" }; return false }
+        XCTAssertEqual(surfaced.count, 1, "the live duplicate of p1 must not surface twice")
+        try await p.answer(hs.pending[0].id, .permission(.allow(updatedInput: nil, updatedPermissions: nil, classification: .userTemporary)))
+        await p.terminate()
+    }
+    /// Group 2e. A request re-armed at the handshake used to be pushed straight out as `.request`, bypassing
+    /// §6.3 entirely — and its live retransmission, which *would* have gone through the policy, was then
+    /// discarded here as a duplicate. An unknown subtype among the pending set therefore reached the user as a
+    /// prompt nothing could answer, while the live path refuses the identical request within a second.
+    func testAPendingRequestGoesThroughTheSamePolicyAsALiveOne() async throws {
+        let h = try Harness(); let p = h.make(scenario: "pending_unknown")
+        let hs = try await p.spawn()
+        XCTAssertEqual(hs.pending.map(\.id.rawValue), ["u2"])
+        guard case .policyAnswered(let answered, let error)? = await h.expect({ if case .policyAnswered = $0 { return true }; return false },
+                                                                             "the pending unknown subtype was refused by policy") else { return }
+        XCTAssertEqual(answered.id.rawValue, "u2")
+        XCTAssertTrue(error.contains("afleet_never_heard"), error)
+        _ = await h.expect({ if case .stderr(let l, _) = $0 { return l.hasPrefix("ANSWER u2") }; return false }, "the child received the answer")
+        try await Task.sleep(for: .milliseconds(300))      // let the live retransmission land and be deduplicated
+        let events = await h.log.events
+        XCTAssertFalse(events.contains { if case .request(let r) = $0 { return r.id.rawValue == "u2" }; return false },
+                       "an unknown subtype must never be surfaced as a prompt")
+        XCTAssertEqual(events.filter { if case .policyAnswered(let r, _) = $0 { return r.id.rawValue == "u2" }; return false }.count, 1,
+                       "answered exactly once: the live duplicate is still deduplicated")
+        await p.terminate()
+    }
+    /// Group 3g. Outer cancellation removes and cancels the in-flight task, and neither reaches a tool that is
+    /// insensitive to cancellation. Such a tool still returns — and its reply used to be written to a child
+    /// that had withdrawn the request, with its host invocation published to the user as work that was done.
+    ///
+    /// Both halves are checked against something real rather than an internal flag: the stand-in logs every
+    /// `control_response` it receives, so the absence of `MCP m8` is the reply genuinely not arriving.
+    func testACancelledMCPCallNeitherAnswersNorPublishesADelivery() async throws {
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "mcp_slow_tool,cancel_mcp", diagnostics: sink, extraTools: [CancellationDeafTool()])
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr("CANCELLED m8", _) = $0 { return true }; return false }, "the child cancelled the call")
+        try await Task.sleep(for: .milliseconds(1200))     // well past the tool's own 600 ms
+        let stderr = await h.stderrLines()
+        XCTAssertFalse(stderr.contains { $0.hasPrefix("MCP m8 ") }, "a late mcp_response reached the child: \(stderr)")
+        let events = await h.log.events
+        XCTAssertFalse(events.contains { if case .hostToolInvoked = $0 { return true }; return false },
+                       "a cancelled call published a delivery the user would see")
+        XCTAssertTrue(sink.entries.contains { $0.contains("\"what\":\"mcp_delivery_abandoned\"") && $0.contains("\"reason\":\"cancelled\"") },
+                      "entries: \(sink.entries.suffix(6))")
+        await p.terminate()
+    }
+    /// Group 3h. The reply write was discarded with `try?` and `hostToolInvoked` published unconditionally, so
+    /// a stdin that had gone away produced a user-visible "file sent" for a reply the child never received.
+    /// The write is made to fail for real — the stand-in closes its read end of stdin and keeps running, so
+    /// the write gets EPIPE while the request is still very much in flight and the cancellation check of 3g
+    /// cannot be what suppresses the event.
+    func testADeliveryIsPublishedOnlyAfterTheWriteSucceeds() async throws {
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "close_stdin,mcp_slow_tool,stay_alive", diagnostics: sink, extraTools: [CancellationDeafTool()])
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr("STDIN CLOSED", _) = $0 { return true }; return false }, "the child let go of its read end of stdin")
+        try await Task.sleep(for: .milliseconds(1200))
+        let events = await h.log.events
+        XCTAssertFalse(events.contains { if case .hostToolInvoked = $0 { return true }; return false },
+                       "\"file sent\" was published though the reply never reached the child")
+        XCTAssertTrue(sink.entries.contains { $0.contains("\"what\":\"mcp_delivery_abandoned\"") && $0.contains("\"reason\":\"write_failed\"") },
+                      "entries: \(sink.entries.suffix(6))")
+        await p.terminate()
+    }
+    /// The control: the same tool, uncancelled and with a stdin that works, does publish its delivery. Without
+    /// this the two tests above would hold for a transport that never published `hostToolInvoked` at all.
+    func testAnUninterruptedDeliveryIsStillPublished() async throws {
+        let h = try Harness()
+        let p = h.make(scenario: "mcp_slow_tool", extraTools: [CancellationDeafTool()])
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .hostToolInvoked(.sentFile(let paths, _, _, _), _) = $0 { return paths.first?.lastPathComponent == "hello.txt" }; return false },
+                           "an uninterrupted delivery must be published")
+        _ = await h.expect({ if case .stderr(let l, _) = $0 { return l.hasPrefix("MCP m8 ") }; return false }, "and the reply must reach the child")
+        await p.terminate()
+    }
+    /// Carried decision 3: `ControlSuccess.requestFrames` compact-maps with `try?`, so an element that does
+    /// not decode as a control request is silently skipped and a pending prompt could go unsurfaced. The raw
+    /// array is still re-encoded verbatim, so nothing is lost on the wire — but the gap must be recorded.
+    func testHandshakePendingUnderReportIsRecorded() async throws {
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "pending_undecodable", diagnostics: sink)
+        let hs = try await p.spawn()
+        XCTAssertEqual(hs.pending.map(\.id.rawValue), ["q1"])
+        XCTAssertTrue(sink.entries.contains { $0.contains("\"what\":\"handshake_pending_under_reported\"") && $0.contains("\"key\":\"pending_permission_requests\"") && $0.contains("\"decoded\":1") && $0.contains("\"on_wire\":2") },
+                      "the skipped element must be recorded; entries: \(sink.entries)")
+        await p.terminate()
+    }
+    /// Carried decision 1: after honouring a cancel the engine still answers with an error response for a
+    /// request id the pending map has already forgotten. That is ordinary traffic — a diagnostic at most,
+    /// never a throw, never an event, never an opaque-census entry.
+    func testLateControlResponseForAForgottenRequestIsOrdinaryTraffic() async throws {
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "side_question_late_error", diagnostics: sink)
+        _ = try await p.spawn()
+        let asked = Task { try await p.request(SideQuestion(question: "which one?")) }
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("HOST side_question WITHHELD") }; return false }, "stand-in withheld the answer")
+        asked.cancel()
+        do { _ = try await asked.value; XCTFail("a cancelled request returned a value") }
+        catch is CancellationError {} catch { XCTFail("expected CancellationError, got \(error)") }
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("LATE ERROR ") }; return false }, "stand-in sent the late error response")
+        try await Task.sleep(for: .milliseconds(300))
+        let events = await h.log.events
+        let surfaced = events.contains { if case .frame(.controlResponse, _) = $0 { return true }; if case .frame(.opaque, _) = $0 { return true }; return false }
+        XCTAssertFalse(surfaced, "an uncorrelated control_response must not reach the event stream")
+        XCTAssertTrue(sink.entries.contains { $0.contains("\"what\":\"uncorrelated_control_response\"") }, "it must still be recorded; entries: \(sink.entries)")
+        let status = await p.status; XCTAssertEqual(status, .running)
+        await p.terminate()
+    }
+    func testStderrExitCodeAndSendAfterExit() async throws {
+        let h = try Harness(); let p = h.make(scenario: "stderr:boom,exit:3")
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr("boom", .first) = $0 { return true }; return false }, "stderr line with epoch")
+        guard case .exited(.code(3, let tail), .first)? = await h.expect({ if case .exited = $0 { return true }; return false }, "exit code 3") else { return }
+        XCTAssertTrue(tail.contains("boom"))
+        do { _ = try await p.send(UserInput(text: "x")); XCTFail() } catch let e as WireError { XCTAssertEqual(e, .processExited) }
+    }
+    /// `diagnostics.log` says metadata only, and `ExitStatus` carries up to fifty lines of raw child stderr.
+    /// The exit used to be recorded by interpolating the whole status into a free-form `lifecycle(String)`,
+    /// which put that tail on disk. `LifecycleNotice` now has no arm that can hold one, so the assertion is
+    /// on the *whole* entry rather than on the absence of one string: its key set is exactly the five
+    /// metadata keys, which is a claim no future payload can slip past.
+    ///
+    /// The tail is still asserted present on the `.exited` event first. Without that, the absence below would
+    /// say only that the child never wrote anything.
+    func testChildStderrNeverReachesTheDiagnosticsLog() async throws {
+        let secret = "sk-ant-api03-NOTAREAL-9f2 /Users/someone/private/ledger.csv"
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "stderr:\(secret),exit:3", diagnostics: sink)
+        _ = try await p.spawn()
+        guard case .exited(.code(3, let tail), _)? = await h.expect({ if case .exited = $0 { return true }; return false }, "exit code 3") else { return }
+        XCTAssertTrue(tail.contains(secret), "the tail must still reach consumers: \(tail)")
+        for line in sink.entries {
+            XCTAssertFalse(line.contains("sk-ant-api03-NOTAREAL"), "child stderr reached the metadata log: \(line)")
+            XCTAssertFalse(line.contains("ledger.csv"), "child stderr reached the metadata log: \(line)")
+        }
+        let exits = sink.entries.filter { $0.contains("\"what\":\"exited\"") }
+        XCTAssertEqual(exits.count, 1, "\(sink.entries)")
+        let entry = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: Data(try XCTUnwrap(exits.first).utf8)).objectValue)
+        XCTAssertEqual(Set(entry.keys), ["at", "event", "epoch", "what", "code"])
+        XCTAssertEqual(entry["code"], .integer(3))
+    }
+    func testHandshakeTimeoutCarriesStderrTail() async throws {
+        let h = try Harness(); let p = h.make(scenario: "no_init,stderr:warming")
+        do { _ = try await p.spawn(handshakeTimeout: .seconds(1)); XCTFail("spawn should time out") }
+        catch let e as WireError { if case .handshakeTimeout(let tail) = e { XCTAssertTrue(tail.contains("warming")) } else { XCTFail("\(e)") } }
+        let after = await p.status; XCTAssertNotEqual(after, .running)
+    }
+    func testLaunchFailure() async throws {
+        let h = try Harness()
+        var e = h.env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = ""
+        let p = ClaudeProcess(epoch: .first, launch: LaunchConfiguration(binary: URL(fileURLWithPath: "/nonexistent/claude"), cwd: h.cwd, session: .new(SessionID())),
+                              environment: e, configHome: ConfigHome(root: h.cwd, source: .environment),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: h.cwd, tools: []), diagnostics: NullDiagnostics(), capture: nil)
+        do { _ = try await p.spawn(); XCTFail() } catch let err as WireError { if case .launchFailed = err {} else { XCTFail("\(err)") } }
+    }
+    /// Carried decision 4: the launch-failure path finishes the channel, and `BoundedChannel.push` drops
+    /// anything pushed after that. The exit must therefore be published before the finish, not after it —
+    /// FleetKit's ownership release is driven by `.exited`.
+    func testLaunchFailurePublishesExitBeforeFinishingTheStream() async throws {
+        let h = try Harness()
+        var e = h.env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = ""
+        let p = ClaudeProcess(epoch: .first, launch: LaunchConfiguration(binary: URL(fileURLWithPath: "/nonexistent/claude"), cwd: h.cwd, session: .new(SessionID())),
+                              environment: e, configHome: ConfigHome(root: h.cwd, source: .environment),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: h.cwd, tools: []), diagnostics: NullDiagnostics(), capture: nil)
+        let drain = Task { () -> [WireEvent] in var seen: [WireEvent] = []; for await ev in p.events { seen.append(ev) }; return seen }
+        do { _ = try await p.spawn(); XCTFail() } catch let err as WireError { if case .launchFailed = err {} else { XCTFail("\(err)") } }
+        let seen = await drain.value
+        XCTAssertTrue(seen.contains { if case .exited = $0 { return true }; return false }, "the launch failure's exit never reached the stream: \(seen.count) events")
+    }
+    func testKeepAliveFramesFlowThrough() async throws {
+        let h = try Harness(); let p = h.make(scenario: "keep_alive")
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .frame(.keepAlive, _) = $0 { return true }; return false }, "keep_alive frame")
+        await p.terminate()
+    }
+    /// The other half of the MCP failure path: the server hands the metadata back through `handle`, and this
+    /// actor — the only place that knows the epoch — is what actually records it. The unit test in
+    /// `WireMCPTests` covers the server's side; without this one the transport could ignore the descriptor
+    /// entirely and nothing would notice.
+    func testMCPToolFailureIsRecordedByTheTransportWithoutLeakingPayload() async throws {
+        struct ExplodingTool: MCPTool {
+            struct Boom: Error { let modelNamedPath: String }
+            var name: String { "explode" }
+            var description: String { "throws" }
+            var inputSchema: JSONValue { .object([:]) }
+            func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
+                throw Boom(modelNamedPath: arguments["path"]?.stringValue ?? "")
+            }
+        }
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "mcp_tool_throws", diagnostics: sink, extraTools: [ExplodingTool()])
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr(let s, _) = $0 { return s.hasPrefix("MCP m7 ") }; return false }, "the tool call was answered")
+        let answer = await h.stderrLines().first { $0.hasPrefix("MCP m7 ") } ?? ""
+        XCTAssertTrue(answer.contains("failed unexpectedly (Boom)"), "model-visible text must be the summary: \(answer)")
+        XCTAssertFalse(answer.contains("ledger.csv"), "the model must not be handed the error's own description")
+        let recorded = sink.entries.filter { $0.contains("\"event\":\"mcp_tool_failure\"") }
+        XCTAssertEqual(recorded.count, 1, "entries: \(sink.entries)")
+        let entry = recorded[0]
+        XCTAssertTrue(entry.contains("\"tool\":\"explode\""))
+        XCTAssertTrue(entry.contains("\"error_type\":\"Boom\""))
+        XCTAssertTrue(entry.contains("\"epoch\":1"), "the epoch is why this is recorded here and not in the server: \(entry)")
+        XCTAssertFalse(entry.contains("ledger.csv"), "the metadata log stays metadata: \(entry)")
+        await p.terminate()
+    }
+    /// Fix 3: `finish()` used to run on a fixed 50 ms timer after the exit, and everything the reader had not
+    /// yet handed over was pushed into a finished channel, where `push` drops it.
+    ///
+    /// Getting this to discriminate took a second attempt. A fast consumer does not expose it: the child can
+    /// only exit once it has written everything, so at most a pipe buffer plus one read chunk is ever in
+    /// flight, and 50 ms drains that easily. The case a timer actually loses is a *slow* consumer — the reader
+    /// parked in `push` when the child exits, with the whole backlog still on its side of the channel. The
+    /// flood is sized to fit the pipe buffer so the child can exit without blocking, and the consumer paces
+    /// itself well past the old window.
+    func testEveryFrameWrittenBeforeExitIsDeliveredToASlowConsumer() async throws {
+        let h = try Harness()
+        let total = 100
+        var e = h.env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = "flood:\(total),exit:0"
+        let p = ClaudeProcess(epoch: .first, launch: LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: h.cwd, session: .new(SessionID())),
+                              environment: e, configHome: ConfigHome(root: h.cwd, source: .environment),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: h.cwd, tools: []),
+                              diagnostics: NullDiagnostics(), capture: nil, eventBufferCapacity: 4)
+        _ = try await p.spawn()
+        var assistants = 0, sawResult = false, sawExit = false
+        for await ev in p.events {
+            switch ev {
+            case .frame(.assistant, _): assistants += 1
+            case .frame(.result, _): sawResult = true
+            case .exited: sawExit = true
+            default: break
+            }
+            if sawExit { break }
+            try await Task.sleep(for: .milliseconds(2))     // ~200 ms of draining against a 50 ms window
+        }
+        XCTAssertEqual(assistants, total, "frames still held by the reader at exit must not be dropped by finish()")
+        XCTAssertTrue(sawResult, "the result frame is the one that matters most")
+        XCTAssertTrue(sawExit, "the exit must still be published after the drain")
+    }
+    /// Fix C. The child answers the request and exits in the same breath, so the response is sitting in the
+    /// pipe when the termination handler fires. Failing outbound waiters before the drain — which is what an
+    /// earlier revision did — turns a delivered answer into `processExited`. They settle after the bounded
+    /// drain now, which is safe for exactly the reason the handshake waiter is: `Waiter.settle` is first-wins,
+    /// so the arriving response gets there first, and callers keep their own `timeout:` for the case where
+    /// nothing arrives at all.
+    func testAResponseAlreadyInThePipeIsCorrelatedThoughTheChildHasExited() async throws {
+        let h = try Harness()
+        var e = h.env; e.variables["SCRIPTED_CLAUDE_SCENARIO"] = "exit_after_answer"
+        // A four-element channel and a consumer that paces itself: the reader is parked in `push` with the
+        // answer still unread when the child dies. Without the back-pressure the reader simply wins the race
+        // and the correlation is never exercised — an earlier version of this test passed against the break
+        // for exactly that reason.
+        let p = ClaudeProcess(epoch: .first, launch: LaunchConfiguration(binary: TestPaths.scriptedClaude, cwd: h.cwd, session: .new(SessionID())),
+                              environment: e, configHome: ConfigHome(root: h.cwd, source: .environment),
+                              mcpServer: AfleetMCPServer(serverVersion: "0.1.0", cwd: h.cwd, tools: []),
+                              diagnostics: NullDiagnostics(), capture: nil, eventBufferCapacity: 4)
+        let sawExit = Waiter<Void>()
+        let consumer = Task {
+            for await ev in p.events {
+                if case .exited = ev { sawExit.settle(.success(())) }
+                try? await Task.sleep(for: .milliseconds(2))
+            }
+        }
+        defer { consumer.cancel() }
+        _ = try await p.spawn()
+        let r: JSONValue = try await p.request(GetSettings())
+        XCTAssertEqual(r, .object([:]), "the answer was on the wire before the exit and must be correlated")
+        let timer = sawExit.timeout(after: .seconds(12)) { WireError.processExited }
+        defer { timer.cancel() }
+        do { try await sawExit.value() } catch { XCTFail("the exit was never published") }
+    }
+    /// Fix B. A child that answers the handshake *with a pending request* and exits in the same breath leaves
+    /// `spawn` on its success path with events still to publish, while `processDidExit` is already publishing
+    /// the terminal one. Nothing orders two continuations resuming on one actor, so this is a race; it is run
+    /// repeatedly because a race observed once is luck, and the invariant it checks is absolute — `.exited` is
+    /// the last event on the stream, always.
+    func testNoEventIsPublishedAfterTheTerminalExit() async throws {
+        for attempt in 0..<20 {
+            let h = try Harness(); let p = h.make(scenario: "pending,exit:0")
+            _ = try? await p.spawn()
+            guard await h.expect({ if case .exited = $0 { return true }; return false }, "exited (attempt \(attempt))", within: .seconds(12)) != nil else { return }
+            try await Task.sleep(for: .milliseconds(50))     // give a late publisher every chance to land
+            let events = await h.log.events
+            guard let terminal = events.firstIndex(where: { if case .exited = $0 { return true }; return false }) else {
+                return XCTFail("no exit on attempt \(attempt)")
+            }
+            let after = events[(terminal + 1)...]
+            XCTAssertTrue(after.isEmpty, "attempt \(attempt): \(after.count) event(s) published after the terminal exit: \(after.map { "\($0)" })")
+        }
+    }
+    func testCaptureReceivesRedactedLinesForBothDirections() async throws {
+        let h = try Harness()
+        let root = h.cwd.appendingPathComponent("capture")
+        let cap = RawCapture(root: root, configHome: ConfigHome(root: h.cwd.appendingPathComponent("cfg"), source: .environment), budgetBytes: 1_000_000)
+        let p = h.make(scenario: "", capture: cap)
+        _ = try await p.spawn(); _ = try await p.send(UserInput(text: "hello")); try await Task.sleep(for: .milliseconds(300)); await p.terminate()
+        let dir = root.appendingPathComponent(RawCapture.configHomeHash(ConfigHome(root: h.cwd.appendingPathComponent("cfg"), source: .environment)))
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        XCTAssertEqual(files.count, 1)
+        let text = try String(contentsOf: dir.appendingPathComponent(files[0]), encoding: .utf8)
+        XCTAssertTrue(text.contains("\"subtype\":\"initialize\"")); XCTAssertTrue(text.contains("\"type\":\"assistant\""))
+    }
+}
+
+/// The engine's JSON-RPC handshake with the in-process MCP server, and the ordering constraint it places on
+/// this transport.
+///
+/// Every recorded fixture opens the same way: the engine sends `mcp_message`/`initialize` toward the server and
+/// **waits for the host's answer before answering `control_request/initialize`** (frame 2 before frame 4 in
+/// `zero-cost`, `plain-two-turn`, `send-user-file` and `resume-no-replay`). The stand-in now reproduces that,
+/// which turns a structural property of `ClaudeProcess` into something a test can hold: `spawn()` starts the
+/// stdout reader before it writes the initialize request, so the inbound `mcp_message` is answered while
+/// `spawn()` is still suspended. A transport that started reading after the handshake returned would deadlock
+/// against this stand-in rather than pass quietly.
+final class MCPStartupOrderingTests: XCTestCase {
+
+    func testTheEngineSInitializeResponseFollowsTheHostAnsweringTheServerHandshake() async throws {
+        let h = try Harness()
+        let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "", diagnostics: sink)
+        _ = try await p.spawn()
+        await p.terminate()
+
+        // Both directions are recorded, so the order is read off the log rather than inferred from timing.
+        let mcpIn = sink.entries.firstIndex { $0.contains("\"direction\":\"inbound\"") && $0.contains("\"subtype\":\"mcp_message\"") }
+        let answerOut = sink.entries.firstIndex { $0.contains("\"direction\":\"outbound\"") && $0.contains("\"subtype\":\"mcp_message\"") }
+        let initResponseIn = sink.entries.firstIndex { $0.contains("\"direction\":\"inbound\"") && $0.contains("\"type\":\"control_response\"") && $0.contains("\"request_id\":\"init-1\"") }
+        let inbound = try XCTUnwrap(mcpIn, "the engine never asked the in-process server to initialize")
+        let answered = try XCTUnwrap(answerOut, "the host never answered the server handshake")
+        let response = try XCTUnwrap(initResponseIn, "no initialize response was recorded")
+        XCTAssertLessThan(inbound, answered, "the host answered before it was asked")
+        XCTAssertLessThan(answered, response, "the initialize response arrived before the host answered the server handshake; the ordering the fixtures record was not exercised")
+    }
+
+    /// The window the corpus shows but never photographs: between the handshake completing and `tools/list`
+    /// being answered, the server is not yet connected and its tool list is empty. A host that reads
+    /// `mcp_status` the instant `spawn()` returns is inside it.
+    func testTheServerIsNotConnectedTheMomentTheHandshakeCompletes() async throws {
+        let h = try Harness()
+        let p = h.make(scenario: "mcp_slow_connect:0.6")
+        _ = try await p.spawn()
+
+        let immediate = try await p.request(MCPStatus(), timeout: .seconds(5))
+        let atOnce = try XCTUnwrap(immediate["mcpServers"]?.arrayValue?.first { $0["name"]?.stringValue == "afleet" })
+        XCTAssertEqual(atOnce["status"]?.stringValue, "connecting")
+        XCTAssertEqual(atOnce["tools"]?.arrayValue?.count, 0, "a tool list before tools/list was answered")
+
+        var connected: JSONValue?
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline, connected == nil {
+            let reading = try await p.request(MCPStatus(), timeout: .seconds(5))
+            connected = reading["mcpServers"]?.arrayValue?.first { $0["name"]?.stringValue == "afleet" && $0["status"]?.stringValue == "connected" }
+            if connected == nil { try await Task.sleep(for: .milliseconds(100)) }
+        }
+        let server = try XCTUnwrap(connected, "the server never reached connected")
+        XCTAssertEqual(server["tools"]?.arrayValue?.compactMap { $0["name"]?.stringValue }, ["send_user_file"])
+        await p.terminate()
+    }
+
+}
+
+/// Who a channel is, when the engine is the one who decides.
+final class ForkIdentityTests: XCTestCase {
+
+    /// A fork's id is the engine's, not the one it was forked from.
+    ///
+    /// `--fork-session` makes the CLI mint a fresh session id, so the `--resume` target names the source and
+    /// never this channel. The id arrives on `auth_status`, which the stand-in emits at frame 5 exactly as
+    /// every recorded fixture does — after the initialize response and before any user frame, which is why
+    /// this resolves without a turn ever being taken.
+    ///
+    /// The capture is the sharpest form of the defect: files are keyed by session id, so a fork reporting the
+    /// source id writes into the source channel's capture. Asserted as an exact directory listing, because
+    /// "the real file exists" would hold just as well beside a stray one under the wrong name.
+    func testForkTakesItsIdentityFromAuthStatusAndNeverReportsTheSourceId() async throws {
+        let h = try Harness()
+        let source = SessionID("11111111-0000-4000-8000-000000000001")!
+        let expected = SessionID("f0f0f0f0-0000-4000-8000-000000000fff")!
+        let configHome = ConfigHome(root: h.cwd.appendingPathComponent("cfg"), source: .environment)
+        let captureRoot = h.cwd.appendingPathComponent("capture")
+        let capture = RawCapture(root: captureRoot, configHome: configHome)
+        let p = h.make(scenario: "", capture: capture, session: .resume(source, fork: true))
+
+        let atConstruction = await p.identity
+        guard case .awaitingFork(let from, let provisional) = atConstruction else {
+            return XCTFail("a fork's identity is not awaiting resolution at construction: \(atConstruction)")
+        }
+        XCTAssertEqual(from, source)
+        let beforeSpawn = await p.sessionID
+        XCTAssertNil(beforeSpawn, "a fork reported an id before the engine gave it one")
+
+        _ = try await p.spawn()
+        guard case .sessionIdentityResolved(let resolved, .first)? = await h.expect({
+            if case .sessionIdentityResolved = $0 { return true }; return false
+        }, "sessionIdentityResolved") else { return }
+        XCTAssertEqual(resolved, expected)
+        XCTAssertNotEqual(resolved, source)
+        let after = await p.sessionID
+        XCTAssertEqual(after, resolved)
+        await p.terminate()
+        _ = await h.expect({ if case .exited = $0 { return true }; return false }, "exited")
+
+        let directory = captureRoot.appendingPathComponent(RawCapture.configHomeHash(configHome))
+        let files = Set((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+        XCTAssertEqual(files, ["\(resolved).ndjson"],
+                       "the capture opened under the provisional name did not become the real one")
+        XCTAssertFalse(files.contains("\(provisional).ndjson"))
+        XCTAssertFalse(files.contains("\(source).ndjson"))
+        // The whole event stream, not just the resolution: nothing anywhere named the session forked from.
+        let resolutions = await h.log.events.compactMap { event -> SessionID? in
+            if case .sessionIdentityResolved(let id, _) = event { return id }; return nil
+        }
+        XCTAssertEqual(resolutions, [expected])
+    }
+
+    /// The other half: a plain resume keeps the id it was given, at construction and after the same
+    /// `auth_status` that resolves a fork. Only a fork's identity is unknown.
+    func testAResumeKeepsItsIdentityAndEmitsNoResolution() async throws {
+        let h = try Harness()
+        let target = SessionID("22222222-0000-4000-8000-000000000002")!
+        let p = h.make(scenario: "", session: .resume(target, fork: false))
+        let atConstruction = await p.identity
+        XCTAssertEqual(atConstruction, .known(target))
+        _ = try await p.spawn()
+        try await Task.sleep(for: .milliseconds(500))     // long enough for frame 5 to have arrived
+        let stillTheTarget = await p.sessionID
+        XCTAssertEqual(stillTheTarget, target)
+        let resolutions = await h.log.events.filter { if case .sessionIdentityResolved = $0 { return true }; return false }
+        XCTAssertTrue(resolutions.isEmpty, "a non-fork resolved an identity it already had: \(resolutions)")
+        await p.terminate()
+    }
+}

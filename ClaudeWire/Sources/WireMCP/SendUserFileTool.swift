@@ -1,0 +1,94 @@
+import Foundation
+import WireFrames
+
+/// Mirrors the built-in SendUserFile shape: files[], caption?, status, display? (parent §6.8).
+/// Verified against the bundled tool at ~/claude-code-bundle/2.1.258/cli.pretty.js:485919
+/// (files: array of string, min 1; caption optional; status enum normal|proactive, required;
+/// display enum render|attach, optional).
+public struct SendUserFileTool: MCPTool {
+    public init() {}
+    public var name: String { "send_user_file" }
+    public var description: String { "Send one or more files to the user. Use status 'proactive' for unsolicited results and 'normal' when replying; display 'render' opens an inline preview, 'attach' offers a download." }
+    public var inputSchema: JSONValue {
+        .object(["type": .string("object"),
+                 "properties": .object([
+                    "files": .object(["type": .string("array"), "items": .object(["type": .string("string")]), "description": .string("Paths, absolute or relative to the working directory")]),
+                    "caption": .object(["type": .string("string")]),
+                    "status": .object(["type": .string("string"), "enum": .array([.string("normal"), .string("proactive")])]),
+                    "display": .object(["type": .string("string"), "enum": .array([.string("render"), .string("attach")])]),
+                 ]),
+                 "required": .array([.string("files"), .string("status")])])
+    }
+    /// The tool's path policy, as a pure function: no filesystem is touched, so every rule below is
+    /// decidable without a file existing. The readability and directory checks in `call` operate on
+    /// this result.
+    ///
+    /// Three rules, all deliberate:
+    /// - A leading `~` expands to the home directory *before* the absolute test, so `~/report.pdf`
+    ///   does not become `<cwd>/~/report.pdf`.
+    /// - A leading `/` is absolute and is taken as given. This tool accepts any absolute path the
+    ///   model can read, matching the built-in's domain.
+    /// - Anything else resolves against the channel cwd, and a `..` may walk out of it. That is
+    ///   intended rather than a hole: confining the relative form while accepting absolute paths
+    ///   anywhere would be an inconsistency, not a boundary.
+    ///
+    /// The result is standardized, so on Darwin a path under `/private` can come back with that
+    /// prefix resolved away: `/private/etc/hosts` returns as `/etc/hosts`. The rewritten path is the
+    /// one that reaches the user-visible sent-file item. That is correct — the two name the same
+    /// file — but it is a property worth knowing rather than meeting by surprise.
+    public static func resolve(_ path: String, against cwd: URL) -> URL {
+        let expanded = (path as NSString).expandingTildeInPath
+        let base = expanded.hasPrefix("/")
+            ? URL(fileURLWithPath: expanded)
+            : cwd.standardizedFileURL.appendingPathComponent(expanded)
+        return base.standardizedFileURL
+    }
+
+    public func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
+        // A bare string is coerced to a one-element array, mirroring the built-in's Zod preprocess
+        // (`fs((e) => typeof e === "string" ? [e] : e, R(i()).min(1))`, bundle 2.1.258:485919). The
+        // model was trained against a runtime that accepts this, so its output distribution includes
+        // it; and "a.txt" means exactly ["a.txt"], so rejecting it buys no disambiguation and costs a
+        // turn. Anything else non-conforming is still a protocol error.
+        let files: [JSONValue]
+        switch arguments["files"] {
+        case .string(let one): files = [.string(one)]
+        case .array(let many): files = many
+        default: throw MCPArgumentError("files must be a non-empty array of strings")
+        }
+        guard !files.isEmpty, files.allSatisfy({ $0.stringValue != nil }) else { throw MCPArgumentError("files must be a non-empty array of strings") }
+        guard let status = arguments["status"]?.stringValue, ["normal", "proactive"].contains(status) else { throw MCPArgumentError("status must be 'normal' or 'proactive'") }
+        // Read through a case match rather than `stringValue`, which returns nil for both "absent" and
+        // "present but not a string" and so quietly accepted `display: 5` as `display: nil`. An optional the
+        // caller got wrong is an argument error, not an omission; only `null` and absence mean omitted.
+        let display = try Self.optionalString(arguments["display"], "display must be 'render' or 'attach'")
+        if let display, !["render", "attach"].contains(display) { throw MCPArgumentError("display must be 'render' or 'attach'") }
+        let caption = try Self.optionalString(arguments["caption"], "caption must be a string")
+        var resolved: [URL] = []
+        for f in files.compactMap(\.stringValue) {
+            let url = Self.resolve(f, against: context.cwd)
+            // isReadableFile(atPath:) is also true for a readable directory, which would report a send
+            // Task 10 cannot perform; the built-in resolves per-file metadata and cannot reach that state.
+            // The object's TYPE, not just "exists and is not a directory". A FIFO, a device node or a socket
+            // passes existence and `isReadableFile` — `access(R_OK)` answers about permissions, not about what
+            // the object is — and would produce a successful sent-file invocation for something Task 10 cannot
+            // transfer. Only a regular file is sendable.
+            let isRegular = (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
+            guard isRegular, FileManager.default.isReadableFile(atPath: url.path) else {
+                return .text("Cannot send \(f): no such file, not a regular file, or not readable", isError: true)
+            }
+            resolved.append(url)
+        }
+        let names = resolved.map(\.lastPathComponent).joined(separator: ", ")
+        return .text("Sent \(resolved.count) file\(resolved.count == 1 ? "" : "s") to the user: \(names)",
+                     invocation: .sentFile(paths: resolved, caption: caption, status: status, display: display))
+    }
+    /// An optional string argument: absent or `null` is nil, a string is itself, anything else is an error.
+    private static func optionalString(_ value: JSONValue?, _ message: String) throws -> String? {
+        switch value {
+        case nil, .null?: return nil
+        case .string(let s)?: return s
+        default: throw MCPArgumentError(message)
+        }
+    }
+}

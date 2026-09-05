@@ -1,0 +1,1 @@
+{"type":"control_request","request_id":"req-e1","request":{"subtype":"elicitation","mcp_server_name":"github","message":"Choose a repository","mode":"form","elicitation_id":"el-1","requested_schema":{"type":"object","properties":{"repo":{"type":"string"}}}}}

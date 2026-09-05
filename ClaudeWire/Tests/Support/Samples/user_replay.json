@@ -1,0 +1,1 @@
+{"type":"user","message":{"role":"user","content":"hello there"},"parent_tool_use_id":null,"uuid":"6d1d4b1e-0000-4000-8000-0000000000aa","session_id":"1b2c3d4e-0000-4000-8000-00000000abcd","isReplay":true,"origin":{"kind":"human"}}
