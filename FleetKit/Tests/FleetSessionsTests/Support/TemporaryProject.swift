@@ -83,12 +83,15 @@ final class TemporaryProject {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: file)
     }
 
+    /// A NUL-terminated C buffer as a Swift string; `String(cString:)` over an array is deprecated.
+    static func decode(_ buffer: [CChar]) -> String { decodeCString(buffer) }
+
     static func realpath(_ url: URL) -> String {
         var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
         guard url.path(percentEncoded: false).withCString({ Darwin.realpath($0, &buffer) }) != nil else {
             return url.path(percentEncoded: false)
         }
-        return String(cString: buffer)
+        return decode(buffer)
     }
 }
 
@@ -114,7 +117,7 @@ enum TreeDigest {
             case S_IFLNK:
                 var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
                 let n = readlink(path, &buffer, buffer.count - 1)
-                out[relative] = "link \(n > 0 ? String(cString: buffer) : "?")"
+                out[relative] = "link \(n > 0 ? decodeCString(buffer) : "?")"
             default:
                 let bytes = (try? Data(contentsOf: URL(filePath: path))) ?? Data()
                 out[relative] = "file \(mode) \(bytes.count) \(ContentHashForTests.hex(bytes))"
@@ -164,4 +167,9 @@ struct TreeWitness {
         let changed = after.keys.filter { before[$0] != nil && before[$0] != after[$0] }.sorted()
         XCTFail("\(what) changed: added \(added); removed \(removed); changed \(changed)", file: file, line: line)
     }
+}
+
+/// Shared by `TemporaryProject.realpath` and `TreeDigest`'s symlink arm.
+func decodeCString(_ buffer: [CChar]) -> String {
+    String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
 }

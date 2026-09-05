@@ -138,7 +138,8 @@ public struct LocalSettingsStore: Sendable {
         guard rootFD >= 0 else { throw Self.refusal(forErrno: errno) }
         defer { Darwin.close(rootFD) }
         guard let opened = Self.descriptorPath(rootFD), opened == resolved else { throw Refusal.symlink }
-        guard !RealPath.contains(RealPath.string(configHome), opened) else { throw Refusal.insideConfigHome }
+        let home = RealPath.string(configHome)
+        guard !RealPath.contains(home, opened) else { throw Refusal.insideConfigHome }
         guard Self.isDirectory(rootFD) else { throw Refusal.notADirectory }
         guard ownerUID(.descriptor(rootFD)) == me else { throw Refusal.foreignUID }
         // `.git` beside the root: an `lstat` is not an open, and the descriptor above has just proved that this name
@@ -152,10 +153,17 @@ public struct LocalSettingsStore: Sendable {
 
         if mkdirat(rootFD, ".claude", 0o755) != 0, errno != EEXIST { throw Refusal.writeFailed }
         let dirFD = openat(rootFD, ".claude", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-        guard dirFD >= 0 else { throw Self.refusal(forErrno: errno) }
+        guard dirFD >= 0 else { throw Self.directoryRefusal(forErrno: errno, in: rootFD, named: ".claude") }
         defer { Darwin.close(dirFD) }
         guard Self.isDirectory(dirFD) else { throw Refusal.notADirectory }
         guard ownerUID(.descriptor(dirFD)) == me else { throw Refusal.foreignUID }
+        // Where the store directory *itself* lands, not only its root. `CLAUDE_CONFIG_DIR` may name
+        // `<root>/.claude`, in which case the root is nowhere near the config home and the check above passes
+        // while the write goes straight into it — the arrangement parent §6.12 names in as many words. Asked of
+        // the descriptor, so this too is never a string computed before the open.
+        guard let storePath = Self.descriptorPath(dirFD), !RealPath.contains(home, storePath) else {
+            throw Refusal.insideConfigHome
+        }
 
         // 3. The existing document, read through a descriptor.
         var preservedMode: mode_t = 0o644
@@ -176,7 +184,14 @@ public struct LocalSettingsStore: Sendable {
         guard let document = (try? JSONSerialization.jsonObject(with: Data(rawText.utf8))) as? [String: Any] else {
             throw Refusal.unparseable
         }
-        var merged = document[Self.disabledKey] as? [String] ?? []
+        // A value of another shape would slip past the scanner's bracket check and the insert path would append a
+        // *second* key: both parsers take the last occurrence, so afleet's value would win, but the document would
+        // be left with two. This build does not know what such a file means, and fail-closed is the rule.
+        var merged: [String] = []
+        if let existing = document[Self.disabledKey] {
+            guard let names = existing as? [String] else { throw Refusal.unparseable }
+            merged = names
+        }
         for name in names where !merged.contains(name) { merged.append(name) }
         guard let arrayData = try? JSONSerialization.data(withJSONObject: merged,
                                                           options: [.withoutEscapingSlashes]),
@@ -193,13 +208,19 @@ public struct LocalSettingsStore: Sendable {
         }
         // Declared before the descriptor's own `defer` so it runs after it: the directory goes away whether this
         // call succeeds or refuses, and `ENOTEMPTY` from a concurrent writer's staging file is not our business.
+        // Only when *this* call created it. A `.cc-writes` that was already there belongs to somebody else — an
+        // interrupted write of ours or a concurrent one — and removing it would pull the directory out from under
+        // a writer that is still using it. The cost is that an interrupted write leaves the directory behind.
         defer { if createdStaging { _ = unlinkat(dirFD, ".cc-writes", AT_REMOVEDIR) } }
         hooks.afterStagingDirectory()
         let stagingFD = openat(dirFD, ".cc-writes", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-        guard stagingFD >= 0 else { throw Self.refusal(forErrno: errno) }
+        guard stagingFD >= 0 else { throw Self.directoryRefusal(forErrno: errno, in: dirFD, named: ".cc-writes") }
         defer { Darwin.close(stagingFD) }
         guard Self.isDirectory(stagingFD) else { throw Refusal.notADirectory }
         guard ownerUID(.descriptor(stagingFD)) == me else { throw Refusal.foreignUID }
+        guard let stagingPath = Self.descriptorPath(stagingFD), !RealPath.contains(home, stagingPath) else {
+            throw Refusal.insideConfigHome
+        }
 
         // 5. The staging file: private on creation, the target's own mode before the rename.
         let temporary = "settings.local.json.\(UUID().uuidString)"
@@ -237,10 +258,33 @@ public struct LocalSettingsStore: Sendable {
         return st.st_uid
     }
 
-    /// A swapped component is what produces both of these: `O_NOFOLLOW` on a symlink is `ELOOP`, and a name that is
-    /// no longer a directory is `ENOTDIR`.
+    /// Why an open without `O_DIRECTORY` failed. There `O_NOFOLLOW` does answer `ELOOP` for a symlink, so the errno
+    /// is the whole story.
     private static func refusal(forErrno code: Int32) -> Refusal {
-        (code == ELOOP || code == ENOTDIR) ? .symlink : .writeFailed
+        switch code {
+        case ELOOP: .symlink
+        case ENOTDIR: .notADirectory
+        default: .writeFailed
+        }
+    }
+
+    /// Why a *directory* open relative to `parent` failed, and this one cannot be read off the errno.
+    ///
+    /// Measured on Darwin: `openat(fd, name, O_DIRECTORY|O_NOFOLLOW)` answers `ENOTDIR` for a symlink, for a plain
+    /// file and for a dangling link alike; `ELOOP` appears only when `O_DIRECTORY` is absent. So the entry itself
+    /// has to be asked, through the descriptor already held — `fstatat`, not a path. The word matters because it
+    /// reaches the user in `ChannelBanner.mcpDeclineRefused`, and telling someone "symlink" when their `.claude` is
+    /// a regular file sends them hunting the wrong thing.
+    ///
+    /// The refusal is already decided by the time this runs; all that is being chosen is what to call it. So the
+    /// window between the failed open and this `fstatat` costs nothing: an entry that changed in it, or vanished,
+    /// answers `symlink`, which is the conservative word for "something moved under us".
+    private static func directoryRefusal(forErrno code: Int32, in parent: Int32, named name: String) -> Refusal {
+        guard code == ELOOP || code == ENOTDIR else { return .writeFailed }
+        guard code == ENOTDIR else { return .symlink }
+        var st = stat()
+        guard fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) == 0 else { return .symlink }
+        return st.st_mode & S_IFMT == S_IFLNK ? .symlink : .notADirectory
     }
 
     private static func isDirectory(_ fd: Int32) -> Bool {

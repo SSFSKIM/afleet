@@ -867,9 +867,15 @@ public actor ChannelSupervisor {
         }
     }
 
-    /// *Decline*: the one Claude Code-owned file afleet writes, through §6.12's resolver and write policy. It runs
-    /// only while this channel holds no process, and a refusal banners the reason word and changes nothing else —
-    /// the channel is still consent-blocked and the sheet is still the way out.
+    /// *Decline*: the one Claude Code-owned file afleet writes, through §6.12's resolver and write policy. A refusal
+    /// banners the reason word and changes nothing else — the channel is still consent-blocked and the sheet is
+    /// still the way out.
+    ///
+    /// **Weaker than the spec's precondition, deliberately and temporarily.** §6.12 says the write runs only while
+    /// no owned process *for the project* is running; what is checked here is only this channel's own. Two channels
+    /// in one project — ordinary for this app — would let the idle one write while the other's child is live.
+    /// Answering the spec's question needs a project-to-channel index, which arrives with Task 9's facade; the check
+    /// belongs there and is carried to it, not built here.
     public func declineProjectServers(_ names: [String]) async throws {
         guard let preconditions else { throw LifecycleError.notOwned }
         do {
@@ -1036,8 +1042,9 @@ public actor ChannelSupervisor {
         process = nil
         await fleet.rollback(reservation)
         // Something the user can see. The channel is left connecting with no process, exactly as a spawn error
-        // leaves it, and the item the crash path already uses is what offers the way back.
-        state.systemItem = .crashed(exit: status, reopenOffered: true)
+        // leaves it, and the item is what offers the way back — its own case, because this is not a crash: afleet
+        // ended a child whose engine would not say which session it was.
+        state.systemItem = .forkIdentityTimedOut(exit: status, reopenOffered: true)
         publish()
     }
 

@@ -95,6 +95,10 @@ public struct PendingDecision: Hashable, Sendable {
 public enum SystemItem: Hashable, Sendable {
     case crashed(exit: ExitStatus, reopenOffered: Bool)
     case wedged(EscalationTrace, reopenOffered: Bool)
+    /// A fork whose engine never announced its own session id within the supervisor's deadline. Not a crash: afleet
+    /// ended the child itself, and the exit is that termination's. It carries `reopenOffered` like the other two
+    /// because what the user needs is the same affordance, and a banner could not offer it.
+    case forkIdentityTimedOut(exit: ExitStatus, reopenOffered: Bool)
 }
 
 /// The channel-level banners of §7.4 and §6.12.
@@ -102,7 +106,8 @@ public enum ChannelBanner: Hashable, Sendable {
     case releasedToTerminal                       // "Opened in your terminal; afleet released this session"
     case contended(HolderSet)
     case settingDidNotSurvive(String)             // the setting's name
-    case mcpDeclineRefused(String)                // the reason word: unparseable, symlink, foreignUID, insideConfigHome, writeFailed
+    // the reason word: unparseable, symlink, notADirectory, foreignUID, insideConfigHome, processLive, writeFailed
+    case mcpDeclineRefused(String)
     case managedSettingsPending
     case untrusted
     case heldElsewhere(HolderSet)                 // send refused; Fork offered

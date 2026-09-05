@@ -264,7 +264,7 @@ final class PreconditionTests: XCTestCase {
                              settingSources: nil, acceptances: acceptances)
         }
 
-        var verdicts = now([])
+        let verdicts = now([])
         XCTAssertEqual(verdicts.count, 3)
         XCTAssertEqual(Set(verdicts.values.map { $0 == .pending }), [true], "all three are pending")
         XCTAssertEqual(server(verdicts, "s")?.transport, .stdio(command: "npx", arguments: ["-y", "@example/s"]))
@@ -574,8 +574,10 @@ final class PreconditionTests: XCTestCase {
         witness.assertUnchanged("the scratch config home behind a linked `.claude`")
     }
 
-    /// The `CLAUDE_CONFIG_DIR`-inside-the-project case: the store would resolve inside the config home, so afleet
-    /// refuses the write and shows the banner, and §7.8's never-write rule holds without exception.
+    /// The first of the two arrangements that put the store inside the config home: the **project** is inside the
+    /// config home, so the project root's own descriptor already lies under it. The other arrangement — a config
+    /// home at `<root>/.claude`, which is the one parent §6.12 names — is
+    /// `testDeclineRefusesAConfigHomeInsideTheProject`, and the root check here does not catch it.
     func testDeclineRefusesAStoreInsideTheConfigHome() throws {
         let home = try newHome()
         let root = home.url.appending(path: "inside-project")
@@ -587,6 +589,78 @@ final class PreconditionTests: XCTestCase {
             XCTAssertEqual(error as? LocalSettingsStore.Refusal, .insideConfigHome)
         }
         witness.assertUnchanged("the scratch config home")
+    }
+
+    /// The second arrangement, and the one parent §6.12 names in as many words: `CLAUDE_CONFIG_DIR` places the
+    /// config home *inside the project*, at the very directory the store resolves to. The project root is nowhere
+    /// near the config home, so a check on the root alone passes and the write goes straight into a Claude Code
+    /// config home — the one thing §7.8 and X9 forbid without exception. The store directory's own descriptor is
+    /// what catches it, and the staging directory's descriptor catches the same trick one level down.
+    func testDeclineRefusesAConfigHomeInsideTheProject() throws {
+        // (a) the config home *is* `<root>/.claude`, the store directory itself.
+        let a = try newProject()
+        let configHome = a.root.appending(path: ".claude")
+        try FileManager.default.createDirectory(at: configHome, withIntermediateDirectories: true)
+        try Data("{\"projects\": {}}".utf8).write(to: configHome.appending(path: ".claude.json"))
+        var witness = TreeWitness(configHome)
+
+        XCTAssertThrowsError(try LocalSettingsStore()
+            .decline(names: ["d"], gitRoot: a.root, cwd: a.root, configHome: configHome)) { error in
+            XCTAssertEqual(error as? LocalSettingsStore.Refusal, .insideConfigHome)
+        }
+        witness.assertUnchanged("the config home at the project's `.claude`")
+        XCTAssertEqual(TreeDigest.listing(of: configHome), [".claude.json"],
+                       "no settings.local.json was written into the config home")
+
+        // (b) one level down: the config home is the staging directory, so `.claude` passes and `.cc-writes` is
+        // where the write would land.
+        let b = try newProject()
+        let staging = b.stagingDirectory
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        witness = TreeWitness(staging)
+
+        XCTAssertThrowsError(try LocalSettingsStore()
+            .decline(names: ["d"], gitRoot: b.root, cwd: b.root, configHome: staging)) { error in
+            XCTAssertEqual(error as? LocalSettingsStore.Refusal, .insideConfigHome)
+        }
+        witness.assertUnchanged("the config home at the project's staging directory")
+        XCTAssertEqual(TreeDigest.listing(of: staging), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: b.localSettingsFile.path(percentEncoded: false)),
+                       "and the refusal came before the target was written")
+    }
+
+    /// A `.claude` that is a plain file is `notADirectory`, and a `.claude` that is a symlink is `symlink` — and on
+    /// Darwin the errno cannot tell the two apart. `openat` with `O_DIRECTORY|O_NOFOLLOW` answers `ENOTDIR` for
+    /// both (`ELOOP` appears only without `O_DIRECTORY`), so the writer asks the entry through the descriptor it
+    /// already holds. This test is one half of that discrimination; `testDeclineRefusesASymlinkedDotClaude` is the
+    /// other, and a mapping that answers either word unconditionally fails one of them.
+    func testDeclineRefusesAPlainFileWhereTheStoreDirectoryShouldBe() throws {
+        let home = try newHome()
+        let project = try newProject()
+        try Data("not a directory".utf8).write(to: project.root.appending(path: ".claude"))
+        let witness = TreeWitness(project.root)
+
+        XCTAssertThrowsError(try LocalSettingsStore()
+            .decline(names: ["d"], gitRoot: project.root, cwd: project.root, configHome: home.url)) { error in
+            XCTAssertEqual(error as? LocalSettingsStore.Refusal, .notADirectory)
+        }
+        witness.assertUnchanged("the project whose `.claude` is a plain file")
+    }
+
+    /// An existing `disabledMcpjsonServers` of another shape is refused rather than worked around: splicing cannot
+    /// find a bracketed value, and inserting the key would leave the document carrying it twice.
+    func testDeclineRefusesANonArrayDisabledList() throws {
+        let home = try newHome()
+        for value in ["null", "\"a\"", "{\"x\": 1}", "[1, 2]"] {
+            let project = try newProject()
+            try project.writeLocalSettingsRaw("{\"disabledMcpjsonServers\": \(value)}")
+            let witness = TreeWitness(project.root)
+            XCTAssertThrowsError(try LocalSettingsStore()
+                .decline(names: ["d"], gitRoot: project.root, cwd: project.root, configHome: home.url)) { error in
+                XCTAssertEqual(error as? LocalSettingsStore.Refusal, .unparseable, "for \(value)")
+            }
+            witness.assertUnchanged("the project whose disabled list is \(value)")
+        }
     }
 
     /// A foreign uid anywhere on the path is a refusal, and so is a file whose JSON does not parse.
@@ -628,8 +702,12 @@ final class PreconditionTests: XCTestCase {
         }
         witnessB.assertUnchanged("the project with a foreign `.claude`")
 
-        // (c) the staging directory's descriptor, the third.
+        // (c) the staging directory's descriptor, the third. `.claude` is made by the test, because the writer
+        // legitimately creates it before it ever reaches the staging directory and the witness is about what was
+        // *written*, not about an empty directory on the way there.
         let c = try newProject()
+        try FileManager.default.createDirectory(at: c.root.appending(path: ".claude"),
+                                                withIntermediateDirectories: true)
         let witnessC = TreeWitness(c.root)
         let seenC = LockedBox<Int>(0)
         let storeC = LocalSettingsStore(ownerUID: { subject in
@@ -643,6 +721,7 @@ final class PreconditionTests: XCTestCase {
                                                 configHome: home.url)) { error in
             XCTAssertEqual(error as? LocalSettingsStore.Refusal, .foreignUID)
         }
+        witnessC.assertUnchanged("the project with a foreign staging directory")
         XCTAssertFalse(FileManager.default.fileExists(atPath: c.localSettingsFile.path(percentEncoded: false)))
         XCTAssertFalse(FileManager.default.fileExists(atPath: c.stagingDirectory.path(percentEncoded: false)))
 
