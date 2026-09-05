@@ -888,8 +888,13 @@ never reach the wire and are therefore compared file-to-file only: attachment re
 (*A-11*), the `system` records `turn_duration`, `stop_hook_summary`,
 `local_command` and `informational` (`compact_boundary` left this list 2026-09-05: the
 `compact-boundary` fixture shows the engine emits it as a `system` frame and mirrors it, so it
-is compared like any other record), and `user` records carrying `isMeta`
-(on disk with no wire counterpart across C1's corpus; added 2026-09-05 from C3's grounding).
+is compared like any other record), and three classes of `user` record that reach the wire
+only inside `transcript_mirror` frames: those carrying `isMeta` (added 2026-09-05 from C3's
+grounding), those whose `origin.kind` is `task-notification` (the injected `<task-notification>`
+message this section already says is never emitted as a `user` frame; four across the corpus),
+and the root record of an agent stream (the prompt the parent injected, which the wire carries
+only as the spawning `Task` call's input; every sidechain root lies on an agent stream and no
+main-stream root is one; both added 2026-09-06 from C3's check two).
 The overlay is tested separately
 against wire fixtures only. Both lists are explicit in the test and are reviewed whenever
 the baseline moves.
@@ -2480,8 +2485,8 @@ notarized distribution, and any write under `<configHome>` (X9).
 |---|---|---|
 | C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `2515b04` from `child/c1-probes-fixtures` `13226e6` (89 commits); G1–G4 green: 18 fixtures (16 recorded on the pinned 2.1.259 binary, 2 synthetic with shapes confirmed on the installed binary), 242 probe and 24 fake-claude tests on Python 3.9 and 3.14, drift ritual clean 2.1.259→2.1.260, one independent Codex leak-risk review closed; fifteen `C1/…` notes filed and reconciled. Follow-up wave **merged** 2026-09-05 at `66fd4a5`: `spike-mcp-decline-files` settled at zero cost (§6.12 confirmed; note filed), `rewind-turn` and `compact-boundary` scenarios written and offline-verified; both recorded 2026-09-05 after the window reset, redacted, verified and independently signed (checklist v3), **merged** 2026-09-05 from `worktree-agent-aaf78bf28064267d9` `c380ee7` (5 commits); catalogue 20 (18 recorded, 2 synthetic); redactor now matches `account`/`organization` anywhere in a key name after two live tenant uuids passed the gate (regression test; 245 probe tests); two `C1/…` parent-impact notes reconciled (§7.3 exclusion list, compaction facts, item 13's stale-target fallback) |
 | C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `b38e1f2` from `child/c2-core-wire` `9ab116a` (72 commits; history rewritten before merge so no engine byte from the recording workstation reaches the repository); G1–G4 green at the tip: ClaudeWire 225 tests, four of them live and run once from a clean build against the installed CLI under the scratch config home with no failures, AfleetCore 6; G2 over 18 fixtures and 1353 frames with the ten synthetic findings pinned as an exact set; one independent Codex leak-risk review (5 findings) and a six-lens review panel (32 findings) both closed by four sequential fix waves; the C2 reconciliations of 2026-09-04 and 2026-09-05 are in the Revision Notes; deferred debt indexed in `docs/tech-debt-tracker.md`; spend: three model turns on the child's own live gates and one in the orchestrator's final live pass |
-| C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` on `child/c3-timeline` (v1 `916ce02`, parent-pin `ee94449`; spec v2.5 `121ab5b`); plan `plans/2026-09-05-c3-fleetkit-timeline.md` (v5 `f9f0f2c`, 12 tasks) | **executing** (wave 2): spec v1 reviewed 2026-09-05, four questions ruled (leaf path; rewind and compact recordings as a C1 follow-up; opt-in local index measurement; listing policy is C4's), six grounding facts filed on this parent; three independent adversarial passes over spec and plan folded (v2.2/v2, v2.4/v4, v2.5/v5), the third pass declared final; executor dispatched 2026-09-05 from `29a7c86` (branch carries `main` `6994ff8`); edits nothing in `FleetKit/Package.swift` (targets already declared in the C3 region) |
-| C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md` on `child/c4-sessions-fleet` (v1 `2b77140`, X5/X6 amendments folded at `847ad41`, parent-pin `ee94449`; spec v2.4 `22edc0f`); plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4 `598fb4e`, 12 tasks) | **executing** (wave 2): three independent adversarial passes over spec and plan folded (v2.2/v2, v2.3/v3, v2.4/v4), the third pass declared final; executor dispatched 2026-09-05 from `c7bcdb5` (branch carries `main` `e30a4a7`: `maxTurns`, twenty fixtures); Task 11 (G2, `IndexStorage`) waits for C3 to merge; spec v1 reviewed 2026-09-05, three questions ruled (store protocol stays in FleetKit with C3's `IndexStorage` implemented in `FleetSessions`; one composed haiku turn to widen the write allowlist; one store document per namespace) plus four rulings on `agents --json` cadence, wedged exclusion from eligibility and eviction, MCP consent read from both locations, and the listing policy; owns `FleetKit/Package.swift`; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
+| C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` (v1 `916ce02`, parent-pin `ee94449`; v2.7 at merge `a758308`); plan `plans/2026-09-05-c3-fleetkit-timeline.md` (v5 `f9f0f2c`, 13 tasks); retrospective in the child spec's Outcomes & Retrospective | **merged** 2026-09-06 at `f4a8723` from `child/c3-timeline` `a758308` (57 commits of its own; only `FleetKit/Sources/FleetTimeline`, its tests and `docs/` touched, `FleetKit/Package.swift` byte-identical); G1–G4 green at the tip: `FleetTimelineTests` 165 tests, 4 skipped without `AFLEET_LOCAL_INDEX`, 0 failures, run twice in separate scratch paths; G1 check one over 20 mirrored streams and 518 entries, check two over 132 compared items across all twenty fixtures with no exclusion (two pinned differences on `compact-boundary`, named by shape); G2 measured opt-in on the author's config home: 365/366 ms cold build over 3,032 transcripts (limit 500), 1 ms incremental (limit 50), 667/679 ms largest history (limit 1,000); G3/G4 by the twelve named tests; X1 import graph green; X9 scratch-home fingerprint unchanged across the suite; one Codex whole-branch review (3 P1, 7 P2) and one adversarial review (6) closed by one fix wave (two dismissals logged as tracker 22 and 23); the twenty-fixture corpus surfaced three findings at merge, fixed red-first before any repin (boundary chain, `isSynthetic` union, recorded rewind); independent leak-risk review at merge (4 findings: three fixed, one logged as tracker 24); deferred debt entries 11–25 in `docs/tech-debt-tracker.md`; spend: no model turns (C3 spawns no process) |
+| C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md` on `child/c4-sessions-fleet` (v1 `2b77140`, X5/X6 amendments folded at `847ad41`, parent-pin `ee94449`; spec v2.4 `22edc0f`); plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4 `598fb4e`, 12 tasks) | **executing** (wave 2): three independent adversarial passes over spec and plan folded (v2.2/v2, v2.3/v3, v2.4/v4), the third pass declared final; executor dispatched 2026-09-05 from `c7bcdb5` (branch carries `main` `e30a4a7`: `maxTurns`, twenty fixtures); Task 11 (G2, `IndexStorage`) unblocked by C3's merge on 2026-09-06 (`f4a8723`); Tasks 1–9 landed on the branch (suite 190 at `f390a2f`), Task 10 next; spec v1 reviewed 2026-09-05, three questions ruled (store protocol stays in FleetKit with C3's `IndexStorage` implemented in `FleetSessions`; one composed haiku turn to widen the write allowlist; one store document per namespace) plus four rulings on `agents --json` cadence, wedged exclusion from eligibility and eviction, MCP consent read from both locations, and the listing policy; owns `FleetKit/Package.swift`; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
 | C6 Conversation surface and Agents panel | — | composite; blocked-by C3, C4, C5 |
 | C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core dispatchable now, held for the human's approval of the cut; C7.4–C7.7 blocked-by C5.G4 (C7.4 also by C4's X5, C7.6 by C4's store) |
@@ -4265,3 +4270,87 @@ Pending — written at finish.
   corpus holds no `compact_boundary` record, so none of its pins move until it merges `main`.
   The rewind reviewer's proposed twelfth checklist item (identity-shaped key names) stays with
   the gate owner as C1's spec records, since adding it re-opens all twenty signatures.
+
+- 2026-09-06 reconciliation of C3 (merge `f4a8723` from `child/c3-timeline` `a758308`, 57 commits
+  of its own over the merge base `1249c17`, `main` merged into the branch at `681ec88` first).
+  Binding content touched, all recorded in the child spec's Parent revisions and Revision Notes:
+  **§7.3's file-only exclusion list** gains the two `user` classes above (filed from check two's
+  evidence; the sentence is amended in place). **X4**: `ProjectionCategories.comparedWireToFile`
+  gains `.compactBoundary`, completing the 2026-09-05 amendment that removed `compact_boundary`
+  from the exclusion list — check two now compares the boundary wire-to-file, and with the
+  `compact-boundary` fixture in the corpus the comparison is live: `rewind-turn` is clean at 8
+  compared items, and `compact-boundary` compares 11 with two pinned differences named by shape,
+  the delivery order of the post-compaction turn's two `user` records (the wire delivers the
+  attachment carrier before the prompt, against the file's chain order, timestamps equal) and
+  the boundary row's timestamp (the frame carries none, and the replay harness stamps it from
+  the recording envelope's relative offset; a recording with an absolute origin retires that
+  half). The compared shape stays `role, model, origin, toolDenialKind, contentBlocks`; the
+  metadata's two spellings and the logical parent are deliberately outside it. The four X4
+  constants C6 reads are `ProjectionCategories.durable` (seven categories), `.overlay` (five),
+  `.comparedWireToFile` (seven) and `.fileOnlyRecordKinds`; check two is ordered and
+  category-complete (a reordering with no item changed is a finding). **The tap contract** (X4
+  with X5): `StreamIngestion.open(file:events:policy:)` takes one subscription of C4's
+  per-subscriber fan-out `LifecycleAPI.events(of:)`, buffers it before reading the file, aligns
+  the buffered mirror entries against the file's tail and owns the ordering; C6 takes a separate
+  subscription for `WireReducer` and never feeds frames itself; `open` is bounded (fifty settle
+  rounds of `tapSettle`) because C6 blocks on it. `Overlay` is declared in full beside
+  `WireReducer` (`QueueState`, `Banner`, `sessionState`). **G2 and "every session on the
+  machine"** (§1, C3 acceptance): the index skips symlinked entries under `projects/`, directories
+  and files alike, because the engine's own session-by-id locator and picker skip them (2.1.258
+  `cli.pretty.js:13753-13755` and `:13937`; `Dirent.isDirectory()`/`isFile()` are false for a
+  symlink), so a session the CLI itself cannot locate is not listed; the build reports the count
+  of skipped directories in its `indexBuilt` diagnostic. On the author's machine that is fourteen
+  slugs holding 1,306 main files, all of them aliases of directories already indexed; whether a
+  product should surface such sessions is a question for the human and needs engine-side
+  support. **G2 numbers** (opt-in, read-only measurement of the author's config home behind
+  `AFLEET_LOCAL_INDEX=1`, counts and timings only): 3,032 main transcripts; cold build median of
+  five 365 ms and 366 ms against 500; incremental update after one touch 1 ms against 50; largest
+  transcript (109 MB, 4 MiB window, 2,626 records) read and reduced in 667 ms and 679 ms against
+  1,000. "Cold" means a fresh `TranscriptIndex` actor with no persisted snapshot, page cache warm;
+  a genuinely cold cache adds the SSD read of some 380 MB of heads and tails (tracker 21, C4's when
+  the sidebar's first paint is measured). The first measurement was 66,412 ms; the cost was
+  grapheme-aware `String` scanning of two 64 KiB chunks per file, not I/O (the pure `pread` floor
+  was 96 ms), replaced by a byte-level scan pinned against the old helpers over forty-two invented
+  inputs, an arithmetic ISO-8601 path (the formatter took a process-wide ICU lock) and a decoder
+  fast path for the five conversation kinds; no budget was widened and no shipped source reads the
+  environment. **The twenty-fixture corpus at merge**: 96 assertions went red when the branch
+  merged `main`; each was classified before any repin, and three were findings rather than
+  counts, fixed red-first. The record reducer read a boundary's `parentUuid: null` as a root and
+  rendered `compact-boundary` as a 27-record branch; it now continues the chain through the
+  boundary's `logicalParentUuid` (the writer sets exactly that pair, `cli.pretty.js:430982`; the
+  engine's own loader never reads `logicalParentUuid` but relinks across the boundary in `hns`,
+  `:432524`, keeping only the preserved segment because it is rebuilding a context window; afleet
+  renders the file, so it takes the bridge and not the deletion, per §7.3's soft-boundary rule).
+  The compaction summary, a `user` record with `isCompactSummary` and `isVisibleInTranscriptOnly`
+  echoed with `isSynthetic: true`, was hidden by the wire reducer and not by the record reducer;
+  the engine's `lwe` (`:366496`) defines `isSynthetic` as `isMeta || isVisibleInTranscriptOnly ||
+  isCompactSummary`, and the record reducer now hides on that union, so §7.3's "one rule, two
+  spellings" holds with the union as the rule. The replay harness mapped only in-direction
+  frames to host signals, so the honoured `rewind_conversation` answer never reached the reducer
+  and the abandoned turn stayed on the wire half; it now emits `.rewound` from the host's own
+  answer, and a recorded rewind truncates as §6.4 describes. Pins re-derived from a walk of
+  `Fixtures/`: 20 fixtures (18 recorded), 17 mirrored, 20 streams and 518 entries in check one,
+  760 file records and 521 mirror entries, 19 main files holding 15 logical sessions (unchanged:
+  the two new recordings resume a session two fixtures already shared), 132 compared items.
+  **Child-local means worth one line each**: uuid-less record identity is canonical hash plus an
+  occurrence ordinal assigned in application order and never renumbered by *Load earlier*; the
+  file-rewrite guard has four variants (new inode, shorter same inode, tail-anchor mismatch,
+  same bytes under a new inode); a mirror gap is the actor's own deadline, cleared by the exit;
+  the bounded window's closure has a 20 MiB span budget with a degraded marker; agent transcripts
+  are read whole; the wire reducer reads `non_execution_kind` from the user frame's lossless
+  extras for a tool denial; a hard compact boundary discards the resumed seed as well as the
+  builder. **Deferred**: tracker entries 11–25 under "From C3"; 14 (per-frame recompute in
+  `publish`, O(N × records), owner C6), 22 (same-uuid cross-source conflict counted as a
+  duplicate) and 23 (window-root suppression on a rewound tail, now witnessed by a test on
+  `compact-boundary` and still open for the declared-parent shape) are the ones C6 must know;
+  25 is C2's (`CompactBoundaryFields` does not declare `logical_parent_uuid`, which the wire frame
+  carries per the 2026-09-05 note above, so `WireReducer` passes `nil` for the boundary's logical
+  parent). Human-gate question 5 of the child spec (what "closed" means for the bounded window:
+  the named leaf is inside the window and its earliest chain record is a turn start or the file's
+  first record) was implemented as recommended and stays overrulable at the renderer.
+  Independent leak-risk review at merge (Codex adversarial, four findings): recorded uuid
+  prefixes quoted as evidence in the child spec became counts, a recorded instant in a source
+  comment became invented digits, an opt-in test's staging failure now throws a fixed `XCTSkip`
+  rather than a Cocoa error carrying a path, and test temp trees being unchecked against the
+  config home is tracker 24; the rule these share is that an engine byte copied into prose or a
+  comment is a byte nobody reviewed there (§11).
