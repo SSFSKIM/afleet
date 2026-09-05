@@ -343,10 +343,11 @@ recorded here as a flow-back to the parent rather than invented locally:
   only lists them). Without it the Browser would parse timeline items, which X1 forbids.
 - a **pane request and exit report** at the lifecycle seam: X5's `openInTerminal(channel)`
   and `attach(job)` perform their ownership work (§7.2 rule 5, the quiescent handoff) and
-  hand the Terminal panel a `PaneRequest {executable, arguments, cwd, environment,
+  hand the Terminal panel a `PaneRequest {id, executable, arguments, cwd, environment,
   purpose: .hatch(SessionID) | .attach(jobShort) | .logs(jobShort) | .shell | .command}`;
   the panel runs it and reports `PaneExit {request, code, observedAt}` back through X5,
-  which owns the re-adoption. The Terminal panel never spawns `claude` for a session on
+  which owns the re-adoption and matches the exit to its request by `id` (the panel
+  echoes the request it was given, unchanged; parent X5, amended 2026-09-05). The Terminal panel never spawns `claude` for a session on
   its own initiative. `stop`, `respawn` and `rm` are CLI verbs with no PTY and belong to X5's
   actions; the sidebar's *Stop* and *Respawn* call X5, not Workbench.
 
