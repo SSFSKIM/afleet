@@ -124,3 +124,26 @@ not renumber anything above.
     heads and tails. Pre-existing test design, recorded so the budget's name does not mislead.
     Owner: C4, when the sidebar's first paint is measured for real.
 
+22. **A same-uuid cross-source conflict is counted as a duplicate without comparing content.**
+    `StreamIngestion.swift:478-483`: once a uuid is applied, a mirror entry carrying it is counted
+    and dropped, and the inverse path binds a file locator to a mirror-retained record, neither
+    comparing canonical content. Under protocol skew, a partial write or corruption the projection
+    could hold one source's payload while `rawRecord` reads the other's bytes, with only a duplicate
+    count to show for it. Dismissed as design intent for now: the child spec's arbitration table
+    says a delivery whose key is already applied is a counted duplicate, and hashing every record on
+    every uuid collision is a cost the spec deliberately does not pay. Owner: C3/C6, as hardening.
+    Closer: compare canonical content on a cross-source uuid collision only, and emit a typed
+    conflict notice with an explicit source-precedence or rebuild policy when they disagree.
+23. **Window-root suppression can attach a rewound branch to abandoned history.**
+    `RecordReducer.swift:389-403`: for an open window, `ConversationTree` exempts the first missing
+    parent in *physical file order* rather than the selected chain's boundary. A bounded tail of a
+    rewound transcript can begin inside an abandoned branch and only later reach the new branch's
+    turn start; the abandoned record then consumes the exemption, and the real chain boundary
+    becomes eligible for five-second orphan healing and can be attached to the abandoned branch. The
+    reopened timeline would show discarded turns ahead of the active branch even though closure
+    declared the window valid. Not fixed because there is no oracle: no fixture contains a rewind,
+    which the child spec already lists as a delegated unknown owed to C1, and a fix against an
+    unwitnessed path is a guess. Owner: C3/C1. Closer: have window closure carry the selected
+    chain's boundary uuid explicitly in `WindowMarker` and exempt only that record, plus a rewound
+    fixture above 8 MiB whose tail begins on an abandoned branch, compared against the whole-file
+    leaf chain.

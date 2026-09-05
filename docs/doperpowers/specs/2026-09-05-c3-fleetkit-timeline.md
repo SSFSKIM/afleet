@@ -700,8 +700,11 @@ public enum ProjectionCategories {
   public static let durable: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .compactBoundary, .taskRun]
   /// Only the wire carries these; rendered live, not expected on reopen.
   public static let overlay: Set<TimelineCategory> = [.cluster, .decision, .hookRun, .notification, .turnSummary]
-  /// Check two compares these item for item; `.taskRun` only for subagent runs, by agent id and source file.
-  public static let comparedWireToFile: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun]
+  /// Check two compares these item for item, and in order; `.taskRun` only for subagent runs, by agent id and source file.
+  /// `.compactBoundary` was added on 2026-09-05 by the whole-branch fix wave, completing the parent's own amendment
+  /// (Revision Notes): the comparison is unexercised on this branch, whose corpus carries no compaction, and becomes
+  /// live when the branch merges a `main` that has the `compact-boundary` fixture.
+  public static let comparedWireToFile: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun, .compactBoundary]
   /// Record kinds that never reach the wire as conversational frames and are compared file-to-file only.
   /// `compact_boundary` left this list on 2026-09-05 (parent amendment; Revision Notes below).
   public static let fileOnlyRecordKinds: Set<RecordKindMatcher> = [
@@ -976,6 +979,11 @@ record reducer's projection of that snapshot, which is what `StreamIngestion.ope
 on a resume. It then runs `RecordReducer` over every transcript file, merges, filters both projections to
 `comparedWireToFile`, and compares item for item by `ItemID`, category and
 `comparedItemFields`, printing the first difference with item ids and field names only.
+The comparison is **ordered**: the two filtered sequences are compared position by position over
+the ids both sides hold, and the first positional mismatch is a difference in its own right. A
+channel that looks the same from disk and from the wire is one whose rows are the same *sequence*,
+and nothing upstream of the shared `ItemBuilder` constrains that — the wire reducer folds in
+arrival order, the record reducer derives tree and leaf order first.
 The overlay assertions read the same frames and check that every `can_use_tool`,
 `request_user_dialog` and `elicitation` request produced a decision item, every
 `tool_use_summary` labelled a cluster, and every `result` produced a turn summary with
@@ -1497,8 +1505,9 @@ Pending — written at finish.
   file-to-file only. `ProjectionCategories.fileOnlyRecordKinds` drops `.system("compact_boundary")`
   and keeps the rest of the list. Nothing else moves: this branch's corpus carries no
   `compact_boundary` record in any fixture, so no census pin, count or name set changes, and
-  `.compactBoundary` stays in `durable` and out of `comparedWireToFile` exactly as before. The new
-  fixture itself is not merged here — `FixtureCorpus.committedCount` is 18 on this branch and is
+  `.compactBoundary` stays in `durable`; it was added to `comparedWireToFile` on the same day by the
+  whole-branch fix wave, which is the rest of this same amendment — the comparison is vacuous here
+  and becomes live at merge. The new fixture itself is not merged here — `FixtureCorpus.committedCount` is 18 on this branch and is
   the first pin to move when this branch merges `main`.
 
 - 2026-09-05: v2.5, third Codex pass (ten findings; nine folded, one half-dismissed by the

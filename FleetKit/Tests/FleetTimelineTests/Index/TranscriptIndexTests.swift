@@ -114,8 +114,12 @@ final class TranscriptIndexTests: XCTestCase {
     /// A cancelled build stops and throws rather than publishing what its lanes happened to finish.
     ///
     /// The lanes run in a detached task, so cancellation only reaches them through the handler; each lane tests
-    /// `Task.isCancelled` once per item, and `build()` checks after each phase. Deterministic without a race: the child
-    /// task cannot begin until this method suspends, and `cancel()` is the statement after it is created.
+    /// `Task.isCancelled` once per item, and `build()` checks after each phase. The `Task` here is unstructured and
+    /// started from a `nonisolated` async context, so it is scheduled on the global executor and may well begin
+    /// before `cancel()` returns — the test does not depend on it not having. What it depends on is that the build
+    /// cannot get through seventeen files before the cancellation lands, and a build that *had* finished is rejected
+    /// by the assertions rather than passing quietly: the `.success` arm fails, and an empty `entries` with a
+    /// `.distantPast` `builtAt` is exactly what a build that published nothing looks like.
     func testACancelledBuildThrowsAndPublishesNothing() async throws {
         let tree = try corpusTree()
         let index = makeIndex(tree.temp)
