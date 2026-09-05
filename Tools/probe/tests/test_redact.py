@@ -225,6 +225,35 @@ class RedactFrameTests(unittest.TestCase):
         self.assertEqual(out["response"]["response"], {"manualUrl": "https://claude.ai/oauth/authorize?<redacted>",
                                                        "automaticUrl": "https://claude.ai/o?<redacted>"})
 
+    def test_oauth_requests_drop_their_url_queries(self):
+        """The grant travels outbound too: `mcp_oauth_callback_url` and `mcp_authenticate`
+        carry it in a request-side URL, where rule 6 used to run only over responses."""
+        f = {"type": "control_request", "request_id": "r4", "request": {
+            "subtype": "mcp_oauth_callback_url", "server_name": "afleet",
+            "callbackUrl": "http://localhost:1455/callback?code=grant-1&state=nonce-1"}}
+        out = self.r.redact_frame(f, "out", {})
+        self.assertEqual(out["request"]["callbackUrl"], "http://localhost:1455/callback?<redacted>")
+        self.assertEqual(out["request"]["server_name"], "afleet")
+        g = {"type": "control_request", "request_id": "r5", "request": {
+            "subtype": "mcp_authenticate", "server_name": "afleet",
+            "nested": {"redirectUri": "https://claude.ai/oauth/cb?code=grant-2&state=nonce-2"}}}
+        out2 = self.r.redact_frame(g, "out", {})
+        self.assertEqual(out2["request"]["nested"]["redirectUri"], "https://claude.ai/oauth/cb?<redacted>")
+
+    def test_oauth_callback_state_is_redacted_and_other_state_fields_are_not(self):
+        """`claude_oauth_callback` carries its grant as bare strings: `authorizationCode`, which
+        the `authorization` secret word already catches, and `state`, which no rule reached.
+        The subtype is the gate -- `state` is an ordinary field name everywhere else."""
+        f = {"type": "control_request", "request_id": "r6", "request": {
+            "subtype": "claude_oauth_callback", "authorizationCode": "grant-3", "state": "nonce-3"}}
+        out = self.r.redact_frame(f, "out", {})
+        self.assertEqual(out["request"]["state"], "<redacted>")
+        self.assertEqual(out["request"]["authorizationCode"], "<redacted>")
+        g = {"type": "control_request", "request_id": "r7", "request": {
+            "subtype": "can_use_tool", "tool_name": "Bash", "input": {
+                "state": "expanded", "url": "https://docs.test/page?section=intro"}}}
+        self.assertEqual(self.r.redact_frame(g, "out", {}), g)
+
 
 class ScanTests(unittest.TestCase):
     def test_scan_finds_hard_failures(self):
