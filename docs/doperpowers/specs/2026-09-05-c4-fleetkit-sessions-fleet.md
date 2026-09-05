@@ -55,7 +55,12 @@ enumerates every transition as a `(row, from, event, to)` scenario, one entry pe
 row admits and per to-state it can reach; each row test declares the scenarios it drove and
 asserts the transition it observed by `(from, event, to)`, and the suite asserts that the set
 of scenarios covered equals the set of scenarios in the table, so a row, a from-state or an
-outcome added later without a test fails the build. The scenarios, grouped by row:
+outcome added later without a test fails the build. **The table holds 58 scenarios** as of the
+whole-branch fix wave (55 at the end of the twelve tasks; ruling 1 added `readyExitedClean` and
+a crash-exhaustion row from connecting and retargeted the ready-crash row, and `scalpel-1#11`
+added `foreignRecordGone` from `backgroundJob`), and `LifecycleCoverageTests` asserts the set
+equality in both directions with the method-parity check running key to test only. The
+scenarios, grouped by row:
 
 - eager spawn on open of a recently active archived channel; history-only open of an older one; spawn-then-send on an older one when the user sends;
 - connecting to ready when the post-handshake check is clean; connecting to foreign live, own process terminated, when the post-handshake check finds another holder (item 46 at the API level);
