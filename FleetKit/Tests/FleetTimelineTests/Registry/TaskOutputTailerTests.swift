@@ -74,14 +74,48 @@ final class TaskOutputTailerTests: XCTestCase {
         XCTAssertEqual(received.map(\.truncatedByEngine), [false, false, false])
     }
 
+    /// The window the two-poll trailer rule opens: a read ending on `]\n` is held back for one poll interval, and a
+    /// finished background shell has its output file reaped inside that window. The held-back chunk — the whole output
+    /// and its exit code, the only thing a consumer is waiting for — must still be delivered.
+    func testABufferedTrailerSurvivesTheFileBeingReaped() async throws {
+        let tree = try TempTree()
+        let url = tree.root.appendingPathComponent("reaped.output")
+        let whole = "alpha\n\n[exited with code 7]\n"
+        try Data(whole.utf8).write(to: url)
+
+        // Long enough that the confirming poll cannot fire while the test opens the window by hand.
+        let tailer = TaskOutputTailer(path: url, pollInterval: .milliseconds(300))
+        let stream = await tailer.chunks()
+        let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
+        defer { watchdog.cancel() }
+
+        var waited = 0
+        while await tailer.bufferedTrailerBytes == 0, waited < 300 {
+            try await Task.sleep(for: .milliseconds(5))
+            waited += 1
+        }
+        let buffered = await tailer.bufferedTrailerBytes
+        XCTAssertEqual(buffered, whole.utf8.count, "the first poll holds the trailer back rather than yielding it")
+        try tree.remove(url)          // reaped before the confirming poll ever runs
+
+        var received: [OutputChunk] = []
+        for await chunk in stream { received.append(chunk) }
+
+        XCTAssertEqual(received.count, 1, "the held-back chunk is flushed, not dropped, when the stream ends")
+        XCTAssertEqual(received.first?.text, whole)
+        XCTAssertEqual(received.first?.exitCode, 7)
+        XCTAssertEqual(received.first?.offset, 0)
+    }
+
     /// The engine creates the output file after it announces the task, so the tailer waits rather than finishing.
+    /// The consumer here abandons the stream with a `break` and never calls `stop()`: the pump must stop of its own
+    /// accord, or a closed panel leaves the filesystem being polled for the rest of the tailer's life.
     func testAbsentFileIsWaitedFor() async throws {
         let tree = try TempTree()
         let url = tree.root.appendingPathComponent("not-yet.output")
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "the file does not exist when the tailer starts")
 
         let tailer = TaskOutputTailer(path: url, pollInterval: .milliseconds(10))
-        let stream = await tailer.chunks()
         let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
         defer { watchdog.cancel() }
         let writer = Task {
@@ -90,13 +124,25 @@ final class TaskOutputTailerTests: XCTestCase {
         }
         defer { writer.cancel() }
 
+        // The stream and its iterator share one context, so both are scoped here: releasing them is exactly what a
+        // real consumer's `break`, cancelled task or closed panel does, and nothing below calls `stop()`.
         var first: OutputChunk?
-        for await chunk in stream { first = chunk; break }
-        await tailer.stop()
+        do {
+            let stream = await tailer.chunks()
+            for await chunk in stream { first = chunk; break }
+        }
 
         let chunk = try XCTUnwrap(first, "a tailer that gave up on the absent file would end its stream with no chunk")
         XCTAssertEqual(chunk.text, "late arrival\n")
         XCTAssertEqual(chunk.offset, 0)
+
+        var settled = 0
+        while await tailer.isPolling, settled < 300 {
+            try await Task.sleep(for: .milliseconds(5))
+            settled += 1
+        }
+        let polling = await tailer.isPolling
+        XCTAssertFalse(polling, "abandoning the stream stops the pump; nothing else here calls stop()")
     }
 
     /// A `localAgent` entry's output file is a symlink into the agent's transcript sidecar; a consumer must open that

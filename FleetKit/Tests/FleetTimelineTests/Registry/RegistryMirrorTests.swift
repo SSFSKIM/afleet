@@ -74,8 +74,11 @@ final class RegistryMirrorTests: XCTestCase {
                        "background-shell's recorded task-event sequence")
 
         // Row 1 — the engine lists the task before any task_started names it: a minimal entry, live, not yet started.
-        var mirror = Self.fold(events, upTo: 1)
+        var mirror = RegistryMirror()
+        guard case .system(let listing, let listedAt) = events[0] else { return XCTFail("row 1 is a system frame") }
+        let touchedByListing = mirror.apply(listing, at: listedAt, epoch: .first)
         let id = try XCTUnwrap(mirror.entries.keys.sorted().first, "background_tasks_changed creates the entry it names")
+        XCTAssertEqual(touchedByListing, [id], "a listing reports the id it listed")
         XCTAssertEqual(mirror.entries.count, 1)
         XCTAssertEqual(mirror.entries[id]?.kind, .localBash)
         XCTAssertEqual(mirror.entries[id]?.listedByEngine, true)
@@ -105,8 +108,12 @@ final class RegistryMirrorTests: XCTestCase {
         XCTAssertEqual(entry.status, .running)
         XCTAssertEqual(entry.notified, false)
 
-        // Row 4 — the engine unlists it; nothing else moves, and it is still live work.
-        mirror = Self.fold(events, upTo: 4)
+        // Row 4 — the engine unlists it; nothing else moves, and it is still live work. The empty payload names no id,
+        // so the frame must report the one it unlisted: Task 8's reducer learns what changed from this return value.
+        mirror = Self.fold(events, upTo: 3)
+        guard case .system(let unlisting, let unlistedAt) = events[3] else { return XCTFail("row 4 is a system frame") }
+        XCTAssertEqual(mirror.apply(unlisting, at: unlistedAt, epoch: .first), [id],
+                       "an empty background_tasks_changed reports the id it unlisted")
         entry = try XCTUnwrap(mirror.entries[id])
         XCTAssertEqual(entry.listedByEngine, false)
         XCTAssertEqual(entry.status, .running, "background_tasks_changed is a liveness cross-check, not a status")

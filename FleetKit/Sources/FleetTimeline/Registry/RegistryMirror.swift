@@ -71,6 +71,8 @@ public struct RegistryMirror: Hashable, Sendable {
             if let toolUseID = started.toolUseID { entry.toolUseID = toolUseID }
             entry.status = .running
             entry.notified = false
+            // Deliberately beyond the fold rules as written: a re-arm is a fresh run of the same id, so its previous
+            // end and start would misdate the run now beginning.
             entry.endedAt = nil
             entry.startedCount += 1
             entry.startedAt = now
@@ -84,6 +86,8 @@ public struct RegistryMirror: Hashable, Sendable {
             let patch = updated.patch
             if let status = patch["status"]?.stringValue { entry.status = TaskStatus(wire: status) }
             if let end = patch["end_time"]?.intValue { entry.endedAt = Date(timeIntervalSince1970: Double(end) / 1000) }
+            // Deliberately beyond the fold rules as written: the patch is a patch, and a description it carries is as
+            // current as one `task_progress` carries.
             if let description = patch["description"]?.stringValue { entry.description = description }
             entry.lastFrameAt = now
             entries[entry.id] = entry
@@ -121,8 +125,15 @@ public struct RegistryMirror: Hashable, Sendable {
                 entry.lastFrameAt = now
                 entries[id] = entry
             }
-            for id in entries.keys where !listed.contains(id) { entries[id]?.listedByEngine = false }
-            return listed.sorted()
+            // An unlisting touches an entry as surely as a listing does, and Task 8's reducer folds through this
+            // return value: a `tasks: []` payload that reported nothing touched would be invisible to it. Only a real
+            // transition counts — an entry already unlisted was not touched by this frame.
+            var touched = listed
+            for id in entries.keys where !listed.contains(id) && entries[id]?.listedByEngine == true {
+                entries[id]?.listedByEngine = false
+                touched.insert(id)
+            }
+            return touched.sorted()
 
         default:
             return []

@@ -84,16 +84,45 @@ public actor TaskOutputTailer {
                 do { try await Task.sleep(for: interval) } catch { await self.stop(); return }
             }
         }
+        // A consumer that stops iterating — a cancelled task, a closed panel, a `break` — must not leave the pump
+        // polling the filesystem for the rest of the tailer's life. Abandoning the stream is a stop.
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.stop() }
+        }
         return stream
     }
 
+    /// Ends the stream. Every termination path routes through here — an unlinked file, a non-regular or unreadable
+    /// one, a cancelled sleep, an abandoned stream, an explicit stop — so the held-back trailer is flushed here and
+    /// only here. Dropping it would lose exactly the chunk a consumer waits for: the finished output and its exit
+    /// code, in the one poll interval between reading the trailer and confirming it. A finished background shell has
+    /// its output file reaped promptly, so that window is not hypothetical.
     public func stop() {
+        flushPending()
         finished = true
         continuation?.finish()
         continuation = nil
         pump?.cancel()
         pump = nil
     }
+
+    /// Yield the held-back read. It ends on `]\n` by construction, so its trailer is parsed: the file has stopped
+    /// growing, for the most final of reasons.
+    private func flushPending() {
+        guard !pending.isEmpty, let continuation else { return }
+        let buffer = pending
+        pending = Data()
+        let text = String(decoding: buffer, as: UTF8.self)
+        let trailer = OutputTrailer.parse(text)
+        continuation.yield(OutputChunk(text: text, exitCode: trailer.exitCode,
+                                       truncatedByEngine: trailer.truncated, offset: offset - buffer.count))
+    }
+
+    /// Whether the polling task is still alive, and how many bytes are held back awaiting confirmation. Both exist for
+    /// the tests: one proves that abandoning a stream stops the pump, the other lets a test open the confirmation
+    /// window deterministically instead of racing it.
+    var isPolling: Bool { pump != nil }
+    var bufferedTrailerBytes: Int { pending.count }
 
     /// Everything the file holds right now, in one read, with the trailer parsed if it is there. Independent of the
     /// polling offset, so a caller may snapshot a finished file without a stream at all.
