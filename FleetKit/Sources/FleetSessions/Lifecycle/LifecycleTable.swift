@@ -15,6 +15,8 @@ public enum LifecycleTable {
     /// Every path that calls `terminateOrWedge()`; the wedged row has one scenario per action so G1 injects the `nil`
     /// through each. `postHandshakeYield` is the yield the parent's "Owned, any" wedged row already covers — Owned-connecting
     /// is one of the states "any" admits — and which this enumeration used to omit.
+    /// It also names a fork's identity-deadline expiry, which yields from the same state for the same reason: a
+    /// handshake that cannot be finished, ended from Owned-connecting.
     public enum TerminatingAction: String, CaseIterable, Hashable, Sendable {
         case reap, sendToBackground, openInTerminal, restart, logout, capEviction, postHandshakeYield
     }

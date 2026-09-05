@@ -134,6 +134,11 @@ public actor ChannelSupervisor {
     /// live child and a cap slot the counter can never reclaim.
     private var forkIdentityTimer: Task<Void, Never>?
     private let spawnSibling: SiblingSpawner
+    /// The §6.12 gate every spawn passes first. nil in a rig that is driving a lifecycle row rather than a project.
+    private let preconditions: SpawnPreconditions?
+    /// The launch's sources exclude `local` and the project declares `.mcp.json` servers, so `--strict-mcp-config`
+    /// is on and the header says the project's servers are off. Re-applied wherever the header note is cleared.
+    private var projectServersOff = false
 
     private let updatesContinuation: AsyncStream<ChannelState>.Continuation
     /// Every transition, published after the state has changed.
@@ -157,10 +162,11 @@ public actor ChannelSupervisor {
                 evictVictim: @escaping @Sendable (ChannelKey) async -> EvictionOutcome = { _ in .victimBecameIneligible },
                 evictionBarrier: @escaping @Sendable (ChannelKey) async -> Void = { _ in },
                 spawnSibling: @escaping SiblingSpawner = { _, _ in nil },
+                preconditions: SpawnPreconditions? = nil,
                 initialOrigin: ChannelOrigin = .archived, initialDesired: DesiredOwnership = .none,
                 handshakeTimeout: Duration = .seconds(30)) {
         self.keyBox = ChannelKeyBox(key); self.launchTemplate = launchTemplate; self.factory = factory
-        self.spawnSibling = spawnSibling
+        self.spawnSibling = spawnSibling; self.preconditions = preconditions
         self.ownership = ownership; self.observer = observer; self.clock = clock
         self.eligibilityInputs = eligibilityInputs; self.fleet = fleet; self.diagnostics = diagnostics
         self.isRecent = isRecent; self.handshakeTimeout = handshakeTimeout
@@ -715,6 +721,30 @@ public actor ChannelSupervisor {
         spawning = true
         defer { spawning = false }
         unresolvedSettings = []   // whatever an earlier restart could not read back died with its process
+
+        // The §6.12 gate, before the cap and before the pre-spawn check: a project afleet may not spawn into must
+        // not take a slot on the way to being refused, and nothing here changes a state a transition could refuse.
+        var template = launchOverride ?? launchTemplate
+        if let preconditions {
+            let (verdict, resolved) = await preconditions.evaluate(
+                key: key, cwd: template.cwd, launch: template, wedged: state.wedged,
+                foreignHolders: state.observed.foreign, store: store)
+            diagnostics.record(.precondition(verdict: Self.name(of: verdict), session: key.session.description))
+            guard verdict == .ready else {
+                // A consent sheet is not a banner, and a decline that was just refused has already set one that
+                // says more than "consent needed" would; the other verdicts each have their own.
+                switch verdict {
+                case .untrusted: state.banner = .untrusted
+                case .managedSettingsPending: state.banner = .managedSettingsPending
+                case .contended(let holders): state.banner = .contended(holders)
+                case .ready, .consentNeeded, .wedged: break
+                }
+                publish()
+                throw LifecycleError.precondition(verdict)
+            }
+            template = resolved
+            projectServersOff = resolved.strictMCPConfig
+        }
         // A respawn continues the crash series; anything the user asked for starts a new one, which is what makes
         // *Reopen* mean something after the fourth failure.
         if reason != .respawn { crashCount = 0; wasReadyInThisSeries = false }
@@ -752,7 +782,7 @@ public actor ChannelSupervisor {
         epoch = epoch.next()
         state.epoch = epoch
         let mine = epoch
-        let handle = factory(epoch, launchOverride ?? launchTemplate)
+        let handle = factory(epoch, template)
         process = handle
         startPump(handle)
 
@@ -774,7 +804,7 @@ public actor ChannelSupervisor {
         // The reservation is held rather than confirmed, because which key it belongs to is not known yet.
         if isAwaitingFork {
             state.banner = nil
-            state.headerNote = nil
+            state.headerNote = projectServersOff ? .projectServersOff : nil
             forkReservation = reservation
             if let resolved = forkIdentityPending {
                 forkIdentityPending = nil
@@ -816,13 +846,45 @@ public actor ChannelSupervisor {
 
         await fleet.confirm(reservation)
         state.banner = nil
-        state.headerNote = nil
+        state.headerNote = projectServersOff ? .projectServersOff : nil
         if let resolved = await handle.sessionID { state.identity = .known(resolved) }
         guard reason != .restart else { return }   // Task 6 runs the readbacks and applies `.ready` itself
         apply(.handshakeClean, to: .ready)
         armDormantTimer()
         pushEligibility()
         await flushQueuedInput()
+    }
+
+    /// The verdict's own word, with no payload: a precondition diagnostic names a shape, never a path or a record.
+    private static func name(of verdict: SpawnPrecondition) -> String {
+        switch verdict {
+        case .ready: "ready"
+        case .untrusted: "untrusted"
+        case .consentNeeded(let servers): "consentNeeded(\(servers.count))"
+        case .managedSettingsPending: "managedSettingsPending"
+        case .contended(let holders): "contended(\(holders.holders.count))"
+        case .wedged: "wedged"
+        }
+    }
+
+    /// *Decline*: the one Claude Code-owned file afleet writes, through §6.12's resolver and write policy. It runs
+    /// only while this channel holds no process, and a refusal banners the reason word and changes nothing else —
+    /// the channel is still consent-blocked and the sheet is still the way out.
+    public func declineProjectServers(_ names: [String]) async throws {
+        guard let preconditions else { throw LifecycleError.notOwned }
+        do {
+            // The runtime cwd, not the template's: a `set_cwd` moves the project the channel is in, and the store
+            // resolves from where the channel actually is.
+            try preconditions.decline(names: names, cwd: runtime.cwd, configHome: key.configHome,
+                                      processIsLive: process != nil)
+            diagnostics.record(.declineWrite(outcome: "written", servers: names.count))
+        } catch let error as LifecycleError {
+            guard case .declineRefused(let reason) = error else { throw error }
+            diagnostics.record(.declineWrite(outcome: reason, servers: names.count))
+            state.banner = .mcpDeclineRefused(reason)
+            publish()
+            throw error
+        }
     }
 
     private func flushQueuedInput() async {
@@ -962,14 +1024,20 @@ public actor ChannelSupervisor {
         guard isAwaitingFork, deadlineEpoch == epoch, let reservation = forkReservation else { return }
         forkReservation = nil
         forkIdentityPending = nil
+        diagnostics.record(.forkIdentityDeadlineExpired(session: key.session.description,
+                                                        epoch: deadlineEpoch.rawValue))
         // The parent's wedged row is "Owned, any", and the yield of a spawn that cannot finish is the action this
         // one is: `postHandshakeYield` fires only from connecting, which is where a fork without an id sits.
-        if case .wedged = await terminateOrWedge(during: .postHandshakeYield) {
+        let outcome = await terminateOrWedge(during: .postHandshakeYield)
+        guard case .exited(let status) = outcome else {
             await fleet.rollback(reservation)
             return
         }
         process = nil
         await fleet.rollback(reservation)
+        // Something the user can see. The channel is left connecting with no process, exactly as a spawn error
+        // leaves it, and the item the crash path already uses is what offers the way back.
+        state.systemItem = .crashed(exit: status, reopenOffered: true)
         publish()
     }
 
@@ -1200,6 +1268,15 @@ public actor ChannelSupervisor {
     /// Every branch publishes exactly once — directly, or through the `apply` that succeeded — so a caller watching
     /// `publishedCount` has a synchronisation point that is after the whole decision and not in the middle of it.
     private func handleExit(_ status: ExitStatus, epoch exited: ProcessEpoch) async {
+        // A fork's reservation is confirmed nowhere but `resolveForkIdentity`, and an exit before the identity
+        // arrives reaches neither that nor the deadline: leaving it here would keep a claim in the counter's
+        // `reserved` map for the life of the process, one of six slots, permanently, per such crash. `release` on an
+        // unconfirmed provisional key is a no-op, so there is nothing to double-free.
+        forkIdentityTimer?.cancel(); forkIdentityTimer = nil
+        if let reservation = forkReservation {
+            forkReservation = nil
+            await fleet.rollback(reservation)
+        }
         state.pendingDecisions = []
         turnRunning = false
         process = nil

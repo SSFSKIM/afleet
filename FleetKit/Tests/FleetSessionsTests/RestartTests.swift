@@ -34,7 +34,7 @@ final class RestartTests: XCTestCase {
     /// The fixture whose replay stays alive after the handshake until the host asks it to stop.
     private static let idle = "resume-no-replay"
 
-    private func scriptDirectory(_ rig: Rig) -> URL { rig.cwd.appending(path: ".scripts") }
+    private func scriptDirectory(_ rig: Rig) -> URL { rig.scratch.appending(path: "scripts") }
 
     /// The `get_settings` answer, in the recorded shape: `{applied: {...}, effective_keys: [...]}`.
     private static func settingsAnswer(applied: [String: Any], effectiveKeys: [String]) -> [String: Any] {
@@ -271,8 +271,8 @@ final class RestartTests: XCTestCase {
     func testRestartRelaunchesTheCWDChangedBySetCwd() async throws {
         let rig = try newRig()
         let session = try FakeClaudeLaunch.sessionID(of: Self.idle)
-        let a = rig.cwd.appending(path: "a")
-        let b = rig.cwd.appending(path: "b")
+        let a = rig.scratch.appending(path: "a")
+        let b = rig.scratch.appending(path: "b")
         for directory in [a, b] {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }

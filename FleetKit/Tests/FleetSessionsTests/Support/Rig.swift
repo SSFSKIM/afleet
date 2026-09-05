@@ -57,9 +57,17 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     let observer: FleetObserver
     let fleet: FleetCapCounter
     let cwd: URL
+    /// Scratch space for the *test's* own files — replay scripts, directories a `/add-dir` or a `set_cwd` points at.
+    /// Deliberately not the launch cwd: `tearDown` proves nothing in `FleetSessions` wrote under that one, and a
+    /// harness that put its own fixtures there would make the proof vacuous.
+    let scratch: URL
     let runnerCalls: ScriptedProcessRunner.Recorder
     let verbs: CLIVerbs
     let store: FileStateStore
+    /// `testNothingElseInThePackageWritesUnderAProject` as a whole-package property: the rig's own cwd is a project
+    /// directory, and `tearDown` proves nothing in `FleetSessions` wrote under it. The one §6.12 write is the
+    /// `LocalSettingsStore.decline` of `PreconditionTests`, which uses its own project and never this one.
+    private var cwdWitness: TreeWitness!
     private let storeDirectory: URL
     /// The `OwnershipCheck` seam every supervisor this rig builds shares: it runs once a release has been observed
     /// and before the caller's recheck, which is the window the preempt rows are about.
@@ -103,6 +111,9 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         cwd = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appending(path: "afleet-c4-cwd-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        scratch = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appending(path: "afleet-c4-scratch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
 
         let runner = ScriptedProcessRunner(rules: ScriptedProcessRunner.defaultRules(files))
         runnerCalls = runner.calls
@@ -114,6 +125,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         storeDirectory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appending(path: "afleet-c4-store-\(UUID().uuidString)")
         store = try FileStateStore(baseDirectory: storeDirectory, configHomes: [home.url])
+
+        cwdWitness = TreeWitness(cwd)
 
         let box = OwnPIDBox()
         observer = FleetObserver(configHome: home.configHome, reader: reader, clock: clock,
@@ -306,7 +319,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
                     dropFixture: Bool = false, eligibility: EligibilityBox = EligibilityBox(),
                     records: Bool = true, template overrideTemplate: LaunchConfiguration? = nil,
                     script: URL? = nil, relaunchScript: URL? = nil, initOverride: URL? = nil,
-                    forkFixture: String? = nil) -> ChannelSupervisor {
+                    forkFixture: String? = nil, cwdOverride: URL? = nil,
+                    preconditions: SpawnPreconditions? = nil) -> ChannelSupervisor {
         func makeEnvironment(script: URL?) -> ResolvedEnvironment {
             var e = FakeClaudeLaunch.environment(fixture: fixture, script: script, initOverride: initOverride,
                                                  speed: speed)
@@ -319,7 +333,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         // has two environments; this is the rig standing in for two recordings of one channel.
         let relaunchEnvironment = relaunchScript.map { makeEnvironment(script: $0) } ?? environment
         let template = overrideTemplate
-            ?? FakeClaudeLaunch.launch(fixture: fixture, cwd: cwd, session: .resume(session, fork: false))
+            ?? FakeClaudeLaunch.launch(fixture: fixture, cwd: cwdOverride ?? cwd,
+                                       session: .resume(session, fork: false))
         let key = ChannelKey(configHome: home.url, session: session)
         let sink: any FleetDiagnosticsSink = records ? diagnostics : NullFleetDiagnostics()
 
@@ -349,9 +364,12 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
                 return self.supervisor(
                     session: provisional.session, fixture: siblingFixture, isRecent: true, speed: speed,
                     eligibility: EligibilityBox(), records: records,
-                    template: FakeClaudeLaunch.launch(fixture: siblingFixture, cwd: self.cwd, session: start),
-                    script: script, relaunchScript: relaunchScript, initOverride: initOverride)
+                    template: FakeClaudeLaunch.launch(fixture: siblingFixture,
+                                                      cwd: cwdOverride ?? self.cwd, session: start),
+                    script: script, relaunchScript: relaunchScript, initOverride: initOverride,
+                    cwdOverride: cwdOverride, preconditions: preconditions)
             },
+            preconditions: preconditions,
             initialOrigin: origin, initialDesired: desired)
 
         lock.lock()
@@ -545,14 +563,16 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         for supervisor in supervisors { await supervisor.shutdown() }
     }
 
-    func tearDown() async {
+    func tearDown(file: StaticString = #filePath, line: UInt = #line) async {
         releaseEviction()
         for supervisor in supervisors { await supervisor.reap() }
         await observer.stop()
         for task in tasks { task.cancel() }
         for pid in locked({ Array(_helpers) }) { killHelper(pid) }
+        cwdWitness.assertUnchanged("the rig's project directory", file: file, line: line)
         home.removeAll()
         try? FileManager.default.removeItem(at: cwd)
+        try? FileManager.default.removeItem(at: scratch)
         try? FileManager.default.removeItem(at: storeDirectory)
     }
 }

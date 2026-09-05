@@ -18,6 +18,10 @@ public enum FleetDiagnosticEvent: Sendable {
     case staleExit(id: UUID, purpose: String)
     case jobNotListedAfterBackground(session: String)
     case wedged(session: String, steps: Int)
+    /// A fork's engine never announced an id within the supervisor's deadline. The child is ended and the slot goes
+    /// back; without this the failure had no record, no banner and no item, and the user was left on the connecting
+    /// glyph with nothing said.
+    case forkIdentityDeadlineExpired(session: String, epoch: UInt64)
     /// Liveness fell back to the `startedAt` window because the record carried no `procStart`.
     case procStartAbsent(pid: Int32)
     /// Liveness fell back to the `startedAt` window because the record's `procStart` did not parse.
@@ -72,6 +76,9 @@ public enum FleetDiagnosticEvent: Sendable {
             return .object(["event": .string("job_not_listed_after_background"), "session": .string(session)])
         case let .wedged(session, steps):
             return .object(["event": .string("wedged"), "session": .string(session), "steps": .integer(Int64(steps))])
+        case let .forkIdentityDeadlineExpired(session, epoch):
+            return .object(["event": .string("fork_identity_deadline_expired"), "session": .string(session),
+                            "epoch": .integer(Int64(epoch))])
         case let .procStartAbsent(pid):
             return .object(["event": .string("proc_start_absent"), "pid": .integer(Int64(pid))])
         case let .procStartUnparseable(pid):

@@ -33,13 +33,29 @@ final class ScratchConfigHome {
 
     /// Marks a project root trusted, the way the trust dialog does — in *this* directory, which is a home the test
     /// created and not one the never-write rule protects.
-    func trust(root: URL) throws {
+    func trust(root: URL) throws { try setTrust(root: root, true) }
+
+    /// The same write with the answer the dialog recorded, so a test can produce the *declined* entry as well as
+    /// the accepted one.
+    func setTrust(root: URL, _ accepted: Bool) throws {
+        try mutateProjectEntry(root: root) { $0["hasTrustDialogAccepted"] = accepted }
+    }
+
+    /// The legacy per-project consent arrays live here. The engine migrates them into local settings at startup and
+    /// its consent decision never reads them; a test writes them to prove afleet does not read them either.
+    func setProjectEntry(root: URL, _ fields: [String: Any]) throws {
+        try mutateProjectEntry(root: root) { entry in for (k, v) in fields { entry[k] = v } }
+    }
+
+    private func mutateProjectEntry(root: URL, _ body: (inout [String: Any]) -> Void) throws {
         let file = url.appending(path: ".claude.json")
         var document = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any] ?? [:]
         var projects = document["projects"] as? [String: Any] ?? [:]
-        let key = root.resolvingSymlinksInPath().path(percentEncoded: false)
+        // `realpath`, not `resolvingSymlinksInPath`: the latter rewrites `/private/var` back to `/var`, which is
+        // the spelling the reader will never produce, so the entry would be written under a key nothing looks up.
+        let key = TemporaryProject.realpath(root)
         var entry = projects[key] as? [String: Any] ?? [:]
-        entry["hasTrustDialogAccepted"] = true
+        body(&entry)
         projects[key] = entry
         document["projects"] = projects
         try write(document, to: file)

@@ -30,6 +30,7 @@ final class RecordingDiagnostics: FleetDiagnosticsSink, DiagnosticsSink, @unchec
     private var _jobNotListed: [String] = []
     private var _handoffWaits: [(outcome: String, waitedMs: Int)] = []
     private var _wireSteps: [String] = []
+    private var _forkIdentityDeadlines: [String] = []
 
     init() {}
 
@@ -45,6 +46,8 @@ final class RecordingDiagnostics: FleetDiagnosticsSink, DiagnosticsSink, @unchec
     var staleExits: [UUID] { lock.lock(); defer { lock.unlock() }; return _staleExits }
     var jobNotListed: [String] { lock.lock(); defer { lock.unlock() }; return _jobNotListed }
     var handoffWaits: [(outcome: String, waitedMs: Int)] { lock.lock(); defer { lock.unlock() }; return _handoffWaits }
+    /// Every fork whose identity deadline expired, by session.
+    var forkIdentityDeadlines: [String] { lock.lock(); defer { lock.unlock() }; return _forkIdentityDeadlines }
     /// Every `terminate_escalated` step ClaudeWire reported through the capturing sink.
     var wireEscalationSteps: [String] { lock.lock(); defer { lock.unlock() }; return _wireSteps }
 
@@ -75,6 +78,8 @@ final class RecordingDiagnostics: FleetDiagnosticsSink, DiagnosticsSink, @unchec
             _jobNotListed.append(session)
         case let .handoffWait(outcome, waitedMs, _):
             _handoffWaits.append((outcome, waitedMs))
+        case let .forkIdentityDeadlineExpired(session, _):
+            _forkIdentityDeadlines.append(session)
         default:
             break
         }
