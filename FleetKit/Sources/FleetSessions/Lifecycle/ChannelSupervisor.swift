@@ -559,23 +559,36 @@ public actor ChannelSupervisor {
             let target: LifecycleTable.StateName = {
                 if process != nil { return .ready }
                 if contendedFrom == .dormant { return .dormant }
-                // The table admits only `archivedRecent` here, but `enter` reads that name as a *statement* about
-                // recency, so naming it unconditionally would make a channel recent merely by passing through
-                // Contended. The name is derived from the flag the channel already has.
+                // `enter` reads a state name as a *statement* about recency, so naming `archivedRecent`
+                // unconditionally would make a channel recent merely by passing through Contended. The name comes
+                // from the flag the channel already has, and the table admits both.
                 return Self.name(of: .archived, isRecent: isRecent)
             }()
-            state.banner = nil
-            contendedFrom = nil
-            apply(.holdersSettled, to: target)
+            settle(to: target)
             return
         }
         guard foreign.count == 1 else { publish(); return }
         let (origin, presence) = OriginResolver.resolve(key: key, ownedState: nil, holders: foreign,
                                                         pendingHatch: false)
         state.presence = presence
+        settle(to: Self.name(of: origin, isRecent: isRecent))
+    }
+
+    /// Leaves Contended, and leaves it *intact* if the table refuses. A transition that finds no candidate is a
+    /// programming error and this actor stays in the state it was in — so the banner and the from-state it would
+    /// need to try again must not have been thrown away first, or the channel is Contended with no way out and
+    /// re-runs the refused transition on every later holder update.
+    private func settle(to target: LifecycleTable.StateName) {
+        let banner = state.banner
+        let from = contendedFrom
         state.banner = nil
         contendedFrom = nil
-        apply(.holdersSettled, to: Self.name(of: origin, isRecent: isRecent))
+        guard apply(.holdersSettled, to: target) else {
+            state.banner = banner
+            contendedFrom = from
+            publish()
+            return
+        }
     }
 
     /// A fresh unbounded fan-out per call. This is the only way a wire frame leaves the supervisor.

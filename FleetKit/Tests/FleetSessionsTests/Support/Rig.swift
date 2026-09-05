@@ -1,8 +1,14 @@
 import Foundation
+import Darwin
 import XCTest
 import AfleetCore
 import ClaudeWire
 @testable import FleetSessions
+
+struct HelperSpawnFailure: Error, CustomStringConvertible {
+    let code: Int32
+    var description: String { "posix_spawn of the helper process failed with \(code)" }
+}
 
 struct ScriptedSpawnFailure: Error, CustomStringConvertible {
     var description: String { "the scripted handle refused to spawn" }
@@ -65,8 +71,7 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     private let lock = NSLock()
     private var _onReleased: (@Sendable () async -> Void)?
     private var _byKey: [ChannelKey: ChannelSupervisor] = [:]
-    private var _helpers: [Int32: Process] = [:]
-    private var _reapers: [DispatchSemaphore] = []
+    private var _helpers: Set<Int32> = []
     private var _heldVictims: Set<ChannelKey> = []
     private var _heldEviction: [CheckedContinuation<Void, Never>] = []
     private var _extraOwnPIDs: Set<Int32> = []
@@ -166,36 +171,37 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
 
     // MARK: - Real processes the test started
 
-    /// A real child of the test, standing in for a job worker or a terminal tab: a pid that can genuinely die, which
-    /// is what `awaitRelease` waits for. `/bin/sleep` is started and reaped by this rig and nothing else.
+    /// A real child of the test, standing in for a job worker or a terminal tab: a pid that can genuinely die,
+    /// which is what `awaitRelease` waits for.
+    ///
+    /// `posix_spawn` rather than `Process`, so this rig owns the child outright and nothing else is waiting on it.
+    /// Foundation reaps a `Process` asynchronously on machinery of its own, which is what made `killHelper` unable
+    /// to promise the pid was gone by the time it returned.
     @discardableResult
     func startHelper() throws -> Int32 {
-        let process = Process()
-        process.executableURL = URL(filePath: "/bin/sleep")
-        process.arguments = ["3600"]
-        try process.run()
-        let pid = process.processIdentifier
-        lock.lock(); _helpers[pid] = process; lock.unlock()
+        let path = "/bin/sleep"
+        var argv: [UnsafeMutablePointer<CChar>?] = [strdup(path), strdup("3600"), nil]
+        defer { for argument in argv where argument != nil { free(argument) } }
+        var pid: pid_t = 0
+        let code = posix_spawn(&pid, path, nil, nil, &argv, environ)
+        guard code == 0 else { throw HelperSpawnFailure(code: code) }
+        lock.lock(); _helpers.insert(pid); lock.unlock()
         return pid
     }
 
-    /// Signals the helper and *reaps* it: a zombie still answers `kill(pid, 0)`, so a release wait would never end.
-    ///
-    /// The reap runs off the caller's thread. This is called from inside a holder read, and a read runs on the
-    /// cooperative pool; blocking one of its threads on `waitUntilExit` starves whatever else the wait needs.
+    /// Kills the helper and **reaps it before returning**, so `kill(pid, 0)` stops answering the moment this call
+    /// does. A release wait polls on the manual clock, which a test advances as fast as sleepers park, so the wait's
+    /// whole budget can pass in a few milliseconds of wall time: a pid left as a zombie for even that long makes the
+    /// wait run out and the channel go Contended instead of re-adopting. `SIGKILL` cannot be caught, so `waitpid`
+    /// returns as soon as the kernel has torn the process down; no Swift concurrency has to make progress for it.
     func killHelper(_ pid: Int32) {
-        lock.lock(); let process = _helpers.removeValue(forKey: pid); lock.unlock()
-        guard let process else { return }
-        if process.isRunning { process.terminate() }
-        let reaped = DispatchSemaphore(value: 0)
-        Thread.detachNewThread { process.waitUntilExit(); reaped.signal() }
-        lock.lock(); _reapers.append(reaped); lock.unlock()
-    }
-
-    /// Waits for every helper this rig killed to have been reaped, so teardown leaves no zombie behind.
-    private func awaitReapers() {
-        lock.lock(); let reapers = _reapers; _reapers = []; lock.unlock()
-        for reaper in reapers { _ = reaper.wait(timeout: .now() + .seconds(10)) }
+        guard locked({ _helpers.remove(pid) != nil }) else { return }
+        kill(pid, SIGKILL)
+        var status: Int32 = 0
+        while waitpid(pid, &status, 0) < 0 {
+            if errno == EINTR { continue }
+            break   // ECHILD: already reaped, which is the same postcondition
+        }
     }
 
     // MARK: - Holding an eviction open
@@ -234,7 +240,11 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     /// Steps the manual clock in the release wait's own 500 ms poll interval while `body` runs, up to `limit` of test
     /// time, so a clock-driven wait makes progress. Nothing here sleeps on wall time to move the lifecycle: every
     /// step is the test moving the clock, and the wall-clock race is only a failure guard.
-    func steppingClock<T: Sendable>(upTo limit: Duration = .seconds(5),
+    ///
+    /// The default limit is the handoff budget itself: a wait cannot outlast it, so a shorter default can only ever
+    /// end a wait early and fail a test that was going to pass. A test that means to *reach* the timeout passes the
+    /// budget explicitly, which is the same number and says so at the call site.
+    func steppingClock<T: Sendable>(upTo limit: Duration = ChannelSupervisor.handoffBudget,
                                     file: StaticString = #filePath, line: UInt = #line,
                                     _ body: @escaping @Sendable () async throws -> T) async throws -> T {
         let done = LockedFlag()
@@ -501,9 +511,7 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         for supervisor in supervisors { await supervisor.reap() }
         await observer.stop()
         for task in tasks { task.cancel() }
-        let helpers = locked { Array(_helpers.keys) }
-        for pid in helpers { killHelper(pid) }
-        awaitReapers()
+        for pid in locked({ Array(_helpers) }) { killHelper(pid) }
         home.removeAll()
         try? FileManager.default.removeItem(at: cwd)
         try? FileManager.default.removeItem(at: storeDirectory)

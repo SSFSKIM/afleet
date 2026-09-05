@@ -84,6 +84,9 @@ public enum LifecycleTable {
         .init(.desiredObservedDisagree, .ready, .desiredObservedDisagree, .contended),
         .init(.desiredObservedDisagree, .dormant, .desiredObservedDisagree, .contended),
         .init(.contendedSettled, .contended, .holdersSettled, .archivedRecent),
+        // Archived-older is a matching origin too: the parent's row is "the matching origin", and a channel nobody
+        // holds and afleet holds no process for is archived — recent or not, depending on the flag it already had.
+        .init(.contendedSettled, .contended, .holdersSettled, .archivedOlder),
         .init(.contendedSettled, .contended, .holdersSettled, .ready),
         .init(.contendedSettled, .contended, .holdersSettled, .dormant),
         .init(.contendedSettled, .contended, .holdersSettled, .foreignUsersTerminal),

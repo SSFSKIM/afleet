@@ -83,6 +83,9 @@ final class LifecycleRowTests: XCTestCase {
             T(.desiredObservedDisagree, .connecting, .desiredObservedDisagree, .contended),
             T(.desiredObservedDisagree, .ready, .desiredObservedDisagree, .contended),
             T(.desiredObservedDisagree, .dormant, .desiredObservedDisagree, .contended)],
+        "testContendedSettlingToNobodyLeavesAnOlderChannelOlder": [
+            T(.contendedSettled, .contended, .holdersSettled, .archivedOlder),
+            T(.archivedOlderOpened, .archivedOlder, .opened, .archivedOlder)],
         "testContendedResolvesWhenHoldersSettle": [
             T(.contendedSettled, .contended, .holdersSettled, .archivedRecent),
             T(.contendedSettled, .contended, .holdersSettled, .ready),
@@ -1610,6 +1613,36 @@ final class LifecycleRowTests: XCTestCase {
     }
 
     // MARK: - contendedSettled
+
+    /// A channel that was not recently active is still not recently active after passing through Contended. The
+    /// parent's row is "the matching origin", and for a channel afleet holds no process for and that nobody else
+    /// holds either, archived-older is the matching origin — so the table admits it and the channel has a way out.
+    ///
+    /// Deriving the name from the flag without the row is worse than getting the flag wrong: `apply` refuses a
+    /// transition it has no candidate for, and the channel is left Contended with no banner and no way out.
+    func testContendedSettlingToNobodyLeavesAnOlderChannelOlder() async throws {
+        let rig = try newRig()
+        let session = SessionID()
+        let supervisor = rig.supervisor(session: session, isRecent: false, origin: .owned(.ready), desired: .owned)
+        await supervisor.holdersChanged(set([foreignHolder(session)]))
+        let contended = await supervisor.state
+        XCTAssertEqual(contended.origin, .owned(.contended))
+        rig.forgetTransitions()
+
+        await supervisor.holdersChanged(set([]))
+
+        let settled = await supervisor.state
+        XCTAssertEqual(settled.origin, .archived)
+        XCTAssertNil(settled.banner, "the contended banner is cleared when the holders settle")
+        XCTAssertEqual(rig.diagnostics.notInTable, [], "the channel had a transition to take")
+
+        // Still older: opening it renders history and spawns nothing, which is the whole point of the flag.
+        try await supervisor.open()
+        XCTAssertEqual(rig.spawnCount, 0)
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
+    }
+
+
 
     /// Contended is a state the channel comes back out of. Zero holders means the session is nobody's — unless the
     /// channel still owns a process, or was dormant when the disagreement arrived; one holder means that holder's
