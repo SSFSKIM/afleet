@@ -703,9 +703,10 @@ public enum ProjectionCategories {
   /// Check two compares these item for item; `.taskRun` only for subagent runs, by agent id and source file.
   public static let comparedWireToFile: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun]
   /// Record kinds that never reach the wire as conversational frames and are compared file-to-file only.
+  /// `compact_boundary` left this list on 2026-09-05 (parent amendment; Revision Notes below).
   public static let fileOnlyRecordKinds: Set<RecordKindMatcher> = [
     .kind("attachment"), .system("turn_duration"), .system("stop_hook_summary"), .system("local_command"),
-    .system("informational"), .system("compact_boundary"), .userWhere(.isMeta)]
+    .system("informational"), .userWhere(.isMeta)]
   /// Fields compared inside an item under check two; everything else is display or timing.
   public static let comparedItemFields: ItemFieldSet = [.role, .model, .contentBlocks(.text, .thinking, .toolUse(id: true, name: true, input: true), .toolResult(content: true, isError: true), .image, .document), .origin, .toolDenialKind]
 }
@@ -1299,6 +1300,17 @@ the questions stand as the record of what was asked. The fifth was added at v2.2
 Pending — written at finish.
 
 ## Revision Notes
+
+- 2026-09-05: v2.6, parent amendment applied mid-execution (coordinator, during Task 1/2).
+  §7.3's file-only exclusion list has lost `compact_boundary`: the `compact-boundary` recording
+  taken on `main` today shows the engine emitting the boundary on the wire as a `system` frame of
+  that subtype and mirroring the record, so it is compared like any other record rather than
+  file-to-file only. `ProjectionCategories.fileOnlyRecordKinds` drops `.system("compact_boundary")`
+  and keeps the rest of the list. Nothing else moves: this branch's corpus carries no
+  `compact_boundary` record in any fixture, so no census pin, count or name set changes, and
+  `.compactBoundary` stays in `durable` and out of `comparedWireToFile` exactly as before. The new
+  fixture itself is not merged here — `FixtureCorpus.committedCount` is 18 on this branch and is
+  the first pin to move when this branch merges `main`.
 
 - 2026-09-05: v2.5, third Codex pass (ten findings; nine folded, one half-dismissed by the
   coordinator). The tap is stated as one subscription of C4's per-subscriber fan-out

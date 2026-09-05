@@ -1006,9 +1006,13 @@ public enum ProjectionCategories {
     public static let durable: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .compactBoundary, .taskRun]
     public static let overlay: Set<TimelineCategory> = [.cluster, .decision, .hookRun, .notification, .turnSummary]
     public static let comparedWireToFile: Set<TimelineCategory> = [.userMessage, .assistantMessage, .toolCall, .peerMessage, .sentFile, .taskRun]
+    /// `compact_boundary` is deliberately absent: the parent amended §7.3's exclusion list on
+    /// 2026-09-05 after the `compact-boundary` recording showed the engine emitting the boundary
+    /// on the wire as a `system` frame of that subtype and mirroring the record, so it is compared
+    /// like any other record rather than file-to-file only.
     public static let fileOnlyRecordKinds: Set<RecordKindMatcher> = [
         .kind("attachment"), .system("turn_duration"), .system("stop_hook_summary"), .system("local_command"),
-        .system("informational"), .system("compact_boundary"), .userWhere(.isMeta)]
+        .system("informational"), .userWhere(.isMeta)]
     public static let comparedItemFields: ItemFieldSet = [.role, .model, .origin, .toolDenialKind,
         .contentBlocks(text: true, thinking: true, toolUseID: true, toolUseName: true, toolUseInput: true, toolResultContent: true, toolResultIsError: true, image: true, document: true)]
     /// Excluded on purpose and named so: `stop_reason` and `usage` differ between the mirror and the file of an agent stream
@@ -1830,6 +1834,14 @@ Each was answered with the recommendation below and the plan proceeds on it; ove
 7. **The `WireEventPolicy` pin.** Tasks 8 and 9 consume `WireEventPolicy` from `WireTransport`, on `main` at merge `ca68f2e` (branch commit `f187499`); Task 8's Step 0 preflights `git merge-base --is-ancestor ca68f2e HEAD` and stops if the pin is missing. The five `WireEventPolicyFixtureTests` on `main` are the parity witness between the actor and the function, which agree by construction; no separate parity test is written, because no fake-claude Swift harness exists to drive the actor in-process. C3 still duplicates none of that logic.
 
 ## Revision Notes
+
+- 2026-09-05: parent amendment applied mid-execution, before Task 4 was dispatched.
+  `ProjectionCategories.fileOnlyRecordKinds` (Task 4, Step 2) drops `.system("compact_boundary")`:
+  the engine emits the boundary on the wire as a `system` frame of that subtype and mirrors the
+  record, so it is not file-only. The rest of the list is unchanged, and no pin, count or checkpoint
+  moves — this branch's corpus carries no `compact_boundary` record. Task 5's rule 8 and Task 8's
+  `.system(.compactBoundary)` route are unaffected: `.compactBoundary` was never in
+  `comparedWireToFile`, so check two's item set does not change.
 
 - 2026-09-05: v5, third Codex pass (spec v2.5; ten findings, nine folded, one half-dismissed by
   the coordinator). Task 10: `receive` states the seam — the tap is one subscription of C4's
