@@ -56,6 +56,8 @@ final class LifecycleRowTests: XCTestCase {
             T(.capReached, .ready, .seventhSpawnNeeded, .dormant), T(.connectingClean, .connecting, .handshakeClean, .ready)],
         "testAdoptStopsTheJobWaitsForRosterRemovalThenResumes": [
             T(.jobAdopt, .backgroundJob, .adopt, .connecting), T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        "testAStaleRecordSeenDuringAHandoffDoesNotTurnTheChannelContended": [
+            T(.ownedSendToBackground, .ready, .sendToBackground, .backgroundJob)],
         "testSendToBackgroundTerminatesWaitsForRegistryRemovalThenStartsAJob": [
             T(.ownedSendToBackground, .ready, .sendToBackground, .backgroundJob),
             T(.ownedSendToBackground, .dormant, .sendToBackground, .backgroundJob)],
@@ -1197,6 +1199,53 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(unchanged.origin, .owned(.ready))
         let pending = await supervisor.pendingPaneRequest
         XCTAssertNil(pending, "neither is a hatch, so neither is waited on")
+    }
+
+    /// A poll that lands inside a handoff, while our own child's registry record has outlived its process, must
+    /// not turn the channel Contended.
+    ///
+    /// The record is removed by the CLI, not by the terminate, which is the whole reason the release wait exists;
+    /// and once `process` is nil the fleet's own-pid set no longer claims that pid, so a `HolderSet` read in that
+    /// window shows our own dying child as a stranger. Rule 1 used to fire on it. The handoff then finished, put a
+    /// real job on the roster, and left the channel reading `owned(contended)` — because `sendToBackground`'s own
+    /// transition has no candidate from Contended.
+    ///
+    /// Found by G5's adoption scenario against the installed CLI, which asserted `.backgroundJob` and got
+    /// `owned(contended)` after a send-to-background that had otherwise entirely succeeded. The holder here is
+    /// pushed straight through `holdersChanged` and never written to the scripted files, which is exactly the live
+    /// shape: seen by one poll, gone by the time the handoff's own recheck runs.
+    ///
+    /// Deliberate break: drop `!handingOff` from the rule-1 guard in `holdersChanged` → the channel ends
+    /// `owned(contended)` and this fails with the live run's own message.
+    func testAStaleRecordSeenDuringAHandoffDoesNotTurnTheChannelContended() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let session = SessionID()
+        // `desired: .owned` is the point: rule 1 fires only when afleet wants the channel owned, which is what
+        // every path into this handoff leaves behind — the live scenario arrived here through `adopt`.
+        let supervisor = try await readyScripted(rig, session: session, desired: .owned)
+        let childPID = try rig.startHelper()
+        rig.scriptedHandles[0].pid = childPID
+        try rig.files.writeRegistry(pid: childPID, sessionID: session, kind: "interactive", entrypoint: "sdk-cli")
+        rig.reader.onLabel(OwnershipLabel.release) { [weak rig] in
+            rig?.files.removeRegistry(pid: childPID)
+            rig?.killHelper(childPID)
+        }
+        // The poll that lands in the window: our own child's record, no longer recognised as ours.
+        rig.onReleased = { [weak supervisor] in
+            await supervisor?.holdersChanged(HolderSet(
+                holders: [Holder(pid: childPID, sessionID: session, sources: [.registry], kind: "interactive",
+                                 entrypoint: "sdk-cli", isOwnChild: false)],
+                observedAt: Date()))
+        }
+
+        rig.forgetTransitions()
+        _ = try await rig.steppingClock { try await supervisor.sendToBackground() }
+
+        let origin = await supervisor.state.origin
+        XCTAssertEqual(origin, .backgroundJob,
+                       "a stale record of our own child inside the handoff window turned the channel Contended")
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 
     // MARK: - handoffPreempted

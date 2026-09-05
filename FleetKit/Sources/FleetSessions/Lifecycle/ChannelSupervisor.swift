@@ -110,6 +110,8 @@ public actor ChannelSupervisor {
     /// True from the moment a spawn takes its reservation until it has applied its own outcome. The holder updates
     /// that arrive in that window belong to the post-handshake check, not to the disagreement rule.
     private var spawning = false
+    /// A handoff — send to background, or the terminal hatch — is between its terminate and its launch.
+    private var handingOff = false
 
     /// What the channel is *running*: every value here arrived from an engine answer or an engine frame, and the
     /// quiescent restart relaunches from a copy of it rather than from the launch template.
@@ -529,6 +531,8 @@ public actor ChannelSupervisor {
             throw LifecycleError.notOwned
         }
         if let trace = state.wedged { throw LifecycleError.wedged(trace) }
+        handingOff = true
+        defer { handingOff = false }
 
         var terminated = false
         if let handle = process {
@@ -1387,7 +1391,16 @@ public actor ChannelSupervisor {
         // and take `connectingFoundHolder`, the row that exists for a holder found during a spawn. Raising the
         // disagreement here instead would move the channel to Contended and leave that check's own transition with
         // no candidate — `transitionNotInTable`, which Task 12's gate reads as a programming error.
-        if state.desired == .owned, !spawning, here == .connecting || here == .ready || here == .dormant,
+        // Nor while a handoff of ours is between its terminate and its launch, and for the same reason the spawn
+        // is excluded. Our own child's registry record outlives its process — the CLI removes it, and the release
+        // wait exists precisely to wait for that — and once `process` is nil the fleet's own-pid set no longer
+        // claims it, so a poll landing in that window reads our own dying child as a stranger. The handoff runs
+        // its own recheck a moment later and takes `holderAppearedBeforeLaunch` if a holder is genuinely there;
+        // raising the disagreement here instead moves the channel to Contended, from which the handoff's own
+        // transition has no candidate, and it ends holding a job it cannot show. G5's adoption scenario found
+        // this: send-to-background ran, the job was on the roster, and the channel read `owned(contended)`.
+        if state.desired == .owned, !spawning, !handingOff,
+           here == .connecting || here == .ready || here == .dormant,
            mine.contains(where: { !$0.isOwnChild }) {
             enterContended(mine, via: .desiredObservedDisagree)
             return
