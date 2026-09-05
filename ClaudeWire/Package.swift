@@ -22,7 +22,7 @@ let package = Package(
         .testTarget(name: "WireMCPTests", dependencies: ["WireMCP", "WireTestSupport"], swiftSettings: v6),
         .testTarget(name: "WireEnvironmentTests", dependencies: ["WireEnvironment", "WireTestSupport"], swiftSettings: v6),
         .testTarget(name: "WireDiagnosticsTests", dependencies: ["WireDiagnostics", "WireTestSupport"], swiftSettings: v6),
-        .testTarget(name: "WireTransportTests", dependencies: ["WireTransport", "WireTestSupport"], swiftSettings: v6),
+        .testTarget(name: "WireTransportTests", dependencies: ["WireTransport", "WireEnvironment", "WireTestSupport"], swiftSettings: v6),
         .testTarget(name: "ClaudeWireTests", dependencies: ["ClaudeWire", "WireTestSupport"], swiftSettings: v6),
     ]
 )

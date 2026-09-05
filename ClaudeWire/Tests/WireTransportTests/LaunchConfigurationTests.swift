@@ -1,5 +1,6 @@
 import XCTest
 import AfleetCore
+import WireEnvironment
 import WireFrames
 import WireTransport
 
@@ -7,6 +8,9 @@ final class LaunchConfigurationTests: XCTestCase {
     private let bin = URL(fileURLWithPath: "/Users/x/.local/bin/claude")
     private let cwd = URL(fileURLWithPath: "/tmp/scratch")
     private let sid = SessionID("0f3a6e2c-9b1d-4e5f-8a7b-1c2d3e4f5a6b")!
+    /// The home this launch resolved. Deliberately *not* `<HOME>/.claude`, so a child that re-derived its
+    /// own default rather than being told this one lands somewhere else and the difference is visible.
+    private let resolved = ConfigHome(root: URL(fileURLWithPath: "/Users/x/.claude-scratch"), source: .environment)
 
     func testNewChannelMinimalLineTokenForToken() throws {
         let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid))
@@ -82,7 +86,7 @@ final class LaunchConfigurationTests: XCTestCase {
     func testChildEnvironmentTableAndForbiddenVariables() {
         let base = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "HOME": "/Users/x", "CLAUDE_CODE_REMOTE": "1", "CLAUDE_CODE_CONTAINER_ID": "c", "CLAUDE_CODE_ENTRYPOINT": "cli"],
                                        shell: "/bin/zsh", capturedAt: .init(), mode: .login)
-        let env = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)).childEnvironment(over: base)
+        let env = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)).childEnvironment(over: base, configHome: resolved)
         XCTAssertEqual(env["PATH"], "/usr/bin"); XCTAssertEqual(env["HOME"], "/Users/x")
         XCTAssertEqual(env["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"], "1"); XCTAssertEqual(env["CLAUDE_AUTO_BACKGROUND_TASKS"], "1")
         XCTAssertEqual(env["CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK"], "1"); XCTAssertEqual(env["CLAUDE_CODE_FORK_SUBAGENT"], "1")
@@ -93,15 +97,17 @@ final class LaunchConfigurationTests: XCTestCase {
         XCTAssertEqual(env["CLAUDE_CODE_QUESTION_PREVIEW_FORMAT"], "markdown")
         XCTAssertNil(env["CLAUDE_CODE_REMOTE"]); XCTAssertNil(env["CLAUDE_CODE_CONTAINER_ID"]); XCTAssertNil(env["CLAUDE_CODE_ENTRYPOINT"])
         let opts = ChildEnvironmentOptions(forkSubagents: false, automodeDecisionLog: true, questionPreviewFormat: "markdown")
-        let env2 = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid), environment: opts).childEnvironment(over: base)
+        let env2 = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid), environment: opts).childEnvironment(over: base, configHome: resolved)
         XCTAssertNil(env2["CLAUDE_CODE_FORK_SUBAGENT"]); XCTAssertEqual(env2["AUTOMODE_DECISION_LOG"], "1"); XCTAssertEqual(env2["CLAUDE_CODE_QUESTION_PREVIEW_FORMAT"], "markdown")
-        XCTAssertEqual(env2["CLAUDE_CONFIG_DIR"], nil)
+        XCTAssertEqual(env["CLAUDE_CONFIG_DIR"], "/Users/x/.claude-scratch")
+        XCTAssertEqual(env2["CLAUDE_CONFIG_DIR"], "/Users/x/.claude-scratch")
     }
+    /// An explicit override still wins over the resolved home: that is the whole of what it does now.
     func testConfigHomeOverrideInjectsConfigDir() {
         let base = ResolvedEnvironment(variables: ["PATH": "/usr/bin"], shell: "/bin/zsh", capturedAt: .init(), mode: .login)
         var c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid))
         c.configHomeOverride = URL(fileURLWithPath: "/tmp/afleet-fixtures/config-home")
-        XCTAssertEqual(c.childEnvironment(over: base)["CLAUDE_CONFIG_DIR"], "/tmp/afleet-fixtures/config-home")
+        XCTAssertEqual(c.childEnvironment(over: base, configHome: resolved)["CLAUDE_CONFIG_DIR"], "/tmp/afleet-fixtures/config-home")
     }
 
     /// Parent spec section 6.1: the child carries no variable beginning with CLAUDE from the resolved
@@ -120,14 +126,14 @@ final class LaunchConfigurationTests: XCTestCase {
                         "CLAUDE_SOMETHING_INVENTED_LATER": "1",
                         "ANTHROPIC_API_KEY": "keep-me"],
             shell: "/bin/zsh", capturedAt: .init(), mode: .processFallback)
-        let env = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)).childEnvironment(over: base)
+        let env = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)).childEnvironment(over: base, configHome: resolved)
         XCTAssertNil(env["CLAUDECODE"])
         XCTAssertNil(env["CLAUDE_CODE_SESSION_ID"])
         XCTAssertNil(env["CLAUDE_CODE_CHILD_SESSION"])
         XCTAssertNil(env["CLAUDE_SOMETHING_INVENTED_LATER"])
-        // Derived, never inherited: section 6.9 gives one ConfigHome per launch, and only an explicit
-        // override puts it in the child.
-        XCTAssertNil(env["CLAUDE_CONFIG_DIR"])
+        // Derived, never inherited — but present. The scrub removes the shell's value; what the child is
+        // given is the home this launch resolved, which here is not the inherited one.
+        XCTAssertEqual(env["CLAUDE_CONFIG_DIR"], "/Users/x/.claude-scratch")
         // A non-CLAUDE variable is untouched, and the deliberate table wins over an inherited same-named value.
         XCTAssertEqual(env["ANTHROPIC_API_KEY"], "keep-me")
         XCTAssertEqual(env["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"], "1")
@@ -137,6 +143,73 @@ final class LaunchConfigurationTests: XCTestCase {
         XCTAssertEqual(env["CLAUDE_CODE_FORK_SUBAGENT"], "1")
         var withOverride = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid))
         withOverride.configHomeOverride = URL(fileURLWithPath: "/tmp/afleet-fixtures/config-home")
-        XCTAssertEqual(withOverride.childEnvironment(over: base)["CLAUDE_CONFIG_DIR"], "/tmp/afleet-fixtures/config-home")
+        XCTAssertEqual(withOverride.childEnvironment(over: base, configHome: resolved)["CLAUDE_CONFIG_DIR"], "/tmp/afleet-fixtures/config-home")
+    }
+
+    /// The child's config home equals afleet's by construction, with no test override anywhere.
+    ///
+    /// Asserted twice over, and the second half is the one that names the old defect. Deriving §6.9's rule
+    /// over the environment the child is actually handed is exactly what the child itself does at startup:
+    /// with the home absent it fell through to `<HOME>/.claude`, so afleet was reading one home while the
+    /// session it launched wrote to another. The two roots differ here precisely so that gap is visible.
+    func testResolvedConfigHomeReachesTheChildWithNoOverride() {
+        let base = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "HOME": "/Users/x", "CLAUDE_CONFIG_DIR": "/Users/x/.claude"],
+                                       shell: "/bin/zsh", capturedAt: .init(), mode: .login)
+        let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid))
+        XCTAssertNil(c.configHomeOverride)
+        let env = c.childEnvironment(over: base, configHome: resolved)
+        XCTAssertEqual(env["CLAUDE_CONFIG_DIR"], resolved.root.path)
+        let asTheChildSeesIt = ConfigHome.derive(from: ResolvedEnvironment(variables: env, shell: "/bin/zsh", capturedAt: .init(), mode: .login))
+        XCTAssertEqual(asTheChildSeesIt.root.path, resolved.root.path,
+                       "the child re-derives a different home from the environment it was given")
+    }
+
+    /// §6.9 reads the project directory name together with the config home, and the engine honours it only
+    /// together with the home, so it travels with it — when the captured environment had one, and not
+    /// otherwise.
+    func testProjectDirNameSurvivesWhenTheCaptureHadIt() {
+        let withName = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "CLAUDE_CODE_PROJECT_DIR_NAME": "afleet-work"],
+                                           shell: "/bin/zsh", capturedAt: .init(), mode: .login)
+        let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid))
+        XCTAssertEqual(c.childEnvironment(over: withName, configHome: resolved)["CLAUDE_CODE_PROJECT_DIR_NAME"], "afleet-work")
+        let without = ResolvedEnvironment(variables: ["PATH": "/usr/bin"], shell: "/bin/zsh", capturedAt: .init(), mode: .login)
+        XCTAssertNil(c.childEnvironment(over: without, configHome: resolved)["CLAUDE_CODE_PROJECT_DIR_NAME"])
+    }
+
+    /// Configuration the engine reads survives the scrub; a marker it sets on its own children does not.
+    /// One assertion, because the two halves are the same decision seen from either side.
+    func testProviderConfigurationSurvivesTheScrubAndAMarkerDoesNot() {
+        let base = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_CHILD_SESSION": "1"],
+                                       shell: "/bin/zsh", capturedAt: .init(), mode: .processFallback)
+        let env = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)).childEnvironment(over: base, configHome: resolved)
+        XCTAssertEqual(env["CLAUDE_CODE_USE_BEDROCK"], "1")
+        XCTAssertNil(env["CLAUDE_CODE_CHILD_SESSION"])
+    }
+
+    /// The twelve, written out. An allowlist that grows by accident is the failure mode this guards, so the
+    /// set is pinned by name and then pinned again by behaviour: everything beginning with `CLAUDE` that
+    /// reaches the child is exactly the launch table, the config home, and these twelve.
+    ///
+    /// `CLAUDE_CODE_OAUTH_TOKEN` is in the captured environment here and must not be among them: the engine
+    /// sets it on its own children as a credential handoff, and an owned channel authenticates from its
+    /// config home.
+    func testPassThroughSetIsExactlyTheseTwelveNames() {
+        let twelve: Set<String> = ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+                                   "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+                                   "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+                                   "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+                                   "CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH",
+                                   "CLAUDE_CODE_MAX_OUTPUT_TOKENS"]
+        XCTAssertEqual(LaunchConfiguration.passedThroughConfiguration, twelve)
+        var variables = ["PATH": "/usr/bin", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret",
+                         "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_INVENTED_NEXT_RELEASE": "1"]
+        for name in twelve { variables[name] = "1" }
+        let base = ResolvedEnvironment(variables: variables, shell: "/bin/zsh", capturedAt: .init(), mode: .processFallback)
+        let env = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid)).childEnvironment(over: base, configHome: resolved)
+        let table: Set<String> = ["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "CLAUDE_AUTO_BACKGROUND_TASKS",
+                                  "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK", "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT",
+                                  "CLAUDE_CODE_FORK_SUBAGENT"]
+        XCTAssertEqual(Set(env.keys.filter { $0.hasPrefix("CLAUDE") }), twelve.union(table).union(["CLAUDE_CONFIG_DIR"]))
+        XCTAssertNil(env["CLAUDE_CODE_OAUTH_TOKEN"])
     }
 }

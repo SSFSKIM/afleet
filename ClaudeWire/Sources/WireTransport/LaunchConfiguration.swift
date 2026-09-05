@@ -33,7 +33,10 @@ public struct LaunchConfiguration: Hashable, Sendable {
     public var settingSources: [SettingSource]?      // nil = CLI default; [] = --setting-sources ""
     public var strictMCPConfig: Bool
     public var environment: ChildEnvironmentOptions
-    /// Tests and recordings only: sets CLAUDE_CONFIG_DIR in the child. FleetKit never sets it (§6.9: one ConfigHome per launch).
+    /// Tests and recordings only: the config home to put in the child in place of the launch's own resolved
+    /// one. `childEnvironment` sets `CLAUDE_CONFIG_DIR` on every launch (§6.9: one ConfigHome per launch, and
+    /// the child is told which one); this field only redirects it, and is how a recording points a child at a
+    /// scratch home instead of the user's.
     public var configHomeOverride: URL?
 
     public init(binary: URL, cwd: URL, session: SessionStart, model: String? = nil, permissionMode: PermissionMode? = nil, agent: String? = nil,
@@ -88,8 +91,9 @@ public struct LaunchConfiguration: Hashable, Sendable {
     /// Parent §6.1's table over the resolved environment.
     ///
     /// The scrub is a prefix rule, not a list: **no** variable whose name begins with `CLAUDE`
-    /// survives from the resolved environment, and only the table's own entries plus, when chosen,
-    /// `CLAUDE_CONFIG_DIR` are added back. A list would need extending every time the engine gains a
+    /// survives from the resolved environment, and what is added back afterwards is exactly the table's own
+    /// entries, the resolved config home and the project directory name beside it, and
+    /// `passedThroughConfiguration`. A list would need extending every time the engine gains a
     /// marker, and the markers reach afleet for real — §6.9's `.processFallback` arm returns afleet's
     /// own environment verbatim, so an afleet launched from inside a Claude Code session would
     /// otherwise hand `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_CHILD_SESSION` to the
@@ -97,7 +101,11 @@ public struct LaunchConfiguration: Hashable, Sendable {
     ///
     /// The scrub lives here rather than at capture because §6.9 derives ConfigHome from the captured
     /// `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_PROJECT_DIR_NAME`.
-    public func childEnvironment(over base: ResolvedEnvironment) -> [String: String] {
+    ///
+    /// `configHome` is the home this launch resolved, and it is always put back after the scrub. A home is
+    /// always chosen, so the child is always told which one: letting it re-derive its own default is how
+    /// afleet's view of the config home and the child's come apart.
+    public func childEnvironment(over base: ResolvedEnvironment, configHome: ConfigHome) -> [String: String] {
         var env = base.variables
         for key in Array(env.keys) where key.hasPrefix("CLAUDE") { env[key] = nil }
         // `ANTHROPIC_API_KEY` deliberately survives, per the parent Decision Log. afleet resolves the login
@@ -111,7 +119,35 @@ public struct LaunchConfiguration: Hashable, Sendable {
         if let f = environment.questionPreviewFormat { env["CLAUDE_CODE_QUESTION_PREVIEW_FORMAT"] = f }
         if environment.forkSubagents { env["CLAUDE_CODE_FORK_SUBAGENT"] = "1" }
         if environment.automodeDecisionLog { env["AUTOMODE_DECISION_LOG"] = "1" } else { env["AUTOMODE_DECISION_LOG"] = nil }
-        if let configHomeOverride { env["CLAUDE_CONFIG_DIR"] = configHomeOverride.path }
+        // The scrub took the config home with it, so it is put back — always, and from the home this launch
+        // resolved rather than from whatever the shell happened to hold. An override redirects it and nothing
+        // else; that is what a recording uses to point a child at a scratch home.
+        env["CLAUDE_CONFIG_DIR"] = (configHomeOverride ?? configHome.root).path
+        // §6.9 reads the project directory name together with the config home and the engine honours it the
+        // same way, so it travels with it or not at all.
+        if let projectDirName = base.variables["CLAUDE_CODE_PROJECT_DIR_NAME"] {
+            env["CLAUDE_CODE_PROJECT_DIR_NAME"] = projectDirName
+        }
+        for name in Self.passedThroughConfiguration { env[name] = base.variables[name] }
         return env
     }
+
+    /// User configuration the engine **reads** rather than sets, and which the login shell may legitimately
+    /// hold: which provider a session talks to, and the output-token ceiling. The prefix scrub takes these
+    /// with everything else, so they are named here to survive it.
+    ///
+    /// A list is right here and wrong for the markers, and the asymmetry is deliberate rather than an
+    /// oversight to tidy up. A marker this list missed would make the child believe it is nested inside
+    /// another session and change its behaviour silently; a provider variable this list misses produces a
+    /// session talking to the wrong provider, which the very first readback shows.
+    ///
+    /// `CLAUDE_CODE_OAUTH_TOKEN` is deliberately absent. The engine *sets* it on its own children as a
+    /// credential handoff, and an owned channel authenticates from its config home instead — inheriting it
+    /// would hand a session someone else's credential.
+    public static let passedThroughConfiguration: Set<String> = [
+        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+        "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+        "CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    ]
 }

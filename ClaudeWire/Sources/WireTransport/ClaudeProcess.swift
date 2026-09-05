@@ -62,7 +62,7 @@ public actor ClaudeProcess {
         guard status == .launching else { throw WireError.notInRunningState(status) }
         let p = box.process
         p.executableURL = launch.binary; p.arguments = try launch.arguments(); p.currentDirectoryURL = launch.cwd
-        p.environment = launch.childEnvironment(over: environment)
+        p.environment = launch.childEnvironment(over: environment, configHome: configHome)
         p.standardInput = box.stdin; p.standardOutput = box.stdout; p.standardError = box.stderr
         p.terminationHandler = { [weak self] proc in
             let raw: ExitStatus = proc.terminationReason == .uncaughtSignal ? .signal(proc.terminationStatus, stderrTail: "") : .code(proc.terminationStatus, stderrTail: "")
