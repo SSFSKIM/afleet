@@ -1334,12 +1334,63 @@ the questions stand as the record of what was asked. The fifth was added at v2.2
 - Observation: The `continued-in` record's destination field is `continuedInSessionId`; its
   `sessionId` is the source. Impact: the accessor, `SessionState` and the index read that
   field; a mutation test with invented ids guards it, since no fixture carries the kind.
+- Observation: The machine's own config home holds 4,337 main transcripts under 546 real
+  project directories and 14 symlinked ones, 1.85 GB in all, with the same 109 MB maximum the
+  v1 grounding recorded (the earlier figure, 2,967 files and 1.39 GB, was the same home five
+  weeks of work ago). Impact: the grounding's shape holds; the numbers below are re-measured
+  against the larger set.
+- Observation: `TranscriptIndex.discoverMainFiles` sees 3,031 of those 4,337 files. The 14
+  project directories that are symlinks are skipped, because `URLResourceKey.isDirectoryKey`
+  is false for a symlink URL, and they hold 1,306 main transcripts between them. Impact: the
+  index silently under-reports a home whose project directories are symlinked; whether a
+  symlinked *directory* is followed is a policy question X9 does not answer (X9 refuses a
+  symlinked transcript *file*, which the reader's `O_NOFOLLOW` still does). Filed as a C3
+  follow-up; not changed in Task 13, which is a verification task.
+- Observation: G2's first budget is missed by two orders of magnitude. Five cold builds over
+  3,031 files: median 66,412 ms against a 500 ms budget. The head-and-tail reads are not the
+  cost — reading all 3,031 heads and tails through `HeadTailReader` single-threaded takes
+  about 1.3 s, and raw `pread` of the same 461 MB takes 1,308 ms — so essentially the whole
+  66 s is `makeEntry`'s substring scanning over the two 64 KiB chunks, about 22 ms per file.
+  Impact: the budget is not relaxed and the gate is reported failed; the fix is a cheaper
+  head-and-tail scan, not a wider budget.
+- Observation: G2's third budget is missed narrowly: the 109 MB transcript's bounded window
+  read and reduce takes 1,158 ms against a 1,000 ms budget (4 MiB tail, 2,626 records, no
+  window extension). Impact: same ruling — reported, not relaxed.
+- Observation (against Question 2, incremental reduction deliberately not planned):
+  `StreamIngestion.publish` (`Sources/FleetTimeline/Ingest/StreamIngestion.swift:884`)
+  recomputes the whole projection through `recompute()` (`:858`) once per buffered frame, so
+  draining N buffered frames is O(N x records). Task 10's first settle-cap test fed frames at
+  `Task.yield()` rate; a 250 ms settle then buffered thousands of frames and the drain ran past
+  ten seconds. No engine emits mirror frames at that rate, so Task 10 is not threatened by it,
+  and the time cap bounds `open` — but the residual cost is relocated, not removed.
 
 ## Outcomes & Retrospective
 
 Pending — written at finish.
 
 ## Revision Notes
+
+- 2026-09-05: Plan executed; Task 13 run. **G1 passes** (check one over 18 mirrored streams
+  and 493 mirrored entries compared against file records, plus 3 `agent_metadata` sidecars;
+  check two over 113 compared items across all 18 fixtures; 143 tests in
+  `FleetTimelineTests`, 4 skipped without `AFLEET_LOCAL_INDEX`, 0 failures).
+  **G2 FAILS on two of its three budgets** and is reported, not relaxed. Measured on the
+  local config home: 3,031 main transcripts indexed, cold-build median 66,412 ms against a
+  500 ms budget (min 66,249, max 69,206 over five builds), incremental update after one
+  `touch` 28 ms against a 50 ms budget (passes), largest transcript 109,427,514 bytes read
+  and reduced in 1,158 ms against a 1,000 ms budget (4 MiB window, 2,626 records, 0
+  extensions). The cost is not I/O: the same 3,031 head-and-tail reads take about 1.3 s.
+  **G3 and G4 pass** by the twelve tests named in the plan's Task 13 (45 tests across
+  `IngestionTests`, `AgentRunTreeTests`, `RegistryMirrorTests` and `TaskOutputTailerTests`,
+  0 failures). **X1 passes**: `ImportGraphTests` is green and `FleetKit/Package.swift` is
+  byte-identical to `main`. **X9 passes**: the scratch config home's recursive fingerprint is
+  `files=7498 digest=d1e260432bf761f1` before and after the whole suite, and no file under
+  the author's home carrying a name only these tests use was modified during the run.
+  Unwitnessed paths tested by mutation: orphan healing, compact-boundary truncation,
+  supersedes retraction, synthetic-user hiding, rewind truncation, cleared-to-empty (two
+  tests), `continued-in` (two tests), off-chain tool results, an unmatched block id joining
+  by `sourceToolAssistantUUID`, and a message-id group with no record on the chain.
+  Parent revisions to file at merge: none beyond the six already filed.
 
 - 2026-09-05: v2.6, parent amendment applied mid-execution (coordinator, during Task 1/2).
   §7.3's file-only exclusion list has lost `compact_boundary`: the `compact-boundary` recording

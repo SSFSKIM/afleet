@@ -63,3 +63,27 @@ durable index.
     and identical on the corpus; they diverge only for a depth-2 node no source answered for,
     which surfaces as a root instead of vanishing. C6 reads `roots` and must be told at
     recomposition. Owner: C3 (whole-branch review). Closer: decide which reading C6 needs.
+14. **Incremental reduction in `StreamIngestion.publish`.** `publish`
+    (`FleetKit/Sources/FleetTimeline/Ingest/StreamIngestion.swift:884`) recomputes the whole
+    projection through `recompute()` (`:858`) once per applied frame, so draining N buffered
+    frames is O(N x records). Measured in Task 10: a `Task.yield()`-rate feeder made a 250 ms
+    settle buffer thousands of frames and the drain ran past ten seconds. No engine emits
+    mirror frames at that rate, and the settle's time cap bounds `open`, so the residual cost
+    is relocated rather than removed. Owner: C6, if live rendering needs it (the C3 plan's
+    Question 2 defers it deliberately). Closer: reduce incrementally, with the
+    file-versus-wire projection-equality invariant as the guard.
+15. **`TranscriptIndex` skips symlinked project directories.** `discoverMainFiles` filters on
+    `URLResourceKey.isDirectoryKey`, which is false for a symlink URL, so a project directory
+    that is a symlink contributes no session. On the author's own config home that is 14
+    directories holding 1,306 of 4,337 main transcripts. Owner: C3 follow-up. Closer: decide
+    whether a symlinked project *directory* is followed (X9 refuses symlinked transcript
+    *files*, which is a separate rule) and resolve it in discovery if so.
+16. **The index's cold build is two orders of magnitude over its budget.** Spec C3 G2 asks for
+    a median under 500 ms; five builds over 3,031 files measured a 66,412 ms median. The reads
+    are not the cost — the same 3,031 head-and-tail reads take about 1.3 s single-threaded —
+    so it is `TranscriptIndex.makeEntry`'s substring scanning over the two 64 KiB chunks, some
+    22 ms per file. The 109 MB transcript's windowed read and reduce also misses, at 1,158 ms
+    against 1,000 ms. Owner: C3 follow-up, before C4 wires the index to a sidebar. Closer: one
+    pass over each chunk instead of a `range(of:)` per field, and a profile of
+    `WindowedTranscript.read` on the 4 MiB tail.
+
