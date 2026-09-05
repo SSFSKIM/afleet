@@ -1395,39 +1395,43 @@ parent's §7.8.
   relying on accumulation alone (accumulation self-corrects the ceiling but says nothing about a
   scenario whose own waits have run away).
   Date/Author: 2026-09-06 / C4 Task 10 re-review.
-- Decision: G5's adoption scenario keeps its one-word prompt; the promptless variant is rejected.
-  Rationale: the prompt looked like two turns paid for a word — "conversation" distinguishes a job
-  carrying a session id from an exec job that does not, and none of the scenario's assertions
-  (adopt stops the job, resumes the same session id owned, the handshake is clean, *Send to
-  background* hands it back) depends on the transcript having content. So a promptless variant was
-  proposed and briefly accepted. It is wrong, and the evidence is C1's: a handshake-only session
-  writes **nothing** to a transcript — the `zero-cost` fixture's README says "no turn begins, no
-  `system/init` is emitted and nothing is written to a transcript", and its `transcript/` holds only
-  a `.gitkeep`. The engine locates a session to resume by its JSONL file, so with none both resume
-  paths refuse: print mode at 2.1.258 `cli.pretty.js:153719` ("No conversation found with session
-  ID", `failure_reason not_found_explicit_id`) and the `--bg` path at `:790009`. Reaping terminates
-  the process and writes nothing. The zero-cost probe that suggested otherwise had resumed a session
-  that already carried turns, which is why it stayed resident; that evidence supports "an uncapped
-  bg session *with a transcript* stays resident" and not "a promptless session has a transcript".
-  What remains open — whether an uncapped bg session that has answered stays resident — is what the
-  gate exists to learn, and if it is false that is a product fact the adoption feature needs rather
-  than a test defect. The two-turn reservation stands and the zero-cost witness stays on the adopt's
-  own resume launch, which carries `--max-turns 1` and no prompt.
-  Rejected: the promptless recipe, on the citations above; probing for a turn-free transcript write
-  (none of the ten zero-cost control requests produces one).
-  Measured afterwards, at zero cost, and sharper than the reasoning that preceded it: the
-  transcript is load-bearing at the **adopt's resume**, not at the job's creation. A bare
-  `claude --bg` with no prompt does mint and carry its own session id, reaches no model, stays
-  resident, and `jobs()` lists it — the live gate proved all of that. It fails one step later,
-  because `perform(.adopt)` resumes through afleet's own print-mode launch, and that refuses a
-  session with no transcript. All three resume paths are now pinned against installed CLI
-  **2.1.261**: `--bg --resume` by full uuid accepts a transcript-less session and keeps its id;
-  by short id it starts a copy; `-p --resume` refuses outright with "No conversation found with
-  session ID", a `result` of subtype `error_during_execution`, `total_cost_usd` 0 and exit 1.
-  So the job's session must carry a transcript, and a transcript costs one turn. Note the version
-  drift: the bundle authority is 2.1.258 and the fixtures 2.1.259, and this is the first place it
-  has mattered — the facts above are 2.1.261's.
-  Date/Author: 2026-09-06 / C4 Task 10, corrected by the architect, then measured.
+- Decision: G5's adoption scenario makes its background job the way production does — open a
+  channel owned, send one cheap prompt so a transcript exists, `sendToBackground`, then adopt it
+  back — rather than creating the job with a `claude --bg` verb.
+  Rationale: three recipes were tried against the installed CLI and each fell for its own reason,
+  and the reasons are engine facts worth keeping. (1) `--bg --model haiku --max-turns 1 "pong"`:
+  the job reached a terminal state 3.5 s after creation and `Fleet.jobs()`, which filters terminal
+  records, never saw it. The cap looked like the cause. (2) A bare promptless `claude --bg`: it
+  mints and carries its own session id, reaches no model, stays resident, and `jobs()` does list
+  it — but `perform(.adopt)` resumes through afleet's own print-mode launch, and that refuses a
+  session with no transcript. (3) The prompted recipe with the cap dropped: it ends 3.9 s after
+  creation anyway. So the cap was never what ended it — **a background conversation job given a
+  prompt is a one-shot runner that answers and exits, while a session handed to the daemon without
+  a prompt stays resident idle until stopped.** Adoption targets resident jobs, so racing a CLI
+  verb was testing a job the product model does not own; the earlier greens were a race won against
+  a warm daemon. Building the job through the facade removes the timing window and exercises both
+  parent-required verbs on a real conversation job in the order §7.4 describes.
+  Two facts pinned against installed CLI **2.1.261** (the bundle authority is 2.1.258 and the
+  fixtures 2.1.259; the 2.1.258 reading does not distinguish the two resume paths that 2.1.261
+  clearly does): the residency rule above, and the three resume paths — `--bg --resume` by full
+  uuid accepts a transcript-less session and keeps its id, by short id it starts a copy, and
+  `-p --resume` refuses outright with "No conversation found with session ID", a `result` of
+  subtype `error_during_execution`, `total_cost_usd` 0 and exit 1. A transcript is written when the
+  prompt is **submitted**, not when the turn completes, which is why a fast adopt of a prompted job
+  costs nothing.
+  What the live gate bought, and the argument for having run it: four product defects, every one in
+  shipped lifecycle code and every one invisible to a unit suite that was already 190 tests green —
+  `52d7405` an archived channel never learning it had a foreign holder; `57f0233` a supervisor built
+  after its holder already existed never hearing about it, which is the *ordinary* case once C5
+  registers channels from C3's index; `ea72912` the daemon re-claiming a session's existing job
+  short, so a "new short" filter rejected the one job the call was about and §7.4's own
+  adopt-then-send-back round trip could never have completed; and `6c06209` our own dying child
+  read as a stranger inside the release window, leaving a channel holding a job it could not show.
+  Each has a CLI-free discriminating test with its break performed. Cumulative live spend to the
+  point of this decision: `total_cost_usd 0.593697`, plus two sub-cent prompt turns the harness's
+  own summing cannot see.
+  Rejected: all three earlier recipes, on the evidence above.
+  Date/Author: 2026-09-06 / C4 Task 10, settled after four live runs.
 
 ## Surprises & Discoveries
 
