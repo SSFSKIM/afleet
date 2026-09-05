@@ -432,11 +432,11 @@ final class LiveCLITests: XCTestCase {
     /// The installed version is asserted `>=` the baseline rather than equal to it: the baseline names the
     /// version the protocol evidence was recorded against, and patch releases land between recordings.
     func testVersionGateAcceptsTheInstalledBuildAndRefusesAFabricatedOlderOne() async throws {
-        let (_, binary) = try await resolvedBinary()
+        let (resolvedEnv, binary) = try await resolvedBinary()
 
         let calls = ScriptedRunner.Recorder()
         let real = VersionGate(runner: RecordingPassThroughRunner(inner: FoundationProcessRunner(), calls: calls))
-        guard case .accepted(let installed) = await real.check(binary: binary) else {
+        guard case .accepted(let installed) = await real.check(binary: binary, environment: resolvedEnv) else {
             return XCTFail("the installed claude was refused by VersionGate")
         }
         // Without this the verdict could have come from a runner that was never asked anything.
@@ -448,13 +448,13 @@ final class LiveCLITests: XCTestCase {
         let base = ProtocolBaseline.baseline
         XCTAssertGreaterThan(base.patch, 0, "the fabricated-older string below is derived by decrementing the patch")
         let older = "\(base.major).\(base.minor).\(base.patch - 1) (Claude Code)"
-        guard case .tooOld(let reported, let against) = await gate(reporting: older).check(binary: binary) else {
+        guard case .tooOld(let reported, let against) = await gate(reporting: older).check(binary: binary, environment: resolvedEnv) else {
             return XCTFail("VersionGate accepted a fabricated \(older)")
         }
         XCTAssertEqual(reported, SemanticVersion(major: base.major, minor: base.minor, patch: base.patch - 1))
         XCTAssertEqual(against, base)
 
-        guard case .accepted = await gate(reporting: "\(base.major + 1).0.0 (Claude Code)").check(binary: binary) else {
+        guard case .accepted = await gate(reporting: "\(base.major + 1).0.0 (Claude Code)").check(binary: binary, environment: resolvedEnv) else {
             return XCTFail("VersionGate refused a fabricated newer build")
         }
     }
@@ -711,7 +711,7 @@ struct RecordingPassThroughRunner: ProcessRunner {
     let inner: any ProcessRunner
     let calls: ScriptedRunner.Recorder
     func run(_ executable: URL, arguments: [String], environment: [String: String], timeout: Duration) async throws -> ProcessOutput {
-        calls.add(arguments)
+        calls.add(arguments, environment: environment)
         return try await inner.run(executable, arguments: arguments, environment: environment, timeout: timeout)
     }
 }

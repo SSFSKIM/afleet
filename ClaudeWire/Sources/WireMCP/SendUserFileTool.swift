@@ -58,22 +58,37 @@ public struct SendUserFileTool: MCPTool {
         }
         guard !files.isEmpty, files.allSatisfy({ $0.stringValue != nil }) else { throw MCPArgumentError("files must be a non-empty array of strings") }
         guard let status = arguments["status"]?.stringValue, ["normal", "proactive"].contains(status) else { throw MCPArgumentError("status must be 'normal' or 'proactive'") }
-        let display = arguments["display"]?.stringValue
+        // Read through a case match rather than `stringValue`, which returns nil for both "absent" and
+        // "present but not a string" and so quietly accepted `display: 5` as `display: nil`. An optional the
+        // caller got wrong is an argument error, not an omission; only `null` and absence mean omitted.
+        let display = try Self.optionalString(arguments["display"], "display must be 'render' or 'attach'")
         if let display, !["render", "attach"].contains(display) { throw MCPArgumentError("display must be 'render' or 'attach'") }
+        let caption = try Self.optionalString(arguments["caption"], "caption must be a string")
         var resolved: [URL] = []
         for f in files.compactMap(\.stringValue) {
             let url = Self.resolve(f, against: context.cwd)
             // isReadableFile(atPath:) is also true for a readable directory, which would report a send
             // Task 10 cannot perform; the built-in resolves per-file metadata and cannot reach that state.
-            var isDirectory: ObjCBool = false
-            let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
-            guard exists, !isDirectory.boolValue, FileManager.default.isReadableFile(atPath: url.path) else {
-                return .text("Cannot send \(f): no such file, not readable, or a directory", isError: true)
+            // The object's TYPE, not just "exists and is not a directory". A FIFO, a device node or a socket
+            // passes existence and `isReadableFile` — `access(R_OK)` answers about permissions, not about what
+            // the object is — and would produce a successful sent-file invocation for something Task 10 cannot
+            // transfer. Only a regular file is sendable.
+            let isRegular = (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
+            guard isRegular, FileManager.default.isReadableFile(atPath: url.path) else {
+                return .text("Cannot send \(f): no such file, not a regular file, or not readable", isError: true)
             }
             resolved.append(url)
         }
         let names = resolved.map(\.lastPathComponent).joined(separator: ", ")
         return .text("Sent \(resolved.count) file\(resolved.count == 1 ? "" : "s") to the user: \(names)",
-                     invocation: .sentFile(paths: resolved, caption: arguments["caption"]?.stringValue, status: status, display: display))
+                     invocation: .sentFile(paths: resolved, caption: caption, status: status, display: display))
+    }
+    /// An optional string argument: absent or `null` is nil, a string is itself, anything else is an error.
+    private static func optionalString(_ value: JSONValue?, _ message: String) throws -> String? {
+        switch value {
+        case nil, .null?: return nil
+        case .string(let s)?: return s
+        default: throw MCPArgumentError(message)
+        }
     }
 }

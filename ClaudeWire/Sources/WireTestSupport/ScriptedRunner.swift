@@ -15,14 +15,21 @@ public struct ScriptedRunner: ProcessRunner {
     public final class Recorder: @unchecked Sendable {
         private let lock = NSLock()
         private var storage: [[String]] = []
+        private var envs: [[String: String]] = []
         public init() {}
         public var invocations: [[String]] { lock.lock(); defer { lock.unlock() }; return storage }
+        /// The environment each invocation was given. Recorded because "which environment the probe ran in"
+        /// is a claim a caller has to be able to assert, and it is invisible in the arguments.
+        public var environments: [[String: String]] { lock.lock(); defer { lock.unlock() }; return envs }
         /// Records one invocation and returns its index, so a caller never reads `invocations` unlocked.
-        @discardableResult public func add(_ a: [String]) -> Int { lock.lock(); defer { lock.unlock() }; storage.append(a); return storage.count - 1 }
+        @discardableResult public func add(_ a: [String], environment: [String: String] = [:]) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            storage.append(a); envs.append(environment); return storage.count - 1
+        }
     }
 
     public func run(_ executable: URL, arguments: [String], environment: [String: String], timeout: Duration) async throws -> ProcessOutput {
-        let i = calls.add(arguments)
+        let i = calls.add(arguments, environment: environment)
         return outputs[min(i, outputs.count - 1)]
     }
 }

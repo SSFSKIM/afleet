@@ -131,6 +131,47 @@ final class AfleetMCPServerTests: XCTestCase {
         XCTAssertEqual(ok.result["isError"], .bool(false))
         XCTAssertNotNil(againInv)
     }
+    /// Group 4j. An optional argument read through `stringValue` returns nil for both "absent" and "present
+    /// but not a string", so `display: 5` was silently accepted as `display: nil` instead of being refused.
+    func testAPresentButWrongTypedOptionalIsAnArgumentError() async throws {
+        let s = server()
+        let wrong: [(String, JSONValue)] = [("display", .integer(5)), ("display", .bool(true)), ("display", .array([.string("render")])),
+                                            ("caption", .integer(7)), ("caption", .object(["text": .string("x")]))]
+        for (key, bad) in wrong {
+            let args: JSONValue = .object(["files": .array([.string("a.txt")]), "status": .string("normal"), key: bad])
+            let (reply, inv, _) = await s.handle(req(80, "tools/call", .object(["name": .string("send_user_file"), "arguments": args])))
+            guard case .response(.error(let e)) = reply else { return XCTFail("\(key) = \(bad) was accepted: \(reply)") }
+            XCTAssertEqual(e.error.code, -32602, "\(key) = \(bad)")
+            XCTAssertNil(inv, "\(key) = \(bad)")
+        }
+        // Absence and an explicit null still mean omitted, so the rule above rejects wrong types rather than
+        // optionality.
+        let (ok, inv, _) = await s.handle(req(81, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object([
+            "files": .array([.string("a.txt")]), "status": .string("normal"), "display": .null, "caption": .null])])))
+        guard case .response(.response(let resp)) = ok else { return XCTFail("\(ok)") }
+        XCTAssertEqual(resp.result["isError"], .bool(false))
+        guard case .sentFile(_, let caption, _, let display) = inv else { return XCTFail("\(String(describing: inv))") }
+        XCTAssertNil(caption); XCTAssertNil(display)
+    }
+    /// Group 4k. The path check tested existence, non-directory and readability but never the object's TYPE.
+    /// `access(R_OK)` answers about permissions, so a FIFO passes all three and produced a successful
+    /// sent-file invocation for something that cannot be transferred.
+    func testAFIFOIsNotATransferableFile() async throws {
+        let fifo = tmp.appendingPathComponent("pipe.fifo")
+        guard mkfifo(fifo.path, 0o644) == 0 else { throw XCTSkip("mkfifo failed with errno \(errno)") }
+        // The premise: it passes every check the old rule made.
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fifo.path, isDirectory: &isDirectory))
+        XCTAssertFalse(isDirectory.boolValue)
+        XCTAssertTrue(FileManager.default.isReadableFile(atPath: fifo.path))
+
+        let s = server()
+        let (reply, inv, _) = await s.handle(req(82, "tools/call", .object(["name": .string("send_user_file"), "arguments": .object([
+            "files": .array([.string("pipe.fifo")]), "status": .string("normal")])])))
+        guard case .response(.response(let resp)) = reply else { return XCTFail("\(reply)") }
+        XCTAssertEqual(resp.result["isError"], .bool(true), "a FIFO was reported as sent")
+        XCTAssertNil(inv, "a FIFO produced a user-visible sent-file invocation")
+    }
     func testAbsolutePathsAnywhereReadableAreAllowed() async throws {
         // The built-in SendUserFile accepts any file the model can read; afleet mirrors that domain (child spec, WireMCP).
         let s = server()
