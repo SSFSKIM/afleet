@@ -4162,3 +4162,35 @@ Pending — written at finish.
   server*. Not settled: a project whose store resolves to a repository root above the session
   cwd, the multi-server dialog, the *all future servers* leg, and whether the write preserves
   unrecognised keys in an existing store, since this run created the file.
+- 2026-09-05 C1/rewind-turn: `rewind_conversation` has two behaviours and §7.3's edit-via-rewind
+  clause and §10 item 13 rest on the one this recording refuses. A target uuid read out of a
+  **resumed** transcript is declined: the answer is a `control_response {subtype: "success"}`
+  whose body is `{rewound: false, prefillText: null, precedingAssistantUuid: null, error:
+  "stale target"}` — a body-level `error` string inside a success envelope, so a host that
+  reads success from the envelope alone treats a refused rewind as a completed one, and the
+  body has no `targetMessageUuid` at all. A target the same process sent is honoured, answering
+  `{rewound: true, targetMessageUuid, prefillText, precedingAssistantUuid}`, where `prefillText`
+  is the composer prefill item 13 describes, returned by the engine rather than reconstructed.
+  Afleet's *Edit* on a past user message is exactly the refused case whenever the channel has
+  been reopened since that message was sent, and needs a state of its own rather than an error
+  banner. The honoured rewind's only effect outside its response is one appended `last-prompt`
+  naming `precedingAssistantUuid`, which leaves the turn just recorded in the file, below the
+  leaf and unreachable from it — the abandoned branch §7.3's source arbitration has to survive.
+  Also observed and unexplained: the turn's own closing `last-prompt` was not on disk three
+  settled seconds after its `result`, so a `result` frame does not mean the turn's records have
+  all landed. Fixture `rewind-turn`.
+- 2026-09-05 C1/compact-boundary: **§7.3's file-only exclusion list is wrong about
+  `compact_boundary`** and should lose it. `/compact` sent as a user message is honoured
+  headless — there is no control request for a compaction, so that is the only way a host can
+  ask — and the engine puts a `system` frame with `subtype: "compact_boundary"` on the wire,
+  keys `type, subtype, session_id, uuid, logical_parent_uuid, compact_metadata`, and mirrors the
+  same record. While the exclusion stands, the differential invariant never compares a record
+  the wire does deliver. Three more facts for §7.3's compaction paragraph: the `result` after a
+  compaction reads `success`, `num_turns: 0`, empty `result` and an all-zero `usage` with a
+  non-zero `total_cost_usd`, so a paid turn reports itself as no turn; the boundary record on
+  disk carries `parentUuid: null` with the only link back in `logicalParentUuid`, so a reducer
+  following `parentUuid` alone reads one file as two disjoint trees; and the summary is a
+  `user` record carrying `isCompactSummary` and `isVisibleInTranscriptOnly`, not a `system` or
+  `assistant` one. This compaction preserved a segment (`preservedSegment` names a head, an
+  anchor and a tail) and nothing before the boundary was dropped, so §7.3's hard-truncation
+  sentence is still unexercised. Fixture `compact-boundary`.
