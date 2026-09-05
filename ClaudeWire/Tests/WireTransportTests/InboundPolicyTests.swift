@@ -19,4 +19,13 @@ final class InboundPolicyTests: XCTestCase {
         let mcp = try JSONDecoder().decode(MCPMessageRequest.self, from: Data(#"{"subtype":"mcp_message","server_name":"afleet","message":{"jsonrpc":"2.0","id":1,"method":"ping"}}"#.utf8))
         XCTAssertEqual(policy.decide(req(.mcpMessage(mcp))), .routeToMCP)
     }
+    /// Group 2f, the other half. The frames-level test pins that an unknown suggestion degrades; this pins
+    /// what that buys — the request stays one the policy surfaces, rather than a `.malformed` the policy
+    /// refuses on the user's behalf.
+    func testAPermissionRequestWithAnUnknownSuggestionIsStillSurfaced() throws {
+        let policy = InboundPolicy.default(declaredDialogKinds: [], registeredHookCallbackIDs: [])
+        let json = #"{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/tmp/a.txt"},"tool_use_id":"toolu_fc","permission_suggestions":[{"type":"addTimeLimitedRules","rules":[{"toolName":"Write"}],"behavior":"allow","destination":"localSettings","expiresAt":1799999999}]}"#
+        let decoded = try JSONDecoder().decode(CanUseToolRequest.self, from: Data(json.utf8))
+        XCTAssertEqual(policy.decide(req(.canUseTool(decoded))), .surface)
+    }
 }

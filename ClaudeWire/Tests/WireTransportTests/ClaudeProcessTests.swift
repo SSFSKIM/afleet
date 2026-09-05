@@ -211,6 +211,27 @@ final class ClaudeProcessTests: XCTestCase {
         try await p.answer(hs.pending[0].id, .permission(.allow(updatedInput: nil, updatedPermissions: nil, classification: .userTemporary)))
         await p.terminate()
     }
+    /// Group 2e. A request re-armed at the handshake used to be pushed straight out as `.request`, bypassing
+    /// §6.3 entirely — and its live retransmission, which *would* have gone through the policy, was then
+    /// discarded here as a duplicate. An unknown subtype among the pending set therefore reached the user as a
+    /// prompt nothing could answer, while the live path refuses the identical request within a second.
+    func testAPendingRequestGoesThroughTheSamePolicyAsALiveOne() async throws {
+        let h = try Harness(); let p = h.make(scenario: "pending_unknown")
+        let hs = try await p.spawn()
+        XCTAssertEqual(hs.pending.map(\.id.rawValue), ["u2"])
+        guard case .policyAnswered(let answered, let error)? = await h.expect({ if case .policyAnswered = $0 { return true }; return false },
+                                                                             "the pending unknown subtype was refused by policy") else { return }
+        XCTAssertEqual(answered.id.rawValue, "u2")
+        XCTAssertTrue(error.contains("afleet_never_heard"), error)
+        _ = await h.expect({ if case .stderr(let l, _) = $0 { return l.hasPrefix("ANSWER u2") }; return false }, "the child received the answer")
+        try await Task.sleep(for: .milliseconds(300))      // let the live retransmission land and be deduplicated
+        let events = await h.log.events
+        XCTAssertFalse(events.contains { if case .request(let r) = $0 { return r.id.rawValue == "u2" }; return false },
+                       "an unknown subtype must never be surfaced as a prompt")
+        XCTAssertEqual(events.filter { if case .policyAnswered(let r, _) = $0 { return r.id.rawValue == "u2" }; return false }.count, 1,
+                       "answered exactly once: the live duplicate is still deduplicated")
+        await p.terminate()
+    }
     /// Carried decision 3: `ControlSuccess.requestFrames` compact-maps with `try?`, so an element that does
     /// not decode as a control request is silently skipped and a pending prompt could go unsurfaced. The raw
     /// array is still re-encoded verbatim, so nothing is lost on the wire — but the gap must be recorded.

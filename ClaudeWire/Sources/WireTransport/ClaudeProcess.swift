@@ -122,7 +122,13 @@ public actor ClaudeProcess {
             await channel.push(.handshakeCompleted(handshake, epoch))
             for r in pending {
                 if isExited { break }
-                await channel.push(.request(r))
+                // Through the same policy as a live request, and for the same reason. A pending request is
+                // one the engine re-arms across a reconnect; nothing about having been re-armed makes an
+                // unknown subtype known, a malformed body decodable or an undeclared dialog kind declared.
+                // Pushed straight out as `.request` — as this did — those three bypass §6.3 entirely, and
+                // their live retransmissions, which *would* have gone through it, are then discarded here as
+                // duplicates. The whole class went unanswered.
+                await apply(policy.decide(r), to: r)
             }
         }
         return handshake
@@ -135,6 +141,9 @@ public actor ClaudeProcess {
     /// `ControlSuccess`'s typed views compact-map with `try?`: an element that does not decode as a control
     /// request is skipped, and a skipped element could be a permission prompt that never reaches the user. It
     /// is still re-encoded verbatim, so nothing is lost on the wire, but the gap is recorded here.
+    ///
+    /// Registration only. What to *do* with each request is decided in `spawn`, by the same `policy.decide`
+    /// the live path uses — a decision can require a write, and this runs before any suspension is allowed.
     private func registerPending(_ s: ControlSuccess) {
         func take(_ raw: JSONValue?, _ typed: [ControlRequestFrame], _ key: String) {
             let onWire = raw?.arrayValue?.count ?? 0
@@ -145,7 +154,6 @@ public actor ClaudeProcess {
                 let request = InboundRequest.parse(frame: frame, epoch: epoch, receivedAt: .now)
                 guard !seenInboundIDs.contains(request.id) else { continue }
                 seenInboundIDs.insert(request.id)
-                pendingInbound[request.id] = request
                 handshakePending.append(request)
             }
         }
@@ -244,7 +252,12 @@ public actor ClaudeProcess {
         let request = InboundRequest.parse(frame: req, epoch: epoch, receivedAt: .now)
         if seenInboundIDs.contains(request.id) { return }              // a live duplicate of a pending request re-armed at handshake
         seenInboundIDs.insert(request.id)
-        switch policy.decide(request) {
+        await apply(policy.decide(request), to: request)
+    }
+    /// §6.3's decision, carried out. The one place a decision becomes an event or an answer, so that a
+    /// request re-armed at the handshake and the same request arriving live cannot be treated differently.
+    private func apply(_ decision: PolicyDecision, to request: InboundRequest) async {
+        switch decision {
         case .surface:
             pendingInbound[request.id] = request
             await channel.push(.request(request))

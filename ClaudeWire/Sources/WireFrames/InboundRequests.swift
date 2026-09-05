@@ -17,22 +17,45 @@ public enum PermissionUpdate: Hashable, Sendable, Codable {
     case setMode(mode: PermissionMode, destination: PermissionUpdateDestination)
     case addDirectories(directories: [String], destination: PermissionUpdateDestination)
     case removeDirectories(directories: [String], destination: PermissionUpdateDestination)
+    /// A suggestion whose shape this build does not model, kept exactly as it arrived.
+    ///
+    /// Forward compatibility, and what is at stake is the whole request rather than the suggestion.
+    /// `CanUseToolFields` decodes `permission_suggestions` eagerly, so a single unfamiliar element used to
+    /// fail the typed decode of the entire `can_use_tool` request and land it in `.malformed` — which §6.3
+    /// answers with an immediate error. The day the engine ships a seventh variant, every permission prompt
+    /// carrying one would be refused on the user's behalf without ever being shown. Degrading the element
+    /// keeps the request usable, and the value re-encodes verbatim, so nothing is lost on the wire.
+    ///
+    /// This is deliberately the fallback for *any* element the six cases above cannot decode, not only for an
+    /// unrecognised `type`: a new `destination` or `behavior` on an otherwise familiar variant is the same
+    /// forward-compatibility event wearing a different hat, and would otherwise take the request down with it.
+    case unknown(JSONValue)
 
     public enum CodingKeys: String, CodingKey { case type, rules, behavior, destination, mode, directories }
     public init(from decoder: any Decoder) throws {
+        let raw = try JSONValue(from: decoder)
+        guard let known = try? Self.known(from: decoder) else { self = .unknown(raw); return }
+        self = known
+    }
+    private static func known(from decoder: any Decoder) throws -> PermissionUpdate {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let dest = try c.decode(PermissionUpdateDestination.self, forKey: .destination)
         switch try c.decode(String.self, forKey: .type) {
-        case "addRules": self = .addRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest)
-        case "replaceRules": self = .replaceRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest)
-        case "removeRules": self = .removeRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest)
-        case "setMode": self = .setMode(mode: try c.decode(PermissionMode.self, forKey: .mode), destination: dest)
-        case "addDirectories": self = .addDirectories(directories: try c.decode([String].self, forKey: .directories), destination: dest)
-        case "removeDirectories": self = .removeDirectories(directories: try c.decode([String].self, forKey: .directories), destination: dest)
+        case "addRules": return .addRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest)
+        case "replaceRules": return .replaceRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest)
+        case "removeRules": return .removeRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest)
+        case "setMode": return .setMode(mode: try c.decode(PermissionMode.self, forKey: .mode), destination: dest)
+        case "addDirectories": return .addDirectories(directories: try c.decode([String].self, forKey: .directories), destination: dest)
+        case "removeDirectories": return .removeDirectories(directories: try c.decode([String].self, forKey: .directories), destination: dest)
         case let other: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown PermissionUpdate type \(other)")
         }
     }
     public func encode(to encoder: any Encoder) throws {
+        if case .unknown(let raw) = self {
+            var single = encoder.singleValueContainer()
+            try single.encode(raw)
+            return
+        }
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .addRules(let r, let b, let d): try c.encode("addRules", forKey: .type); try c.encode(r, forKey: .rules); try c.encode(b, forKey: .behavior); try c.encode(d, forKey: .destination)
@@ -41,6 +64,7 @@ public enum PermissionUpdate: Hashable, Sendable, Codable {
         case .setMode(let m, let d): try c.encode("setMode", forKey: .type); try c.encode(m, forKey: .mode); try c.encode(d, forKey: .destination)
         case .addDirectories(let dirs, let d): try c.encode("addDirectories", forKey: .type); try c.encode(dirs, forKey: .directories); try c.encode(d, forKey: .destination)
         case .removeDirectories(let dirs, let d): try c.encode("removeDirectories", forKey: .type); try c.encode(dirs, forKey: .directories); try c.encode(d, forKey: .destination)
+        case .unknown: break                                    // handled above, before the keyed container exists
         }
     }
 }

@@ -111,6 +111,7 @@ def release_initialize_response():
           "uuid": uuid(), "session_id": SESSION})
     mcp_message("s1n", {"jsonrpc": "2.0", "method": "notifications/initialized"})
     if held_initialize.pop("pending", False): can_use_tool("p1")
+    if has("pending_unknown"): control_request("u2", {"subtype": "afleet_never_heard", "anything": 1})
     threading.Thread(target=after_init, daemon=True).start()
 
 def request_tools_list():
@@ -209,6 +210,12 @@ def handle(line):
             resp = {"commands": [], "agents": [], "models": [], "output_style": "default", "available_output_styles": ["default"], "current_model": "scripted", "current_permission_mode": "default", "session_state": {}, "pid": os.getpid(), "fast_mode_state": "off"}
             body = {"subtype": "success", "request_id": rid, "response": resp}
             if has("pending"): body["pending_permission_requests"] = [{"type": "control_request", "request_id": "p1", "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": {"file_path": "p.txt", "content": "x"}, "tool_use_id": "toolu_p1"}}]
+            if has("pending_unknown"):
+                # Synthetic. The engine re-arms only requests it knows about, but the host cannot assume its
+                # own vocabulary matches the engine's: a subtype afleet has never heard of is exactly what a
+                # newer engine re-arms, and the pending path must treat it the way the live path does.
+                body["pending_permission_requests"] = [
+                    {"type": "control_request", "request_id": "u2", "request": {"subtype": "afleet_never_heard", "anything": 1}}]
             if has("pending_undecodable"):
                 body["pending_permission_requests"] = [
                     {"type": "control_request", "request_id": "q1", "request": {"subtype": "can_use_tool", "tool_name": "Write", "input": {"file_path": "q.txt", "content": "x"}, "tool_use_id": "toolu_q1"}},
