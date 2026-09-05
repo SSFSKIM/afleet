@@ -34,4 +34,26 @@ enum Breaks {
         object[head] = try set(Array(path.dropFirst()), in: child, to: new)
         return .object(object)
     }
+
+    /// The record with the dotted `path` set, where the last component may be a key the recorded shape never carried
+    /// and any component may be an array index. A sibling of `mutating(field:in:to:)`, which names object keys only
+    /// and requires every component to exist already; appended here (Task 5) so a mutation test can add a field the
+    /// engine writes but no fixture does — a `system` subtype, a `supersedes` list, an explicit `leafUuid` null.
+    static func setting(path: String, in record: TranscriptRecord, to value: JSONValue) throws -> TranscriptRecord {
+        RecordDecoder.decode(entry: try put(path.split(separator: ".").map(String.init), in: try record.jsonValue(), to: value))
+    }
+
+    private static func put(_ path: [String], in value: JSONValue, to new: JSONValue) throws -> JSONValue {
+        guard let head = path.first else { return new }
+        let rest = Array(path.dropFirst())
+        if var object = value.objectValue {
+            object[head] = try put(rest, in: object[head] ?? .object([:]), to: new)
+            return .object(object)
+        }
+        if var array = value.arrayValue, let index = Int(head), array.indices.contains(index) {
+            array[index] = try put(rest, in: array[index], to: new)
+            return .array(array)
+        }
+        throw FixtureCorpus.Failure("Breaks: the path component \(head) names neither an object key nor a live array index")
+    }
 }
