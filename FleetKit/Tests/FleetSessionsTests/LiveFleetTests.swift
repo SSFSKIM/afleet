@@ -253,13 +253,24 @@ final class LiveFleetTests: XCTestCase {
         }
     }
 
-    // MARK: - Scenario 4: adoption, two turns reserved and none expected
+    // MARK: - Scenario 4: adoption, one turn
 
-    /// *Adopt* stops the job, resumes the same session owned, and *Send to background* hands it back.
+    /// The §7.4 round trip on a real conversation job, made the way production makes one: an owned channel is sent
+    /// to the background and adopted back.
     ///
-    /// The job is a one-turn, uncapped `claude --bg`. The turn buys the transcript that adopt's own print-mode
-    /// resume requires; the second reserved turn is insurance for a resumed job that runs one, and the scenario
-    /// asserts that the adopted channel itself produced no result frame.
+    /// The job is **not** created by racing a CLI verb, and that is the lesson this scenario cost the most to
+    /// learn. On 2.1.261 a `--bg` job given a prompt is a one-shot runner: it answers and goes terminal about
+    /// 3.9 s after creation whether or not it carries `--max-turns` — measured, `createdAt 18:03:03.977`,
+    /// `firstTerminalAt 18:03:07.828`, no kill line, two assistant entries and `{input_tokens: 10,
+    /// output_tokens: 41}`. `Fleet.jobs()` filters terminal records, and a `jobs()` call runs `agents --json` and
+    /// takes seconds, so observing such a job is a race that earlier runs of this scenario happened to win against
+    /// a warm daemon. A session handed to the daemon *without* a prompt stays resident idle until stopped, and
+    /// `perform(.sendToBackground)` is exactly that: `--bg --resume <id>`, promptless. So the channel is made
+    /// owned, given one cheap turn so a transcript exists — adopt's own print-mode resume refuses a session
+    /// without one — and then handed over through the facade, after which it is `.backgroundJob` by transition
+    /// rather than by observation and there is no window to lose.
+    ///
+    /// Both parent-required verbs are exercised on the one job, in the order §7.4 describes.
     ///
     /// Deliberate break: drop `verbs.stop` from `ChannelSupervisor.adopt` → the worker never leaves and the
     /// release wait times out into Contended.
@@ -269,58 +280,58 @@ final class LiveFleetTests: XCTestCase {
         let rig = try await LiveRig(budget: Self.budget)
         addTeardownBlock { await rig.shutdown() }
 
-        // 570 s is the sum of this scenario's own bounded waits: the 120 s `--bg` run, a sixty-second job poll and
-        // a twenty-second origin poll each able to overrun by one twenty-second `jobs()` call, the adopt (a
-        // twenty-second stop, the ten-second handoff budget, a seventy-second spawn), the send-to-background (a
-        // 45 s termination, the handoff budget, a pre-spawn reconcile, `--bg --resume` with its roster
-        // confirmation, and `agents --json`), and the stop-and-remove tail.
-        try await Self.budget.run(turns: 2, wallTime: .seconds(570)) {
+        // 600 s is the sum of this scenario's own bounded waits: the open (a twenty-second pre-spawn reconcile, a
+        // thirty-second handshake, a twenty-second post-handshake reconcile), 120 s for the prompt's `result`, a
+        // sixty-second settle, the send-to-background (a 45 s termination, the ten-second handoff budget, a
+        // pre-spawn reconcile, `--bg --resume` with its roster confirmation and `agents --json`), a twenty-second
+        // roster poll able to overrun by one twenty-second `jobs()` call, the adopt (a twenty-second stop, the
+        // handoff budget, a seventy-second spawn), and the reap-and-remove tail.
+        try await Self.budget.run(turns: 2, wallTime: .seconds(600)) {
             let directory = try Self.trustedDirectory(0)
-            // One turn, and no `--max-turns`. Both halves are the settled shape and both were paid for.
-            //
-            // The cap had to go: `--max-turns 1` ends the session the moment it answers, and the live run of
-            // 2026-09-05 recorded the job terminal 3.5 s after creation, before `Fleet.jobs()` — which filters
-            // terminal records — could list it.
-            //
-            // The prompt has to stay, and this is the expensive lesson. A promptless job was tried: a bare
-            // `claude --bg` does mint and carry its own session id, reaches no model, and stays resident
-            // (`state: working, tempo: blocked, firstTerminalAt: null` from t+15 s to t+90 s), and `jobs()` listed
-            // it in the live run. But such a session writes nothing under `projects/`, and *adopt* resumes it
-            // through afleet's own print-mode launch, which refuses a session with no transcript. Measured
-            // directly, at zero cost, against a session a bare `--bg` had created:
-            //
-            //     claude -p --input-format stream-json … --resume <uuid>
-            //     → "No conversation found with session ID: <uuid>", result error_during_execution,
-            //       total_cost_usd 0, exit 1
-            //
-            // which is the `processExited` the adopt spawn threw. The two resume paths differ: `--bg --resume`
-            // accepted the very same uuid and kept its id. So the job's session must carry a transcript, and a
-            // transcript costs one turn. `--bg` is a CLI verb rather than a `ClaudeProcess`, so the "every launch
-            // carries an explicit cap" rule is untouched, and the one-word prompt bounds the spend by itself.
-            _ = try await rig.runner.run(rig.binary,
-                                         arguments: ["--bg", "--model", Self.haiku, "Reply with exactly: pong"],
-                                         environment: rig.childEnvironment, cwd: directory, timeout: .seconds(120))
-
-            let started = try await Self.poll(upTo: .seconds(60)) { () -> JobEntry? in
-                await rig.fleet.jobs().first { $0.sessionID != nil && $0.cwd?.lastPathComponent == directory.lastPathComponent }
-            }
-            let job = try XCTUnwrap(started, "the --bg conversation job never appeared in jobs()")
-            let session = try XCTUnwrap(job.sessionID)
+            let session = SessionID()
             let key = ChannelKey(configHome: LiveGate.scratchHome, session: session)
+
             await rig.fleet.register(key, cwd: directory, recent: true)
             let opened = await rig.fleet.events(of: key)
-            let stream = try XCTUnwrap(opened, "the fleet has no channel for the adopted session")
+            let stream = try XCTUnwrap(opened, "the fleet has no channel for this session")
             let log = LiveEventLog()
             let pump = Task { for await event in stream { await log.append(event) } }
             defer { pump.cancel() }
-            let sawJobOrigin = try await Self.poll(upTo: .seconds(20)) { () -> Bool? in
-                await rig.fleet.state(of: key)?.origin == .backgroundJob ? true : nil
-            }
-            XCTAssertEqual(sawJobOrigin, true,
-                           "the registered channel never read as .backgroundJob, so adopt has nothing to adopt")
 
-            // The resume carries `--max-turns 1`: a resumed job may run a turn, which is the second reservation.
-            _ = Self.budget.launch(LaunchConfiguration(binary: rig.binary, cwd: directory, session: .resume(session, fork: false)),
+            // One prompt, one agentic turn, and the cap says so.
+            _ = Self.budget.launch(LaunchConfiguration(binary: rig.binary, cwd: directory, session: .new(session)),
+                                   maxTurns: 1, model: Self.haiku, freshSessions: [session])
+            let ready = try await rig.fleet.open(key, cwd: directory, recent: true)
+            XCTAssertEqual(ready.origin, .owned(.ready))
+
+            try await rig.fleet.perform(.send(UserInput(text: "Reply with exactly: pong")), on: key)
+            switch await Self.settle(log, quietFor: .seconds(10), upTo: .seconds(120), { events in
+                !Self.results(in: events).isEmpty
+            }) {
+            case .settled:
+                break
+            case .conditionUnmet(let results):
+                XCTFail("the prompt produced \(results) result frame(s) in two minutes")
+            case .stillBusy:
+                XCTFail("the channel never went quiet after its one turn")
+            }
+
+            // *Send to background*: the facade's own verb, which runs `--bg --resume <id>` with no prompt.
+            let backgrounded = try await rig.fleet.perform(.sendToBackground, on: key)
+            XCTAssertTrue(rig.runner.calls.ran(["--bg", "--resume", session.description]),
+                          "send-to-background did not run --bg --resume")
+            // Both halves, because the second is the one adoption depends on in production: the channel says it is
+            // a background job because it took the transition, and the roster says so because it was observed.
+            XCTAssertEqual(backgrounded.origin, .backgroundJob)
+            let listed = try await Self.poll(upTo: .seconds(20)) { () -> JobEntry? in
+                await rig.fleet.jobs().first { $0.sessionID == session }
+            }
+            let job = try XCTUnwrap(listed, "no job on the roster for the session that was handed back")
+
+            // The resume carries `--max-turns 1` and no prompt: the second reserved turn is insurance for a
+            // resumed job that runs one, and the assertion below is that this one did not.
+            _ = Self.budget.launch(LaunchConfiguration(binary: rig.binary, cwd: directory,
+                                                       session: .resume(session, fork: false)),
                                    maxTurns: 1, model: Self.haiku)
             let adopted = try await rig.fleet.perform(.adopt, on: key)
 
@@ -333,32 +344,21 @@ final class LiveFleetTests: XCTestCase {
                            "adopt did not reach owned/ready; the post-handshake check found a holder")
             XCTAssertEqual(adopted.identity.resolved, session)
 
-            let backgrounded = try await rig.fleet.perform(.sendToBackground, on: key)
-            XCTAssertTrue(rig.runner.calls.ran(["--bg", "--resume", session.description]),
-                          "send-to-background did not run --bg --resume")
-            XCTAssertEqual(backgrounded.origin, .backgroundJob)
-            let rosterAfterHandback = await rig.fleet.jobs()
-            let handedBack = try XCTUnwrap(rosterAfterHandback.first { $0.sessionID == session },
-                                           "no job on the roster for the session that was handed back")
-
-            try await rig.fleet.performJob(.stop, handedBack.short)
-            _ = try await Self.poll(upTo: .seconds(20)) { () -> Bool? in
-                await rig.fleet.jobs().contains { $0.short == handedBack.short } ? nil : true
-            }
-            _ = try? await rig.verbs.remove(handedBack.short)
-            _ = try? await rig.verbs.remove(job.short)
+            try await rig.fleet.perform(.reap, on: key)
+            _ = try? await rig.fleet.performJob(.remove, job.short)
 
             let observed = await log.events
-            for result in Self.results(in: observed) {
+            let results = Self.results(in: observed)
+            for result in results {
                 XCTAssertNotEqual(result.subtype, "error_max_turns",
                                   "a turn ended at the --max-turns cap: result subtype error_max_turns")
+                XCTAssertFalse(result.isError, "a turn ended with an error result: \(result.subtype)")
                 await Self.budget.add(cost: result.totalCostUSD)
             }
-            // The channel afleet owns after the adopt is sent no prompt, so *its* launches must produce no result
-            // frame: the one turn this scenario spends belongs to the `--bg` job, which is not this channel. A
-            // resume that quietly started running turns of its own would fail here rather than on the invoice.
-            XCTAssertEqual(Self.results(in: observed).count, 0,
-                           "the adopted channel produced a result frame, so the resume spent a turn of its own")
+            // Exactly the one turn the prompt bought. The resume that follows the adopt is sent nothing, so a
+            // resume that quietly started running turns of its own fails here rather than on the invoice.
+            XCTAssertEqual(results.count, 1,
+                           "expected one result frame for the one prompt, saw \(results.count)")
             Self.budget.assertEveryLaunchWasDecorated()
         }
     }
