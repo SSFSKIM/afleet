@@ -4029,3 +4029,11 @@ Pending — written at finish.
   `redact.py` gaps as a C1 follow-up on `main`. Raised by C2's whole-branch review panel
   (scalpel-4#1, scalpel-4#3, sweep#2) and its Wave A worker. Flags C2 (Wave B in flight),
   C1 (follow-up), C4 (channel keying on the identity event; ConfigHome), C5 and C7 (X11).
+- 2026-09-05: `main`'s public history keeps the recording machine's home directory as it
+  stands. The path appeared in the tui-parity evidence set and one plan from 2026-09-03,
+  before the §11 origin rule existed; the tip has been clean since d29e40e, the exposure is a
+  macOS account name and a public plugin inventory with no secret, and a force-pushed
+  rewrite would break every existing clone for a modest gain. Decided by the user on
+  2026-09-05 after the option was put to them with a recommendation to leave it. The child
+  branch is different: never pushed, so its six leaking historical blobs are rewritten out
+  before merge.
