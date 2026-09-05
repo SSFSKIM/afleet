@@ -78,9 +78,11 @@ enum FixtureWireReplay {
         let wire = try wirePolicy(for: fx)
         var context = WireEventPolicy.Context(epoch: epoch)
         var hostRequestIDs: Set<RequestID> = []
+        var rewindRequestIDs: Set<RequestID> = []
         for frame in recorded where frame.direction == "in" {
             guard case .controlRequest(let request) = frame.frame else { continue }
             hostRequestIDs.insert(request.requestID)
+            if request.subtype == "rewind_conversation" { rewindRequestIDs.insert(request.requestID) }
             context.pendingOutbound.insert(request.requestID)
         }
 
@@ -127,8 +129,13 @@ enum FixtureWireReplay {
             }
             var events: [WireEvent] = []
             consume(wire.effects(for: frame.frame, in: context, receivedAt: .now), into: &events)
-            guard !events.isEmpty else { continue }
-            steps.append(Step(t: frame.t, events: events, signal: nil))
+            if !events.isEmpty { steps.append(Step(t: frame.t, events: events, signal: nil)) }
+            // The one host action the engine reports back rather than being told: a rewind the host asked for and the
+            // engine honoured. In production the host reads its own `rewind_conversation` answer and hands the
+            // reducer the `.rewound` itself, so the replay does the same, as its own step at the same instant.
+            if let signal = rewindSignal(of: frame.frame, requests: rewindRequestIDs) {
+                steps.append(Step(t: frame.t, events: [], signal: signal))
+            }
         }
 
         return Trace(steps: steps, context: context, effectKinds: kinds, hostRequestIDs: hostRequestIDs,
@@ -150,6 +157,18 @@ enum FixtureWireReplay {
         default:
             return nil
         }
+    }
+
+    /// The `control_response` to a `rewind_conversation` the host sent, read the way a host must read it: both legs
+    /// answer inside a `success` envelope, so only the body says which happened. `rewound: true` carries
+    /// `precedingAssistantUuid`, the record the transcript's leaf moves to and therefore the last row that survives;
+    /// `rewound: false` carries a body-level `error` and changed nothing, so it produces no signal at all.
+    private static func rewindSignal(of frame: Frame, requests: Set<RequestID>) -> HostSignal? {
+        guard case .controlResponse(let response) = frame, requests.contains(response.requestID),
+              case .success(let success) = response.body,
+              success.response?["rewound"]?.boolValue == true,
+              let uuid = success.response?["precedingAssistantUuid"]?.stringValue else { return nil }
+        return .rewound(toUUID: uuid)
     }
 
     private static func outcome(of body: ControlResponseBody, subtype: String) -> DecisionOutcome {

@@ -717,6 +717,70 @@ final class WireReducerTests: XCTestCase {
         XCTAssertFalse(trace.context.pendingInbound.contains(invented))
     }
 
+    /// The engine tells a host about a rewind only in the `control_response` to the host's own `rewind_conversation`,
+    /// and only in that response's *body*: both legs answer inside a `success` envelope, so a host that reads the
+    /// envelope alone cannot tell them apart. `rewind-turn` records both — a refusal carrying `rewound: false` and a
+    /// body-level error, and an acceptance carrying `rewound: true` with `precedingAssistantUuid` — and only the
+    /// acceptance moved anything: the file's `last-prompt` names that preceding assistant afterwards, and the three
+    /// records the abandoned turn wrote stay in the file below the leaf.
+    ///
+    /// So the replay must deliver exactly one `.rewound`, naming that assistant, and the wire half must lose the
+    /// abandoned turn. Before this fixture the truncation was an unwitnessed path reached only by mutation.
+    func testARecordedRewindTruncatesTheWireHalfAndARefusalDoesNot() throws {
+        let fx = try FixtureCorpus.named("rewind-turn")
+
+        // Both legs, read straight off the recording's raw frames.
+        var requests = 0, honoured = 0, refused = 0
+        for recorded in try fx.frames() {
+            let value = recorded.value
+            if recorded.direction == "in", value["type"]?.stringValue == "control_request",
+               value["request"]?["subtype"]?.stringValue == "rewind_conversation" { requests += 1 }
+            guard recorded.direction == "out", value["type"]?.stringValue == "control_response",
+                  let body = value["response"] else { continue }
+            switch body["response"]?["rewound"]?.boolValue {
+            case true:
+                honoured += 1
+                XCTAssertNotNil(body["response"]?["precedingAssistantUuid"]?.stringValue,
+                                "an honoured rewind names the record the leaf moves to")
+            case false:
+                refused += 1
+                XCTAssertEqual(body["subtype"]?.stringValue, "success",
+                               "the refusal is a success envelope carrying a body-level error, not an error envelope")
+            default:
+                continue
+            }
+        }
+        XCTAssertEqual([requests, honoured, refused], [2, 1, 1], "the recording holds both legs of the rewind")
+
+        // The replay's mapping: one signal, naming the uuid the file's own leaf names.
+        let trace = try FixtureWireReplay.trace(for: fx)
+        let rewinds: [String] = trace.steps.compactMap {
+            if case .rewound(let uuid)? = $0.signal { uuid } else { nil }
+        }
+        XCTAssertEqual(rewinds.count, 1, "the honoured leg reaches the reducer and the refused leg does not")
+        let file = try ProjectionEqualityTests.fileProjection(fx)
+        XCTAssertEqual(rewinds.first, file.session.leaf, "and it is the uuid the file's last-prompt names")
+
+        // The same replay twice, once with the signal withheld: the difference is exactly the abandoned turn.
+        var withRewind = try FixtureWireReplay.reducer(for: fx)
+        var withoutRewind = withRewind
+        for step in trace.steps {
+            FixtureWireReplay.apply(step, to: &withRewind)
+            if case .rewound? = step.signal { continue }
+            FixtureWireReplay.apply(step, to: &withoutRewind)
+        }
+        let fileOnly = try ProjectionComparison.fileOnlyRecordUUIDs(fx)
+        let kept = Set(ProjectionComparison.compared(withoutRewind.durable, fileOnly: fileOnly).keys)
+        let truncated = Set(ProjectionComparison.compared(withRewind.durable, fileOnly: fileOnly).keys)
+        XCTAssertEqual(kept.subtracting(truncated).count, 2,
+                       "the abandoned turn is one user message and one assistant message")
+        XCTAssertTrue(truncated.isSubset(of: kept), "the rewind removes rows and adds none")
+        XCTAssertEqual(ProjectionComparison.compare(wire: withRewind.durable, file: file, fileOnly: fileOnly), [],
+                       "with the rewind delivered the wire half is the file half")
+        XCTAssertFalse(ProjectionComparison.compare(wire: withoutRewind.durable, file: file, fileOnly: fileOnly).isEmpty,
+                       "and without it the two halves disagree, which is what makes this a discrimination")
+    }
+
     /// **No fixture carries a `session_state_changed` frame.** Two schema-shaped frames with invented identifiers are
     /// applied to a replayed `plain-two-turn`: the last wins, no item is made, and a process replacement clears it.
     func testSessionStateChangedLandsInTheOverlay() throws {

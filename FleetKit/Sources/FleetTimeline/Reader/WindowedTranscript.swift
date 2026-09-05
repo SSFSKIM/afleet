@@ -130,6 +130,19 @@ public enum WindowedTranscript {
         }
     }
 
+    /// The `logicalParentUuid` a record declares. Only a `compact_boundary` carries one on this corpus: the engine's
+    /// writer sets `parentUuid: null, logicalParentUuid: <previous leaf>` on a boundary and the ordinary pair on
+    /// every other record (2.1.258 `cli.pretty.js` line 430982), so it is the boundary's only link to the half of
+    /// the conversation before it.
+    static func logicalParentUUID(of record: TranscriptRecord) -> String? {
+        switch record {
+        case .user(let r): r.fields.logicalParentUuid
+        case .assistant(let r): r.fields.logicalParentUuid
+        case .system(let r): r.fields.logicalParentUuid
+        default: nil
+        }
+    }
+
     /// A turn start: a `user` record that is neither a tool result nor `isMeta` — the same three conditions the engine's
     /// own first-prompt scan applies (2.1.258 `Ett`, line 13464, and `F5`).
     static func isTurnStart(_ record: TranscriptRecord) -> Bool {

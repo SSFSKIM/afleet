@@ -251,19 +251,72 @@ enum IndependentCount {
     static func comparedItems(_ fx: FixtureCorpus.Fixture) throws -> Int {
         var total = 0
         for (_, kind, url) in try fx.transcriptFiles() {
-            total += try streamItems(url)
+            total += try streamItems(url, rendered: nil)
             if case .agentTranscript = kind { total += 1 }
         }
         return total
     }
 
-    private static func streamItems(_ url: URL) throws -> Int {
+    /// The same walk, restricted to the records the leaf-path ruling renders: the chain to the file's leaf, plus the
+    /// off-chain `assistant` records that share a `message.id` with a record on it. Both halves are walked here off
+    /// the raw JSON — including the step through a `logicalParentUuid` where a record declares no `parentUuid` — so
+    /// the floor states the ruling independently instead of borrowing the reducer's answer for it. A file with no
+    /// abandoned branch and no compaction gives the same number as `comparedItems`, which is every fixture but the
+    /// two the rewind and the compaction touch.
+    static func comparedItemsOnLeafPath(_ fx: FixtureCorpus.Fixture) throws -> Int {
+        var total = 0
+        for (_, kind, url) in try fx.transcriptFiles() {
+            total += try streamItems(url, rendered: renderedRecords(try lines(url)))
+            if case .agentTranscript = kind { total += 1 }
+        }
+        return total
+    }
+
+    /// The rendered set: from the last `last-prompt`'s `leafUuid` (else the last record carrying a uuid) up by
+    /// `parentUuid`, falling back to `logicalParentUuid` where a record declares no `parentUuid`, then widened by
+    /// every `assistant` record whose `message.id` is already on it.
+    private static func renderedRecords(_ records: [JSONValue]) -> Set<String> {
+        let conversation = ["user", "assistant", "attachment", "system", "progress"]
+        var byUUID: [String: JSONValue] = [:]
+        var order: [String] = []
+        var leaf: String?
+        for record in records {
+            let type = record["type"]?.stringValue
+            if type == "last-prompt" { leaf = record["leafUuid"]?.stringValue }
+            guard let type, conversation.contains(type), let uuid = record["uuid"]?.stringValue else { continue }
+            byUUID[uuid] = record
+            order.append(uuid)
+        }
+        var cursor = leaf.flatMap { byUUID[$0] != nil ? $0 : nil } ?? order.last
+        var chain: Set<String> = []
+        while let uuid = cursor, let record = byUUID[uuid], !chain.contains(uuid) {
+            chain.insert(uuid)
+            let parent = record["parentUuid"]?.stringValue ?? record["logicalParentUuid"]?.stringValue
+            cursor = parent.flatMap { byUUID[$0] != nil ? $0 : nil }
+        }
+        var messageIDs: Set<String> = []
+        for uuid in chain where byUUID[uuid]?["type"]?.stringValue == "assistant" {
+            if let id = byUUID[uuid]?["message"]?["id"]?.stringValue { messageIDs.insert(id) }
+        }
+        for uuid in order where byUUID[uuid]?["type"]?.stringValue == "assistant" {
+            if let id = byUUID[uuid]?["message"]?["id"]?.stringValue, messageIDs.contains(id) { chain.insert(uuid) }
+        }
+        return chain
+    }
+
+    private static func streamItems(_ url: URL, rendered: Set<String>?) throws -> Int {
         var count = 0
         var runMessageID: String?
         var runOpen = false
+        func renders(_ record: JSONValue) -> Bool {
+            guard let rendered else { return true }
+            guard let uuid = record["uuid"]?.stringValue else { return false }
+            return rendered.contains(uuid)
+        }
         for record in try lines(url) {
             switch record["type"]?.stringValue {
             case "assistant":
+                guard renders(record) else { continue }
                 let messageID = record["message"]?["id"]?.stringValue
                 if !runOpen || messageID == nil || messageID != runMessageID { count += 1 }
                 runOpen = true
@@ -272,7 +325,12 @@ enum IndependentCount {
                 where block["type"]?.stringValue == "tool_use" { count += 1 }
             case "user":
                 runOpen = false; runMessageID = nil
+                guard renders(record) else { continue }
+                // The three flags the engine folds into one `isSynthetic` on the frame it echoes (`lwe`, 2.1.258
+                // `cli.pretty.js` line 366496); the compaction summary carries the last two.
                 if record["isMeta"]?.boolValue == true { continue }
+                if record["isCompactSummary"]?.boolValue == true { continue }
+                if record["isVisibleInTranscriptOnly"]?.boolValue == true { continue }
                 // The two file-only user shapes, restated here rather than read off
                 // `ProjectionCategories.fileOnlyRecordKinds`: an engine-injected task notification and a subagent's
                 // opening prompt reach the host only through the transcript and the mirror, never as a `user` frame.
@@ -284,6 +342,9 @@ enum IndependentCount {
                 count += 1
             case "system":
                 runOpen = false; runMessageID = nil          // a boundary or a notification: renders, so it closes the run
+                // A `compact_boundary` is the one `system` subtype in `comparedWireToFile`; the notification subtypes
+                // are overlay rows and are compared nowhere.
+                if record["subtype"]?.stringValue == "compact_boundary", renders(record) { count += 1 }
             default:
                 continue                                     // attachments, progress and every state kind render nothing
             }
@@ -402,6 +463,7 @@ final class ProjectionEqualityTests: XCTestCase {
     private static let expectedComparedItems: [String: Int] = [
         "ask-user-question": 4,          // one prompt, two assistant groups, one AskUserQuestion call
         "background-shell": 5,           // one prompt, three assistant groups, one Bash call; the task-notification peer is file-only, the shell's own run row wire-only
+        "compact-boundary": 11,          // eight on the leaf path before the compaction, the boundary row, and the turn's two prompts; the summary is hidden on both halves
         "control-shapes": 2,             // one prompt and one assistant group; the fixture is about control traffic
         "dialog-fable-overage": 1,       // synthetic: a flat list of roots, so only the leaf `a-4` is rendered
         "dialog-refusal-fallback": 1,    // synthetic: the same, so only the leaf `u-undeclared` is rendered
@@ -414,11 +476,37 @@ final class ProjectionEqualityTests: XCTestCase {
         "plain-two-turn": 4,             // two prompts, two assistant groups, no tools
         "rate-limited-turn": 4,          // two prompts, two assistant groups
         "resume-no-replay": 4,           // entirely the initial/ snapshot: the engine replayed nothing
+        "rewind-turn": 8,                // four prompts and four assistant groups; the abandoned turn is on a branch and is rendered by neither half
         "send-user-file": 6,             // one prompt, three assistant groups, one Bash call, one send_user_file row
         "session-mirror-relocation": 8,  // four prompts and four assistant groups across the relocation
         "session-mirror-resume": 12,     // ten from initial/, two more from the resumed turn
         "zero-cost": 0,                  // no transcript and no conversation frame: both halves are empty
     ]
+
+    /// The one recorded fixture whose two halves are expected to differ, stated as `"<category> <field>"` per finding
+    /// so the pin names no identifier the corpus carries. Two findings, for two reasons:
+    ///
+    /// **`userMessage <order:>`.** After the compaction the engine echoes the turn's two `user` records in an order
+    /// that is neither the file's chain order nor its own timestamp order: the file links them by `parentUuid`, the
+    /// prompt first and the carrier that holds its attachments second, and the wire delivers the carrier first. The
+    /// frames carry the same timestamps the records do, so nothing about the rows themselves disagrees — the
+    /// disagreement is delivery order alone, and a reducer that folds in arrival order, which is what a live channel
+    /// shows, cannot learn the chain order until the file is read.
+    ///
+    /// **`compactBoundary timestamp`.** The `system/compact_boundary` frame carries no `timestamp` field, so the wire
+    /// stamps that row from the instant it arrived — and in this replay that instant is the recording envelope's `t`,
+    /// a millisecond offset from the start of the run rather than an epoch. It is the corpus's first compared item
+    /// with no timestamp of its own, so it is the first to show that the harness has no absolute clock to arrive at;
+    /// in a live channel the arrival instant is real and falls inside the tolerance. Re-derived, not inherited: a
+    /// recording that gave the harness an absolute origin would retire this half of the pin.
+    private static let expectedRecordedFindings: [String: Set<String>] = [
+        "compact-boundary": ["userMessage <order:>", "compactBoundary timestamp"],
+    ]
+
+    /// A finding named by what it is rather than by which records it fell between (C3 constraint 12).
+    private static func shape(of difference: Difference) -> String {
+        "\(difference.category) \(difference.field.hasPrefix("<order:") ? "<order:>" : difference.field)"
+    }
 
     /// The overlay's outcome on the two synthetic fixtures, pinned the same way. Their `result` frames omit
     /// `duration_ms` and `total_cost_usd`, which `ResultFields` declares required on the bundle's authority, so each
@@ -481,7 +569,7 @@ final class ProjectionEqualityTests: XCTestCase {
         var findings: Set<String> = []
         var comparedPerFixture: [String: Int] = [:]
         let all = try FixtureCorpus.all()
-        for fx in all {                                                   // all eighteen: no skip, no exclusion list
+        for fx in all {                                                   // all twenty: no skip, no exclusion list
             let wire = try FixtureWireReplay.replay(fx)
             let file = try Self.fileProjection(fx)
             let fileOnly = try ProjectionComparison.fileOnlyRecordUUIDs(fx)
@@ -489,22 +577,29 @@ final class ProjectionEqualityTests: XCTestCase {
             comparedPerFixture[fx.name] = ProjectionComparison.itemsCompared(file, fileOnly: fileOnly)
             if fx.synthetic {
                 for d in diffs { findings.insert("\(fx.name) \(d)") }
+            } else if let pinned = Self.expectedRecordedFindings[fx.name] {
+                XCTAssertEqual(Set(diffs.map(Self.shape(of:))), pinned,
+                               "\(fx.name): the pinned findings and no others: \(diffs.map(\.description))")
+                XCTAssertEqual(diffs.count, pinned.count,
+                               "\(fx.name): one finding per pinned reason: \(diffs.map(\.description))")
             } else {
                 XCTAssertTrue(diffs.isEmpty, "\(fx.name): \(diffs.prefix(5).map(\.description))")
             }
         }
         // Three layers, each of which an empty comparison fails: the count the comparison saw equals an independent
         // walk of the same fixture's records, it equals the pinned outcome for that name, and the names are all
-        // eighteen.
+        // twenty.
         for fx in all {
             let independent = try IndependentCount.comparedItems(fx)
+            let onLeafPath = try IndependentCount.comparedItemsOnLeafPath(fx)
+            XCTAssertLessThanOrEqual(onLeafPath, independent, "\(fx.name): the leaf path cannot exceed the whole file")
             let compared = comparedPerFixture[fx.name]
             // A synthetic transcript need not be a chain, and neither dialog's is, so the walk's floor is a statement
             // about its constructor there and is pinned rather than asserted — exactly as the equality above is.
             if fx.synthetic {
                 if compared != independent { findings.insert("\(fx.name) compared \(compared ?? -1) of \(independent) records-implied items") }
             } else {
-                XCTAssertEqual(compared, independent, "\(fx.name): the comparison did not see every item")
+                XCTAssertEqual(compared, onLeafPath, "\(fx.name): the comparison did not see every item")
             }
         }
         XCTAssertEqual(comparedPerFixture, Self.expectedComparedItems)
@@ -558,11 +653,11 @@ final class ProjectionEqualityTests: XCTestCase {
         }
         XCTAssertEqual(summaryFrames, 0, "a fixture now carries tool_use_summary: this test must read it, not construct one")
         XCTAssertEqual(findings, Self.expectedSyntheticOverlayFindings)
-        // Vacuity guards: the corpus's seventeen decision requests and its twenty-four decodable result frames were
+        // Vacuity guards: the corpus's seventeen decision requests and its twenty-six decodable result frames were
         // each reached. Both numbers are the sum of the independent walks above, so they cannot drift silently.
         XCTAssertEqual(decisionsSeen, try all.reduce(0) { $0 + (try IndependentCount.decisionStates($1).count) })
         XCTAssertEqual(decisionsSeen, 17)
-        XCTAssertEqual(turnsSeen, 24)
+        XCTAssertEqual(turnsSeen, 26)
 
         // 4. The cluster, from a constructed frame whose ids are read off a replayed recording, so no engine byte
         //    enters this file.

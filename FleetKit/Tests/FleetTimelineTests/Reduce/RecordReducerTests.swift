@@ -10,9 +10,16 @@ final class RecordReducerTests: XCTestCase {
 
     // MARK: - The corpus
 
-    /// Every main stream of every *recorded* fixture reduces to one chain: no branch, no orphan, and exactly as many
-    /// rendered messages as the file has non-tool-result, non-meta `user` records — counted here by a walk of the
-    /// records that shares no code with the reducer, so the two sides are a real comparison.
+    /// Every main stream of every *recorded* fixture reduces to one rendered chain, and the chains it does not render
+    /// are named one by one. This is the first witness of the child spec's leaf-path ruling (human-gate question 1,
+    /// decided "leaf path, with branches kept for a later affordance"): until `rewind-turn` and `compact-boundary`
+    /// joined the corpus, no recording held a chain the leaf excludes, so the ruling had nothing to be right about.
+    /// Both now do — each carries the same abandoned turn, three records the honoured rewind left below the leaf —
+    /// and the census below states each one by fixture name and record count rather than asserting an empty set.
+    ///
+    /// The rendered-message clause is the ruling's other half: rendered messages equal the file's prompt records
+    /// *on the leaf path*, so the prompt that lies on an abandoned branch is subtracted. The walk that counts them
+    /// shares no code with the reducer, so the two sides are a real comparison.
     ///
     /// The two synthetic fixtures are excluded and the exclusion is the point: `dialog-fable-overage` and
     /// `dialog-refusal-fallback` carry placeholder transcripts in which no record has a `parentUuid` at all, so every
@@ -21,6 +28,7 @@ final class RecordReducerTests: XCTestCase {
     func testEveryMainStreamReducesToOneChainWithNoBranchesOnTheCorpus() throws {
         var mainFiles = 0
         var totalMessages = 0
+        var census: [String: [Int]] = [:]
         for fixture in try FixtureCorpus.all() where !fixture.synthetic {
             for (stream, kind, url) in try fixture.transcriptFiles() {
                 guard case .mainTranscript = kind else { continue }
@@ -28,18 +36,74 @@ final class RecordReducerTests: XCTestCase {
                 let records = try TranscriptReader(url: url).readAll().records
                 let projection = RecordReducer.reduce(records, stream: stream, sourceFile: url)
 
-                XCTAssertEqual(projection.branches, [], "\(fixture.name): a main stream must reduce to one chain")
+                if !projection.branches.isEmpty { census[fixture.name] = projection.branches.map(\.count) }
                 XCTAssertEqual(projection.warnings.filter { $0.kind == .orphanHealed || $0.kind == .orphanUnhealed }, [],
                                "\(fixture.name): a main stream must carry no orphan")
 
                 let rendered = projection.items.filter { $0.category == .userMessage || $0.category == .peerMessage }.count
-                XCTAssertEqual(rendered, Self.promptRecordCount(records),
-                               "\(fixture.name): rendered messages must equal the file's prompt records")
+                XCTAssertEqual(rendered, Self.promptRecordCount(records, on: Self.leafChain(records)),
+                               "\(fixture.name): rendered messages must equal the file's prompt records on the leaf path")
                 totalMessages += rendered
             }
         }
-        XCTAssertEqual(mainFiles, 15, "the corpus has fifteen recorded main transcripts")
-        XCTAssertEqual(totalMessages, 30, "the recorded main transcripts carry thirty prompt records in all")
+        XCTAssertEqual(mainFiles, 17, "the corpus has seventeen recorded main transcripts")
+        // Every branch in the corpus, by fixture and by records per branch. `rewind-turn` records the rewind that
+        // made the branch; `compact-boundary` resumes that same session, so its file inherits the same three records.
+        // Every other recorded main stream is one chain, which the equality states by their absence from the census.
+        XCTAssertEqual(census, ["rewind-turn": [3], "compact-boundary": [3]],
+                       "the corpus's branches, one line per fixture that has any")
+        XCTAssertEqual(totalMessages, 40, "the recorded main transcripts carry forty prompt records on their leaf paths")
+    }
+
+    /// A soft compaction is one chain, not two.
+    ///
+    /// `compact-boundary`'s boundary record carries `parentUuid: null` and names its only link back in
+    /// `logicalParentUuid` — the pair the engine's own writer puts on a boundary and on nothing else
+    /// (2.1.258 `cli.pretty.js` line 430982) — so a reducer that follows `parentUuid` alone reads the file as two
+    /// trees and renders the post-boundary tail only. The recording preserves a segment, so it is a *soft* boundary
+    /// and rule 6 keeps the half before it; the boundary item then sits between the two halves in leaf-chain order.
+    func testASoftCompactBoundaryContinuesTheChainThroughItsLogicalParent() throws {
+        let (records, stream, url) = try Self.mainStream(of: "compact-boundary")
+        let projection = RecordReducer.reduce(records, stream: stream, sourceFile: url)
+
+        // The boundary, read off the records: exactly one, no `parentUuid`, a `logicalParentUuid` this same file
+        // carries, and metadata that names a preserved segment — so the hard/soft decision must come out soft.
+        let boundaries = records.compactMap { record -> SystemRecord? in
+            if case .system(let system) = record, system.fields.subtype == "compact_boundary" { system } else { nil }
+        }
+        XCTAssertEqual(boundaries.count, 1, "the recording holds one compaction")
+        let boundary = try XCTUnwrap(boundaries.first)
+        XCTAssertNil(boundary.fields.parentUuid, "the boundary starts a new parentUuid chain")
+        let logical = try XCTUnwrap(boundary.fields.logicalParentUuid, "and carries its only link back as logicalParentUuid")
+        XCTAssertTrue(records.contains { $0.uuid == logical }, "which names a record of this same file")
+        XCTAssertFalse(ItemBuilder.isHardTruncation(compactMetadata: boundary.fields.compactMetadata),
+                       "this compaction preserved a segment, so nothing before it is dropped")
+
+        // One chain. The only branch is the abandoned turn the rewind left in this session before the compaction —
+        // not the twenty-seven records that precede the boundary, which is what a parentUuid-only walk yields.
+        XCTAssertEqual(projection.branches.map(\.count), [3],
+                       "the pre-boundary half is on the chain; only the abandoned turn is a branch")
+
+        let rendered = projection.items.filter { $0.category == .userMessage || $0.category == .peerMessage }.count
+        XCTAssertEqual(rendered, Self.promptRecordCount(records, on: Self.leafChain(records)),
+                       "every prompt on the leaf path is rendered, on both sides of the boundary")
+        XCTAssertGreaterThan(rendered, Self.promptRecordCount(records, on: Self.postBoundaryUUIDs(records)),
+                             "and that is strictly more than the post-boundary tail alone")
+
+        // Position: the boundary item is preceded by items the file wrote before it and followed by items it wrote
+        // after, so the two halves are on one line with the boundary between them.
+        var positionOf: [String: Int] = [:]
+        for (index, record) in records.enumerated() { if let uuid = record.uuid { positionOf[uuid] = index } }
+        let boundaryPosition = try XCTUnwrap(positionOf[boundary.fields.uuid])
+        let placed = projection.items.compactMap { item in positionOf[item.id.key].map { (item, $0) } }
+        let boundaryIndex = try XCTUnwrap(placed.firstIndex { $0.0.category == .compactBoundary },
+                                          "the boundary is rendered")
+        XCTAssertGreaterThan(boundaryIndex, 0, "the pre-boundary half is rendered before it")
+        XCTAssertLessThan(boundaryIndex, placed.count - 1, "and the post-boundary half after it")
+        XCTAssertTrue(placed[..<boundaryIndex].allSatisfy { $0.1 < boundaryPosition },
+                      "every item before the boundary comes from a record the file wrote before it")
+        XCTAssertTrue(placed[(boundaryIndex + 1)...].allSatisfy { $0.1 > boundaryPosition },
+                      "and every item after it from a record the file wrote after it")
     }
 
     /// `plain-two-turn` has four assistant records in two `message.id` pairs, so two items; their `recordUUIDs`
@@ -717,15 +781,43 @@ final class RecordReducerTests: XCTestCase {
         return nil
     }
 
-    /// A `user` record the timeline renders: not `isMeta`, not a bare carrier of tool results. Written here from the
-    /// records, deliberately sharing nothing with the reducer.
-    private static func promptRecordCount(_ records: [TranscriptRecord]) -> Int {
+    /// A `user` record the timeline renders, counted over the uuids `on` names: not one of the three flags the
+    /// engine folds into `isSynthetic`, and not a bare carrier of tool results. Written here from the records,
+    /// deliberately sharing nothing with the reducer.
+    private static func promptRecordCount(_ records: [TranscriptRecord], on rendered: Set<String>) -> Int {
         records.reduce(into: 0) { total, record in
-            guard case .user(let user) = record, user.fields.isMeta != true else { return }
+            guard case .user(let user) = record, rendered.contains(user.fields.uuid) else { return }
+            if user.fields.isMeta == true || user.fields.isCompactSummary == true { return }
+            if user.additional["isVisibleInTranscriptOnly"]?.boolValue == true { return }
             if case .blocks(let blocks) = user.fields.message.fields.content,
                blocks.contains(where: { if case .toolResult = $0 { true } else { false } }) { return }
             total += 1
         }
+    }
+
+    /// The leaf path, walked off the records: from the file's leaf up by `parentUuid`, and by `logicalParentUuid`
+    /// where a record declares no `parentUuid` at all — which on this corpus is the compact boundary and nothing
+    /// else. Written here rather than borrowed from `ConversationTree`, so the two sides are a real comparison.
+    private static func leafChain(_ records: [TranscriptRecord]) -> Set<String> {
+        var byUUID: [String: TranscriptRecord] = [:]
+        for record in records where record.isConversation { if let uuid = record.uuid { byUUID[uuid] = record } }
+        var cursor = lastPromptLeaf(records) ?? records.last(where: \.isConversation)?.uuid
+        if let uuid = cursor, byUUID[uuid] == nil { cursor = records.last(where: \.isConversation)?.uuid }
+        var chain: Set<String> = []
+        while let uuid = cursor, let record = byUUID[uuid], !chain.contains(uuid) {
+            chain.insert(uuid)
+            cursor = WindowedTranscript.parentUUID(of: record) ?? WindowedTranscript.logicalParentUUID(of: record)
+        }
+        return chain
+    }
+
+    /// Every record the file wrote at or after its `compact_boundary`, by file order. The vacuity guard for the
+    /// clause above: a reducer that stopped at the boundary would render exactly these.
+    private static func postBoundaryUUIDs(_ records: [TranscriptRecord]) -> Set<String> {
+        guard let index = records.firstIndex(where: { record in
+            if case .system(let system) = record { system.fields.subtype == "compact_boundary" } else { false }
+        }) else { return Set(records.compactMap(\.uuid)) }
+        return Set(records[index...].compactMap(\.uuid))
     }
 
     /// Tool-use id → the uuid of the assistant record that opened it, the ids some result answers, and the set of
@@ -751,12 +843,7 @@ final class RecordReducerTests: XCTestCase {
                 break
             }
         }
-        var cursor = lastPromptLeaf(records) ?? records.last(where: \.isConversation)?.uuid
-        var chain: Set<String> = []
-        while let uuid = cursor, byUUID[uuid] != nil, !chain.contains(uuid) {
-            chain.insert(uuid)
-            cursor = byUUID[uuid].flatMap(WindowedTranscript.parentUUID(of:))
-        }
+        let chain = leafChain(records)
 
         var messageIDsOnChain: Set<String> = []
         for record in records {

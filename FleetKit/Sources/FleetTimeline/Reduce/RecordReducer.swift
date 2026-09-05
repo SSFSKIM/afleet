@@ -116,7 +116,7 @@ public struct RecordReducer: Sendable {
             case .attachment, .progress:
                 continue                                        // hidden above; renders nothing and breaks no run
             case .user(let user):
-                if options.hideMeta, user.fields.isMeta == true { continue }
+                if options.hideMeta, Self.isSynthetic(user) { continue }
                 builder.addUser(uuid: uuid, key: key, message: user.fields.message,
                                 timestamp: clock.parse(user.fields.timestamp), messageOrigin: user.fields.origin,
                                 toolUseResult: user.fields.toolUseResult, toolDenialKind: user.fields.toolDenialKind,
@@ -292,9 +292,21 @@ public struct RecordReducer: Sendable {
         switch record {
         case .attachment: return .attachment
         case .progress: return .progress
-        case .user(let user): return (hideMeta && user.fields.isMeta == true) ? .isMeta : nil
+        case .user(let user):
+            guard hideMeta, isSynthetic(user) else { return nil }
+            return user.fields.isMeta == true ? .isMeta : .isSynthetic
         default: return nil
         }
+    }
+
+    /// The engine's own `lwe` (2.1.258 `cli.pretty.js` line 366496): `isMeta || isVisibleInTranscriptOnly ||
+    /// isCompactSummary`. That function is what puts `isSynthetic` on the `user` frame the engine echoes (lines
+    /// 146777 and 147019), so this is the file spelling of the flag the wire reducer already hides on — one rule,
+    /// not two narrower ones. The corpus witnesses the two spellings meeting exactly once, at `compact-boundary`'s
+    /// compaction summary: `isCompactSummary` and `isVisibleInTranscriptOnly` on disk, `isSynthetic` on the wire.
+    static func isSynthetic(_ user: UserRecord) -> Bool {
+        if user.fields.isMeta == true || user.fields.isCompactSummary == true { return true }
+        return user.additional["isVisibleInTranscriptOnly"]?.boolValue == true
     }
 
     static func timestampString(of record: TranscriptRecord) -> String? {
@@ -397,7 +409,20 @@ struct ConversationTree {
         var windowRootRemaining = windowRootAllowed
         for (index, uuid) in order.enumerated() {
             guard let record = byUUID[uuid] else { continue }
-            guard let declared = WindowedTranscript.parentUUID(of: record) else { roots.append(uuid); continue }
+            guard let declared = WindowedTranscript.parentUUID(of: record) else {
+                // A record with no `parentUuid` that names a `logicalParentUuid` continues the chain through it. On
+                // this corpus that is the `compact_boundary` and nothing else: the engine's writer sets exactly this
+                // pair on a boundary (2.1.258 `cli.pretty.js` line 430982), and its own loader then relinks across
+                // the boundary rather than leaving two trees (`hns`, line 432524, called at line 434195). Reading the
+                // `null` as a root would split a soft compaction into two files' worth of conversation and render
+                // only the half after it, which rule 6 keeps whole.
+                if let logical = WindowedTranscript.logicalParentUUID(of: record), byUUID[logical] != nil {
+                    attach(uuid, to: logical)
+                    continue
+                }
+                roots.append(uuid)
+                continue
+            }
             if byUUID[declared] != nil { attach(uuid, to: declared); continue }
             if windowRootRemaining {
                 windowRootRemaining = false
