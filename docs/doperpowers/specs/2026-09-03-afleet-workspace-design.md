@@ -725,7 +725,9 @@ presence glyph and the composer state. Detection: a channel is *foreign live* wh
 registry record names its session id and its pid is not one of afleet's own children;
 *background job* when the roster or `agents --json` names it; *owned* when afleet holds it;
 otherwise *archived*. The registry and roster are watched with FSEvents and polled every
-five seconds as a fallback. Observation alone is not a claim; the ownership protocol
+five seconds as a fallback; `claude agents --json`, which boots the CLI on every run, is
+run at the pre-spawn check, on adopt, send-to-background and the `/logout` census, and on a
+slow reconciliation, never on the five-second poll. Observation alone is not a claim; the ownership protocol
 below decides who may spawn.
 
 **Foreign-session safety invariant.** afleet never stops, kills, signals or adopts a
@@ -1109,7 +1111,8 @@ permission mode, model, effort or fast mode.
 
 ### 7.8 Store
 
-`~/Library/Application Support/afleet/state.json`, atomic writes, schema version. The
+`~/Library/Application Support/afleet/state.<namespace>.json`, one document per namespace so
+three packages never contend for one file, atomic writes, a schema version per namespace. The
 store is a **namespaced key-value API**: each package persists its own `Codable` types
 under its own namespace and FleetKit never models upper-layer state. FleetKit's own
 namespace holds channel grouping and pins, section order and collapse, unread cursors per
@@ -1432,7 +1435,7 @@ output committed), the SDK typings fetched on demand.
 
 | Path | Content | Rules |
 |---|---|---|
-| `~/Library/Application Support/afleet/state.json` | the namespaced store (§7.8) | atomic writes, schema version |
+| `~/Library/Application Support/afleet/state.<namespace>.json` | the namespaced store (§7.8), one document per namespace | atomic writes, schema version per namespace |
 | `~/Library/Logs/afleet/diagnostics.log` | metadata-only diagnostics: frame type, subtype, size, timing, request id, control answer behavior and classification without payload, lifecycle and ownership events | rotated, 50 MB budget |
 | `~/Library/Logs/afleet/capture/<configHomeHash>/<session-id>.ndjson` | raw frame capture, **only while the Developer setting is on** | redacted before disk: identity fields by key name, normalised and case-insensitive, on string values — the set C1's redactor fixes (`account`, `accountUuid`, `accountId`, `accountName`, `organization`, `organizationUuid`, `organizationId`, `organizationName`, `user`, `userId`, `userUuid`, `userName`, `subscription`, `subscriptionType`, `fullName`) plus any email-shaped string anywhere, and an `account`, `organization` or `user` object replaced whole; `update_environment_variables` frames; any string-valued field whose name contains token, oauth, key or secret, excluding the usage counters (`input_tokens`, `output_tokens`, `max_tokens`, `thinking_tokens` and their kin), with an assertion after redaction that every frame typed before it stays typed; the capture redactor implements the same rule set as C1's `Tools/probe/redact.py` in full — its secret words including `bearer`, its structural exemptions (`projectKey`, `apiKeySource` and the rest of `SECRET_EXEMPT` and `SECRET_STRUCTURE_PATHS`), its handling of arrays under identity names and its per-rule placeholders — so a divergence between the two is a defect, not a choice, with one stated exception: C1's home-directory and hostname rule is a publication rule and does not run at capture, because a capture stays in the user's own log directory and their own paths are the diagnostic they opened it for; any future affordance that exports or shares a capture applies that rule at export; MCP JSON-RPC bodies truncated to 4 KB; directory 0700, files 0600; 200 MB total budget, oldest deleted first; a session's capture is deleted when its transcript disappears from `<configHome>/projects`; *Delete diagnostics* in Settings removes everything |
 
@@ -2315,7 +2318,11 @@ SwiftPM package or target that builds and tests without the children above it, p
   are panes.
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
-  types; FleetKit never models upper-layer state. Owner: C4. Binds C5, C7.
+  types; FleetKit never models upper-layer state. Owner: C4. Binds C5, C7. Amended
+  2026-09-05: the store protocol stays in `FleetSessions`; `FleetTimeline` persists only
+  through `IndexStorage`, a two-function protocol it declares, which C4 implements in
+  `FleetSessions` over the store, so nothing moves to `AfleetCore` and the package edge
+  between the two children stays one-way.
 - **X7 Panel tab host.** A tab registers with an id, title, icon, a view builder that
   receives the current channel context (session id, cwd, environment, store handle)
   and a `LinkRouter` target capability; the host owns tab order (Thread, Agents, Files,
@@ -2454,8 +2461,8 @@ notarized distribution, and any write under `<configHome>` (X9).
 |---|---|---|
 | C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `2515b04` from `child/c1-probes-fixtures` `13226e6` (89 commits); G1–G4 green: 18 fixtures (16 recorded on the pinned 2.1.259 binary, 2 synthetic with shapes confirmed on the installed binary), 242 probe and 24 fake-claude tests on Python 3.9 and 3.14, drift ritual clean 2.1.259→2.1.260, one independent Codex leak-risk review closed; fifteen `C1/…` notes filed and reconciled |
 | C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `b38e1f2` from `child/c2-core-wire` `9ab116a` (72 commits; history rewritten before merge so no engine byte from the recording workstation reaches the repository); G1–G4 green at the tip: ClaudeWire 225 tests, four of them live and run once from a clean build against the installed CLI under the scratch config home with no failures, AfleetCore 6; G2 over 18 fixtures and 1353 frames with the ten synthetic findings pinned as an exact set; one independent Codex leak-risk review (5 findings) and a six-lens review panel (32 findings) both closed by four sequential fix waves; the C2 reconciliations of 2026-09-04 and 2026-09-05 are in the Revision Notes; deferred debt indexed in `docs/tech-debt-tracker.md`; spend: three model turns on the child's own live gates and one in the orchestrator's final live pass |
-| C3 FleetKit timeline | child spec in progress on `child/c3-timeline` (worktree `../afleet-c3`, parent-pin `ee94449`) | in-flight (wave 2): child spec dispatched 2026-09-05; reads §6.1/X11, §6.2/X3, §6.3, §7.6, §11 and §17.7 as revised 2026-09-05; adds targets only inside the C3 region of `FleetKit/Package.swift` |
-| C4 FleetKit sessions and fleet | child spec in progress on `child/c4-sessions-fleet` (worktree `../afleet-c4`, parent-pin `ee94449`) | in-flight (wave 2): child spec dispatched 2026-09-05; owns `FleetKit/Package.swift`, §7.4's wedged row, the pending-list surface, channel keying on the identity event and the `apiKeySource` readback; its live gate widens C2's one-turn config-home write allowlist; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
+| C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` on `child/c3-timeline` (v1 `916ce02`, parent-pin `ee94449`); plan in progress | in-flight (wave 2): spec v1 reviewed 2026-09-05, four questions ruled (leaf path; rewind and compact recordings as a C1 follow-up; opt-in local index measurement; listing policy is C4's), six grounding facts filed on this parent; adds targets only inside the C3 region of `FleetKit/Package.swift` |
+| C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md` on `child/c4-sessions-fleet` (v1 `2b77140`, X5/X6 amendments folded at `847ad41`, parent-pin `ee94449`); plan in progress | in-flight (wave 2): spec v1 reviewed 2026-09-05, three questions ruled (store protocol stays in FleetKit with C3's `IndexStorage` implemented in `FleetSessions`; one composed haiku turn to widen the write allowlist; one store document per namespace) plus four rulings on `agents --json` cadence, wedged exclusion from eligibility and eviction, MCP consent read from both locations, and the listing policy; owns `FleetKit/Package.swift`; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
 | C6 Conversation surface and Agents panel | — | composite; blocked-by C3, C4, C5 |
 | C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core dispatchable now, held for the human's approval of the cut; C7.4–C7.7 blocked-by C5.G4 (C7.4 also by C4's X5, C7.6 by C4's store) |
@@ -4120,3 +4127,19 @@ Pending — written at finish.
   `enabledMcpjsonServers` and `disabledMcpjsonServers` through its local-settings writer, so
   §6.12's decline write is the engine's own path, and the per-project arrays in `.claude.json`
   are a read location the engine also consults, never afleet's write target.
+- 2026-09-05: C3 and C4 child specs reviewed at the human gate the orchestrator holds for
+  children. From C3's grounding, filed here: `user` records with `isMeta` are file-only
+  (§7.3's list extended, a binding list, on the corpus evidence); the engine's head-and-tail
+  read is 64 KiB each way; a forked subagent's `system/init` and `result` carry the session's
+  own id and no parent id, so result attribution is host state, never a frame field; an
+  agent's `<taskId>.output` is JSON-equal to its transcript and not byte-equal, and task
+  output files live under the temporary directory, not the config home; the engine's picker
+  hides `entrypoint: sdk-cli`, which is every afleet session, so the listing policy (C4's under
+  X5) copies none of its drop rules; §17.2's transcript count is 2,967 today. From C4's:
+  §7.8's store is one document per namespace; §7.1 states when `agents --json` runs; X6 records
+  C3's `IndexStorage` as the only persistence seam between the two children; a wedged channel
+  is excluded from dormant eligibility and cap eviction; MCP consent state is computed from
+  both the local-settings store and the project entry in `.claude.json`, read-only, and written
+  only through §6.12. Two C1 follow-ups queued: corrective recordings for a rewind and a
+  compaction, and a zero-cost probe that declines a project server in the TUI under the scratch
+  home and diffs which files change. Flags C3, C4 (plans), C1 (follow-ups), C6 (§7.3 list).
