@@ -88,8 +88,9 @@ public struct LaunchConfiguration: Hashable, Sendable {
         case .new(let id): a += ["--session-id", id.description]
         case .resume(let id, let fork): a += ["--resume", id.description]; if fork { a.append("--fork-session") }
         case .forkFrom(let id, let point):
-            a += ["--resume", id.description, "--fork-session", "--resume-session-at", point.entryUUID]
-            if let dropsTurn = point.dropsTurn { a += ["--resume-drops-turn", dropsTurn] }
+            a += ["--resume", id.description, "--fork-session", "--resume-session-at",
+                  try Self.token(point.entryUUID, for: "--resume-session-at")]
+            if let dropsTurn = point.dropsTurn { a += ["--resume-drops-turn", try Self.token(dropsTurn, for: "--resume-drops-turn")] }
         }
         if let model { a += ["--model", try Self.token(model, for: "--model")] }
         if let permissionMode { a += ["--permission-mode", permissionMode.rawValue] }
