@@ -257,6 +257,35 @@ final class FleetFacadeTests: XCTestCase {
 
     // MARK: - Jobs
 
+    /// A channel registered *after* its holder already exists learns about it at once.
+    ///
+    /// `fanOut` runs only on a published holder set and the observer publishes only what changed, so a supervisor
+    /// built later would otherwise never hear about a holder that was already there — it would sit archived with a
+    /// live job against its session until something unrelated moved the fleet-wide set. G5's adoption scenario
+    /// found this against the installed CLI: the job was listed by `jobs()` and the channel stayed archived, so
+    /// `perform(.adopt)` had nothing to adopt. C5 registers channels from C3's index, and a job or a terminal
+    /// session that predates the register is the ordinary case rather than a corner.
+    ///
+    /// Deliberate break: remove the seeding task from `Fleet.build` → the wait times out with the channel archived.
+    func testAChannelRegisteredAfterItsHolderExistsLearnsAboutItAtOnce() async throws {
+        let harness = self.harness!
+        let fleet = harness.fleet
+        let session = try fixtureSession()
+        let k = key(session)
+
+        // Written before the fleet reads anything, so the holder is present in the observer's *first* snapshot and
+        // no later change can publish it: the only way the supervisor can hear about it is the seeding.
+        try harness.files.writeJob(short: "jseed1", state: "working", sessionID: session, resumeSessionID: session,
+                                   pid: ScriptedHolderFiles.livePID)
+        await fleet.start()
+        try await harness.waitFor("the observer's first read") { await fleet.jobs().contains { $0.sessionID == session } }
+
+        await fleet.register(k, cwd: harness.cwd, recent: true)
+        try await harness.waitFor("the registered channel to read as a background job") {
+            await fleet.state(of: k)?.origin == .backgroundJob
+        }
+    }
+
     func testJobsListsAnExecJobAndAConversationJobAndTheVerbsActOnThem() async throws {
         let harness = self.harness!
         let fleet = harness.fleet

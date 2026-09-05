@@ -194,6 +194,19 @@ public actor Fleet: LifecycleAPI {
 
         supervisors[key] = supervisor
         filedAs[ObjectIdentifier(supervisor)] = key
+
+        // Seed the new supervisor with the holders the observer has already read. `fanOut` runs only on a
+        // *published* set and the observer publishes only what changed, so a channel registered after its holder
+        // already existed would otherwise never hear about it — it would sit archived with a live job or a live
+        // terminal against its session until something unrelated moved the fleet-wide set. G5's adoption scenario
+        // found this: the job was in `jobs()` and the channel stayed archived, so `adopt` had nothing to adopt.
+        // Detached rather than awaited because `build` is called from a synchronous path, and harmless when the
+        // snapshot is empty: `holdersChanged` with no holders for this session publishes and changes nothing.
+        tasks.append(Task { [weak self] in
+            guard let self else { return }
+            await supervisor.holdersChanged(await self.currentHolders())
+        })
+
         let stream = supervisor.updates
         tasks.append(Task { [weak self] in
             for await state in stream {
@@ -229,6 +242,9 @@ public actor Fleet: LifecycleAPI {
         }
         updatesContinuation.yield(state)
     }
+
+    /// The observer's most recent read, published or not.
+    private func currentHolders() async -> HolderSet { await observer.snapshot() }
 
     private func evict(_ victim: ChannelKey) async -> EvictionOutcome {
         guard let supervisor = supervisors[victim] else { return .victimBecameIneligible }
