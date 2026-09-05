@@ -117,14 +117,143 @@ final class RecordReducerTests: XCTestCase {
                 }
             }
         }
-        // Grounded by the walk above: 26 tool uses on disk, 2 of them on the two agent files' off-chain parallel
-        // branch, so 24 reach the projection — 23 tool cards and the one `send_user_file`. The off-chain result join
-        // leaves these totals where they were, and that is a corpus fact rather than a coincidence: the corpus's only
-        // two off-chain results answer those same two off-chain calls, so no on-chain call was ever left open by the
-        // chain-only reading. `testAnOffChainToolResultStillCompletesItsCall_mutation` is what discriminates the rule.
-        XCTAssertEqual(projectedTotal, 24)
-        XCTAssertEqual([completed, denied, failed, running], [22, 1, 0, 0],
+        // Grounded by the walk above: 26 tool uses on disk and all 26 reach the projection — 25 tool cards and the one
+        // `send_user_file`. The last two are the parallel `Bash` calls of `explore-depth-1`'s and `nested-depth-2`'s
+        // agent streams, whose opening assistant records lie off the `parentUuid` chain but share a `message.id` with
+        // a record on it, so rule 4's group production renders them and the off-chain results complete them. Nothing
+        // recorded is left running: 25 completed cards, 1 denied (`permission-deny`), 0 failed, 0 running.
+        XCTAssertEqual(projectedTotal, 26)
+        XCTAssertEqual([completed, denied, failed, running], [24, 1, 0, 0],
                        "every recorded call is answered; only permission-deny's is denied")
+    }
+
+    /// Rule 4's unit of production is the `message.id` group, so a parallel tool call whose opening `assistant` record
+    /// lies off the `parentUuid` chain is still rendered, and the off-chain result completes it (the engine's `kns`,
+    /// 2.1.258 `cli.pretty.js` line 432695).
+    ///
+    /// `nested-depth-2`'s depth-2 agent stream is the fixture this rule exists for: it is one of the corpus's only two
+    /// branch points, and the branch is exactly a parallel pair — a second `assistant` record repeating the first's
+    /// `message.id` with a second `tool_use` block, and the `user` record answering it. Under a chain-only reading
+    /// that call was absent from the projection altogether. `explore-depth-1`'s agent stream carries the same shape
+    /// and is checked alongside it.
+    func testAParallelCallOffTheChainIsRegroupedByItsMessageID() throws {
+        for (fixture, depth) in [("nested-depth-2", 2), ("explore-depth-1", 1)] {
+            let (records, stream, url) = try Self.agentStream(of: fixture, depth: depth)
+            let label = "\(fixture)/depth \(depth)"
+
+            // The branch, walked off the records: an assistant record off the chain whose `message.id` is on it.
+            let walk = Self.toolWalk(records)
+            var chain: Set<String> = []
+            var cursor = records.last(where: \.isConversation)?.uuid
+            var byUUID: [String: TranscriptRecord] = [:]
+            for record in records { if let uuid = record.uuid { byUUID[uuid] = record } }
+            while let uuid = cursor, byUUID[uuid] != nil, !chain.contains(uuid) {
+                chain.insert(uuid)
+                cursor = byUUID[uuid].flatMap(WindowedTranscript.parentUUID(of:))
+            }
+            let assistants = records.compactMap { record -> AssistantRecord? in
+                if case .assistant(let assistant) = record { assistant } else { nil }
+            }
+            let onChainIDs = Set(assistants.filter { chain.contains($0.fields.uuid) }.compactMap { $0.fields.message.fields.id })
+            let offChainSiblings = assistants.filter {
+                !chain.contains($0.fields.uuid) && $0.fields.message.fields.id.map(onChainIDs.contains) == true
+            }
+            XCTAssertEqual(offChainSiblings.count, 1, "\(label): one assistant record repeats an on-chain message.id")
+            let sibling = try XCTUnwrap(offChainSiblings.first)
+            let siblingCalls = sibling.fields.message.fields.content.compactMap {
+                if case .toolUse(let use) = $0 { use.fields.id } else { nil }
+            }
+            XCTAssertEqual(siblingCalls.count, 1, "\(label): the off-chain record opens exactly one call")
+            let parallelCall = siblingCalls[0]
+            XCTAssertFalse(chain.contains(try XCTUnwrap(walk.opened[parallelCall])),
+                           "\(label): the record opening it really is off the parentUuid chain")
+
+            let projection = RecordReducer.reduce(records, stream: stream, sourceFile: url)
+            let call = try XCTUnwrap(Self.toolCalls(projection).first { $0.toolUseID == parallelCall },
+                                     "\(label): the parallel call is rendered")
+            XCTAssertEqual(call.status, .completed, "\(label): its off-chain result completes it")
+            XCTAssertNotNil(call.result, "\(label): with the result block's own content")
+
+            // The group is one item: both records' uuids, both records' keys, and the blocks in file order.
+            let group = assistants.filter { $0.fields.message.fields.id == sibling.fields.message.fields.id }
+            let item = try XCTUnwrap(projection.items.compactMap { item -> AssistantMessageItem? in
+                if case .assistantMessage(let assistant) = item,
+                   assistant.recordUUIDs.contains(sibling.fields.uuid) { assistant } else { nil }
+            }.first, "\(label): the off-chain record folds into the item its group keys")
+            XCTAssertEqual(item.recordUUIDs, group.map { $0.fields.uuid }, "\(label): every record of the group, in file order")
+            XCTAssertEqual(item.id.key, group[0].fields.uuid, "\(label): the group's first record keys the item")
+            XCTAssertEqual(item.provenance.records.count, group.count, "\(label): every record of the group is provenance")
+            XCTAssertEqual(item.blocks.count, group.reduce(0) { $0 + $1.fields.message.fields.content.count },
+                           "\(label): the group's blocks concatenated")
+
+            XCTAssertEqual(projection.branches, [],
+                           "\(label): the branch was the group and its result, and both are back on the line")
+        }
+    }
+
+    /// The other side of the same rule, and the one no recording reaches: a `message.id` group with **no** record on
+    /// the chain is not produced. Reached by naming an earlier leaf in `nested-depth-2`'s depth-2 agent stream — the
+    /// file records no `last-prompt`, so the mutation appends one — which leaves the first group straddling the chain
+    /// (rendered whole, parallel call and all) and drops two later groups off it entirely.
+    func testAMessageIDGroupWithNoRecordOnTheChainIsNotProduced_mutation() throws {
+        let (records, stream, url) = try Self.agentStream(of: "nested-depth-2", depth: 2)
+        var byUUID: [String: TranscriptRecord] = [:]
+        for record in records { if let uuid = record.uuid { byUUID[uuid] = record } }
+
+        // The earlier leaf: the first `user` record on the file's own chain that carries a tool result — the earliest
+        // point that still leaves whole later groups behind. (The file's *first* tool-result record in file order is
+        // the parallel branch's own, which is off the chain and would name a leaf the file never had.)
+        var recorded: Set<String> = []
+        var walker = records.last(where: \.isConversation)?.uuid
+        while let uuid = walker, byUUID[uuid] != nil, !recorded.contains(uuid) {
+            recorded.insert(uuid)
+            walker = byUUID[uuid].flatMap(WindowedTranscript.parentUUID(of:))
+        }
+        let leaf = try XCTUnwrap(records.compactMap { record -> String? in
+            guard case .user(let user) = record, recorded.contains(user.fields.uuid),
+                  case .blocks(let blocks) = user.fields.message.fields.content,
+                  blocks.contains(where: { if case .toolResult = $0 { true } else { false } }) else { return nil }
+            return user.fields.uuid
+        }.first)
+        let line = #"{"type":"last-prompt","timestamp":"2026-09-05T00:00:00.000Z","leafUuid":"\#(leaf)"}"#
+        let shortened = records + [RecordDecoder.decode(line: Data(line.utf8))]
+
+        // What the shortened chain reaches, walked off the records: the groups it touches, and the calls they open.
+        var chain: Set<String> = []
+        var cursor: String? = leaf
+        while let uuid = cursor, byUUID[uuid] != nil, !chain.contains(uuid) {
+            chain.insert(uuid)
+            cursor = byUUID[uuid].flatMap(WindowedTranscript.parentUUID(of:))
+        }
+        let assistants = records.compactMap { record -> AssistantRecord? in
+            if case .assistant(let assistant) = record { assistant } else { nil }
+        }
+        let renderedIDs = Set(assistants.filter { chain.contains($0.fields.uuid) }.compactMap { $0.fields.message.fields.id })
+        func calls(of assistant: AssistantRecord) -> [String] {
+            assistant.fields.message.fields.content.compactMap { if case .toolUse(let use) = $0 { use.fields.id } else { nil } }
+        }
+        let produced = Set(assistants.filter { $0.fields.message.fields.id.map(renderedIDs.contains) == true }.flatMap(calls))
+        let withheld = Set(assistants.filter { $0.fields.message.fields.id.map(renderedIDs.contains) != true }.flatMap(calls))
+        XCTAssertFalse(withheld.isEmpty, "the shortened chain must leave at least one whole group behind")
+        let opener = Self.toolWalk(records).opened
+        XCTAssertTrue(produced.contains { opener[$0].map { !chain.contains($0) } == true },
+                      "and must still pull one off-chain record in, so both directions are exercised")
+
+        let projection = RecordReducer.reduce(shortened, stream: stream, sourceFile: url)
+        XCTAssertEqual(projection.session.leaf, leaf)
+        let rendered = Set(Self.toolCalls(projection).map(\.toolUseID))
+        XCTAssertEqual(rendered, produced, "only the groups the chain touches are produced")
+        XCTAssertTrue(rendered.isDisjoint(with: withheld), "a group with no record on the chain opens nothing")
+
+        let withheldRecords = Set(assistants.filter { $0.fields.message.fields.id.map(renderedIDs.contains) != true }
+                                    .map { $0.fields.uuid })
+        XCTAssertFalse(withheldRecords.isEmpty)
+        let inItems = Set(projection.items.compactMap { item -> [String]? in
+            if case .assistantMessage(let assistant) = item { assistant.recordUUIDs } else { nil }
+        }.flatMap { $0 })
+        XCTAssertTrue(inItems.isDisjoint(with: withheldRecords), "and produces no assistant item of its own")
+        let branched = Set(projection.branches.map(\.head))
+        XCTAssertFalse(branched.isEmpty, "its records land in branches instead")
     }
 
     /// The one MCP tool whose call is an item of its own: `send-user-file` yields a `sentFile` and no tool card for it.
@@ -198,7 +327,12 @@ final class RecordReducerTests: XCTestCase {
         XCTAssertEqual(after.items.last?.id.key, firstAssistant)
         XCTAssertEqual(after.branches.count, 1)
         XCTAssertEqual(after.branches.first?.tail, recordedLeaf)
-        XCTAssertEqual(after.branches.first?.count, 6, "six conversation records fall off the shortened chain")
+        // Six conversation records fall off the shortened `parentUuid` chain, and one comes straight back: the second
+        // record of the first assistant's own `message.id`. Rule 4 produces the whole group when any of its records is
+        // on the chain, so that record is rendered — it folds into the item the first record keys, which is why
+        // `items.last` is still the first assistant above — and only five stay in the branch.
+        XCTAssertEqual(after.branches.first?.count, 5,
+                       "the leaf's `message.id` group is rendered whole; the rest of the tail is the branch")
     }
 
     /// `leafUuid: null` with `explicit: true` is the engine's *cleared to empty* (parity §35.4). `control-shapes`
@@ -245,8 +379,10 @@ final class RecordReducerTests: XCTestCase {
     /// A `tool_result` completes its call by `tool_use_id` wherever its record lies: rule 4 decides which records
     /// produce items, and a result produces none — it completes an item another record already made. No recording
     /// carries an on-chain call whose only result is off-chain (checked: the corpus's two off-chain results answer
-    /// off-chain calls), so the path is reached by naming an earlier leaf, which drops `background-shell`'s recorded
-    /// result record off the chain while leaving the `Bash` call on it.
+    /// off-chain calls, and rule 4's group production now renders both), so the path is reached with two named
+    /// mutations of `background-shell`: naming an earlier leaf, which drops the recorded result record off the chain
+    /// while leaving the `Bash` call on it, and re-parenting that record onto the first prompt, so the group
+    /// regrouping does not pull it back with its call's own `message.id` group.
     func testAnOffChainToolResultStillCompletesItsCall_mutation() throws {
         let (records, stream, url) = try Self.mainStream(of: "background-shell")
         let opener = try XCTUnwrap(records.compactMap { record -> String? in
@@ -258,8 +394,19 @@ final class RecordReducerTests: XCTestCase {
             guard case .sessionState(let state, _) = record else { return false }
             return state.fields.type == "last-prompt"
         })
+        let answeringIndex = try XCTUnwrap(records.firstIndex { record in
+            guard case .user(let user) = record, case .blocks(let blocks) = user.fields.message.fields.content
+            else { return false }
+            return blocks.contains { if case .toolResult = $0 { true } else { false } }
+        })
+        let firstPrompt = try XCTUnwrap(records.compactMap { record -> String? in
+            guard case .user(let user) = record, WindowedTranscript.parentUUID(of: record) == nil else { return nil }
+            return user.fields.uuid
+        }.first)
         var shortened = records
         shortened[promptIndex] = try Breaks.setting(path: "leafUuid", in: records[promptIndex], to: .string(opener))
+        shortened[answeringIndex] = try Breaks.setting(path: "parentUuid", in: records[answeringIndex],
+                                                       to: .string(firstPrompt))
 
         let projection = RecordReducer.reduce(shortened, stream: stream, sourceFile: url)
         XCTAssertEqual(projection.session.leaf, opener)
@@ -539,6 +686,20 @@ final class RecordReducerTests: XCTestCase {
         throw FixtureCorpus.Failure("fixture \(name) has no main transcript")
     }
 
+    /// The agent stream a fixture's `.meta.json` sidecars put at `spawnDepth`.
+    private static func agentStream(of name: String, depth: Int) throws -> ([TranscriptRecord], LogicalStream, URL) {
+        let fixture = try FixtureCorpus.named(name)
+        var wanted: Set<LogicalStream> = []
+        for (stream, url) in try fixture.metaFiles() {
+            let metadata = try JSONDecoder().decode(AgentMetadataRecord.self, from: try Data(contentsOf: url))
+            if metadata.fields.spawnDepth == depth { wanted.insert(stream) }
+        }
+        for (stream, _, url) in try fixture.transcriptFiles() where wanted.contains(stream) {
+            return (try TranscriptReader(url: url).readAll().records, stream, url)
+        }
+        throw FixtureCorpus.Failure("fixture \(name) has no agent stream at depth \(depth)")
+    }
+
     private static func toolCalls(_ projection: StreamProjection) -> [ToolCallItem] {
         projection.items.compactMap { if case .toolCall(let call) = $0 { call } else { nil } }
     }
@@ -567,8 +728,10 @@ final class RecordReducerTests: XCTestCase {
         }
     }
 
-    /// Tool-use id → the uuid of the assistant record that opened it, the ids some result answers, and the leaf chain,
-    /// all walked straight off the records.
+    /// Tool-use id → the uuid of the assistant record that opened it, the ids some result answers, and the set of
+    /// records the projection renders, all walked straight off the records. The rendered set is the leaf chain plus
+    /// every assistant record sharing a `message.id` with a record on it (rule 4's group), re-derived here rather than
+    /// borrowed from the reducer, so the two sides are a real comparison.
     private static func toolWalk(_ records: [TranscriptRecord]) -> (opened: [String: String], answered: Set<String>, chain: Set<String>) {
         var opened: [String: String] = [:]
         var answered: Set<String> = []
@@ -594,6 +757,19 @@ final class RecordReducerTests: XCTestCase {
             chain.insert(uuid)
             cursor = byUUID[uuid].flatMap(WindowedTranscript.parentUUID(of:))
         }
-        return (opened, answered, chain)
+
+        var messageIDsOnChain: Set<String> = []
+        for record in records {
+            guard case .assistant(let assistant) = record, chain.contains(assistant.fields.uuid),
+                  let id = assistant.fields.message.fields.id else { continue }
+            messageIDsOnChain.insert(id)
+        }
+        var rendered = chain
+        for record in records {
+            guard case .assistant(let assistant) = record, let id = assistant.fields.message.fields.id,
+                  messageIDsOnChain.contains(id) else { continue }
+            rendered.insert(assistant.fields.uuid)
+        }
+        return (opened, answered, rendered)
     }
 }

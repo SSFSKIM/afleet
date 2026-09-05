@@ -91,12 +91,17 @@ public struct RecordReducer: Sendable {
                                         recordKind: tree.byUUID[uuid]?.kind))
         }
 
-        // 4–8. Items from the chain, branches from the rest.
+        // 4–8. Items from the chain, branches from the rest. Rule 4's unit of production for an assistant message is
+        // the `message.id` *group*, not the single record: a group is produced when any one of its records lies on the
+        // chain, and `tree.regrouped(chain:)` splices the rest of it — plus the `tool_result` users those records
+        // parent — back onto the rendered line, exactly as the engine's `kns` does. A group with no record on the
+        // chain is not produced and stays in `branches`.
         let chain = clearedToEmpty ? [] : tree.chain(to: session.leaf)
         if !clearedToEmpty, session.leaf == nil { session.leaf = chain.last }
-        let branches = tree.branches(excluding: Set(chain))
+        let rendered = clearedToEmpty ? [] : tree.regrouped(chain: chain)
+        let branches = tree.branches(excluding: Set(rendered))
         var builder = ItemBuilder(stream: stream, sourceFile: sourceFile, origin: origin)
-        for uuid in chain {
+        for uuid in rendered {
             guard let record = tree.byUUID[uuid] else { continue }
             let key = keyByUUID[uuid]
             switch record {
@@ -131,11 +136,11 @@ public struct RecordReducer: Sendable {
         // Rule 4 governs which records produce *items*, and a `tool_result` block produces none: it completes an item
         // another record already produced. Rule 3 states the join with no chain qualification — "the `user` record
         // whose `tool_result` block names that id completes it" — and the engine agrees, re-attaching off-chain results
-        // in `kns` (2.1.258 cli.pretty.js:432693, called from `buildConversationChain` right after the leaf walk). So a
+        // in `kns` (2.1.258 cli.pretty.js:432695, called from `buildConversationChain` right after the leaf walk). So a
         // result completes its call by `tool_use_id` wherever the record carrying it lies. Only the id join runs here:
         // the `sourceToolAssistantUUID` fallback resolves an id the engine rewrote on the chain, and guessing across a
         // branch could complete the wrong call.
-        let onChain = Set(chain)
+        let onChain = Set(rendered)
         for uuid in tree.order where !onChain.contains(uuid) {
             guard case .user(let user) = tree.byUUID[uuid] else { continue }
             builder.joinToolResults(message: user.fields.message, key: keyByUUID[uuid],
@@ -437,6 +442,73 @@ struct ConversationTree {
             cursor = parentOf[uuid]
         }
         return walk.reversed()
+    }
+
+    /// The chain with each rendered `message.id` group made whole again — the engine's `kns`
+    /// (`~/claude-code-bundle/2.1.258/cli.pretty.js` line 432695, called from `buildConversationChain`/`aEe` at line
+    /// 432623 immediately after the leaf walk, and reported as `tengu_chain_parallel_tr_recovered` at line 432743).
+    ///
+    /// One API message can be written as several `assistant` records, and when it opened parallel tool calls only one
+    /// of them is on the `parentUuid` chain: the others hang off the first as siblings, together with the `user`
+    /// records answering them. The engine puts them back, and so must this reducer — the wire side has no
+    /// `parentUuid` at all and groups by `message.id` alone, so anything else would make the two disagree on every
+    /// parallel tool call (parent §7.3, check two).
+    ///
+    /// For each `message.id` with **at least one** record on the chain, the group's off-chain records and the
+    /// off-chain `tool_result` users they parent are spliced in after the *last* on-chain record of that group, so the
+    /// group's records stay consecutive in the projection and `ItemBuilder.addAssistant` folds them into one item with
+    /// every record's uuid and blocks in file order. A `message.id` with **no** record on the chain is never
+    /// considered, so it produces nothing and its records stay in `branches`.
+    ///
+    /// Two deliberate divergences, both unobservable on the corpus: the spliced records are ordered by file order
+    /// where the bundle sorts them by timestamp (the same reasoning as `host(for:...)` — file order and time order
+    /// agree on every recording), and the parent read here is the declared `parentUuid`, as the bundle reads it,
+    /// rather than a healed attachment.
+    func regrouped(chain: [String]) -> [String] {
+        var messageIDOf: [String: String] = [:]
+        var members: [String: [String]] = [:]
+        var resultsByParent: [String: [String]] = [:]
+        for uuid in order {
+            guard let record = byUUID[uuid] else { continue }
+            switch record {
+            case .assistant(let assistant):
+                guard let messageID = assistant.fields.message.fields.id else { continue }
+                messageIDOf[uuid] = messageID
+                members[messageID, default: []].append(uuid)
+            case .user(let user):
+                guard let parent = WindowedTranscript.parentUUID(of: record),
+                      case .blocks(let blocks) = user.fields.message.fields.content,
+                      blocks.contains(where: { if case .toolResult = $0 { true } else { false } }) else { continue }
+                resultsByParent[parent, default: []].append(uuid)
+            default:
+                continue
+            }
+        }
+        // The anchor is the last on-chain record of the group, as the bundle's `d` map is (it overwrites per id).
+        var anchorOf: [String: String] = [:]
+        for uuid in chain { if let messageID = messageIDOf[uuid] { anchorOf[messageID] = uuid } }
+
+        var claimed = Set(chain)
+        var handled: Set<String> = []
+        var spliced: [String: [String]] = [:]
+        for uuid in chain {
+            guard let messageID = messageIDOf[uuid], !handled.contains(messageID) else { continue }
+            handled.insert(messageID)
+            let group = members[messageID] ?? [uuid]
+            var pulled = group.filter { !claimed.contains($0) }
+            pulled.append(contentsOf: group.flatMap { resultsByParent[$0] ?? [] }.filter { !claimed.contains($0) })
+            guard !pulled.isEmpty else { continue }
+            claimed.formUnion(pulled)
+            spliced[anchorOf[messageID] ?? uuid, default: []].append(contentsOf: pulled)
+        }
+        guard !spliced.isEmpty else { return chain }
+
+        var out: [String] = []
+        for uuid in chain {
+            out.append(uuid)
+            if let extra = spliced[uuid] { out.append(contentsOf: extra) }
+        }
+        return out
     }
 
     /// Every off-chain subtree, one `Branch` each: the head is the record whose parent is on the chain (or nowhere),
