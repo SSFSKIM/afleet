@@ -229,10 +229,21 @@ public actor StreamIngestion {
     /// Set by `alignBuffer`: buffered frame index → the entry indices the alignment claimed against the read.
     private var claimedEntries: [Int: Set<Int>] = [:]
 
-    /// The whole file (or its initial window) into a stream that holds nothing yet.
+    /// The bounded window is the main stream's alone: `loadEarlier()` and the published `WindowMarker` both speak for
+    /// `mainStream` and nothing else, so an agent transcript read to a tail would have a beginning no caller could
+    /// ever ask for. Agent transcripts are therefore read whole. They are the small ones — an agent run is one task's
+    /// worth of records — and being unable to reach the first half of one is worse than reading it.
+    private func policy(for stream: LogicalStream) -> WindowPolicy {
+        switch stream.name {
+        case .main: return policy
+        case .agent: return .whole
+        }
+    }
+
+    /// The whole file (or, for the main stream, its initial window) into a stream that holds nothing yet.
     private func readWhole(into stream: LogicalStream) throws {
         guard var st = streams[stream] else { return }
-        let result = try WindowedTranscript.read(TranscriptReader(url: st.path), policy: policy)
+        let result = try WindowedTranscript.read(TranscriptReader(url: st.path), policy: policy(for: stream))
         var applied: [RecordKey] = []
         var duplicates = 0
         st.readStart = result.ranges.first?.offset ?? 0
@@ -514,6 +525,7 @@ public actor StreamIngestion {
         if case .fileOnly(let since) = stateValue, since == epoch { return effect }
         stateValue = .fileOnly(since: epoch)
         effect.stateChange = stateValue
+        clearPendingConfirmations()
         diagnostics.record(.mirrorErrorSwitchedToFileOnly(session: session, stream: Self.streamName(of: error),
                                                           epoch: epoch))
         return effect
@@ -579,7 +591,7 @@ public actor StreamIngestion {
                             effect: inout Effect, trackPending: Bool? = nil) {
         guard let result = try? TranscriptReader(url: st.path).readAppended(from: offset) else { return }
         apply(fileRecords: result.records, ranges: result.ranges, stream: stream, into: &st,
-              seedUnclaimed: true, trackPending: trackPending ?? (mode == .mirrorPrimary), now: now,
+              seedUnclaimed: true, trackPending: trackPending ?? acceptsMirrorConfirmation, now: now,
               applied: &effect.applied, duplicates: &effect.duplicates)
         st.offset = result.length
         refreshAnchor(&st, ranges: result.ranges)
@@ -589,7 +601,8 @@ public actor StreamIngestion {
     /// One payload-free `fileRewritten`, and `State` untouched. The only event that renumbers a published key.
     private func rebuild(stream: LogicalStream, into st: inout StreamState, identity: FileIdentity,
                          effect: inout Effect) {
-        guard let result = try? WindowedTranscript.read(TranscriptReader(url: st.path), policy: policy) else { return }
+        guard let result = try? WindowedTranscript.read(TranscriptReader(url: st.path), policy: policy(for: stream))
+        else { return }
         let previousLength = st.offset
         st.records = []; st.applied = []; st.locators = [:]; st.ordinals = [:]
         st.fileUnclaimed = [:]; st.mirrorUnclaimed = [:]; st.pendingFromFile = [:]
@@ -690,6 +703,27 @@ public actor StreamIngestion {
 
     // MARK: - The mirror gap
 
+    /// Whether a record the watcher applies now can still be confirmed by a mirror delivery. Only `mirrorPrimary`
+    /// waits for one at all, and `applyMirror` refuses every entry once the state is `fileOnly`, so a record
+    /// remembered after that switch can never be confirmed and would expire into a `mirrorGap` that reports the
+    /// switch that already happened. Tracking is what the sweep reads, so tracking is where this belongs.
+    private var acceptsMirrorConfirmation: Bool {
+        guard mode == .mirrorPrimary else { return false }
+        if case .fileOnly = stateValue { return false }
+        return true
+    }
+
+    /// Forget every record still waiting for a mirror confirmation that will not come. Every caller has established
+    /// that: the mirror errored, or the process that would have sent the frames has exited.
+    private func clearPendingConfirmations() {
+        for (stream, var st) in streams where !st.pendingFromFile.isEmpty {
+            st.pendingFromFile = [:]
+            streams[stream] = st
+        }
+        gapSweep?.cancel()
+        gapSweep = nil
+    }
+
     /// The deadline's body. Entries older than `mirrorGapWindow` are removed and counted; a non-zero count switches the
     /// state once, emits one effect with no keys and the `stateChange`, and records one `mirrorGap` per stream swept.
     /// No file event is required: the coalesced watcher event that would have caught it may never come.
@@ -757,6 +791,11 @@ public actor StreamIngestion {
             st.cursor = st.offset
             streams[stream] = st
         }
+        // The same reasoning, applied to what was already pending: a record the watcher applied before the exit is
+        // waiting on a mirror frame from a process that has exited. `trackPending: false` alone only kept this read's
+        // records out of the map; the ones already in it would still expire and switch the state to `fileOnly` for a
+        // gap that is not one.
+        clearPendingConfirmations()
         return effect
     }
 
@@ -872,8 +911,13 @@ public actor StreamIngestion {
                 if let locator = st.records[index].locator { locators[key] = locator }
             }
             options.locators = locators
-            var projection = RecordReducer.reduce(records, stream: stream, sourceFile: st.path,
-                                                  origin: .file, options: options)
+            // A stream whose file this actor has never seen — the main stream under `.mirrorOnly`, an agent stream a
+            // mirror frame named before the transcript appeared — learned every record it holds from a mirror entry.
+            // Saying `.file` about it, and naming a file that does not exist, is the one thing `Provenance.origin`
+            // exists to prevent.
+            let onDisk = st.fileIdentity != nil
+            var projection = RecordReducer.reduce(records, stream: stream, sourceFile: onDisk ? st.path : nil,
+                                                  origin: onDisk ? .file : .mirror, options: options)
             if let metadata = st.metadata { projection.metadata = metadata }
             projections.append(projection)
         }

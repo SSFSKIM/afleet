@@ -102,9 +102,13 @@ public struct AgentRunTree: Hashable, Sendable {
 
     /// The run's activity line and last tool. It never creates a node: a `task_progress` for an id the tree has not
     /// seen start belongs to a task this tree does not model.
+    ///
+    /// `summary` wins over `description` when the frame carries one (child spec: the activity line is
+    /// `task_progress.description` and `last_tool_name`, replaced by `summary` when present): the summary is the
+    /// engine's own sentence about what the run is doing, and the description is the lower-level step under it.
     public mutating func apply(taskProgress f: TaskProgress, at now: Date) {
         guard nodes[f.taskID] != nil else { return }
-        nodes[f.taskID]!.activityLine = f.description
+        nodes[f.taskID]!.activityLine = f.summary ?? f.description
         if let tool = f.lastToolName { nodes[f.taskID]!.lastToolName = tool }
         if let type = f.subagentType { nodes[f.taskID]!.agentType = type }
         if let use = f.toolUseID, nodes[f.taskID]!.toolUseID == nil { nodes[f.taskID]!.toolUseID = use; resolveJoins() }

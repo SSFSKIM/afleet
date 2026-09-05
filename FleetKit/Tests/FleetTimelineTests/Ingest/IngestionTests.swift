@@ -717,6 +717,176 @@ final class IngestionTests: XCTestCase {
         await ingestion.close()
     }
 
+    /// The other half of the same rule, for what was already pending. `trackPending: false` keeps the exit's *own*
+    /// read out of the map; a record the watcher applied a moment earlier is already in it, with the sweep armed, and
+    /// the process that would have confirmed it has now exited. Left alone it expires into a `mirrorGap` and switches
+    /// a healthy channel to `fileOnly`.
+    func testTheExitClearsAPendingMirrorGapFromBeforeIt() async throws {
+        let fx = try FixtureCorpus.named("plain-two-turn")
+        let tree = try TempTree()
+        let mainPath = try tree.add(fx, slug: "plain")
+        let notices = RecordingTimelineDiagnostics()
+        let ingestion = StreamIngestion(session: fx.sessionID, configHome: tree.root, mode: .mirrorPrimary,
+                                        diagnostics: notices, mirrorGapWindow: .milliseconds(400))
+        let log = EffectLog(ingestion)
+        let tap = SyntheticTap()
+        try await ingestion.open(file: mainPath, events: tap.events)
+
+        // One unmirrored watcher append, remembered and swept for in 400 ms.
+        try tree.touch(mainPath)
+        let watched = await ingestion.fileChanged(mainPath)
+        _ = try await next(log, "the watcher's own effect")
+        XCTAssertEqual(watched.applied.count, 1, "one appended record, applied from the file")
+        XCTAssertNil(watched.stateChange, "the deadline has not passed yet")
+
+        // The process exits well inside the window: the mirror that would have confirmed that record is gone.
+        tap.exited(epoch: .first)
+        _ = try await next(log, "the exit's reconciliation")
+
+        try await Task.sleep(for: .milliseconds(700))       // well past the window the append armed
+        await expectEqual(await ingestion.state, .both, "an exited process's unconfirmed record is not a gap")
+        XCTAssertFalse(notices.notices.contains { if case .mirrorGap = $0 { return true } else { return false } },
+                       "no gap notice for a record the exit already accounted for")
+        XCTAssertTrue(log.all.allSatisfy { $0.stateChange == nil }, "no effect carried a state change")
+        await ingestion.close()
+    }
+
+    /// After a `mirror_error` the mirror is refused as a source for the epoch (`applyMirror` returns at once), so a
+    /// record the watcher applies afterwards can never be confirmed. Remembering it anyway means every file append
+    /// under `fileOnly` eventually reports a `mirrorGap` for a mirror everybody already knows is gone.
+    func testFileOnlyStopsRememberingFileAppendsForTheGapSweep() async throws {
+        let sample = FixtureCorpus.root.deletingLastPathComponent()
+            .appendingPathComponent("ClaudeWire/Tests/Support/Samples/system_mirror_error.json")
+        let errorFrame = FrameDecoder.decode(line: try Data(contentsOf: sample))
+        guard case .system(.mirrorError) = errorFrame else {
+            return XCTFail("C2's sample no longer decodes to system/mirror_error")
+        }
+
+        let fx = try FixtureCorpus.named("plain-two-turn")
+        let tree = try TempTree()
+        let mainPath = try tree.add(fx, slug: "plain")
+        let notices = RecordingTimelineDiagnostics()
+        let ingestion = StreamIngestion(session: fx.sessionID, configHome: tree.root, mode: .mirrorPrimary,
+                                        diagnostics: notices, mirrorGapWindow: .milliseconds(400))
+        let log = EffectLog(ingestion)
+        let tap = SyntheticTap()
+        try await ingestion.open(file: mainPath, events: tap.events)
+
+        // One append before the error — remembered, sweep armed — and the error inside that window.
+        try tree.touch(mainPath)
+        _ = await ingestion.fileChanged(mainPath)
+        _ = try await next(log, "the watcher change before the error")
+        let switched = try await send(tap, errorFrame, log, "the mirror error")
+        XCTAssertEqual(switched.stateChange, .fileOnly(since: .first))
+
+        // And one append after it, which the mirror can no longer confirm either.
+        try tree.touch(mainPath)
+        let after = await ingestion.fileChanged(mainPath)
+        _ = try await next(log, "the watcher change after the error")
+        XCTAssertEqual(after.applied.count, 1, "the file is still a source under fileOnly")
+
+        try await Task.sleep(for: .milliseconds(700))       // well past the window either append would have armed
+        let gaps = notices.notices.filter { if case .mirrorGap = $0 { return true } else { return false } }
+        XCTAssertEqual(gaps.count, 0, "file-only reports the switch once, not a gap per append after it")
+        await expectEqual(await ingestion.state, .fileOnly(since: .first), "and the state is the one it already was")
+        await ingestion.close()
+    }
+
+    /// The bounded window belongs to the main stream: `loadEarlier()` and the published `WindowMarker` name
+    /// `mainStream` and nothing else. An agent transcript read to a tail would therefore have a beginning no caller
+    /// could ever ask for, so agent transcripts are read whole whatever the policy says.
+    ///
+    /// The corpus's agent transcripts do not close a tail window by themselves — their `user` records are tool
+    /// results, so the closure rule walks back to offset 0 and reads them whole by accident. To make the window
+    /// actually close mid-file, the fixture's own first line is appended again with an invented uuid and no
+    /// `parentUuid`: a turn start that is its own chain root, which is exactly what the rule closes on. No byte here
+    /// is new — it is the recording's line with one field replaced, the same mutation `TempTree.touch` makes.
+    func testAnAgentTranscriptIsReadWholeUnderATightWindowPolicy() async throws {
+        let fx = try FixtureCorpus.named("explore-depth-1")
+        let tree = try TempTree()
+        let mainPath = try tree.add(fx, slug: "explore")
+
+        let subagents = tree.projects.appendingPathComponent("explore").appendingPathComponent("\(fx.sessionID)")
+            .appendingPathComponent("subagents")
+        let agentPaths = try FileManager.default.contentsOfDirectory(at: subagents, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }
+        XCTAssertEqual(agentPaths.count, 1, "explore-depth-1 has one agent transcript beside its main file")
+        let agentPath = try XCTUnwrap(agentPaths.first)
+
+        let firstLine = try XCTUnwrap(LineScanner.scan(try Data(contentsOf: agentPath)).lines.first).bytes
+        var object = try XCTUnwrap(try JSONDecoder().decode(JSONValue.self, from: firstLine).objectValue)
+        XCTAssertEqual(object["type"]?.stringValue, "user", "the agent transcript opens on its prompt")
+        object["uuid"] = .string("00000000-0000-4000-8000-00000000a9e0")
+        object["parentUuid"] = .null
+        var closingLine = try JSONValue.object(object).canonicalData()
+        closingLine.append(UInt8(ascii: "\n"))
+        try tree.appendRaw(closingLine, to: agentPath)
+
+        // Small enough that this policy's tail is a fraction of the file, and the appended turn start closes it.
+        let tight = WindowPolicy(wholeFileUpTo: 0, initialTail: 2048, earlierStep: 2048)
+        let windowed = try WindowedTranscript.read(TranscriptReader(url: agentPath), policy: tight)
+        let onDisk = try TranscriptReader(url: agentPath).readAll().records
+        XCTAssertLessThan(windowed.records.count, onDisk.count,
+                          "the tight policy really does cut this agent transcript short")
+
+        let ingestion = StreamIngestion(session: fx.sessionID, configHome: tree.root, mode: .filePrimary)
+        _ = EffectLog(ingestion)
+        let tap = SyntheticTap()
+        try await ingestion.open(file: mainPath, events: tap.events, policy: tight)
+
+        let agentStreams = await ingestion.openStreams.filter { if case .agent = $0.name { true } else { false } }
+        let agent = try XCTUnwrap(agentStreams.first)
+        await expectEqual(await ingestion.applied(agent).count, onDisk.count,
+                          "every record of the agent transcript was read, not just its tail")
+        await expectEqual(labels(await ingestion.applied(agent).map(\.key)),
+                          labels(RecordKey.keys(for: onDisk, in: agent)))
+
+        // The main stream is still windowed: this is a per-stream policy, not a policy the actor ignores.
+        let main = stream(tree, fx.sessionID)
+        let mainOnDisk = try TranscriptReader(url: mainPath).readAll().records
+        await expectTrue(await ingestion.applied(main).count < mainOnDisk.count,
+                         "the main stream still honours the tight window")
+        await ingestion.close()
+    }
+
+    /// A stream whose file this actor has never seen learned every record it holds from a mirror entry. Labelling it
+    /// `.file`, and naming a file that does not exist, is what `Provenance.origin` exists to prevent — and it left
+    /// `.mirror` unreachable.
+    func testAMirrorOnlyStreamCarriesMirrorProvenance() async throws {
+        let turn = SyntheticTranscript.queuedTurnLines(turn: 1)
+        let session = try XCTUnwrap(SessionID(SyntheticTranscript.sessionID))
+        let tree = try TempTree()
+        let directory = tree.projects.appendingPathComponent("synthetic", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let mainPath = directory.appendingPathComponent("\(session).jsonl")
+
+        let ingestion = StreamIngestion(session: session, configHome: tree.root, mode: .filePrimary)
+        let log = EffectLog(ingestion)
+        let tap = SyntheticTap()
+        try await ingestion.open(file: mainPath, events: tap.events)
+        await expectEqual(await ingestion.state, .mirrorOnly)
+
+        _ = try await send(tap, try mirrorFrame(path: mainPath, entries: [try entry(turn[0]), try entry(turn[1])]),
+                           log, "the mirror before the file exists")
+        let fromMirror = await ingestion.projection
+        XCTAssertFalse(fromMirror.items.isEmpty, "the mirror alone produced items")
+        XCTAssertEqual(Set(fromMirror.items.map(\.provenance.origin)), [.mirror],
+                       "every item of a stream with no file on disk came by the mirror")
+        XCTAssertEqual(fromMirror.items.compactMap(\.provenance.sourceFile), [],
+                       "and none of them names a file that does not exist")
+
+        var data = Data()
+        for line in turn.prefix(3) { data.append(line) }
+        try data.write(to: mainPath)
+        _ = await ingestion.fileChanged(mainPath)
+        _ = try await next(log, "the file appearing")
+        let onDisk = await ingestion.projection
+        XCTAssertEqual(Set(onDisk.items.map(\.provenance.origin)), [.file],
+                       "once the file exists the same records are the file's")
+        XCTAssertEqual(Set(onDisk.items.compactMap(\.provenance.sourceFile)), [mainPath.standardizedFileURL])
+        await ingestion.close()
+    }
+
     /// `open` awaits the tap falling quiet, and C6 awaits `open`. An engine emitting mirror frames faster than
     /// `tapSettle` must therefore not stall the channel: the settle wait is capped and the alignment runs on whatever
     /// is buffered.

@@ -415,6 +415,42 @@ final class AgentRunTreeTests: XCTestCase {
         XCTAssertEqual(touched.startedCount, one.startedCount)
     }
 
+    /// `task_progress.summary` replaces the activity line when the frame carries one (child spec: the activity line is
+    /// `task_progress.description` and `last_tool_name`, replaced by `summary` when present). No recorded
+    /// `task_progress` in the corpus carries a non-nil `summary`, which is asserted here rather than assumed, so the
+    /// frame below is constructed: schema-shaped, with an invented summary and uuid, and the task id read off the
+    /// fixture at run time.
+    func testTaskProgressSummaryReplacesTheDescription() throws {
+        let fx = try FixtureCorpus.named("nested-depth-2")
+        var tree = Self.tree(fx)
+        Self.fold(try Self.events(fx), into: &tree, metadata: true)
+        let (one, _) = try depths(tree, fx)
+        let described = try XCTUnwrap(tree.node(one.id)?.activityLine,
+                                      "the recorded task_progress frames already set an activity line")
+
+        let line = JSONValue.object([
+            "type": .string("system"),
+            "subtype": .string("task_progress"),
+            "task_id": .string(one.id),
+            "description": .string("afleet invented lower-level step"),
+            "summary": .string("afleet invented summary"),
+            "usage": .object([:]),
+            "uuid": .string("00000000-0000-4000-8000-00000000ab02"),
+            "session_id": .string(fx.sessionID.description),
+        ])
+        guard case .system(.taskProgress(let frame)) = FrameDecoder.decode(line: try line.canonicalData()) else {
+            return XCTFail("the invented line did not decode as system/task_progress")
+        }
+        XCTAssertEqual(frame.summary, "afleet invented summary")
+        tree.apply(taskProgress: frame, at: Date(timeIntervalSince1970: 0))
+
+        let touched = try XCTUnwrap(tree.node(one.id))
+        XCTAssertEqual(touched.activityLine, "afleet invented summary",
+                       "the summary is the activity line, not the description under it")
+        XCTAssertNotEqual(touched.activityLine, "afleet invented lower-level step")
+        XCTAssertNotEqual(touched.activityLine, described)
+    }
+
     // MARK: - The wire reducer's route
 
     func testNodeWithToolUseFindsTheSpawnedNode() throws {
