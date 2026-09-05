@@ -4186,3 +4186,9 @@ Pending — written at finish.
   are dropped as uncorrelated with no event; a correlated response carrying an error body
   settles its waiter as a normal settlement; every cancel frame yields a cancel effect and
   the no-task case is a no-op. C3's G1 replay (its Task 8) depends on this merge and pins it.
+- 2026-09-05 C2 corrective (`1458568`): `LaunchConfiguration.maxTurns: Int?` emits
+  `--max-turns <n>` (n ≥ 1, else `WireError.invalidArgument`), placed after the session
+  arguments; two composer tests (ClaudeWire 232 → 234). The flag caps agentic (assistant)
+  turns inside one prompt and ends the turn with a `result` of subtype `error_max_turns` at
+  the limit; it is not a prompt count. `claude --bg` forwards it. C4's live gate (G5) bounds
+  every installed-CLI scenario with it and checks the field's presence in its Task 10 preflight.
