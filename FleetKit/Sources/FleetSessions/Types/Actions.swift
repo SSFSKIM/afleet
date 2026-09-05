@@ -95,6 +95,10 @@ public enum LifecycleError: Error, Hashable, Sendable {
     case answerFailed(RequestID, reason: String)
     /// The spawn barrier while a `LogoutPlan` runs.
     case logoutInProgress
+    /// The action needs a quiescent channel and this one is not: *Reap* with a decision on screen, a turn in
+    /// flight or a background shell still working. The blocker is the one the verdict named, so a surface can say
+    /// what is holding the channel rather than "not now".
+    case notEligible(DormantEligibility.Blocker)
     /// Another lifecycle operation on this channel is already in flight. The two documented exceptions never raise
     /// it: a send while a spawn is in flight queues, and a restart asked for while one runs merges into the
     /// pending change.

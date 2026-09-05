@@ -96,6 +96,10 @@ final class LifecycleRowTests: XCTestCase {
             T(.ownedOpenInTerminal, .ready, .openInTerminal, .foreignOwnTab)],
         "testForeignRecordDisappearingArchivesTheChannel": [
             T(.foreignRecordGone, .foreignUsersTerminal, .recordDisappeared, .archivedRecent)],
+        // The same row from the other origin that holds no process of afleet's (the test lives in
+        // `LifecycleRowTests+Jobs.swift`).
+        "testABackgroundJobWhoseRosterWorkerGoesArchivesTheChannel": [
+            T(.foreignRecordGone, .backgroundJob, .recordDisappeared, .archivedRecent)],
         "testSendOnAForeignSessionIsRefusedWithForkOffered": [
             T(.foreignSendRefused, .foreignUsersTerminal, .sendRefused, .foreignUsersTerminal)],
         "testHandoffTimeoutEntersContendedFromEveryHandoff": [

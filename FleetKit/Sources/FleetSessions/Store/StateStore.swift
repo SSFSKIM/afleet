@@ -92,4 +92,11 @@ public protocol StateStore: Sendable {
     func write<T: Codable & Sendable>(_ value: T, namespace: StoreNamespace, key: String) async throws
     func remove(namespace: StoreNamespace, key: String) async throws
     func keys(in namespace: StoreNamespace) async throws -> [String]
+    /// Adds one string to the array at `key`, keeping it a set, in a single step on the store.
+    ///
+    /// A protocol member rather than a read and a write at the call site: those are two hops onto the store, and a
+    /// second appender that lands between them writes a list that never saw the first one's element. The shorts of
+    /// afleet's own background jobs are appended from one supervisor per handoff, and two handoffs at once is an
+    /// ordinary thing for this app.
+    func appendUnique(_ element: String, namespace: StoreNamespace, key: String) async throws
 }

@@ -218,4 +218,121 @@ final class ForkTests: XCTestCase {
                                                                session: SessionID()))
         guard case .granted = decision else { return XCTFail("the freed slot was not granted: \(decision)") }
     }
+
+    // MARK: - What the resolved identity has to change
+
+    /// Once a fork has learned its own id, every later launch of that channel resumes *it*. The template it was
+    /// built with names the session it forked from and carries `--fork-session`, so a crash respawn from that
+    /// template would mint a third session and leave the fork's own transcript behind.
+    ///
+    /// Scripted, not recorded: the crash, the backoff and the identity event are the test's.
+    ///
+    /// Deliberate break: drop the `launchTemplate.session` assignment from `resolveForkIdentity`.
+    func testACrashAfterAForkResolvedItsIdentityResumesTheForksOwnSession() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let source = SessionID()
+        let supervisor = rig.supervisor(session: source, origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        let provisional = try await supervisor.fork(at: nil)
+        let fork = try XCTUnwrap(rig.supervisor(for: provisional))
+        let handle = try XCTUnwrap(rig.scriptedHandles.last)
+        let resolved = SessionID()
+
+        handle.push(.sessionIdentityResolved(resolved, handle.epoch))
+        try await rig.waitUntil(fork, "the fork to be ready on its own id") { $0.origin == .owned(.ready) }
+
+        let published = await fork.publishedCount
+        handle.push(.exited(.code(1, stderrTail: ""), handle.epoch))
+        try await rig.waitForPublish(fork, above: published)
+        try await rig.waitForSleeper(due: .seconds(1))
+        await rig.clock.advance(by: .seconds(1))
+        try await rig.waitFor("the respawn to launch") { rig.launches.count == 3 }
+
+        XCTAssertEqual(rig.launches[2].session, .resume(resolved, fork: false),
+                       "the respawn resumes the fork's own session and forks nothing")
+    }
+
+    /// The identity check reads the pid and asks the ownership question, and the child can die in that window. The
+    /// checks that follow are about a process that no longer exists: nothing may be published ready, and the
+    /// reservation the fork was holding has to go back — `handleExit` cannot give it back, because the identity
+    /// check took it out of `forkReservation` before its first await.
+    ///
+    /// Scripted, not recorded: an exit timed inside a post-handshake read is not something a recording can produce.
+    ///
+    /// Deliberate break: remove the `resolvedEpoch == epoch, process != nil` re-guard after the two awaits.
+    func testAnExitDuringTheIdentityCheckPublishesNoReadyAndGivesTheSlotBack() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        let occupiedBeforeTheFork = await rig.fleet.occupancy
+
+        let held = HeldAnswer(), entered = HeldAnswer()
+        rig.configureScriptedHandles { handle in
+            handle.pidGate = { entered.release(); await held.wait() }
+        }
+        let provisional = try await supervisor.fork(at: nil)
+        let fork = try XCTUnwrap(rig.supervisor(for: provisional))
+        let handle = try XCTUnwrap(rig.scriptedHandles.last)
+
+        handle.push(.sessionIdentityResolved(SessionID(), handle.epoch))
+        try await rig.waitFor("the identity check to reach the pid read") { entered.isReleased }
+        let published = await fork.publishedCount
+        // Delivered on the actor: the pump is still inside the identity event, parked on the pid read, so an exit
+        // pushed onto the same stream would queue behind the very handler it is meant to race.
+        await fork.handle(event: .exited(.code(1, stderrTail: ""), handle.epoch))
+        let afterTheExit = await fork.publishedCount
+        XCTAssertGreaterThan(afterTheExit, published, "the exit was taken")
+        held.release()
+
+        try await rig.waitFor("the fork's reservation to go back", timeout: .seconds(5)) {
+            await rig.fleet.occupancy == occupiedBeforeTheFork
+        }
+        try await rig.drainPublished(of: fork)
+        XCTAssertFalse(rig.published(of: fork).contains { $0.origin == .owned(.ready) },
+                       "nothing is ready on a process that has already exited")
+        let holdsProvisional = await rig.fleet.isLive(provisional)
+        XCTAssertFalse(holdsProvisional, "and no live slot was confirmed under the provisional key")
+    }
+
+    /// An id announced by one child is that child's. A spawn parked past its own exit stashes the id it saw; the
+    /// respawn behind it is a *different* engine with a *different* session, and consuming the stash there re-keys
+    /// the channel onto an id nothing is running under.
+    ///
+    /// Scripted, not recorded: two children of one channel, the first parked inside its handshake.
+    ///
+    /// Deliberate break: store the stashed identity without its epoch and consume it unconditionally.
+    func testAnIdentityStashedByOneEpochIsNotConsumedByTheNext() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let source = SessionID(), provisional = SessionID()
+        let template = FakeClaudeLaunch.launch(fixture: Self.idle, cwd: rig.cwd,
+                                               session: .resume(source, fork: true))
+        let held = HeldAnswer()
+        rig.holdNextSpawn { await held.wait() }
+        let fork = rig.supervisor(session: provisional, origin: .owned(.connecting), template: template)
+        let spawning = Task { try await fork.spawn(reason: .open) }
+        try await rig.waitFor("the fork's first child to park in its handshake") { !rig.scriptedHandles.isEmpty }
+        let first = try XCTUnwrap(rig.scriptedHandles.first)
+
+        // Delivered on the actor rather than through the pump, so the order of the two events is the test's.
+        let stale = SessionID()
+        await fork.handle(event: .sessionIdentityResolved(stale, first.epoch))
+        await fork.handle(event: .exited(.code(1, stderrTail: ""), first.epoch))
+        held.release()
+        _ = try? await spawning.value
+
+        try await rig.waitForSleeper(due: .seconds(1))
+        await rig.clock.advance(by: .seconds(1))
+        try await rig.waitFor("the respawn's child") { rig.scriptedHandles.count == 2 }
+        // The second child has announced nothing, so the fork is still waiting for an id and its deadline is armed.
+        // Without the epoch beside the stash there is no deadline: the channel went ready on the dead child's id.
+        try await rig.waitForSleeper(due: Self.handshakeTimeout)
+
+        let state = await fork.state
+        XCTAssertEqual(state.origin, .owned(.connecting), "the fork is still waiting for its own id")
+        XCTAssertEqual(state.identity, .awaitingFork(from: source, provisional: provisional))
+        XCTAssertNotEqual(fork.key.session, stale, "the id the dead child announced is not this child's")
+    }
 }

@@ -324,7 +324,7 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
             evictionBarrier: { [weak self] victim in await self?.barrier(for: victim) },
             // The part Task 9's facade plays: a fork is a new channel, built here under the provisional key its
             // source minted and with the fork's own `SessionStart` on its launch line.
-            spawnSibling: { [weak self] provisional, start in
+            spawnSibling: { [weak self] _, provisional, start in
                 guard let self else { return nil }
                 let siblingFixture = forkFixture ?? fixture
                 return self.supervisor(

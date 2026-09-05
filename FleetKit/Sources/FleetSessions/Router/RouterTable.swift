@@ -6,7 +6,7 @@ import ClaudeWire
 /// strategies name the sequence, so a test checks each against the fixture that recorded it rather than checking that an
 /// enum case is an enum case.
 public enum RouteStrategy: Hashable, Sendable {
-    case applyFlagSetting(key: String)            // apply_flag_settings {settings: {key: value}} then get_settings.effective_keys
+    case applyFlagSetting(key: String)            // apply_flag_settings {settings: {key: value}} then get_settings.effective
     case setModel                                  // set_model {model}
     case setPermissionMode                         // set_permission_mode {mode}; the bare form is `.permissionsView`
     case renameSession                             // rename_session {title}
@@ -24,7 +24,7 @@ public enum RouteStrategy: Hashable, Sendable {
     case native(String)                            // UI-only: picker, focus, tasks list, agents list
 }
 public enum LifecycleActionName: String, Hashable, Sendable { case fork, sendToBackground, stopEverything, backgroundAll, logout }
-public enum ReadbackSource: String, Hashable, Sendable { case getSettingsApplied, getSettingsEffectiveKeys, handshakePermissionMode, fastModeState, none }
+public enum ReadbackSource: String, Hashable, Sendable { case getSettingsApplied, getSettingsEffective, handshakePermissionMode, fastModeState, none }
 public struct LocalCommand: Hashable, Sendable {
     public let name: String; public let strategy: RouteStrategy; public let readback: ReadbackSource; public let explanation: String
     public init(name: String, strategy: RouteStrategy, readback: ReadbackSource, explanation: String) {
@@ -35,10 +35,10 @@ public enum RouterTable {
     public static let local: [LocalCommand] = [
         .init(name: "/model", strategy: .setModel, readback: .getSettingsApplied, explanation: "Changes the model for this channel without a Claude turn."),
         .init(name: "/permissions", strategy: .setPermissionMode, readback: .handshakePermissionMode, explanation: "Changes the permission mode; on its own opens the read-only rules view."),
-        .init(name: "/effort", strategy: .applyFlagSetting(key: "effortLevel"), readback: .getSettingsEffectiveKeys, explanation: "Changes the effort level; max cannot be set mid-session."),
+        .init(name: "/effort", strategy: .applyFlagSetting(key: "effortLevel"), readback: .getSettingsEffective, explanation: "Changes the effort level; max cannot be set mid-session."),
         .init(name: "/rename", strategy: .renameSession, readback: .none, explanation: "Renames the channel and the transcript's title."),
         .init(name: "/add-dir", strategy: .restart, readback: .none, explanation: "Adds a directory by restarting this channel under the same session id."),
-        .init(name: "/agent", strategy: .applyFlagSetting(key: "agent"), readback: .getSettingsEffectiveKeys, explanation: "Switches the agent from the next turn."),
+        .init(name: "/agent", strategy: .applyFlagSetting(key: "agent"), readback: .getSettingsEffective, explanation: "Switches the agent from the next turn."),
         .init(name: "/cd", strategy: .setCwd, readback: .none, explanation: "Changes the working directory; an untrusted directory asks for trust first."),
         .init(name: "/fast", strategy: .applyFlagSetting(key: "fastMode"), readback: .fastModeState, explanation: "Turns fast mode on or off."),
         .init(name: "/config", strategy: .text, readback: .none, explanation: "Runs in the engine; the persisted setting is read back with get_settings."),

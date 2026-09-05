@@ -189,8 +189,8 @@ public actor Fleet: LifecycleAPI {
             fleet: counter, diagnostics: diagnostics, isRecent: isRecent, spawnBarrier: spawnBarrier,
             environment: environment, configHome: configHome, verbs: verbs, store: store,
             evictVictim: { [weak self] victim in await self?.evict(victim) ?? .victimBecameIneligible },
-            spawnSibling: { [weak self] provisional, start in
-                await self?.buildSibling(provisional, start: start, from: key)
+            spawnSibling: { [weak self] source, provisional, start in
+                await self?.buildSibling(provisional, start: start, from: source)
             },
             preconditions: preconditionsGate)
 
@@ -222,8 +222,11 @@ public actor Fleet: LifecycleAPI {
     /// A fork is a *new channel* under the provisional key its source minted, with the fork's own `SessionStart` on
     /// its launch line and its source's working directory.
     private func buildSibling(_ provisional: ChannelKey, start: SessionStart,
-                              from source: ChannelKey) -> ChannelSupervisor {
-        let cwd = seeds[source]?.cwd ?? configHome.root
+                              from source: ChannelKey) async -> ChannelSupervisor {
+        // The source's *runtime* directory, not its seed: a `/cd` moves the project the channel is in, and a fork
+        // of a channel the user moved belongs where the user moved it. The seed is the fallback for a source this
+        // fleet no longer holds a supervisor for, which is not a case a live fork can be in.
+        let cwd = await supervisors[source]?.runtimeState().cwd ?? seeds[source]?.cwd ?? configHome.root
         seeds[provisional] = Seed(cwd: cwd, isRecent: true)
         return build(key: provisional, launch: LaunchConfiguration(binary: binary, cwd: cwd, session: start),
                      isRecent: true)
@@ -303,6 +306,14 @@ public actor Fleet: LifecycleAPI {
         case .send(let input):
             _ = try await supervisor.send(input)
         case .reap:
+            // Gated here and not inside `reap()`: the reap the *user* asked for must not end a child with a
+            // decision on screen or a background shell still working, while `ChannelSupervisor.reap()` is also the
+            // unconditional teardown terminate a rig ends a test with.
+            let verdict = await supervisor.currentEligibility()
+            guard case .eligible = verdict else {
+                if case .blocked(let blocker) = verdict { throw LifecycleError.notEligible(blocker) }
+                return await supervisor.state
+            }
             await supervisor.reap()
         case .adopt:
             try await supervisor.adopt()
@@ -320,10 +331,11 @@ public actor Fleet: LifecycleAPI {
                 _ = try? await supervisor.perform(StopTask(taskID: task))
             }
         case .backgroundAll:
-            for other in supervisors.values {
-                guard case .owned = await other.state.origin else { continue }
-                _ = try? await other.sendToBackground()
-            }
+            // One `background_tasks` with no `tool_use_id`: the engine puts every tool the current turn is running
+            // into the background. It is not a handoff — a loop of `sendToBackground` would terminate every owned
+            // child in the fleet and re-launch each as a `--bg` job, which is a different verb the *Stop* sheet
+            // does not offer.
+            _ = try await supervisor.perform(BackgroundTasks())
         case .logout:
             try await beginLogout()
         case .reopen:

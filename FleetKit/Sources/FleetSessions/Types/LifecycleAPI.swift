@@ -25,7 +25,10 @@ public protocol LifecycleAPI: Sendable {
     func declineProjectServers(_ names: [String], project: URL) async throws
     /// Store only.
     func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async
-    /// nil unless owned; a fresh unbounded fan-out per call, finished when the channel archives.
+    /// A fresh unbounded fan-out per call for any channel this fleet owns a supervisor for, and nil for a key it
+    /// does not know. Deliberately *not* gated on the channel being owned: subscribing before `perform(.open)` is
+    /// what lets a consumer see the handshake rather than join after it. The stream is finished when the channel
+    /// archives, so a consumer's `for await` ends rather than waiting on frames that can never come.
     func events(of key: ChannelKey) async -> AsyncStream<WireEvent>?
     /// Every transition, coalesced per channel.
     var updates: AsyncStream<ChannelState> { get }

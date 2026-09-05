@@ -30,6 +30,7 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
     private var _sendGate: (@Sendable () async -> Void)?
     private var _terminateGate: (@Sendable () async -> Void)?
     private var _sent: [UserInput] = []
+    private var _pidGate: (@Sendable () async -> Void)?
 
     init(epoch: ProcessEpoch, session: SessionID?, pid: Int32 = 424_242,
          terminateReturns: TerminationReport = TerminationReport(exit: .code(0, stderrTail: ""), steps: [])) {
@@ -119,11 +120,22 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
     }
     /// Every input this handle was asked to write, in order.
     var sent: [UserInput] { lock.lock(); defer { lock.unlock() }; return _sent }
+    /// Awaited inside `childProcessIdentifier`: how a test parks the supervisor on the *first* await after a
+    /// handshake — the pid read every post-handshake check begins with — and feeds an exit into that window.
+    var pidGate: (@Sendable () async -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _pidGate }
+        set { lock.lock(); _pidGate = newValue; lock.unlock() }
+    }
 
     // MARK: - ProcessHandle
 
     var events: any AsyncSequence<WireEvent, Never> & Sendable { stream }
-    var childProcessIdentifier: Int32 { get async { locked { _pid } } }
+    var childProcessIdentifier: Int32 {
+        get async {
+            await locked { _pidGate }?()
+            return locked { _pid }
+        }
+    }
     var sessionID: SessionID? { get async { locked { _session } } }
 
     func spawn(handshakeTimeout: Duration) async throws -> Handshake {

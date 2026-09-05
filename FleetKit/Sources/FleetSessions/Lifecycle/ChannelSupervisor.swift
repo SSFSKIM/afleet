@@ -28,7 +28,11 @@ extension LifecycleTable.Event {
 /// Builds the supervisor a fork spawns beside this one. The facade injects it (Task 9): a fork is a *new channel*
 /// under a provisional key, not a second process on this one. The key is the provisional one this supervisor minted
 /// and the `SessionStart` is the fork's, so the sibling's launch template carries the fork on its command line.
-public typealias SiblingSpawner = @Sendable (ChannelKey, SessionStart) async -> ChannelSupervisor?
+/// The source key is a call-time argument and never a captured one: a fork re-keys itself the moment its identity
+/// resolves, so a closure that captured the key its channel was built under would look its own source up under a key
+/// the fleet no longer files it as — and a fork of a fork would find no project at all.
+public typealias SiblingSpawner = @Sendable (_ source: ChannelKey, _ provisional: ChannelKey, _ start: SessionStart)
+    async -> ChannelSupervisor?
 
 /// The channel's key, readable without hopping onto the actor. A fork's is provisional until
 /// `.sessionIdentityResolved` rewrites it; every other channel's never changes.
@@ -133,7 +137,11 @@ public actor ChannelSupervisor {
     /// An identity that resolved before the spawn had finished taking its reservation. The engine emits
     /// `auth_status` immediately after the initialize response, so the pump can reach the event while `spawn` is
     /// still suspended inside `handle.spawn`; dropping it would leave the fork connecting forever.
-    private var forkIdentityPending: SessionID?
+    ///
+    /// The epoch travels with the id, because an id belongs to the child that announced it: a spawn parked past its
+    /// own exit and a respawn behind it are two engines with two sessions, and consuming the first one's id in the
+    /// second one's finalisation re-keys the channel onto a session nothing is running under.
+    private var forkIdentityPending: (id: SessionID, epoch: ProcessEpoch)?
     /// The fork's identity deadline. `ClaudeProcess.spawn` returns at the initialize response and cancels its own
     /// handshake timer there, while a fork's id arrives much later off the frame reader, so the spawn's timeout
     /// cannot cover it: without this a fork whose engine never announces an id sits connecting forever, holding a
@@ -171,7 +179,7 @@ public actor ChannelSupervisor {
                 store: (any StateStore)? = nil,
                 evictVictim: @escaping @Sendable (ChannelKey) async -> EvictionOutcome = { _ in .victimBecameIneligible },
                 evictionBarrier: @escaping @Sendable (ChannelKey) async -> Void = { _ in },
-                spawnSibling: @escaping SiblingSpawner = { _, _ in nil },
+                spawnSibling: @escaping SiblingSpawner = { _, _, _ in nil },
                 preconditions: SpawnPreconditions? = nil,
                 initialOrigin: ChannelOrigin = .archived, initialDesired: DesiredOwnership = .none,
                 handshakeTimeout: Duration = .seconds(30)) {
@@ -255,8 +263,11 @@ public actor ChannelSupervisor {
 
     private func enter(_ name: LifecycleTable.StateName) {
         switch name {
-        case .archivedRecent: state.origin = .archived; isRecent = true
-        case .archivedOlder: state.origin = .archived; isRecent = false
+        // A channel that has archived owns no process, and `events()` hands out an unbounded fan-out per call: a
+        // consumer looping over one would wait forever on frames that can never come. `shutdown()` finishes them at
+        // app exit, which is far too late — archiving happens on ordinary transitions.
+        case .archivedRecent: finishSubscribers(); state.origin = .archived; isRecent = true
+        case .archivedOlder: finishSubscribers(); state.origin = .archived; isRecent = false
         case .connecting:
             // Read before the origin moves: `currentName` is still the state this channel is leaving.
             restingOrigin = restingName(leaving: currentName)
@@ -531,6 +542,12 @@ public actor ChannelSupervisor {
         self.inFlight = .reopen
         defer { self.inFlight = nil }
         let holders = await ownership.beforeSpawn(session: key.session)
+        if let trace = state.wedged, holders.isEmpty, ProcessLiveness.isRunning(pid: trace.pid) {
+            // A ghost stops mattering when its record is gone *and* its pid is dead — `holdersChanged` frees the
+            // slot on exactly those two facts. A child that will not die but whose record the CLI has already
+            // removed is invisible to the holder check, and spawning behind it puts two writers on one transcript.
+            throw LifecycleError.wedged(trace)
+        }
         guard holders.isEmpty else {
             // Nothing changes state: the ghost is still the channel's situation and *Reopen* is still what is
             // offered. All the user learns is that somebody else has the session right now.
@@ -604,7 +621,7 @@ public actor ChannelSupervisor {
     @discardableResult
     public func sendToBackground() async throws -> JobShort {
         try await handOff(during: .sendToBackground, event: .sendToBackground, to: .backgroundJob) {
-            let short = try await verbs.backgroundResume(key.session, cwd: launchTemplate.cwd)
+            let short = try await verbs.backgroundResume(key.session, cwd: runtime.cwd)
             try await rememberOwnJob(short)
             try await confirmListed(short)
             return short
@@ -616,7 +633,7 @@ public actor ChannelSupervisor {
     public func openInTerminal() async throws -> PaneRequest {
         try await handOff(during: .openInTerminal, event: .openInTerminal, to: .foreignOwnTab) {
             let request = paneRequest(arguments: ["--resume", key.session.description],
-                                      cwd: launchTemplate.cwd, purpose: .hatch(key.session))
+                                      cwd: runtime.cwd, purpose: .hatch(key.session))
             pendingHatch = request
             diagnostics.record(.paneRequest(id: request.id, purpose: "hatch", session: key.session.description))
             return request
@@ -704,13 +721,12 @@ public actor ChannelSupervisor {
         return LifecycleError.heldElsewhere(set)
     }
 
+    /// One append, not a read and a write. Two supervisors handing off at once are two actors over one store, and
+    /// a read-then-write across two hops loses whichever short landed in between: the shorts are how afleet knows
+    /// which jobs are its own, and a lost one is a job the sidebar never claims.
     private func rememberOwnJob(_ short: JobShort) async throws {
         guard let store else { return }
-        var shorts = (try? await store.read([String].self, namespace: .fleetKit,
-                                            key: FleetKitKeys.ownJobShorts)) ?? []
-        guard !shorts.contains(short.rawValue) else { return }
-        shorts.append(short.rawValue)
-        try await store.write(shorts, namespace: .fleetKit, key: FleetKitKeys.ownJobShorts)
+        try await store.appendUnique(short.rawValue, namespace: .fleetKit, key: FleetKitKeys.ownJobShorts)
     }
 
     /// The CLI exiting zero is not the confirmation; the job being listed is. `backgroundResume` already waited for
@@ -727,13 +743,13 @@ public actor ChannelSupervisor {
 
     /// `claude attach <short>` in a pane. It changes no ownership: the job keeps the session.
     public func attach(job: JobEntry) -> PaneRequest {
-        paneRequest(arguments: ["attach", job.short.rawValue], cwd: job.cwd ?? launchTemplate.cwd,
+        paneRequest(arguments: ["attach", job.short.rawValue], cwd: job.cwd ?? runtime.cwd,
                     purpose: .attach(job.short))
     }
 
     /// `claude logs <short>` in a pane. It changes no ownership.
     public func logs(job: JobEntry) -> PaneRequest {
-        paneRequest(arguments: ["logs", job.short.rawValue], cwd: job.cwd ?? launchTemplate.cwd,
+        paneRequest(arguments: ["logs", job.short.rawValue], cwd: job.cwd ?? runtime.cwd,
                     purpose: .logs(job.short))
     }
 
@@ -833,6 +849,11 @@ public actor ChannelSupervisor {
 
     private func dropSubscriber(_ id: UUID) { subscribers[id] = nil }
 
+    private func finishSubscribers() {
+        for continuation in subscribers.values { continuation.finish() }
+        subscribers = [:]
+    }
+
     /// Finishes every subscriber stream and cancels the dormant timer. It terminates nothing: the facade calls this
     /// at app exit, and the user's channels keep running.
     public func shutdown() {
@@ -841,8 +862,7 @@ public actor ChannelSupervisor {
         forkIdentityTimer?.cancel(); forkIdentityTimer = nil
         respawnTask?.cancel(); respawnTask = nil
         pumpTask?.cancel(); pumpTask = nil
-        for continuation in subscribers.values { continuation.finish() }
-        subscribers = [:]
+        finishSubscribers()
         updatesContinuation.finish()
     }
 
@@ -886,7 +906,16 @@ public actor ChannelSupervisor {
 
         // The §6.12 gate, before the cap and before the pre-spawn check: a project afleet may not spawn into must
         // not take a slot on the way to being refused, and nothing here changes a state a transition could refuse.
-        var template = launchOverride ?? launchTemplate
+        // Group D: what this channel is *running*, not what it was opened with. `--resume` restores the
+        // conversation and nothing else, so a `/model`, a `/permissions`, an `/effort`, a `/cd` or an `/add-dir`
+        // lives in `runtime` and has to be put back on the command line of every child — the dormant resume, the
+        // crash respawn, the reopen, the adopt and the pane re-adoption alike. The quiescent restart composes its
+        // own line and passes it as `launch`, which is the one override there is.
+        //
+        // `agent` is deliberately not composed. The restart clears it because re-passing `--agent` replays the
+        // agent's `initialPrompt` as a user turn (parent §7.4); the runtime still remembers the name for the
+        // header, and taking it from there would put the flag back.
+        var template = launchOverride ?? composedFromRuntime()
         if let preconditions {
             let (verdict, resolved) = await preconditions.evaluate(
                 key: key, cwd: template.cwd, launch: template, wedged: state.wedged,
@@ -979,7 +1008,13 @@ public actor ChannelSupervisor {
             }
             throw error
         }
-        guard epoch == mine else { return }   // an exit already respawned past this attempt
+        // An exit already respawned past this attempt, or ended the child this one was finalising. Either way the
+        // finalisation below is about a process that is not this channel's any more, and the one thing this attempt
+        // still owes the fleet is its slot: returning with the reservation held costs one of the six permanently,
+        // per race. `ProcessHandle` is `Sendable` and not `AnyObject`, so the handle cannot be compared by identity
+        // — epoch equality plus non-nil is sufficient, because only a new spawn replaces the handle and that
+        // advances the epoch.
+        guard epoch == mine, process != nil else { await fleet.rollback(reservation); return }
 
         // A fork's key is a random provisional id, so the post-handshake check has nothing to ask about: it runs on
         // the *resolved* id when `.sessionIdentityResolved` arrives, and until then the channel stays connecting.
@@ -988,11 +1023,12 @@ public actor ChannelSupervisor {
             state.banner = nil
             state.headerNote = projectServersOff ? .projectServersOff : nil
             forkReservation = reservation
-            if let resolved = forkIdentityPending {
+            if let pending = forkIdentityPending, pending.epoch == mine {
                 forkIdentityPending = nil
-                await resolveForkIdentity(resolved, epoch: mine)
+                await resolveForkIdentity(pending.id, epoch: mine)
                 return
             }
+            forkIdentityPending = nil
             armForkIdentityDeadline(epoch: mine)
             return
         }
@@ -1026,6 +1062,8 @@ public actor ChannelSupervisor {
             return
         }
 
+        // Two more awaits have run since the guard above, and the child can die in either of them.
+        guard epoch == mine, process != nil else { await fleet.rollback(reservation); return }
         await fleet.confirm(reservation)
         state.banner = nil
         state.headerNote = projectServersOff ? .projectServersOff : nil
@@ -1035,6 +1073,20 @@ public actor ChannelSupervisor {
         armDormantTimer()
         pushEligibility()
         await flushQueuedInput()
+    }
+
+    /// The launch template with every field the channel has since changed taken from the runtime record. The
+    /// template keeps what only it knows — the binary, the session start, the invariants a restart request set, and
+    /// the agent.
+    private func composedFromRuntime() -> LaunchConfiguration {
+        var launch = launchTemplate
+        launch.cwd = runtime.cwd
+        launch.model = runtime.model
+        launch.permissionMode = runtime.permissionMode
+        launch.effort = runtime.effort
+        launch.addDirectories = runtime.addDirectories
+        launch.environment = runtime.environment
+        return launch
     }
 
     /// The verdict's own word, with no payload: a precondition diagnostic names a shape, never a path or a record.
@@ -1135,7 +1187,7 @@ public actor ChannelSupervisor {
         guard let source = state.identity.resolved else { throw LifecycleError.notOwned }
         let start: SessionStart = point.map { .forkFrom(source, at: $0) } ?? .resume(source, fork: true)
         let provisional = ChannelKey(configHome: key.configHome, session: SessionID())
-        guard let sibling = await spawnSibling(provisional, start) else { throw LifecycleError.notOwned }
+        guard let sibling = await spawnSibling(key, provisional, start) else { throw LifecycleError.notOwned }
         try await sibling.open()
         return provisional
     }
@@ -1179,11 +1231,22 @@ public actor ChannelSupervisor {
             return
         }
 
+        // Two awaits have run since this method took the reservation out of `forkReservation`, so `handleExit`
+        // cannot give it back: an exit in that window leaves the checks below asking about a process that is gone,
+        // and the rollback is this method's own.
+        guard resolvedEpoch == epoch, process != nil else {
+            await fleet.rollback(reservation)
+            return
+        }
         await fleet.rekey(key, to: resolvedKey)
         await fleet.confirm(reservation)
         keyBox.set(resolvedKey)
         state.key = resolvedKey
         state.identity = .known(resolved)
+        // Every later launch of this channel resumes the fork's *own* session. The template it was built from names
+        // the session it forked from and carries `--fork-session`; relaunching from that would mint a third session
+        // and leave this fork's transcript behind. `relaunch` already forces the same value for a restart.
+        launchTemplate.session = .resume(resolved, fork: false)
         apply(.handshakeClean, to: .ready)
         armDormantTimer()
         pushEligibility()
@@ -1309,7 +1372,9 @@ public actor ChannelSupervisor {
         unresolvedSettings = Readback.verify(
             snapshot: snapshot, handshake: handshake,
             settingsApplied: settings["applied"] ?? .object([:]),
-            effectiveKeys: settings["effective_keys"]?.arrayValue?.compactMap(\.stringValue) ?? [])
+            // `effective` is an *object* of the settings the engine has applied, keyed by name; the readback wants
+            // the names and never the values, which a fixture redacts anyway.
+            effectiveKeys: settings["effective"]?.objectValue.map { Array($0.keys) } ?? [])
         await becomeReadyOrBanner()
     }
 
@@ -1409,7 +1474,7 @@ public actor ChannelSupervisor {
             guard isAwaitingFork, resolvedEpoch == epoch else { return }
             // The spawn may still be inside `handle.spawn`: the engine emits `auth_status` right after the initialize
             // response, so the reservation this event has to move may not have been recorded yet.
-            guard forkReservation != nil else { forkIdentityPending = resolved; return }
+            guard forkReservation != nil else { forkIdentityPending = (resolved, resolvedEpoch); return }
             await resolveForkIdentity(resolved, epoch: resolvedEpoch)
         case .frame(let frame, _):
             noteActivity()
@@ -1499,6 +1564,9 @@ public actor ChannelSupervisor {
             forkReservation = nil
             await fleet.rollback(reservation)
         }
+        // The id this child announced dies with it. The stash exists only for the window in which the spawn has not
+        // recorded its reservation yet, and nothing beyond this epoch may read it.
+        if forkIdentityPending?.epoch == exited { forkIdentityPending = nil }
         state.pendingDecisions = []
         turnRunning = false
         process = nil
@@ -1563,7 +1631,10 @@ public actor ChannelSupervisor {
 
         let here = currentName
         if here == .contended { resolveContended(mine); return }
-        if here == .foreignUsersTerminal {
+        // The holder's record went away, so the session is nobody's. The rule is about the *holder*, not about
+        // which kind of holder it was: a background job whose roster worker leaves is the same fact as a terminal
+        // whose registry record vanishes, and the channel is archived from both.
+        if here == .foreignUsersTerminal || here == .backgroundJob {
             guard mine.isEmpty else { publish(); return }
             apply(.recordDisappeared, to: .archivedRecent)
             return

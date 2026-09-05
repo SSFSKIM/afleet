@@ -66,6 +66,22 @@ public actor FileStateStore: StateStore {
         statuses[namespace] = .current
     }
 
+    /// One actor-isolated body with no suspension point between the load and the persist, which is what makes the
+    /// read-modify-write a single step.
+    public func appendUnique(_ element: String, namespace: StoreNamespace, key: String) throws {
+        guard !key.isEmpty else { throw StoreError.emptyKey }
+        try load(namespace)
+        try refuseIfNewer(namespace)
+        var values = documents[namespace] ?? [:]
+        var list = (values[key].flatMap { try? Self.decode([String].self, from: $0) }) ?? []
+        guard !list.contains(element) else { return }
+        list.append(element)
+        values[key] = try Self.encode(list)
+        try persist(namespace, values: values)
+        documents[namespace] = values
+        statuses[namespace] = .current
+    }
+
     public func remove(namespace: StoreNamespace, key: String) throws {
         guard !key.isEmpty else { throw StoreError.emptyKey }
         try load(namespace)

@@ -92,6 +92,12 @@ public enum LifecycleTable {
         .init(.handoffPreempted, .dormant, .holderAppearedBeforeLaunch, .contended),
         .init(.ownTabExited, .foreignOwnTab, .paneExitedAndRecordGone, .connecting),
         .init(.foreignRecordGone, .foreignUsersTerminal, .recordDisappeared, .archivedRecent),
+        // The row is about the *holder's* record going away, not about which kind of holder it was: a background
+        // job whose roster worker leaves holds the session no more than a terminal whose registry record vanished,
+        // and the channel is archived from both. The concrete table had enumerated one of the two origins the
+        // general rule names — the same under-enumeration the spec has already recorded for `postHandshakeYield`,
+        // `contendedSettled` and `holderAppeared`.
+        .init(.foreignRecordGone, .backgroundJob, .recordDisappeared, .archivedRecent),
         .init(.foreignSendRefused, .foreignUsersTerminal, .sendRefused, .foreignUsersTerminal),
         .init(.handoffTimedOut, .backgroundJob, .handoffTimedOut, .contended),        // adopt: the job did not leave
         .init(.handoffTimedOut, .ready, .handoffTimedOut, .contended),                // send to background / open in terminal: our record did not leave

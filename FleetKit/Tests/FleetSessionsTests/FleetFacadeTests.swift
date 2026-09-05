@@ -65,7 +65,7 @@ final class FleetFacadeTests: XCTestCase {
                 }
                 let handle = ScriptedProcessHandle(epoch: epoch, session: session,
                                                    pid: 500_000 + Int32(epoch.rawValue))
-                built.append(handle)
+                built.append(handle, launch)
                 return handle
             }
         }
@@ -116,6 +116,16 @@ final class FleetFacadeTests: XCTestCase {
     }
 
     private var harness: Harness!
+    /// Harnesses a single test built for itself — a scripted-handle fleet, say — torn down with the shared one.
+    private var extraHarnesses: [Harness] = []
+
+    /// A second fleet of this suite's shape whose children are `ScriptedProcessHandle`s, so a test can read the
+    /// control requests the facade sent and the launch lines it composed.
+    private func scriptedHarness() throws -> Harness {
+        let harness = try Harness(scriptedHandles: true)
+        extraHarnesses.append(harness)
+        return harness
+    }
 
     override func setUp() async throws {
         try await super.setUp()
@@ -123,6 +133,8 @@ final class FleetFacadeTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        for extra in extraHarnesses { await extra.tearDown() }
+        extraHarnesses = []
         await harness?.tearDown()
         harness = nil
         try await super.tearDown()
@@ -133,6 +145,117 @@ final class FleetFacadeTests: XCTestCase {
     }
 
     private func fixtureSession() throws -> SessionID { try FakeClaudeLaunch.sessionID(of: Self.fixture) }
+
+    // MARK: - Actions the facade owns
+
+    /// *Background all* is one request to the engine, not a handoff of every channel. `background_tasks` with no
+    /// `tool_use_id` asks the engine to put every tool the current turn is running into the background; a loop of
+    /// `sendToBackground` instead terminates every owned child in the fleet and re-launches each as a `--bg` job,
+    /// which is a different verb with a different meaning and nothing the *Stop* sheet offers.
+    ///
+    /// Scripted handles: what the test reads is the control request the facade sent.
+    ///
+    /// Deliberate break: loop `sendToBackground` over every owned channel again.
+    func testBackgroundAllSendsOneBackgroundTasksRequestAndTerminatesNothing() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        let first = ChannelKey(configHome: harness.home.url, session: SessionID())
+        let second = ChannelKey(configHome: harness.home.url, session: SessionID())
+        await fleet.start()
+        _ = try await fleet.open(first, cwd: harness.cwd, recent: true)
+        _ = try await fleet.open(second, cwd: harness.cwd, recent: true)
+
+        _ = try await fleet.perform(.backgroundAll, on: first)
+
+        let handles = harness.handles.all
+        XCTAssertEqual(handles.count, 2, "two channels, two children, and no relaunch")
+        XCTAssertEqual(handles[0].controlRequests.map(\.subtype), ["background_tasks"])
+        XCTAssertEqual(handles[0].controlRequests.first?.payload, .object([:]),
+                       "no tool_use_id: every tool of the current turn, not one named tool")
+        XCTAssertEqual(handles[1].controlRequests.map(\.subtype), [],
+                       "the request goes to the channel the sheet was opened on")
+        XCTAssertEqual(handles.map(\.terminateCount), [0, 0], "nothing was terminated")
+        let states = await [fleet.state(of: first)?.origin, fleet.state(of: second)?.origin]
+        XCTAssertEqual(states, [.owned(.ready), .owned(.ready)], "and no channel became a job")
+    }
+
+    /// The thirty-minute reap and the cap eviction both re-evaluate eligibility at the moment they act. The
+    /// facade's own `.reap` did not: *Reap* on a channel with a decision on screen killed the child under the
+    /// question. The gate is on the facade and not on `ChannelSupervisor.reap()`, which the rig uses as an
+    /// unconditional teardown terminate.
+    ///
+    /// Deliberate break: call `supervisor.reap()` from `perform(.reap)` without consulting the verdict.
+    func testAFacadeReapIsRefusedWhileTheChannelIsNotEligible() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: SessionID())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        let handle = try XCTUnwrap(harness.handles.all.first)
+
+        handle.push(.request(Self.decisionRequest(epoch: handle.epoch)))
+        try await harness.waitFor("the decision to be on screen") {
+            await fleet.state(of: k)?.pendingDecisions.count == 1
+        }
+
+        do {
+            _ = try await fleet.perform(.reap, on: k)
+            XCTFail("the reap ended a child with a decision still on screen")
+        } catch {
+            XCTAssertEqual(error as? LifecycleError, .notEligible(.pendingDecision),
+                           "the refusal names the blocker")
+        }
+        XCTAssertEqual(handle.terminateCount, 0, "the process survived")
+        let origin = await fleet.state(of: k)?.origin
+        XCTAssertEqual(origin, .owned(.ready))
+    }
+
+    /// A fork of a fork. The sibling spawner captured the key its source was *filed under when it was built*, and a
+    /// fork re-keys itself the moment its identity resolves — so the grandchild was looked up under a key the fleet
+    /// no longer knows, found no seed, and launched in the config home instead of the project. The source key is a
+    /// call-time argument now, and the directory comes from the source's own runtime state rather than from the
+    /// seed, so a `/cd` moves the fork's children too.
+    ///
+    /// Deliberate break: capture `key` in the `spawnSibling` closure again.
+    func testAForkOfAForkLaunchesInTheSourcesProjectAndNotTheConfigHome() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: SessionID())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+
+        _ = try await fleet.perform(.fork(at: nil), on: k)
+        let forkHandle = try XCTUnwrap(harness.handles.all.last)
+        let resolved = SessionID()
+        forkHandle.push(.sessionIdentityResolved(resolved, forkHandle.epoch))
+        let forkKey = ChannelKey(configHome: harness.home.url, session: resolved)
+        try await harness.waitFor("the fork to be ready on its resolved id") {
+            await fleet.state(of: forkKey)?.origin == .owned(.ready)
+        }
+
+        _ = try await fleet.perform(.fork(at: nil), on: forkKey)
+
+        let launches = harness.handles.launches
+        XCTAssertEqual(launches.count, 3, "the channel, its fork and the fork's fork")
+        XCTAssertEqual(launches[2].cwd.standardizedFileURL, harness.cwd.standardizedFileURL,
+                       "the grandchild runs in the project, not in the config home")
+        XCTAssertEqual(launches[2].session, .resume(resolved, fork: true),
+                       "and forks the session its source is actually running")
+    }
+
+    /// The `can_use_tool` shape the engine asks with, from `DecisionTests`' own builder.
+    private static func decisionRequest(epoch: ProcessEpoch) -> InboundRequest {
+        let raw = JSONValue.object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Bash"),
+            "input": .object(["command": .string("echo hi")]),
+            "tool_use_id": .string("toolu_facade-reap"),
+        ])
+        // The decode cannot fail on a body this file composed; a nil would silently make the test vacuous.
+        let typed = try! JSONDecoder().decode(CanUseToolRequest.self, from: try! raw.canonicalData())
+        return InboundRequest(id: RequestID(rawValue: "facade-reap"), epoch: epoch, receivedAt: .now,
+                              payload: .canUseTool(typed), raw: raw)
+    }
 
     // MARK: - States and updates
 
@@ -561,11 +684,17 @@ final class FleetFacadeTests: XCTestCase {
     // MARK: - Collecting
 
     /// The scripted handles a harness built, in spawn order.
-    final class ScriptedHandles: @unchecked Sendable {   // `lock` serialises `storage`
+    final class ScriptedHandles: @unchecked Sendable {   // `lock` serialises `storage` and `lines`
         private let lock = NSLock()
         private var storage: [ScriptedProcessHandle] = []
-        func append(_ handle: ScriptedProcessHandle) { lock.lock(); storage.append(handle); lock.unlock() }
+        private var lines: [LaunchConfiguration] = []
+        func append(_ handle: ScriptedProcessHandle, _ launch: LaunchConfiguration) {
+            lock.lock(); storage.append(handle); lines.append(launch); lock.unlock()
+        }
         var all: [ScriptedProcessHandle] { lock.lock(); defer { lock.unlock() }; return storage }
+        /// The line each spawn was composed from, in spawn order: what the facade asked the factory for, which is
+        /// where a channel's working directory and its `--model` are visible from outside the supervisor.
+        var launches: [LaunchConfiguration] { lock.lock(); defer { lock.unlock() }; return lines }
     }
 
     private final class Collected: @unchecked Sendable {   // `lock` serialises `storage`
