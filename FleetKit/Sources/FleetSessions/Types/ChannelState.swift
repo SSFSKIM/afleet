@@ -40,7 +40,8 @@ public struct Holder: Hashable, Sendable {
     }
 }
 
-/// One snapshot of every live holder of one session, stamped with the moment it was read.
+/// One snapshot of live holders, stamped with the moment it was read. `FleetObserver` publishes a fleet-wide set
+/// that `holders(for:)` narrows to a session; a `ChannelState` carries the holders of its own session.
 public struct HolderSet: Hashable, Sendable {
     public var holders: [Holder]
     public var observedAt: Date

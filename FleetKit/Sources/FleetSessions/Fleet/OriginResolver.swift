@@ -53,12 +53,17 @@ public enum OriginResolver {
 
     /// A foreign holder's presence is whatever its own record says, and `.unknown` when it says nothing — which is
     /// every headless holder.
+    ///
+    /// The registry's `status` vocabulary is `busy` / `shell` / `idle` / `waiting` (parity
+    /// `docs/tui-parity/areas/50-36-39-38-notifications-remote-teams-daemon.md:407`, SPEC §38.18.1); a TUI running
+    /// a shell command is busy. The job states (`working`, `blocked`, …) are not in it: they live in `state`, and
+    /// nothing builds a `ForeignPresence` from `state`.
     private static func presence(of foreign: ForeignPresence?) -> Presence {
         guard let foreign else { return .unknown }
         switch foreign.status {
-        case "busy", "working": return .busy
+        case "busy", "shell": return .busy
         case "idle": return .idle
-        case "waiting", "blocked": return .waiting(for: foreign.waitingFor)
+        case "waiting": return .waiting(for: foreign.waitingFor)
         default: return .unknown
         }
     }

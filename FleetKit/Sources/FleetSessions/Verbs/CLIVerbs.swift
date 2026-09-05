@@ -18,12 +18,22 @@ public struct CLIVerbs: Sendable {
     private let environment: [String: String]
     private let diagnostics: any FleetDiagnosticsSink
     private let timeout: Duration
+    /// Drives the roster confirmation's bounded re-read. Production passes `ContinuousClock`.
+    private let clock: any Clock<Duration>
 
     public init(runner: any ProcessRunner, binary: URL, configHome: ConfigHome, environment: [String: String],
-                diagnostics: any FleetDiagnosticsSink, timeout: Duration = .seconds(20)) {
+                diagnostics: any FleetDiagnosticsSink, timeout: Duration = .seconds(20),
+                clock: any Clock<Duration> = ContinuousClock()) {
         self.runner = runner; self.binary = binary; self.configHome = configHome; self.environment = environment
-        self.diagnostics = diagnostics; self.timeout = timeout
+        self.diagnostics = diagnostics; self.timeout = timeout; self.clock = clock
     }
+
+    /// How long the new job has to appear in `daemon/roster.json`, and how often that file is re-read. Whether the
+    /// daemon writes the roster before `--bg` exits is not a fact this package has probe evidence for, so the
+    /// confirmation assumes neither timing: it succeeds on the first read when the entry is already there and waits
+    /// for it otherwise.
+    private static let rosterBudget = Duration.seconds(3)
+    private static let rosterInterval = Duration.milliseconds(200)
 
     // MARK: - Verbs
 
@@ -55,19 +65,28 @@ public struct CLIVerbs: Sendable {
 
     /// Sends a session to the background and returns the short of the job the CLI created, found by diffing
     /// `jobs/*/state.json` for `resumeSessionId == id` and then confirmed in the roster.
+    ///
+    /// - Warning: `cwd` does **not** set the job's working directory. `ProcessRunner` has no working-directory
+    ///   parameter, so the child inherits afleet's own directory; Task 9 closes that with a FleetSessions-local
+    ///   working-directory seam over C2's protocol. Until then `cwd` only disambiguates between candidate job
+    ///   records.
     public func backgroundResume(_ id: SessionID, cwd: URL) async throws -> JobShort {
         let before = Set(jobShorts())
         _ = try await run("--bg --resume", ["--bg", "--resume", id.description])
-        return try confirmed(matching: { $0.resumeSessionId == id.description }, notIn: before,
-                             preferring: cwd, session: id.description)
+        return try await confirmed(matching: { $0.resumeSessionId == id.description }, notIn: before,
+                                   disambiguatingWith: cwd, verb: "--bg --resume", session: id.description)
     }
 
     /// Runs one command as a background job. An exec job carries no session, so the short is found by its newness
     /// alone.
+    ///
+    /// - Warning: `cwd` does **not** set the job's working directory, for the reason on `backgroundResume`. The
+    ///   child inherits afleet's own directory until Task 9's working-directory seam lands.
     public func backgroundExec(_ command: String, cwd: URL) async throws -> JobShort {
         let before = Set(jobShorts())
         _ = try await run("--bg --exec", ["--bg", "--exec", command])
-        return try confirmed(matching: { _ in true }, notIn: before, preferring: cwd, session: "")
+        return try await confirmed(matching: { _ in true }, notIn: before, disambiguatingWith: cwd,
+                                   verb: "--bg --exec", session: "")
     }
 
     // MARK: - Internals
@@ -110,23 +129,35 @@ public struct CLIVerbs: Sendable {
         return RosterRecord.decode(data)
     }
 
-    /// The one new job the predicate accepts that the roster also names. The CLI having exited zero is not enough:
-    /// a job that never reached the roster is the `jobNotListedAfterBackground` diagnostic.
-    private func confirmed(matching predicate: (JobRecord) -> Bool, notIn before: Set<String>,
-                           preferring cwd: URL, session: String) throws -> JobShort {
-        let workers = roster()?.workers ?? [:]
+    /// The one new job the predicate accepts that the roster also names, waited for rather than demanded at once.
+    ///
+    /// The CLI having exited zero is not enough — the spec's confirmation is the roster — but neither is one read
+    /// the instant it exits: nothing in this package's evidence says the daemon writes `daemon/roster.json` before
+    /// `--bg` returns. So the roster is re-read every `rosterInterval` until `rosterBudget` runs out, which is
+    /// correct whichever way the daemon does it. A job that never reaches the roster is the
+    /// `jobNotListedAfterBackground` diagnostic.
+    ///
+    /// `cwd` is a tie-breaker between candidate records and nothing more; see the warnings on the two callers.
+    private func confirmed(matching predicate: @escaping (JobRecord) -> Bool, notIn before: Set<String>,
+                           disambiguatingWith cwd: URL, verb: String, session: String) async throws -> JobShort {
         let wanted = cwd.resolvingSymlinksInPath().path(percentEncoded: false)
-        let candidates = jobShorts()
-            .filter { !before.contains($0) }
-            .compactMap { short in job(short).map(predicate) == true ? (short, job(short)?.cwd) : nil }
-            // Two jobs created in the same instant is not a case the CLI produces, but when the record names a
-            // directory, the one that names *this* directory is the one this call asked for.
-            .sorted { a, b in (a.1 == wanted ? 0 : 1) < (b.1 == wanted ? 0 : 1) }
-            .map(\.0)
-        guard let short = candidates.first(where: { workers[$0] != nil }) else {
-            diagnostics.record(.jobNotListedAfterBackground(session: session))
-            throw LifecycleError.verbFailed(verb: "background", exitCode: 0)
+        let attempts = max(1, Int(Self.rosterBudget / Self.rosterInterval) + 1)
+        for attempt in 0..<attempts {
+            if attempt > 0, (try? await clock.sleep(for: Self.rosterInterval)) == nil { break }
+            let workers = roster()?.workers ?? [:]
+            let candidates = jobShorts()
+                .filter { !before.contains($0) }
+                .compactMap { short -> (String, String?)? in
+                    guard let record = job(short), predicate(record) else { return nil }
+                    return (short, record.cwd)
+                }
+                // Two jobs created in the same instant is not a case the CLI produces, but when the record names a
+                // directory, the one that names *this* directory is the one this call asked for.
+                .sorted { a, b in (a.1 == wanted ? 0 : 1) < (b.1 == wanted ? 0 : 1) }
+                .map(\.0)
+            if let short = candidates.first(where: { workers[$0] != nil }) { return JobShort(rawValue: short) }
         }
-        return JobShort(rawValue: short)
+        diagnostics.record(.jobNotListedAfterBackground(session: session))
+        throw LifecycleError.verbFailed(verb: verb, exitCode: 0)
     }
 }

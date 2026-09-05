@@ -36,7 +36,7 @@ public actor FleetObserver {
 
     // MARK: - Reading
 
-    /// The last published set.
+    /// The holders of the most recent read, published or not: an unchanged read updates this and publishes nothing.
     public func snapshot() -> HolderSet { last.holders }
 
     /// The last read in full: the jobs and the skip count as well as the holders.
@@ -56,19 +56,22 @@ public actor FleetObserver {
     // MARK: - Lifetime
 
     public func start() async {
+        guard timers.isEmpty, sources.isEmpty else { return }   // idempotent: a second start must not double up
         await refresh(agentsJSON: false)
         arm(["sessions", "jobs", "daemon"])
         timers = [
             Task { [weak self, clock, pollInterval] in
                 while !Task.isCancelled {
                     guard (try? await clock.sleep(for: pollInterval)) != nil else { return }
-                    await self?.refresh(agentsJSON: false)
+                    guard let self else { return }   // the observer went away without stop(); stop sleeping
+                    await self.refresh(agentsJSON: false)
                 }
             },
             Task { [weak self, clock, reconcileInterval] in
                 while !Task.isCancelled {
                     guard (try? await clock.sleep(for: reconcileInterval)) != nil else { return }
-                    await self?.refresh(agentsJSON: true)
+                    guard let self else { return }
+                    await self.refresh(agentsJSON: true)
                 }
             },
         ]

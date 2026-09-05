@@ -87,6 +87,16 @@ final class ScriptedHolderFiles: @unchecked Sendable {   // `lock` serialises ev
         }
     }
 
+    /// Names a worker in the roster on its own, for a test that needs the job file and the roster entry to appear
+    /// at different moments.
+    func addRosterWorker(short: String, pid: Int32) throws {
+        try mutateRoster { workers in
+            var worker: [String: Any] = ["pid": Int(pid)]
+            if let token = ProcessLiveness.procStartToken(for: pid) { worker["procStart"] = token }
+            workers[short] = worker
+        }
+    }
+
     /// What `claude stop <short>` does to the files: the job goes terminal and its worker leaves the roster.
     func stopJob(short: String) throws {
         let file = root.appending(path: "jobs/\(short)/state.json")

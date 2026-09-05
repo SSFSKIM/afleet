@@ -208,7 +208,9 @@ public struct FileHolderReader: HolderReader {
             for row in rows {
                 if let pid = row.pid, var known = byPID[pid] {
                     known.sources.insert(.agentsJSON)
-                    if known.jobShort == nil { known.jobShort = row.id }
+                    // Only a job row's `id` may set `jobShort`: `Holder.isJob` reads it, so an interactive row that
+                    // ever carried an id would silently turn a foreign terminal into a background job.
+                    if known.jobShort == nil, row.state != nil || row.kind == "background" { known.jobShort = row.id }
                     if known.presence == nil {
                         known.presence = presence(status: row.status, waitingFor: row.waitingFor, name: row.name)
                     }

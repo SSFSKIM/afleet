@@ -21,6 +21,9 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, any Error>) in
                 lock.lock()
+                // Under the lock, so a cancellation that arrived after the handler was installed but before this
+                // body ran cannot leave a sleeper nobody will ever resume.
+                if Task.isCancelled { lock.unlock(); c.resume(throwing: CancellationError()); return }
                 if deadline <= _now { lock.unlock(); c.resume(); return }
                 waiters.append((deadline, id, c)); lock.unlock()
             }

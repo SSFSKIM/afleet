@@ -79,6 +79,37 @@ final class CLIVerbsTests: XCTestCase {
         XCTAssertNotNil(files.rosterWorkers()[short.rawValue], "the short is confirmed in the roster")
     }
 
+    /// The CLI exiting zero does not mean the daemon has written the roster yet, and this package has no probe
+    /// evidence either way, so the confirmation re-reads on the injected clock instead of assuming.
+    func testBackgroundResumeWaitsForTheRosterToNameTheNewWorker() async throws {
+        let clock = TestClock()
+        let files = self.files!
+        let short = "j00007"
+        // The job file lands with the CLI's exit; the roster entry does not.
+        let rule = ScriptedProcessRunner.Rule(
+            match: { $0.count == 3 && $0[0] == "--bg" && $0[1] == "--resume" },
+            respond: { argv in
+                guard let id = SessionID(argv[2]) else { return .exit(1) }
+                try files.writeJob(short: short, state: "working", sessionID: id, resumeSessionID: id, pid: nil)
+                return .exit(0)
+            })
+        let waiting = CLIVerbs(runner: ScriptedProcessRunner(rules: [rule], calls: calls),
+                               binary: URL(filePath: "/usr/bin/true"), configHome: home.configHome,
+                               environment: [:], diagnostics: sink, clock: clock)
+
+        let wanted = SessionID()
+        let cwd = home.url
+        let call = Task { try await waiting.backgroundResume(wanted, cwd: cwd) }
+        for _ in 0..<2000 where clock.sleeperCount == 0 { await Task.yield() }
+        XCTAssertEqual(clock.sleeperCount, 1, "the first roster read missed and the verb is waiting on the clock")
+
+        try files.addRosterWorker(short: short, pid: ScriptedHolderFiles.livePID)
+        await clock.advance(by: .milliseconds(200))
+        let resolved = try await call.value
+        XCTAssertEqual(resolved.rawValue, short)
+        XCTAssertTrue(sink.names.allSatisfy { $0 != "job_not_listed_after_background" })
+    }
+
     func testANonZeroExitThrowsVerbFailed() async {
         // `respawn` has no rule in the default script, so the runner exits 1.
         do {
