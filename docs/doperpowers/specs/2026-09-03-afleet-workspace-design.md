@@ -4252,3 +4252,16 @@ Pending — written at finish.
   the start of the turn where every other fixture puts it. Anything keyed on "init means a turn
   is starting" fires at the moment the context is replaced instead, most of the way through the
   prompt it belongs to.
+
+- 2026-09-05 reconciliation of the C1 follow-up (merge `01b9e15`, twenty fixtures): the two
+  `C1/…` notes above are folded. §7.3's file-only exclusion list loses `compact_boundary` and
+  its compaction paragraph gains the wire, cost and parent-link facts; item 13 and the composer
+  paragraph gain the stale-target fallback: a rewind the engine refuses becomes *Fork from here*
+  at the message's preceding assistant record with the composer prefilled from the transcript,
+  and the host never reads a refused rewind as done. C2 corrective in the same landing:
+  `FixtureCorpusTests` pins move from 18 to 20 fixtures and from 16 to 18 recorded; the
+  twenty-fixture corpus decodes losslessly (1435 frames, 1425 round-tripped, the rest opaque or
+  named findings). C3's Task 3 exclusion set follows by executor amendment; the C3 branch's
+  corpus holds no `compact_boundary` record, so none of its pins move until it merges `main`.
+  The rewind reviewer's proposed twelfth checklist item (identity-shaped key names) stays with
+  the gate owner as C1's spec records, since adding it re-opens all twenty signatures.
