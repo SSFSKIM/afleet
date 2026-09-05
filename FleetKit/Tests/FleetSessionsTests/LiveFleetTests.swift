@@ -253,9 +253,14 @@ final class LiveFleetTests: XCTestCase {
         }
     }
 
-    // MARK: - Scenario 4: adoption, two turns
+    // MARK: - Scenario 4: adoption, two turns reserved and none expected
 
     /// *Adopt* stops the job, resumes the same session owned, and *Send to background* hands it back.
+    ///
+    /// The job is a **promptless** `claude --bg`, so nothing here reaches a model: the two turns are insurance and
+    /// the scenario asserts on the way out that it really cost nothing. A "conversation" job is one that carries a
+    /// session id, as against an exec job that carries none, and none of the assertions below depends on the
+    /// transcript having content.
     ///
     /// Deliberate break: drop `verbs.stop` from `ChannelSupervisor.adopt` → the worker never leaves and the
     /// release wait times out into Contended.
@@ -272,21 +277,26 @@ final class LiveFleetTests: XCTestCase {
         // confirmation, and `agents --json`), and the stop-and-remove tail.
         try await Self.budget.run(turns: 2, wallTime: .seconds(570)) {
             let directory = try Self.trustedDirectory(0)
-            // No `--max-turns` on this line, and the spec was amended to match. `claude --bg` does forward the
-            // flag, but `--max-turns 1` ends the session the moment it answers: the live run recorded the job
-            // going terminal 3.5 s after creation, and `Fleet.jobs()` filters terminal records out, so the job
-            // afleet is supposed to adopt was gone before the first `jobs()` call could answer. A `--bg`
-            // conversation session without the cap stays resident and idle after replying, which is the state
-            // adoption is about. The job is a CLI verb and not a `ClaudeProcess`, so the "every launch carries an
-            // explicit cap" rule is untouched, and the one-word prompt bounds the spend by itself.
-            _ = try await rig.runner.run(rig.binary,
-                                         arguments: ["--bg", "--model", Self.haiku, "Reply with exactly: pong"],
+            // A bare `claude --bg`, with no prompt and no `--resume`. It reaches no model, it returns in under a
+            // second, and it leaves a resident conversation job that mints and carries its own session id —
+            // measured at zero turn cost on 2026-09-06: `state: working, tempo: blocked, firstTerminalAt: null`
+            // from t+15 s to t+90 s, settling only when it was stopped. The id it minted is the one `jobs()`
+            // reports and the one adopt resumes; `--session-id` is refused on this line by the CLI itself
+            // ("--bg manages the session id"), which is why the scenario reads the id back rather than choosing it.
+            //
+            // Not the spec's `--bg --resume <id>` after a handshake-only open, for two reasons found while
+            // preparing this run. A handshake-only session leaves nothing under `projects/`, so there is no
+            // transcript to reap into being — resume works on such a session anyway, by full uuid, but the
+            // premise was false. And opening through the fleet first sets `desired == .owned`, so when the job
+            // holder appears the dormant channel takes rule 1 into Contended, from which the table has no `adopt`
+            // row: the scenario would have failed silently at `perform(.adopt)`.
+            _ = try await rig.runner.run(rig.binary, arguments: ["--bg"],
                                          environment: rig.childEnvironment, cwd: directory, timeout: .seconds(120))
 
             let started = try await Self.poll(upTo: .seconds(60)) { () -> JobEntry? in
                 await rig.fleet.jobs().first { $0.sessionID != nil && $0.cwd?.lastPathComponent == directory.lastPathComponent }
             }
-            let job = try XCTUnwrap(started, "the --bg conversation job never appeared in jobs()")
+            let job = try XCTUnwrap(started, "the promptless --bg conversation job never appeared in jobs()")
             let session = try XCTUnwrap(job.sessionID)
             let key = ChannelKey(configHome: LiveGate.scratchHome, session: session)
             await rig.fleet.register(key, cwd: directory, recent: true)
@@ -336,6 +346,10 @@ final class LiveFleetTests: XCTestCase {
                                   "a turn ended at the --max-turns cap: result subtype error_max_turns")
                 await Self.budget.add(cost: result.totalCostUSD)
             }
+            // Nothing here sends a prompt, so the two reserved turns are insurance and this says so out loud: a
+            // recipe that quietly started costing turns again would fail here rather than on the invoice.
+            XCTAssertEqual(Self.results(in: observed).count, 0,
+                           "the promptless adoption scenario produced a result frame, so a turn was spent")
             Self.budget.assertEveryLaunchWasDecorated()
         }
     }
@@ -449,6 +463,18 @@ final class LiveFleetTests: XCTestCase {
                            "final reading: paths moved under names the engine is not known to write")
             XCTAssertTrue(Self.touches(finalDifference, prefix: "projects/"),
                           "the final reading saw no transcript under projects/")
+            // The discriminating demonstration, made against this reading rather than by editing the allowlist and
+            // running the scenario a second time — which would cost another two turns for a fact the same bytes
+            // already carry. `projects/` is the name the engine always writes, so an allowlist without it must
+            // report the transcript as unexplained; an allowlist that explains everything either way is not
+            // discriminating and this is what catches that.
+            let withoutProjects = LiveGate.engineWrittenPaths.filter { $0 != "projects/" }
+            let unexplainedWithoutProjects = LiveGate.unexplained(finalDifference, against: withoutProjects)
+            XCTAssertFalse(unexplainedWithoutProjects.isEmpty,
+                           "removing projects/ from the allowlist explained the final reading anyway")
+            XCTAssertTrue(unexplainedWithoutProjects.allSatisfy { $0.hasPrefix("projects/") },
+                          "removing projects/ named something other than a transcript: \(unexplainedWithoutProjects)")
+            print("[G5] without projects/ the final reading leaves \(unexplainedWithoutProjects.count) path(s) unexplained")
             print("[G5] composed live reading \(liveDifference.summary); final reading \(finalDifference.summary)")
 
             // What the one prompt actually did, from the channel's own events.

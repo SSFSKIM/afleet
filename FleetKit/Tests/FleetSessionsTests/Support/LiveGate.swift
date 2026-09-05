@@ -51,18 +51,17 @@ enum LiveGate {
         ".last-update-result.json", "settings.json",
     ]
 
-    /// The allowlist's first components, which is what a reading is compared against.
-    private static let allowedComponents: Set<String> = Set(engineWrittenPaths.map {
-        $0.hasSuffix("/") ? String($0.dropLast()) : $0
-    })
-
-    /// Every relative path in `difference` whose first component matches no entry of the allowlist, sorted.
+    /// Every relative path in `difference` whose first component matches no entry of `allowlist`, sorted.
     ///
     /// An unexplained path fails the gate with its name, because either the allowlist or the never-write claim is
-    /// wrong and both deserve a look.
-    static func unexplained(_ difference: ConfigHomeWitness.Difference) -> [String] {
-        difference.created.union(difference.modified).union(difference.deleted)
-            .filter { !allowedComponents.contains($0.split(separator: "/").first.map(String.init) ?? $0) }
+    /// wrong and both deserve a look. `allowlist` is a parameter so a scenario can hold the same reading up against
+    /// a deliberately narrowed set and prove the comparison discriminates, rather than taking that on faith or
+    /// paying for a second live run to see it fail.
+    static func unexplained(_ difference: ConfigHomeWitness.Difference,
+                            against allowlist: Set<String> = engineWrittenPaths) -> [String] {
+        let allowed = Set(allowlist.map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 })
+        return difference.created.union(difference.modified).union(difference.deleted)
+            .filter { !allowed.contains($0.split(separator: "/").first.map(String.init) ?? $0) }
             .sorted()
     }
 }
