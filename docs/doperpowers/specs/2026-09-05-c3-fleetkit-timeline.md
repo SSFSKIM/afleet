@@ -356,15 +356,14 @@ record's key is its canonical hash *and* its ordinal, assigned by the applier in
 order: `RecordKey.keys(for:in:)` numbers a whole-file read, and `StreamIngestion` numbers
 incrementally as deliveries arrive. Keys never renumber once published; the one exception is
 the rewrite rebuild below, which replaces a stream's keys wholesale. Two deliveries of one
-append are matched by hash and per-source occurrence index beyond the open offset: the k-th
-mirror delivery of a content is the k-th file line of that content past the offset, whichever
-arrives first assigns the ordinal, and the other is a counted duplicate (the file's binds the
-locator). The matching presumes what the channel flow provides: `open` runs before the
-epoch's first mirror entry and at an offset no later than the first line that mirror carries —
-a fresh session's file does not exist before its first turn, a resumed file is opened at
-launch, and `session-mirror-resume`'s `streams.json` offset is that point on disk — because a
-mirror entry re-delivering a uuid-less line the open already read has no uuid to match by and
-would be applied again. Records `loadEarlier` prepends take fresh ordinals and move no published key.
+append are matched by hash and per-source occurrence past the stream's *cursor*: the k-th
+unclaimed mirror delivery of a content is the k-th unclaimed file line of that content past
+the cursor, whichever arrives first assigns the ordinal, and the other is a counted duplicate
+(the file's binds the locator). The cursor is where `open` aligned the channel's tap against
+the file it read (the arbitration section below), so a mirror entry re-delivering a uuid-less
+line the open already read — a frame whose emission crossed the read, or a re-open while a
+turn runs — is claimed against that line and never applied again; nothing about the channel
+flow is presumed. Records `loadEarlier` prepends take fresh ordinals and move no published key.
 
 ### The transcript reader (`Reader/`)
 
@@ -514,7 +513,7 @@ banners; task frames feed the `RegistryMirror` and the `AgentRunTree` and synthe
 completion `TaskRunItem` from `task_notification`; `tool_progress` moves the registry
 entry's `lastFrameAt` and the agent node's last tool and makes no item (no fixture carries
 it: unwitnessed, tested on a constructed frame); `transcript_mirror` frames are not
-reduced here at all — they go to `StreamIngestion`; `.opaque` frames become `OpaqueItem`s.
+reduced here at all — `StreamIngestion` consumes them from the same tap; `.opaque` frames become `OpaqueItem`s.
 From `.request`: a decision item in state `pending`, keyed by request id, labelled from the
 payload, mirrored to the agent node when the request carries an agent id; `.policyAnswered`
 and `.requestCancelled` settle it; `HostSignal.decisionAnswered` settles it with the
@@ -530,16 +529,16 @@ re-slugs the agent tree, whose transcript paths are computed from its current sl
 public actor StreamIngestion {
   public enum Mode: Sendable { case filePrimary, mirrorPrimary }       // the parent's build flag
   public enum State: Sendable, Hashable { case both, fileOnly(since: ProcessEpoch), mirrorOnly }
-  public init(session: SessionID, configHome: URL, mode: Mode, diagnostics: any TimelineDiagnosticsSink)
+  public init(session: SessionID, configHome: URL, mode: Mode, diagnostics: any TimelineDiagnosticsSink, mirrorGapWindow: Duration, tapSettle: Duration)
   public struct Effect: Sendable { public var applied: [RecordKey]; public var duplicates: Int; public var routedElsewhere: Int; public var changes: [TimelineChange]; public var stateChange: State? }
-  public func open(mainPath: URL, policy: WindowPolicy) async throws -> DurableProjection
-  public func apply(mirror frame: TranscriptMirrorFrame, epoch: ProcessEpoch, at: Date) -> Effect
+  public func open(file mainPath: URL, events: some AsyncSequence<WireEvent, Never> & Sendable, policy: WindowPolicy) async throws -> DurableProjection
+                                                                        // consumes the channel's tap into a buffer, reads the file, aligns the buffer against its tail, applies the rest, then keeps consuming until the tap ends or `close()`
+  public nonisolated let effects: AsyncStream<Effect>                   // every effect in order — the tap's and the calls' below — what C6 folds
   public func fileChanged(_ path: URL, at: Date) async -> Effect
-  public func mirrorError(_ error: MirrorError, epoch: ProcessEpoch) -> Effect
   public func relocated(mainPath: URL) async
-  public func processExited(_ epoch: ProcessEpoch) async -> Effect     // re-read each stream, reconcile by key
   public func loadEarlier() async throws -> Effect                      // *Load earlier* (C6's contract): the next window back, prepended; `applied` lists the prepended keys
   public func rawRecord(for key: RecordKey) async throws -> JSONValue  // the raw view's read: the bytes at the key's locator, decoded and verified against the key
+  public func close()                                                   // stops consuming the tap; every query still answers
   public enum RawRecordError: Error, Sendable, Equatable { case unknownKey, staleLocator }
   public var offsets: [LogicalStream: Int] { get }
   public var paths: [LogicalStream: URL] { get }                        // the current aliases
@@ -549,30 +548,58 @@ public actor StreamIngestion {
 ```
 
 One ingestion per channel holds every stream of the session, a set of applied record keys
-per stream, a byte offset per file, and each file's `(st_dev, st_ino)` and length as captured
-at open. The arbitration table:
+per stream, a byte offset per file, each file's `(st_dev, st_ino)` and length as captured at
+open, and per stream the cursor its tap alignment fixed (below). The arbitration table:
 
 | Delivery | Applied when | Not applied when |
 |---|---|---|
-| file record, on open | always; sets the stream's offset to the file length and captures the file's `(st_dev, st_ino)` and length | — |
-| mirror entry | its key is not yet applied and the resolved stream is this session's | key already applied (a duplicate, counted); path resolves to another session (a routing fault, a notice); state is `fileOnly` for this epoch |
-| file record, on watcher change | its key is not yet applied — for a uuid-less record, no mirror delivery of that hash beyond the open offset is still unmatched | key already applied by the mirror (the locator is bound to that key) |
+| file record, on open | always; sets the stream's offset to the file length and captures the file's `(st_dev, st_ino)` and length; the tap is already being consumed into a buffer | — |
+| mirror entry buffered while `open` read | the alignment below does not claim it (then it is a mirror entry past the cursor, next row) | the alignment claims it against a line the open read (a duplicate, counted) |
+| mirror entry, from the tap | its key is not yet applied and the resolved stream is this session's — for a uuid-less entry, the file holds no unclaimed line of that hash past the cursor | key already applied (a duplicate, counted); the file's earliest unclaimed line of that hash past the cursor is claimed instead (a duplicate, counted); path resolves to another session (a routing fault, a notice); state is `fileOnly` for this epoch |
+| file record, on watcher change | its key is not yet applied — for a uuid-less record, no mirror delivery of that hash past the cursor is still unconfirmed | key already applied by the mirror (the locator is bound to that key) |
 | `agent_metadata` entry | always, as the stream's metadata (not a timeline record) | — |
 | mirror entry naming a stream with no open file | opens the stream lazily (an agent starting) | — |
 | file rewritten: a shorter length, or a changed `(st_dev, st_ino)` | the stream is rebuilt whole through `WindowedTranscript`: records, applied set, locators and ordinals replaced; one `TimelineNotice.fileRewritten` | — (nothing is read from the stale offset) |
 | `loadEarlier` | the next window back, prepended with fresh keys and locators; the marker moves | `earlierAvailable == false` (an empty effect) |
 
-On open the file is read first and mirror entries apply past that read, because a resumed
-mirror carries only later appends. The one record a resume writes and never mirrors is
-closed by the file read, which is why the watcher stays attached under `mirrorPrimary` and
-why G4's `session-mirror-resume` case is stated as the counter-example. A `mirror_error`
-for a stream, or a record the watcher delivers that no mirror frame delivered within a
-short window (two seconds, the same order as the engine's own write-stability windows,
-advisory), switches the ingestion to `fileOnly(since:)` for the process epoch and emits one
-`TimelineNotice.mirrorErrorSwitchedToFileOnly` or `.mirrorGap`. On process exit every
-stream's file is re-read from its offset and reconciled by key; a record the file has and
-the projection lacks is applied, a record the projection has and the file lacks is kept and
-counted in a notice, never dropped. `relocated(mainPath:)` rebinds the main stream's path
+**Open and the tap.** `open` takes the channel's tap — the `WireEvent` sequence
+`FleetSessions` publishes for the channel — and owns the ordering between it and the file:
+it starts consuming the tap into a buffer, then reads the file (whole or the initial window,
+recording its length L), then waits until the tap has been quiet for `tapSettle` (20 ms by
+default; the engine emits a write's frame within the millisecond, so a frame in flight at
+the read lands inside it), then aligns the buffered entries against the file's tail before
+it applies any of them. The mirror frame carries `filePath` and `entries` and nothing
+positional, so the alignment is by content: because the tap precedes the read and the
+engine writes in order, the buffer's prefix is a suffix of the record sequence the read
+ended at. Walking the buffered entries in order, a uuid entry the file holds claims its
+record and fixes the cursor there; uuid-less entries between two fixed points claim the
+file's unclaimed uuid-less records between the same points by hash, in order; when the
+buffer holds no anchor, the longest k such that its first k identities equal the file's
+last k are claimed. The cursor — the end of the last claimed record, the start of the read
+when nothing was claimed — is the file-side counting origin from then on: a claimed entry
+is a counted duplicate, an unclaimed one is applied as a mirror entry past the cursor under
+the occurrence rule, and an entry arriving later that re-delivers a line before L claims
+the earliest unclaimed line of its hash past the cursor by that same rule rather than
+applying again. A claim never creates a record and a wrong claim costs the latency until
+the watcher shows the line, while a missed claim is a phantom no fold removes
+(`queue-operation` and the `file-history-*` kinds do not fold idempotently), so the walk
+claims whenever it can; one `TimelineNotice.tapAligned` per stream records the claimed and
+unclaimed counts. No precondition on the channel flow is stated: a resumed mirror that
+carries only later appends, a fresh file that does not exist before its first turn, and C6
+re-opening a channel's timeline while a turn runs are one case, and a re-open mid-epoch
+needs no special handling. C6 obtains the channel's tap from `FleetSessions` and hands it
+to `open`; it never feeds frames itself. The one record a resume writes and never mirrors
+is closed by the file read, which is why the watcher stays attached under `mirrorPrimary`
+and why G4's `session-mirror-resume` case is stated as the counter-example. A
+`mirror_error` for a stream (the tap's `system` frame), or a record the watcher delivers
+that no mirror frame delivered within a short window (two seconds, the same order as the
+engine's own write-stability windows, advisory), switches the ingestion to
+`fileOnly(since:)` for the process epoch and emits one
+`TimelineNotice.mirrorErrorSwitchedToFileOnly` or `.mirrorGap`. On the tap's `exited`
+event every stream's file is re-read from its offset and reconciled by key; a record the
+file has and the projection lacks is applied, a record the projection has and the file
+lacks is kept and counted in a notice, never dropped; the tap's first event under a greater
+epoch lifts a `fileOnly(since:)` back to `both`. `relocated(mainPath:)` rebinds the main stream's path
 and the sidecar directory, keeps every offset, and reopens nothing; a rename keeps the
 inode, so the identity captured at open still matches. `rawRecord(for:)` is
 how the raw view sees a hidden record: the projection carries only the `HiddenRecord`'s
@@ -844,6 +871,7 @@ public enum TimelineNotice: Sendable, Hashable {
   case unknownRecordKind(session: SessionID, kind: String)
   case orphanHealed(session: SessionID, stream: LogicalStream.StreamName)
   case relocationFollowed(session: SessionID)
+  case tapAligned(session: SessionID, stream: LogicalStream.StreamName, claimed: Int, unclaimed: Int)
   case fileRewritten(session: SessionID, stream: LogicalStream.StreamName, previousLength: Int, newLength: Int)
   case indexBuilt(files: Int, durationMs: Int)
   case indexUpdated(changed: Int, durationMs: Int)
@@ -930,7 +958,8 @@ host answer; `processReplaced`), `IngestionTests` (the arbitration table row by 
 unmirrored record and the multiplicity of repeated uuid-less lines, `nested-depth-2` for lazy
 agent streams, the `mirror_error` sample for the switch, a copy rewritten without its first
 lines for the rewrite arm and `rawRecord`'s stale-locator check, and the rewound synthetic
-transcript for `loadEarlier` paginated to the root), `IndexTests` (as G2 states, over fifteen
+transcript for `loadEarlier` paginated to the root, and three synthetic straddles for the tap
+alignment — anchored, unanchored, and a re-open mid-epoch while frames keep arriving), `IndexTests` (as G2 states, over fifteen
 logical sessions: a later snapshot updates its entry, a relocation to a new slug updates the
 path and never removes and re-adds, and the later `mtime` wins when two files carry one id
 in either `changed` order) and `LocalHomeIndexTests`, `AgentRunTreeTests`
@@ -950,7 +979,9 @@ constants, `RecordKey`, `LogicalStream`, `TranscriptRecord`, `DurableProjection`
 `TranscriptIndex` with `IndexEntry`, `IndexSnapshot` and `IndexStorage`, `StreamIngestion`,
 `TranscriptReader`, `TaskOutputTailer`, `TimelineNotice`, `ChannelTimeline` with
 `recentURLs(limit:)`, `SeenURL` and `URLSources.contributing` — all public with public
-initialisers. Binds C4 (`liveWork(asOf:)`, `IndexStorage`, `IndexEntry`'s listing flags),
+initialisers. `StreamIngestion.open` takes the channel's tap: C6 obtains it from
+`FleetSessions` and hands it to `open`, folds `effects`, and never feeds frames itself.
+Binds C4 (`liveWork(asOf:)`, `IndexStorage`, `IndexEntry`'s listing flags),
 C6 and every leaf of its cut (the item model, the category constants, the overlay, the tree
 and the transcript path of a run), and C7's Browser leaf (`recentURLs(limit:)`, under X7 as
 amended).
@@ -1109,13 +1140,26 @@ the questions stand as the record of what was asked. The fifth was added at v2.2
   resume fixtures (the seed is exactly what `StreamIngestion.open` provides).
 - Decision: A uuid-less record's key is its canonical hash plus an occurrence ordinal,
   assigned by the applier in application order; two deliveries of one append are matched by
-  hash and per-source occurrence index beyond the open offset. Rationale: the engine writes
+  hash and per-source occurrence past the alignment cursor (v2.4; v2.3 counted from the open
+  offset). Rationale: the engine writes
   byte-identical state records repeatedly (forty-eight later occurrences in the corpus) and
   its own dedup table never collapses them; a content-only key drops them under mirror-only
   ingestion and makes G3's exact key sequence unreachable. Application order, not file
   order, is what keeps a published key stable when `loadEarlier` prepends. Rejected:
   content-only keys (loses records); file-order ordinals (renumber on every prepend); a
   counter inside `TranscriptRecord` (a record cannot know its own ordinal).
+- Decision: `StreamIngestion.open` takes the channel's `WireEvent` tap and owns the ordering
+  between it and the file — buffer the tap, read the file, align the buffer against the
+  file's tail, and count occurrences from the alignment's cursor from then on. Rationale:
+  the mirror frame carries nothing positional; `queue-operation` and the `file-history-*`
+  kinds do not fold idempotently, so one doubled record is a phantom queued item or a
+  duplicated rewind entry; a consumer-side ordering rule cannot close the write-then-emit
+  straddle at the tap; and C6 re-opening a channel's timeline while a turn runs is an
+  ordinary action. A claim never creates a record, so the walk errs toward claiming: a wrong
+  claim is latency until the watcher shows the line, a missed claim is a phantom. Rejected:
+  the v2.3 precondition that `open` precede the epoch's first mirror entry (unenforceable at
+  the tap); C6 feeding frames after its own read (moves the race, does not close it); a
+  positional field in the frame (not ours to add).
 - Decision: `fileChanged` detects a rewrite — a shorter length or a changed `(st_dev,
   st_ino)` — and rebuilds the stream whole, emitting `fileRewritten`; `rawRecord` verifies
   the decoded record against its key and throws `staleLocator` on a mismatch. Rationale:
@@ -1173,6 +1217,23 @@ Pending — written at finish.
 
 ## Revision Notes
 
+- 2026-09-05: v2.4, coordinator ruling on the precondition v2.3 stated (open before the
+  epoch's first mirror entry): withdrawn, not restated. `StreamIngestion.open(file:events:policy:)`
+  takes the channel's tap and owns the ordering — it buffers the tap before reading the file,
+  waits for the tap to settle, aligns the buffered entries against the file's tail (a uuid
+  anchor fixes the cursor exactly; uuid-less entries between fixed points match by hash in
+  order; without an anchor, the longest k such that the first k buffered identities equal the
+  file's last k), applies what the alignment does not claim as mirror-only, and counts
+  occurrences from the cursor rather than the open offset from then on; an entry arriving
+  after the alignment that re-delivers a line before the read's end claims the earliest
+  unclaimed line of its hash past the cursor. A re-open mid-epoch needs no special case.
+  Surface: `apply(mirror:)`, `mirrorError` and `processExited` leave the public block — the
+  tap drives them — and `effects`, `close()`, `tapSettle:` and `mirrorGapWindow:` (which the
+  plan's initialiser already had) join it; `open`'s label is `file:` as the ruling wrote it,
+  `relocated(mainPath:)` keeps its label because `HostSignal.relocated(mainPath:)` shares it;
+  `TimelineNotice.tapAligned` records the claimed and unclaimed counts. Contracts: C6 obtains
+  the channel's tap from `FleetSessions` and hands it to `open`; it never feeds frames itself.
+  Decision Log entry added; the occurrence decision's rationale now counts from the cursor.
 - 2026-09-05: v2.3, declaration audit before the third review (no design change). The
   `TranscriptRecord` block gains `contentHash` and `key(in:ordinal:)`, which the v2.3 prose and
   the plan already had while the block still read `key(in:)`; the reader's window is named
