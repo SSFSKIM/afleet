@@ -678,7 +678,17 @@ to subscribers. On the identity event for the current epoch, in order:
 holder takes the existing `connectingFoundHolder` rows (terminate, `fleet.rollback`, foreign
 or contended, no re-index); clean: `fleet.rekey(provisional, to: id)`, the facade
 re-indexes, `identity = .known(id)`, `apply(.handshakeClean → .ready)`, publish. An identity
-not resolved within `handshakeTimeout` fails the spawn on the handshake-timeout path.
+not resolved within `handshakeTimeout` is failed by a *supervisor-side identity deadline*, a
+timer the supervisor arms on its injected clock when it enters the awaiting-fork branch and
+cancels when the identity resolves; on expiry it terminates through `terminateOrWedge`, rolls
+the fork's reservation back and fails the channel as a spawn error does. Corrected in
+execution (Task 6 review): C2's handshake-timeout path cannot cover this, because
+`ClaudeProcess.spawn` returns at the initialize response and cancels its timer in a `defer`,
+while a fork's id resolves later off the frame reader. Without the deadline a fork whose
+engine never emits `auth_status` sits in `.connecting` for ever, holding a live process and a
+cap slot the counter can never reclaim. Making `ClaudeProcess.spawn` wait for `auth_status`
+would be the wrong closure: it is C2's to own, and it would hold every fork's handshake open
+while frames already need to be fanning out.
 Captures follow C2's provisional-name rule on their own. A plain fork launches
 `SessionStart.resume(source, fork: true)`. *Fork from here* launches
 `SessionStart.forkFrom(source, at: ForkPoint(entryUUID: <the clicked record's uuid>,
