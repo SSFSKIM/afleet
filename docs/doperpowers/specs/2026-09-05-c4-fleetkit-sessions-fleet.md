@@ -580,6 +580,14 @@ never eligible: there is no live process of ours to reap and a ghost may still h
 transcript (ruling of 2026-09-05). The mirror is C3's
 `RegistryMirrorEntry` (X4); until C3 lands, the supervisor takes it through a protocol,
 `TaskMirrorReading`, that G1's stand-in conforms to and G2 replaces with the real mirror.
+In production the fold is a `ChannelTaskMirror` per channel, built by `Fleet.build`, written by
+that channel's own event pump through C3's `apply(_:at:epoch:)`, and read back by the one
+`eligibilityInputs` closure every decision goes through — the thirty-minute reap, the cap
+eviction, `perform(.reap)`, and `/logout`'s census and its *Stop*, which reads it again at the
+moment the stop is sent. "Last task frame time" is the host's own reading and is stamped on the
+**injected** clock, not on C3's wall-clock `lastFrameAt`: it is the quantity the heartbeat rule
+compares, and a wall-clock one could not be moved by a test. The fold is forgotten when the child
+exits, because a background shell is that child's own and dies with it.
 
 **Wedged.** When the handle's `terminate()` returns a `TerminationReport` whose `exit` is
 `nil` the channel enters `.owned(.dormant)` with `wedged` set to `EscalationTrace(steps:
@@ -1020,6 +1028,14 @@ right response is to leave the channel alone and let the user retry, never to re
 entry points refuse without throwing, because their signatures cannot: `reap()` returns silently
 and `evict()` answers `.victimBecameIneligible` — a channel already running an operation of its own
 is not a victim.
+
+`LifecycleError.notEligible(DormantEligibility.Blocker)` is the **second** addition beside it, and
+C5 and C6 must know about it too: `perform(.reap)` — the *Reap* a surface offers — is now refused
+whenever the channel is not dormant-eligible, and the error names the blocker (a turn in flight, a
+decision on screen, queued input, a wedge, or a background task by id) so the surface can say what
+is holding the channel rather than "not now". The refusal is on the facade only;
+`ChannelSupervisor.reap()` stays the unconditional terminate the thirty-minute timer and a test
+teardown use.
 
 ## Delegated unknowns
 
@@ -1494,9 +1510,18 @@ parent's §7.8.
   `handleExit`; an unconditional restore would leave the crash row with no candidate and make every
   handshake-phase crash a `transitionNotInTable` diagnostic. On every other failure an exit is on
   its way and `handleExit` owns the outcome, which reaches the same resting state through case 4.
+  One residual violation was left open by the wave's worker 2 and closed by its worker 4, on the
+  architect's ruling: a child that exits **cleanly** inside the post-handshake window left the
+  channel connecting with no process, because `handleExit` takes `.exitedClean` only from ready and
+  the finalisation's own guard returned with nothing but the rollback. Both post-handshake guards
+  now call `restoreResting(ifEpochIs: mine)` beside the rollback. The guard inside `restoreResting`
+  is what keeps this off the paths that do have an exit on their way: a parked respawn or a newer
+  epoch refuses it. The invariant is the ruling's, so a known one-line violation of it does not
+  survive the wave that establishes it.
   Rejected: patching each of the five findings where it was found (five different answers to one
-  design question); leaving a wedged or crashed channel in ready with `process == nil`.
-  Date/Author: 2026-09-06 / reconciling architect, executed by the fix wave's worker 1.
+  design question); leaving a wedged or crashed channel in ready with `process == nil`; leaving the
+  clean-exit case open because the triage's wording for `scalpel-1#5` did not name it.
+  Date/Author: 2026-09-06 / reconciling architect, executed by the fix wave's workers 1 and 4.
 
 - Decision (**ruling 2**): one in-flight marker per channel — `inFlight: LifecycleOperation?` —
   and refusal, not queueing. Rationale: `spawning` and `handingOff` were two booleans covering two
@@ -1558,8 +1583,42 @@ parent's §7.8.
   gives each supervisor a `RegistryMirror` fed from its own pump through C3's `apply(_:at:epoch:)`,
   `eligibilityInputs` reads the live mirror and its `lastFrameAt`, and `liveTaskIDs()` reads the
   same mirror at the moment *Stop* executes rather than replaying census-time ids.
-  Rejected: carrying it as tracker debt behind a stand-in mirror.
-  Date/Author: 2026-09-06 / reconciling architect.
+  As executed: the fold is `ChannelTaskMirror`, one per channel, built in `Fleet.build` and written
+  by the supervisor's own `handle(event:)` — the five task subtypes through C3's
+  `apply(_:at:epoch:)` and `tool_progress` through its heartbeat fold. It is read back by the same
+  closure `Fleet.build` hands the supervisor, so `eligibilityInputs`, `liveTaskIDs()`, the
+  thirty-minute reap, the cap eviction and `perform(.reap)` all read one object as of the moment
+  each of them asks. A frame that touched a task row pushes the verdict; nothing else does.
+  Two facts had to be settled in execution. **The age is stamped on the injected clock.** C3's
+  `lastFrameAt` is a wall-clock `Date` and this child's lifecycle runs on an injected
+  `any Clock<Duration>`, so an age derived from `Date()` would be a quantity no manual clock can
+  move and every test of the heartbeat rule would have to sleep on wall time. Each folded frame
+  therefore also takes a `ClockStamp` — an instant captured inside a generic function and handed
+  back as a `@Sendable () -> Duration`, because `any Clock<Duration>` cannot surface its `Instant`
+  — and `lastTaskFrameAge` is that stamp's age, read when it is asked for. C3's `Date` still stamps
+  the rows, which is what `evictable(asOf:)` and every row time mean. **The mirror is forgotten
+  when the child exits.** A background shell is a child of the engine's process and dies with it,
+  while a row nobody notifies is live for ever, so a mirror carried across an exit would leave the
+  channel unreapable and un-evictable on a fact that stopped being true; `handleExit` resets it
+  beside `unresolvedSettings`.
+  Rejected: carrying it as tracker debt behind a stand-in mirror; a second subscription to
+  `events()` from the facade (the supervisor's pump is already the one place every frame passes,
+  and a subscription taken after `build` can miss the frames of a spawn that has already started);
+  comparing `Date()` against C3's stamp.
+  Date/Author: 2026-09-06 / reconciling architect, executed by the fix wave's worker 4.
+
+- Decision: a spawn composes every launch field from the runtime record **except `agent`**.
+  Rationale: Group D's rule is that `--resume` restores the conversation and nothing else, so a
+  `/model`, a `/permissions`, an `/effort`, a `/cd` or an `/add-dir` has to be put back on the
+  command line of every child this channel launches. `agent` is the one field that must not be:
+  re-passing `--agent` replays the agent's `initialPrompt` as a user turn (parent §7.4), which is
+  why the quiescent restart clears it — and composing it from `runtime.agent`, which still holds
+  the name for the header, would put the flag back on the very next respawn after a restart. The
+  triage's "compose from the runtime record" reads as unconditional; it is not.
+  Rejected: composing `agent` with the rest and clearing it again in the restart's own override
+  (two writers of one field, and every non-restart spawn would still replay the prompt); dropping
+  `runtime.agent` so nothing can compose it (the header names the agent a channel is running).
+  Date/Author: 2026-09-06 / fix wave's worker 2, recorded by worker 4.
 
 - Decision: the live budget rises from four short turns to **five**, and the fifth buys an eighth
   scenario, "restart readback".

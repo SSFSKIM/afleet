@@ -57,6 +57,40 @@ final class SpawnFinalisationTests: XCTestCase {
                        "nothing is ready over a process that has exited")
     }
 
+    /// The same window, and the invariant ruling 1 states: never leave an owned channel in ready or connecting with
+    /// no process. A child that exits *cleanly* there is nobody's crash — `handleExit` takes `.exitedClean` only
+    /// from ready, so it leaves a connecting channel alone — and the finalisation's own guard returned holding
+    /// nothing but the rollback. The channel stayed connecting with no process: no send resumes it, no timer fires
+    /// on it, and only a relaunch of the app moves it. It rests where it started instead.
+    ///
+    /// Deliberate break: drop `restoreResting(ifEpochIs: mine)` from the post-handshake guards.
+    func testACleanExitDuringThePostHandshakeCheckRestsTheChannelRatherThanLeavingItConnecting() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let held = HeldAnswer(), entered = HeldAnswer()
+        rig.configureScriptedHandles { handle in
+            handle.pidGate = { entered.release(); await held.wait() }
+        }
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        let spawning = Task { try await supervisor.spawn(reason: .open) }
+        try await rig.waitFor("the spawn to reach its post-handshake pid read") { entered.isReleased }
+        let handle = try XCTUnwrap(rig.scriptedHandles.first)
+
+        let published = await supervisor.publishedCount
+        handle.push(.exited(.code(0, stderrTail: ""), handle.epoch))
+        try await rig.waitForPublish(supervisor, above: published)
+        held.release()
+        _ = try? await spawning.value
+
+        try await rig.waitUntil(supervisor, "the channel to rest") { $0.origin != .owned(.connecting) }
+        let state = await supervisor.state
+        XCTAssertEqual(state.origin, .owned(.dormant),
+                       "a processless owned channel rests dormant; connecting would name a process that has gone")
+        let pid = await supervisor.livePID()
+        XCTAssertNil(pid, "and it rests with no process")
+        XCTAssertNil(state.systemItem, "a clean exit is not a crash: no item and no Reopen")
+    }
+
     /// A crash the spawn was suspended past. `handleExit` has already continued the series and the respawn behind it
     /// owns the channel now, so this attempt's only remaining duty is to give its slot back — and today it returns
     /// without doing so, which costs one of the fleet's six slots permanently, per race.

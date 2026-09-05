@@ -275,3 +275,20 @@ architect's rulings settled them). Line numbers are as at `4f2102d`, before the 
     homes. Owner: C4. Closer: hold a verified directory descriptor for the base, if the store ever
     holds something a same-uid process should not be able to redirect.
 
+41. **A channel's task mirror never forgets a finished row inside one child's life.**
+    Task 11's finding 2, now live: `FleetTimeline`'s `RegistryMirror` names its evictable rows
+    through `evictable(asOf:grace:)` but exposes no remover, so `ChannelTaskMirror` cannot act on
+    the answer. Nothing decides wrongly — the reading eligibility gets is C3's own `liveWork`, and
+    the whole mirror is reset when the child exits — so the cost is a completed row per background
+    task for the life of one process. Owner: C3 for the remover, C4 for the call. Closer: a
+    `mutating func forget(_ ids: [String])` on `RegistryMirror`, called with `evictable(asOf:)`
+    after each fold.
+42. **The per-channel mirror does not fold the Bash tool's own result sentence.**
+    `RegistryMirror.observe(bashToolResult:toolUseID:at:epoch:)` binds a background shell's id and
+    output file from the tool result, which is the first frame that names either — before
+    `task_started` arrives. `ChannelTaskMirror` folds the five task subtypes and `tool_progress`
+    only, so for the moment between the tool result and the first task frame the channel looks
+    idle to the reap. The window is one frame wide and both later frames arm the row, so nothing
+    survives it; a surface that wants the output file from the same mirror will need it. Owner:
+    C4, with C6's task pane. Closer: fold the assistant/user tool-result frames here as C3's own
+    ingest does, rather than re-deriving the sentence.

@@ -61,6 +61,10 @@ public actor ChannelSupervisor {
     private let observer: FleetObserver
     private let clock: any Clock<Duration>
     private let eligibilityInputs: @Sendable () async -> DormantEligibility.Input
+    /// This channel's fold of C3's task registry, which `eligibilityInputs` reads back. The supervisor writes it and
+    /// never reads it: every eligibility decision goes through the one closure, so a rig that states a mirror
+    /// outright and a fleet that folds one are the same code path.
+    private let taskMirror: ChannelTaskMirror?
     private let fleet: FleetCapCounter
     private let diagnostics: any FleetDiagnosticsSink
     private let handshakeTimeout: Duration
@@ -173,6 +177,7 @@ public actor ChannelSupervisor {
     public init(key: ChannelKey, launchTemplate: LaunchConfiguration, factory: @escaping ProcessFactory,
                 ownership: OwnershipCheck, observer: FleetObserver, clock: any Clock<Duration>,
                 eligibilityInputs: @escaping @Sendable () async -> DormantEligibility.Input,
+                taskMirror: ChannelTaskMirror? = nil,
                 fleet: FleetCapCounter, diagnostics: any FleetDiagnosticsSink, isRecent: Bool,
                 spawnBarrier: SpawnBarrier = SpawnBarrier(),
                 environment: ResolvedEnvironment, configHome: ConfigHome, verbs: CLIVerbs,
@@ -186,7 +191,8 @@ public actor ChannelSupervisor {
         self.keyBox = ChannelKeyBox(key); self.launchTemplate = launchTemplate; self.factory = factory
         self.spawnSibling = spawnSibling; self.preconditions = preconditions
         self.ownership = ownership; self.observer = observer; self.clock = clock
-        self.eligibilityInputs = eligibilityInputs; self.fleet = fleet; self.diagnostics = diagnostics
+        self.eligibilityInputs = eligibilityInputs; self.taskMirror = taskMirror
+        self.fleet = fleet; self.diagnostics = diagnostics
         self.isRecent = isRecent; self.handshakeTimeout = handshakeTimeout; self.spawnBarrier = spawnBarrier
         self.environment = environment; self.configHome = configHome; self.verbs = verbs; self.store = store
         self.evictVictim = evictVictim; self.evictionBarrier = evictionBarrier
@@ -1014,7 +1020,17 @@ public actor ChannelSupervisor {
         // per race. `ProcessHandle` is `Sendable` and not `AnyObject`, so the handle cannot be compared by identity
         // — epoch equality plus non-nil is sufficient, because only a new spawn replaces the handle and that
         // advances the epoch.
-        guard epoch == mine, process != nil else { await fleet.rollback(reservation); return }
+        //
+        // And it rests the channel. A child that ends *cleanly* in this window is nobody's crash — `handleExit`
+        // takes `.exitedClean` only from ready, so it leaves a connecting channel alone — and returning here without
+        // the restore leaves an owned channel connecting with no process, which ruling 1 says never happens.
+        // `restoreResting` refuses when a crash series' respawn is parked or a newer epoch owns the channel, so the
+        // paths that do have an exit on their way are untouched.
+        guard epoch == mine, process != nil else {
+            await fleet.rollback(reservation)
+            restoreResting(ifEpochIs: mine)
+            return
+        }
 
         // A fork's key is a random provisional id, so the post-handshake check has nothing to ask about: it runs on
         // the *resolved* id when `.sessionIdentityResolved` arrives, and until then the channel stays connecting.
@@ -1063,7 +1079,11 @@ public actor ChannelSupervisor {
         }
 
         // Two more awaits have run since the guard above, and the child can die in either of them.
-        guard epoch == mine, process != nil else { await fleet.rollback(reservation); return }
+        guard epoch == mine, process != nil else {
+            await fleet.rollback(reservation)
+            restoreResting(ifEpochIs: mine)
+            return
+        }
         await fleet.confirm(reservation)
         state.banner = nil
         state.headerNote = projectServersOff ? .projectServersOff : nil
@@ -1476,9 +1496,14 @@ public actor ChannelSupervisor {
             // response, so the reservation this event has to move may not have been recorded yet.
             guard forkReservation != nil else { forkIdentityPending = (resolved, resolvedEpoch); return }
             await resolveForkIdentity(resolved, epoch: resolvedEpoch)
-        case .frame(let frame, _):
+        case .frame(let frame, let frameEpoch):
             noteActivity()
             RuntimeStateUpdater.apply(frame: frame, to: &runtime, seededFromInit: &seededFromInit)
+            // The channel's own task mirror, folded from the channel's own pump. A frame that touched a task row is
+            // the only frame that can have changed the answer to "may this channel be reaped", so it is also the
+            // only one that pushes: an armed background shell has to be visible to the thirty-minute reap, to the
+            // cap eviction and to `/logout` before any of them acts.
+            if taskMirror?.note(frame, epoch: frameEpoch) == true { pushEligibility() }
             switch frame {
             case .result:
                 turnRunning = false
@@ -1571,6 +1596,7 @@ public actor ChannelSupervisor {
         turnRunning = false
         process = nil
         unresolvedSettings = []   // the process whose readbacks they were is gone
+        taskMirror?.reset()       // and so are the background tasks: they were children of that process
         pushEligibility()
 
         // Our own `terminateOrWedge()` ended this epoch. Whatever status the escalation produced is not a crash: a

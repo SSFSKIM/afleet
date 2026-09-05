@@ -175,17 +175,24 @@ public actor Fleet: LifecycleAPI {
         return build(key: key, launch: launch, isRecent: seed.isRecent)
     }
 
+    /// How long a running task's last frame may be, before the host stops believing it is still running: the
+    /// engine's own task heartbeat, and the boundary parent §7.4's uncertainty rule is stated over.
+    static let taskHeartbeat = Duration.seconds(30)
+
     private func build(key: ChannelKey, launch: LaunchConfiguration, isRecent: Bool) -> ChannelSupervisor {
         launches[key] = launch
+        // This channel's own fold of C3's task registry: written by the supervisor's pump, read back here. The
+        // thirty-minute reap, the cap eviction, `perform(.reap)` and `/logout`'s census and *Stop* all decide
+        // through this one closure, so all of them see the same tasks, as of the moment each of them asks.
+        let taskMirror = ChannelTaskMirror(clock: clock)
         let supervisor = ChannelSupervisor(
             key: key, launchTemplate: launch, factory: factory, ownership: ownership, observer: observer,
             clock: clock,
-            // C3's mirror has landed and `RegistryEntry` conforms to `TaskMirrorReading` (Task 11), but nothing
-            // folds one per channel yet: `mirror` and `lastTaskFrameAge` are the two inputs still unwired, and both
-            // the thirty-minute reap and `liveTaskIDs()` — `/logout`'s census and its *Stop* — read this closure.
             eligibilityInputs: { DormantEligibility.Input(turnRunning: false, pendingDecisions: 0, queuedInput: 0,
-                                                          mirror: [], lastTaskFrameAge: nil,
-                                                          heartbeatInterval: .seconds(30), wedged: false) },
+                                                          mirror: taskMirror.liveEntries,
+                                                          lastTaskFrameAge: taskMirror.lastFrameAge,
+                                                          heartbeatInterval: Self.taskHeartbeat, wedged: false) },
+            taskMirror: taskMirror,
             fleet: counter, diagnostics: diagnostics, isRecent: isRecent, spawnBarrier: spawnBarrier,
             environment: environment, configHome: configHome, verbs: verbs, store: store,
             evictVictim: { [weak self] victim in await self?.evict(victim) ?? .victimBecameIneligible },
@@ -279,6 +286,11 @@ public actor Fleet: LifecycleAPI {
                                                             store: store)
         return verdict
     }
+
+    /// The supervisor a key is filed under, or nil. Internal, and the one way into a channel from outside the
+    /// facade: a test that asserts on what the fleet-wide counter holds has to drain that channel's own
+    /// fire-and-forget eligibility chain first, and nothing public does that for one key.
+    func channel(_ key: ChannelKey) -> ChannelSupervisor? { supervisors[key] }
 
     public func isDormantEligible(_ key: ChannelKey) async -> Bool {
         guard let supervisor = supervisors[key] else { return false }

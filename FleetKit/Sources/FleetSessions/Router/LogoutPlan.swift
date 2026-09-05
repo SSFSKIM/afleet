@@ -158,12 +158,20 @@ public enum LogoutPlan {
         // Stop: the turn first, then each task by id. `interrupt {cancel_queued: true}` before `stop_task` because a
         // queued input would start the next turn the moment the running one ends.
         if choice == .stop, !census.nonEligible.isEmpty {
+            var stopped = 0
             for entry in census.nonEligible {
                 guard let channel = fleet.channels.first(where: { $0.key == entry.key }) else { continue }
                 _ = try? await channel.perform(Interrupt(cancelQueued: true))
-                for task in entry.tasks { _ = try? await channel.perform(StopTask(taskID: task)) }
+                // The tasks the channel has *now*, not the ones the census wrote down. The user reads the sheet for
+                // as long as they read it, and the engine keeps working: a background shell armed in that window
+                // would be left running under a CLI that had just signed out. `entry.tasks` stays what it always
+                // was, the payload of *Wait*.
+                for task in await channel.liveTaskIDs() {
+                    _ = try? await channel.perform(StopTask(taskID: task))
+                    stopped += 1
+                }
             }
-            fleet.diagnostics.record(.logout(step: "tasksStopped", count: blocking.count))
+            fleet.diagnostics.record(.logout(step: "tasksStopped", count: stopped))
         }
 
         // The jobs afleet launched, stopped through the CLI and confirmed gone from the roster: the verb exiting

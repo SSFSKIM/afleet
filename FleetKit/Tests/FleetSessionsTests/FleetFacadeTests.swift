@@ -210,6 +210,184 @@ final class FleetFacadeTests: XCTestCase {
         XCTAssertEqual(origin, .owned(.ready))
     }
 
+    /// **Group H, the wired mirror.** A channel with a background task armed on its own pump is not eligible, and
+    /// the two places that end a child on eligibility both see it: the facade's *Reap* refuses and names the task,
+    /// and the cap eviction never picks the channel as its victim. Before the mirror was wired every supervisor read
+    /// an empty one, so a channel whose background shell had just been announced was the fleet's most inviting
+    /// victim — and terminating it kills the shell, which is the loss parent §7.4's dormant-eligibility paragraph
+    /// exists to prevent.
+    ///
+    /// Six channels fill the cap. Five are held by a decision on screen and the sixth by the armed task, so the
+    /// seventh open must be refused rather than evicting anybody: with the mirror unwired the armed channel is the
+    /// one eligible candidate and is reaped instead.
+    ///
+    /// Deliberate break: hand `Fleet.build`'s `eligibilityInputs` an empty mirror again.
+    func testAChannelWithAnArmedTaskRefusesAReapAndIsNeverTheEvictionVictim() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        await fleet.start()
+        var keys: [ChannelKey] = []
+        for _ in 0..<FleetCapCounter.capacity {
+            let k = ChannelKey(configHome: harness.home.url, session: SessionID())
+            keys.append(k)
+            _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        }
+        let handles = harness.handles.all
+        XCTAssertEqual(handles.count, FleetCapCounter.capacity)
+
+        // The channel the engine has announced a background shell on, and nothing else about it.
+        let armed = keys[0]
+        let taskID = "task-invented-armed-shell-1"
+        handles[0].push(.frame(try Self.backgroundTasksChanged(taskIDs: [taskID], session: armed.session),
+                               handles[0].epoch))
+        try await harness.waitFor("the armed task to reach the channel's own mirror") {
+            await fleet.isDormantEligible(armed) == false
+        }
+        await fleet.channel(armed)?.drainEligibility()
+
+        do {
+            _ = try await fleet.perform(.reap, on: armed)
+            XCTFail("the reap ended a child with a background task armed")
+        } catch {
+            XCTAssertEqual(error as? LifecycleError, .notEligible(.taskArmed(taskID)),
+                           "the refusal names the task that is holding the channel")
+        }
+
+        // Everybody else is held by a decision, so the armed channel is the only channel an eviction could pick.
+        for (index, k) in keys.enumerated().dropFirst() {
+            handles[index].push(.request(Self.decisionRequest(epoch: handles[index].epoch)))
+            try await harness.waitFor("the decision on channel \(index) to be on screen") {
+                await fleet.state(of: k)?.pendingDecisions.count == 1
+            }
+            await fleet.channel(k)?.drainEligibility()
+        }
+
+        let seventh = ChannelKey(configHome: harness.home.url, session: SessionID())
+        var refusal: (any Error)?
+        do { _ = try await fleet.open(seventh, cwd: harness.cwd, recent: true) } catch { refusal = error }
+        XCTAssertEqual(refusal as? LifecycleError, .capReached(live: FleetCapCounter.capacity),
+                       "with nobody eligible the cap refuses rather than evicting the armed channel")
+        XCTAssertEqual(handles.map(\.terminateCount), Array(repeating: 0, count: FleetCapCounter.capacity),
+                       "no channel was terminated, least of all the one with a task armed")
+        XCTAssertEqual(harness.handles.all.count, FleetCapCounter.capacity, "the refused spawn built no child")
+        let origin = await fleet.state(of: armed)?.origin
+        XCTAssertEqual(origin, .owned(.ready))
+    }
+
+    /// **Group H, the clock.** The age of the last task frame is measured on the *injected* clock. C3's mirror
+    /// stamps `lastFrameAt` as a wall-clock `Date`; an age derived from `Date()` is a quantity no manual clock can
+    /// move, and the uncertainty rule — a running task whose last frame is older than its heartbeat may have
+    /// completed unseen — would then be untestable without sleeping on wall time, which this package forbids.
+    ///
+    /// One `task_started` and no frame after it: the task is running and fresh, and the same task is uncertain once
+    /// the clock has moved past the thirty-second heartbeat. Nothing sleeps; only `TestClock.advance` moves.
+    ///
+    /// Deliberate break: derive `lastTaskFrameAge` from `Date().timeIntervalSince(entry.lastFrameAt)`.
+    func testTheAgeOfTheLastTaskFrameIsMeasuredOnTheInjectedClock() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: SessionID())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        let handle = try XCTUnwrap(harness.handles.all.first)
+
+        let taskID = "task-invented-running-shell-1"
+        handle.push(.frame(try Self.taskStarted(taskID: taskID, session: k.session), handle.epoch))
+        try await harness.waitFor("the started task to reach the channel's own mirror") {
+            await fleet.isDormantEligible(k) == false
+        }
+
+        do {
+            _ = try await fleet.perform(.reap, on: k)
+            XCTFail("the reap ended a child with a background task running")
+        } catch {
+            XCTAssertEqual(error as? LifecycleError, .notEligible(.taskRunning(taskID)),
+                           "a task whose frame just arrived is running, not uncertain")
+        }
+
+        await harness.clock.advance(by: .seconds(31))
+
+        do {
+            _ = try await fleet.perform(.reap, on: k)
+            XCTFail("the reap ended a child whose task state is unknown")
+        } catch {
+            XCTAssertEqual(error as? LifecycleError, .notEligible(.taskStateUncertain(taskID)),
+                           "the manual clock moved the age past the heartbeat, so the mirror may have missed the end")
+        }
+        XCTAssertEqual(handle.terminateCount, 0, "neither refusal touched the child")
+    }
+
+    /// **Group H, the epoch.** A background shell is a child of the engine's process and dies with it, so the rows
+    /// a child left behind say nothing about the channel once that child has gone. The mirror is the channel's, not
+    /// the child's, so nothing else would clear them — and a row nobody ever notifies is live for ever, which would
+    /// leave the channel permanently unreapable and permanently un-evictable on a fact that stopped being true when
+    /// the child exited.
+    ///
+    /// Deliberate break: drop `taskMirror?.reset()` from `handleExit`.
+    func testTheTasksOfAChildThatHasGoneDoNotHoldTheChannel() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: SessionID())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        let handle = try XCTUnwrap(harness.handles.all.first)
+
+        handle.push(.frame(try Self.taskStarted(taskID: "task-invented-orphan-shell-1", session: k.session),
+                           handle.epoch))
+        try await harness.waitFor("the running task to reach the channel's own mirror") {
+            await fleet.isDormantEligible(k) == false
+        }
+
+        handle.push(.exited(.code(0, stderrTail: ""), handle.epoch))
+        try await harness.waitFor("the channel to rest after its child exited cleanly") {
+            await fleet.state(of: k)?.origin == .owned(.dormant)
+        }
+        let eligible = await fleet.isDormantEligible(k)
+        XCTAssertTrue(eligible, "the shell died with the child, so nothing is holding the channel any more")
+    }
+
+    /// A `background_tasks_changed` listing, built from the published schema with invented identifiers and decoded
+    /// through `FrameDecoder` rather than hand-assembled. It announces a task and starts nothing: the row it folds
+    /// to is armed.
+    private static func backgroundTasksChanged(taskIDs: [String], session: SessionID) throws -> Frame {
+        let line = JSONValue.object([
+            "type": .string("system"),
+            "subtype": .string("background_tasks_changed"),
+            "tasks": .array(taskIDs.map { id in
+                .object(["task_id": .string(id), "task_type": .string("local_bash"),
+                         "description": .string("an invented background shell"), "status": .string("running")])
+            }),
+            "uuid": .string("00000000-0000-4000-8000-00000000c4a1"),
+            "session_id": .string(session.description),
+        ])
+        guard case .system(let system) = FrameDecoder.decode(line: try line.canonicalData()) else {
+            struct NotASystemFrame: Error {}
+            throw NotASystemFrame()
+        }
+        return .system(system)
+    }
+
+    /// A `task_started`, invented the same way: the row it folds to has started and has not been handed back, which
+    /// is what the mirror calls running.
+    private static func taskStarted(taskID: String, session: SessionID) throws -> Frame {
+        let line = JSONValue.object([
+            "type": .string("system"),
+            "subtype": .string("task_started"),
+            "task_id": .string(taskID),
+            "tool_use_id": .string("toolu_inventedToolUseIdentifier02"),
+            "description": .string("an invented background shell"),
+            "is_backgrounded": .bool(true),
+            "task_type": .string("local_bash"),
+            "uuid": .string("00000000-0000-4000-8000-00000000c4a2"),
+            "session_id": .string(session.description),
+        ])
+        guard case .system(let system) = FrameDecoder.decode(line: try line.canonicalData()) else {
+            struct NotASystemFrame: Error {}
+            throw NotASystemFrame()
+        }
+        return .system(system)
+    }
+
     /// A fork of a fork. The sibling spawner captured the key its source was *filed under when it was built*, and a
     /// fork re-keys itself the moment its identity resolves — so the grandchild was looked up under a key the fleet
     /// no longer knows, found no seed, and launched in the config home instead of the project. The source key is a

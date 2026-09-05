@@ -202,6 +202,46 @@ final class LogoutPlanTests: XCTestCase {
         XCTAssertFalse(rig.spawnBarrier.isRaised)
     }
 
+    /// *Stop* stops the tasks the channel has **when Stop runs**, not the list the census wrote down
+    /// (`scalpel-2#2`). The census and the sheet are separated by however long the user looks at it, and the engine
+    /// keeps working in between: a background shell announced in that window would be left running under a CLI that
+    /// had just signed out, which is the one thing this plan exists to prevent. `liveTaskIDs()` is read again at the
+    /// moment the stop is sent; the census list stays what it always was, the payload of *Wait*.
+    ///
+    /// Scripted handles rather than a replay: what the test reads is the requests the plan actually sent, in order.
+    ///
+    /// Deliberate break: `for task in entry.tasks` in `LogoutPlan.execute`.
+    func testStopStopsTheTasksTheChannelHasWhenItRunsAndNotTheCensusList() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let running = "task-invented-logout-shell-1", armedLater = "task-invented-logout-shell-2"
+        let eligibility = EligibilityBox()
+        eligibility.mirror = [MirrorEntryStandIn(taskID: running, isRunning: true, isBackground: true)]
+        let channel = rig.supervisor(session: SessionID(), fixture: Self.idle, eligibility: eligibility)
+        try await channel.open()
+        let handle = try XCTUnwrap(rig.scriptedHandles.first)
+        let fleet = context(rig, channels: [channel])
+
+        let census = await LogoutPlan.build(fleet: fleet)
+        XCTAssertEqual(census.nonEligible.map(\.key), [channel.key])
+        XCTAssertEqual(census.nonEligible.first?.tasks, [running], "the census names the task it saw")
+
+        // The user reads the sheet; the engine arms a second background task in the meantime.
+        eligibility.mirror = [MirrorEntryStandIn(taskID: running, isRunning: true, isBackground: true),
+                              MirrorEntryStandIn(taskID: armedLater, isRunning: false, isArmed: true,
+                                                 isBackground: true)]
+        await channel.mirrorChanged()
+
+        let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
+        XCTAssertEqual(outcome, .success(exited: [channel.key], foreignLeftRunning: []))
+        XCTAssertEqual(handle.controlRequests.map(\.subtype), ["interrupt", "stop_task", "stop_task"],
+                       "the turn first, then one stop per task the channel has now")
+        XCTAssertEqual(handle.controlRequests.filter { $0.subtype == "stop_task" }
+                           .compactMap { $0.payload["task_id"]?.stringValue },
+                       [running, armedLater],
+                       "the task armed between the census and the stop was stopped too")
+    }
+
     /// One channel with a running mirror task and one afleet-launched job: the plan lists both, *Wait* holds without
     /// acting, and *Stop* interrupts the turn, stops the task, stops the job and waits for the roster to drop its
     /// worker before `claude auth logout` runs. A foreign registry record keeps its token and is named.
