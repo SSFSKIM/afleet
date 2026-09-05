@@ -114,7 +114,32 @@ final class FixtureCorpusTests: XCTestCase {
     private struct SyntheticFinding: CustomStringConvertible {
         let fixture: String, line: Int, pair: String, field: String, why: String
         var description: String { "\(fixture):\(line) \(pair) — no typed decode at '\(field)': \(why)" }
+        /// Fixture, line, census pair and the missing key — everything that identifies the finding, and
+        /// nothing that is only the decoder's phrasing of it.
+        var identity: String { "\(fixture):\(line) \(pair) \(field)" }
     }
+
+    /// Every synthetic frame that does not decode typed, by name.
+    ///
+    /// Asserted as an equality rather than printed, and rather than counted. Printed, a regression in a frame
+    /// that only a synthetic fixture carries stayed green with the breakage in console output; counted, a new
+    /// finding could hide behind one that had gone away. Equality fails in both directions: a frame that
+    /// stops decoding lands here as an addition, and one that starts decoding — because the model was
+    /// relaxed, or the fixture rewritten — as a removal that has to be taken out on purpose.
+    ///
+    /// All ten are the same shortfall: a synthetic `result` frame built without `duration_ms`.
+    private static let expectedSyntheticFindings: Set<String> = [
+        "dialog-fable-overage:7 result/success duration_ms",
+        "dialog-fable-overage:13 result/success duration_ms",
+        "dialog-fable-overage:19 result/success duration_ms",
+        "dialog-fable-overage:25 result/success duration_ms",
+        "dialog-fable-overage:31 result/success duration_ms",
+        "dialog-refusal-fallback:9 result/success duration_ms",
+        "dialog-refusal-fallback:14 result/error_during_execution duration_ms",
+        "dialog-refusal-fallback:20 result/error_during_execution duration_ms",
+        "dialog-refusal-fallback:26 result/error_during_execution duration_ms",
+        "dialog-refusal-fallback:30 result/success duration_ms",
+    ]
 
     /// Why a finding is a finding and not a reason to relax the model. Printed with the findings so
     /// the reader is not left to infer it from the fixture counts: what makes a field required is
@@ -290,11 +315,14 @@ final class FixtureCorpusTests: XCTestCase {
         }
 
         print("G2: \(dirs.count) fixtures (\(recordedFixtures) recorded, \(syntheticFixtures) synthetic), \(corpusLines) frames (\(corpusIn) in, \(corpusOut) out), \(corpusRoundTrips) round-tripped")
-        if findings.isEmpty {
-            print("G2 synthetic findings: none")
-        } else {
-            print("G2 synthetic findings (\(findings.count)):\n\(Self.findingsPreamble)")
-            for finding in findings { print("  - \(finding)") }
-        }
+        XCTAssertEqual(Set(findings.map(\.identity)), Self.expectedSyntheticFindings, """
+            the set of synthetic frames that do not decode typed changed.
+            \(Self.findingsPreamble)
+            found:
+            \(findings.map { "  - \($0)" }.sorted().joined(separator: "\n"))
+            """)
+        // Ten findings over ten distinct lines: the set above would also hold if one line produced two
+        // findings and another none, which is not the corpus this describes.
+        XCTAssertEqual(findings.count, Self.expectedSyntheticFindings.count)
     }
 }
