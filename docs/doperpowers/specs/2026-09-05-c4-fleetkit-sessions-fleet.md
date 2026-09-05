@@ -9,8 +9,11 @@
 > registry mirror lands, this child may merge with it pending and marked in the tracking
 > map, and a later failure is a corrective task on C4 flagged to C5 and C6. This document
 > treats the parent's §17 C4 section and its binding inheritance (§6.11, §6.12, §7.1, §7.2,
-> §7.4, §7.6's query definition, §7.7, §7.8; contracts X1, X2, X3, X5, X6, X9, X10) as
-> landed and records only the residue those sections leave to this child.
+> §7.4, §7.6's query definition, §7.7, §7.8; contracts X1, X2, X3, X5, X6, X9, X10, with X5
+> and X6 as the parent amended them on 2026-09-05 from C7's decomposing run: the Terminal
+> panel never spawns `claude` on its own initiative, X5 hands it pane requests and receives
+> pane exits; X6 admits dotted keys and a per-namespace schema version) as landed and records
+> only the residue those sections leave to this child.
 
 ## Purpose
 
@@ -56,7 +59,7 @@ fails the build:
 - wedged when `terminate()` returns `nil`: no respawn under that session id, the escalation trace on a system item, *Reopen* spawning only after the ownership check finds no holder;
 - adopt: `claude stop <short>`, wait for exit and roster removal, spawn `--resume`;
 - send to background: `terminate()`, wait for exit and registry removal, `claude --bg --resume <id>`, the new job found in the roster by its `resumeSessionId` (item 16);
-- open in terminal: `terminate()`, wait, hand the launch to the terminal (a closure the app provides; the test's closure records the call), keep mirroring; re-adopt when the terminal's process exits and its record is gone;
+- open in terminal: `terminate()`, wait, return a `PaneRequest` whose purpose is `.hatch(id)`, whose arguments are the interactive `--resume <id>` line and whose environment is composed through ClaudeWire's launch configuration so the hatch resumes under the same config home; keep mirroring; re-adopt when the panel reports the `PaneExit` and the record is gone (the test plays the panel: it takes the request and reports the exit);
 - foreign live in the user's terminal: send refused with the "running in your terminal" reason and *Fork* offered; record gone means archived;
 - Contended after a handoff wait exceeds 10 s, and whenever desired and observed disagree; back to the matching origin when the holder set settles to zero or one;
 - the quiescent restart: snapshot, terminate, wait, spawn with the carried flags and never `--agent`, re-send `apply_flag_settings`, verify every readback, composer disabled until each matches, a banner naming the setting that did not survive (items 58 and 63 at the API level, the mismatch half driven by `FAKE_CLAUDE_INIT` answering a different `current_permission_mode`).
@@ -282,15 +285,33 @@ public enum SpawnPrecondition: Hashable, Sendable {
 }
 
 public enum LifecycleAction: Hashable, Sendable {
-  case open, send(UserInput), reap, adopt, sendToBackground, openInTerminal, fork(at: UUID?)
+  case open, send(UserInput), reap, adopt, sendToBackground, fork(at: UUID?)
   case quiescentRestart(RestartRequest), stopEverything, backgroundAll, logout, reopen
+  case stopJob(JobShort), respawnJob(JobShort), removeJob(JobShort)      // CLI verbs, no PTY (parent X5 as amended 2026-09-05)
 }
+
+// Design inheritance from the parent's X5 as amended on 2026-09-05 (C7's decomposing run): the Terminal
+// panel never spawns `claude` for a session on its own initiative. X5 performs the ownership work of
+// §7.2 rule 5 and hands the panel a pane request; the panel runs it and reports the exit back through
+// X5, which owns the re-adoption of §7.4's hatch rows. `attach` and `logs` are panes; `stop`,
+// `respawn` and `rm` are verbs above.
+public enum PanePurpose: Hashable, Sendable { case hatch(SessionID), attach(JobShort), logs(JobShort), shell, command }
+public struct PaneRequest: Hashable, Sendable {
+  public var executable: URL; public var arguments: [String]; public var cwd: URL
+  public var environment: [String: String]                   // composed by C4 through LaunchConfiguration.childEnvironment (§6.1, X11)
+  public var purpose: PanePurpose
+}
+public struct PaneExit: Hashable, Sendable { public var request: PaneRequest; public var code: Int32; public var observedAt: Date }
 
 public protocol LifecycleAPI: Sendable {                     // what C5, C6 and C7 call; nothing else spawns
   func state(of key: ChannelKey) async -> ChannelState?
   func states() async -> [ChannelState]
   func preconditions(for key: ChannelKey) async -> SpawnPrecondition
   func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState
+  func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest     // §7.4 open-in-terminal row up to the handoff; purpose .hatch
+  func attach(_ job: JobShort) async throws -> PaneRequest               // `claude attach <short>`; purpose .attach
+  func logs(_ job: JobShort) async throws -> PaneRequest                 // `claude logs <short>`; purpose .logs
+  func paneExited(_ exit: PaneExit) async                                // the panel's report; X5 re-adopts a hatch whose record is gone
   func isDormantEligible(_ key: ChannelKey) async -> Bool
   func declineProjectServers(_ names: [String], project: URL) async throws        // the §6.12 write
   func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async   // store only
@@ -399,6 +420,22 @@ state stays `.connecting` until every readback matches, and a mismatch sets
 `ChannelState.banner = .settingDidNotSurvive(name)` and keeps the composer disabled until the
 user picks a value. `apiKeySource` is re-read from the relaunch's first `system/init`.
 
+**Open in terminal, attach and logs** follow the parent's X5 as amended: `openInTerminal`
+runs `terminate()`, awaits release, marks the channel `.foreignLive(.ownTerminalTab)` with the
+pending hatch recorded, and returns a `PaneRequest` whose executable is the located binary,
+whose arguments are `["--resume", id]` (the interactive line, none of §6.1's print-mode
+flags), whose cwd is the channel's, and whose environment is
+`LaunchConfiguration.childEnvironment(over: resolved, configHome:)` for that channel, so the
+hatch resumes under the same config home and the same scrubbed, re-injected environment as
+the owned process did. `attach(job)` and `logs(job)` return requests for `claude attach
+<short>` and `claude logs <short>` with the job's cwd and the same environment, and change no
+ownership. The panel runs the request and calls `paneExited`; for a `.hatch` the supervisor
+then waits for the registry record to disappear (rule 5's release) and spawns `--resume <id>`
+owned, which is §7.4's re-adoption row; a `PaneExit` for a request the supervisor no longer
+tracks (an older epoch, a channel already re-adopted) is recorded and ignored. The panel
+never spawns `claude` for a session on its own initiative, and no other package receives a
+`PaneRequest` for a session.
+
 **Fork** spawns `--resume <id> --fork-session` (with `--resume-session-at <uuid>` and
 `--resume-drops-turn` when forking from a message) as a new channel whose key is provisional
 until `.sessionIdentityResolved`; the supervisor re-keys the channel on that event and
@@ -481,8 +518,13 @@ One JSON document per namespace, `<base>/state.<namespace>.json`, with an envelo
 `{schemaVersion, values: {key: json}}`; every write re-serialises the namespace document
 to a temporary file in the same directory and renames it into place; a document whose
 `schemaVersion` is newer than the reader's is refused with an error rather than rewritten.
-The app injects `baseDirectory` (`~/Library/Application Support/afleet/` in production, a
-temporary directory in tests); nothing about the store knows a ConfigHome, and a base
+Keys are non-empty strings in which dots are ordinary characters and imply no hierarchy;
+the schema version is per namespace and nothing else is versioned. This is design
+inheritance from the parent's X6 as amended on 2026-09-05: Workbench persists under
+`workbench.browser` and `workbench.panel.<configHomeHash>.<sessionId>` in its own namespace,
+and a test writes and reads back both key shapes through the API. The app injects
+`baseDirectory` (`~/Library/Application Support/afleet/` in production, a temporary
+directory in tests); nothing about the store knows a ConfigHome, and a base
 directory inside one is rejected at construction (X9). `FleetKitState` holds the namespace's
 own `Codable` types: channel grouping and pins, section order and collapse, unread cursors
 per session, `DesiredOwnership` per channel, project-server acceptances `(project, name,
@@ -494,8 +536,9 @@ baseline and the last census. FleetKit never models Workbench or Afleet state.
 `CLIVerbs` wraps `ProcessRunner` with the resolved environment, the located binary and a
 per-verb timeout: `agentsJSON() -> [AgentsRow]`, `stop(short)`, `backgroundResume(id, cwd)
 -> JobShort` (found by diffing `jobs/*/state.json` before and after for `resumeSessionId ==
-id`, then confirmed in the roster), `backgroundExec(command, cwd)`, `authStatus()`,
-`authLogout()`. Every verb call is a diagnostic event carrying the verb, exit code and
+id`, then confirmed in the roster), `backgroundExec(command, cwd)`, `respawn(short)`, `remove(short)`, `authStatus()`,
+`authLogout()`; `attach` and `logs` are never run here, because they need a PTY and are pane
+requests (X5 as amended). Every verb call is a diagnostic event carrying the verb, exit code and
 duration and never its stdout. Tests inject `ScriptedProcessRunner`, which maps an argv
 pattern to `(stdout, exit)` and may mutate the scripted holder files so that `stop` removes a
 worker from the roster and marks the job stopped, and `--bg --resume` creates a job with the
@@ -530,8 +573,10 @@ is not reachable from afleet and is stated as untested.
 ## Contracts
 
 **Owned by C4.** X5 Lifecycle API, exactly `LifecycleAPI`, `ChannelState`,
-`SpawnPrecondition`, `LifecycleAction`, `HolderSet` and `ChannelKey` above, with public
-initialisers on every value a downstream package constructs. X6 Store namespaces, exactly
+`SpawnPrecondition`, `LifecycleAction`, `PaneRequest`, `PanePurpose`, `PaneExit`,
+`HolderSet` and `ChannelKey` above, with public initialisers on every value a downstream
+package constructs; the pane protocol and the verb-versus-pane split are inherited from the
+parent's X5 as amended on 2026-09-05, not chosen here. X6 Store namespaces, exactly
 `StateStore`, `StoreNamespace` and `FileStateStore` above. X10 Command router table,
 exactly `RouterTable`, `LaunchSettingMatrix`, `CommandRouter.route` and
 `RefusalInterceptor`; the composer renders them and re-implements no mapping. X1's FleetKit
@@ -694,3 +739,9 @@ Pending — written at finish.
 ## Revision Notes
 
 - 2026-09-05: v1, written at dispatch against parent commit `ee94449`.
+- 2026-09-05: v1 amended the same day, before any plan, with the coordinator's flow-back
+  from C7's decomposing run as design inheritance: X5's pane protocol (`PaneRequest`,
+  `PaneExit`, `openInTerminal`, `attach`, `logs`, `paneExited`; `stop`, `respawn`, `rm` as
+  verb actions) and X6's dotted keys with a per-namespace schema version, including
+  Workbench's two key shapes. The parent's amended X5 and X6 text is the authority; this
+  document's lineage check at recomposition compares against it.
