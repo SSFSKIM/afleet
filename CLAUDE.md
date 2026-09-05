@@ -22,7 +22,11 @@ Rules every agent working here holds (spec §7.8, §11, §12; contract X9):
 - The Agent SDK typings are all-rights-reserved: fetch on demand, never commit.
   cmux is GPL: read for architecture only, copy nothing.
 - Fixtures are recorded only through opt-in capture, redacted before disk and reviewed
-  before commit. Never send `submit_feedback` casually; it uploads real feedback.
+  before commit. The same holds for every engine byte that reaches any committed file —
+  a test sample, a stand-in's data, a test vector, a quoted frame — because the rule is
+  about the byte's origin, not the directory (§11). Redactor test inputs use invented
+  identifiers, never the author's own. Never send `submit_feedback` casually; it uploads
+  real feedback.
 - Never `end_session` a channel with running background tasks without warning; stream
   close kills its shells.
 - Protocol facts come from C1's probes and fixtures, not from guessing; unknown one-way

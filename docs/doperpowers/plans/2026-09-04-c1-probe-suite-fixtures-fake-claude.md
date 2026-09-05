@@ -1582,7 +1582,7 @@ def build_fixture(root, name="demo", **overrides):
 
 class SlugAndSnapshotTests(unittest.TestCase):
     def test_slug_of_replaces_every_non_alphanumeric(self):
-        self.assertEqual(fixture.slug_of("/Users/new/Developer/GitHub/afleet"), "-Users-new-Developer-GitHub-afleet")
+        self.assertEqual(fixture.slug_of("/Users/probe/Developer/GitHub/afleet"), "-Users-new-Developer-GitHub-afleet")
         self.assertEqual(fixture.slug_of("/private/tmp/afleet-fixtures/x.y"), "-private-tmp-afleet-fixtures-x-y")
 
     def test_find_and_snapshot_redacts_and_rewrites_the_slug(self):
@@ -4519,7 +4519,7 @@ For the persistence half, run two more spikes by hand with the harness from a Py
 
 ```bash
 cd /tmp/afleet-fixtures/spike-agent-switch && CLAUDE_CONFIG_DIR=/tmp/afleet-fixtures/config-home /usr/bin/python3 - <<'EOF'
-import sys, uuid; sys.path.insert(0, "/Users/new/Developer/GitHub/afleet-c1/Tools/probe")
+import sys, uuid; sys.path.insert(0, "/Users/probe/Developer/GitHub/afleet-c1/Tools/probe")
 import harness, redact
 sid = str(uuid.uuid4())
 s = harness.Session(harness.Launch(cwd=".", session_id=sid, agent="probe-agent", setting_sources="project", max_turns=2), redact.Redactor()); s.start()

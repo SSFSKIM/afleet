@@ -8,3 +8,6 @@ DerivedData/
 
 .doperpowers/
 __pycache__/
+.obsidian/
+.claude/worktrees/
+.claude/settings.local.json

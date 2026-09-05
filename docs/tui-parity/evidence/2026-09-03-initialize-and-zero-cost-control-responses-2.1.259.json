@@ -885,7 +885,7 @@
   "model": "claude-fable-5-1",
   "memoryFiles": [
    {
-    "path": "/Users/new/.claude/CLAUDE.md",
+    "path": "/Users/probe/.claude/CLAUDE.md",
     "type": "User",
     "tokens": 5914
    }
@@ -1324,7 +1324,7 @@
      "type": "stdio",
      "command": "node",
      "args": [
-      "/Users/new/.claude/skills/chatgpt-advisor/server/mcp-server.mjs"
+      "/Users/probe/.claude/skills/chatgpt-advisor/server/mcp-server.mjs"
      ]
     },
     "scope": "dynamic",

@@ -264,15 +264,33 @@ Child environment, on top of the resolved login-shell environment (§6.9):
 | `AUTOMODE_DECISION_LOG=1` | per-decision classifier log for the auto-mode explain view (*A-26*) | Developer setting, default off |
 
 The child environment carries **no variable beginning with `CLAUDE`** from the resolved
-environment (§6.9); the table's own entries and, when an override is chosen,
-`CLAUDE_CONFIG_DIR` are added back on purpose. A prefix rule, not a list: every marker the
-CLI sets on its own children changes its behaviour somewhere — `CLAUDE_CODE_REMOTE`
+environment (§6.9); the table's own entries and `CLAUDE_CONFIG_DIR` — set to the resolved
+ConfigHome root on **every** spawn, not only when a test override is chosen, so the child's
+home equals afleet's view by construction — are added back on purpose, with
+`CLAUDE_CODE_PROJECT_DIR_NAME` passed through beside it when the capture carried it. A
+prefix rule, not a list: every marker the CLI sets on its own children changes its
+behaviour somewhere — `CLAUDE_CODE_REMOTE`
 disables auto-memory and changes compaction, `CLAUDE_CODE_CONTAINER_ID` auto-backgrounds
 every command, `CLAUDE_CODE_CHILD_SESSION` turns transcript saving off in the interactive
 CLI and hid a spike observation for a whole run (spike-contention) — a list needs extending
 each time the CLI gains one, and the markers reach afleet through the process-environment
 fallback of §6.9 whenever afleet itself was launched from inside a Claude Code session.
 None of them carries tool output anyway (*Parity F-23*).
+
+The 2.1.258 bundle sets forty-four distinct `CLAUDE*` names on its children and reads seven
+hundred more, so the marker set is neither small nor fixed and the prefix rule's stale
+direction is the safe one: a marker it fails to drop misrepresents the child silently, while
+a configuration variable it drops produces a visible difference. That visible loss is
+bought back by an explicit **pass-through set** of user configuration the engine only
+reads: provider selection (`CLAUDE_CODE_USE_BEDROCK`, `_USE_VERTEX`, `_USE_FOUNDRY`,
+`_USE_MANTLE`, `_USE_ANTHROPIC_AWS`, `_USE_ANTHROPIC_GOOGLE_CLOUD`), their auth-skip
+switches (`CLAUDE_CODE_SKIP_BEDROCK_AUTH`, `_SKIP_VERTEX_AUTH`, `_SKIP_FOUNDRY_AUTH`,
+`_SKIP_MANTLE_AUTH`, `_SKIP_ANTHROPIC_AWS_AUTH`) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS`. An
+allowlist is acceptable here and not for markers because *its* stale direction is also
+safe: a provider variable added later is dropped, and the user sees the wrong provider in
+the `apiKeySource` readback. `CLAUDE_CODE_OAUTH_TOKEN` is never passed through — the engine
+sets it on children as a credential handoff, and an owned channel authenticates from the
+config home. A test pins the set exactly, so an addition is deliberate.
 
 - `--permission-prompt-tool stdio` is the correctness fix and is sufficient on its own:
   the literal `stdio` installs the control-protocol answerer (*SPEC 45.23.1*); without it
@@ -328,10 +346,35 @@ The first stdin line is `initialize`:
 
 Its response carries `commands`, `agents`, `models`, `output_style`,
 `available_output_styles`, `account`, `current_model`, `current_permission_mode`,
-`session_state`, `pid` (*SPEC 45.18.4*). The first `system/init` frame adds `tools`,
-`skills`, `plugins`, `agents`, `slash_commands` with its `terminal_slash_commands`
-subset, `mcp_servers`, `capabilities`, `claude_code_version`, `apiKeySource` and
-`messaging_socket_path` (*SPEC 45.10.4*). Both are kept on the channel's session object.
+`session_state`, `pid` (*SPEC 45.18.4*). **The handshake is complete when that response
+arrives.** The first `system/init` frame is not part of it: the engine emits `system/init`
+at the start of every turn (§7.3), so it arrives only after the first user message and never
+arrives on a session that handshakes without sending one — `resume-no-replay` and
+`zero-cost` contain no `system/init` at all, and in every other fixture it follows the first
+`user` frame. It adds `tools`, `skills`, `plugins`, `agents`, `slash_commands` with its
+`terminal_slash_commands` subset, `mcp_servers`, `capabilities`, `claude_code_version`,
+`apiKeySource` and `messaging_socket_path` (*SPEC 45.10.4*), and it reaches consumers on the
+event stream, not on the handshake value. Both payloads are kept on the channel's session
+object, each when it arrives; anything that needs `system/init` before the first turn does
+not have it and must not block on it.
+
+**A session's own id is observable right after the handshake, without a turn.** `auth_status`
+(on the launch line via `--enable-auth-status`) is frame 5 in every recorded fixture, directly
+after the `initialize` response, and carries `session_id`; in both resume fixtures that id
+equals the `--resume` target, so it is the process's own. For a fork (`--resume <id>
+--fork-session`) that is the *new* id. A fork's identity is therefore **pending** until the
+first frame carrying `session_id` arrives, and the wire layer says so in its type rather than
+filling in the source id; it emits an event when the identity resolves, FleetKit keys the
+channel on that event, and a capture opened before it is written under a provisional name
+and renamed. The fork id is never read off `system/init`, which would reintroduce the
+first-turn dependency the handshake rule removed.
+
+The in-process MCP server is likewise not connected at the moment the `initialize`
+response arrives: on 2.1.260 its bring-up completed about 0.9 s later, and an `mcp_status`
+sent immediately after the handshake returned an empty list. A negative check ("the declined
+server is absent", item 54) is safe at any time; a positive one ("`afleet` is connected")
+reads `mcp_servers` off the first `system/init` or polls `mcp_status` after a settle, and
+never fails a launch on the first empty answer.
 
 `supportedDialogKinds` names exactly the two families the headless dialog dispatcher ever
 forwards, `refusal_fallback_prompt` and `fable_overage_consent_prompt`; MCP elicitation
@@ -394,7 +437,21 @@ that is not fast-capable promotes the session model to Opus, so the header re-re
 - **Diagnostics are metadata-only by default**: per frame, type, subtype, byte size, timing
   and request id, written to `~/Library/Logs/afleet/`. Raw frame capture is a Developer
   setting, off by default, and is the only source of fixtures; its redaction and retention
-  rules are in §11.
+  rules are in §11. *Metadata-only is a binding contract, not a default*: no value derived
+  from a frame's payload reaches the diagnostics log, whatever its diagnostic value, because
+  that log is unredacted by construction and §11's redactor cannot rescue it — the redactor
+  works structurally, by key name, so a free-form string passes through untouched. The
+  worked case is an MCP tool failure: an in-process tool's arguments come straight off an
+  engine frame, so a `send_user_file` error description carries the path the model named.
+  Record the tool name, the error's Swift type and its `NSError` domain and code; never the
+  description. When a value is diagnostic enough to be worth keeping and payload-derived,
+  its home is the opt-in capture, which is the redacted artefact. A diagnostic event case
+that carries a free-form `String` is the bypass shape: payload walked through one twice in
+C2 — an MCP tool error's description, then the process exit path interpolating an
+`ExitStatus` whose stderr tail is fifty raw lines from the CLI and its hooks. Event cases
+carry structured fields (an exit code, a signal, a tool name, an error type and domain); a
+message that must be text is drawn from a fixed set the type declares, never built at the
+call site.
 
 ### 6.4 Inbound and outbound requests
 
@@ -495,7 +552,15 @@ reap, respawn) lives in FleetKit (§7.4); ClaudeWire only executes it.
 served in-process over `mcp_message` frames carrying JSON-RPC (*SPEC 45.21*): the binary
 forwards requests, the host answers in a control response; a JSON-RPC notification carried
 in `mcp_message` is answered with `mcp_response {"jsonrpc": "2.0", "result": {}, "id": 0}`,
-as the SDK does. Tools appear to the model as `mcp__afleet__<tool>`. The first tool is
+as the SDK does. **The bring-up starts inside the handshake and the host must serve it
+there.** In every recorded fixture the server's JSON-RPC `initialize` arrives as an inbound
+`mcp_message` at frame 2, *before* the engine's own `initialize` control response at frame 4,
+and the engine does not answer `initialize` until the host has answered that JSON-RPC
+request; `notifications/initialized` follows the response, and `tools/list` arrives with the
+first turn or the first outbound request. A host whose inbound-request loop starts only after
+spawn returns therefore deadlocks its own handshake. The loop is live from the first byte,
+and a spawn's handshake wait runs concurrently with it. The server reports connected about
+0.9 s after the handshake (§6.2). Tools appear to the model as `mcp__afleet__<tool>`. The first tool is
 `send_user_file(files: [path], caption?: string, status: "normal" | "proactive",
 display?: "render" | "attach")`, mirroring the built-in tool's shape so the model's
 prompt-trained behaviour transfers (*Parity* area 13), because the built-in `SendUserFile`
@@ -526,6 +591,16 @@ process-environment fallback, which returns afleet's own environment verbatim an
 arm active when the shell capture fails. C1's corpus was recorded with the driving agent's
 `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_CHILD_SESSION` present (§6.10), a
 fidelity caveat a differential test suspects before it suspects the engine.
+
+Credentials the user placed in that shell — `ANTHROPIC_API_KEY` above all — are inherited,
+deliberately. afleet presents every session on the machine, adopted terminal sessions
+included, and those authenticate however the user's shell says; an owned channel that
+silently authenticated differently from a terminal session of the same user would be the
+worse surprise. The `CLAUDE*` scrub exists because those variables are *session markers*
+that misrepresent the child as nested, not because they are secrets. What the design owes
+the user is visibility of the billing context, not a hidden override: `system/init.apiKeySource`
+(exempt from redaction for this reason) is a readback C4 keeps on the session and C6 shows
+in the channel header whenever it is anything but the OAuth login.
 
 **ConfigHome** is derived from the same capture: `CLAUDE_CONFIG_DIR` when set, else
 `~/.claude`; `CLAUDE_CODE_PROJECT_DIR_NAME` is honored only together with it
@@ -954,7 +1029,11 @@ channels not in view.
 
 **Banners.** A `rate_limit_event` renders a banner at the top of the channel with the
 limit that applies and its reset time, and a row in Activity, until the next event clears
-it. An `auth_status` frame that reports a problem renders a banner with the state and a
+it. Whether the turn ran is decided by `status` alone. `overageStatus` is a separate fact
+about buying credits past the plan: an organisation that has switched overage off reports
+`status: "allowed"` together with `overageStatus: "rejected"` and
+`overageDisabledReason: "org_level_disabled"` on a turn that runs to completion (observed
+live on 2026-09-05), and that pair must not render as a refusal. An `auth_status` frame that reports a problem renders a banner with the state and a
 *Sign in* action that opens a Terminal tab running `claude auth login`; a healthy status
 clears it.
 
@@ -1342,6 +1421,35 @@ output committed), the SDK typings fetched on demand.
 | `~/Library/Application Support/afleet/state.json` | the namespaced store (§7.8) | atomic writes, schema version |
 | `~/Library/Logs/afleet/diagnostics.log` | metadata-only diagnostics: frame type, subtype, size, timing, request id, control answer behavior and classification without payload, lifecycle and ownership events | rotated, 50 MB budget |
 | `~/Library/Logs/afleet/capture/<configHomeHash>/<session-id>.ndjson` | raw frame capture, **only while the Developer setting is on** | redacted before disk: identity fields by key name, normalised and case-insensitive, on string values — the set C1's redactor fixes (`account`, `accountUuid`, `accountId`, `accountName`, `organization`, `organizationUuid`, `organizationId`, `organizationName`, `user`, `userId`, `userUuid`, `userName`, `subscription`, `subscriptionType`, `fullName`) plus any email-shaped string anywhere, and an `account`, `organization` or `user` object replaced whole; `update_environment_variables` frames; any string-valued field whose name contains token, oauth, key or secret, excluding the usage counters (`input_tokens`, `output_tokens`, `max_tokens`, `thinking_tokens` and their kin), with an assertion after redaction that every frame typed before it stays typed; the capture redactor implements the same rule set as C1's `Tools/probe/redact.py` in full — its secret words including `bearer`, its structural exemptions (`projectKey`, `apiKeySource` and the rest of `SECRET_EXEMPT` and `SECRET_STRUCTURE_PATHS`), its handling of arrays under identity names and its per-rule placeholders — so a divergence between the two is a defect, not a choice, with one stated exception: C1's home-directory and hostname rule is a publication rule and does not run at capture, because a capture stays in the user's own log directory and their own paths are the diagnostic they opened it for; any future affordance that exports or shares a capture applies that rule at export; MCP JSON-RPC bodies truncated to 4 KB; directory 0700, files 0600; 200 MB total budget, oldest deleted first; a session's capture is deleted when its transcript disappears from `<configHome>/projects`; *Delete diagnostics* in Settings removes everything |
+
+**Every engine byte that reaches a committed file is a publication.** The redaction rules
+above are stated for `Fixtures/`, but their premise is the byte's origin, not the directory:
+a `system/init` pasted into a test sample, a frame quoted in a stand-in's data file, a
+response body used as a test vector, a transcript excerpt in a report — each carries the
+account name, home directory, plugin inventory, socket path and identity fields of the
+machine it came from, and each goes through the publication rules (identity keys, secrets,
+email, home directory and hostname) before it is committed. Test inputs that exist to prove
+the redactor works use invented identifiers, never the author's own; a value the redactor
+must scrub is still a disclosure when it is committed as the input. Two correct principles
+collide on exactly this file: *prefer real evidence*, because invented sample data is how a
+wrong model slips past review, and *publish nothing real*. The resolution is that fidelity
+is a property of the **shape** — keys, nesting, types, the fields a consumer reads by name —
+and is verified key-for-key against the capture, while every **value** that could identify
+a machine or a person is replaced before the file is committed; a reviewer who checks the
+first also checks the second, and a sample praised for being a faithful derivation has not
+yet been checked at all. The single check before any merge to `main` is a grep of the whole
+tree for the recording machine's account name, home directory and the author's handles,
+expected to match nothing outside `docs/`.
+
+Two gaps in `Tools/probe/redact.py` are on record from C2's pre-merge review and are
+corrected on `main` as a C1 follow-up rather than tolerated as divergences: URL-query
+stripping ran only over `control_response` bodies, so `mcp_oauth_callback_url.callbackUrl`
+and `mcp_authenticate.redirectUri` on the *request* side kept their `code` and `state`; and
+`claude_oauth_callback` carries a bare `state` that no rule reached (`authorizationCode` is
+caught by the `authorization` secret word). Both rules are gated on C1's `OAUTH_SUBTYPES`,
+never on scanning strings; a `can_use_tool` request carrying a URL stays untouched. C2's
+capture redactor already implements both; its differential vectors gain the cases once
+`redact.py` has them.
 
 Nothing under `<configHome>` is written by afleet.
 
@@ -1927,8 +2035,9 @@ SwiftPM package or target that builds and tests without the children above it, p
   5 s wait, SIGTERM order. G2 (required, blocked-by C1.G1): every frame in every fixture
   decodes and re-encodes without loss of known fields, unknown frames become opaque
   values (item 36's ClaudeWire part). G3 (required): against the installed CLI, a
-  handshake completes, `mcp__afleet__send_user_file` appears in `system/init.tools` and
-  a round trip returns the file (S5's mechanism, item 29's wire half); `claude
+  handshake completes on the `initialize` response, the first turn's `system/init` lists
+  `mcp__afleet__send_user_file` in `tools` as observed on the event stream, and a round
+  trip returns the file (S5's mechanism, item 29's wire half); `claude
   --version` older than the baseline is refused (item 33's logic); the environment
   resolver yields the login shell's PATH and a `CLAUDE_CONFIG_DIR` set in `~/.zshrc` is
   honoured (items 34 and 48's wire half). G4 (required): `Tools/fetch-typings.sh`
@@ -2145,7 +2254,12 @@ SwiftPM package or target that builds and tests without the children above it, p
   environment table, `send(frame)`, `request(subtype, payload) async -> response`, an
   inbound stream of epoch-tagged frames and requests, `terminate()`, and the answer
   policy of §6.3 as the default handler for unknown inbound requests. The
-  `initialize` payload is §6.2's. Owner: C2. Binds C3, C4 and the fixtures of C1.
+  `initialize` payload is §6.2's, and spawn returns when the `initialize` response
+  arrives; the handshake value carries that response and nothing from `system/init`,
+  which is a first-turn frame on the event stream (§6.2). `sessionID` is known at
+  construction for `.new` and `.resume` and is pending for a fork until the first
+  `session_id`-bearing frame, `auth_status` in practice; the transport emits the
+  resolution as an event (§6.2). Owner: C2. Binds C3, C4 and the fixtures of C1.
 - **X4 Timeline model.** `TimelineItem` as §7.3; record identity is logical stream plus
   uuid or hash; the durable projection and overlay category lists and the wire exclusion
   list are named constants the differential test and the renderer both read; the
@@ -2183,7 +2297,9 @@ SwiftPM package or target that builds and tests without the children above it, p
   re-implements a mapping. Owner: C4. Binds C6.
 - **X11 Environment injection.** `ResolvedEnvironment` is captured once by ClaudeWire,
   carried as a Core value and handed to Workbench by the app; every git, gh, shell and
-  claude process inherits it. Owner: C2. Binds C2, C5, C7.
+  claude process inherits it. The claude child's environment is composed as §6.1 says:
+  prefix scrub, then `CLAUDE_CONFIG_DIR` set to the resolved ConfigHome root on every
+  spawn, then the table's entries and the pass-through set. Owner: C2. Binds C2, C5, C7.
 
 ### 17.6 Ordering and dependency map
 
@@ -2229,12 +2345,37 @@ directory, never under any config home.
 - **CLI drift mid-build.** A CLI upgrade changes a frame the children depend on.
   Mitigation: C1's census runs on every upgrade; the baseline stays pinned at 2.1.259
   until the census is clean and the fixtures are re-recorded in one commit.
+- **Tests that pass but cannot fail.** A test asserts an outcome the system's own structure
+  already guarantees, so it goes green against the defect it was written to catch. C2 alone
+  produced six instances by Task 11, across four different causes: an assertion enforced by
+  the data structure under test rather than by the code being tested; a timing window that
+  the child process's own write-then-exit ordering always satisfied; an error-bridging field
+  exercised only with a value type whose bridged form is constant; and a parser that silently
+  skips the one declaration the test exists to compare, while asserting nothing about having
+  parsed anything at all. Mitigation, binding on every child: a test written to prove a fix
+  is *demonstrated failing against the pre-fix code* before the fix is accepted, and where
+  the break cannot be executed — signalling a process group would destroy the test runner —
+  the substitute is a trace assertion that the dangerous path was never entered, stated as
+  such. A test that compares two things also asserts that it found them, and a floor on
+  *did we parse anything* is not a floor on *did we parse the thing we compare*: C2's seventh
+  instance passed a count floor and three key checks while the property bodies it exists to
+  compare had stopped parsing entirely, because the discriminants and the bodies are read by
+  different patterns. The rule binds prescriptions as well as code — that seventh instance
+  was a remedy an owner specified for an earlier non-discriminating test, and it inherited
+  the same defect. Reviewers ask what the assertion would have to see in order to fail, not
+  whether it happens to be true.
 - **Spike fallbacks fire.** S7 (native markdown), S1 (GhosttyKit) or S3 (Monaco) fail
   their criteria. Mitigation: each has a named fallback in §15 that keeps the child's
   contract; the fallback is a Revision Note, not a re-cut.
 - **Swift 6.3 strict concurrency friction** in the actor-based process layer and the
   SwiftUI shell. Mitigation: C2 sets the concurrency conventions (actors for processes,
-  `Sendable` frames, `@MainActor` view models) that later children inherit.
+  `Sendable` frames, `@MainActor` view models) that later children inherit. Those
+  conventions state a *property*, not an allowlist: an escape from checked concurrency is
+  permitted where a type is a single-owner box whose state is reachable from one place that
+  serialises every access, and each use documents which mechanism serialises it. An
+  enumeration of blessed type names goes stale silently the first time a legitimate new case
+  appears, and an inheriting child cannot tell a missing entry from a violation; a stated
+  property lets a reviewer judge a new case at the site.
 - **Live-CLI acceptance costs tokens and time.** Mitigation: every UI item that can be
   driven by `fake-claude` is, and the installed-CLI items are batched into one
   walkthrough session per child.
@@ -3261,6 +3402,122 @@ retrospectives, and this map points at them. Recomposition (§17.1) closes the u
   and a `progressToken`.
   Impact: §6.8 records both; a host must tolerate the `_meta` and must not read the first
   turn as "listed, therefore called".
+- Observation: The safest-looking place to put an error string is the one place it must not
+  go, and a plausible instruction to "log the text rather than lose it" walks straight into
+  it.
+  Evidence: C2's Task 10. The executor asked its worker to log unexpected MCP tool-error
+  text so it would not be silently dropped; the review rejected the implementation, and the
+  executor then rejected the reviewer's alternative of widening the log's contract. Two
+  facts settled it: the error description is frame-derived payload, and the diagnostics log
+  is the one artefact §11's redactor never runs over. A second detail made the code inert
+  anyway — the sink the MCP server would have written to is a constructor argument the
+  transport never populates, so in shipped code the text was lost exactly as before while a
+  direct unit test made it look covered.
+  Impact: §6.3 states metadata-only as a binding contract with the payload-derivation test
+  attached, so the next agent reaching for the same convenience meets the rule before the
+  review does.
+- Observation: The dominant defect class in wave 1 is not wrong code but tests that cannot
+  fail, and reviewers catch them far more reliably than authors do.
+  Evidence: six instances in C2 by Task 11. The most instructive is the flood test, the
+  single piece of evidence for the transport redesign's headline property — that a stalled
+  consumer makes the engine block on its own pipe rather than growing memory without bound.
+  One of its assertions was enforced by the bounded channel whatever fed it, and the other
+  held whether the child blocked or streamed six megabytes out unimpeded; a reader that
+  eagerly drained everything into memory passed it unchanged. Five of the six were found by
+  a reviewer; the sixth was found by its author only by running the demonstration rather
+  than by re-reading the test.
+  Impact: §17.7 carries the mitigation as a binding practice — prove the test fails against
+  the break, and assert that a comparison found something to compare.
+- Observation: A fixture's silence about a field means different things depending on how the
+  fixture was made, and "the fixture is authoritative" is wrong without that distinction.
+  Evidence: C2's Task 12. Told to treat a fixture as right and the decoder as wrong until
+  proven otherwise, a worker faithfully made four `result` fields optional because ten result
+  lines omitted them. Every one of those lines came from the two *synthetic* fixtures; all
+  fifteen recorded fixtures carrying a result frame list all four as required. C1 had omitted
+  them deliberately and said so twice in `Tools/probe/synthetic/dialogs.py`: a frame "holds
+  the keys the bundle shows and no more", because "a fabricated zero would enter the census as
+  a shape nothing observed". Fixing the generator would therefore have inflicted the exact
+  harm C1 was guarding against, to make a decoder test more convenient.
+  Impact: the authority rule is stated with its premise attached — a *recorded* fixture is
+  authoritative about what the engine sends; a *synthetic* one is authoritative only about the
+  shape it was built to exercise, and its silence is evidence about its constructor, not about
+  the engine. `fixture.json`'s `synthetic` flag is what a gate keys on. C2's G2 asserts
+  losslessness and opaque counts over the whole corpus, asserts typed decoding against the
+  recorded fixtures only, and surfaces a synthetic decode failure as a named finding rather
+  than accepting it silently or failing on it.
+- Observation: The engine's `system/init` is a first-turn frame, not a handshake frame, and a
+  transport written to wait for it at spawn hangs for its full timeout on every real launch.
+  Evidence: C2's live gate G3. Across all sixteen recorded fixtures the `initialize` response
+  is the first frame out; `system/init` follows the first `user` frame in fourteen and is
+  absent in the two that never send one. Six zero-cost live launches reproduced the timeout.
+  The bundle builds the frame inside the per-turn query path. Eleven tasks of review missed
+  it because the scripted stand-in every transport test ran against emitted `system/init`
+  right after `initialize`, having been written to the specification's assumption — every
+  test agreed with a wrong model and passed. C1's fake-claude was never wrong, because it
+  replays recorded frames.
+  Impact: §6.2 and X3 state that the handshake completes on the `initialize` response and
+  that `system/init` is an event-stream frame; C2's G3 is amended to observe it there. The
+  stand-in's contract becomes "models the recorded engine; behaviour no fixture shows is a
+  stand-in defect". G1 could not have caught this by construction — it is defined as provable
+  without the real CLI — which is the case for G3's existence in one line.
+- Observation: `overageStatus: "rejected"` arrives on turns that run, and a guard that reads
+  it as a refusal wastes exactly the budget it exists to protect.
+  Evidence: C2's G3. Its live-signal guard keyed on `overageStatus`; the shared scratch
+  organisation has overage disabled, so an allowed turn reported `status: "allowed"`,
+  `overageStatus: "rejected"`, `overageDisabledReason: "org_level_disabled"`, and the guard
+  read the completed turn as rejected. One model turn was spent learning this; the second
+  made the gate assert the round trip, and the worker stopped there.
+  Impact: §7.6 states that `status` alone decides whether a turn ran and that the
+  overage pair is a fact about credit purchase, not about the turn. The guard now keys on
+  `status` with a regression test for the overage-disabled shape.
+- Observation: The in-process MCP server connects after the handshake, not with it.
+  Evidence: C2's G3 measured about 0.9 s between the `initialize` response and the `afleet`
+  server reporting connected; an `mcp_status` sent at once returned an empty list.
+  Impact: §6.2 records the latency; positive connection checks read the first `system/init`
+  or poll after a settle, and no launch fails on the first empty answer.
+- Observation: The redaction discipline was read as being about a directory, and a real
+  capture walked past it by being called a sample.
+  Evidence: C2's branch committed `ClaudeWire/Tests/Support/Samples/system_init.json`, a
+  genuine `system/init` from the developer's machine — home directory, account name, the
+  full plugin, skill and agent inventory, a socket path — as the stand-in's shape sample,
+  and used the author's own handle and name as redactor test vectors. Four gates passed
+  over it, because none of them asks the question. A grep of the branch diff for the
+  account name found it in a minute.
+  Impact: §11 states the rule by the byte's origin — every engine byte that reaches a
+  committed file is a publication — requires invented identifiers in redactor test inputs,
+  and names the pre-merge grep as a fixed step.
+- Observation: The metadata-log contract was made binding in the morning and violated on a
+  different path by the evening, through the same door — a free-form string.
+  Evidence: the pre-merge Codex review of C2 found `diagnostics.record(.lifecycle("exited
+  \(final)"))` on the exit path, where `final` carries up to fifty lines of raw child
+  stderr. The Task 10 ruling had closed the MCP tool-error case; the exit path was already
+  written and nobody re-read it against the new rule.
+  Impact: §6.3 names the shape — a `String`-carrying event case — rather than the instance,
+  and requires structured fields or a declared fixed message set.
+- Observation: The `CLAUDE*` prefix scrub was deleting the very variable ConfigHome is
+  derived from, so afleet could believe a session lived in one home while the child wrote to
+  another.
+  Evidence: C2's review panel (scalpel-4#1). `LaunchConfiguration` restored only the *test*
+  override after the scrub; §6.1's "when an override is chosen, `CLAUDE_CONFIG_DIR` is added
+  back" had been read as the test hook. The G3 live tests never saw it because they set the
+  override.
+  Impact: §6.1 and X11 set `CLAUDE_CONFIG_DIR` to the resolved root on every spawn.
+- Observation: The first ruling on that finding replaced the prefix rule with four marker
+  names, and was wrong; the reversal is the finding.
+  Evidence: the four came from a bundle scan that looked for four. A literal scan of 2.1.258
+  finds forty-four names the engine sets on children and seven hundred it reads. The
+  executor had already generalised a principle from the first ruling ("when the members are
+  fixed and knowable, name them") on a premise nobody had checked.
+  Impact: §6.1 records why the prefix rule stands — when a rule will be stale either way,
+  choose the one whose staleness announces itself — and why an allowlist is acceptable for
+  pass-through and not for markers. Process rule for every reconciling architect: never
+  generalise from a finding whose evidence you have not audited yourself.
+- Observation: A fork's true identity is on the wire before any turn.
+  Evidence: `auth_status` at frame 5 in all sixteen recorded fixtures carries `session_id`,
+  equal to the `--resume` target in both resume fixtures. Raised by scalpel-4#3, which found
+  the transport keeping the source id for a fork.
+  Impact: §6.2 and X3 make a fork's identity pending until that frame and forbid reading it
+  off `system/init`.
 
 ## Outcomes & Retrospective
 
@@ -3690,3 +3947,85 @@ Pending — written at finish.
   `main`; the child branch's early fixture commits carry the recording machine's account
   name in two `ls -l` owner columns, redacted before merge and never pushed before it.
   §17.9 updated. C2.G2 can now run against the complete corpus.
+- 2026-09-05: §6.3 promotes metadata-only diagnostics from a default to a binding contract
+  and states its test: no payload-derived value in the diagnostics log, because that log is
+  unredacted and §11's redactor is structural and would pass a free-form string through. The
+  MCP tool-failure case is written out with the substitute (tool name, error type, `NSError`
+  domain and code). Raised by C2's Task 10 review, where the executor declined the
+  reviewer's alternative of widening the contract and amending §11 — the correct call, since
+  the redaction design rests on the metadata log being safe by construction and the capture
+  being the redacted artefact. Flags C2 (in flight), C6 and C7, which both write
+  diagnostics.
+- 2026-09-05: §17.7's concurrency-convention mitigation now requires the conventions C2
+  hands down to be stated as a property with a documented serialisation mechanism, rather
+  than as an enumerated list of permitted types. Raised by C2's Task 10, whose review found
+  three sound uses outside the enumerated set — the defect was in the constraint, not the
+  code. C2 amends its own plan's Global Constraints, which is where that wording lives; this
+  note binds the *form* for C3 through C7, which inherit the convention. The same
+  enumeration-goes-stale failure has now appeared three times in C2 (the environment-variable
+  list, the secret-exemption summary, this constraint), so the form is the finding, not the
+  instance.
+- 2026-09-05: The rule that protocol facts come from C1's fixtures gains the distinction that
+  makes it safe: recorded fixtures are authoritative about engine behaviour, synthetic ones
+  only about the shapes they were constructed to exercise. A synthetic fixture's missing field
+  is not evidence the engine omits it. Raised by C2's Task 12, where the undifferentiated rule
+  drove four always-sent `result` fields optional in the decoder on the strength of two
+  synthetic fixtures, against fifteen unanimous recordings — which would have silently
+  disabled exactly the drift detection the two-stage decoder exists to provide. Reverted;
+  C1's generator is deliberately partial and stays as it is. Binds every child that reads
+  `Fixtures/`, and the root `CLAUDE.md` routing line should be read with this attached.
+  The settling evidence is the bundle, not the corpus, and the distinction matters for how
+  this kind of question is answered in future: a census records what was *observed*, while
+  the engine source records what is *promised*, and only a promise justifies keeping a field
+  required against a fixture that omits it. In `cli.pretty.js` every result frame is built by
+  one helper that spreads `{type, duration_ms, uuid}` last, so those cannot be overridden by
+  any caller, and the paths supplying `total_cost_usd` and `session_id` do so unconditionally;
+  no *stream-json* path emits a result frame missing any of the four. The scope matters: one
+  `type: "result"` literal in the binary does omit `session_id`, but it goes to the worker
+  event channel, never to stdout, so the guarantee is about the wire this app reads and not
+  about every result-shaped object the engine constructs. Verified first-hand at 2.1.258.
+- 2026-09-05: §6.2 and X3 now say the handshake completes on the `initialize` response and
+  that `system/init` is a first-turn frame delivered on the event stream, never on the
+  handshake value; C2's G3 acceptance observes it there. Raised by C2's live gate, whose
+  first real launch timed out because `spawn()` waited for a frame the engine does not send
+  until a message is submitted. §7.3's "`system/init` is expected at the start of every
+  turn" was already correct; §6.2's "both are kept on the session object" had been read as
+  "both arrive with the handshake". Flags C2 (in flight, fix wave dispatched), C3 and C4
+  (both consume `Handshake`; anything written to read `tools`, `capabilities` or
+  `mcp_servers` off it must read them off the first `system/init` on the stream instead).
+- 2026-09-05: §6.2 records that the in-process MCP server connects about 0.9 s after the
+  `initialize` response and that an immediate `mcp_status` is empty; §7.6 records that
+  `status` alone decides whether a turn ran and that `overageStatus: "rejected"` with
+  `overageDisabledReason: "org_level_disabled"` is the normal shape for an organisation
+  with overage off. Both measured live by C2's G3 on 2.1.260. Flags C4 (post-handshake
+  checks, §6.12) and C6 (banners).
+- 2026-09-05: §6.8 states the bring-up ordering as a host constraint: the in-process
+  server's JSON-RPC `initialize` arrives before the engine's `initialize` response in every
+  recorded fixture, so the inbound-request loop must be serving `mcp_message` while the
+  handshake is still pending. Raised by C2's Task 13 review, which found the scripted
+  stand-in modelling the bring-up *after* the handshake and only in one opt-in scenario —
+  the same class of unfaithfulness that hid the `system/init` defect. C2's transport already
+  behaves correctly (G3 passed live); the stand-in is being brought into line. Flags C2 (in
+  flight).
+- 2026-09-05: §11 gains the origin rule — every engine byte that reaches a committed file
+  is a publication and goes through the publication rules first, wherever it lives — plus
+  the requirement that redactor test inputs use invented identifiers, and the pre-merge
+  tree grep as a fixed step. Raised by the pre-merge leak sweep of C2's branch, which found
+  a real `system/init` committed as a stand-in sample. Flags C2 (fix wave in flight) and
+  every later child that commits engine output in any form.
+- 2026-09-05: §6.9 records that shell credentials, `ANTHROPIC_API_KEY` first, are inherited
+  by design and that the user's protection is the `apiKeySource` readback in the channel
+  header, not a hidden scrub; raised by the pre-merge Codex review of C2 and dismissed as
+  design intent with the reason written down. §6.3 names the free-form-string event case
+  as the bypass shape after the exit path was found interpolating an `ExitStatus` with its
+  stderr tail into the metadata log; C2's fix wave replaces it with structured fields.
+  Flags C2 (in flight), C4 and C6 (the `apiKeySource` readback), and C7 (diagnostics).
+- 2026-09-05: §6.1 and X11 now set `CLAUDE_CONFIG_DIR` to the resolved ConfigHome root on
+  every spawn after the prefix scrub, pass `CLAUDE_CODE_PROJECT_DIR_NAME` through beside it,
+  and add a pinned pass-through set for provider configuration; the prefix rule itself
+  stands, with the bundle count as the reason a marker list was rejected a second time.
+  §6.2 and X3 make a fork's `sessionID` pending until the first `session_id`-bearing frame
+  (`auth_status`, frame 5) and forbid reading it off `system/init`. §11 records two
+  `redact.py` gaps as a C1 follow-up on `main`. Raised by C2's whole-branch review panel
+  (scalpel-4#1, scalpel-4#3, sweep#2) and its Wave A worker. Flags C2 (Wave B in flight),
+  C1 (follow-up), C4 (channel keying on the identity event; ConfigHome), C5 and C7 (X11).

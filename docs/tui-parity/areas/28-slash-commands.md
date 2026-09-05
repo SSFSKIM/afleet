@@ -2,7 +2,7 @@
 
 # 28 — Slash commands: TUI-vs-headless gap inventory
 
-Source chapter: `/Users/new/claude-code-bundle/2.1.257/SPEC/28-slash-commands.md` (read in full,
+Source chapter: `/Users/probe/claude-code-bundle/2.1.257/SPEC/28-slash-commands.md` (read in full,
 §25 verbatim prompt bodies skimmed, §26 telemetry skipped per brief).
 Live cross-check: `/tmp/afleet-gap/init-dump.json` (2.1.259 `initialize` control_response,
 102 advertised commands).
