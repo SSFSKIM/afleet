@@ -274,7 +274,8 @@ public enum TranscriptRecord: Sendable, Hashable {
 
   public var kind: String { get }             // the wire `type`, e.g. "user", "last-prompt"
   public var uuid: String? { get }
-  public func key(in stream: LogicalStream) -> RecordKey
+  public var contentHash: String? { get }    // the uuid-less kinds' canonical-JSON SHA-256 (the `canonicalHash` above); nil for a uuid record
+  public func key(in stream: LogicalStream, ordinal: Int) -> RecordKey   // ordinal ignored for a uuid record; a sequence's come from `RecordKey.keys(for:in:)`
 }
 ```
 
@@ -344,7 +345,7 @@ resolved through it; a watcher event is resolved through it; the fixture loader 
 `_slug_` placeholder through it because the placeholder is a slug like any other. The
 session id is read from the file name (`<sessionId>.jsonl`) or the directory
 (`<sessionId>/subagents/agent-<taskId>.jsonl`), never from the slug. A relocation therefore
-changes nothing about identity: `StreamIngestion.relocated(to:)` rebinds the alias and
+changes nothing about identity: `StreamIngestion.relocated(mainPath:)` rebinds the alias and
 carries the byte offset, and the two `filePath` values `session-mirror-relocation` records
 resolve to one stream.
 
@@ -358,7 +359,12 @@ the rewrite rebuild below, which replaces a stream's keys wholesale. Two deliver
 append are matched by hash and per-source occurrence index beyond the open offset: the k-th
 mirror delivery of a content is the k-th file line of that content past the offset, whichever
 arrives first assigns the ordinal, and the other is a counted duplicate (the file's binds the
-locator). Records `loadEarlier` prepends take fresh ordinals and move no published key.
+locator). The matching presumes what the channel flow provides: `open` runs before the
+epoch's first mirror entry and at an offset no later than the first line that mirror carries —
+a fresh session's file does not exist before its first turn, a resumed file is opened at
+launch, and `session-mirror-resume`'s `streams.json` offset is that point on disk — because a
+mirror entry re-delivering a uuid-less line the open already read has no uuid to match by and
+would be applied again. Records `loadEarlier` prepends take fresh ordinals and move no published key.
 
 ### The transcript reader (`Reader/`)
 
@@ -368,8 +374,8 @@ records after an offset and the new length, sealing a torn tail the way the engi
 final line without a terminator is held back and re-read on the next call, and a leading
 `\n` the engine writes to seal a torn tail is skipped); `readWindow(policy:)` returns a
 bounded window from the end, aligned back to a record boundary and then extended
-backwards until the leaf path is closed, with `earlierAvailable: true` and the offset the
-next `readEarlier(before:)` continues from; `read(at:length:)` returns one record's bytes,
+backwards until the leaf path is closed, with a `WindowMarker` (`earlierAvailable: true`, `continueBefore` the offset the
+next `readEarlier(before:)` continues from); `read(at:length:)` returns one record's bytes,
 and every read returns `ranges: [ByteRange]` (`offset`, `length`) parallel to its records; the
 reader is stream-less, and `RecordLocator` is a stream plus one of these ranges. A window is
 *closed* when the leaf the file names lies inside it and the earliest record of the leaf's
@@ -1167,6 +1173,12 @@ Pending — written at finish.
 
 ## Revision Notes
 
+- 2026-09-05: v2.3, declaration audit before the third review (no design change). The
+  `TranscriptRecord` block gains `contentHash` and `key(in:ordinal:)`, which the v2.3 prose and
+  the plan already had while the block still read `key(in:)`; the reader's window is named
+  `WindowMarker` where it is returned; the identity paragraph says `relocated(mainPath:)` as
+  the `StreamIngestion` block does; the occurrence-matching paragraph states its precondition
+  (open before the epoch's first mirror entry, at an offset no later than that entry).
 - 2026-09-05: v2.3, after the Codex adversarial review of plan v2 (eight findings, all
   verified real and accepted, each shaped by a coordinator ruling) and a merge of `main` at
   `ca68f2e` (C2's `WireEventPolicy` corrective; the corpus unchanged). Record keys: a
