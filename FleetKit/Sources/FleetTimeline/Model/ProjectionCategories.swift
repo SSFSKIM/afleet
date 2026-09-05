@@ -6,8 +6,9 @@ import ClaudeWire
 public enum RecordKindMatcher: Hashable, Sendable {
     case kind(String)
     case system(String)
-    /// A `user` record by its `message.origin.kind` — the engine's own injected messages, which reach the host
-    /// through the transcript and the mirror but never as a `user` frame.
+    /// A `user` record by its record-level `origin.kind` — `origin` is a key of the record, not a key under
+    /// `message` — the engine's own injected messages, which reach the host through the transcript and the
+    /// mirror but never as a `user` frame.
     case userOrigin(String)
     case userWhere(UserFlag)
     /// `sidechainRoot`: an agent stream's opening prompt — `isSidechain` with no `parentUuid`. Every main-stream
