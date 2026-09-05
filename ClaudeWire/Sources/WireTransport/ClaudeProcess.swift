@@ -276,7 +276,7 @@ public actor ClaudeProcess {
                 let id = request.id
                 mcpTasks[id] = Task { [mcpServer] in
                     let (reply, invocation, failure) = await mcpServer.handle(m.message)
-                    await self.deliverMCP(id, reply: reply, invocation: invocation, failure: failure)
+                    await self.deliverTrackedMCP(id, reply: reply, invocation: invocation, failure: failure)
                 }
             default:
                 let (reply, invocation, failure) = await mcpServer.handle(m.message)
@@ -284,16 +284,36 @@ public actor ClaudeProcess {
             }
         }
     }
+    /// Delivery for a `tools/call` that was routed to a task, and only while that task is still the
+    /// registered in-flight one.
+    ///
+    /// `control_cancel_request` and the exit path both remove and cancel the task, and neither can stop a tool
+    /// that is insensitive to cancellation, or one that finished a moment before the cancel arrived. Such a
+    /// tool still returns — and without this check its answer is written to a child that has moved on and its
+    /// host invocation is published to the user as work that was done.
+    private func deliverTrackedMCP(_ id: RequestID, reply: MCPReply, invocation: HostToolInvocation?, failure: MCPToolFailure?) async {
+        guard mcpTasks.removeValue(forKey: id) != nil else {
+            diagnostics.record(.lifecycle(.mcpDeliveryAbandoned(requestID: id, reason: .cancelled), epoch: epoch))
+            return
+        }
+        await deliverMCP(id, reply: reply, invocation: invocation, failure: failure)
+    }
     /// The MCP server has no sink of its own and no epoch; the failure metadata rides out on its return and
     /// is recorded here, where both are known. Metadata only — the error's own description is frame-derived
     /// payload and the diagnostics log is metadata by contract.
     private func deliverMCP(_ id: RequestID, reply: MCPReply, invocation: HostToolInvocation?, failure: MCPToolFailure?) async {
-        mcpTasks[id] = nil
         if let failure {
             diagnostics.record(.mcpToolFailure(tool: failure.tool, errorType: failure.errorType, domain: failure.domain, code: failure.code, epoch: epoch))
         }
         let rpc: JSONRPCMessage = { if case .response(let r) = reply { return r }; return .response(.init(id: .number(0), result: .object([:]))) }()
-        try? await writeAnswer(id, .mcpResponse(rpc), subtype: "mcp_message")
+        do { try await writeAnswer(id, .mcpResponse(rpc), subtype: "mcp_message") }
+        catch {
+            // The reply never reached the child — a closed stdin, an EPIPE, an exit — so nothing was
+            // delivered. `hostToolInvoked` is a user-visible item ("file sent"); publishing it here would
+            // announce a delivery that did not happen, which is the one thing this event must never do.
+            diagnostics.record(.lifecycle(.mcpDeliveryAbandoned(requestID: id, reason: .writeFailed), epoch: epoch))
+            return
+        }
         if let invocation { await channel.push(.hostToolInvoked(invocation, epoch)) }
     }
     private func subtype(of frame: Frame) -> String? {

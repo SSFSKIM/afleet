@@ -45,6 +45,9 @@ public enum DiagnosticEvent: Sendable {
 /// Which of the three exit-publication sites found the event channel already finished.
 public enum ExitPublicationSite: String, Sendable { case launchFailure = "launch_failure", exit, neverLaunched = "never_launched" }
 
+/// Why an MCP reply the in-process server produced was never delivered to the child.
+public enum MCPDeliveryAbandonment: String, Sendable { case cancelled, writeFailed = "write_failed" }
+
 /// The lifecycle notices, one case per thing that can be reported.
 ///
 /// This used to be a free-form `String`, and a free-form String in a metadata log is an open door: the
@@ -62,6 +65,9 @@ public enum LifecycleNotice: Sendable {
     case handshakePendingUnderReported(decoded: Int, onWire: Int, key: String)
     case uncorrelatedControlResponse(requestID: RequestID)
     case readerDrainDeadlineExceeded
+    /// A `tools/call` produced a reply that was not sent on: the request had been cancelled, or the write
+    /// failed. Either way no `hostToolInvoked` was published, which is the point of recording it.
+    case mcpDeliveryAbandoned(requestID: RequestID, reason: MCPDeliveryAbandonment)
     case exited(code: Int32)
     case exitedOnSignal(Int32)
 
@@ -78,6 +84,8 @@ public enum LifecycleNotice: Sendable {
             ["what": .string("uncorrelated_control_response"), "request_id": .string(requestID.rawValue)]
         case .readerDrainDeadlineExceeded:
             ["what": .string("reader_drain_deadline_exceeded")]
+        case .mcpDeliveryAbandoned(let requestID, let reason):
+            ["what": .string("mcp_delivery_abandoned"), "request_id": .string(requestID.rawValue), "reason": .string(reason.rawValue)]
         case .exited(let code):
             ["what": .string("exited"), "code": .integer(Int64(code))]
         case .exitedOnSignal(let signal):

@@ -93,6 +93,24 @@ final class Harness {
     func stderrLines() async -> [String] { await log.events.compactMap { if case .stderr(let s, _) = $0 { return s }; return nil } }
 }
 
+/// A tool that finishes what it started whatever anyone asks of it, and claims a delivery when it does.
+///
+/// `Task.sleep` would not do: it throws on cancellation, which would make the tool cancellation-*sensitive*
+/// and let the tests above pass without the fixes they exist for. The point is a tool the cancellation cannot
+/// reach, because that is the tool the guarantee is about.
+struct CancellationDeafTool: MCPTool {
+    var name: String { "slow_send" }
+    var description: String { "sleeps through cancellation, then reports a sent file" }
+    var inputSchema: JSONValue { .object(["type": .string("object"), "properties": .object([:])]) }
+    func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.6) { c.resume() }
+        }
+        return .text("sent", invocation: .sentFile(paths: [context.cwd.appendingPathComponent("hello.txt")],
+                                                   caption: nil, status: "normal", display: nil))
+    }
+}
+
 final class ClaudeProcessTests: XCTestCase {
     func testHandshakeAndEcho() async throws {
         let h = try Harness(); let p = h.make(scenario: "")
@@ -230,6 +248,56 @@ final class ClaudeProcessTests: XCTestCase {
                        "an unknown subtype must never be surfaced as a prompt")
         XCTAssertEqual(events.filter { if case .policyAnswered(let r, _) = $0 { return r.id.rawValue == "u2" }; return false }.count, 1,
                        "answered exactly once: the live duplicate is still deduplicated")
+        await p.terminate()
+    }
+    /// Group 3g. Outer cancellation removes and cancels the in-flight task, and neither reaches a tool that is
+    /// insensitive to cancellation. Such a tool still returns — and its reply used to be written to a child
+    /// that had withdrawn the request, with its host invocation published to the user as work that was done.
+    ///
+    /// Both halves are checked against something real rather than an internal flag: the stand-in logs every
+    /// `control_response` it receives, so the absence of `MCP m8` is the reply genuinely not arriving.
+    func testACancelledMCPCallNeitherAnswersNorPublishesADelivery() async throws {
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "mcp_slow_tool,cancel_mcp", diagnostics: sink, extraTools: [CancellationDeafTool()])
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr("CANCELLED m8", _) = $0 { return true }; return false }, "the child cancelled the call")
+        try await Task.sleep(for: .milliseconds(1200))     // well past the tool's own 600 ms
+        let stderr = await h.stderrLines()
+        XCTAssertFalse(stderr.contains { $0.hasPrefix("MCP m8 ") }, "a late mcp_response reached the child: \(stderr)")
+        let events = await h.log.events
+        XCTAssertFalse(events.contains { if case .hostToolInvoked = $0 { return true }; return false },
+                       "a cancelled call published a delivery the user would see")
+        XCTAssertTrue(sink.entries.contains { $0.contains("\"what\":\"mcp_delivery_abandoned\"") && $0.contains("\"reason\":\"cancelled\"") },
+                      "entries: \(sink.entries.suffix(6))")
+        await p.terminate()
+    }
+    /// Group 3h. The reply write was discarded with `try?` and `hostToolInvoked` published unconditionally, so
+    /// a stdin that had gone away produced a user-visible "file sent" for a reply the child never received.
+    /// The write is made to fail for real — the stand-in closes its read end of stdin and keeps running, so
+    /// the write gets EPIPE while the request is still very much in flight and the cancellation check of 3g
+    /// cannot be what suppresses the event.
+    func testADeliveryIsPublishedOnlyAfterTheWriteSucceeds() async throws {
+        let h = try Harness(); let sink = RecordingDiagnostics()
+        let p = h.make(scenario: "close_stdin,mcp_slow_tool,stay_alive", diagnostics: sink, extraTools: [CancellationDeafTool()])
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .stderr("STDIN CLOSED", _) = $0 { return true }; return false }, "the child let go of its read end of stdin")
+        try await Task.sleep(for: .milliseconds(1200))
+        let events = await h.log.events
+        XCTAssertFalse(events.contains { if case .hostToolInvoked = $0 { return true }; return false },
+                       "\"file sent\" was published though the reply never reached the child")
+        XCTAssertTrue(sink.entries.contains { $0.contains("\"what\":\"mcp_delivery_abandoned\"") && $0.contains("\"reason\":\"write_failed\"") },
+                      "entries: \(sink.entries.suffix(6))")
+        await p.terminate()
+    }
+    /// The control: the same tool, uncancelled and with a stdin that works, does publish its delivery. Without
+    /// this the two tests above would hold for a transport that never published `hostToolInvoked` at all.
+    func testAnUninterruptedDeliveryIsStillPublished() async throws {
+        let h = try Harness()
+        let p = h.make(scenario: "mcp_slow_tool", extraTools: [CancellationDeafTool()])
+        _ = try await p.spawn()
+        _ = await h.expect({ if case .hostToolInvoked(.sentFile(let paths, _, _, _), _) = $0 { return paths.first?.lastPathComponent == "hello.txt" }; return false },
+                           "an uninterrupted delivery must be published")
+        _ = await h.expect({ if case .stderr(let l, _) = $0 { return l.hasPrefix("MCP m8 ") }; return false }, "and the reply must reach the child")
         await p.terminate()
     }
     /// Carried decision 3: `ControlSuccess.requestFrames` compact-maps with `try?`, so an element that does

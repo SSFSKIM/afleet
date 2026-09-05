@@ -57,10 +57,23 @@ public actor AfleetMCPServer {
     public let cwd: URL
     private let tools: [String: any MCPTool]
     private var inFlight: [JSONRPCID: Task<MCPToolResult, any Error>] = [:]
+    /// Ids a `notifications/cancelled` has claimed while their call was still in flight.
+    ///
+    /// `Task.cancel()` alone is a request, not an outcome: a tool that ignores cancellation, swallows it, or
+    /// finished a moment before the notification was handled still returns a result, and that result would go
+    /// out as a success carrying a host invocation for work the client has already withdrawn. This is the
+    /// durable record that decides the answer once the call comes back. Bounded by construction — an id is
+    /// entered only while `inFlight` holds it, and leaves with it.
+    private var cancelled: Set<JSONRPCID> = []
 
     public init(serverVersion: String, cwd: URL, tools: [any MCPTool]) {
         self.serverVersion = serverVersion; self.cwd = cwd
         self.tools = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0) })
+    }
+
+    /// The one answer a cancelled call may produce, whatever the tool went on to return.
+    private static func cancelledResponse(_ id: JSONRPCID) -> MCPReply {
+        .response(.error(.init(id: id, error: .init(code: -32800, message: "Request cancelled"))))
     }
 
     public func handle(_ message: JSONRPCMessage) async -> (MCPReply, HostToolInvocation?, MCPToolFailure?) {
@@ -68,7 +81,7 @@ public actor AfleetMCPServer {
         case .notification(let n):
             if n.method == "notifications/cancelled", let idv = n.params?["requestId"] {
                 let id: JSONRPCID? = idv.intValue.map(JSONRPCID.number) ?? idv.stringValue.map(JSONRPCID.string)
-                if let id { inFlight[id]?.cancel() }
+                if let id, let running = inFlight[id] { cancelled.insert(id); running.cancel() }
             }
             return (.notificationAck, nil, nil)
         case .response, .error:
@@ -99,9 +112,10 @@ public actor AfleetMCPServer {
                 let args = r.params?["arguments"] ?? .object([:])
                 let task = Task { try await tool.call(arguments: args, context: MCPToolContext(cwd: cwd)) }
                 inFlight[r.id] = task
-                defer { inFlight[r.id] = nil }
+                defer { inFlight[r.id] = nil; cancelled.remove(r.id) }
                 do {
                     let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+                    if cancelled.contains(r.id) { return (Self.cancelledResponse(r.id), nil, nil) }
                     // A failure never carries a host invocation out of this actor. Task 10 turns the
                     // invocation into a user-visible item ("file sent"), so letting one ride an
                     // isError result would announce something that did not happen. No tool sets both
@@ -109,10 +123,12 @@ public actor AfleetMCPServer {
                     let invocation = result.isError ? nil : result.hostInvocation
                     return (.response(.response(.init(id: r.id, result: .object(["content": .array(result.content), "isError": .bool(result.isError)])))), invocation, nil)
                 } catch let e as MCPArgumentError {
+                    if cancelled.contains(r.id) { return (Self.cancelledResponse(r.id), nil, nil) }
                     return (.response(.error(.init(id: r.id, error: .init(code: -32602, message: e.message)))), nil, nil)
                 } catch is CancellationError {
-                    return (.response(.error(.init(id: r.id, error: .init(code: -32800, message: "Request cancelled")))), nil, nil)
+                    return (Self.cancelledResponse(r.id), nil, nil)
                 } catch {
+                    if cancelled.contains(r.id) { return (Self.cancelledResponse(r.id), nil, nil) }
                     // An unexpected throw stays a runtime failure (isError), not a protocol error —
                     // but this text is model-visible, and a Foundation error's description carries the
                     // full filesystem path it failed on. Summarise instead of echoing it.

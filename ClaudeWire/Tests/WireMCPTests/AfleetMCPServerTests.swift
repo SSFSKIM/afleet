@@ -2,6 +2,21 @@ import XCTest
 import WireFrames
 import WireMCP
 
+/// A tool the cancellation cannot reach: it sleeps on a dispatch queue rather than with `Task.sleep`, which
+/// would throw on cancellation and make the test pass without the fix it exists for.
+private struct DeafTool: MCPTool {
+    var name: String { "deaf" }
+    var description: String { "ignores cancellation, then claims a delivery" }
+    var inputSchema: JSONValue { .object(["type": .string("object"), "properties": .object([:])]) }
+    func call(arguments: JSONValue, context: MCPToolContext) async throws -> MCPToolResult {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { c.resume() }
+        }
+        return .text("done", invocation: .sentFile(paths: [context.cwd.appendingPathComponent("a.txt")],
+                                                   caption: nil, status: "normal", display: nil))
+    }
+}
+
 final class AfleetMCPServerTests: XCTestCase {
     private var tmp: URL!
     override func setUpWithError() throws {
@@ -93,6 +108,28 @@ final class AfleetMCPServerTests: XCTestCase {
         let (r3, _, _) = await s.handle(req(8, "tools/call", .object(["name": .string("no_such_tool"), "arguments": .object([:])])))
         guard case .response(.error(let e3)) = r3 else { return XCTFail() }
         XCTAssertEqual(e3.error.code, -32602)
+    }
+    /// Group 3i. `notifications/cancelled` called `cancel()` on the task and recorded nothing durable, and
+    /// `Task.cancel()` is a request rather than an outcome: a tool that ignores it — or that finished a moment
+    /// before the notification was handled — still returns, and the result went out as a success carrying a
+    /// host invocation for work the client had already withdrawn.
+    func testACancelledCallIsRefusedEvenWhenTheToolIgnoresCancellation() async throws {
+        let s = AfleetMCPServer(serverVersion: "0.1.0", cwd: tmp, tools: [DeafTool()])
+        let message = req(20, "tools/call", .object(["name": .string("deaf"), "arguments": .object([:])]))
+        let call = Task { await s.handle(message) }
+        try await Task.sleep(for: .milliseconds(100))       // the call is in flight; the tool is 400 ms long
+        guard case .notificationAck = (await s.handle(.notification(.init(method: "notifications/cancelled", params: .object(["requestId": .integer(20)]))))).0 else {
+            return XCTFail("the cancellation was not acknowledged")
+        }
+        let (reply, invocation, _) = await call.value
+        guard case .response(.error(let e)) = reply else { return XCTFail("a cancelled call answered with \(reply)") }
+        XCTAssertEqual(e.error.code, -32800)
+        XCTAssertNil(invocation, "a cancelled call must not publish a host invocation")
+        // The record is per-call, not sticky: the next call with the same id is answered normally.
+        let (again, againInv, _) = await s.handle(req(20, "tools/call", .object(["name": .string("deaf"), "arguments": .object([:])])))
+        guard case .response(.response(let ok)) = again else { return XCTFail("\(again)") }
+        XCTAssertEqual(ok.result["isError"], .bool(false))
+        XCTAssertNotNil(againInv)
     }
     func testAbsolutePathsAnywhereReadableAreAllowed() async throws {
         // The built-in SendUserFile accepts any file the model can read; afleet mirrors that domain (child spec, WireMCP).

@@ -168,6 +168,13 @@ def after_init():
                 ("m5", {"jsonrpc": "2.0", "id": 5, "method": "resources/list"}),
                 ("m6", {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 4}})]
         for rid, msg in msgs: control_request(rid, {"subtype": "mcp_message", "server_name": "afleet", "message": msg})
+    if has("mcp_slow_tool"):
+        mcp_message("m8", {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                           "params": {"name": "slow_send", "arguments": {}}})
+        if has("cancel_mcp"):
+            def cancel_m8():
+                time.sleep(0.2); emit({"type": "control_cancel_request", "request_id": "m8"}); log("CANCELLED m8")
+            threading.Thread(target=cancel_m8, daemon=True).start()
     if has("mcp_tool_throws"):
         control_request("m7", {"subtype": "mcp_message", "server_name": "afleet",
                                "message": {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -191,6 +198,7 @@ def after_init():
 
 answered = set()
 deaf = [False]
+closed_stdin = [False]
 # side_question_late_error: request ids the host asked and we deliberately left hanging until it cancels.
 withheld = {}
 def handle(line):
@@ -281,6 +289,12 @@ def handle(line):
             # reading, the 64 KB pipe fills behind the host's next write, and `StdinWriter`'s serial queue —
             # and everything queued behind it, `end_session` included — is stuck there.
             if has("deaf_stdin"): deaf[0] = True
+            # `close_stdin` keeps this process running but takes its read end of the pipe away, so the
+            # host's next write gets EPIPE. Also synthetic: "the reply never reached the child" has to be
+            # produced for real, and a child that *exits* instead would unregister the in-flight MCP task
+            # and prove nothing about the write. Both flags are actioned on the main thread, below —
+            # closing fd 0 underneath a thread blocked reading it raises EBADF and kills the interpreter.
+            if has("close_stdin"): closed_stdin[0] = True
         if rid == "s2":
             result = ((r.get("response") or {}).get("mcp_response") or {}).get("result") or {}
             mcp["tools"] = [tool.get("name") for tool in result.get("tools", [])]
@@ -316,6 +330,11 @@ for line in sys.stdin:
     if deaf[0]:
         log("DEAF")
         while True: time.sleep(1)
+    if closed_stdin[0]:
+        try: os.close(0)
+        except OSError: pass
+        log("STDIN CLOSED")
+        break
 # stdin closed
 if has("stay_alive") or has("ignore_end_session") or has("ignore_sigterm"):
     while True: time.sleep(1)
