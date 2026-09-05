@@ -110,8 +110,15 @@ public struct CLIVerbs: Sendable {
     public func backgroundResume(_ id: SessionID, cwd: URL) async throws -> JobShort {
         let before = Set(jobShorts())
         _ = try await run("--bg --resume", ["--bg", "--resume", id.description], cwd: cwd)
+        // `requireNew: false`, and that is the whole of the fix. The daemon reuses a session's existing short when
+        // the same session is backgrounded again — the live gate watched it write
+        // `bg claimed-spare fdb4e2d6 (fleet)` under the very short the job had been adopted from — so a newness
+        // filter here rejects the one job this call is about. Adopt-then-send-back is not a corner: it is §7.4's
+        // own round trip, and it could never have completed. The session id is the discriminator this verb has and
+        // the roster confirmation below is what proves the worker is live now, so newness adds nothing here.
         return try await confirmed(matching: { $0.resumeSessionId == id.description }, notIn: before,
-                                   disambiguatingWith: cwd, verb: "--bg --resume", session: id.description)
+                                   requireNew: false, disambiguatingWith: cwd, verb: "--bg --resume",
+                                   session: id.description)
     }
 
     /// Runs one command as a background job in `cwd`. An exec job carries no session, so the short is found by its
@@ -119,8 +126,10 @@ public struct CLIVerbs: Sendable {
     public func backgroundExec(_ command: String, cwd: URL) async throws -> JobShort {
         let before = Set(jobShorts())
         _ = try await run("--bg --exec", ["--bg", "--exec", command], cwd: cwd)
-        return try await confirmed(matching: { _ in true }, notIn: before, disambiguatingWith: cwd,
-                                   verb: "--bg --exec", session: "")
+        // `requireNew: true`: an exec job carries no session, so newness is the only thing that tells this call's
+        // job from every other exec job in the home.
+        return try await confirmed(matching: { _ in true }, notIn: before, requireNew: true,
+                                   disambiguatingWith: cwd, verb: "--bg --exec", session: "")
     }
 
     // MARK: - Internals
@@ -178,16 +187,21 @@ public struct CLIVerbs: Sendable {
     /// correct whichever way the daemon does it. A job that never reaches the roster is the
     /// `jobNotListedAfterBackground` diagnostic.
     ///
+    /// `requireNew` says whether a short that already existed may be the answer. It may not for an exec job, whose
+    /// only discriminator is newness; it may for a resumed session, whose discriminator is the session id and whose
+    /// short the daemon reuses when the same session is backgrounded a second time.
+    ///
     /// `cwd` is a tie-breaker between candidate records and nothing more; see the warnings on the two callers.
     private func confirmed(matching predicate: @escaping (JobRecord) -> Bool, notIn before: Set<String>,
-                           disambiguatingWith cwd: URL, verb: String, session: String) async throws -> JobShort {
+                           requireNew: Bool, disambiguatingWith cwd: URL, verb: String,
+                           session: String) async throws -> JobShort {
         let wanted = cwd.resolvingSymlinksInPath().path(percentEncoded: false)
         let attempts = max(1, Int(Self.rosterBudget / Self.rosterInterval) + 1)
         for attempt in 0..<attempts {
             if attempt > 0, (try? await clock.sleep(for: Self.rosterInterval)) == nil { break }
             let workers = roster()?.workers ?? [:]
             let candidates = jobShorts()
-                .filter { !before.contains($0) }
+                .filter { !requireNew || !before.contains($0) }
                 .compactMap { short -> (String, String?)? in
                     guard let record = job(short), predicate(record) else { return nil }
                     return (short, record.cwd)

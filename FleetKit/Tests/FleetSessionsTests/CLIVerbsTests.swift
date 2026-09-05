@@ -79,6 +79,40 @@ final class CLIVerbsTests: XCTestCase {
         XCTAssertNotNil(files.rosterWorkers()[short.rawValue], "the short is confirmed in the roster")
     }
 
+    /// The round trip §7.4 asks for: a session adopted out of a job and sent back to the background reuses the
+    /// short it already had, and the verb has to recognise it.
+    ///
+    /// Found by G5's adoption scenario against the installed CLI, which failed with
+    /// `verbFailed(verb: "--bg --resume", exitCode: 0)` while the daemon log recorded
+    /// `bg claimed-spare fdb4e2d6 (fleet)` — a live worker under the very short the newness filter was excluding.
+    ///
+    /// Deliberate break: pass `requireNew: true` from `backgroundResume` → the short is filtered out, the roster
+    /// confirmation runs out of budget and the verb throws `verbFailed` with a zero exit code.
+    func testBackgroundResumeAcceptsTheShortTheSessionAlreadyHad() async throws {
+        let wanted = SessionID()
+        let files = self.files!
+        let short = "j00042"
+        // The job the session was adopted out of: its directory is still there, terminal, with no roster worker.
+        try files.writeJob(short: short, state: "stopped", sessionID: wanted, resumeSessionID: wanted, pid: nil)
+
+        // The daemon re-claims the same short and puts a live worker back in the roster.
+        let rule = ScriptedProcessRunner.Rule(
+            match: { $0.count == 3 && $0[0] == "--bg" && $0[1] == "--resume" },
+            respond: { argv in
+                guard let id = SessionID(argv[2]) else { return .exit(1) }
+                try files.writeJob(short: short, state: "working", sessionID: id, resumeSessionID: id,
+                                   pid: ScriptedHolderFiles.livePID)
+                return .exit(0)
+            })
+        let verbs = CLIVerbs(runner: ScriptedProcessRunner(rules: [rule], calls: calls),
+                             binary: URL(filePath: "/usr/bin/true"), configHome: home.configHome,
+                             environment: [:], diagnostics: sink)
+
+        let resolved = try await verbs.backgroundResume(wanted, cwd: home.url)
+        XCTAssertEqual(resolved.rawValue, short, "the verb refused the short the session already had")
+        XCTAssertTrue(sink.names.allSatisfy { $0 != "job_not_listed_after_background" })
+    }
+
     /// The CLI exiting zero does not mean the daemon has written the roster yet, and this package has no probe
     /// evidence either way, so the confirmation re-reads on the injected clock instead of assuming.
     func testBackgroundResumeWaitsForTheRosterToNameTheNewWorker() async throws {
