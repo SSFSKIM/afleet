@@ -87,7 +87,7 @@ public struct HeadTailReader: HeadTailReading {
     /// is only a prefilter, and the post-parse guard reproduces the engine's own `u.type === r` check (line 13405).
     /// It cannot produce a false negative on real engine bytes either, being a strict superset of the engine's literal.
     public static func lastLineString(_ text: String, type: String?, key: String) -> String? {
-        BufferScan(Array(text.utf8), keys: [key, "type"]).lastLineString(type: type, key: key)
+        BufferScan(Array(text.utf8), keys: key == "type" ? ["type"] : [key, "type"]).lastLineString(type: type, key: key)
     }
 
     /// `VQ`: scanning lines from the start, the first line containing `"key":` that parses to an object whose `key` is a string.

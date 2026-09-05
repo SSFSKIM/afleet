@@ -1426,16 +1426,25 @@ Pending — written at finish.
 
 ## Revision Notes
 
-- 2026-09-05 (G2 fix wave): **G2 now passes on all three budgets.** Measured over the local config
-  home, 3,032 main transcripts, median of five cold builds, twice: 372 ms and 376 ms against the
-  500 ms budget (was 66,412 ms); incremental update after one `touch` 1 ms against 50 ms (was 28 ms);
-  largest transcript, 109,427,514 bytes, 4 MiB window, 2,626 records, 0 extensions, read and reduced
-  in 676 ms and 700 ms against the 1,000 ms budget (was 1,158 ms). No budget was widened, no
-  assertion softened and the measured set was not shrunk. `FleetTimelineTests` runs 144 tests, 4
-  skipped without `AFLEET_LOCAL_INDEX`, 0 failures. The engine's substring semantics are unchanged:
+- 2026-09-05 (G2 fix wave, numbers re-taken after review): **G2 now passes on all three budgets.**
+  Measured over the local config home, 3,032 main transcripts, median of five cold builds, twice:
+  365 ms and 366 ms against the 500 ms budget (was 66,412 ms); incremental update after one `touch`
+  1 ms against 50 ms (was 28 ms); largest transcript, 109,427,514 bytes, 4 MiB window, 2,626
+  records, 0 extensions, read and reduced in 667 ms and 679 ms against the 1,000 ms budget (was
+  1,158 ms). No budget was widened, no assertion softened and the measured set was not shrunk. The
+  first set of numbers from this wave was discarded and re-taken: review found that a temporary
+  profiling switch (`AFLEET_FLOOR`) had survived into the commit, and a budget measured by a binary
+  that carries an undisclosed way to skip the measured work is not evidence, whether or not the
+  switch was ever set. It is removed and no shipped source in the package reads the environment at
+  all. `FleetTimelineTests` runs 148 tests, 4 skipped without `AFLEET_LOCAL_INDEX`, 0 failures. The engine's substring semantics are unchanged:
   the five helpers now have one byte-level implementation that the `String` entry points wrap, so
   `HeadTailReaderTests` and `TranscriptIndexTests` pin it. A thirteenth index test covers the
-  symlinked slug and the symlinked transcript in a `TempTree`.
+  symlinked slug and the symlinked transcript in a `TempTree`; a fourteenth covers a cancelled
+  build; and `BufferScanEquivalenceTests` runs forty-two invented inputs through both the byte scan
+  and the implementation it replaced, copied verbatim from `835a8d2`, over the branches no
+  recording reaches — the 200-unit truncation and a cut inside a surrogate pair, escaped quotes and
+  backslashes, an unterminated value, non-ASCII beside a key, both separator spellings, the
+  `<command-name>` and `<bash-input>` cases, the XML skip, and the two record flags.
 
 - 2026-09-05: Plan executed; Task 13 run. **G1 passes** (check one over 18 mirrored streams
   and 493 mirrored entries compared against file records, plus 3 `agent_metadata` sidecars;

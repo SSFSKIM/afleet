@@ -64,8 +64,9 @@ struct BufferScan {
         // the most frequent key in a transcript line and every one of its occurrences would otherwise be an append into a
         // nested array.
         let typeIndex = keys.firstIndex(of: "type")
-        // The key list as one contiguous blob plus a bucket per possible first byte: at each key-shaped quote pair the
-        // candidates are the handful sharing that byte, compared with one `memcmp`, and no hashing happens in the loop.
+        // The key list as one contiguous blob plus a bucket per key-ending byte: at each `":` the candidates are the
+        // handful whose last byte matches, compared with one `memcmp`, and no hashing happens in the loop. A key repeated
+        // in `keys` is added once, at its first position, which is the position `hits(_:)` looks up.
         var patternBytes: [UInt8] = []
         var patterns: [(start: Int, length: Int, index: Int)] = []
         var buckets = [[Int]](repeating: [], count: 256)
@@ -76,8 +77,7 @@ struct BufferScan {
             patterns.append((start: patternBytes.count, length: utf8.count, index: index))
             patternBytes.append(contentsOf: utf8)
         }
-        for (index, key) in keys.enumerated() where index != typeIndex { add(key, index) }
-        if let typeIndex { add("type", typeIndex) }
+        for (index, key) in keys.enumerated() where keys.firstIndex(of: key) == index { add(key, index) }
 
         var starts: [Int] = [0]
         var ends: [Int] = []
@@ -130,14 +130,15 @@ struct BufferScan {
                     var spaced = false
                     if value < count, base[value] == 0x20 { spaced = true; value += 1 }
                     let quoted = value < count && base[value] == 0x22
-                    if index == typeIndex {
-                        guard quoted, value + 1 < count,
-                              let end = memchr(base + value + 1, 0x22, count - value - 1) else { continue }
+                    found[index].append(Hit(quote: openAt, line: line, valueAt: value, spaced: spaced, quoted: quoted))
+                    // `type` is recorded twice: as an ordinary hit, because it is a key a caller may ask about like any
+                    // other, and — when its value is a short quoted token — as a line marker, which is what the three
+                    // line prefilters consult.
+                    if index == typeIndex, quoted, value + 1 < count,
+                       let end = memchr(base + value + 1, 0x22, count - value - 1) {
                         let endAt = UnsafeRawPointer(end) - UnsafeRawPointer(base)
                         if endAt - value - 1 <= 64 { types.append(TypeHit(line: line, value: (value + 1)..<endAt)) }
-                        continue
                     }
-                    found[index].append(Hit(quote: openAt, line: line, valueAt: value, spaced: spaced, quoted: quoted))
                 }
             }
             }

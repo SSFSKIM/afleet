@@ -109,6 +109,28 @@ final class TranscriptIndexTests: XCTestCase {
                       "one indexBuilt notice naming the seventeen files read: \(notices.notices)")
     }
 
+    // MARK: - Cancellation
+
+    /// A cancelled build stops and throws rather than publishing what its lanes happened to finish.
+    ///
+    /// The lanes run in a detached task, so cancellation only reaches them through the handler; each lane tests
+    /// `Task.isCancelled` once per item, and `build()` checks after each phase. Deterministic without a race: the child
+    /// task cannot begin until this method suspends, and `cancel()` is the statement after it is created.
+    func testACancelledBuildThrowsAndPublishesNothing() async throws {
+        let tree = try corpusTree()
+        let index = makeIndex(tree.temp)
+        let build = Task { try await index.build() }
+        build.cancel()
+        let result = await build.result
+        switch result {
+        case .success: XCTFail("a cancelled build returned a snapshot instead of throwing")
+        case .failure(let error): XCTAssertTrue(error is CancellationError, "cancelled with \(type(of: error))")
+        }
+        let snapshot = await index.snapshot
+        XCTAssertTrue(snapshot.entries.isEmpty, "a cancelled build published no entry")
+        XCTAssertEqual(snapshot.builtAt, .distantPast, "a cancelled build did not stamp the snapshot")
+    }
+
     // MARK: - Symlinks under `projects/`
 
     /// A symlinked slug directory is skipped and counted; a symlinked transcript inside a real slug is refused.

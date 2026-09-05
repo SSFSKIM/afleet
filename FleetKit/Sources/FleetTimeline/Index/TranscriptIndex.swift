@@ -57,7 +57,9 @@ public actor TranscriptIndex {
         let started = Date()
         symlinkedProjects = 0
         let discovered = await discoverMainFiles()
+        try Task.checkCancellation()
         let reads = await readAll(discovered)
+        try Task.checkCancellation()
 
         var entries: [SessionID: IndexEntry] = [:]
         candidates = [:]
@@ -94,7 +96,7 @@ public actor TranscriptIndex {
         return await Self.inParallel(over: files.count, width: min(concurrency, files.count)) { [self] lane, width in
             var built: [(MainFile, IndexEntry)] = []
             var index = lane
-            while index < files.count {
+            while index < files.count, !Task.isCancelled {
                 let file = files[index]
                 if let read = try? reader.read(file.url) { built.append((file, makeEntry(file, read))) }
                 index += width
@@ -153,7 +155,7 @@ public actor TranscriptIndex {
         let listed = await Self.inParallel(over: all.count, width: min(concurrency, max(1, all.count))) { lane, width in
             var built: [(path: String, file: MainFile)] = []
             var index = lane
-            while index < all.count {
+            while index < all.count, !Task.isCancelled {
                 built.append(contentsOf: Self.mainFiles(in: all[index]))
                 index += width
             }
@@ -315,10 +317,6 @@ public actor TranscriptIndex {
     /// passes. Before this the entry was a dozen grapheme-aware scans over two 64 KiB Swift `String`s, measured at
     /// 19.8 ms per file, which was the whole of the cold build's cost (gate G2).
     nonisolated private func makeEntry(_ file: MainFile, _ headTail: HeadTail) -> IndexEntry {
-        if ProcessInfo.processInfo.environment["AFLEET_FLOOR"] == "1" {
-            return IndexEntry(sessionID: file.sessionID, path: file.url, slug: file.slug, title: "", titleSource: .fallback,
-                              preview: "", mtime: headTail.mtime, size: headTail.size, hasSubagents: false)
-        }
         let head = BufferScan(headTail.headBytes, keys: Self.headKeys)
         let tail = BufferScan(headTail.tailBytes, keys: Self.tailKeys)
         let aiTitle = tail.lastString("aiTitle")

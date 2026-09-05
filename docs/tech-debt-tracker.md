@@ -87,3 +87,35 @@ durable index.
     pass over each chunk instead of a `range(of:)` per field, and a profile of
     `WindowedTranscript.read` on the 4 MiB tail.
 
+17. **Closed: entries 15 and 16.** Both were resolved by the G2 fix wave (`child/c3-timeline`).
+    Entry 15 is closed by a ruling rather than a change: a symlinked project directory is skipped
+    deliberately, because the engine skips it too (2.1.258 `cli.pretty.js:13753-13755` drops any
+    directory entry whose `Dirent.isDirectory()` is false), so a session under one is a session the
+    CLI itself cannot find. The build now counts the skipped directories and reports the count in
+    `indexBuilt`. On the author's home all fourteen resolve to sibling directories inside the same
+    `projects/`, so their 1,306 files are aliases of files already indexed and following them would
+    have added no session. Entry 16 is closed by measurement: cold build 66,412 ms to 365 ms
+    against a 500 ms budget, largest transcript 1,158 ms to 667 ms against 1,000 ms.
+18. **`hasSubagents` narrows on a case-insensitive volume.** The build consults the slug
+    directory's listing for a `<sessionId>` entry before `stat`-ing, to save a syscall per file. On a
+    case-insensitive volume a directory whose name differs from the file's stem only by case would
+    be found by `stat` and missed by the listing. Owner: C3/C4. Closer: compare case-insensitively
+    when the volume is, or drop the hint if the syscall turns out not to matter.
+19. **Small cleanups in the index and reader.** A duplicated comment around the canonical-slug
+    resolution in `TranscriptIndex.swift`; a dead `buffer.removeLast` in `TranscriptReader.pread`
+    (`unsafeUninitializedCapacity` already sets the count); non-conversation lines parsed twice,
+    once by `RecordDecoder`'s type probe and once by the two-stage path; and `Task.detached` in
+    `inParallel` escaping the caller's priority as well as its executor, which is the point of it
+    but means a deliberately low-priority caller no longer gets what it asked for. Owner: C3/C4.
+20. **`ClaudeWire`'s `JSONValue.init(from:)` throws up to five `DecodingError`s per value.** It
+    tries `Bool`, `Int64`, `Double`, `String`, array and object in turn, so a string costs three
+    thrown errors and an object five, each building a coding path and a description. This is the
+    single largest remaining cost in the transcript read path and it slows every consumer of the
+    package. Owner: C2 — deliberately not touched by C3, which has no mandate over that target.
+    Closer: reorder the attempts (string and object first) or decode `[String: JSONValue]` directly
+    where the caller knows the shape; the ordering of `Int64` before `Double` must be kept.
+21. **G2's "cold" build means no persisted index and a fresh actor, not a cold page cache.** The
+    365 ms median is warm steady state; a genuinely cold cache adds the SSD read of some 380 MB of
+    heads and tails. Pre-existing test design, recorded so the budget's name does not mislead.
+    Owner: C4, when the sidebar's first paint is measured for real.
+
