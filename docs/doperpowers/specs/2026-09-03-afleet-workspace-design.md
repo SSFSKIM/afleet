@@ -4145,3 +4145,20 @@ Pending — written at finish.
   only through §6.12. Two C1 follow-ups queued: corrective recordings for a rewind and a
   compaction, and a zero-cost probe that declines a project server in the TUI under the scratch
   home and diffs which files change. Flags C3, C4 (plans), C1 (follow-ups), C6 (§7.3 list).
+- 2026-09-05 C1/mcp-decline-files: §6.12's decline write is confirmed against the terminal's
+  own dialog, on 2.1.259 under the scratch config home, for zero cost
+  (`Tools/probe/spikes/mcp-decline-files.md`, scenario `spike-mcp-decline-files`). Declining a
+  project `.mcp.json` server creates exactly one file, `<project>/.claude/settings.local.json`,
+  holding exactly one key, `disabledMcpjsonServers`, with the declined server's name — the file
+  and the key §6.12 already names. The project's entry in the scratch `.claude.json` is created
+  by the *workspace-trust* dialog, not the MCP one, and arrives with `enabledMcpjsonServers` and
+  `disabledMcpjsonServers` already present as empty arrays; both are still empty after the
+  decline, and `enableAllProjectMcpServers` never appears. So the read side of the 2026-09-05
+  C4 note above holds with a sharpening: the rejection is readable only from the local-settings
+  store, and a host that reads the project entry's identically-named arrays sees no rejection.
+  Two dialogs matter to whoever automates this: both arrive with the safe option preselected —
+  workspace trust on `No, exit`, the MCP dialog on `Continue without using this MCP server` — so
+  a decline is a bare `Enter` and an arrow key can wrap the selection onto *Use this MCP
+  server*. Not settled: a project whose store resolves to a repository root above the session
+  cwd, the multi-server dialog, the *all future servers* leg, and whether the write preserves
+  unrecognised keys in an existing store, since this run created the file.
