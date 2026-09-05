@@ -590,10 +590,13 @@ config home, or stdout.
 C2's live gate proved the never-write rule for one turn. G5 takes the same before-and-after
 reading of `/tmp/afleet-fixtures/config-home` across every live scenario it runs and reports
 the set of relative paths the engine created or modified. The allowlist C4 ships names, as
-path patterns, what the engine is known to write: `sessions/<pid>.json` and its `.key`
-sibling, `projects/<slug>/<sid>.jsonl` and the `<sid>/` sidecar tree, `tasks/`,
-`jobs/<short>/`, `daemon/`, `history.jsonl`, `.claude.json`, `shell-snapshots/`,
-`session-env/`, `file-history/`, `statsig/` and `cache/`. An observed path outside the
+top-level names, what the engine is known to write, C2's observed set plus the trees
+this child exercises: `sessions/`, `projects/`, `tasks/`, `jobs/`, `daemon/`, `todos/`,
+`statsig/`, `shell-snapshots/`, `session-env/`, `file-history/`, `debug/`, `plugins/`,
+`cache/`, `backups/`, `plans/`, `ide/`, `logs/`, `history/`, `.claude.json`,
+`.credentials.json`, `.last-cleanup`, `.last-update-result.json`, `daemon.log`,
+`history.jsonl` and `settings.json`; a unit test pins the set exactly so an addition is
+deliberate. An observed path outside the
 allowlist fails the gate with the path named, because either the allowlist or the never-write
 claim is wrong and both deserve a look. The turn-spending scenario behind
 `AFLEET_LIVE_CLI_TURNS=1` sends one `haiku` prompt asking for a background shell and an
@@ -798,5 +801,6 @@ Pending — written at finish.
   document: "every row of §7.4 including wedged reachable from a scripted `fake-claude`
   scenario". The wedged row is not, because SIGKILL cannot be refused; G1 and the Decision
   Log now say the supervisor drives its process through a `ProcessHandle` seam and that one
-  row runs against a scripted handle. Plan:
+  row runs against a scripted handle. The write allowlist is restated as top-level names,
+  C2's observed set plus the trees this child exercises, pinned by a unit test. Plan:
   `docs/doperpowers/plans/2026-09-05-c4-fleetkit-sessions-fleet.md`.
