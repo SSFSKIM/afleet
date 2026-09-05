@@ -1415,7 +1415,19 @@ parent's §7.8.
   own resume launch, which carries `--max-turns 1` and no prompt.
   Rejected: the promptless recipe, on the citations above; probing for a turn-free transcript write
   (none of the ten zero-cost control requests produces one).
-  Date/Author: 2026-09-06 / C4 Task 10, corrected by the architect.
+  Measured afterwards, at zero cost, and sharper than the reasoning that preceded it: the
+  transcript is load-bearing at the **adopt's resume**, not at the job's creation. A bare
+  `claude --bg` with no prompt does mint and carry its own session id, reaches no model, stays
+  resident, and `jobs()` lists it — the live gate proved all of that. It fails one step later,
+  because `perform(.adopt)` resumes through afleet's own print-mode launch, and that refuses a
+  session with no transcript. All three resume paths are now pinned against installed CLI
+  **2.1.261**: `--bg --resume` by full uuid accepts a transcript-less session and keeps its id;
+  by short id it starts a copy; `-p --resume` refuses outright with "No conversation found with
+  session ID", a `result` of subtype `error_during_execution`, `total_cost_usd` 0 and exit 1.
+  So the job's session must carry a transcript, and a transcript costs one turn. Note the version
+  drift: the bundle authority is 2.1.258 and the fixtures 2.1.259, and this is the first place it
+  has mattered — the facts above are 2.1.261's.
+  Date/Author: 2026-09-06 / C4 Task 10, corrected by the architect, then measured.
 
 ## Surprises & Discoveries
 
