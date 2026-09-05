@@ -72,6 +72,14 @@ final class ActivityQueryTests: XCTestCase {
                    "session_id": "00000000-0000-4000-8000-00000000aaaa"])
     }
 
+    /// A user frame echoing one tool result, failed or not.
+    private func toolResult(uuid: String, toolUse: String, isError: Bool) throws -> Frame {
+        try frame(["type": "user", "uuid": uuid, "session_id": "00000000-0000-4000-8000-00000000aaaa",
+                   "message": ["role": "user",
+                               "content": [["type": "tool_result", "tool_use_id": toolUse,
+                                            "content": "output", "is_error": isError]]]])
+    }
+
     private func notification(uuid: String, text: String) throws -> Frame {
         try frame(["type": "system", "subtype": "notification", "key": "k", "text": text, "priority": "normal",
                    "uuid": uuid, "session_id": "00000000-0000-4000-8000-00000000aaaa"])
@@ -117,6 +125,19 @@ final class ActivityQueryTests: XCTestCase {
         XCTAssertEqual(rows.map(\.itemUUID), ["uuid-denied", "uuid-note"])
         XCTAssertEqual(rows[0].text, "Write")
         XCTAssertEqual(rows[1].text, "the hook says hello")
+    }
+
+    /// The spec's failed-result category is two things, and this is the second: an `is_error` tool result the
+    /// engine echoed on a user frame, whether or not the turn as a whole ended in an error.
+    func testAnIsErrorToolResultIsAFailedResultAndACleanOneIsNot() throws {
+        let k = key()
+        let failed = try toolResult(uuid: "uuid-user-1", toolUse: "toolu_bad", isError: true)
+        let clean = try toolResult(uuid: "uuid-user-2", toolUse: "toolu_good", isError: false)
+        let rows = ActivityQuery.rows(states: [state(k)], mirrors: [:], recent: [k: [failed, clean]])
+
+        XCTAssertEqual(rows.map(\.kind), [.failedResult])
+        XCTAssertEqual(rows[0].itemUUID, "uuid-user-1")
+        XCTAssertEqual(rows[0].text, "toolu_bad")
     }
 
     func testACleanResultProducesNoRow() throws {

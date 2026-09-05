@@ -58,6 +58,18 @@ final class LogoutPlanTests: XCTestCase {
         XCTAssertEqual(refused as? LifecycleError, .logoutInProgress)
         XCTAssertEqual(rig.spawnCount, 2, "nothing launched behind the barrier")
 
+        // And `open()` asks before it transitions, so the refusal leaves the channel exactly where it was rather
+        // than parked in connecting with no process — the rule that no partial state sits behind a transition
+        // that may be refused.
+        let secondLatecomer = rig.supervisor(session: SessionID(), fixture: Self.idle)
+        var openRefused: (any Error)?
+        do { try await secondLatecomer.open() } catch { openRefused = error }
+        XCTAssertEqual(openRefused as? LifecycleError, .logoutInProgress)
+        let untouched = await secondLatecomer.state
+        XCTAssertEqual(untouched.origin, .archived, "the refused open left no half-opened channel")
+        XCTAssertEqual(untouched.desired, .none)
+        XCTAssertEqual(rig.spawnCount, 2, "still nothing launched behind the barrier")
+
         rig.diagnostics.mark("act")
         let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
         XCTAssertEqual(outcome, .success(exited: census.owned, foreignLeftRunning: []))

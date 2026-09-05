@@ -25,9 +25,13 @@ final class FleetFacadeTests: XCTestCase {
         let fleet: Fleet
         let cwd: URL
         let diagnosticsDirectory: URL
+        /// The handles the scripted factory built, in spawn order; empty unless the harness was asked for them.
+        let handles = ScriptedHandles()
         private let storeDirectory: URL
 
-        init() throws {
+        /// `scriptedHandles` swaps the production factory for one that hands out a `ScriptedProcessHandle` per
+        /// spawn, which is how a test reads back the control requests the facade sent.
+        init(scriptedHandles: Bool = false) throws {
             home = try ScratchConfigHome()
             files = ScriptedHolderFiles(home: home)
             let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
@@ -42,10 +46,28 @@ final class FleetFacadeTests: XCTestCase {
             runner = ScriptedProcessRunner(rules: ScriptedProcessRunner.defaultRules(files) + Harness.jobRules(),
                                            calls: recorder)
             store = try FileStateStore(baseDirectory: storeDirectory, configHomes: [home.url])
-            fleet = try Fleet(configHome: home.configHome,
+            let factory: ProcessFactory? = scriptedHandles ? Harness.scriptedFactory(into: handles) : nil
+            fleet = Fleet(configHome: home.configHome,
                               environment: FakeClaudeLaunch.environment(fixture: FleetFacadeTests.fixture),
                               binary: FakeClaudeLaunch.binary, store: store,
-                              diagnosticsDirectory: diagnosticsDirectory, clock: clock, runner: runner)
+                              diagnosticsDirectory: diagnosticsDirectory, clock: clock, factory: factory,
+                              runner: runner)
+        }
+
+        /// A factory handing out one `ScriptedProcessHandle` per spawn, collected in order.
+        static func scriptedFactory(into built: ScriptedHandles) -> ProcessFactory {
+            { epoch, launch in
+                let session: SessionID
+                switch launch.session {
+                case .new(let id): session = id
+                case .resume(let id, _): session = id
+                case .forkFrom(let id, _): session = id
+                }
+                let handle = ScriptedProcessHandle(epoch: epoch, session: session,
+                                                   pid: 500_000 + Int32(epoch.rawValue))
+                built.append(handle)
+                return handle
+            }
         }
 
         /// `respawn` and `rm`, which the shared default script does not answer: `jfail` is the short whose respawn
@@ -64,50 +86,18 @@ final class FleetFacadeTests: XCTestCase {
             try? FileManager.default.removeItem(at: diagnosticsDirectory)
         }
 
-        /// Steps the manual clock in the release wait's own poll interval while `body` runs, so a clock-driven wait
-        /// makes progress. Nothing here sleeps on wall time to move the lifecycle: every step is the test moving
-        /// the clock, and the wall-clock guard only turns a hang into a named failure.
+        /// The suite's clock stepper and wall-clock wait, over this harness's manual clock. Both bodies live in
+        /// `TestTiming`, so this harness and `Rig` cannot drift apart.
         func steppingClock<T: Sendable>(upTo limit: Duration = ChannelSupervisor.handoffBudget,
                                         file: StaticString = #filePath, line: UInt = #line,
                                         _ body: @escaping @Sendable () async throws -> T) async throws -> T {
-            let done = Rig.LockedFlag()
-            let clock = self.clock
-            let interval = OwnershipCheck.releasePollInterval
-            let stepper = Task {
-                var stepped = Duration.zero
-                while !done.value && stepped < limit {
-                    guard clock.sleeperCount(due: interval) >= 1 else {
-                        try? await Task.sleep(for: .milliseconds(1))
-                        continue
-                    }
-                    await clock.advance(by: interval)
-                    stepped += interval
-                }
-            }
-            let work = Task { try await body() }
-            let watchdog = Task {
-                try? await Task.sleep(for: .seconds(60))
-                guard !Task.isCancelled, !done.value else { return }
-                XCTFail("the clock-stepped call never returned", file: file, line: line)
-                work.cancel()
-            }
-            defer { done.set(); stepper.cancel(); watchdog.cancel() }
-            return try await work.value
+            try await TestTiming.steppingClock(clock, upTo: limit, file: file, line: line, body)
         }
 
-        /// Waits, on wall time, for something already in flight to reach a point the test can read. It moves no
-        /// part of the lifecycle: only the manual clock does that.
         func waitFor(_ description: String, timeout: Duration = .seconds(30),
                      file: StaticString = #filePath, line: UInt = #line,
                      _ predicate: @Sendable () async -> Bool) async throws {
-            let deadline = ContinuousClock.now.advanced(by: timeout)
-            while ContinuousClock.now < deadline {
-                if await predicate() { return }
-                try? await Task.sleep(for: .milliseconds(2))
-            }
-            XCTFail("timed out waiting for \(description)", file: file, line: line)
-            struct Timeout: Error {}
-            throw Timeout()
+            try await TestTiming.waitFor(description, timeout: timeout, file: file, line: line, predicate)
         }
 
         /// Every line the fleet's own diagnostics file holds, as decoded objects.
@@ -358,6 +348,82 @@ final class FleetFacadeTests: XCTestCase {
         XCTAssertEqual(real(reported), real(harness.cwd))
     }
 
+    // MARK: - A restart's unresolved settings
+
+    /// Every name `Readback.verify` can report, mapped to the request that puts it back — `outputStyle` through
+    /// `update_settings`, the one key that request accepts (parent §7.7, *Parity F-7*), and not through a
+    /// `/config` turn read back with `get_settings`.
+    ///
+    /// This test owns the *mapping* half of the deliverable, deliberately and not by omission. The other half —
+    /// that a failed apply leaves the banner where it was — needs a channel with a non-empty `unresolvedSettings`,
+    /// which only a quiescent restart with a failing readback produces, and that rig and that banner both live in
+    /// `RestartTests`. Splitting them keeps each assertion next to the machinery it is about.
+    func testResolveSettingSendsTheRequestEachNameMapsTo() async throws {
+        await harness.tearDown()
+        harness = try Harness(scriptedHandles: true)
+        let harness = self.harness!
+        let fleet = harness.fleet
+        let k = key(SessionID())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        try await harness.waitFor("the channel to be ready") { await fleet.state(of: k)?.origin == .owned(.ready) }
+        let handle = try XCTUnwrap(harness.handles.all.first)
+
+        try await fleet.resolveSetting("model", to: .string("claude-haiku-4-5-20251001"), on: k)
+        try await fleet.resolveSetting("permissionMode", to: .string("acceptEdits"), on: k)
+        try await fleet.resolveSetting("effort", to: .string("high"), on: k)
+        try await fleet.resolveSetting("outputStyle", to: .string("Explanatory"), on: k)
+        try await fleet.resolveSetting("fastMode", to: .bool(true), on: k)
+        try await fleet.resolveSetting("flagSettings.advisor", to: .string("on"), on: k)
+
+        XCTAssertEqual(handle.controlRequests.map(\.subtype),
+                       ["set_model", "set_permission_mode", "apply_flag_settings", "update_settings",
+                        "apply_flag_settings", "apply_flag_settings"])
+        let payloads = handle.controlRequests.map(\.payload)
+        XCTAssertEqual(payloads[0]["model"]?.stringValue, "claude-haiku-4-5-20251001")
+        XCTAssertEqual(payloads[1]["mode"]?.stringValue, "acceptEdits")
+        XCTAssertEqual(payloads[2]["settings"]?["effortLevel"]?.stringValue, "high")
+        XCTAssertEqual(payloads[3]["source"]?.stringValue, "localSettings",
+                       "`update_settings` takes only the local source")
+        XCTAssertEqual(payloads[3]["settings"]?["outputStyle"]?.stringValue, "Explanatory")
+        XCTAssertEqual(payloads[4]["settings"]?["fastMode"]?.boolValue, true)
+        XCTAssertEqual(payloads[5]["settings"]?["advisor"]?.stringValue, "on")
+
+        // A name outside the closed set sends nothing rather than guessing at a request.
+        try await fleet.resolveSetting("somethingTheReadbackNeverReports", to: .string("x"), on: k)
+        XCTAssertEqual(handle.controlRequests.count, 6)
+
+        // And a key the fleet owns no supervisor for is not a channel to apply anything to.
+        do {
+            try await fleet.resolveSetting("model", to: .string("m"), on: key(SessionID()))
+            XCTFail("a setting was applied to a channel that does not exist")
+        } catch {
+            XCTAssertEqual(error as? LifecycleError, .notOwned)
+        }
+    }
+
+    // MARK: - Rotation
+
+    /// The log rotates once, into `fleet.log.1`, and keeps writing to `fleet.log`.
+    func testTheDiagnosticsLogRotatesOnce() throws {
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appending(path: "afleet-c4-rotate-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sink = FileFleetDiagnostics(directory: directory, rotateAt: 200)
+        for index in 0..<40 { sink.record(.logout(step: "census", count: index)) }
+        sink.flush()
+
+        let current = directory.appending(path: "fleet.log")
+        let rotated = directory.appending(path: "fleet.log.1")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: rotated.path(percentEncoded: false)),
+                      "the log never rotated")
+        let lines = try String(contentsOf: current, encoding: .utf8).split(separator: "\n")
+        XCTAssertGreaterThan(lines.count, 0, "the new log is being written to")
+        let size = try XCTUnwrap(FileManager.default.attributesOfItem(
+            atPath: current.path(percentEncoded: false))[.size] as? Int)
+        XCTAssertLessThanOrEqual(size, 200 + 64, "the current log is bounded by the rotation threshold")
+    }
+
     // MARK: - The §6.12 decline, project-wide
 
     /// §6.12's precondition is about the *project*, not about the channel the sheet happens to be open in. Two
@@ -464,6 +530,14 @@ final class FleetFacadeTests: XCTestCase {
     }
 
     // MARK: - Collecting
+
+    /// The scripted handles a harness built, in spawn order.
+    final class ScriptedHandles: @unchecked Sendable {   // `lock` serialises `storage`
+        private let lock = NSLock()
+        private var storage: [ScriptedProcessHandle] = []
+        func append(_ handle: ScriptedProcessHandle) { lock.lock(); storage.append(handle); lock.unlock() }
+        var all: [ScriptedProcessHandle] { lock.lock(); defer { lock.unlock() }; return storage }
+    }
 
     private final class Collected: @unchecked Sendable {   // `lock` serialises `storage`
         private let lock = NSLock()

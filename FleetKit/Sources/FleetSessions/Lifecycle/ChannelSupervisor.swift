@@ -302,6 +302,10 @@ public actor ChannelSupervisor {
     public func open() async throws {
         guard case .archived = state.origin else { return }
         if isRecent {
+            // Asked here, before the transition, and not only inside the spawn: a channel refused because the fleet
+            // is signing out has to be left exactly as it was, and the `apply` below would already have moved it to
+            // connecting with no process behind it. Nothing else in this method can fail, so nothing is half done.
+            try spawnBarrier.check()
             state.desired = .owned
             apply(.opened, to: .connecting)
             try await spawn(reason: .open)

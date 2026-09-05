@@ -59,7 +59,7 @@ public actor Fleet: LifecycleAPI {
     public init(configHome: ConfigHome, environment: ResolvedEnvironment, binary: URL, store: any StateStore,
                 diagnosticsDirectory: URL, clock: any Clock<Duration> = ContinuousClock(),
                 factory: ProcessFactory? = nil,
-                runner: any DirectoryProcessRunner = FoundationDirectoryRunner()) throws {
+                runner: any DirectoryProcessRunner = FoundationDirectoryRunner()) {
         self.configHome = configHome
         self.environment = environment
         self.binary = binary
@@ -449,7 +449,7 @@ public actor Fleet: LifecycleAPI {
     public func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
         guard let supervisor = supervisors[key] else { throw LifecycleError.notOwned }
         if let request = Self.request(forSetting: name, value: value) {
-            _ = try await supervisor.perform(request.raw)
+            _ = try await StrategyExecutor.send(request, on: supervisor)
         }
         await supervisor.resolveSetting(name)
     }

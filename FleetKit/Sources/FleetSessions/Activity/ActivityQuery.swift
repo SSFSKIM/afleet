@@ -85,6 +85,17 @@ public enum ActivityQuery {
                                             text: denial["tool_name"]?.stringValue ?? ""))
                 }
 
+            case .user(let user):
+                // The spec's failed-result category is two things: a `result` frame's error subtypes, above, and
+                // the `is_error` tool results the engine echoes on a user frame. A tool that failed is a failure
+                // the user has to see whether or not the turn as a whole ended in one.
+                guard case .blocks(let blocks) = user.message.content else { break }
+                for block in blocks {
+                    guard case .toolResult(let toolResult) = block, toolResult.isError == true else { continue }
+                    rows.append(ActivityRow(key: key, kind: .failedResult, itemUUID: user.uuid,
+                                            text: toolResult.toolUseID))
+                }
+
             case .system(.permissionDenied(let denied)):
                 rows.append(ActivityRow(key: key, kind: .permissionDenied, itemUUID: denied.uuid,
                                         text: denied.toolName))
