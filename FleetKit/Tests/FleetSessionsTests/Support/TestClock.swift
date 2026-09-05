@@ -13,7 +13,11 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
     private var _now = Instant(offset: .zero)
     private typealias Waiter = (deadline: Instant, id: UUID, continuation: CheckedContinuation<Void, any Error>)
     private var waiters: [Waiter] = []
+    private var _requested: [Duration] = []
     public init() {}
+    /// Every duration a sleeper asked for, in the order it asked. The backoff row asserts on this: "how long did the
+    /// supervisor wait" is invisible in the state and is exactly what a constant backoff would get wrong.
+    public var requestedDurations: [Duration] { lock.lock(); defer { lock.unlock() }; return _requested }
     public var now: Instant { lock.lock(); defer { lock.unlock() }; return _now }
     public var minimumResolution: Duration { .zero }
     public func sleep(until deadline: Instant, tolerance: Duration?) async throws {
@@ -23,6 +27,7 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
                 lock.lock()
                 // Under the lock, so a cancellation that arrived after the handler was installed but before this
                 // body ran cannot leave a sleeper nobody will ever resume.
+                _requested.append(_now.duration(to: deadline))
                 if Task.isCancelled { lock.unlock(); c.resume(throwing: CancellationError()); return }
                 if deadline <= _now { lock.unlock(); c.resume(); return }
                 waiters.append((deadline, id, c)); lock.unlock()
