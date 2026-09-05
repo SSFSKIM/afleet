@@ -33,6 +33,14 @@ public struct Handshake: Sendable {
     public let initialize: InitializeResponse
     /// Requests the engine re-arms in the initialize response itself (`pending_permission_requests`,
     /// `pending_user_dialog_requests`) — not from `system/init`, so unaffected by the above.
+    ///
+    /// `Handshake.pending` is a wire fact; nothing renders from it. It is the engine's own report of what it
+    /// still has outstanding, recorded verbatim so a diagnostic or a test can compare it against what followed.
+    /// The one surface a consumer may draw prompts from is the event stream: the engine re-sends each of these
+    /// as a live `control_request` immediately after the handshake, those pass through the inbound policy, and
+    /// only the ones the policy surfaces arrive as request events. Reading this array to display prompts is not
+    /// an ambiguity in the contract to be resolved by taste — it is a violation of it, and it double-shows or
+    /// shows a prompt the policy answered on the caller's behalf.
     public let pending: [InboundRequest]
     public init(initialize: InitializeResponse, pending: [InboundRequest]) { self.initialize = initialize; self.pending = pending }
 }

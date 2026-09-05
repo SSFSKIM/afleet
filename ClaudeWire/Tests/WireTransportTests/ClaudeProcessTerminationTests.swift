@@ -46,7 +46,7 @@ final class ClaudeProcessTerminationTests: XCTestCase {
         // The whole escalation trace, as a sequence rather than a membership check. SIGKILL re-establishes
         // liveness immediately before it signals, so a recheck that got the sense wrong would put
         // `no_live_child_to_signal` here instead of `SIGKILL` and the child would outlive `terminate()`.
-        XCTAssertEqual(sink.terminateSteps, ["end_session", "stdin_closed", "SIGTERM", "SIGKILL"])
+        XCTAssertEqual(sink.terminateSteps, ["end_session", "stdin_close_requested", "SIGTERM", "SIGKILL"])
         let statuses = await probe.value
         XCTAssertTrue(statuses.contains(.terminating))
         // never .exited before the real exit: every .exited sample must come after all .terminating samples
@@ -77,7 +77,7 @@ final class ClaudeProcessTerminationTests: XCTestCase {
         XCTAssertFalse(steps.contains { $0.contains("\"step\":\"SIGTERM\"") }, "a signal was sent with no child: \(steps)")
         XCTAssertFalse(steps.contains { $0.contains("\"step\":\"SIGKILL\"") }, "a signal was sent with no child: \(steps)")
         XCTAssertEqual(steps.filter { $0.contains("\"step\":\"never_launched\"") }.count, 1, "steps: \(steps)")
-        XCTAssertFalse(steps.contains { $0.contains("\"step\":\"stdin_closed\"") }, "there is no stdin to close: \(steps)")
+        XCTAssertFalse(steps.contains { $0.contains("\"step\":\"stdin_close_requested\"") }, "there is no stdin to close: \(steps)")
         // And the pid the pre-fix code would have signalled is in fact 0, the whole process group.
         let pid = await p.childProcessIdentifier
         XCTAssertEqual(pid, 0, "an unlaunched Process reports pid 0; kill(0, ...) is group-wide")

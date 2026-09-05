@@ -550,7 +550,7 @@ final class LiveCLITests: XCTestCase {
         let events = await log.wait(upTo: .seconds(10)) { $0.contains { if case .exited = $0 { return true }; return false } }
 
         // end_session ended it: had it not, `terminate()` would have escalated and the steps would include SIGTERM.
-        XCTAssertEqual(diagnostics.steps, ["end_session", "stdin_closed"], "termination escalated past end_session")
+        XCTAssertEqual(diagnostics.steps, ["end_session", "stdin_close_requested"], "termination escalated past end_session")
         let exits = events.compactMap { if case .exited(let s, _) = $0 { return s }; return nil }
         XCTAssertEqual(exits.count, 1, "expected exactly one exit event, saw \(exits)")
         XCTAssertEqual(exits.first?.isClean, true, "session did not exit cleanly: \(String(describing: exits.first))")

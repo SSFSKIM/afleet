@@ -484,6 +484,12 @@ public actor ClaudeProcess {
     /// wait, so `status` is still `.terminating`, no `.exited` has been published, and the pid may still be
     /// live. Reporting that as if it were an ordinary return would have this method contradict its own
     /// contract, which is that completion follows an observed exit.
+    ///
+    /// The event stream is left open in that case, deliberately. `pushFinal(.exited(...))` is the only thing in
+    /// this type that ends it, and every call to it follows an exit this actor actually observed, so a `nil`
+    /// return means the caller's `for await` has not finished and will not until the child is seen to die.
+    /// Synthesising a terminal event to tidy the stream would be this layer lying about the child's fate; what
+    /// an application does with a channel wedged this way is its own decision, one level up.
     @discardableResult
     public func terminate() async -> ExitStatus? {
         if case .exited(let s) = status { return s }
@@ -531,7 +537,12 @@ public actor ClaudeProcess {
             diagnostics.record(.terminateEscalated(step: "graceful_phase_deadline_exceeded", epoch: epoch))
         } else {
             if stdin != nil, endLine != nil { diagnostics.record(.terminateEscalated(step: "end_session", epoch: epoch)) }
-            diagnostics.record(.terminateEscalated(step: "stdin_closed", epoch: epoch))
+            // Named for what was asked, not for what is true. `StdinWriter` serialises on one queue, so when the
+            // `end_session` write is parked on a pipe the child has stopped reading, `close()` is queued behind
+            // it and the descriptor is still open at this moment — it stays open until SIGKILL frees the pipe.
+            // A step named `stdin_closed` would put a state the system is not in into the record. The exit
+            // event is the statement that the descriptor actually closed.
+            diagnostics.record(.terminateEscalated(step: "stdin_close_requested", epoch: epoch))
         }
         if let s = await waitForExit(upTo: max(graceEnds - ContinuousClock.now, .zero)) { return s }
         // The backstop for any path that reaches the escalation with no live child. `processIdentifier` is 0

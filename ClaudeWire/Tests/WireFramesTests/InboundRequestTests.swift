@@ -13,7 +13,7 @@ final class InboundRequestTests: XCTestCase {
         guard case .canUseTool(let p) = r.payload else { return XCTFail() }
         XCTAssertEqual(p.toolName, "Write"); XCTAssertEqual(p.toolUseID, "toolu_02")
         XCTAssertEqual(p.permissionSuggestions?.count, 1)
-        guard case .addRules(let rules, let behavior, let dest) = p.permissionSuggestions?[0] else { return XCTFail() }
+        guard case .addRules(let rules, let behavior, let dest, _) = p.permissionSuggestions?[0] else { return XCTFail() }
         XCTAssertEqual(rules[0].toolName, "Write"); XCTAssertEqual(behavior, .allow); XCTAssertEqual(dest, .localSettings)
         guard case .write(let w) = p.typedInput else { return XCTFail() }
         XCTAssertEqual(w.filePath, "/tmp/scratch/out.txt")
@@ -52,7 +52,7 @@ final class InboundRequestTests: XCTestCase {
         let r = InboundRequest.parse(frame: f, epoch: .first, receivedAt: .now)
         guard case .canUseTool(let p) = r.payload else { return XCTFail("one unknown suggestion made the request \(r.payload)") }
         XCTAssertEqual(p.permissionSuggestions?.count, 2)
-        guard case .addRules(_, let behavior, let dest) = p.permissionSuggestions?[0] else { return XCTFail("the known suggestion was lost") }
+        guard case .addRules(_, let behavior, let dest, _) = p.permissionSuggestions?[0] else { return XCTFail("the known suggestion was lost") }
         XCTAssertEqual(behavior, .allow); XCTAssertEqual(dest, .localSettings)
         guard case .unknown(let raw) = p.permissionSuggestions?[1] else { return XCTFail("the unknown suggestion was not degraded") }
         XCTAssertEqual(raw["type"], .string("addTimeLimitedRules"))
@@ -62,6 +62,24 @@ final class InboundRequestTests: XCTestCase {
         let back = try JSONDecoder().decode(JSONValue.self, from: reencoded)
         let original = try JSONDecoder().decode(JSONValue.self, from: line)
         XCTAssertEqual(try back.canonicalData(), try original.canonicalData(), "the unknown suggestion did not survive re-encoding")
+    }
+    /// Group 2f, one level down. A *familiar* variant carrying an *unfamiliar field* must not go opaque.
+    ///
+    /// `.unknown` is the answer to a variant this build does not model. It is the wrong answer to a variant it
+    /// does model that has simply grown a key: degrading there would silently lose the control that variant
+    /// drives, which is the same forward-compatibility failure the unknown case exists to prevent. So the
+    /// element decodes into its typed case and the extra key survives in the element's own extras bag, exactly
+    /// the way an unmodelled key on a frame survives in `Lossless.additional`.
+    func testAKnownPermissionSuggestionWithAnUnfamiliarFieldStaysTypedAndKeepsTheField() throws {
+        let data = Data(#"{"type":"setMode","mode":"plan","destination":"session","expiresAt":1799999999}"#.utf8)
+        let update = try JSONDecoder().decode(PermissionUpdate.self, from: data)
+        guard case .setMode(let mode, let dest, let extras) = update else {
+            return XCTFail("an extra key made a modelled variant opaque: \(update)")
+        }
+        XCTAssertEqual(mode, .plan); XCTAssertEqual(dest, .session)
+        XCTAssertEqual(extras["expiresAt"], .integer(1799999999), "the unmodelled field must survive on the element")
+        let back = try JSONDecoder().decode(JSONValue.self, from: try JSONEncoder().encode(update))
+        XCTAssertEqual(back, try JSONDecoder().decode(JSONValue.self, from: data), "the element did not re-encode key for key")
     }
     /// The engine's `issued_at` / `deadline_ms` on hook_callback are @internal and unmodelled; they must survive in `additional`.
     func testUnmodelledKeysSurviveInAdditional() throws {

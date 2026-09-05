@@ -11,12 +11,12 @@ public enum PermissionUpdateDestination: String, Codable, Sendable, CaseIterable
 
 /// The engine's `PermissionUpdate` discriminated union (bundle 2.1.258 `cli.pretty.js:513878`, schema `_i`).
 public enum PermissionUpdate: Hashable, Sendable, Codable {
-    case addRules(rules: [PermissionRuleValue], behavior: PermissionBehavior, destination: PermissionUpdateDestination)
-    case replaceRules(rules: [PermissionRuleValue], behavior: PermissionBehavior, destination: PermissionUpdateDestination)
-    case removeRules(rules: [PermissionRuleValue], behavior: PermissionBehavior, destination: PermissionUpdateDestination)
-    case setMode(mode: PermissionMode, destination: PermissionUpdateDestination)
-    case addDirectories(directories: [String], destination: PermissionUpdateDestination)
-    case removeDirectories(directories: [String], destination: PermissionUpdateDestination)
+    case addRules(rules: [PermissionRuleValue], behavior: PermissionBehavior, destination: PermissionUpdateDestination, extras: [String: JSONValue])
+    case replaceRules(rules: [PermissionRuleValue], behavior: PermissionBehavior, destination: PermissionUpdateDestination, extras: [String: JSONValue])
+    case removeRules(rules: [PermissionRuleValue], behavior: PermissionBehavior, destination: PermissionUpdateDestination, extras: [String: JSONValue])
+    case setMode(mode: PermissionMode, destination: PermissionUpdateDestination, extras: [String: JSONValue])
+    case addDirectories(directories: [String], destination: PermissionUpdateDestination, extras: [String: JSONValue])
+    case removeDirectories(directories: [String], destination: PermissionUpdateDestination, extras: [String: JSONValue])
     /// A suggestion whose shape this build does not model, kept exactly as it arrived.
     ///
     /// Forward compatibility, and what is at stake is the whole request rather than the suggestion.
@@ -29,24 +29,56 @@ public enum PermissionUpdate: Hashable, Sendable, Codable {
     /// This is deliberately the fallback for *any* element the six cases above cannot decode, not only for an
     /// unrecognised `type`: a new `destination` or `behavior` on an otherwise familiar variant is the same
     /// forward-compatibility event wearing a different hat, and would otherwise take the request down with it.
+    ///
+    /// It is just as deliberately *not* the fallback for a modelled variant that has merely grown a key. A
+    /// decoder that is too wide is as wrong as one that is too narrow: degrading `setMode` because the engine
+    /// attached an unfamiliar field to it would hide the mode the interface has to act on. Such an element
+    /// decodes into its typed case and the unmodelled keys survive in that case's `extras`, which re-encode
+    /// after the modelled keys — the same bargain `Lossless.additional` strikes for a frame, one level down.
     case unknown(JSONValue)
+
+    // Construction without extras is the ordinary case: nothing afleet originates carries unmodelled keys.
+    public static func addRules(rules: [PermissionRuleValue], behavior: PermissionBehavior, destination: PermissionUpdateDestination) -> Self {
+        .addRules(rules: rules, behavior: behavior, destination: destination, extras: [:])
+    }
+    public static func replaceRules(rules: [PermissionRuleValue], behavior: PermissionBehavior, destination: PermissionUpdateDestination) -> Self {
+        .replaceRules(rules: rules, behavior: behavior, destination: destination, extras: [:])
+    }
+    public static func removeRules(rules: [PermissionRuleValue], behavior: PermissionBehavior, destination: PermissionUpdateDestination) -> Self {
+        .removeRules(rules: rules, behavior: behavior, destination: destination, extras: [:])
+    }
+    public static func setMode(mode: PermissionMode, destination: PermissionUpdateDestination) -> Self {
+        .setMode(mode: mode, destination: destination, extras: [:])
+    }
+    public static func addDirectories(directories: [String], destination: PermissionUpdateDestination) -> Self {
+        .addDirectories(directories: directories, destination: destination, extras: [:])
+    }
+    public static func removeDirectories(directories: [String], destination: PermissionUpdateDestination) -> Self {
+        .removeDirectories(directories: directories, destination: destination, extras: [:])
+    }
 
     public enum CodingKeys: String, CodingKey { case type, rules, behavior, destination, mode, directories }
     public init(from decoder: any Decoder) throws {
         let raw = try JSONValue(from: decoder)
-        guard let known = try? Self.known(from: decoder) else { self = .unknown(raw); return }
+        guard let known = try? Self.known(from: decoder, raw: raw) else { self = .unknown(raw); return }
         self = known
     }
-    private static func known(from decoder: any Decoder) throws -> PermissionUpdate {
+    /// Every key of `raw` the named variant does not model. `type` and `destination` are common to all six.
+    private static func extras(_ raw: JSONValue, modelling keys: String...) -> [String: JSONValue] {
+        guard case .object(let o) = raw else { return [:] }
+        let declared = Set(keys + ["type", "destination"])
+        return o.filter { !declared.contains($0.key) }
+    }
+    private static func known(from decoder: any Decoder, raw: JSONValue) throws -> PermissionUpdate {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let dest = try c.decode(PermissionUpdateDestination.self, forKey: .destination)
         switch try c.decode(String.self, forKey: .type) {
-        case "addRules": return .addRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest)
-        case "replaceRules": return .replaceRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest)
-        case "removeRules": return .removeRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest)
-        case "setMode": return .setMode(mode: try c.decode(PermissionMode.self, forKey: .mode), destination: dest)
-        case "addDirectories": return .addDirectories(directories: try c.decode([String].self, forKey: .directories), destination: dest)
-        case "removeDirectories": return .removeDirectories(directories: try c.decode([String].self, forKey: .directories), destination: dest)
+        case "addRules": return .addRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest, extras: extras(raw, modelling: "rules", "behavior"))
+        case "replaceRules": return .replaceRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest, extras: extras(raw, modelling: "rules", "behavior"))
+        case "removeRules": return .removeRules(rules: try c.decode([PermissionRuleValue].self, forKey: .rules), behavior: try c.decode(PermissionBehavior.self, forKey: .behavior), destination: dest, extras: extras(raw, modelling: "rules", "behavior"))
+        case "setMode": return .setMode(mode: try c.decode(PermissionMode.self, forKey: .mode), destination: dest, extras: extras(raw, modelling: "mode"))
+        case "addDirectories": return .addDirectories(directories: try c.decode([String].self, forKey: .directories), destination: dest, extras: extras(raw, modelling: "directories"))
+        case "removeDirectories": return .removeDirectories(directories: try c.decode([String].self, forKey: .directories), destination: dest, extras: extras(raw, modelling: "directories"))
         case let other: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown PermissionUpdate type \(other)")
         }
     }
@@ -57,15 +89,18 @@ public enum PermissionUpdate: Hashable, Sendable, Codable {
             return
         }
         var c = encoder.container(keyedBy: CodingKeys.self)
+        let extras: [String: JSONValue]
         switch self {
-        case .addRules(let r, let b, let d): try c.encode("addRules", forKey: .type); try c.encode(r, forKey: .rules); try c.encode(b, forKey: .behavior); try c.encode(d, forKey: .destination)
-        case .replaceRules(let r, let b, let d): try c.encode("replaceRules", forKey: .type); try c.encode(r, forKey: .rules); try c.encode(b, forKey: .behavior); try c.encode(d, forKey: .destination)
-        case .removeRules(let r, let b, let d): try c.encode("removeRules", forKey: .type); try c.encode(r, forKey: .rules); try c.encode(b, forKey: .behavior); try c.encode(d, forKey: .destination)
-        case .setMode(let m, let d): try c.encode("setMode", forKey: .type); try c.encode(m, forKey: .mode); try c.encode(d, forKey: .destination)
-        case .addDirectories(let dirs, let d): try c.encode("addDirectories", forKey: .type); try c.encode(dirs, forKey: .directories); try c.encode(d, forKey: .destination)
-        case .removeDirectories(let dirs, let d): try c.encode("removeDirectories", forKey: .type); try c.encode(dirs, forKey: .directories); try c.encode(d, forKey: .destination)
-        case .unknown: break                                    // handled above, before the keyed container exists
+        case .addRules(let r, let b, let d, let e): try c.encode("addRules", forKey: .type); try c.encode(r, forKey: .rules); try c.encode(b, forKey: .behavior); try c.encode(d, forKey: .destination); extras = e
+        case .replaceRules(let r, let b, let d, let e): try c.encode("replaceRules", forKey: .type); try c.encode(r, forKey: .rules); try c.encode(b, forKey: .behavior); try c.encode(d, forKey: .destination); extras = e
+        case .removeRules(let r, let b, let d, let e): try c.encode("removeRules", forKey: .type); try c.encode(r, forKey: .rules); try c.encode(b, forKey: .behavior); try c.encode(d, forKey: .destination); extras = e
+        case .setMode(let m, let d, let e): try c.encode("setMode", forKey: .type); try c.encode(m, forKey: .mode); try c.encode(d, forKey: .destination); extras = e
+        case .addDirectories(let dirs, let d, let e): try c.encode("addDirectories", forKey: .type); try c.encode(dirs, forKey: .directories); try c.encode(d, forKey: .destination); extras = e
+        case .removeDirectories(let dirs, let d, let e): try c.encode("removeDirectories", forKey: .type); try c.encode(dirs, forKey: .directories); try c.encode(d, forKey: .destination); extras = e
+        case .unknown: return                                   // handled above, before the keyed container exists
         }
+        var any = encoder.container(keyedBy: AnyCodingKey.self)
+        for (k, v) in extras { try any.encode(v, forKey: AnyCodingKey(stringValue: k)) }
     }
 }
 
