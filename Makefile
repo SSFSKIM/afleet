@@ -12,6 +12,8 @@ REVIEWER ?=
 test-tools:
 	$(PYTHON) -m unittest discover -s Tools/probe/tests -t Tools/probe/tests -p 'test_*.py'
 	$(PYTHON) -m unittest discover -s Tools/fake-claude/tests -t Tools/fake-claude/tests -p 'test_*.py' || test $$? -eq 5
+	$(PYTHON) -m unittest discover -s Tools/c5/tests -t Tools/c5/tests -p 'test_*.py'
+	$(MAKE) check-x7
 
 probe:
 	$(PYTHON) Tools/probe/probe.py diff --claude "$(CLAUDE)" $(if $(FIXTURE),--fixture "$(FIXTURE)") $(if $(SCRIPT),--script "$(SCRIPT)")
