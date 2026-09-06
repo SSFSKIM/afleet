@@ -451,3 +451,16 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     composer's own three sinks after unlinking their files, but it cannot reach `Fleet`'s
     duplicate pair, so those two go on writing into unlinked inodes until the app is
     relaunched. Whichever fix above lands closes this half too.
+54. **`TranscriptIndex` and `Fleet` disagree about the config home's spelling.** The index
+    records a symlink-resolved root in its snapshot; `Fleet` keys supervisors by the
+    launch-resolved root. C5's `ChannelRegistrar.listed` threads the home through as an argument
+    so registration joins them correctly today, but the disagreement is still there for the next
+    consumer that joins those two by key — C6 and C7 both will. Found at C5 Task 4. Closer:
+    settle one spelling at the seam, or have both sides canonicalise identically, rather than
+    each caller remembering to bridge it.
+55. **`FleetBrowserModel.rebuild()` re-derives every section on every `ChannelState`.** Harmless
+    at C4's cap of six live processes, which is the only thing that pushes states today. It is
+    the first thing a view bound straight to `sections` would feel, so C5 Task 5 and C6 should
+    know. Found at C5 Task 4. Closer: patch the affected section rather than rebuilding, if a
+    profile ever shows it.
+
