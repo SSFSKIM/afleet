@@ -270,7 +270,10 @@ enum ClaudeJSONReader {
         return document["hasCompletedOnboarding"] as? Bool == true
     }
 
-    private static func read(_ url: URL) -> Data? {
+    /// Internal rather than private since Task 4: `ClaudeProjects` reads the same file for the
+    /// sidebar's section order and must open it the same guarded way — read-only, `O_NOFOLLOW`, so
+    /// a `.claude.json` that is a symlink is refused rather than followed out of the home (X9).
+    static func read(_ url: URL) -> Data? {
         let descriptor = url.path.withCString { open($0, O_RDONLY | O_NOFOLLOW) }
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
