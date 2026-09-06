@@ -447,3 +447,7 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     capturing sink), or the composer stops constructing that pair and exposes `Fleet`'s. The
     first is a small FleetKit change and is the better shape. Owner: C6 (first writer), with
     the FleetKit signature change belonging to whoever touches `Fleet.init` next.
+    Second consequence, found in Task 3's review: Settings' *Delete diagnostics* renews the
+    composer's own three sinks after unlinking their files, but it cannot reach `Fleet`'s
+    duplicate pair, so those two go on writing into unlinked inodes until the app is
+    relaunched. Whichever fix above lands closes this half too.
