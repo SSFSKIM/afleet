@@ -88,6 +88,11 @@ public enum LifecycleError: Error, Hashable, Sendable {
     case declineRefused(reason: String)
     case notOwned
     case verbFailed(verb: String, exitCode: Int32)
+    /// The verb outlasted its budget and the runner had to signal the child. Distinct from `verbFailed` because
+    /// the two ask for different answers: a non-zero exit is the CLI refusing the request, while this is afleet
+    /// giving up on a child that never returned — and the third merge-evidence run could not tell them apart,
+    /// because a killed child's `-1` reads exactly like any other failure.
+    case verbTimedOut(verb: String, afterMs: Int)
     /// An answer for an id that is unknown, cancelled, already answered or from an older epoch.
     case decisionGone(RequestID)
     /// The write behind an answer failed; the id is consumed (`ClaudeProcess.answer` removes `pendingInbound[id]`

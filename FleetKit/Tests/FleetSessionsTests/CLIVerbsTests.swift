@@ -1,4 +1,5 @@
 import XCTest
+import WireEnvironment
 import AfleetCore
 import WireTransport
 @testable import FleetSessions
@@ -34,6 +35,27 @@ final class CLIVerbsTests: XCTestCase {
         let base = ResolvedEnvironment(variables: ["PATH": "/usr/bin:/bin"], shell: "/bin/zsh",
                                        capturedAt: Date(), mode: .processFallback)
         return launch.childEnvironment(over: base, configHome: home.configHome)
+    }
+
+    /// A verb the runner had to abandon is not a verb the CLI refused. The runner reports the abandonment in
+    /// `timedOut`, and until this it was dropped: a killed child's exit code was thrown as an ordinary
+    /// `verbFailed`, which is why the third merge-evidence run's `stop` failure could not say whether the child
+    /// had hung or the CLI had said no.
+    func testATimedOutVerbIsDistinguishedFromOneTheCLIRefused() async throws {
+        let abandoned = ScriptedProcessRunner.Rule(match: { $0.first == "stop" },
+                                                   respond: { _ in ProcessOutput(stdout: Data(), stderr: Data(),
+                                                                                 exitCode: -1, timedOut: true) })
+        let runner = ScriptedProcessRunner(rules: [abandoned], calls: calls)
+        let timing = CLIVerbs(runner: runner, binary: URL(filePath: "/usr/bin/true"), configHome: home.configHome,
+                              environment: childEnvironment(), diagnostics: sink)
+
+        var thrown: (any Error)?
+        do { try await timing.stop(JobShort(rawValue: "j00001")) } catch { thrown = error }
+
+        guard case .verbTimedOut(let verb, _)? = thrown as? LifecycleError else {
+            return XCTFail("an abandoned verb gave \(String(describing: thrown))")
+        }
+        XCTAssertEqual(verb, "stop")
     }
 
     func testAgentsJSONDecodesTheScriptedArray() async throws {

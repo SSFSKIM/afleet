@@ -25,6 +25,21 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertLessThan(elapsed, .seconds(5), "run must not wait for the grandchild: took \(elapsed)")
         XCTAssertEqual(String(decoding: out.stdout, as: UTF8.self), "hi")
     }
+    /// The discriminating case, and the one the live `claude stop` hit: the child exits *promptly* while a
+    /// grandchild still holds the inherited write end, and the timeout is generous. Settlement must key on the
+    /// child's exit, not on end-of-file, so `run` returns in about the child's own lifetime rather than burning
+    /// the whole budget and reporting a SIGTERM.
+    func testGrandchildHoldingStdoutDoesNotDelaySettlementPastTheChildsExit() async throws {
+        let start = ContinuousClock.now
+        let out = try await FoundationProcessRunner().run(
+            URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "sleep 30 & printf hi; exit 0"],
+            environment: [:], timeout: .seconds(30))
+        let elapsed = ContinuousClock.now - start
+        XCTAssertLessThan(elapsed, .seconds(5), "run must settle on the child's exit, not on EOF: took \(elapsed)")
+        XCTAssertEqual(String(decoding: out.stdout, as: UTF8.self), "hi")
+        XCTAssertEqual(out.exitCode, 0)
+        XCTAssertFalse(out.timedOut)
+    }
     /// A timeout small enough to elapse during start-up must still resume the caller rather than latching
     /// settlement before there is a continuation to resume.
     func testNearZeroTimeoutStillReturns() async throws {

@@ -25,9 +25,12 @@ public struct FoundationProcessRunner: ProcessRunner {
 /// `terminationStatus` access, happens on `queue`. The sole exception is the thread that blocks in
 /// `waitUntilExit()`; it touches nothing else and hops back to `queue` to report the exit.
 ///
-/// Reads are event-driven, non-blocking `DispatchSourceRead`s rather than blocking `readDataToEndOfFile`
-/// calls, because settlement must never wait on a pipe: a grandchild that inherited stdout and outlives the
-/// child — a `.zshrc` that backgrounds a daemon — would otherwise hold `run` open long past the timeout.
+/// Settlement is keyed to the child's exit, never to end-of-file on its pipes. A grandchild that inherited
+/// stdout and outlives the child — a `.zshrc` that backgrounds a daemon, or the CLI's own `bg spare` host —
+/// holds the write end open indefinitely, so waiting for EOF would burn the whole timeout on a child that
+/// exited in a second and report the SIGTERM that followed. Reads are event-driven, non-blocking
+/// `DispatchSourceRead`s for the same reason, and the exit path takes one last non-blocking pass over each
+/// pipe so that everything the child wrote before exiting is in the result.
 private final class ProcessJob: @unchecked Sendable {
     /// After `terminate()`, how long the child gets to exit before SIGKILL, and then before we settle anyway.
     private static let grace = DispatchTimeInterval.milliseconds(500)
@@ -36,8 +39,8 @@ private final class ProcessJob: @unchecked Sendable {
     private let process = Process()
     private let out = Pipe(), err = Pipe()
     private var stdoutData = Data(), stderrData = Data()
-    private var sources: [DispatchSourceRead] = []
-    private var openDrains = 0
+    /// One entry per pipe still open, holding what is needed to make a final read of it.
+    private var drains: [(fd: Int32, source: DispatchSourceRead, append: (Data) -> Void)] = []
     private var exited = false
     private var timedOut = false
     private var settled = false
@@ -74,7 +77,7 @@ private final class ProcessJob: @unchecked Sendable {
         }
     }
 
-    /// Accumulates one pipe until EOF. The cancel handler closes the handle, which releases the descriptor
+    /// Accumulates one pipe as it fills. The cancel handler closes the handle, which releases the descriptor
     /// even when the writer never went away.
     private func drain(_ handle: FileHandle, into append: @escaping (Data) -> Void) {
         let fd = handle.fileDescriptor
@@ -82,30 +85,42 @@ private final class ProcessJob: @unchecked Sendable {
         // timers meant to bound this call, and the EAGAIN arm below could never be reached.
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        openDrains += 1
-        source.setEventHandler {
-            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-            let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
-            if n > 0 { append(Data(buffer[0..<n])) }
-            else if n == 0 { source.cancel() }
-            else if errno != EINTR && errno != EAGAIN { source.cancel() }
-        }
+        source.setEventHandler { [self] in _ = readAvailable(fd, into: append, source: source) }
         source.setCancelHandler { [self] in
             try? handle.close()
-            openDrains -= 1
-            if openDrains == 0 { sources.removeAll() }
-            settleIfComplete()
+            drains.removeAll { $0.fd == fd }
         }
-        sources.append(source)
+        drains.append((fd: fd, source: source, append: append))
         source.resume()
     }
 
-    private func settleIfComplete() { if exited && openDrains == 0 { settle() } }
+    /// Reads what the pipe holds right now, appending it. Returns false once the writer is gone or the
+    /// descriptor is unusable, having cancelled the source.
+    @discardableResult
+    private func readAvailable(_ fd: Int32, into append: (Data) -> Void, source: DispatchSourceRead) -> Bool {
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            if n > 0 { append(Data(buffer[0..<n])); continue }
+            if n == 0 { source.cancel(); return false }
+            if errno == EINTR { continue }
+            if errno == EAGAIN { return true }
+            source.cancel(); return false
+        }
+    }
+
+    /// The last pass over each pipe, on the exit path: everything the child wrote before it exited is in the
+    /// kernel's buffer by now, whoever else still holds the write end.
+    private func drainRemaining() { for d in drains { readAvailable(d.fd, into: d.append, source: d.source) } }
+
+    /// The child's exit is the whole of the completion condition — see the type's note on EOF.
+    private func settleIfComplete() { if exited { settle() } }
 
     private func settle() {
         guard !settled else { return }
         settled = true
-        for source in sources where !source.isCancelled { source.cancel() }
+        drainRemaining()
+        for d in drains where !d.source.isCancelled { d.source.cancel() }
         let output = ProcessOutput(stdout: stdoutData, stderr: stderrData,
                                    exitCode: exited ? process.terminationStatus : -1, timedOut: timedOut)
         let finish = completion; completion = nil

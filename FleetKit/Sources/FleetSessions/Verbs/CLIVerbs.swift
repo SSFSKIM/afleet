@@ -174,7 +174,11 @@ public struct CLIVerbs: Sendable {
             diagnostics.record(.verb(name: verb, exitCode: -1, durationMs: elapsedMs(since: start)))
             throw error
         }
-        diagnostics.record(.verb(name: verb, exitCode: out.exitCode, durationMs: elapsedMs(since: start)))
+        let duration = elapsedMs(since: start)
+        diagnostics.record(.verb(name: verb, exitCode: out.exitCode, durationMs: duration))
+        // Checked before the exit code, because a child the runner had to kill reports an exit code that says
+        // nothing: the fact worth carrying is that the budget ran out, not the signal that ended it.
+        guard !out.timedOut else { throw LifecycleError.verbTimedOut(verb: verb, afterMs: duration) }
         guard out.exitCode == 0 else { throw LifecycleError.verbFailed(verb: verb, exitCode: out.exitCode) }
         return out
     }
