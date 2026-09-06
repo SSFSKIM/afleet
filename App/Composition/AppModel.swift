@@ -32,6 +32,23 @@ final class AppModel {
     /// not make a new one on every body evaluation.
     private(set) var settingsReadout: SettingsReadout?
 
+    /// What the window is looking at (spec §6).
+    ///
+    /// It is owned here rather than by the scene because Activity's notifications have to know
+    /// which channel is in view whether or not the Activity view is on screen, and the model that
+    /// decides them is built beside this one. `AfleetApp` reads it; the menu items move it.
+    let shell = ShellModel()
+
+    /// Activity, the badges and the notification router (spec §5, §6). Nil until a launch reaches a
+    /// workspace, and rebuilt by each one — *Check again* is the same call as the first launch, and
+    /// a second Activity following the first fleet's channels would notify twice.
+    private(set) var activity: ActivityModel?
+
+    /// What the last launch read out of the store. Read once because a notification decided behind
+    /// an actor hop arrives after the thing it is about; Settings writing a change takes effect on
+    /// the next launch, which is what the Developer section already says of every other preference.
+    private var notificationPreferences = NotificationPreferences()
+
     init(sequence: LaunchSequence = LaunchSequence(),
          coordinatorFactory: @escaping @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating = { FleetCoordinator(workspace: $0) }) {
         self.sequence = sequence
@@ -56,5 +73,51 @@ final class AppModel {
         }
         route = await configured.run()
         settingsReadout = route.workspace.map(SettingsReadout.init(workspace:))
+        await startActivity()
     }
+
+    /// Builds Activity over the workspace the launch reached, and starts it.
+    ///
+    /// The order matters: the poster's in-app fallback presents into the model, and the router
+    /// posts through the poster, so the model is constructed first and the two are given a weak
+    /// reference back to it. Nothing here retains a cycle — `ActivityModel` owns the router, the
+    /// router owns the poster, and the poster reaches the model only through a closure that holds
+    /// it weakly.
+    private func startActivity() async {
+        activity?.stop()
+        activity = nil
+        guard let workspace = route.workspace, let browser else { return }
+        notificationPreferences = await AfleetSettingsStore.read(from: workspace.store).notifications
+
+        // A box, because the poster needs the model and the model needs the router that needs the
+        // poster. One of the three edges has to be late, and this is the one with nothing to lose:
+        // a notification raised before the model exists has no surface to be raised on.
+        let sink = ActivitySink()
+        let poster = SystemOrInAppPoster { [sink] notification in sink.present(notification) }
+        let router = NotificationRouter(poster: poster,
+                                        lifecycle: workspace.fleet,
+                                        isInView: { [shell] key in shell.focus.session == key.session },
+                                        preferences: { [weak self] in
+                                            self?.notificationPreferences ?? NotificationPreferences()
+                                        })
+        let model = ActivityModel(lifecycle: workspace.fleet,
+                                  configHome: workspace.configHome.root,
+                                  shell: shell,
+                                  router: router,
+                                  store: workspace.store)
+        sink.model = model
+        activity = model
+        model.attach(to: browser)
+        await poster.requestAuthorisation()
+        await model.start()
+    }
+}
+
+/// The late edge of Activity's three-way construction: the poster's in-app fallback presents
+/// through this, and the model is set into it once it exists. Weak, so the box never keeps a
+/// superseded launch's Activity alive.
+@MainActor
+final class ActivitySink {
+    weak var model: ActivityModel?
+    func present(_ notification: AfleetNotification) { model?.present(notification) }
 }

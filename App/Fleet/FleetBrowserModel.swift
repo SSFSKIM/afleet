@@ -73,6 +73,15 @@ final class FleetBrowserModel {
     /// cannot write a state into the wrong channel: a mismatch falls back to the full rebuild.
     private var rowIndex: [SessionID: RowLocation] = [:]
 
+    /// Handed every `ChannelState` this model ingests, before the model does anything with it.
+    ///
+    /// `LifecycleAPI.updates` is **one stream and not a fan-out**: a second `for await` over it
+    /// would take half the states and leave the sidebar with the other half. This model is the one
+    /// consumer, so anything else in the app that needs the live half — Activity, and the
+    /// notification router behind it — is told from here. It is a closure rather than a reference
+    /// to the thing that wants it so that the sidebar keeps knowing nothing about Activity.
+    var stateObserver: (@MainActor (ChannelState) -> Void)?
+
     /// Sessions whose live half has been ingested and not yet written into the row that draws it.
     private var dirty: Set<SessionID> = []
     /// How many states have been ingested. Only ever compared for change.
@@ -259,6 +268,7 @@ final class FleetBrowserModel {
     /// machine's own corpus 231 of the first 1,150 seeded states were of exactly that kind.
     private func ingest(_ state: ChannelState) {
         ingestCount &+= 1
+        stateObserver?(state)
         let id = state.key.session
         states[id] = state
         guard listed[id] != nil else { return }

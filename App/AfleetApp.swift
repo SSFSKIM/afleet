@@ -11,10 +11,11 @@ struct AfleetApp: App {
     /// reads one variable and does nothing else here.
     init() { NotificationSpike.runIfRequested() }
 
-    /// What the window is looking at. It lives here rather than inside a view because `commands`
-    /// is a scene builder: the menu items below are constructed outside every view body and can
-    /// only move state that is owned above the window.
-    @State private var shell = ShellModel()
+    /// What the window is looking at. It lives on `AppModel` rather than in this scene because
+    /// Activity's notifications have to know which channel is in view whether or not the Activity
+    /// view is on screen, and the model that decides them is built beside `AppModel`. One owner;
+    /// the menu items below move it and the window reads it.
+    private var shell: ShellModel { model.shell }
 
     var body: some Scene {
         WindowGroup("afleet") {
