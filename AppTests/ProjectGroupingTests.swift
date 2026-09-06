@@ -58,11 +58,17 @@ final class ProjectGroupingTests: XCTestCase {
 
     /// The launch-path cost guard.
     ///
-    /// Not a threshold this is expected to approach — the scan runs in single-digit milliseconds —
-    /// but the shape it replaced took 2.08 seconds on a document of exactly this size, so a second
-    /// is a bound that separates the two by three orders of magnitude while leaving room for a
-    /// loaded machine. The correctness assertions come first so a scan that returned nothing could
-    /// not pass by being fast.
+    /// Not a threshold this is expected to approach: the scan reads this document in about ten
+    /// milliseconds, write included. The bound is 250 ms, which leaves the passing path a factor of
+    /// twenty-five and still fails the shape this replaced by a factor of six — that one measured
+    /// 1,537 ms here and 2,080 ms on the reviewer's machine. An earlier draft used one second, which
+    /// was safe against false failures but left only 1.5x against the pre-fix code, close enough
+    /// that a faster machine could have slipped under it and quietly stopped discriminating.
+    ///
+    /// The timing is the weaker of the two guards on this change and is here for the regression a
+    /// correctness test cannot see. `testProjectOrderIsFileOrderAndIgnoresAPathAppearingAsAValue` is
+    /// the deterministic one. The correctness assertions come first here too, so a scan that
+    /// returned nothing could not pass by being fast.
     func testProjectOrderOverALargeDocumentIsNotOnTheCriticalPath() throws {
         let home = try ScratchConfigHome()
         let projectCount = 306
@@ -85,7 +91,7 @@ final class ProjectGroupingTests: XCTestCase {
         XCTAssertEqual(order.count, projectCount)
         XCTAssertEqual(order.first, "/invented/repo-0")
         XCTAssertEqual(order.last, "/invented/repo-\(projectCount - 1)")
-        XCTAssertLessThan(elapsed, .seconds(1),
+        XCTAssertLessThan(elapsed, .milliseconds(250),
                           "reading \(projectCount) project keys from \(data.count) bytes took \(Self.ms(elapsed)) ms")
     }
 
