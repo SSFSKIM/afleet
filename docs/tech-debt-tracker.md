@@ -450,7 +450,13 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     Second consequence, found in Task 3's review: Settings' *Delete diagnostics* renews the
     composer's own three sinks after unlinking their files, but it cannot reach `Fleet`'s
     duplicate pair, so those two go on writing into unlinked inodes until the app is
-    relaunched. Whichever fix above lands closes this half too.
+    relaunched. **Neither closer listed above closes this half**, which the first draft of this
+    sentence claimed: one owner per file still holds a handle to an unlinked inode, and so does
+    a composer that exposes `Fleet`'s sinks. What closes both halves together is the C5 spec's
+    revised recommendation — each sink opening the log `O_APPEND` **per write** and closing,
+    holding no handle across writes, so a sink whose file was unlinked recreates it on the next
+    write. That still leaves two sinks racing each other's rotation rename, which only a single
+    rotation owner settles.
 54. **`TranscriptIndex` and `Fleet` disagree about the config home's spelling.** The index
     records a symlink-resolved root in its snapshot; `Fleet` keys supervisors by the
     launch-resolved root. C5's `ChannelRegistrar.listed` threads the home through as an argument
