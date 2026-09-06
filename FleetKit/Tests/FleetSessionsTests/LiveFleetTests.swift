@@ -363,7 +363,123 @@ final class LiveFleetTests: XCTestCase {
         }
     }
 
-    // MARK: - Scenario 5: the composed turn
+    // MARK: - Scenario 5: the restart readback, one turn
+
+    /// A quiescent restart relaunches with the settings the channel had, and the engine — not a stand-in — says so.
+    ///
+    /// This scenario exists because of the one class of defect the rest of the suite structurally cannot catch.
+    /// Every restart test scripted a `get_settings` answer carrying `effective_keys`, an array, and called it the
+    /// recorded shape; the whole-branch panel found `effective_keys` was a redactor artifact the engine has never
+    /// emitted. Stand-ins agreed with the code and the code agreed with the stand-ins. So the assertions below ask
+    /// the installed engine for the shape and read the answer it actually gives: `effective` is an **object**, and
+    /// there is no `effective_keys` key at all.
+    ///
+    /// `/model haiku` is the second alias, and it is also the live half of the resolution the readback does: the
+    /// handshake's `models` table maps `haiku` to `claude-haiku-4-5-20251001`, which is what `applied.model`
+    /// reports, so a readback that compared the alias raw would banner. `/add-dir` is the restart-required setting
+    /// that makes the restart happen at all. Both then have to be in the relaunch argv.
+    ///
+    /// Deliberate break: read `settings["effective_keys"]?.arrayValue` in `restartNow` instead of
+    /// `settings["effective"]?.objectValue` → the readback sees no keys, `flagSettings` aside the model still
+    /// resolves, and the direct assertion on the engine's answer below fails on the shape.
+    func testAQuiescentRestartRelaunchesItsSettingsAndTheEngineReadsThemBack() async throws {
+        try LiveGate.skipUnlessLive()
+        try LiveGate.skipUnlessTurns()
+        let rig = try await LiveRig(budget: Self.budget)
+        addTeardownBlock { await rig.shutdown() }
+
+        // 600 s is the sum of this scenario's own bounded waits: the open (a twenty-second pre-spawn reconcile, a
+        // thirty-second handshake, a twenty-second post-handshake reconcile), 120 s for the prompt's `result` and
+        // its settle, two sixty-second control requests for the model and the readback door, the restart (a 45 s
+        // termination, the ten-second handoff budget, a seventy-second spawn and its own sixty-second
+        // `get_settings`), this test's own sixty-second `get_settings`, and a 45 s reap.
+        try await Self.budget.run(turns: 1, wallTime: .seconds(600)) {
+            let directory = try Self.trustedDirectory(0)
+            let added = try Self.trustedDirectory(2)
+            let session = SessionID()
+            let key = ChannelKey(configHome: LiveGate.scratchHome, session: session)
+
+            await rig.fleet.register(key, cwd: directory, recent: true)
+            let opened = await rig.fleet.events(of: key)
+            let stream = try XCTUnwrap(opened, "the fleet has no channel for this session")
+            let log = LiveEventLog()
+            let pump = Task { for await event in stream { await log.append(event) } }
+            defer { pump.cancel() }
+
+            // The first launch pins the resolved id; the `/model` below moves it to the alias, which is the point.
+            _ = Self.budget.launch(LaunchConfiguration(binary: rig.binary, cwd: directory, session: .new(session)),
+                                   maxTurns: 1, model: Self.haiku, freshSessions: [session])
+            let ready = try await rig.fleet.open(key, cwd: directory, recent: true)
+            XCTAssertEqual(ready.origin, .owned(.ready))
+
+            // One cheap turn, so a transcript exists for the relaunch to resume.
+            try await rig.fleet.perform(.send(UserInput(text: "Reply with exactly: pong")), on: key)
+            switch await Self.settle(log, quietFor: .seconds(10), upTo: .seconds(120), { events in
+                !Self.results(in: events).isEmpty
+            }) {
+            case .settled:
+                break
+            case .conditionUnmet(let results):
+                XCTFail("the prompt produced \(results) result frame(s) in two minutes")
+            case .stillBusy:
+                XCTFail("the channel never went quiet after its one turn")
+            }
+
+            try await rig.fleet.resolveSetting("model", to: .string(Self.haikuAlias), on: key)
+
+            // No model pin on this one: the relaunch carries the alias the channel now holds, and overwriting it
+            // here would be the test answering its own question. The alias is a haiku alias, so the pin's purpose
+            // — nothing but haiku reaches a model — is kept by the value itself.
+            _ = Self.budget.launch(LaunchConfiguration(binary: rig.binary, cwd: directory,
+                                                       session: .resume(session, fork: false)), maxTurns: 1)
+            let launchesBefore = rig.launched.all.count
+            let restarted = try await rig.fleet.perform(.quiescentRestart(RestartRequest(addDirectories: [added])),
+                                                        on: key)
+
+            XCTAssertEqual(restarted.origin, .owned(.ready),
+                           "the quiescent restart did not come back ready")
+            XCTAssertNil(restarted.banner,
+                         "a setting did not survive the relaunch: \(String(describing: restarted.banner))")
+
+            // The relaunch argv, as the engine received it.
+            XCTAssertEqual(rig.launched.all.count, launchesBefore + 1, "the restart launched more than once")
+            let relaunch = try XCTUnwrap(rig.launched.latest, "the restart launched nothing")
+            let argv = try relaunch.arguments()
+            XCTAssertEqual(relaunch.model, Self.haikuAlias, "the relaunch did not carry the new model")
+            XCTAssertTrue(Self.argv(argv, carries: ["--model", Self.haikuAlias]),
+                          "the relaunch argv does not name the new model")
+            XCTAssertTrue(Self.argv(argv, carries: ["--add-dir", added.path(percentEncoded: false)]),
+                          "the relaunch argv does not name the added directory")
+            XCTAssertTrue(Self.argv(argv, carries: ["--resume", session.description]),
+                          "the relaunch did not resume the same session")
+
+            // The engine's own answer, asked of the relaunched child. `effective` is an object of applied settings
+            // keyed by name; `effective_keys` is a name the engine has never used and a fixture redactor invented.
+            let handle = try XCTUnwrap(rig.handles.latest, "the restart built no handle")
+            let settings = try await handle.request(GetSettings(), timeout: .seconds(60))
+            XCTAssertNotNil(settings["effective"]?.objectValue,
+                            "get_settings.effective is not an object; the engine answered \(Self.shape(settings))")
+            XCTAssertNil(settings["effective_keys"],
+                         "get_settings carried an effective_keys key, which the engine is not known to emit")
+            XCTAssertNotNil(settings["applied"]?.objectValue, "get_settings.applied is not an object")
+            print("[G5] get_settings keys \(Self.shape(settings)); effective is an object with " +
+                  "\(settings["effective"]?.objectValue?.count ?? -1) key(s)")
+
+            try await rig.fleet.perform(.reap, on: key)
+
+            let results = Self.results(in: await log.events)
+            for result in results {
+                XCTAssertNotEqual(result.subtype, "error_max_turns",
+                                  "a turn ended at the --max-turns cap: result subtype error_max_turns")
+                XCTAssertFalse(result.isError, "a turn ended with an error result: \(result.subtype)")
+                await Self.budget.add(cost: result.totalCostUSD)
+            }
+            XCTAssertEqual(results.count, 1, "expected one result frame for the one prompt, saw \(results.count)")
+            Self.budget.assertEveryLaunchWasDecorated()
+        }
+    }
+
+    // MARK: - Scenario 6: the composed turn
 
     /// One prompt that makes hooks, a background shell, a subagent and a relocation all write under the config
     /// home, with the witness read while the child is still live and again after it has ended.
@@ -585,6 +701,18 @@ final class LiveFleetTests: XCTestCase {
     // MARK: - Helpers
 
     static let haiku = "claude-haiku-4-5-20251001"
+    /// The second alias. The handshake's `models` table maps it to `haiku`'s resolved id, which is what makes the
+    /// restart's readback resolution meaningful rather than a string comparison that happens to match.
+    static let haikuAlias = "haiku"
+
+    /// Whether `argv` carries these tokens adjacently, which is how an option and its value reach the engine.
+    private static func argv(_ argv: [String], carries pair: [String]) -> Bool {
+        guard pair.count == 2, let index = argv.firstIndex(of: pair[0]) else { return false }
+        return argv.indices.contains(index + 1) && argv[index + 1] == pair[1]
+    }
+
+    /// A JSON answer's top-level key names, sorted. Names only, never values.
+    private static func shape(_ value: JSONValue) -> [String] { (value.objectValue?.keys).map { $0.sorted() } ?? [] }
 
     /// The zero-cost usage read the budget takes before the first scenario and before each turn-spending one.
     private static func readUsage() async -> LiveBudgetReading? {
@@ -847,6 +975,7 @@ private final class LiveRig: @unchecked Sendable {   // every stored value is se
     let verbs: CLIVerbs
     let runner: RecordingDirectoryRunner
     let handles = LiveHandles()
+    let launched = LaunchLog()
     private let storeDirectory: URL
     private let diagnosticsDirectory: URL
 
@@ -885,6 +1014,7 @@ private final class LiveRig: @unchecked Sendable {   // every stored value is se
                          diagnostics: sink, timeout: .seconds(180))
 
         let built = handles
+        let record = launched
         let home = configHome
         let base = environment
         let factory: ProcessFactory = { epoch, launch in
@@ -898,6 +1028,7 @@ private final class LiveRig: @unchecked Sendable {   // every stored value is se
                                         diagnostics: capturing, capture: nil)
             let handle = LiveProcessHandle(process, epoch: epoch, diagnostics: capturing)
             built.append(handle)
+            record.append(decorated)
             return handle
         }
 

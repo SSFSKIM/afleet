@@ -259,7 +259,7 @@ actor LiveBudget {
     /// Twenty minutes, per the spec's amendment: wall time is not the scarce resource here, turns are, and a
     /// ten-minute ceiling did harm in both directions — it could not hold the sum of the scenarios' honest
     /// declarations, and it would have refused the most valuable scenario last in alphabetical order.
-    init(turnCeiling: Int = 4, wallCeiling: Duration = .seconds(1200), probe: UsageProbe? = nil) {
+    init(turnCeiling: Int = 5, wallCeiling: Duration = .seconds(1200), probe: UsageProbe? = nil) {
         self.turnCeiling = turnCeiling; self.wallCeiling = wallCeiling; self.probe = probe
     }
 
@@ -460,6 +460,19 @@ final class LiveHandles: @unchecked Sendable {   // `lock` serialises `built`
     func append(_ handle: LiveProcessHandle) { lock.lock(); built.append(handle); lock.unlock() }
     var all: [LiveProcessHandle] { lock.lock(); defer { lock.unlock() }; return built }
     var latest: LiveProcessHandle? { lock.lock(); defer { lock.unlock() }; return built.last }
+}
+
+/// Every launch the live factory actually handed to a `ClaudeProcess`, after decoration, in spawn order.
+///
+/// Deliberately not the ledger's count: that one also sees the throwaway configurations a scenario decorates
+/// purely to set its expectation. This is the argv the engine really received, which is what a relaunch assertion
+/// has to read.
+final class LaunchLog: @unchecked Sendable {   // `lock` serialises `recorded`
+    private let lock = NSLock()
+    private var recorded: [LaunchConfiguration] = []
+    func append(_ launch: LaunchConfiguration) { lock.lock(); recorded.append(launch); lock.unlock() }
+    var all: [LaunchConfiguration] { lock.lock(); defer { lock.unlock() }; return recorded }
+    var latest: LaunchConfiguration? { lock.lock(); defer { lock.unlock() }; return recorded.last }
 }
 
 /// The real directory runner, with every argv it was asked to run recorded so a scenario can assert that adoption
