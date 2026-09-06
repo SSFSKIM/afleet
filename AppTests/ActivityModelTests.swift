@@ -341,6 +341,40 @@ final class ActivityModelTests: XCTestCase {
         XCTAssertNotNil(plainItem.ask, "the same ask without the flag was not answerable")
     }
 
+    // MARK: - The launch order
+
+    /// Activity has its rows before the notification authorisation prompt is answered.
+    ///
+    /// The prompt is a system alert that does not return until somebody clicks it — spike S-C5-1
+    /// measured it outstanding for the whole of a twelve-second run, with no bound on it at all.
+    /// While `startActivity` awaited it, a first launch had no pumps, no rows, no badges and no
+    /// in-app fallback either, which is the one launch §8.7's observable is about. The poster here
+    /// blocks exactly as the system does.
+    ///
+    /// Three clauses: authorisation **was** asked for, it is **still outstanding**, and Activity is
+    /// nevertheless running with the row its pending decision earns. Without the first, an
+    /// implementation that never requested authorisation at all would pass.
+    func testActivityStartsWithoutWaitingForTheAuthorisationPrompt() async throws {
+        let harness = try Harness()
+        let one = harness.key("1")
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        await arm(harness, one, pending: [ActivityFixtures.pending(ask)])
+        harness.poster.blocksAuthorisation = true
+
+        await ActivityLaunch.begin(harness.model, requesting: harness.poster)
+        await harness.poster.whenAuthorisationRequested()
+
+        XCTAssertEqual(harness.poster.authorisationRequests, 1, "authorisation was never requested")
+        XCTAssertTrue(harness.poster.isBlockedInAuthorisation,
+                      "the prompt was already answered, so this proves nothing about the order")
+        XCTAssertGreaterThan(harness.model.rebuildCount, 0, "Activity never started")
+        XCTAssertEqual(harness.model.items.count, 1,
+                       "Activity started with no rows though a decision is pending")
+
+        harness.poster.releaseAuthorisation()
+    }
+
     // MARK: - G2b
 
     /// A channel not in view with a pending decision carries a red count and an unread dot;

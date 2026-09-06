@@ -18,9 +18,39 @@ final class RecordingPoster: NotificationPosting {
 
     nonisolated init() {}
 
+    /// When true, `requestAuthorisation` suspends until `releaseAuthorisation()` — the system
+    /// prompt of a genuine first launch, which spike S-C5-1 measured outstanding for the whole of a
+    /// run. The launch-order test needs that suspension to be real; nothing else sets it.
+    var blocksAuthorisation = false
+    private(set) var isBlockedInAuthorisation = false
+    private var authorisationGate: CheckedContinuation<Void, Never>?
+
     func requestAuthorisation() async -> Bool {
         authorisationRequests += 1
+        releaseWaiters()
+        if blocksAuthorisation {
+            isBlockedInAuthorisation = true
+            releaseWaiters()
+            await withCheckedContinuation { continuation in authorisationGate = continuation }
+            isBlockedInAuthorisation = false
+        }
         return isAuthorised
+    }
+
+    /// Answers the prompt. A test that leaves it unanswered leaks a suspended task, so every test
+    /// that blocks releases before it ends.
+    func releaseAuthorisation() {
+        authorisationGate?.resume()
+        authorisationGate = nil
+    }
+
+    /// Suspends until the poster has been asked for authorisation, resumed by the asking.
+    func whenAuthorisationRequested() async {
+        if authorisationRequests > 0 { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(Waiter(predicate: { [weak self] _ in (self?.authorisationRequests ?? 0) > 0 },
+                                  continuation: continuation))
+        }
     }
 
     func post(_ notification: AfleetNotification) async {
@@ -53,6 +83,7 @@ final class RecordingPoster: NotificationPosting {
     }
     private var waiters: [Waiter] = []
 
+    /// Called by every event a waiter can be waiting on: a post, and the authorisation request.
     private func releaseWaiters() {
         guard !waiters.isEmpty else { return }
         var remaining: [Waiter] = []

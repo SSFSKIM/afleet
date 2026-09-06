@@ -60,6 +60,11 @@ final class AppModel {
     /// the next launch, which is what the Developer section already says of every other preference.
     private var notificationPreferences = NotificationPreferences()
 
+    /// The notification authorisation request the last launch started. Held rather than discarded:
+    /// it outlives `startActivity` by design and a dropped task is a request nobody can account
+    /// for. Nothing waits on it — see `ActivityLaunch`.
+    private var authorisationRequest: Task<Bool, Never>?
+
     init(sequence: LaunchSequence = LaunchSequence(),
          coordinatorFactory: @escaping @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating = { FleetCoordinator(workspace: $0) }) {
         self.sequence = sequence
@@ -122,8 +127,8 @@ final class AppModel {
         sink.model = model
         activity = model
         model.attach(to: browser)
-        await poster.requestAuthorisation()
-        await model.start()
+        // Activity first, authorisation after and not awaited here — see `ActivityLaunch`.
+        authorisationRequest = await ActivityLaunch.begin(model, requesting: poster)
     }
 }
 
