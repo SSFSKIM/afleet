@@ -180,6 +180,35 @@ final class SettingsReadoutTests: XCTestCase {
         XCTAssertEqual(readout.lastCensus, census, "the readout did not report the stored census")
     }
 
+    /// The count moves. Settings' `.task` runs `refresh()` every time the window is opened, so a
+    /// readout that answered from a cached tally would show the first open's number forever — and
+    /// the test above cannot see that, because it builds a fresh readout after the frames are
+    /// already recorded and refreshes exactly once. This one reuses the readout across two reads.
+    @MainActor
+    func testTheUnknownFrameCountMovesWhenMoreFramesArrive() async throws {
+        let temp = try TempTree()
+        let configHome = try temp.directory("home")
+        try LaunchFixtures.transcript(in: configHome, slug: "invented-project", session: LaunchFixtures.sessionA)
+        let built = try await Self.workspace(temp: temp, configHome: configHome)
+
+        let counter = UnknownFrameCounter(store: built.workspace.store)
+        await counter.record("invented_frame_kind_one")
+        await counter.record("invented_frame_kind_two")
+
+        let readout = SettingsReadout(workspace: built.workspace)
+        await readout.refresh()
+        XCTAssertEqual(readout.unknownFrames.total, 2, "the first read did not see the two frames")
+
+        await counter.record("invented_frame_kind_three")
+        await counter.record("invented_frame_kind_one")
+
+        await readout.refresh()
+        XCTAssertEqual(readout.unknownFrames.total, 4,
+                       "the count froze at \(readout.unknownFrames.total) after the first read")
+        XCTAssertEqual(readout.unknownFrames.counts["invented_frame_kind_one"], 2,
+                       "a repeated type did not accumulate")
+    }
+
     // MARK: - Support
 
     private struct Built {

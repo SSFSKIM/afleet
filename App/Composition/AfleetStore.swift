@@ -102,31 +102,31 @@ struct UnknownFrameTally: Codable, Hashable, Sendable {
     var total: Int { counts.values.reduce(0, +) }
 }
 
-/// The tally's one writer. An actor because frames arrive from every channel at once and the
-/// read-modify-write below is two hops onto the store.
+/// Reading and incrementing the tally. An actor because frames arrive from every channel at once
+/// and the increment below is a read and a write with a suspension between them.
+///
+/// **Nothing is cached here.** An earlier draft kept the loaded tally in a field and returned it
+/// forever after, which froze Settings' count at whatever it was the first time the window was
+/// opened, and would have gone on freezing it for any second instance of this type — Settings
+/// builds its own. The store is the single copy; `FileStateStore` already holds the namespace's
+/// document in memory after the first touch, so reading it every time costs one actor hop and no
+/// file access.
 actor UnknownFrameCounter {
     private let store: any StateStore
-    private var tally: UnknownFrameTally?
 
     init(store: any StateStore) { self.store = store }
 
     /// One frame of a type the corpus does not carry.
     func record(_ type: String) async {
-        var current = await load()
+        var current = await snapshot()
         current.counts[type, default: 0] += 1
-        tally = current
         try? await store.write(current, namespace: .afleet, key: AfleetStoreKeys.unknownFrames)
     }
 
-    func snapshot() async -> UnknownFrameTally { await load() }
-
-    private func load() async -> UnknownFrameTally {
-        if let tally { return tally }
+    func snapshot() async -> UnknownFrameTally {
         let loaded = (try? await store.read(UnknownFrameTally.self, namespace: .afleet,
                                             key: AfleetStoreKeys.unknownFrames)) ?? nil
-        let value = loaded ?? UnknownFrameTally()
-        tally = value
-        return value
+        return loaded ?? UnknownFrameTally()
     }
 }
 
