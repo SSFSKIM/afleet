@@ -98,7 +98,7 @@ final class ProtocolShapeTests: XCTestCase {
     @MainActor func testAReplacementTabsLinkTargetSurvivesTheHandover() async throws {
         let fixture = await Self.makeContext()
         let router = fixture.router
-        let host = StubHost(router: router)
+        let host = StubHost(router: router, context: fixture.context)
         let link = WorkspaceLink.url(URL(string: "https://example.invalid/handover")!)
 
         let placeholder = StubTab(id: .thread, mark: "placeholder", router: router)
@@ -149,10 +149,16 @@ final class ProtocolShapeTests: XCTestCase {
     /// the smallest answer that satisfies the protocol; Task 7 owns the real host.
     @MainActor final class StubHost: PanelHost {
         private let router: StubRouter
+        /// The channel currently on screen. `selectIndex(_:)` is 1-based over `available(for:)`,
+        /// which needs a context, and the real host has one at that point for the same reason.
+        private let context: ChannelContext
         private var tabs: [PanelTabID: any PanelTab] = [:]
         private(set) var selected: PanelTabID?
 
-        init(router: StubRouter) { self.router = router }
+        init(router: StubRouter, context: ChannelContext) {
+            self.router = router
+            self.context = context
+        }
 
         func register(_ tab: any PanelTab) throws {
             guard tabs[tab.id] == nil else { throw PanelHostError.duplicateTab(tab.id) }
@@ -170,8 +176,10 @@ final class ProtocolShapeTests: XCTestCase {
             PanelTabID.allCases.filter { tabs[$0]?.isAvailable(in: context) == true }
         }
         func select(_ id: PanelTabID) { selected = id }
+        /// 1-based over `available(for:)`, not over `allCases` and not over everything registered,
+        /// so Cmd+1 is the first tab the user can actually see.
         func selectIndex(_ index: Int) {
-            let visible = PanelTabID.allCases.filter { tabs[$0] != nil }
+            let visible = available(for: context)
             guard index >= 1, index <= visible.count else { return }
             selected = visible[index - 1]
         }
