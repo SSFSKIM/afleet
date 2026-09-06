@@ -71,3 +71,4 @@ schemes:
         - package: Workbench/EditorCoreTests
         - package: Workbench/LinkRoutingTests
         - package: Workbench/SourceControlCoreTests
+        - package: Workbench/PanelHostAPITests
