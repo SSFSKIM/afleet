@@ -398,3 +398,14 @@ architect's rulings settled them). Line numbers are as at `4f2102d`, before the 
     rate-limit event per turn. The corpus stays pinned at 2.1.259; re-pinning is a deliberate C1
     re-recording, not a drift fix. Owner: C1 (re-pin decision), C6 (the §8 banner must not wait
     for a per-turn event).
+51. **`RouteStrategy.applyFlagSetting`'s readback is declared and never executed.** The table row
+    documents the strategy as "`apply_flag_settings {settings: {key: value}}` then `get_settings`"
+    and gives it `ReadbackSource.getSettingsEffective`, but `CommandRouter.resolve` routes every
+    flag command to a `.controlRequest` and `StrategyExecutor.run` answers `.applyFlagSetting` with
+    `.notARequest`, so nothing anywhere sends the readback or reads `effective` after an applied
+    flag. `RouterTests.testEffortSendsApplyFlagSettingsAndReadsBackEffective` performs the
+    `get_settings` itself, which is why the gap is invisible. Deliberately left alone by the
+    2026-09-06 facade corrective (`ace7a7b`), whose scope was reaching the router from `Fleet` and
+    not changing what it does. Closer: C6 decides where the readback belongs — a second request
+    inside a strategy the executor runs, or the surface re-reading settings after a flag change —
+    and `ReadbackSource` either drives it or goes. Owner: C6.

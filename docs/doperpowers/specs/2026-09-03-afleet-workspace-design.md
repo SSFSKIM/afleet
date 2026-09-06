@@ -2363,6 +2363,9 @@ SwiftPM package or target that builds and tests without the children above it, p
   channel with one in flight is refused, and the surface leaves the channel alone and lets the user
   retry, never retrying on its own; `LifecycleError.notEligible(Blocker)` from `perform(.reap)`,
   naming the blocker (a turn, a decision, queued input, a wedge, a background task by id).
+  Amended 2026-09-06: the router is reachable through this API on a `ChannelKey` — `route(_:on:)`,
+  `send(_:on:)` and `run(_:arguments:on:ui:)` — so C6's composer routes a line and executes what it
+  named without holding anything under the facade.
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
   types; FleetKit never models upper-layer state. Owner: C4. Binds C5, C7. Amended
@@ -4466,3 +4469,8 @@ Pending — written at finish.
   could not run because the ritual resumes the recorded session id and the scratch home was
   recreated that morning (tracker 49, a harness limitation, not drift). The corpus stays pinned at
   2.1.259 (tracker 50); a re-pin is a deliberate C1 re-recording.
+- 2026-09-06 corrective (`ace7a7b`): X5 gains the router's three operations on a `ChannelKey` —
+  `route(_:on:)`, `send(_:on:)` and `run(_:arguments:on:ui:)` — each resolving the key to its
+  supervisor and delegating to `CommandRouter` and `StrategyExecutor`, which until now took a
+  supervisor the facade never handed out. C6's composer can route a slash command and execute what
+  it named through the facade alone.
