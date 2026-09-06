@@ -42,9 +42,12 @@ final class CLIVerbsTests: XCTestCase {
     /// `verbFailed`, which is why the third merge-evidence run's `stop` failure could not say whether the child
     /// had hung or the CLI had said no.
     func testATimedOutVerbIsDistinguishedFromOneTheCLIRefused() async throws {
-        let abandoned = ScriptedProcessRunner.Rule(match: { $0.first == "stop" },
-                                                   respond: { _ in ProcessOutput(stdout: Data(), stderr: Data(),
-                                                                                 exitCode: -1, timedOut: true) })
+        let abandoned = ScriptedProcessRunner.Rule(
+            match: { $0.first == "stop" },
+            respond: { _ in
+                ProcessOutput(stdout: Data(), stderr: Data(), exitCode: -1, timedOut: true,
+                              timeoutState: "pid=4242 liveness=alive name=claude waitReturned=false pipesOpen=2")
+            })
         let runner = ScriptedProcessRunner(rules: [abandoned], calls: calls)
         let timing = CLIVerbs(runner: runner, binary: URL(filePath: "/usr/bin/true"), configHome: home.configHome,
                               environment: childEnvironment(), diagnostics: sink)
@@ -52,10 +55,13 @@ final class CLIVerbsTests: XCTestCase {
         var thrown: (any Error)?
         do { try await timing.stop(JobShort(rawValue: "j00001")) } catch { thrown = error }
 
-        guard case .verbTimedOut(let verb, _)? = thrown as? LifecycleError else {
+        guard case .verbTimedOut(let verb, _, let childState)? = thrown as? LifecycleError else {
             return XCTFail("an abandoned verb gave \(String(describing: thrown))")
         }
         XCTAssertEqual(verb, "stop")
+        // The state travels with the failure rather than being dropped at the runner's edge: an overrun that
+        // cannot say what the child was doing is the exact position the third merge-evidence run left us in.
+        XCTAssertEqual(childState, "pid=4242 liveness=alive name=claude waitReturned=false pipesOpen=2")
     }
 
     func testAgentsJSONDecodesTheScriptedArray() async throws {
