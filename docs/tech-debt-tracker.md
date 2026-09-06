@@ -469,6 +469,16 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     the first thing a view bound straight to `sections` would feel, so C5 Task 5 and C6 should
     know. Found at C5 Task 4. Closer: patch the affected section rather than rebuilding, if a
     profile ever shows it.
+    **Amended after Task 4's review, which found this entry recorded half its subject.** The
+    re-derivation was not pure: grouping called `realpath` plus an upward `fileExists` walk per
+    path component and then read a candidate's `.git`, memoised only *within* one call, so the
+    whole set of probes was repeated from scratch on every rebuild — on the main actor, on every
+    `ChannelState`, every delta, every failed action and every dismissed banner. That half is
+    **closed**: `PathMemo` outlives the call, so each distinct directory is probed once per launch,
+    and `ProjectGroupingTests.testThePathMemoIsNotReprobedOnASecondGrouping` holds it there
+    against a counter of real probes rather than of cache entries. What remains open is the
+    original entry as written — the O(rows) rebuild itself, which is arithmetic and allocation
+    with no syscalls in it.
 56. **`FleetFacadeTests.testOpenListsTheChannelAndPublishesEveryTransition` is load-sensitive
     and fails the whole-suite gate under load.** `FleetKit/Tests/FleetSessionsTests/FleetFacadeTests.swift:473`
     waits with `harness.waitFor("the merged stream to carry the transitions") { collected.count >= 2 }`
