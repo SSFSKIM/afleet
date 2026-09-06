@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import OSLog
 import AfleetCore
 import ClaudeWire
 import FleetKit
@@ -27,6 +28,7 @@ final class NotificationRouter {
     private let lifecycle: any LifecycleAPI
     private let isInView: @MainActor (ChannelKey) -> Bool
     private let preferences: @MainActor () -> NotificationPreferences
+    private let log = Logger(subsystem: "com.afleet.app", category: "notifications")
 
     /// How many notifications have been posted and how many hook callbacks answered. Counts, for
     /// the diagnostics line and for a test that needs a floor (§11).
@@ -68,8 +70,26 @@ final class NotificationRouter {
     private func handle(_ request: InboundRequest, on key: ChannelKey) {
         switch request.payload {
         case .hookCallback(let hook):
-            guard hook.callbackID == HookRoute.notification else { break }
-            postHook(hook, id: request.id, on: key)
+            // **Every** surfaced hook callback is answered, and only one of them is a notification.
+            //
+            // `InboundPolicy` surfaces a `hook_callback` precisely *because* its id is registered,
+            // and `InitializeConfiguration.afleetDefaults` registers two: `afleet.notification` and
+            // `afleet.config-change`. A route that answered only the first left the second
+            // outstanding for ever — the registered matcher carries no timeout, so the engine
+            // blocks until its process dies. The default arm is unconditional rather than a list of
+            // known ids, so registering a third id cannot reintroduce the hang.
+            if hook.callbackID == HookRoute.notification {
+                postHook(hook, id: request.id, on: key)
+            } else {
+                // §6.4's `afleet.config-change`: "refreshes `get_settings` and answers likewise".
+                // C5 answers and does not refresh. `get_settings` is a per-channel control request
+                // whose reader — the channel's settings and permissions view — is C6's; this child
+                // renders no engine settings, so a refresh here would fetch a value nothing draws.
+                // The hang is the defect and the answer is what closes it; the refresh is owed and
+                // is tracker entry 61.
+                log.notice("hook callback answered without a route: \(hook.callbackID, privacy: .public)")
+                answer(request.id, on: key)
+            }
 
         case .canUseTool, .requestUserDialog, .elicitation:
             guard preferences().permissionRequests, !isInView(key) else { break }
@@ -94,13 +114,18 @@ final class NotificationRouter {
                                 title: kind.map { "afleet — \($0)" } ?? "afleet",
                                 body: message,
                                 session: key.session))
+        answer(id, on: key)
+    }
+
+    /// The empty continue every surfaced hook callback gets, whether or not it was also a
+    /// notification. An unanswered surfaced request leaves the engine waiting; `decisionGone` is
+    /// the ordinary outcome of a cancelled callback and is nothing to report.
+    private func answer(_ id: RequestID, on key: ChannelKey) {
         hookAnswerCount += 1
         let lifecycle = self.lifecycle
         let previous = answerTask
         answerTask = Task {
             await previous?.value
-            // An unanswered surfaced request leaves the engine waiting; `decisionGone` is the
-            // ordinary outcome of a cancelled callback and is nothing to report.
             _ = try? await lifecycle.perform(.answer(id, .hookContinue(.empty)), on: key)
         }
     }
@@ -148,6 +173,10 @@ final class NotificationRouter {
 /// declares them to the engine; this is the app's side of the same two strings.
 enum HookRoute {
     static let notification = "afleet.notification"
+    /// Registered by `InitializeConfiguration.afleetDefaults` and therefore *surfaced* by the
+    /// inbound policy. Named here because a reader of the router needs to know the second id
+    /// exists; the router does not branch on it, because its default arm already answers every id
+    /// it does not route and a branch would be one more place to forget.
     static let configChange = "afleet.config-change"
 }
 
