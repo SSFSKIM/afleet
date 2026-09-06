@@ -16,6 +16,15 @@ import PanelHostAPI
 /// Everything the sidebar and the switcher *decide* lives here or in `QuickSwitcherModel`, and the
 /// views read it. No view below computes which rows the thirty-day default hides or which panel tab
 /// a number key means.
+///
+/// **What actually pins the main thread, measured on a real config home of 306 projects and 3,006
+/// transcripts:** `LifecycleAPI.updates` delivers a `ChannelState` continuously — C4 re-runs
+/// `claude agents` every few hundred milliseconds to observe foreign holders — and every one of
+/// them makes `FleetBrowserModel.rebuild()` re-derive all 306 sections, which then makes SwiftUI
+/// re-diff the whole row tree. A six-second sample of the shipped build put 39 percent of the main
+/// thread in `rebuild()` and its sort and 60 percent in `OutlineListCoordinator.diffRows`. That is
+/// tech-debt entry 55, whose closer is an incremental rebuild in `FleetBrowserModel`, and it is not
+/// something the shell can fix from up here.
 @MainActor
 @Observable
 final class ShellModel {
@@ -42,9 +51,21 @@ final class ShellModel {
     /// `List(selection:)` wants an optional and the shell always shows something, so a deselection
     /// — which AppKit produces on a click in the empty space below the last row — leaves the focus
     /// where it was rather than blanking the window.
+    ///
+    /// **The equality guard is not decoration.** `@Observable` invalidates on assignment, not on
+    /// change, so writing back the value the property already holds still tells every observer the
+    /// model moved — and `List` writes its selection back on each update pass. An unguarded setter
+    /// therefore turns every list update into a model change and every model change back into a
+    /// list update. It was added while hunting a sustained 100-percent main thread, and profiling
+    /// then showed a different cause (see the note below), so this is a hazard closed on its own
+    /// merits rather than a measured fix. The same guard is on every other writer here for the
+    /// same reason.
     var listSelection: Focus? {
         get { focus }
-        set { if let newValue { focus = newValue } }
+        set {
+            guard let newValue, newValue != focus else { return }
+            focus = newValue
+        }
     }
 
     /// Cmd+K's sheet.
@@ -66,18 +87,30 @@ final class ShellModel {
 
     // MARK: - The shortcuts' verbs
 
-    func presentSwitcher() { isSwitcherPresented = true }
+    func presentSwitcher() {
+        guard !isSwitcherPresented else { return }
+        isSwitcherPresented = true
+    }
 
-    func showActivity() { focus = .activity }
+    func showActivity() { set(.activity) }
 
-    func select(_ id: SessionID) { focus = .channel(id) }
+    func select(_ id: SessionID) { set(.channel(id)) }
+
+    /// One writer for `focus`, and it never writes a value the model already holds — see
+    /// `listSelection`.
+    private func set(_ next: Focus) {
+        guard next != focus else { return }
+        focus = next
+    }
 
     /// Cmd+1…7. **One-based over `PanelTabID.allCases`**, which is the canonical order contract X7
     /// closes at seven cases, so the mapping cannot drift from the tab bar's. An index outside the
     /// set changes nothing rather than trapping: a key combination is not an assertion.
     func selectPanelTab(at index: Int) {
         guard index >= 1, index <= PanelTabID.allCases.count else { return }
-        panelTab = PanelTabID.allCases[index - 1]
+        let next = PanelTabID.allCases[index - 1]
+        guard next != panelTab else { return }
+        panelTab = next
     }
 
     func toggleShowAll(_ sectionID: String) {
