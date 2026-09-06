@@ -576,8 +576,16 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     Measured at C5 Task 5 by instrumenting `LifecycleAPI.updates` during a launch over a real
     config home: **13,250 states across 2,671 distinct sessions**, `identical=0` — not one was a
     repeat of a state already held — 99.8% carrying the `.archived` origin, and 2,669 of them for
-    sessions the listing policy never lists. It is a bounded burst that drains, not a leak; it
-    only looked endless because the consumer was slower than the producer.
+    sessions the listing policy never lists.
+    **It is not a one-off seeding burst, which is what the first version of this entry said.**
+    C5 Task 5's review found the mechanism and the controller verified it in C4's source:
+    `Fleet.fanOut` (`Fleet.swift:135-137`) walks **every** supervisor for **every** published
+    `HolderSet`, and `ChannelSupervisor.holdersChanged` (`ChannelSupervisor.swift:1718-1720`)
+    assigns `state.observed` before any test of whether anything changed. The observer publishes
+    only sets that differ, but one differing set costs **one published state per registered
+    channel** — and the sidebar registers every listed transcript, so a holder change affecting a
+    single session costs thousands. The cost therefore recurs for the life of the process
+    whenever holders move; seeding is merely the first and largest instance.
     Not a C5 problem any more: the sidebar patches by row, drops states for unlisted sessions and
     coalesces a burst, so 13,250 states now cost 87 publishes and 7 rebuilds, and idle CPU is
     0.1%. Filed because the amplification is real and the next consumer will not have that
