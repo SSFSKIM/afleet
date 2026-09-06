@@ -196,7 +196,12 @@ struct LaunchSequence: Sendable {
             // the pump is the last thing the launch does, which is what lets every batch the
             // watcher produced during startup reach the index.
             let subscription = changes.changes
-            Task.detached(priority: .utility) {
+            // `.userInitiated`, not `.utility`. This pump is the only thing keeping the sidebar in
+            // step with the filesystem, so its latency is a latency the user sees; the utility lane
+            // is for work nobody is waiting on, and somebody is always waiting on this. Do not
+            // lower it for tidiness — a starved pump does not report a slow sidebar, it reports
+            // nothing at all.
+            Task.detached(priority: .userInitiated) {
                 for await changed in subscription {
                     let delta = await index.update(changed: changed)
                     await coordinator.indexChanged(delta)
