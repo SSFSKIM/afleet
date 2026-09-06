@@ -130,4 +130,80 @@ final class SpawnFinalisationTests: XCTestCase {
             return XCTFail("a fleet with one child refused the next spawn: \(decision)")
         }
     }
+
+    // MARK: - Past the confirmed slot
+
+    /// The last await is not the last guard. `fleet.confirm` and the identity read are two more actor hops after
+    /// the epoch check, and `handleExit` clears `process` without advancing the epoch — so a child that dies in
+    /// them leaves the continuation publishing `.ready` over nothing, on a confirmed slot. The cap harm is the
+    /// worse half: `confirm` inserts into `live` from `reserved`, `handleExit`'s `release` only removes from
+    /// `live`, so a confirm that lands after a release installs a live entry for a dead channel — one of six
+    /// slots, gone for the life of the process, and the channel itself has no way back: `send` throws `notOwned`,
+    /// `reap` returns early on `process == nil`, and with no `systemItem` *Reopen* refuses.
+    ///
+    /// Scripted, not recorded: the rig parks the spawn on the far side of the counter turn, which is the whole
+    /// window and is two actor hops wide. A test that only pushed an exit at it would be hoping, not proving.
+    ///
+    /// Deliberate break: remove the `commitFinalisation` call from the end of `spawn`.
+    func testAnExitPastTheConfirmedSlotGivesTheSlotBackAndPublishesNoReady() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let held = HeldAnswer(), entered = HeldAnswer()
+        rig.onFinalising = { entered.release(); await held.wait() }
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        let spawning = Task { try await supervisor.spawn(reason: .open) }
+        try await rig.waitFor("the spawn to park past its confirmed slot") { entered.isReleased }
+        let handle = try XCTUnwrap(rig.scriptedHandles.first)
+
+        let published = await supervisor.publishedCount
+        handle.push(.exited(.code(0, stderrTail: ""), handle.epoch))
+        try await rig.waitForPublish(supervisor, above: published)
+        held.release()
+        _ = try? await spawning.value
+
+        let live = await rig.fleet.isLive(supervisor.key)
+        XCTAssertFalse(live, "a slot confirmed for a child that has gone is a slot nothing will ever release")
+        let occupancy = await rig.fleet.occupancy
+        XCTAssertEqual(occupancy, 0, "the fleet holds nothing for a channel with no process")
+        try await rig.drainPublished(of: supervisor)
+        XCTAssertFalse(rig.published(of: supervisor).contains { $0.origin == .owned(.ready) },
+                       "nothing is ready over a process that has exited")
+        let state = await supervisor.state
+        XCTAssertEqual(state.origin, .owned(.dormant), "the channel rests where the spawn found it")
+        let pid = await supervisor.livePID()
+        XCTAssertNil(pid)
+    }
+
+    /// The same window, reached by the trigger the Critical bar names: `/logout`'s terminate. It ends the child on
+    /// the actor while the spawn is suspended, releases the slot the confirm has already taken, and leaves the
+    /// channel connecting with no process — where the continuation would then publish `.ready`. Ruling 1's flat
+    /// prohibition, from an ordinary user action rather than an adversarial interleaving.
+    ///
+    /// Deliberate break: remove the `commitFinalisation` call from the end of `spawn`.
+    func testALogoutTerminateDuringTheFinalisationRestsTheChannelRatherThanPublishingReady() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let held = HeldAnswer(), entered = HeldAnswer()
+        rig.onFinalising = { entered.release(); await held.wait() }
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        let spawning = Task { try await supervisor.spawn(reason: .open) }
+        try await rig.waitFor("the spawn to park past its confirmed slot") { entered.isReleased }
+        let handle = try XCTUnwrap(rig.scriptedHandles.first)
+
+        let outcome = await supervisor.terminateForLogout()
+        guard case .exited = outcome else { return XCTFail("the plan did not see the child go: \(outcome)") }
+        XCTAssertEqual(handle.terminateCount, 1)
+        held.release()
+        _ = try? await spawning.value
+
+        try await rig.drainPublished(of: supervisor)
+        XCTAssertFalse(rig.published(of: supervisor).contains { $0.origin == .owned(.ready) },
+                       "a channel the plan has just terminated was published ready")
+        let state = await supervisor.state
+        XCTAssertEqual(state.origin, .owned(.dormant), "an owned channel with no process rests dormant")
+        let live = await rig.fleet.isLive(supervisor.key)
+        XCTAssertFalse(live)
+        let occupancy = await rig.fleet.occupancy
+        XCTAssertEqual(occupancy, 0, "and the fleet is empty, which is what the plan is about to sign out over")
+    }
 }

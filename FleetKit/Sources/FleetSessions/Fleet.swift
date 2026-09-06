@@ -566,12 +566,17 @@ enum FleetVersion {
 }
 
 private extension LifecycleAction {
-    /// Whether this action can start a process. Only these are held behind the `/logout` barrier; reading, reaping
-    /// and answering are not.
+    /// Whether this action can put work where `/logout`'s census cannot see it, which is what the barrier holds
+    /// back: a process of our own, or a job or background shell started after the census was taken. Reading,
+    /// reaping, stopping and answering are not held — the plan's own *Stop* runs through them.
+    ///
+    /// The two handoffs are here for the reason `Fleet.openInTerminal` checks the barrier directly: `--bg --resume`
+    /// launches a worker whose short is not in `census.ownJobs`, and `background_tasks` moves the current turn's
+    /// tools into background shells the same list was read without.
     var maySpawn: Bool {
         switch self {
-        case .open, .send, .adopt, .fork, .quiescentRestart, .reopen: true
-        case .reap, .sendToBackground, .stopEverything, .backgroundAll, .logout, .answer: false
+        case .open, .send, .adopt, .fork, .quiescentRestart, .reopen, .sendToBackground, .backgroundAll: true
+        case .reap, .stopEverything, .logout, .answer: false
         }
     }
 }

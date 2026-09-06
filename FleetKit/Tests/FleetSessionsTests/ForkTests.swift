@@ -335,4 +335,93 @@ final class ForkTests: XCTestCase {
         XCTAssertEqual(state.identity, .awaitingFork(from: source, provisional: provisional))
         XCTAssertNotEqual(fork.key.session, stale, "the id the dead child announced is not this child's")
     }
+
+    // MARK: - Past the rekeyed slot
+
+    /// The fork's finalisation has the same shape as the spawn's and one more thing to undo. `rekey` and `confirm`
+    /// run after its last guard, and the reservation left `forkReservation` before the first await, so
+    /// `handleExit`'s rollback finds nothing to give back: an exit in that window confirms a slot for a dead child
+    /// under a key the fleet has just been told to use, and publishes `.ready` over no process.
+    ///
+    /// Scripted, not recorded: the rig parks the resolution on the far side of the counter's two turns, and the
+    /// exit is delivered on the actor, so both the order and the window are the test's.
+    ///
+    /// Deliberate break: remove the `commitFinalisation` call from the end of `resolveForkIdentity`.
+    func testAnExitPastTheForksRekeyedSlotPublishesNoReadyAndLeavesTheKeyAlone() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        let occupiedBeforeTheFork = await rig.fleet.occupancy
+
+        let provisional = try await supervisor.fork(at: nil)
+        let fork = try XCTUnwrap(rig.supervisor(for: provisional))
+        let handle = try XCTUnwrap(rig.scriptedHandles.last)
+        let resolved = SessionID()
+        let resolvedKey = ChannelKey(configHome: provisional.configHome, session: resolved)
+
+        // Set after the source's own spawn and the fork's: neither reaches the finalisation this parks at — a
+        // fork's spawn returns at the awaiting-fork branch, before the counter turn.
+        let held = HeldAnswer(), entered = HeldAnswer()
+        rig.onFinalising = { entered.release(); await held.wait() }
+        handle.push(.sessionIdentityResolved(resolved, handle.epoch))
+        try await rig.waitFor("the identity resolution to park past the rekey") { entered.isReleased }
+
+        // Delivered on the actor: the pump is inside the identity event, so an exit pushed onto the same stream
+        // would queue behind the very handler it is meant to race.
+        let published = await fork.publishedCount
+        await fork.handle(event: .exited(.code(0, stderrTail: ""), handle.epoch))
+        let afterTheExit = await fork.publishedCount
+        XCTAssertGreaterThan(afterTheExit, published, "the exit was taken")
+        held.release()
+
+        try await rig.waitFor("the fork's slot to go back", timeout: .seconds(5)) {
+            await rig.fleet.occupancy == occupiedBeforeTheFork
+        }
+        let holdsResolved = await rig.fleet.isLive(resolvedKey)
+        XCTAssertFalse(holdsResolved, "a slot confirmed under the resolved key of a dead child is never released")
+        let holdsProvisional = await rig.fleet.isLive(provisional)
+        XCTAssertFalse(holdsProvisional)
+        try await rig.drainPublished(of: fork)
+        XCTAssertFalse(rig.published(of: fork).contains { $0.origin == .owned(.ready) },
+                       "nothing is ready over a process that has exited")
+        XCTAssertEqual(fork.key, provisional, "the channel is keyed as it was; nothing was rewritten under it")
+        let state = await fork.state
+        XCTAssertEqual(state.origin, .archived, "a fork that never reached ready rests where its spawn found it")
+    }
+
+    /// Ruling 2 put the `inFlight` marker on every multi-await entry, and this is one: reached from the pump when
+    /// the identity arrives after `open` has returned, `resolveForkIdentity` runs the ownership check, the rekey
+    /// and the confirm across four awaits. Unmarked, the thirty-minute reap, the cap eviction, `/logout`'s
+    /// terminate and the quiescent restart all pass their own `inFlight == nil` guards and run inside it — ending
+    /// the child the resolution is about to publish ready.
+    ///
+    /// The reap is the marker's own witness: it refuses in silence, so what it did is visible only in the child.
+    ///
+    /// Deliberate break: drop the marker adoption from the top of `resolveForkIdentity`.
+    func testAReapDuringTheForksIdentityResolutionIsRefused() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        let provisional = try await supervisor.fork(at: nil)
+        let fork = try XCTUnwrap(rig.supervisor(for: provisional))
+        let handle = try XCTUnwrap(rig.scriptedHandles.last)
+        let resolved = SessionID()
+        let resolvedKey = ChannelKey(configHome: provisional.configHome, session: resolved)
+
+        let held = HeldAnswer(), entered = HeldAnswer()
+        rig.onFinalising = { entered.release(); await held.wait() }
+        handle.push(.sessionIdentityResolved(resolved, handle.epoch))
+        try await rig.waitFor("the identity resolution to park past the rekey") { entered.isReleased }
+
+        await fork.reap()
+        XCTAssertEqual(handle.terminateCount, 0, "a reap ran inside the fork's own resolution")
+        held.release()
+
+        try await rig.waitUntil(fork, "the fork to be ready") { $0.origin == .owned(.ready) }
+        let holdsResolved = await rig.fleet.isLive(resolvedKey)
+        XCTAssertTrue(holdsResolved, "the resolution finished on the slot it moved")
+        XCTAssertEqual(fork.key, resolvedKey)
+    }
 }

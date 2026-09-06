@@ -821,6 +821,19 @@ final class FleetFacadeTests: XCTestCase {
         let stillArchived = await fleet.state(of: blocked)?.origin
         XCTAssertEqual(stillArchived, .archived, "the refusal left no half-opened channel behind")
 
+        // Every action that can put work where the census cannot see it stands behind the same barrier as an open:
+        // a handoff launches a `--bg` job the plan's `ownJobShorts` were read before, and `background_tasks` moves
+        // the current turn's tools into background shells the same list has already been taken without. The
+        // terminal hatch has been gated at this door from the start; these two were the gap.
+        for hidden in [LifecycleAction.sendToBackground, .backgroundAll] {
+            do {
+                _ = try await fleet.perform(hidden, on: blocked)
+                XCTFail("\(hidden) started work the census could not see")
+            } catch {
+                XCTAssertEqual(error as? LifecycleError, .logoutInProgress, "\(hidden) was admitted")
+            }
+        }
+
         await fleet.abandonLogout()
         let gone = await fleet.logoutCensus()
         XCTAssertNil(gone)

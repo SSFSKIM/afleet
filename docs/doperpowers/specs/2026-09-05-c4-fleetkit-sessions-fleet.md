@@ -1003,7 +1003,7 @@ this document's v2 widening to the `.claude.json` project entry is withdrawn in 
 
 ### From the whole-branch review of 2026-09-06
 
-Three parent impacts the architect applies at merge, all of them consequences of the rulings
+Four parent impacts the architect applies at merge, all of them consequences of the rulings
 recorded in the Decision Log.
 
 **§7.4, the lifecycle table.** Three amendments, one principle.
@@ -1041,6 +1041,18 @@ decision on screen, queued input, a wedge, or a background task by id) so the su
 is holding the channel rather than "not now". The refusal is on the facade only;
 `ChannelSupervisor.reap()` stays the unconditional terminate the thirty-minute timer and a test
 teardown use.
+
+**`get_settings`'s answer shape, throughout the parent.** The root spec still specifies
+`effective_keys` and `sources_keys` (§ lines 474, 1075, 1078, 3773-3774, 3966). The recorded
+answer carries `effective` — an object whose *keys* are the setting names — and `sources`, an
+array whose entries each hold a `settings` map; both redactors, C1's fixtures and this child's
+restart readback now read that shape, and the reader that read `effective_keys` was a false
+mismatch that parked a successful relaunch behind a banner that never cleared (ruling 5's
+corrective, and `2b06be9` on `main`). Nothing in the parent's *design* changes — the readback
+still compares the keys the engine reports against the keys the restart applied — only the two
+field names the protocol contract states. The architect owns the edit at merge, as with the §7.4,
+§8.5 and X5 impacts above; it is recorded here because the contradiction is otherwise handed to
+nobody.
 
 ## Delegated unknowns
 

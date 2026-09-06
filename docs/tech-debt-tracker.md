@@ -292,3 +292,37 @@ architect's rulings settled them). Line numbers are as at `4f2102d`, before the 
     survives it; a surface that wants the output file from the same mirror will need it. Owner:
     C4, with C6's task pane. Closer: fold the assistant/user tool-result frames here as C3's own
     ingest does, rather than re-deriving the sentence.
+
+43. **`Fleet.perform(.reap)` reads eligibility on the far side of the marker.** `sweep#1`. The
+    facade checks the verdict (`Fleet.swift:324`) and then awaits `supervisor.reap()` (`:329`),
+    which takes `inFlight` a hop later; a send admitted in between sets `turnRunning`, and the reap
+    never asks again. The gate lives at the facade deliberately — the rig uses `reap()` as
+    unconditional teardown — so the harm is bounded: the channel goes cleanly dormant, the
+    transcript survives and a resume continues. Owner: C4. Closer: a `reapIfEligible()` on the
+    supervisor that takes the marker, re-reads the verdict and terminates in one turn, leaving
+    `reap()` the teardown it is.
+44. **A restart request merged during a restart's own suspension is dropped.** `sweep#2`. A second
+    request folds into `pendingChange` (`ChannelSupervisor.swift:1337-1340`) while `restartNow`
+    runs, and the clear after the terminate discards it — after the composer has told the user the
+    change applies when the current work finishes. The window is as wide as a terminate. It loses a
+    settings request, not conversation state, and the user can ask again. Owner: C4. Closer: fold
+    `pendingChange` into the request being applied at the moment of the clear instead of dropping
+    it.
+45. **A launch that throws before `run()` leaves the channel connecting with no process.**
+    `scalpel-1#3`. `ClaudeProcess.spawn` evaluates `try launch.arguments()` outside the catch that
+    publishes `.exited` (`ClaudeProcess.swift:82`), and the supervisor's handshake catch restores
+    the resting state only for a `terminatedEpochs` member — so this one throw produces no exit and
+    no restore: sends queue for ever, no *Reopen* is offered, and only relaunching afleet moves the
+    channel. It violates ruling 1, but the trigger is narrow: `arguments()` throws only on a
+    caller-chosen value beginning with `-`, and every field that carries one is engine- or
+    picker-sourced except a typed `/model` argument. Owner: C4. Closer: restore the resting state
+    on a throw that arrived with no exit behind it.
+46. **`/logout`'s *Wait* and *Stop* both decide from the census-time blocker set.**
+    `scalpel-4#2`. `LogoutPlan.execute` re-reads task ids only for channels already in
+    `nonEligible` (`LogoutPlan.swift:153`, `:160`). *Stop* therefore terminates a channel that
+    became blocked after the census without stopping its work — the §7.4 harm — and *Wait* is a
+    dead end, because `Fleet.runLogout` keeps the same census after every waiting outcome, so a
+    channel that has since become eligible is waited on for ever. The *Wait* half errs safe: the
+    plan never signs out and the user can choose *Stop* or abandon. The *Stop* half needs the user
+    to drive another channel into a background task while the sheet is open. Owner: C4. Closer:
+    rebuild the blocker set from the live mirror at the moment each choice acts.

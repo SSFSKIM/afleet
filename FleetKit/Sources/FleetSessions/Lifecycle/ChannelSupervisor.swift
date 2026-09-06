@@ -81,6 +81,11 @@ public actor ChannelSupervisor {
     /// Awaited between the victim's observed outcome and the report of it. Nothing in production; the rig parks here
     /// to hold an eviction open while another decision runs.
     private let evictionBarrier: @Sendable (ChannelKey) async -> Void
+    /// Awaited at each finalisation site, on the far side of that spawn's last guard and immediately before the
+    /// counter turn that takes its slot. Nothing in production; the rig parks here to deliver an exit into the one
+    /// window `commitFinalisation` exists for — two actor hops wide, and the interleaving in which the exit's
+    /// `release` runs *before* the `confirm` that would outlive it.
+    private let finalisationBarrier: @Sendable () async -> Void
 
     /// Whether this channel counts as recently active, which is what tells `archivedRecent` from `archivedOlder`.
     /// It is held here rather than derived inside `ChannelState` because it is the supervisor's own fact: C3's index
@@ -184,6 +189,7 @@ public actor ChannelSupervisor {
                 store: (any StateStore)? = nil,
                 evictVictim: @escaping @Sendable (ChannelKey) async -> EvictionOutcome = { _ in .victimBecameIneligible },
                 evictionBarrier: @escaping @Sendable (ChannelKey) async -> Void = { _ in },
+                finalisationBarrier: @escaping @Sendable () async -> Void = {},
                 spawnSibling: @escaping SiblingSpawner = { _, _, _ in nil },
                 preconditions: SpawnPreconditions? = nil,
                 initialOrigin: ChannelOrigin = .archived, initialDesired: DesiredOwnership = .none,
@@ -196,6 +202,7 @@ public actor ChannelSupervisor {
         self.isRecent = isRecent; self.handshakeTimeout = handshakeTimeout; self.spawnBarrier = spawnBarrier
         self.environment = environment; self.configHome = configHome; self.verbs = verbs; self.store = store
         self.evictVictim = evictVictim; self.evictionBarrier = evictionBarrier
+        self.finalisationBarrier = finalisationBarrier
         // A fork's own id is minted by the engine and announced on `auth_status`, so the template's `--fork-session`
         // is what says this channel's key is provisional. Nothing else in the launch can tell us.
         let identity: SessionIdentity = {
@@ -653,6 +660,12 @@ public actor ChannelSupervisor {
     private func handOff<T>(during action: LifecycleTable.TerminatingAction, event: LifecycleTable.Event,
                             to target: LifecycleTable.StateName,
                             _ launch: () async throws -> T) async throws -> T {
+        // Before the origin is even read, and for the same reason `openInTerminal` is gated at the facade: a handoff
+        // admitted after `/logout`'s census — or suspended across it — terminates this child and launches work the
+        // census cannot see. `ownJobShorts` was read before that job existed, so nothing stops it; the channel is
+        // processless by then, so the plan's terminate answers a clean exit and `claude auth logout` runs over a
+        // `--bg` worker afleet started seconds earlier. Nothing has changed yet, so the refusal leaves nothing behind.
+        try spawnBarrier.check()
         guard case .owned(let owned) = state.origin, owned == .ready || owned == .dormant else {
             throw LifecycleError.notOwned
         }
@@ -1084,15 +1097,42 @@ public actor ChannelSupervisor {
             restoreResting(ifEpochIs: mine)
             return
         }
+        // Read before the counter turn rather than after it, so `confirm` is the only hop left between this guard
+        // and the one below.
+        let announced = await handle.sessionID
+        await finalisationBarrier()
         await fleet.confirm(reservation)
+        guard await commitFinalisation(epoch: mine, confirmedAs: key) else { return }
         state.banner = nil
         state.headerNote = projectServersOff ? .projectServersOff : nil
-        if let resolved = await handle.sessionID { state.identity = .known(resolved) }
+        if let announced { state.identity = .known(announced) }
         guard reason != .restart else { return }   // Task 6 runs the readbacks and applies `.ready` itself
         apply(.handshakeClean, to: .ready)
         armDormantTimer()
         pushEligibility()
         await flushQueuedInput()
+    }
+
+    /// The last guard of both spawn paths, run after their last await rather than before it.
+    ///
+    /// Every guard earlier in a spawn is an *entry* check, and the marker keeps other entrants out. This one is
+    /// about an observer: `handleExit` clears `process` from the pump without advancing the epoch, so it can land
+    /// inside the counter turn that takes the slot, and the epoch alone would still read as this attempt's. What
+    /// follows a confirmed slot — `.ready`, the identity, the key, the queued input — belongs to a live child only.
+    ///
+    /// On a no, the undo is a *release* and not a rollback: the reservation has already become a live entry, and
+    /// `FleetCapCounter.release` is the only thing that removes one. `handleExit`'s own release ran while this
+    /// attempt was suspended, against a `live` set the confirm had not written yet, so without this the entry
+    /// outlives the channel — one of six slots, for the life of the process. Then the channel rests, because an
+    /// owned channel left connecting with no process is ruling 1's flat prohibition and has no way back:
+    /// `send` throws, `reap` returns early on `process == nil`, and with no `systemItem` *Reopen* refuses.
+    private func commitFinalisation(epoch mine: ProcessEpoch, confirmedAs confirmed: ChannelKey) async -> Bool {
+        guard epoch == mine, process != nil else {
+            await fleet.release(confirmed)
+            restoreResting(ifEpochIs: mine)
+            return false
+        }
+        return true
     }
 
     /// The launch template with every field the channel has since changed taken from the runtime record. The
@@ -1218,6 +1258,14 @@ public actor ChannelSupervisor {
     private func resolveForkIdentity(_ resolved: SessionID, epoch resolvedEpoch: ProcessEpoch) async {
         guard case .awaitingFork = state.identity, resolvedEpoch == epoch,
               let handle = process, let reservation = forkReservation else { return }
+        // This is the rest of the fork's spawn, and ruling 2's marker belongs on it wherever it is reached from:
+        // inline from `spawn`, where the marker is already held, or — the ordinary case — from the pump, minutes
+        // after `open()` returned, with nothing in flight. Four awaits follow, and without the marker the
+        // thirty-minute reap, the cap eviction, `/logout`'s terminate and the quiescent restart each pass their own
+        // `inFlight == nil` guard and end the child this method is about to publish ready.
+        let ownsMarker = inFlight == nil
+        if ownsMarker { inFlight = .spawn }
+        defer { if ownsMarker { inFlight = nil } }
         forkIdentityTimer?.cancel(); forkIdentityTimer = nil
         forkReservation = nil
 
@@ -1258,8 +1306,16 @@ public actor ChannelSupervisor {
             await fleet.rollback(reservation)
             return
         }
+        await finalisationBarrier()
         await fleet.rekey(key, to: resolvedKey)
         await fleet.confirm(reservation)
+        guard await commitFinalisation(epoch: resolvedEpoch, confirmedAs: resolvedKey) else {
+            // The counter was told to use the resolved key and this channel never will: it is keyed provisionally
+            // until the line below, and a respawn or a reap would release a key nothing holds. The slot itself is
+            // already back; this is the recency stamp and the eligibility verdict following it home.
+            await fleet.rekey(resolvedKey, to: key)
+            return
+        }
         keyBox.set(resolvedKey)
         state.key = resolvedKey
         state.identity = .known(resolved)

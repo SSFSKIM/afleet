@@ -79,8 +79,18 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         set { lock.lock(); _onReleased = newValue; lock.unlock() }
     }
 
+    /// The finalisation seam every supervisor this rig builds shares: it runs on the far side of the counter turn
+    /// that takes the slot and before the guard that decides whether this epoch may still use it. That window is
+    /// two actor hops wide, so a test that only pushed an exit at it would be hoping rather than proving; parking
+    /// here makes the interleaving the test's own.
+    var onFinalising: (@Sendable () async -> Void)? {
+        get { locked { _onFinalising } }
+        set { lock.lock(); _onFinalising = newValue; lock.unlock() }
+    }
+
     private let lock = NSLock()
     private var _onReleased: (@Sendable () async -> Void)?
+    private var _onFinalising: (@Sendable () async -> Void)?
     private var _byKey: [ChannelKey: ChannelSupervisor] = [:]
     private var _helpers: Set<Int32> = []
     private var _heldVictims: Set<ChannelKey> = []
@@ -322,6 +332,7 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
                 return await target.evict()
             },
             evictionBarrier: { [weak self] victim in await self?.barrier(for: victim) },
+            finalisationBarrier: { [weak self] in await self?.onFinalising?() },
             // The part Task 9's facade plays: a fork is a new channel, built here under the provisional key its
             // source minted and with the fork's own `SessionStart` on its launch line.
             spawnSibling: { [weak self] _, provisional, start in

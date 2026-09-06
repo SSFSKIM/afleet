@@ -385,4 +385,36 @@ final class LogoutPlanTests: XCTestCase {
         XCTAssertEqual(outcome, .success(exited: [opened.key], foreignLeftRunning: [neverOpened]),
                        "the report names the session that kept its token")
     }
+
+    /// The background hatch is the terminal hatch's twin, and the barrier is what makes both safe. A
+    /// `sendToBackground` admitted after the census — or suspended across it — terminates the channel's child and
+    /// runs `claude --bg --resume` behind the plan's back. The shorts were read before that job existed, so it is
+    /// not in `census.ownJobs` and nothing stops it; the channel is processless by then, so the plan's terminate
+    /// answers a clean exit, and `claude auth logout` signs out over a worker afleet started seconds earlier.
+    ///
+    /// Deliberate break: drop `try spawnBarrier.check()` from the top of `handOff`.
+    func testABackgroundHandoffIsRefusedWhileALogoutPlanIsPending() async throws {
+        let rig = try newRig()
+        let channel = rig.supervisor(session: SessionID(), fixture: Self.idle)
+        try await channel.open()
+        let fleet = context(rig, channels: [channel])
+
+        let census = await LogoutPlan.build(fleet: fleet)
+        XCTAssertTrue(census.ownJobs.isEmpty, "the shorts were read before any handoff was asked for")
+
+        var refused: (any Error)?
+        do { _ = try await channel.sendToBackground() } catch { refused = error }
+        XCTAssertEqual(refused as? LifecycleError, .logoutInProgress)
+        XCTAssertEqual(rig.runnerCalls.count(prefix: ["--bg", "--resume"]), 0,
+                       "a job the census could never have seen was started behind it")
+        let state = await channel.state
+        XCTAssertEqual(state.origin, .owned(.ready), "the refusal left the channel exactly as it was")
+        let pid = await channel.livePID()
+        XCTAssertNotNil(pid, "and its child was never handed off")
+
+        // The same handoff, once the plan is gone: the barrier refuses this action and does not forbid it.
+        LogoutPlan.abandon(fleet: fleet)
+        _ = try await channel.sendToBackground()
+        XCTAssertEqual(rig.runnerCalls.count(prefix: ["--bg", "--resume"]), 1)
+    }
 }
