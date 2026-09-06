@@ -154,6 +154,48 @@ final class ProjectGroupingTests: XCTestCase {
 
     /// The memo is what stops the grouping re-probing the filesystem on every rebuild. Grouping the
     /// same rows twice through one memo probes nothing the second time.
+    /// The section ids SwiftUI hashes are native Swift strings, not lazily bridged `NSString`s.
+    ///
+    /// **Found by sampling the running app against a real config home of 306 projects**, where the
+    /// main thread sat at 100 percent inside `OutlineListCoordinator.diffRows` with
+    /// `Dictionary.lookup`, `_StringGutsSlice._normalizedHash` and `-[NSPathStore2 characterAtIndex:]`
+    /// at the top of the profile. `PathMemo`'s two answers become `ProjectSection.id` and
+    /// `WorktreeGroup.id`, and SwiftUI hashes both into its `ForEach` identity dictionary on every
+    /// list diff; hashing a bridged path string costs one Objective-C message per character with
+    /// NFC normalisation on top.
+    ///
+    /// The trigger is narrow and is why nothing caught it earlier: `CanonicalPath.string` returns a
+    /// native string when `realpath` succeeds on the first probe and a bridged one only when it had
+    /// to walk up and re-append components — that is, for a **directory that no longer exists**. A
+    /// config home that has accumulated hundreds of projects is full of those.
+    ///
+    /// Contiguity is the assertion rather than a stopwatch: a native Swift string yields a
+    /// contiguous UTF-8 buffer and a lazily bridged `NSString` does not, so this is the property
+    /// itself and not a proxy for it. The third clause is the floor — the raw `CanonicalPath`
+    /// answer for the same path *is* non-contiguous, which is what proves the memo is the thing
+    /// making the difference and that the first two assertions could have failed.
+    func testSectionIDsAreNativeStringsAndNotBridgedPathStores() throws {
+        let tree = try TempTree()
+        // A directory that does not exist, which is the branch that bridges.
+        let missing = tree.root.appending(path: "vanished-repo/checkout", directoryHint: .isDirectory)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path),
+                       "the fixture path exists, so the bridging branch is not the one under test")
+
+        let memo = PathMemo()
+        let root = memo.root(of: missing)
+        let repository = memo.repository(of: root)
+        XCTAssertTrue(Self.isNative(root), "a section id is a bridged NSString and SwiftUI hashes it per character")
+        XCTAssertTrue(Self.isNative(repository), "a worktree group id is a bridged NSString")
+
+        XCTAssertFalse(Self.isNative(CanonicalPath.string(missing)),
+                       "CanonicalPath no longer bridges, so this test measures nothing")
+    }
+
+    /// A native Swift string exposes a contiguous UTF-8 buffer; a lazily bridged `NSString` does not.
+    private static func isNative(_ string: String) -> Bool {
+        string.utf8.withContiguousStorageIfAvailable { _ in true } ?? false
+    }
+
     func testThePathMemoIsNotReprobedOnASecondGrouping() throws {
         let tree = try TempTree()
         let repository = try tree.directory("repo-alpha")

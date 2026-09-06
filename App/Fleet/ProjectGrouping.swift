@@ -244,16 +244,33 @@ final class PathMemo {
         let key = cwd.path
         if let known = rootOfCWD[key] { return known }
         probeCount += 1
-        let resolved = CanonicalPath.string(ProjectRoot.canonical(for: cwd).root)
+        let resolved = Self.native(CanonicalPath.string(ProjectRoot.canonical(for: cwd).root))
         rootOfCWD[key] = resolved
         return resolved
+    }
+
+    /// A path string that is really a Swift string, not a lazily bridged `NSPathStore2`.
+    ///
+    /// **Found by sampling the running app, not by reasoning.** `CanonicalPath.string` ends in
+    /// `(out as NSString).appendingPathComponent(_:)`, so the path it returns is an `NSString`
+    /// bridged back — and every `Hashable` operation on such a string runs
+    /// `_StringGutsSlice._normalizedHash`, which walks it through `-[NSPathStore2 characterAtIndex:]`
+    /// one Objective-C message per character with NFC normalisation on top. These strings become
+    /// `ProjectSection.id` and `WorktreeGroup.id`, which SwiftUI hashes into its `ForEach` identity
+    /// dictionary on every list diff. Against a real config home of 306 projects that pinned the
+    /// main thread at 100 percent inside `OutlineListCoordinator.diffRows`, with
+    /// `Dictionary.lookup` and `characterAtIndex:` at the top of the profile and the window
+    /// unresponsive. Copying the bytes once per distinct directory per launch — this memo's whole
+    /// purpose — makes every later hash a native one.
+    private static func native(_ path: String) -> String {
+        String(decoding: Array(path.utf8), as: UTF8.self)
     }
 
     /// The repository a root belongs to: itself, or the main checkout when the root is a worktree.
     func repository(of root: String) -> String {
         if let known = repositoryOfRoot[root] { return known }
         probeCount += 1
-        let resolved = WorktreeLink.mainRepository(of: root) ?? root
+        let resolved = Self.native(WorktreeLink.mainRepository(of: root) ?? root)
         repositoryOfRoot[root] = resolved
         return resolved
     }
