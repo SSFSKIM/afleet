@@ -479,6 +479,22 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     against a counter of real probes rather than of cache entries. What remains open is the
     original entry as written — the O(rows) rebuild itself, which is arithmetic and allocation
     with no syscalls in it.
+    **Measured at Task 5, and the "harmless" reading does not survive the number.** Task 5 is the
+    first consumer to bind a view straight to `sections`, so it measured before assuming: 3,000
+    rows across 40 sections, warm `PathMemo`, fifty consecutive `apply(_ state:)` calls, mean
+    **47.9 ms** and worst **50.4 ms** per rebuild, all of it on the main actor. Split by phase over
+    the same corpus: about 41 ms building rows (3,000 `URL(fileURLWithPath:)` among them, one per
+    row per rebuild) and about 18 ms grouping. The cap of six live processes bounds how many
+    *channels* push states, not how often each pushes one, and a channel mid-turn pushes many; at
+    48 ms each that is three dropped frames per state. Note this is the model's own cost and is
+    paid whether or not a view is bound. What binding adds is SwiftUI's own diff, and that is
+    **not** free either: `List` renders rows lazily but `OutlineListCoordinator.diffRows` walks the
+    whole row tree on every update, so the model's cost and the view's cost compound. Closer,
+    unchanged in shape and now with a profile behind it: `apply(_ state:)` changes one row's live
+    half, so patch that row in place and re-derive only when its archived-ness or its section
+    membership changed. Owner: whoever
+    next opens `FleetBrowserModel` — C6 is the likely one, since a live conversation is exactly
+    the workload that emits states in a stream.
 56. **`FleetFacadeTests.testOpenListsTheChannelAndPublishesEveryTransition` is load-sensitive
     and fails the whole-suite gate under load.** `FleetKit/Tests/FleetSessionsTests/FleetFacadeTests.swift:473`
     waits with `harness.waitFor("the merged stream to carry the transitions") { collected.count >= 2 }`
@@ -495,3 +511,37 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     it appends — rather than polling a deadline. C5 converted its own tests this way in `0f3ec6b`
     and the pattern transfers directly.
 
+57. **The sidebar reads `SidebarGrouping` and never writes it, so pinning and collapse do not
+    persist.** Spec §4 says grouping, pinning and collapse persist through `FleetKitKeys.grouping`
+    and unread cursors through `FleetKitKeys.unreadCursors`. Task 5 wired the read half only:
+    `FleetCoordinator.loadGrouping` loads the persisted `SidebarGrouping` and `ProjectGrouping`
+    orders sections by it, and `SidebarView` draws the pin glyph on a pinned section — but the
+    sidebar offers no pin, unpin or collapse action, so nothing ever writes a new value back.
+    A user can therefore see a pin that a previous version of afleet set and cannot set one.
+    Task 5's brief lists neither action among its deliverables, which is why this is a gap rather
+    than a bug. Closer: a context menu on the section header calling through to a
+    `FleetBrowserModel.setPinned(_:on:)` / `setCollapsed(_:on:)` pair that writes `SidebarGrouping`
+    back through `StateStore` under `.fleetKit`. Owner: C6, or a C5 follow-up if the human gate
+    wants it before C6.
+58. **`LifecycleAPI.attach` hands back a `PaneRequest` that nothing in C5 renders.** The sidebar's
+    *Attach* on a background job calls `FleetBrowserModel.attach(_:)`, which returns X5's
+    `PaneRequest`; `ShellModel.pendingPane` holds the most recent one and no surface runs it,
+    because running a pane is the Terminal panel's job and that is C7's. Nothing is lost — the
+    request is a value and X5 does the ownership work either way — but the button currently
+    reports success and shows nothing, which is a wrong affordance in the same sense §5 uses of a
+    half-drawn card. Closer: either Task 8's pane seam consumes `pendingPane` and hands it to the
+    registered runner, or the button is disabled with a sentence until C7.3 lands. Owner: C5
+    Task 8 for the first option, which is the cheaper of the two and is already building the seam.
+
+59. **`TrustReader.isTrusted` reads `<configHome>/.claude.json`, which on an ordinary installation
+    is a file that has never existed.** Same defect as the one C5 Task 5 fixed on the app side and
+    the same evidence: the engine resolves the global config document as
+    `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263 `cli.pretty.js:298330`) while
+    the config home is `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")`, so the two coincide only
+    when the variable is set. `FleetKit/Sources/FleetSessions/Preconditions/TrustReader.swift:68`
+    appends to the root unconditionally, so with the variable unset every project reads as
+    untrusted and `SpawnPrecondition.untrusted` refuses every spawn. Not observed as a failure yet
+    because C5 spawns nothing; C6 is the first child that will. **Outside C5's fence** — the file
+    is C4's, inside the FleetKit package — which is why this is an entry and not a commit.
+    Closer: `isTrusted` takes the resolved document location, or a `ConfigHome` rather than a URL,
+    the same shape the app now uses. Owner: C4, before C6 spawns.
