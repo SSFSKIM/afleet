@@ -15,7 +15,14 @@ public enum PanelHostError: Error, Hashable, Sendable {
     /// placeholder by unregistering it and then registering its own tab for the same id;
     /// without this, `register`'s duplicate check would make the seven ids permanently
     /// first-come, and C6 could never register Thread over C5's placeholder.
-    func unregister(_ id: PanelTabID)
+    ///
+    /// It is `async` because it **awaits** the link-target withdrawal rather than spawning it. A
+    /// synchronous member could only spawn and return, and on the handover path above nothing
+    /// would then order the withdrawal before the replacement's registration: landing second it
+    /// would delete the *new* tab's target and links would silently stop arriving. Awaiting is
+    /// what makes the guarantee above true — a registration issued after this returns cannot be
+    /// undone by it.
+    func unregister(_ id: PanelTabID) async
     func registerPaneRunner(_ runner: any PaneRunning, for tab: PanelTabID)
     /// Registered tabs that report themselves available for this channel, in PanelTabID order.
     func available(for context: ChannelContext) -> [PanelTabID]

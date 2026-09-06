@@ -3,6 +3,7 @@ import XCTest
 import AfleetCore
 import FleetKit
 import PanelHostAPI
+import SwiftUI
 
 /// X7's shape, pinned. Four assertions, each about a decision four other children inherit:
 /// the closed tab set and its order, that every case carries user-visible copy, that
@@ -89,7 +90,96 @@ final class ProtocolShapeTests: XCTestCase {
         XCTAssertEqual(delivered.count, 1, "a withdrawn tab's target still delivered")
     }
 
+    /// The handover `PanelHost.unregister(_:)` exists for: a later child takes an id C5 holds a
+    /// placeholder under. Because `unregister` **awaits** the link-target withdrawal instead of
+    /// spawning it, the withdrawal cannot land after the replacement's registration and delete the
+    /// new tab's target. Against the spawn-and-return shape a synchronous member would force, the
+    /// link reaches nobody and this fails.
+    @MainActor func testAReplacementTabsLinkTargetSurvivesTheHandover() async throws {
+        let fixture = await Self.makeContext()
+        let router = fixture.router
+        let host = StubHost(router: router)
+        let link = WorkspaceLink.url(URL(string: "https://example.invalid/handover")!)
+
+        let placeholder = StubTab(id: .thread, mark: "placeholder", router: router)
+        try host.register(placeholder)
+        await router.register(placeholder.target)
+        await fixture.context.links.open(link, from: .currentPanel)
+        let afterFirstOpen = await router.deliveredMarks
+        XCTAssertEqual(afterFirstOpen, ["placeholder"], "the placeholder never received a link")
+
+        // The handover, in the order a later child performs it.
+        await host.unregister(.thread)
+        let replacement = StubTab(id: .thread, mark: "replacement", router: router)
+        try host.register(replacement)
+        await router.register(replacement.target)
+
+        await fixture.context.links.open(link, from: .currentPanel)
+        let afterHandover = await router.deliveredMarks
+        XCTAssertEqual(afterHandover, ["placeholder", "replacement"],
+                       "the withdrawal landed after the replacement registered and deleted its target")
+    }
+
     // MARK: - Stubs
+
+    /// A tab that carries the `LinkTarget` it registers, so the handover above can tell which of
+    /// two tabs sharing one id a link reached.
+    @MainActor final class StubTab: PanelTab {
+        let id: PanelTabID
+        let mark: String
+        let target: LinkTarget
+
+        init(id: PanelTabID, mark: String, router: StubRouter) {
+            self.id = id
+            self.mark = mark
+            self.target = LinkTarget(tab: id, specificity: 10, handles: { _ in true },
+                                     open: { link, destination in await router.deliver(link, destination, mark) })
+        }
+
+        var title: String { id.defaultTitle }
+        var systemImage: String { id.defaultSystemImage }
+        func isAvailable(in context: ChannelContext) -> Bool { true }
+        func makeSession(for context: ChannelContext) -> any PanelTabSession { StubSession() }
+        func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView { AnyView(EmptyView()) }
+    }
+
+    @MainActor final class StubSession: PanelTabSession {}
+
+    /// The minimum conformance the ordering test needs. Everything not on the handover path is
+    /// the smallest answer that satisfies the protocol; Task 7 owns the real host.
+    @MainActor final class StubHost: PanelHost {
+        private let router: StubRouter
+        private var tabs: [PanelTabID: any PanelTab] = [:]
+        private(set) var selected: PanelTabID?
+
+        init(router: StubRouter) { self.router = router }
+
+        func register(_ tab: any PanelTab) throws {
+            guard tabs[tab.id] == nil else { throw PanelHostError.duplicateTab(tab.id) }
+            tabs[tab.id] = tab
+        }
+
+        /// Awaited, not spawned. This is the whole point of the member being `async`.
+        func unregister(_ id: PanelTabID) async {
+            tabs[id] = nil
+            await router.unregister(tab: id)
+        }
+
+        func registerPaneRunner(_ runner: any PaneRunning, for tab: PanelTabID) {}
+        func available(for context: ChannelContext) -> [PanelTabID] {
+            PanelTabID.allCases.filter { tabs[$0]?.isAvailable(in: context) == true }
+        }
+        func select(_ id: PanelTabID) { selected = id }
+        func selectIndex(_ index: Int) {
+            let visible = PanelTabID.allCases.filter { tabs[$0] != nil }
+            guard index >= 1, index <= visible.count else { return }
+            selected = visible[index - 1]
+        }
+        func popOut(_ id: PanelTabID, channel: ChannelKey) {}
+        func session(for id: PanelTabID, context: ChannelContext) -> any PanelTabSession { StubSession() }
+        func view(for id: PanelTabID, context: ChannelContext) -> AnyView { AnyView(EmptyView()) }
+        func run(_ request: PaneRequest) async throws { throw PanelHostError.noPaneRunner(.terminal) }
+    }
 
     struct Fixture: Sendable {
         let context: ChannelContext
@@ -165,6 +255,12 @@ final class ProtocolShapeTests: XCTestCase {
             await target.open(link, destination)
         }
         func deliver(_ link: WorkspaceLink, _ destination: LinkDestination) { delivered.append((link, destination)) }
+        /// Which tab each delivery reached, in order, so the handover test can name the winner.
+        private(set) var deliveredMarks: [String] = []
+        func deliver(_ link: WorkspaceLink, _ destination: LinkDestination, _ mark: String) {
+            delivered.append((link, destination))
+            deliveredMarks.append(mark)
+        }
     }
 
     actor ExitRecorder {
