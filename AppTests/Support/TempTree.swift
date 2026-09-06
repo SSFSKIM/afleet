@@ -30,10 +30,17 @@ struct TempTree {
 
     /// The injectable form. `temporaryDirectory` is the directory the tree is created under;
     /// `configHomes` is the forbidden set. Both default to the real ones.
+    ///
+    /// Both sides are canonicalised here, not just the temporary directory. Comparing a resolved
+    /// path against an unresolved one is a guard that fails open: the two spell one directory two
+    /// ways, no prefix matches, and the tree is created inside the config home it was meant to
+    /// refuse. `configHomes()` resolves its own three entries, but an injected home arrives as the
+    /// caller wrote it, and a caller who names a home through a symlink is the ordinary case.
     init(temporaryDirectory: URL, configHomes: [URL] = TempTree.configHomes()) throws {
         let base = temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL
         let components = base.pathComponents
-        for home in configHomes where components.starts(with: home.pathComponents) {
+        let forbidden = configHomes.map { $0.resolvingSymlinksInPath().standardizedFileURL }
+        for home in forbidden where components.starts(with: home.pathComponents) {
             throw XCTSkip("temporary directory resolves inside a config home")
         }
         root = base.appending(path: "afleet-\(UUID().uuidString)")
