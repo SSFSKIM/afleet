@@ -20,11 +20,13 @@ protocol WorkspaceCoordinating: AnyObject, Sendable {
     /// Ends whatever the coordinator started. `AppModel.launch()` is re-entrant — *Check again* is
     /// the same call as the first launch — so the coordinator a previous launch built is stopped
     /// before a new one replaces it, rather than left with a live `updates` loop nothing reads.
+    ///
+    /// **A requirement, not a defaulted member.** A default would let a future conformer that does
+    /// start something forget to stop it and compile clean, and the symptom of that omission is a
+    /// second `updates` loop reading a stream into a model nothing draws — invisible until someone
+    /// wonders why *Check again* costs memory. An empty implementation is one line and it says
+    /// "this coordinator owns nothing" out loud, which is worth more than the line it saves.
     func stop()
-}
-
-extension WorkspaceCoordinating {
-    func stop() {}
 }
 
 /// Which of the composition root's two snapshots this is.
@@ -50,4 +52,6 @@ final class NoopWorkspaceCoordinator: WorkspaceCoordinating {
     init() {}
     func snapshotAvailable(_ snapshot: IndexSnapshot, origin: SnapshotOrigin) async {}
     func indexChanged(_ delta: IndexDelta) async {}
+    /// Nothing was started, so nothing is stopped.
+    func stop() {}
 }

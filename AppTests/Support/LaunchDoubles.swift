@@ -199,6 +199,12 @@ final class RecordingCoordinator: WorkspaceCoordinating {
         Self.expect(count, in: &snapshotWaiters, have: snapshots.count, what: "snapshots")
     }
 
+    /// This double starts nothing, so it stops nothing. Spelled out rather than defaulted: the
+    /// protocol dropped its default `stop()` so that a coordinator which *does* start something
+    /// cannot forget to stop it and still compile.
+    private(set) var stops = 0
+    func stop() { stops += 1 }
+
     /// Fulfilled the moment the `count`-th delta is handed over.
     func expectDeltas(_ count: Int) -> XCTestExpectation {
         Self.expect(count, in: &deltaWaiters, have: deltas.count, what: "deltas")
