@@ -43,6 +43,10 @@ let package = Package(
 
         // MARK: - PanelHostAPI (owner: C5; X7's protocol, declared here so Workbench and the app both import it)
         .target(name: "PanelHostAPI", dependencies: [core, fleet], swiftSettings: v6),
+        // `core` and `fleet` are required, not decorative: PanelHostAPI does not re-export them,
+        // and under Swift 6's member-import-visibility rules a test that constructs a `ChannelKey`,
+        // a `PaneRequest` or a `SeenURL` must import the module that defines it.
+        .testTarget(name: "PanelHostAPITests", dependencies: ["PanelHostAPI", core, fleet], swiftSettings: v6),
         // MARK: - end of PanelHostAPI
 
         // MARK: - C7.4 terminal panel (owner: C7.4)
