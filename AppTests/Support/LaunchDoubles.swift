@@ -80,6 +80,9 @@ actor StubIndex: IndexAccess {
     private let persisted: IndexSnapshot?
     private let built: IndexSnapshot
     private let blocks: Bool
+    /// A real suspension inside `loadPersisted()`, standing in for the store read the production
+    /// index does there.
+    private let loadDelay: Duration
     private let gate: AsyncStream<Void>
     private nonisolated let gateContinuation: AsyncStream<Void>.Continuation
     private(set) var buildCount = 0
@@ -88,15 +91,20 @@ actor StubIndex: IndexAccess {
     private var delta: IndexDelta
 
     init(persisted: IndexSnapshot?, built: IndexSnapshot, blocks: Bool = false,
+         loadDelay: Duration = .zero,
          delta: IndexDelta = IndexDelta(added: [], updated: [], removed: [], durationMs: 0)) {
         self.persisted = persisted
         self.built = built
         self.blocks = blocks
+        self.loadDelay = loadDelay
         self.delta = delta
         (gate, gateContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
-    func loadPersisted() async throws -> IndexSnapshot? { persisted }
+    func loadPersisted() async throws -> IndexSnapshot? {
+        if loadDelay > .zero { try? await Task.sleep(for: loadDelay) }
+        return persisted
+    }
 
     @discardableResult
     func build() async throws -> IndexSnapshot {

@@ -34,6 +34,7 @@ final class LaunchSequenceTests: XCTestCase {
     private func makeRig(signedIn: Bool = true,
                          persisted: IndexSnapshot? = nil,
                          blockingBuild: Bool = false,
+                         loadDelay: Duration = .zero,
                          delta: IndexDelta = IndexDelta(added: [LaunchFixtures.sessionA])) throws -> Rig {
         let temp = try TempTree()
         let configHome = try temp.directory("home")
@@ -46,7 +47,8 @@ final class LaunchSequenceTests: XCTestCase {
         let log = SeamLog()
         let fleet = StubFleet()
         let built = LaunchFixtures.snapshot(configHome: configHome, ids: [LaunchFixtures.sessionA])
-        let index = StubIndex(persisted: persisted, built: built, blocks: blockingBuild, delta: delta)
+        let index = StubIndex(persisted: persisted, built: built, blocks: blockingBuild,
+                              loadDelay: loadDelay, delta: delta)
         let watcher = StubWatcher()
         let binary = try temp.file("bin/claude", "#!/bin/sh\nexit 0\n")
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
@@ -330,6 +332,42 @@ final class LaunchSequenceTests: XCTestCase {
         XCTAssertTrue(indexSawAll, "the index pump saw \(coordinator.deltas.count) of three batches")
 
         reader.cancel()
+        rig.watcher.finish()
+    }
+
+    /// A batch the watcher produced while the launch was still assembling itself reaches the index.
+    ///
+    /// This is the regression the first fan-out introduced. `TranscriptWatcher.changes` is
+    /// `.unbounded`, so the `for await` it replaced buffered and lost nothing; a feed that starts
+    /// pumping at construction and delivers only to the continuations existing at that instant
+    /// throws away everything arriving before the index subscribes — several suspension points
+    /// later, across a main-actor hop and `loadPersisted()`'s file I/O. Silent, and a lost batch is
+    /// a transcript change the sidebar never learns about.
+    ///
+    /// Two batches are yielded **before** `run()` is called, so they are already in the watcher's
+    /// own buffer when the feed is constructed, and the injected index sleeps twenty milliseconds
+    /// inside `loadPersisted()` — the same suspension the production index takes there, reading the
+    /// store — so a pump that started at construction has certainly drained them before any late
+    /// subscription could be taken. Without that suspension the failure would be a race rather than
+    /// a result.
+    @MainActor
+    func testAWatcherBatchFromBeforeTheLaunchFinishedStillReachesTheIndex() async throws {
+        var rig = try makeRig(loadDelay: .milliseconds(20))
+        let coordinator = RecordingCoordinator()
+        rig.sequence.makeCoordinator = { _ in coordinator }
+
+        let home = rig.configHome
+        rig.watcher.emit([home.appending(path: "projects/invented/early-one.jsonl")])
+        rig.watcher.emit([home.appending(path: "projects/invented/early-two.jsonl")])
+
+        let route = await rig.sequence.run()
+        XCTAssertNotNil(route.workspace)
+
+        rig.watcher.emit([home.appending(path: "projects/invented/late.jsonl")])
+
+        let sawAll = await LaunchFixtures.wait { coordinator.deltas.count == 3 }
+        XCTAssertTrue(sawAll,
+                      "the index saw \(coordinator.deltas.count) of three batches; two of them were produced before the launch finished")
         rig.watcher.finish()
     }
 

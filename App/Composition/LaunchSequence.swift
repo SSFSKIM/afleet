@@ -191,13 +191,18 @@ struct LaunchSequence: Sendable {
         }
 
         if let changes {
-            let subscription = await changes.subscribe()
+            // `changes.changes` is the feed's primary subscription and was created by its
+            // initialiser, so it has been collecting since before the feed read anything. Starting
+            // the pump is the last thing the launch does, which is what lets every batch the
+            // watcher produced during startup reach the index.
+            let subscription = changes.changes
             Task.detached(priority: .utility) {
                 for await changed in subscription {
                     let delta = await index.update(changed: changed)
                     await coordinator.indexChanged(delta)
                 }
             }
+            await changes.start()
         }
 
         return .workspace(workspace)
