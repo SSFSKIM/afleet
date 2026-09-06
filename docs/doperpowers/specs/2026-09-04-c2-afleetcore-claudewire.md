@@ -993,6 +993,19 @@ turn was spent outside the live gate and its one wasted retry.
 
 ## Revision Notes
 
+- 2026-09-07: `FileDiagnostics` held one `FileHandle` open for the sink's whole life and
+  tracked its own offset. The app's *Delete diagnostics* unlinks `diagnostics.log`, and the
+  sink is constructed inside the objects that own it rather than handed to the app, so
+  nothing could reach it to reopen: it kept appending to an unlinked inode until the next
+  relaunch and the user's following diagnostics were lost to a file with no name. C5 found
+  it. Closed in `c31bebd`: each write opens the log `O_WRONLY | O_APPEND | O_CREAT` at mode
+  0600, writes the line and closes, so the kernel places every write at the current end and
+  a deleted log is recreated by the next record; a missing directory is recreated on one
+  retry. `flush()` still means `synchronize()`, now on the file the written lines went to.
+  The single-writer rotation into `diagnostics.log.1` is unchanged except that its size
+  check reads the file's current size, the offset having gone with the handle. No public
+  signature changed. The discriminating test — record, unlink, record, assert the log is
+  back holding exactly the second line — was written red first.
 - 2026-09-05: Closing batch. Three vocabulary entries added to the `terminate()`
   enumeration above: the escalation steps `graceful_phase_deadline_exceeded` and
   `exit_not_observed`, and the lifecycle notice `mcp_delivery_abandoned` with its reasons
