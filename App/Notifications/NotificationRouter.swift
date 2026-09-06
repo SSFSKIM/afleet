@@ -32,6 +32,12 @@ final class NotificationRouter {
     /// the diagnostics line and for a test that needs a floor (§11).
     private(set) var postCount = 0
     private(set) var hookAnswerCount = 0
+    /// The answer in flight. Each waits for the one before it, so the engine is answered in ask
+    /// order; a test awaits it rather than waiting on a duration.
+    private var answerTask: Task<Void, Never>?
+
+    /// Returns once every answer this router has sent has been performed.
+    func settle() async { await answerTask?.value }
 
     init(poster: any NotificationPosting,
          lifecycle: any LifecycleAPI,
@@ -90,7 +96,9 @@ final class NotificationRouter {
                                 session: key.session))
         hookAnswerCount += 1
         let lifecycle = self.lifecycle
-        Task {
+        let previous = answerTask
+        answerTask = Task {
+            await previous?.value
             // An unanswered surfaced request leaves the engine waiting; `decisionGone` is the
             // ordinary outcome of a cancelled callback and is nothing to report.
             _ = try? await lifecycle.perform(.answer(id, .hookContinue(.empty)), on: key)

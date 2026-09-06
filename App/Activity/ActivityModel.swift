@@ -102,6 +102,9 @@ final class ActivityModel {
     /// identifies the channel in it.
     private var cursors: [String: String] = [:]
     private var rebuildTask: Task<Void, Never>?
+    /// The last cursor write. Each waits for the one before it, so two viewings in quick succession
+    /// cannot write the older cursor last.
+    private var cursorWrite: Task<Void, Never>?
     private var focusTask: Task<Void, Never>?
     private var starting: Set<ChannelKey> = []
 
@@ -136,6 +139,7 @@ final class ActivityModel {
         }
         for state in await lifecycle.states() { states[state.key] = state }
         for key in states.keys where isOwned(states[key]) { await follow(key) }
+        states = states.filter { isWorthKeeping($0.value) }
         rebuild()
         observeFocus()
     }
@@ -156,11 +160,31 @@ final class ActivityModel {
     /// One channel's state. Also the return value of an answered decision, which is why it is not
     /// private.
     func apply(_ state: ChannelState) {
-        states[state.key] = state
         if isOwned(state), pumps[state.key] == nil {
             Task { await follow(state.key) }
         }
+        // Activity is O(what is happening), not O(the fleet). Registering a real config home makes
+        // C4 seed a `ChannelState` for every channel on the machine — thousands, almost all of them
+        // archived — and a channel with nothing pending, no system item and no pump cannot produce
+        // a row however long the query looks at it, because rows come from `pendingDecisions`, from
+        // `systemItem` and from the two inputs only a pump fills. Keeping those states would make
+        // every rebuild iterate the whole fleet to produce nothing. A channel that later has
+        // something to say publishes another state and comes back.
+        if isWorthKeeping(state) {
+            states[state.key] = state
+        } else {
+            states[state.key] = nil
+        }
         scheduleRebuild()
+    }
+
+    /// An owned channel counts whether or not its pump exists yet: `follow` is asynchronous, so a
+    /// state that arrives with the channel newly owned reaches here before the subscription does,
+    /// and dropping it would leave the pump feeding a channel the query never looks at. C4's cap
+    /// bounds how many channels can be owned at once, so this keeps the bound.
+    private func isWorthKeeping(_ state: ChannelState) -> Bool {
+        !state.pendingDecisions.isEmpty || state.systemItem != nil
+            || pumps[state.key] != nil || isOwned(state)
     }
 
     private func isOwned(_ state: ChannelState?) -> Bool {
@@ -185,10 +209,10 @@ final class ActivityModel {
         pump.start(stream)
     }
 
-    /// Adds a pump the test built itself, driving it from a fixture rather than from a process.
-    func adopt(_ pump: ChannelEventPump) {
-        pumps[pump.key] = pump
-    }
+    /// This channel's pump, or nil if the app is not following it. Read by a test that has to know
+    /// the events it pushed have arrived before it asserts on the rows they produce — the wait is
+    /// on the input, the assertion on the output.
+    func pump(for key: ChannelKey) -> ChannelEventPump? { pumps[key] }
 
     private func pumpDelivered(_ event: WireEvent, from pump: ChannelEventPump) {
         router.handle(event, on: pump.key)
@@ -313,10 +337,18 @@ final class ActivityModel {
         cursors[session.description] = marker
         let snapshot = cursors
         if let store {
-            Task { try? await store.write(snapshot, namespace: .fleetKit, key: FleetKitKeys.unreadCursors) }
+            let previous = cursorWrite
+            cursorWrite = Task {
+                await previous?.value
+                try? await store.write(snapshot, namespace: .fleetKit, key: FleetKitKeys.unreadCursors)
+            }
         }
         releaseWaiters()
     }
+
+    /// Returns once every cursor written so far is on disk. A rebuilt model reads the store, so a
+    /// test that rebuilds has to know the write it is relying on has landed.
+    func cursorsPersisted() async { await cursorWrite?.value }
 
     /// Watches what the window is looking at and marks that channel seen. `withObservationTracking`
     /// re-arms itself on each change, which is how a non-SwiftUI observer follows an `@Observable`
@@ -355,6 +387,18 @@ final class ActivityModel {
     }
 
     // MARK: - Being told, rather than asked
+
+    /// True while a rebuild is scheduled and has not run.
+    ///
+    /// The rows a view reads are recomputed one main-actor hop after the event that changed them, so
+    /// "the pump has the frame" and "the rows account for it" are two facts and only the second is
+    /// what a reader sees. A consumer waiting on the first alone would be reading a proxy.
+    var isRebuildPending: Bool { rebuildTask != nil }
+
+    /// Suspends until the inputs satisfy `ready` **and** the rows have been recomputed since.
+    func whenSettled(_ ready: @escaping @MainActor (ActivityModel) -> Bool) async {
+        await whenChanged { model in ready(model) && !model.isRebuildPending }
+    }
 
     /// Suspends until `predicate` holds, resumed by the rebuild that makes it true — the same rule
     /// `FleetBrowserModel` follows, and the reason no test here waits on a duration.

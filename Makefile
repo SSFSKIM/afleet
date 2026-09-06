@@ -65,8 +65,16 @@ build: generate
 	xcodebuild -scheme $(SCHEME) -configuration Debug build
 
 # The app's suites and every package suite in one invocation, then the Python tools.
+#
+# `-test-timeouts-enabled` is a watchdog, not an instrument. Every wait inside a test in this tree
+# is fulfilled by the event it waits for and none of them has a deadline, which is the rule — but a
+# *broken* implementation can then leave a wait unfulfilled for ever, and an XCTest run has no
+# per-test limit of its own. Task 6 watched exactly that: a deliberately mutated model held the
+# suite at 100 percent of one core for eleven minutes with no output. The allowance turns that into
+# a reported failure. It bounds the harness; it decides no assertion.
 test: generate
-	xcodebuild test -scheme $(SCHEME) -destination '$(DESTINATION)'
+	xcodebuild test -scheme $(SCHEME) -destination '$(DESTINATION)' \
+		-test-timeouts-enabled YES -default-test-execution-time-allowance 120
 	$(MAKE) test-tools
 
 # Contract X1 over the app target, alone.

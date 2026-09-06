@@ -25,7 +25,18 @@ actor LifecycleDouble: LifecycleAPI {
     private var outcomes: [Result<ChannelState, LifecycleError>] = []
     private var fallback: Result<ChannelState, LifecycleError>?
     private(set) var performed: [ChannelKey] = []
+    /// Every action, with the channel it was performed on. `performed` records the key alone and
+    /// predates Activity; answering has to be asserted on the *action*, because a decision row can
+    /// disappear for the wrong reason and only the emitted answer says the engine was told.
+    private(set) var actions: [(key: ChannelKey, action: LifecycleAction)] = []
     private var roster: [JobEntry] = []
+    /// What `states()` and `state(of:)` answer. Empty by default, which is what the sidebar tests
+    /// expect of a double that has never been told about a channel.
+    private var table: [ChannelKey: ChannelState] = [:]
+    /// The channels `events(of:)` will answer for, and every fan-out taken on each. A fresh stream
+    /// per call and one `yield` to all of them, which is `Fleet.events(of:)`'s own contract.
+    private var opened: Set<ChannelKey> = []
+    private var streams: [ChannelKey: [AsyncStream<WireEvent>.Continuation]] = [:]
 
     init() {
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
@@ -46,14 +57,39 @@ actor LifecycleDouble: LifecycleAPI {
 
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         performed.append(key)
+        actions.append((key, action))
         let outcome = outcomes.isEmpty ? fallback : outcomes.removeFirst()
         guard let outcome else { unreachable("perform with no staged outcome") }
-        return try outcome.get()
+        let state = try outcome.get()
+        // The transition really happened as far as this double is concerned: a caller that answers
+        // a decision and then asks what the channel looks like must not be told the old answer.
+        table[state.key] = state
+        return state
     }
 
     func jobs() async -> [JobEntry] { roster }
-    func states() async -> [ChannelState] { [] }
-    func state(of key: ChannelKey) async -> ChannelState? { nil }
+    func states() async -> [ChannelState] { Array(table.values) }
+    func state(of key: ChannelKey) async -> ChannelState? { table[key] }
+
+    // MARK: - Driving the Activity surface
+
+    /// Sets what `states()` and `state(of:)` answer, and publishes each one on `updates` so a model
+    /// that listens rather than polls is fed the same way production feeds it.
+    func setStates(_ states: [ChannelState]) {
+        for state in states { table[state.key] = state }
+    }
+
+    /// Declares that this fleet owns a supervisor for the channel, so `events(of:)` answers with a
+    /// stream rather than nil.
+    func openEvents(of key: ChannelKey) { opened.insert(key) }
+
+    func push(_ event: WireEvent, to key: ChannelKey) {
+        for continuation in streams[key] ?? [] { continuation.yield(event) }
+    }
+    func finishEvents(of key: ChannelKey) {
+        for continuation in streams[key] ?? [] { continuation.finish() }
+        streams[key] = nil
+    }
 
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition { unreachable("preconditions") }
     func route(_ text: String, on key: ChannelKey) async -> Routed { unreachable("route") }
@@ -67,7 +103,15 @@ actor LifecycleDouble: LifecycleAPI {
     func isDormantEligible(_ key: ChannelKey) async -> Bool { unreachable("isDormantEligible") }
     func declineProjectServers(_ names: [String], project: URL) async throws { unreachable("declineProjectServers") }
     func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async { unreachable("acceptProjectServers") }
-    func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? { nil }
+    /// A fresh fan-out for a channel `openEvents(of:)` opened, and nil otherwise — which is
+    /// `Fleet`'s own contract: nil for a key the fleet owns no supervisor for, and a new stream on
+    /// every call for one it does.
+    func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? {
+        guard opened.contains(key) else { return nil }
+        let (stream, continuation) = AsyncStream<WireEvent>.makeStream(bufferingPolicy: .unbounded)
+        streams[key, default: []].append(continuation)
+        return stream
+    }
 
     private nonisolated func unreachable(_ member: String) -> Never {
         fatalError("LifecycleDouble.\(member) is not part of the fleet browser's surface")
