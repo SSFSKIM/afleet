@@ -471,7 +471,7 @@ compare names, sets and shapes, never whole environments.
 | inbound | `hook_callback` | `afleet.notification` posts the native notification from the hook input and answers an empty continue; `afleet.config-change` refreshes `get_settings` and answers likewise; any other id is answered with an empty continue and logged. Retired-generation callbacks are settled by the binary itself (*SPEC 45.18.3*). |
 | inbound | `mcp_message` | Route to the in-process MCP server (§6.8). |
 | outbound | `interrupt` | Esc while running; honor `still_queued`. |
-| outbound | `set_permission_mode`, `set_model`, `list_models`, `set_max_thinking_tokens`, `apply_flag_settings`, `rename_session`, `set_cwd`, `get_settings` | Command router targets (§7.7). `apply_flag_settings` answers success with **no `response` key**; the readback is `get_settings`, which answers `{applied: {model, effort, advisor, ultracode}, effective_keys, sources_keys: [{source, keys}]}` with the applied flag under `effective_keys` and `source: "flagSettings"` (fixture `control-shapes`, spike-agent-switch). `set_cwd` into a directory the config home has never trusted answers success with `{status: "needs_trust", directory}` and changes nothing; trust is granted only by repeating the call with `trust_accepted: true` **and** `trusted_directory` echoing that directory — `trust_accepted` alone is refused with an error — after which the answer is `{status: "ok", cwd, changed, transcript_relocated}` and `.claude.json` records the resolved path as trusted (fixtures `session-mirror-relocation`, `control-shapes`). |
+| outbound | `set_permission_mode`, `set_model`, `list_models`, `set_max_thinking_tokens`, `apply_flag_settings`, `rename_session`, `set_cwd`, `get_settings` | Command router targets (§7.7). `apply_flag_settings` answers success with **no `response` key**; the readback is `get_settings`, which answers `{applied: {model, effort, advisor, ultracode}, effective: {<setting name>: value}, sources: [{source, settings: {<name>: value}}], errors?}` with the applied flag as a key of `effective` and under `source: "flagSettings"` (fixture `control-shapes`, spike-agent-switch; until 2026-09-06 the fixtures carried a redactor-synthesised `effective_keys`/`sources_keys` in its place — see that day's Revision Note). `set_cwd` into a directory the config home has never trusted answers success with `{status: "needs_trust", directory}` and changes nothing; trust is granted only by repeating the call with `trust_accepted: true` **and** `trusted_directory` echoing that directory — `trust_accepted` alone is refused with an error — after which the answer is `{status: "ok", cwd, changed, transcript_relocated}` and `.claude.json` records the resolved path as trusted (fixtures `session-mirror-relocation`, `control-shapes`). |
 | outbound | `claude_authenticate`, `claude_oauth_callback`, `claude_oauth_wait_for_completion` | `/login`: open `automaticUrl`, or `manualUrl` plus the pasted code; the CLI runs the localhost listener itself (*Parity F-14*). `claude_authenticate` answers `{manualUrl, automaticUrl}`; an invalid code to `claude_oauth_callback` answers the error `Request failed with status code 400`; `claude_oauth_wait_for_completion` with no active flow answers at once with the error `No active claude_authenticate flow` rather than hanging (fixture `control-shapes`). |
 | outbound | `mcp_authenticate`, `mcp_oauth_callback_url`, `mcp_clear_auth` | MCP OAuth from the MCP popover (*Parity F-14*). |
 | outbound | `rewind_conversation`, `rewind_files` | Edit-and-resend; restore files, with `dry_run` first. |
@@ -943,7 +943,14 @@ turnCount}` in the store.
 
 State machine for one channel. "Reap" ends the process while the channel stays owned.
 Every spawn in this table is preceded by the ownership check (§7.2 rule 3) and followed by
-the post-handshake check (rule 4); every handoff waits for the previous holder (rule 5).
+the post-handshake check (rule 4); every handoff waits for the previous holder (rule 5). Ready and connecting each assert a
+process; dormant is the resting state of every processless owned channel. A spawn that does not
+complete — a precondition verdict, a cap refusal, a handshake failure, afleet's own terminate
+during the handshake — leaves the channel where it started (ready returns as dormant; a
+connecting series that never reached ready returns as Archived, older) and is not a row of the
+table. *Reopen* on any offered item (crash exhaustion, fork-identity timeout, wedge) takes the
+resting state's send row after the ownership check, and for a wedge only once the ghost's pid is
+dead (amended 2026-09-06 from C4's whole-branch review).
 
 **Dormant eligibility.** A channel may be reaped only when all of these hold: no running
 turn; no pending decision; no queued input; no running or armed background task, tracked
@@ -962,10 +969,11 @@ with live tasks would silently destroy work the user was told was running.
 | Owned, connecting | handshake done and post-handshake check clean | — | Owned, ready |
 | Owned, connecting | post-handshake check finds another holder | terminate own process; banner | Foreign live |
 | Owned, ready | 30 min dormant-eligible | `terminate()` | Owned, dormant |
+| Owned, ready | process exits 0 on its own | slot released; no system item, because a clean exit is not a crash (2026-09-06) | Owned, dormant |
 | Owned, dormant | user sends | ownership check; spawn `--resume <id>` under the same session id; the send waits and then goes; only a brief connecting glyph | Owned, ready |
 | Owned, dormant | another holder appears | — | Foreign live or Background job |
 | Owned, any | `terminate()` returns with no exit observed (escalation exhausted) | mark the channel **wedged**: no respawn under this session id while a ghost may still hold its transcript; system item with the escalation trace and *Reopen*, which spawns only after the ownership check finds no holder | Owned, wedged |
-| Owned, any | process exits non-zero | respawn with backoff 1 s, 2 s, 4 s (three attempts), each preceded by the ownership check; then a system item with exit code, stderr tail and *Reopen* | Owned, ready or Archived |
+| Owned, any | process exits non-zero | respawn with backoff 1 s, 2 s, 4 s (three attempts), each preceded by the ownership check; then a system item with exit code, stderr tail and *Reopen* | Owned, dormant (the series had reached ready) or Archived, older (it never did) |
 | Owned, ready | 6 owned processes live and a seventh is needed | reap the least recently used **dormant-eligible** channel; if none is eligible, no eviction: the header shows the live count and offers *Send to background* | that one: Owned, dormant |
 | Background job | *Adopt* | `claude stop <short>`; wait for exit and roster removal; spawn `--resume <id>` | Owned, connecting |
 | Owned | *Send to background* | `terminate()`; wait for exit and registry removal; `claude --bg --resume <id>`; verify the roster lists it | Background job |
@@ -987,7 +995,10 @@ for exit and registry removal; spawn `--resume <id>` under the same session id w
 `--permission-mode`, `--model`, `--effort` and every cumulative flag; after the handshake
 re-send `apply_flag_settings` for the process-local values and verify each against the
 readback that exists for it: model and effort from `get_settings.applied`, which carries
-only `model`, `effort`, `advisor` and `ultracode` (*Evidence: control-request shapes*);
+only `model`, `effort`, `advisor` and `ultracode` (*Evidence: control-request shapes*); flag
+settings by key presence in `get_settings.effective`, `applied.model` being the canonical id so
+an alias the user chose is resolved through the handshake's `models[].resolvedModel` before the
+comparison, and `applied.effort: null` meaning the default (2026-09-06);
 permission mode from the handshake's `current_permission_mode`; fast mode from
 `fast_mode_state` on the initialize response and `system/init`; output style from the
 initialize response's `output_style`. The composer stays disabled behind the connecting
@@ -1016,7 +1027,10 @@ Compaction is the `/compact` text command and renders as a divider from
 zero `usage` with a non-zero `total_cost_usd`; on disk the boundary record's `parentUuid` is
 null and `logicalParentUuid` carries the only link back, and the summary is a `user` record
 flagged `isCompactSummary` (fixture `compact-boundary`, 2026-09-05). File rewind uses `rewind_files` with `dry_run: true` first and shows the
-counts before applying. Forking a channel spawns `--resume <id> --fork-session` as a new
+counts before applying; the apply runs only after `rewind_conversation` has been honoured, and
+only when the user asked for the files as well — the checkpoint store is keyed by message id and
+independent of the conversation (2.1.258 `cli.pretty.js:153445`), so a refused conversation rewind
+leaves the working tree untouched (2026-09-06, C4). Forking a channel spawns `--resume <id> --fork-session` as a new
 channel. *Fork from here* on a message adds `--resume-session-at <uuid>` naming that
 message's record: the flag is **inclusive**, so the fork keeps the clicked message and
 drops everything after it, preserves the source's record uuids, so the clicked item maps
@@ -1072,10 +1086,10 @@ Three classes, resolved in this order:
    |---|---|
    | `/model <name>` and the picker | `list_models`, `set_model` |
    | `/permissions <mode>`, the picker, Shift+Tab cycle | `set_permission_mode`. `/permissions` alone opens a **read-only** rules view from `get_settings`; there is no request that removes a rule, and rules are added only through `updatedPermissions` on an open `can_use_tool`, whose `destination` may be `userSettings`, `projectSettings` or `localSettings`, so *Always allow* offers that scope choice like the terminal (*A-24*) |
-   | `/effort <level>` | `apply_flag_settings {effortLevel}`; the request answers success with no `response` key, so the readback is `get_settings.applied` and `effective_keys` (fixture `control-shapes`); `max` cannot be set mid-session (*A-06*) |
+   | `/effort <level>` | `apply_flag_settings {effortLevel}`; the request answers success with no `response` key, so the readback is `get_settings.applied` and the keys of `get_settings.effective` (fixture `control-shapes`); `max` cannot be set mid-session (*A-06*) |
    | `/rename <title>` | `rename_session` |
    | `/add-dir <path>` | a quiescent restart with the new `--add-dir` list. There is no runtime equivalent: `add_directory` is a cloud-container staging call that reads `mount_path`, and `register_repo_root` only registers a clone under cwd or under a launch-time root (*Parity F-6*) |
-   | `/agent <name>` | `apply_flag_settings {agent}`, which takes effect on the very next turn with no restart (spike-agent-switch), with the snapshot caveat of §7.4; the readback is `get_settings.effective_keys` carrying `agent` with `source: "flagSettings"` — `system/init.agent` is absent even on a session launched with `--agent` and is not a readback. `--agent` on a launch line is reserved for a new channel; re-passing it replays the agent's `initialPrompt` (§7.4) |
+   | `/agent <name>` | `apply_flag_settings {agent}`, which takes effect on the very next turn with no restart (spike-agent-switch), with the snapshot caveat of §7.4; the readback is `get_settings.effective` carrying an `agent` key, with `source: "flagSettings"` in `sources` — `system/init.agent` is absent even on a session launched with `--agent` and is not a readback. `--agent` on a launch line is reserved for a new channel; re-passing it replays the agent's `initialPrompt` (§7.4) |
    | `/cd <path>` | `set_cwd`; an untrusted directory answers `{status: "needs_trust", directory}` and changes nothing, so afleet shows its trust dialog and repeats the call with `trust_accepted: true` and `trusted_directory` echoing that directory, the only form the CLI accepts (fixtures `session-mirror-relocation`, `control-shapes`); a `transcript_relocated: true` answer rebinds the transcript paths and watchers (§7.3) |
    | `/fast` | `apply_flag_settings {fastMode: true}` as the opt-in, then the toggle (*Parity F-13*) |
    | `/config [key=value]` | pass-through text; it runs headless for about forty keys and is the only route to persisted settings other than `outputStyle`, the one key `update_settings` accepts (*Parity F-7*) |
@@ -1083,7 +1097,7 @@ Three classes, resolved in this order:
    | `/logout` | global, not per channel. A spawn barrier goes up; the census lists the owned channels and the afleet-launched background jobs from the roster; background jobs are stopped with `claude stop <short>` and verified gone from the roster; owned channels that are not dormant-eligible are listed with their live tasks and the user chooses to wait for them or to stop them explicitly with *Stop everything* semantics, because a bare `terminate()` would kill shells and background work `--resume` cannot restore (§7.4); only then `claude auth logout` runs; success is reported when every listed process has exited, each channel resumable after the next login; foreign sessions are named as keeping their token until they restart, because logout is a separate process and a running session keeps its in-process token (*A-06*) |
    | `/color <c>` | sent as text (`set_color` is not in the dispatcher on 2.1.259) |
    | `/clear` | sent as text; `conversation_reset` frame resets the timeline |
-   | `/rewind` | `rewind_conversation` and `rewind_files` (with `dry_run` first) |
+   | `/rewind` | `rewind_files {dry_run: true}` to preview; then `rewind_conversation`; then `rewind_files {dry_run: false}` only when the conversation rewind was honoured and the user asked for the files too (§8.5; 2026-09-06) |
    | `/fork` | new channel with `--fork-session` |
    | `/background` | send-to-background transition (§7.4) |
    | `/stop` | `interrupt` for the turn; *Stop everything* is `interrupt {cancel_queued: true}` plus `stop_task` for every id in the registry mirror, behind a confirm, because a declared `perTaskStopAffordance` makes a plain interrupt spare running agents; *Background all* beside it is `background_tasks` with no `tool_use_id`, which moves every foreground tool and agent to the background without stopping anything (*SPEC 45.22.10*) |
@@ -1263,7 +1277,8 @@ prefills the returned `prefillText`. The engine honours the rewind only for a me
 running process itself sent; any older target, which after a reopen is every earlier message,
 is refused with `rewound: false` and `error: "stale target"` inside a `success` envelope
 (fixture `rewind-turn`, 2026-09-05), so the host reads the body, not the envelope, and on
-refusal falls back to *Fork from here* (item 13). When *Prompt suggestions* is on, the `prompt_suggestion`
+refusal falls back to *Fork from here* (item 13); no file is reverted ahead of that answer (§7.7
+`/rewind`, 2026-09-06). When *Prompt suggestions* is on, the `prompt_suggestion`
 frame after each turn renders as ghost text in the composer that Tab accepts; it is off by
 default.
 
@@ -2339,7 +2354,15 @@ SwiftPM package or target that builds and tests without the children above it, p
   value, so the lifecycle accepts an exit only when its `request.id` is the one it is
   waiting on, and a late exit from an older pane is discarded. The panel never spawns `claude` for a session on its own
   initiative. `stop`, `respawn` and `rm` are actions here with no PTY; `attach` and `logs`
-  are panes.
+  are panes. Amended 2026-09-06 at C4's merge: `LifecycleAction.answer(RequestID, InboundAnswer)`;
+  `LifecycleAPI.events(of:)` (per-subscriber fan-out; a stream is returned for any registered
+  channel so a consumer may subscribe before `open`, and it finishes on archive);
+  `LifecycleAPI.jobs()` and `performJob(_:_:)` (the job verbs sit off `perform(on:)` because an
+  exec job has no session key); `LifecycleError.busy(LifecycleOperation)` with `LifecycleOperation =
+  spawn | handOff | restart | reopen | adopt | evict | reap` — a second lifecycle operation on a
+  channel with one in flight is refused, and the surface leaves the channel alone and lets the user
+  retry, never retrying on its own; `LifecycleError.notEligible(Blocker)` from `perform(.reap)`,
+  naming the blocker (a turn, a decision, queued input, a wedge, a background task by id).
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
   types; FleetKit never models upper-layer state. Owner: C4. Binds C5, C7. Amended
@@ -2486,7 +2509,7 @@ notarized distribution, and any write under `<configHome>` (X9).
 | C1 Probe suite, fixtures, fake-claude | `2026-09-04-c1-probe-suite-fixtures-fake-claude.md`; plan `plans/2026-09-04-c1-probe-suite-fixtures-fake-claude.md` (12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `2515b04` from `child/c1-probes-fixtures` `13226e6` (89 commits); G1–G4 green: 18 fixtures (16 recorded on the pinned 2.1.259 binary, 2 synthetic with shapes confirmed on the installed binary), 242 probe and 24 fake-claude tests on Python 3.9 and 3.14, drift ritual clean 2.1.259→2.1.260, one independent Codex leak-risk review closed; fifteen `C1/…` notes filed and reconciled. Follow-up wave **merged** 2026-09-05 at `66fd4a5`: `spike-mcp-decline-files` settled at zero cost (§6.12 confirmed; note filed), `rewind-turn` and `compact-boundary` scenarios written and offline-verified; both recorded 2026-09-05 after the window reset, redacted, verified and independently signed (checklist v3), **merged** 2026-09-05 from `worktree-agent-aaf78bf28064267d9` `c380ee7` (5 commits); catalogue 20 (18 recorded, 2 synthetic); redactor now matches `account`/`organization` anywhere in a key name after two live tenant uuids passed the gate (regression test; 245 probe tests); two `C1/…` parent-impact notes reconciled (§7.3 exclusion list, compaction facts, item 13's stale-target fallback) |
 | C2 AfleetCore and ClaudeWire | `2026-09-04-c2-afleetcore-claudewire.md`; plan `plans/2026-09-04-c2-afleetcore-claudewire.md` (14 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-05 at `b38e1f2` from `child/c2-core-wire` `9ab116a` (72 commits; history rewritten before merge so no engine byte from the recording workstation reaches the repository); G1–G4 green at the tip: ClaudeWire 225 tests, four of them live and run once from a clean build against the installed CLI under the scratch config home with no failures, AfleetCore 6; G2 over 18 fixtures and 1353 frames with the ten synthetic findings pinned as an exact set; one independent Codex leak-risk review (5 findings) and a six-lens review panel (32 findings) both closed by four sequential fix waves; the C2 reconciliations of 2026-09-04 and 2026-09-05 are in the Revision Notes; deferred debt indexed in `docs/tech-debt-tracker.md`; spend: three model turns on the child's own live gates and one in the orchestrator's final live pass |
 | C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` (v1 `916ce02`, parent-pin `ee94449`; v2.7 at merge `a758308`); plan `plans/2026-09-05-c3-fleetkit-timeline.md` (v5 `f9f0f2c`, 13 tasks); retrospective in the child spec's Outcomes & Retrospective | **merged** 2026-09-06 at `f4a8723` from `child/c3-timeline` `a758308` (57 commits of its own; only `FleetKit/Sources/FleetTimeline`, its tests and `docs/` touched, `FleetKit/Package.swift` byte-identical); G1–G4 green at the tip: `FleetTimelineTests` 165 tests, 4 skipped without `AFLEET_LOCAL_INDEX`, 0 failures, run twice in separate scratch paths; G1 check one over 20 mirrored streams and 518 entries, check two over 132 compared items across all twenty fixtures with no exclusion (two pinned differences on `compact-boundary`, named by shape); G2 measured opt-in on the author's config home: 365/366 ms cold build over 3,032 transcripts (limit 500), 1 ms incremental (limit 50), 667/679 ms largest history (limit 1,000); G3/G4 by the twelve named tests; X1 import graph green; X9 scratch-home fingerprint unchanged across the suite; one Codex whole-branch review (3 P1, 7 P2) and one adversarial review (6) closed by one fix wave (two dismissals logged as tracker 22 and 23); the twenty-fixture corpus surfaced three findings at merge, fixed red-first before any repin (boundary chain, `isSynthetic` union, recorded rewind); independent leak-risk review at merge (4 findings: three fixed, one logged as tracker 24); deferred debt entries 11–25 in `docs/tech-debt-tracker.md`; spend: no model turns (C3 spawns no process) |
-| C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md` on `child/c4-sessions-fleet` (v1 `2b77140`, X5/X6 amendments folded at `847ad41`, parent-pin `ee94449`; spec v2.4 `22edc0f`); plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4 `598fb4e`, 12 tasks) | **executing** (wave 2): three independent adversarial passes over spec and plan folded (v2.2/v2, v2.3/v3, v2.4/v4), the third pass declared final; executor dispatched 2026-09-05 from `c7bcdb5` (branch carries `main` `e30a4a7`: `maxTurns`, twenty fixtures); Task 11 (G2, `IndexStorage`) unblocked by C3's merge on 2026-09-06 (`f4a8723`); Tasks 1–9 landed on the branch (suite 190 at `f390a2f`), Task 10 next; spec v1 reviewed 2026-09-05, three questions ruled (store protocol stays in FleetKit with C3's `IndexStorage` implemented in `FleetSessions`; one composed haiku turn to widen the write allowlist; one store document per namespace) plus four rulings on `agents --json` cadence, wedged exclusion from eligibility and eviction, MCP consent read from both locations, and the listing policy; owns `FleetKit/Package.swift`; the `LineReader` thread-per-stream limit (tracker item 3) bites at its scale |
+| C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md`; plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4, 12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-06 at `f1e35d9` from `child/c4-sessions-fleet` `26aa962` (owns `FleetKit/Package.swift`; `FleetSessions` and its tests, `docs/`, plus a C2 corrective to `ClaudeWire`'s process runner carried by the branch); suite at the tip: FleetKit 415 tests, 10 skipped without the live flags, ClaudeWire 243; G1 coverage gate 58/58 lifecycle scenarios; G2 over C3's real registry mirror, five boundary cases; G3, G4; G5 eight live scenarios green together twice on the installed 2.1.263 (runs 4 and 5: 136.6 s and 132.3 s, five turns each, $0.17 and $0.19; cumulative child live spend $1.58); two whole-branch Codex reviews (48 confirmed → 10) closed by one fix wave and two follow-up rounds under five architect rulings; four live-gate product defects found at Task 10 and three more at the merge gate; independent leak-risk review at merge: no findings; deferred debt 26–48 in `docs/tech-debt-tracker.md` |
 | C5 App shell, panel host, packaging | — | blocked-by C4 |
 | C6 Conversation surface and Agents panel | — | composite; blocked-by C3, C4, C5 |
 | C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core dispatchable now, held for the human's approval of the cut; C7.4–C7.7 blocked-by C5.G4 (C7.4 also by C4's X5, C7.6 by C4's store) |
@@ -3772,7 +3795,9 @@ Pending — written at finish.
   with **no `response` key at all**, and the readback is `get_settings`, which answers
   `{applied: {model, effort, advisor, ultracode}, effective_keys, sources_keys: [{source,
   keys}]}` — the applied flag appears as `effective_keys: ["effortLevel"]` with `source:
-  "flagSettings"`. `list_models` answers `{models: [{value, resolvedModel, displayName,
+  "flagSettings"`. [2026-09-06: that shape was the redactor's — rule 5 popped `effective` and wrote
+  the key list in its place; the engine answers `effective: {effortLevel: …}` and `sources: [{source,
+  settings}]`. Both redactors and both fixtures were corrected at `2b06be9`.] `list_models` answers `{models: [{value, resolvedModel, displayName,
   description, supportsEffort, supportedEffortLevels, supportsAdaptiveThinking,
   supportsFastMode, supportsAutoMode}]}`. `get_workspace_diff` answers `{diff: null}` outside a
   repository. `rewind_files {user_message_id, dry_run}` answers `{canRewind, filesChanged,
@@ -3963,7 +3988,8 @@ Pending — written at finish.
   `apply_flag_settings {settings: {agent: "probe-agent"}}` answers `success` with no
   `response` key -- the shape S8 records -- and the very next turn's reply carried the agent's
   marker word where the turn before it did not, with no restart. The readback is
-  `get_settings`, which reported `effective_keys: ["agent"]` with `source: "flagSettings"`;
+  `get_settings`, which reported an `agent` key under `effective` (recorded at the time as the
+  redactor's `effective_keys: ["agent"]`; corrected 2026-09-06) with `source: "flagSettings"`;
   `system/init.agent` was absent throughout, including on a session launched with `--agent`,
   so it is not the field to verify against. §7.7's `/agent` row can therefore use
   `apply_flag_settings` with the snapshot caveat instead of a quiescent restart. **And the
@@ -4210,7 +4236,9 @@ Pending — written at finish.
   arguments; two composer tests (ClaudeWire 232 → 234). The flag caps agentic (assistant)
   turns inside one prompt and ends the turn with a `result` of subtype `error_max_turns` at
   the limit; it is not a prompt count. `claude --bg` forwards it. C4's live gate (G5) bounds
-  every installed-CLI scenario with it and checks the field's presence in its Task 10 preflight.
+  every installed-CLI scenario with it and checks the field's presence in its Task 10 preflight
+  [2026-09-06: every `ClaudeProcess` launch; the adoption job's `--bg --resume` is bounded by its
+  prompt rather than by `--max-turns`, and a promptless `--bg` job stays resident until stopped].
 - 2026-09-05 C1/rewind-turn: `rewind_conversation` has two behaviours and §7.3's edit-via-rewind
   clause and §10 item 13 rest on the one this recording refuses. A target uuid read out of a
   **resumed** transcript is declined: the answer is a `control_response {subtype: "success"}`
@@ -4354,3 +4382,76 @@ Pending — written at finish.
   rather than a Cocoa error carrying a path, and test temp trees being unchecked against the
   config home is tracker 24; the rule these share is that an engine byte copied into prose or a
   comment is a byte nobody reviewed there (§11).
+- 2026-09-06 reconciliation of C4 (merge `f1e35d9` from `child/c4-sessions-fleet` `26aa962`; `main`
+  merged into the branch at `5877588` and `c8ffae4`). Binding content touched, each recorded in the
+  child spec's Parent revisions and Decision Log: **§7.4** gains a clean-exit row and the principle
+  that dormant is the resting state of every processless owned channel (ready and connecting each
+  assert a process; a spawn that does not complete leaves the channel where it started; crash
+  exhaustion rests dormant or archived-older; *Reopen* takes the resting state's send row) — five
+  whole-branch-review findings were this one unanswered question. **§8.5 and §7.7 `/rewind`**:
+  `rewind_conversation` first, `rewind_files {dry_run: false}` only on `rewound: true` and only when
+  files were asked for; the engine resolves the file checkpoint through `fileHistory` keyed by message
+  id, independent of the message array (2.1.258 `:153445-153460`; 2.1.263 `:453694-453703`), and
+  `rewind_conversation` touches no file-history state, so the reorder is safe and the previous order
+  reverted the working tree ahead of a refusal the engine designs for. **X5** gains `answer`,
+  `events(of:)`, `jobs()`, `performJob`, `busy(LifecycleOperation)` and `notEligible(Blocker)` as
+  stated in §17 above; no FIFO lease — one in-flight marker per channel, refusal not queueing. **The
+  `get_settings` shape** in the protocol contract (§6.4 table, §7.7 rows, and two historical notes
+  above) is corrected: `effective: {name: value}` and `sources: [{source, settings}]`, never
+  `effective_keys`/`sources_keys`, which existed only because rule 5 of the fixture redactor popped
+  the live object and wrote a key list in its place; C4's restart readback had learned to read that
+  key and would have parked every restart carrying a flag setting behind a false "did not survive"
+  banner against a real engine. Corrective on `main` (`2b06be9`: both redactors redact values and
+  keep shape, a legacy-shape upgrade so `make redact` migrates a committed fixture; `0733c8c`:
+  `control-shapes` and `zero-cost` migrated and re-signed); witnessed live by the zero-cost census
+  (exact on pinned 2.1.259, on 2.1.261 and on 2.1.263) and by G5's eighth scenario, the restart
+  readback, which reports `effective` as an object against the installed engine. The rule it taught:
+  redaction replaces values and never renames or reshapes a field, or every downstream reader tests
+  green against a phantom. **A C2 corrective carried by this merge** (`fdb4446`, `aa8d791`,
+  `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift`, tests +8): the runner learned a child's
+  exit from `waitUntilExit()` on a global dispatch worker, whose run loop nobody spins, so under a
+  full live suite a verb that had already succeeded (kernel state gone, pipes drained) was reported
+  as a timed-out `-1`; the exit now comes from `terminationHandler`, installed before `run()`,
+  settlement is keyed to the exit rather than to end-of-file (the CLI's `bg spare` host inherits the
+  pipes and keeps them open), a last non-blocking pass collects late output, and
+  `ProcessOutput.timeoutState` describes the child at budget expiry (identifiers, states and counts
+  only; `sysctl`, never `ps`). The §6.7 runner contract gains the sentence "settle on exit, not
+  EOF". **Verb budgets** (`CLIVerbs`): read verbs twenty seconds, mutation verbs thirty, sized from
+  clean measurements (`stop` 0.70 s, `--bg --exec` 1.1 s, spawn–list–stop–remove 5.3 s with a cold
+  daemon); the earlier ninety was sized while the runner defect was present, and tracker 27's
+  "slow daemon" diagnosis is corrected in place. **Engine facts pinned at merge** (2.1.261, re-read
+  on 2.1.263 from the bundle extracted the same day): a prompted background conversation job answers
+  and ends ~3.9 s after creation, capped or not; a promptless `--bg` or `--bg --resume <id>` job
+  stays resident idle until stopped; a transcript is written when a prompt is *submitted*;
+  `Fleet.jobs()` filters terminal records; an exec job writes no `sessions/` record while running;
+  print-mode `--resume` and `--bg --resume` share one loader and refuse a transcript-less session
+  (`not_found_explicit_id`), the bg short form forking instead; the daemon on 2.1.263 is transient
+  (exits after five idle seconds, restarts in ~0.3 s; its first-ever start in a fresh home took ~60 s);
+  `claude auth login` (browser flow) stores credentials but never sets `hasCompletedOnboarding`
+  (2.1.263 `cli.pretty.js:265739-265749`; the same asymmetry in 2.1.258), so a scratch config
+  home needs one interactive run before an interactive session will register itself — the
+  scratch home lives under `/tmp`, which a reboot clears, and this re-login is the recovery step.
+  **Seeding** (C5-relevant, §7.4): a supervisor registered after its holder already exists is seeded
+  with the observer's current holder snapshot at build, because C5 registers from C3's index and a
+  pre-existing holder is the ordinary case. **Store, watcher, seams**: one document per namespace
+  (advisory); a dispatch vnode source plus the five-second poll rather than FSEvents (advisory
+  means); `TaskMirrorReading` is the protocol through which C4 consumes X4's mirror, wired per channel
+  from the supervisor's own pump so the reap, eviction and `/logout` see running background tasks;
+  the `IndexStorage` seam is declared in `FleetTimeline` and implemented in `FleetSessions`, no X2
+  change; nothing about §6.12 flows back. **The live gate paid for itself twice**: four product
+  defects at Task 10 (seeding; `backgroundResume` accepting the short a session already had; a stale
+  own-child record inside a handoff turning the channel Contended; the settle window) and three at
+  the merge gate (adopt's own release consumed by the observer's archive-on-disappear, a silent
+  no-op; the runner starvation above; the budgets), none visible to 415 green tests, because the
+  stand-ins agreed with the code rather than with the engine — the whole-branch review's closing
+  observation, and the reason G5 gained its eighth scenario. **Version drift**: the installed CLI
+  auto-updated 2.1.261 → 2.1.263 during the merge day; `~/claude-code-bundle/2.1.263/` is extracted
+  (1837 modules; 359 prose literals added, 256 removed; fifteen embedded docs changed, six new; the
+  hook registry no longer exported under a real name) and every fact this document cites was
+  re-anchored there; the harness-specification chapters remain pinned to 2.1.257 and need
+  re-anchoring before C7. **Deferred**: tracker 26–48 under "From C4"; 47 and 48 are two fixture
+  debts from the re-signing reviewer. Human gate carried: C7.1–C7.3 approval; checklist item 12; item
+  13 *Fork from here*; symlinked project directories; child Q5; whether the scratch config home
+  should leave `/tmp`. Independent leak-risk review at merge: no findings (nineteen UUID literals,
+  all invented; every added line of sixty-plus characters tested against 9.3 MB of recorded evidence
+  with zero verbatim matches; reports emit counts only).

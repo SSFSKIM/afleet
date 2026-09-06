@@ -364,3 +364,14 @@ architect's rulings settled them). Line numbers are as at `4f2102d`, before the 
     plan never signs out and the user can choose *Stop* or abandon. The *Stop* half needs the user
     to drive another channel into a background task while the sheet is open. Owner: C4. Closer:
     rebuild the blocker set from the live mirror at the moment each choice acts.
+
+47. **`Fixtures/control-shapes/README.md` counts eleven requests where the table has twelve.** The
+    opening line says "eleven host-originated control requests in sequence"; the table has twelve rows
+    because `set_cwd` is sent twice — twelve requests across eleven subtypes. Raised by the reviewer who
+    re-signed the fixture after the rule-5 migration (2026-09-06). Any edit re-signs the fixture, so
+    batch it with the next fixture touch. Owner: C1.
+48. **`redaction.json`'s per-rule `count` is a running total across redaction passes.** The rule-5
+    migration stacked two rename hits on the original pass's two, so both migrated manifests read four
+    where two values were replaced — visible in `zero-cost`, whose settings maps are empty. A reader who
+    takes the number for "placeholders currently in the file" is misled; extends entry 10. Closer: a
+    sentence in `Fixtures/REVIEW.md` and in the manifest's own key name if it is ever revised. Owner: C1.
