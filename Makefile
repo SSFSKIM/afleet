@@ -47,3 +47,26 @@ synthetic:
 sign:
 	@test -n "$(FIXTURE)" -a -n "$(REVIEWER)" || (echo "usage: make sign FIXTURE=Fixtures/<name> REVIEWER=<name>" && exit 2)
 	$(PYTHON) Tools/probe/probe.py sign "$(FIXTURE)" --reviewer "$(REVIEWER)"
+
+# --- The app ---------------------------------------------------------------
+# `afleet.xcodeproj` is generated, so every target that needs it regenerates it first.
+
+.PHONY: generate build test check-imports
+
+SCHEME ?= afleet
+DESTINATION ?= platform=macOS
+
+generate:
+	xcodegen generate
+
+build: generate
+	xcodebuild -scheme $(SCHEME) -configuration Debug build
+
+# The app's suites and every package suite in one invocation, then the Python tools.
+test: generate
+	xcodebuild test -scheme $(SCHEME) -destination '$(DESTINATION)'
+	$(MAKE) test-tools
+
+# Contract X1 over the app target, alone.
+check-imports: generate
+	xcodebuild test -scheme $(SCHEME) -destination '$(DESTINATION)' -only-testing:AfleetTests/ImportGraphTests
