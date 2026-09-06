@@ -572,3 +572,17 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     is C4's, inside the FleetKit package — which is why this is an entry and not a commit.
     Closer: `isTrusted` takes the resolved document location, or a `ConfigHome` rather than a URL,
     the same shape the app now uses. Owner: C4, before C6 spawns.
+60. **Registration seeding publishes about five states per channel where one would do.**
+    Measured at C5 Task 5 by instrumenting `LifecycleAPI.updates` during a launch over a real
+    config home: **13,250 states across 2,671 distinct sessions**, `identical=0` — not one was a
+    repeat of a state already held — 99.8% carrying the `.archived` origin, and 2,669 of them for
+    sessions the listing policy never lists. It is a bounded burst that drains, not a leak; it
+    only looked endless because the consumer was slower than the producer.
+    Not a C5 problem any more: the sidebar patches by row, drops states for unlisted sessions and
+    coalesces a burst, so 13,250 states now cost 87 publishes and 7 rebuilds, and idle CPU is
+    0.1%. Filed because the amplification is real and the next consumer will not have that
+    machinery — C6 subscribes to the same stream. Note also that coalescing *duplicates* would
+    have saved nothing here, since there were none; the cost is in how many distinct intermediate
+    states seeding emits per channel. Owner: C4. Closer: publish the settled state per channel
+    rather than each step toward it, or say why the intermediates are load-bearing.
+
