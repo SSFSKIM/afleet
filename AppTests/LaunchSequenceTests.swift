@@ -263,22 +263,27 @@ final class LaunchSequenceTests: XCTestCase {
         let warmCoordinator = RecordingCoordinator()
         warm.sequence.makeCoordinator = { _ in warmCoordinator }
 
+        let bothSnapshots = warmCoordinator.expectSnapshots(2)
         let warmRoute = await warm.sequence.run()
         XCTAssertNotNil(warmRoute.workspace)
 
-        let sawBoth = await LaunchFixtures.wait { warmCoordinator.snapshots.count >= 2 }
-        XCTAssertTrue(sawBoth,
-                      "the coordinator saw \(warmCoordinator.snapshots.count) snapshots, not the restored one and the fresh build")
-        XCTAssertEqual(warmCoordinator.snapshots.first?.builtAt, restoredAt,
+        await fulfillment(of: [bothSnapshots], timeout: LaunchFixtures.hangGuard)
+        // Guarded rather than subscripted: below the count the second read would trap and take the
+        // whole bundle down instead of reporting.
+        guard warmCoordinator.snapshots.count >= 2 else {
+            return XCTFail("the coordinator saw \(warmCoordinator.snapshots.count) snapshots, not the restored one and the fresh build")
+        }
+        XCTAssertEqual(warmCoordinator.snapshots[0].builtAt, restoredAt,
                        "the first snapshot handed over was not the persisted one")
         XCTAssertNotEqual(warmCoordinator.snapshots[1].builtAt, restoredAt,
                           "the second snapshot handed over was the persisted one again, not the fresh build")
 
+        let bothDeltas = warmCoordinator.expectDeltas(2)
         warm.watcher.emit([warmHome.appending(path: "projects/invented/one.jsonl")])
         warm.watcher.emit([warmHome.appending(path: "projects/invented/two.jsonl")])
-        let sawDeltas = await LaunchFixtures.wait { warmCoordinator.deltas.count == 2 }
-        XCTAssertTrue(sawDeltas,
-                      "the coordinator saw \(warmCoordinator.deltas.count) deltas for two watcher batches")
+        await fulfillment(of: [bothDeltas], timeout: LaunchFixtures.hangGuard)
+        XCTAssertEqual(warmCoordinator.deltas.count, 2,
+                       "the coordinator saw \(warmCoordinator.deltas.count) deltas for two watcher batches")
         warm.watcher.finish()
 
         // Cold: nothing persisted, and the coordinator must still hear about the build.
@@ -286,11 +291,12 @@ final class LaunchSequenceTests: XCTestCase {
         let coldCoordinator = RecordingCoordinator()
         cold.sequence.makeCoordinator = { _ in coldCoordinator }
 
+        let coldSnapshot = coldCoordinator.expectSnapshots(1)
         let coldRoute = await cold.sequence.run()
         XCTAssertNotNil(coldRoute.workspace)
-        let sawCold = await LaunchFixtures.wait { coldCoordinator.snapshots.count == 1 }
-        XCTAssertTrue(sawCold,
-                      "a cold launch handed the coordinator \(coldCoordinator.snapshots.count) snapshots, not the one from the build")
+        await fulfillment(of: [coldSnapshot], timeout: LaunchFixtures.hangGuard)
+        XCTAssertEqual(coldCoordinator.snapshots.count, 1,
+                       "a cold launch handed the coordinator \(coldCoordinator.snapshots.count) snapshots, not the one from the build")
         cold.watcher.finish()
     }
 
@@ -320,16 +326,17 @@ final class LaunchSequenceTests: XCTestCase {
         let collected = BatchCollector()
         let reader = Task { for await batch in second { await collected.append(batch) } }
 
+        let secondSawAll = await collected.expect(3)
+        let indexSawAll = coordinator.expectDeltas(3)
         for number in 1...3 {
             rig.watcher.emit([workspace.configHome.root.appending(path: "projects/invented/\(number).jsonl")])
         }
 
-        let secondSawAll = await LaunchFixtures.waitAsync { await collected.count == 3 }
+        await fulfillment(of: [secondSawAll, indexSawAll], timeout: LaunchFixtures.hangGuard)
         let secondCount = await collected.count
-        XCTAssertTrue(secondSawAll, "the second subscriber saw \(secondCount) of three batches")
-
-        let indexSawAll = await LaunchFixtures.wait { coordinator.deltas.count == 3 }
-        XCTAssertTrue(indexSawAll, "the index pump saw \(coordinator.deltas.count) of three batches")
+        XCTAssertEqual(secondCount, 3, "the second subscriber saw \(secondCount) of three batches")
+        XCTAssertEqual(coordinator.deltas.count, 3,
+                       "the index pump saw \(coordinator.deltas.count) of three batches")
 
         reader.cancel()
         rig.watcher.finish()
@@ -356,6 +363,7 @@ final class LaunchSequenceTests: XCTestCase {
         let coordinator = RecordingCoordinator()
         rig.sequence.makeCoordinator = { _ in coordinator }
 
+        let allThree = coordinator.expectDeltas(3)
         let home = rig.configHome
         rig.watcher.emit([home.appending(path: "projects/invented/early-one.jsonl")])
         rig.watcher.emit([home.appending(path: "projects/invented/early-two.jsonl")])
@@ -365,9 +373,9 @@ final class LaunchSequenceTests: XCTestCase {
 
         rig.watcher.emit([home.appending(path: "projects/invented/late.jsonl")])
 
-        let sawAll = await LaunchFixtures.wait { coordinator.deltas.count == 3 }
-        XCTAssertTrue(sawAll,
-                      "the index saw \(coordinator.deltas.count) of three batches; two of them were produced before the launch finished")
+        await fulfillment(of: [allThree], timeout: LaunchFixtures.hangGuard)
+        XCTAssertEqual(coordinator.deltas.count, 3,
+                       "the index saw \(coordinator.deltas.count) of three batches; two of them were produced before the launch finished")
         rig.watcher.finish()
     }
 
@@ -388,18 +396,29 @@ final class LaunchSequenceTests: XCTestCase {
         sequence.makeCoordinator = { _ in coordinator }
 
         let outcome = RouteBox()
-        let running = Task { await outcome.set(sequence.run()) }
+        let hasReturned = expectation(description: "run() returned while the injected build was blocked")
+        let running = Task {
+            await outcome.set(sequence.run())
+            hasReturned.fulfill()
+        }
 
-        let returned = await LaunchFixtures.waitAsync(upTo: .seconds(3), for: { await outcome.isWorkspace })
+        // The one wait in this file whose bound is doing real work, and the reason is the assertion
+        // itself: against an implementation that awaited the build inline, `run()` never returns,
+        // and there is no signal for something that does not happen. The bound turns that hang into
+        // a reported failure. It is not a threshold this test approaches — it passes in hundredths
+        // of a second — and the verdict on the passing path is the fulfilment, not the clock.
+        await fulfillment(of: [hasReturned], timeout: LaunchFixtures.hangGuard)
+        let returned = await outcome.isWorkspace
         XCTAssertTrue(returned,
                       "run() had not returned a workspace while the injected build() was still blocked")
         XCTAssertTrue(coordinator.snapshots.isEmpty,
                       "the coordinator was handed a snapshot before the build was released")
 
+        let landed = coordinator.expectSnapshots(1)
         rig.index.releaseBuild()
 
-        let landed = await LaunchFixtures.wait { coordinator.snapshots.count == 1 }
-        XCTAssertTrue(landed, "the released build never reached the coordinator")
+        await fulfillment(of: [landed], timeout: LaunchFixtures.hangGuard)
+        XCTAssertEqual(coordinator.snapshots.count, 1, "the released build never reached the coordinator")
         let builds = await rig.index.buildCount
         XCTAssertEqual(builds, 1, "the build ran \(builds) times")
         rig.watcher.finish()

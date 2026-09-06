@@ -254,6 +254,8 @@ final class SettingsReadoutTests: XCTestCase {
         let watcher = StubWatcher()
         let binary = try temp.file("bin/claude", "#!/bin/sh\nexit 0\n")
 
+        let signalBox = SignalBox()
+
         let sequence = LaunchSequence(
             storeRoot: temp.root.appending(path: "store", directoryHint: .isDirectory),
             diagnosticsRoot: temp.root.appending(path: "logs", directoryHint: .isDirectory),
@@ -265,6 +267,15 @@ final class SettingsReadoutTests: XCTestCase {
                 composerBox.set(composer)
                 return composer
             },
+            // The real `TranscriptIndex`, over the real composer's sink, with a signal spliced in
+            // so the detached build's completion is something to wait *on* rather than to poll for.
+            makeIndex: { home, store, diagnostics in
+                let signal = IndexBuildSignal(forwardingTo: diagnostics.timeline)
+                signalBox.set(signal)
+                return TranscriptIndex(configHome: home,
+                                       storage: StoreIndexStorage(store: store),
+                                       diagnostics: signal)
+            },
             fleetFactory: { _, _, _, _, _ in fleet },
             makeWatcher: { _ in watcher },
             readClaudeJSON: { _ in true })
@@ -272,11 +283,27 @@ final class SettingsReadoutTests: XCTestCase {
         let route = await sequence.run()
         let workspace = try XCTUnwrap(route.workspace, "the scratch launch did not reach a workspace")
         let composer = try XCTUnwrap(composerBox.value, "the diagnostics composer was never built")
+        let signal = try XCTUnwrap(signalBox.value, "the index was never built through the seam")
 
-        let reported = await LaunchFixtures.wait { composer.timeline.lastIndexBuild != nil }
-        XCTAssertTrue(reported, "the index build never reported an indexBuilt notice")
+        await XCTWaiter().fulfillment(of: [signal.built], timeout: LaunchFixtures.hangGuard)
+        XCTAssertNotNil(composer.timeline.lastIndexBuild, "the index build never reported an indexBuilt notice")
         watcher.finish()
         return Built(workspace: workspace, diagnostics: composer)
+    }
+
+    /// The build signal the sequence spliced in, carried back out of the seam. Same locking
+    /// argument as `ComposerBox`.
+    private final class SignalBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: IndexBuildSignal?
+        func set(_ signal: IndexBuildSignal) {
+            lock.lock(); defer { lock.unlock() }
+            storage = signal
+        }
+        var value: IndexBuildSignal? {
+            lock.lock(); defer { lock.unlock() }
+            return storage
+        }
     }
 
     /// The composer the sequence built, carried back out of the seam.

@@ -159,24 +159,104 @@ final class StubWatcher: TranscriptWatching, @unchecked Sendable {
     func finish() { continuation.finish() }
 }
 
-/// The coordinator the composition root drives, recording each of the three points.
+/// The coordinator the composition root drives, recording each of the three points and signalling
+/// each one as it arrives.
+///
+/// **Nothing here is polled.** An earlier version of these tests waited by re-reading the counts on
+/// a ten-millisecond loop against a five-second budget, which makes the verdict depend on how much
+/// of the machine the polling task got — a test that passes alone and fails on a loaded machine,
+/// which is worse than a failing test because its failure reads as a product bug. The waits below
+/// are fulfilled by the delivery itself, so on the passing path no wall clock is consulted at all.
+/// The `timeout:` at each `fulfillment` call is a hang-guard three orders of magnitude above what
+/// these tests take, there so a genuine regression is reported rather than hanging the suite.
 @MainActor
 final class RecordingCoordinator: WorkspaceCoordinating {
     private(set) var snapshots: [IndexSnapshot] = []
     private(set) var deltas: [IndexDelta] = []
-    private(set) var workspaces = 0
+
+    private var snapshotWaiters: [(needed: Int, expectation: XCTestExpectation)] = []
+    private var deltaWaiters: [(needed: Int, expectation: XCTestExpectation)] = []
 
     init() {}
 
-    func snapshotAvailable(_ snapshot: IndexSnapshot) async { snapshots.append(snapshot) }
-    func indexChanged(_ delta: IndexDelta) async { deltas.append(delta) }
+    func snapshotAvailable(_ snapshot: IndexSnapshot) async {
+        snapshots.append(snapshot)
+        Self.release(&snapshotWaiters, reached: snapshots.count)
+    }
+
+    func indexChanged(_ delta: IndexDelta) async {
+        deltas.append(delta)
+        Self.release(&deltaWaiters, reached: deltas.count)
+    }
+
+    /// Fulfilled the moment the `count`-th snapshot is handed over. Safe to create after the
+    /// stimulus as well as before it: an already-satisfied count fulfils at once, so there is no
+    /// ordering to lose.
+    func expectSnapshots(_ count: Int) -> XCTestExpectation {
+        Self.expect(count, in: &snapshotWaiters, have: snapshots.count, what: "snapshots")
+    }
+
+    /// Fulfilled the moment the `count`-th delta is handed over.
+    func expectDeltas(_ count: Int) -> XCTestExpectation {
+        Self.expect(count, in: &deltaWaiters, have: deltas.count, what: "deltas")
+    }
+
+    private static func expect(_ count: Int,
+                               in waiters: inout [(needed: Int, expectation: XCTestExpectation)],
+                               have: Int, what: String) -> XCTestExpectation {
+        let expectation = XCTestExpectation(description: "\(count) \(what)")
+        if have >= count {
+            expectation.fulfill()
+        } else {
+            waiters.append((count, expectation))
+        }
+        return expectation
+    }
+
+    private static func release(_ waiters: inout [(needed: Int, expectation: XCTestExpectation)],
+                                reached: Int) {
+        for waiter in waiters where waiter.needed <= reached { waiter.expectation.fulfill() }
+        waiters.removeAll { $0.needed <= reached }
+    }
 }
 
-/// Batches a subscriber received, collected off whatever task read them.
+/// Batches a subscriber received, collected off whatever task read them, and signalled as they
+/// arrive. Same reasoning as `RecordingCoordinator`: the delivery fulfils the wait, nothing polls.
 actor BatchCollector {
     private(set) var batches: [[URL]] = []
-    func append(_ batch: [URL]) { batches.append(batch) }
+    private var waiters: [(needed: Int, expectation: XCTestExpectation)] = []
+
+    func append(_ batch: [URL]) {
+        batches.append(batch)
+        for waiter in waiters where waiter.needed <= batches.count { waiter.expectation.fulfill() }
+        waiters.removeAll { $0.needed <= batches.count }
+    }
+
     var count: Int { batches.count }
+
+    /// Fulfilled the moment the `count`-th batch arrives.
+    func expect(_ count: Int) -> XCTestExpectation {
+        let expectation = XCTestExpectation(description: "\(count) batches")
+        if batches.count >= count { expectation.fulfill() } else { waiters.append((count, expectation)) }
+        return expectation
+    }
+}
+
+/// A `TimelineDiagnosticsSink` that forwards to another and signals the first `indexBuilt`.
+///
+/// The composition root issues the index build detached, so a test that reads what the build
+/// reported has to wait for it. Waiting on this rather than re-reading the composer on a timer is
+/// the same rule as everywhere else here: the thing that satisfies the wait is what ends it.
+final class IndexBuildSignal: TimelineDiagnosticsSink, @unchecked Sendable {
+    private let forward: any TimelineDiagnosticsSink
+    let built = XCTestExpectation(description: "the index build reported")
+
+    init(forwardingTo forward: any TimelineDiagnosticsSink) { self.forward = forward }
+
+    func record(_ notice: TimelineNotice) {
+        forward.record(notice)
+        if case .indexBuilt = notice { built.fulfill() }
+    }
 }
 
 // MARK: - Shared helpers
@@ -279,24 +359,42 @@ enum LaunchFixtures {
         return String(hash, radix: 16)
     }
 
-    /// Polls `condition` until it holds or `timeout` elapses. Returns whether it held.
+    /// The hang-guard every `fulfillment(of:timeout:)` in these tests uses.
+    ///
+    /// Not a threshold anything is expected to approach: these waits are fulfilled by the delivery
+    /// they are waiting on, and the tests that use them run in hundredths of a second. Thirty
+    /// seconds is there so a real regression — a batch that never arrives — is reported as a
+    /// failure rather than hanging the suite until XCTest's own ten-minute limit.
+    static let hangGuard: TimeInterval = 30
+
+    /// The retired shape, kept for the three call sites in `ChannelRegistrarTests` that wait on a
+    /// `@Observable` model with no signal to hook.
+    ///
+    /// Polling makes the verdict depend on how much of the machine the polling task got, which is
+    /// what makes a test pass alone and fail on a loaded one. Every wait in `LaunchSequenceTests`
+    /// and `SettingsReadoutTests` is now fulfilled by the delivery itself instead. These three
+    /// cannot be until the thing they watch — Task 4's `FleetBrowserModel` — offers a signal, so
+    /// the budget here matches the hang-guard rather than the five seconds it used to be.
     @MainActor
-    static func wait(upTo timeout: Duration = .seconds(5), for condition: @MainActor () -> Bool) async -> Bool {
+    static func wait(upTo timeout: Duration = .seconds(30), for condition: @MainActor () -> Bool) async -> Bool {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if condition() { return true }
-            try? await Task.sleep(for: .milliseconds(10))
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
         }
         return condition()
     }
 
     /// The same, for a condition that has to reach an actor.
-    static func waitAsync(upTo timeout: Duration = .seconds(5), for condition: @Sendable () async -> Bool) async -> Bool {
+    static func waitAsync(upTo timeout: Duration = .seconds(30), for condition: @Sendable () async -> Bool) async -> Bool {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if await condition() { return true }
-            try? await Task.sleep(for: .milliseconds(10))
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
         }
         return await condition()
     }
+
 }
