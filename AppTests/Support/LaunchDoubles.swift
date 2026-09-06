@@ -330,6 +330,14 @@ enum LaunchFixtures {
 
     /// A minimal main transcript under `<configHome>/projects/<slug>/<sessionID>.jsonl`.
     /// Every byte is invented: no engine recording reaches this file (§11).
+    ///
+    /// **It projects one item, not two, and anything appended to it projects none.** The closing
+    /// `last-prompt` names the *first* user record as the leaf, and `RecordReducer` builds its chain
+    /// from the leaf backwards: the assistant record below is off that chain and lands in `branches`,
+    /// and so does every record a caller appends afterwards — they apply cleanly, `Effect.applied`
+    /// counts them, and the projection does not move. That is the branch rule working, not a defect.
+    /// A caller that appends has to write a fresh `last-prompt` naming the new leaf; see
+    /// `ChannelTimelineModelTests.Rig.appendRecords(to:count:)`.
     @discardableResult
     static func transcript(in configHome: URL, slug: String, session: SessionID) throws -> URL {
         let directory = configHome.appending(path: "projects/\(slug)", directoryHint: .isDirectory)

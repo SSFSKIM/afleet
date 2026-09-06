@@ -82,6 +82,11 @@ final class ChannelTimelineModelTests: XCTestCase {
                       "\(projected.subtracting(rendered).count) projected categories render no row")
         XCTAssertTrue(rendered.isSubset(of: projected),
                       "\(rendered.subtracting(projected).count) rendered categories are in no projection")
+        // What `rendered` reaches, exactly: `ChannelTimelineModel.rows`, the row builder the column
+        // draws — not the column. `TimelineRow.init` copies `item.category`, so the two sets are
+        // equal by construction unless the builder drops a kind, which is the regression this
+        // discriminates. A filter added inside `ChannelTimelineColumn` or `TimelineRowView` would
+        // not be seen here; today the view is an unfiltered `List(model.rows)`.
     }
 
     // MARK: - C3's tap contract
@@ -144,9 +149,16 @@ final class ChannelTimelineModelTests: XCTestCase {
                           "open took \(elapsed.milliseconds) ms against a \(Self.settleBudget.milliseconds) ms budget")
     }
 
-    /// Fifty settle rounds of the twenty-millisecond default `tapSettle`. `StreamIngestion` keeps
-    /// both numbers internal to its own module, so they are restated here with their source named.
-    private static let settleBudget: Duration = .milliseconds(50 * 20)
+    /// Twenty-five settle rounds of the twenty-millisecond default `tapSettle`. `StreamIngestion`
+    /// keeps both numbers internal to its own module, so they are restated here with their source
+    /// named.
+    ///
+    /// **Half the fifty-round ceiling, and deliberately.** A correct archived open exits after one
+    /// round and measures about 45 ms, so the full 1000 ms ceiling left a broken run only 1.46x
+    /// above the bound — a chatty tap that fell quiet after half a second would have passed it. This
+    /// bound is still comfortably inside the fifty rounds the brief names, keeps 11x of headroom over
+    /// the passing path, and fails a tap that burns more than half the rounds instead of all of them.
+    private static let settleBudget: Duration = .milliseconds(25 * 20)
 
     // MARK: - The change feed
 
