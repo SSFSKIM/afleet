@@ -409,3 +409,23 @@ architect's rulings settled them). Line numbers are as at `4f2102d`, before the 
     not changing what it does. Closer: C6 decides where the readback belongs — a second request
     inside a strategy the executor runs, or the surface re-reading settings after a flag change —
     and `ReadbackSource` either drives it or goes. Owner: C6.
+
+## From C5 (`child/c5-app-shell`)
+
+Appended by C5. Entries 49 and 50 are the 2026-09-06 drift ritual's and 51 is the router
+corrective's; C5 numbers from 52 and renumbers nothing above.
+
+52. **Demonstrating a guard failing performs the write the guard exists to refuse.** Parent
+    §17.7 requires that a test written to prove a fix be shown failing against the pre-fix
+    code; for a test whose subject is a refusal — `TempTree`'s config-home guard, the store's
+    `configHomes:` check, the app-write seam of G1e — "pre-fix code" means the guard removed,
+    and the removed-guard run then does the forbidden thing. Observed in C5's Task 1: the
+    demonstration created a directory inside `/tmp/afleet-fixtures/config-home` twice. Both
+    were removed at once and verified gone; no file inside was created, modified or deleted,
+    and the home's thirteen top-level entries and every file under them were untouched (only
+    the root directory's own mtime moved). The committed test was then changed to point at an
+    invented config home under the temporary directory, so repeating the demonstration is
+    safe. Closer: none needed for that test; the entry exists because the tension is general
+    and every later C5 task with a refusal test meets it. The plan's Global Constraints now
+    carry the rule, so this is a record rather than an open item.
+
