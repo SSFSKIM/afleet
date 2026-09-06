@@ -64,6 +64,7 @@ final class SupervisorGuardTests: XCTestCase {
                                         origin: .foreignLive(.usersTerminal))
         let stream = await supervisor.events()
         let finished = HeldAnswer()
+        let streamFinished = finished.expectation(description: "the archived channel's event stream finished")
         let consumer = Task { for await _ in stream {}; finished.release() }
 
         // The holder's record went away: the session is nobody's and the channel is archived.
@@ -71,9 +72,7 @@ final class SupervisorGuardTests: XCTestCase {
         let state = await supervisor.state
         XCTAssertEqual(state.origin, .archived)
 
-        try await rig.waitFor("the archived channel's event stream to finish", timeout: .seconds(5)) {
-            finished.isReleased
-        }
+        try await TestTiming.awaitDelivery([streamFinished])
         consumer.cancel()
     }
 }

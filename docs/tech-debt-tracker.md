@@ -18,6 +18,7 @@ durable index.
    for work that takes about 2 seconds still lost once on a loaded machine, and the failure
    reads as a product bug (`exitCode -1`) rather than a starved test. Closer: raise the budget
    substantially or make the assertion insensitive to machine load.
+   2026-09-07: The instance in `FleetFacadeTests.testOpenListsTheChannelAndPublishesEveryTransition` was converted to delivery-fulfilled waits in `761b748`; the C5 branch's entry 56 closes at its merge.
 3. **`LineReader` parks a blocked thread per stream.** Two streams per session means the
    libdispatch pool is exhausted around thirty concurrent sessions. Nothing proves the reader
    threads terminate, and there is no maximum line length. Owner when it bites: C4's fleet

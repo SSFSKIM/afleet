@@ -106,8 +106,12 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     private var _launches: [LaunchConfiguration] = []
     private var _liveHandles: [LiveProcessHandle] = []
     private var _scriptedHandles: [ScriptedProcessHandle] = []
+    private var _scriptedHandleExpectations: [(needed: Int, expectation: XCTestExpectation)] = []
+    private var _heldEvictionExpectations: [(needed: Int, expectation: XCTestExpectation)] = []
+    private var _decisionExpectations: [(held: Int, handles: Int, expectation: XCTestExpectation)] = []
     private var _supervisors: [ChannelSupervisor] = []
     private var _published: [ObjectIdentifier: [ChannelState]] = [:]
+    private var _publishExpectations: [ObjectIdentifier: [(needed: Int, expectation: XCTestExpectation)]] = [:]
     private var _scriptedTermination: TerminationReport?
     private var _useScripted = false
     private var _scriptedSpawnError: (any Error)?
@@ -166,6 +170,18 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     var liveHandles: [LiveProcessHandle] { lock.lock(); defer { lock.unlock() }; return _liveHandles }
     var scriptedHandles: [ScriptedProcessHandle] { lock.lock(); defer { lock.unlock() }; return _scriptedHandles }
     var supervisors: [ChannelSupervisor] { lock.lock(); defer { lock.unlock() }; return _supervisors }
+
+    /// Fulfilled by construction of the `count`-th scripted handle, after it is available through `scriptedHandles`.
+    func expectScriptedHandles(_ count: Int, description: String) -> XCTestExpectation {
+        let expectation = XCTestExpectation(description: description)
+        lock.lock()
+        let alreadyBuilt = _scriptedHandles.count >= count
+        if !alreadyBuilt { _scriptedHandleExpectations.append((count, expectation)) }
+        lock.unlock()
+        if alreadyBuilt { expectation.fulfill() }
+        return expectation
+    }
+
     /// How many processes the factory built, whatever kind.
     var spawnCount: Int { lock.lock(); defer { lock.unlock() }; return _launches.count }
     /// The backoff sleeps, keyed on the durations the backoff actually asks for rather than on a size threshold that
@@ -177,6 +193,29 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
     func published(of supervisor: ChannelSupervisor) -> [ChannelState] {
         lock.lock(); defer { lock.unlock() }
         return _published[ObjectIdentifier(supervisor)] ?? []
+    }
+
+    /// Fulfilled by the collector that appends the requested supervisor publication.
+    private func expectPublished(_ supervisor: ChannelSupervisor, atLeast count: Int,
+                                 description: String) -> XCTestExpectation {
+        let expectation = XCTestExpectation(description: description)
+        let id = ObjectIdentifier(supervisor)
+        lock.lock()
+        let alreadyDelivered = (_published[id]?.count ?? 0) >= count
+        if !alreadyDelivered { _publishExpectations[id, default: []].append((count, expectation)) }
+        lock.unlock()
+        if alreadyDelivered { expectation.fulfill() }
+        return expectation
+    }
+
+    private func recordPublished(_ state: ChannelState, for id: ObjectIdentifier) -> [XCTestExpectation] {
+        lock.lock(); defer { lock.unlock() }
+        _published[id, default: []].append(state)
+        let delivered = _published[id]?.count ?? 0
+        let ready = _publishExpectations[id, default: []]
+            .filter { $0.needed <= delivered }.map(\.expectation)
+        _publishExpectations[id]?.removeAll { $0.needed <= delivered }
+        return ready
     }
 
     /// Swaps the factory for one that hands out a fresh `ScriptedProcessHandle` per spawn. The report each handle
@@ -261,9 +300,28 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         for continuation in waiting { continuation.resume() }
     }
 
-    /// How many evicting supervisors are actually parked, so a test never races the barrier it means to hold.
-    var heldEvictionCount: Int { locked { _heldEviction.count } }
-    var evictionIsHeld: Bool { heldEvictionCount > 0 }
+    /// Fulfilled when the requested number of evictions have entered the barrier and are observable as held.
+    func expectHeldEvictions(_ count: Int, description: String) -> XCTestExpectation {
+        let expectation = XCTestExpectation(description: description)
+        lock.lock()
+        let alreadyHeld = _heldEviction.count >= count
+        if !alreadyHeld { _heldEvictionExpectations.append((count, expectation)) }
+        lock.unlock()
+        if alreadyHeld { expectation.fulfill() }
+        return expectation
+    }
+
+    /// Fulfilled by either valid observation point in the concurrent-open race detector.
+    func expectHeldEvictions(_ held: Int, orScriptedHandles handles: Int,
+                             description: String) -> XCTestExpectation {
+        let expectation = XCTestExpectation(description: description)
+        lock.lock()
+        let alreadyDecided = _heldEviction.count >= held || _scriptedHandles.count >= handles
+        if !alreadyDecided { _decisionExpectations.append((held, handles, expectation)) }
+        lock.unlock()
+        if alreadyDecided { expectation.fulfill() }
+        return expectation
+    }
 
     private func barrier(for victim: ChannelKey) async {
         guard locked({ _heldVictims.contains(victim) }) else { return }
@@ -271,7 +329,15 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
             lock.lock()
             guard _heldVictims.contains(victim) else { lock.unlock(); continuation.resume(); return }
             _heldEviction.append(continuation)
+            let reached = _heldEviction.count
+            let heldReady = _heldEvictionExpectations.filter { $0.needed <= reached }.map(\.expectation)
+            _heldEvictionExpectations.removeAll { $0.needed <= reached }
+            let decided = _decisionExpectations.filter {
+                $0.held <= reached || $0.handles <= _scriptedHandles.count
+            }.map(\.expectation)
+            _decisionExpectations.removeAll { $0.held <= reached || $0.handles <= _scriptedHandles.count }
             lock.unlock()
+            for expectation in heldReady + decided { expectation.fulfill() }
         }
     }
 
@@ -359,7 +425,7 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         let task = Task { [weak self] in
             for await state in stream {
                 guard let self else { return }
-                self.locked { self._published[id, default: []].append(state) }
+                for expectation in self.recordPublished(state, for: id) { expectation.fulfill() }
             }
         }
         locked { tasks.append(task) }
@@ -387,7 +453,17 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
             handle.spawnError = spawnError
             handle.spawnGate = spawnGate
             configure?(handle)
-            lock.lock(); _scriptedHandles.append(handle); lock.unlock()
+            lock.lock()
+            _scriptedHandles.append(handle)
+            let built = _scriptedHandles.count
+            let handleReady = _scriptedHandleExpectations.filter { $0.needed <= built }.map(\.expectation)
+            _scriptedHandleExpectations.removeAll { $0.needed <= built }
+            let decided = _decisionExpectations.filter {
+                $0.held <= _heldEviction.count || $0.handles <= built
+            }.map(\.expectation)
+            _decisionExpectations.removeAll { $0.held <= _heldEviction.count || $0.handles <= built }
+            lock.unlock()
+            for expectation in handleReady + decided { expectation.fulfill() }
             return handle
         }
         let capturing = CapturingDiagnostics(forwardingTo: diagnostics)
@@ -433,13 +509,6 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         throw Timeout()
     }
 
-    /// Waits for any condition the test can read, on wall time. The body lives in `TestTiming`.
-    func waitFor(_ description: String, timeout: Duration = .seconds(30),
-                 file: StaticString = #filePath, line: UInt = #line,
-                 _ predicate: @Sendable () async -> Bool) async throws {
-        try await TestTiming.waitFor(description, timeout: timeout, file: file, line: line, predicate)
-    }
-
     /// Waits until a sleeper is parked with exactly this much time left, so `advance` cannot race the arming of the
     /// timer it is meant to fire — and cannot be satisfied by a different timer that happens to exist.
     func waitForSleeper(due duration: Duration, file: StaticString = #filePath, line: UInt = #line) async throws {
@@ -453,35 +522,22 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         throw Timeout()
     }
 
-    /// Waits for the detached collector draining `supervisor.updates` to have caught up with everything the actor has
-    /// published. The actor's own count is the authority; without this, a count read from `published(of:)` can hold
-    /// because an update has not been appended yet rather than because it was never made.
+    /// Waits for the detached collector draining `supervisor.updates` to receive everything the actor published.
+    /// The publication delivery fulfils the expectation; the timeout only turns a missing delivery into a failure.
     func drainPublished(of supervisor: ChannelSupervisor,
                         file: StaticString = #filePath, line: UInt = #line) async throws {
         let want = await supervisor.publishedCount
-        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
-        while ContinuousClock.now < deadline {
-            if published(of: supervisor).count >= want { return }
-            try? await Task.sleep(for: .milliseconds(2))
-        }
-        XCTFail("the update collector never caught up: \(published(of: supervisor).count) of \(want)",
-                file: file, line: line)
-        struct Timeout: Error {}
-        throw Timeout()
+        let expectation = expectPublished(supervisor, atLeast: want,
+                                          description: "the update collector caught up to \(want) publications")
+        try await TestTiming.awaitDelivery([expectation], file: file, line: line)
     }
 
-    /// Waits for the supervisor to publish past a count the caller took earlier. `handleExit` publishes once on every
-    /// branch, after the whole decision, so this is a synchronisation point on "the exit has been fully processed".
+    /// Waits for the supervisor's collector to receive a publication past the count the caller took earlier.
     func waitForPublish(_ supervisor: ChannelSupervisor, above count: Int,
                         file: StaticString = #filePath, line: UInt = #line) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
-        while ContinuousClock.now < deadline {
-            if await supervisor.publishedCount > count { return }
-            try? await Task.sleep(for: .milliseconds(2))
-        }
-        XCTFail("the supervisor never published past \(count)", file: file, line: line)
-        struct Timeout: Error {}
-        throw Timeout()
+        let expectation = expectPublished(supervisor, atLeast: count + 1,
+                                          description: "the supervisor published past \(count)")
+        try await TestTiming.awaitDelivery([expectation], file: file, line: line)
     }
 
     func drainActivity() async {

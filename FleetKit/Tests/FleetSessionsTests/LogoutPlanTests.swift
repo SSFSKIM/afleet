@@ -333,11 +333,13 @@ final class LogoutPlanTests: XCTestCase {
         let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         try await supervisor.spawn(reason: .open)
         let handle = rig.scriptedHandles[0]
-        let held = HeldAnswer()
-        handle.sendGate = { await held.wait() }
+        let held = HeldAnswer(), entered = HeldAnswer()
+        let reachedWrite = entered.expectation(description: "the send reached the write")
+        handle.sendGate = { entered.release(); await held.wait() }
 
         let sending = Task { try await supervisor.send(UserInput(text: "hi")) }
-        try await rig.waitFor("the send to reach the write") { handle.sent.count == 1 }
+        defer { held.release(); sending.cancel() }
+        try await TestTiming.awaitDelivery([reachedWrite])
 
         let fleet = context(rig, channels: [supervisor])
         let census = await LogoutPlan.build(fleet: fleet)

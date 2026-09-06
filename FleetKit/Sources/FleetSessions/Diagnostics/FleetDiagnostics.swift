@@ -117,52 +117,71 @@ public struct NullFleetDiagnostics: FleetDiagnosticsSink {
 /// should not have to learn two formats: the file is `fleet.log`, it rotates once into `fleet.log.1`, and every
 /// line is `FleetDiagnosticEvent.jsonValue` — an `event` name and structural fields, never a payload, a path under
 /// a config home, an environment or stdout.
-public final class FileFleetDiagnostics: FleetDiagnosticsSink, @unchecked Sendable {   // `queue` owns the handle
+public final class FileFleetDiagnostics: FleetDiagnosticsSink, @unchecked Sendable {   // `queue` owns the file
     private let queue = DispatchQueue(label: "afleet.fleet-diagnostics")
     private let directory: URL
     private let rotateAt: Int
-    private var handle: FileHandle?
-    private var size = 0
 
     public init(directory: URL, rotateAt: Int = 25 * 1024 * 1024) {
         self.directory = directory
         self.rotateAt = rotateAt
-        queue.sync { open() }
+        queue.sync { createDirectory() }
     }
 
     private var logURL: URL { directory.appendingPathComponent("fleet.log") }
 
-    private func open() {
-        let fm = FileManager.default
-        try? fm.createDirectory(at: directory, withIntermediateDirectories: true,
-                                attributes: [.posixPermissions: 0o700])
-        if !fm.fileExists(atPath: logURL.path) {
-            fm.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
-        }
-        handle = try? FileHandle(forWritingTo: logURL)
-        _ = try? handle?.seekToEnd()
-        size = (try? fm.attributesOfItem(atPath: logURL.path)[.size] as? Int) ?? 0
+    private func createDirectory() {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+    }
+
+    /// The log's size on disk right now. There is no tracked offset to consult: the file may have been unlinked and
+    /// recreated since the last write, in which case the answer is zero.
+    private var currentSize: Int {
+        (try? FileManager.default.attributesOfItem(atPath: logURL.path)[.size] as? Int) ?? 0
     }
 
     public func record(_ event: FleetDiagnosticEvent) {
         queue.async { [self] in
             guard var data = try? event.jsonValue.canonicalData() else { return }
             data.append(0x0A)
-            if size + data.count > rotateAt { rotate() }
-            try? handle?.write(contentsOf: data)
-            size += data.count
+            if currentSize + data.count > rotateAt { rotate() }
+            append(data)
         }
     }
 
+    /// One line, appended to whatever `fleet.log` names at this moment, creating it if it is gone. The file is
+    /// opened `O_APPEND` per write rather than held open for the sink's life: the app's *Delete diagnostics*
+    /// unlinks the log while the sink lives on, and `Fleet` builds its sink internally, so nothing can reach in to
+    /// reopen a stale handle. A held handle would keep writing into the unlinked inode and the user's next
+    /// diagnostics would be lost to a file with no name.
+    private func append(_ data: Data) {
+        var fd = Darwin.open(logURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+        if fd < 0 {   // the directory went with the log
+            createDirectory()
+            fd = Darwin.open(logURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+        }
+        guard fd >= 0 else { return }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        try? handle.write(contentsOf: data)
+        try? handle.close()
+    }
+
     private func rotate() {
-        try? handle?.close(); handle = nil
         let old = directory.appendingPathComponent("fleet.log.1")
         try? FileManager.default.removeItem(at: old)
         try? FileManager.default.moveItem(at: logURL, to: old)
-        open()
     }
 
     /// Every line written so far is on disk when this returns. The facade exposes it so a caller reading the file
     /// is reading the events it just caused rather than racing the queue.
-    public func flush() { queue.sync { try? handle?.synchronize() } }
+    public func flush() {
+        queue.sync {
+            let fd = Darwin.open(logURL.path, O_WRONLY | O_APPEND)
+            guard fd >= 0 else { return }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            try? handle.synchronize()
+            try? handle.close()
+        }
+    }
 }

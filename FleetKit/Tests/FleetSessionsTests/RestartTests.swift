@@ -164,9 +164,11 @@ final class RestartTests: XCTestCase {
 
         eligibility.mirror = []
         try await rig.waitForSleeper(due: ChannelSupervisor.dormantAfter)
+        let relaunched = rig.expectScriptedHandles(2, description: "the queued restart built its child")
         await rig.clock.advance(by: ChannelSupervisor.dormantAfter)
 
-        try await rig.waitFor("the queued restart to relaunch") { rig.spawnCount == 2 }
+        try await TestTiming.awaitDelivery([relaunched])
+        guard rig.launches.count >= 2 else { return XCTFail("the queued restart built no second child") }
         XCTAssertEqual(handle.terminateCount, 1)
         let restarted = await supervisor.state
         XCTAssertNil(restarted.pendingChange)
@@ -626,7 +628,8 @@ final class RestartTests: XCTestCase {
         for matching in [true, false] {
             let rig = try newRig()
             rig.useScriptedHandle()
-            let held = HeldAnswer()
+            let held = HeldAnswer(), entered = HeldAnswer()
+            let reachedReadback = entered.expectation(description: "the restart reached get_settings")
             // Every child of this channel is scripted before it spawns, the one the restart launches included: a
             // handshake is read the instant `spawn` returns, so a handle configured afterwards is configured late.
             rig.configureScriptedHandles { handle in
@@ -636,6 +639,7 @@ final class RestartTests: XCTestCase {
                                                                   "sources": .array([])])]
                 handle.controlGate = { subtype in
                     guard subtype == "get_settings" else { return }
+                    entered.release()
                     await held.wait()
                 }
             }
@@ -643,13 +647,10 @@ final class RestartTests: XCTestCase {
             try await supervisor.spawn(reason: .open)
             _ = try await supervisor.perform(SetPermissionMode(mode: .plan))
 
+            let relaunched = rig.expectScriptedHandles(2, description: "the restart built its child")
             let restart = Task { try await supervisor.quiescentRestart(RestartRequest()) }
-            try await rig.waitFor("the relaunched child") { rig.scriptedHandles.count == 2 }
-            let second = rig.scriptedHandles[1]
-
-            try await rig.waitFor("the restart to reach get_settings") {
-                second.controlRequests.contains { $0.subtype == "get_settings" }
-            }
+            defer { held.release(); restart.cancel() }
+            try await TestTiming.awaitDelivery([relaunched, reachedReadback])
             try await rig.drainPublished(of: supervisor)
             XCTAssertFalse(rig.published(of: supervisor).contains {
                 $0.epoch?.rawValue == 2 && $0.origin == .owned(.ready)
@@ -738,8 +739,10 @@ final class RestartTests: XCTestCase {
         second.push(.exited(.code(1, stderrTail: ""), second.epoch))
         try await rig.waitForPublish(supervisor, above: published)
         try await rig.waitForSleeper(due: ChannelSupervisor.backoffs[0])
+        let thirdChild = rig.expectScriptedHandles(3, description: "the crash respawn built its child")
         await rig.clock.advance(by: ChannelSupervisor.backoffs[0])
-        try await rig.waitFor("the respawn") { rig.spawnCount == 3 }
+        try await TestTiming.awaitDelivery([thirdChild])
+        guard rig.launches.count >= 3 else { return XCTFail("the crash respawn built no third child") }
 
         let respawned = rig.launches[2]
         XCTAssertEqual(respawned.model, "opus", "the respawn continues from the restarted line")
@@ -756,10 +759,12 @@ final class RestartTests: XCTestCase {
     func testAControlAnswerThatNeverArrivesTimesOutOnTheInjectedClock() async throws {
         let rig = try newRig()
         rig.useScriptedHandle()
-        let held = HeldAnswer()
+        let held = HeldAnswer(), entered = HeldAnswer()
+        let reachedReadback = entered.expectation(description: "the restart reached get_settings")
         rig.configureScriptedHandles { handle in
             handle.controlGate = { subtype in
                 guard subtype == "get_settings" else { return }
+                entered.release()
                 await held.wait()
             }
         }
@@ -767,11 +772,8 @@ final class RestartTests: XCTestCase {
         try await supervisor.spawn(reason: .open)
 
         let restart = Task { try await supervisor.quiescentRestart(RestartRequest()) }
-        try await rig.waitFor("the restart to reach get_settings") {
-            rig.scriptedHandles.count == 2 && rig.scriptedHandles[1].controlRequests.contains {
-                $0.subtype == "get_settings"
-            }
-        }
+        defer { held.release(); restart.cancel() }
+        try await TestTiming.awaitDelivery([reachedReadback])
         try await rig.waitForSleeper(due: ChannelSupervisor.controlTimeout)
         await rig.clock.advance(by: ChannelSupervisor.controlTimeout)
 
@@ -812,21 +814,64 @@ final class RestartTests: XCTestCase {
     }
 }
 
-/// A one-shot barrier a test parks an engine answer behind.
-///
-/// The wait polls rather than parking on a continuation because it has to end on cancellation as well as on the
-/// release: a bounded `perform` cancels the request it gave up on, and a barrier that ignored that would hold the
-/// task group open forever. Polling here moves no part of the lifecycle — only the manual clock does that.
-final class HeldAnswer: @unchecked Sendable {   // `lock` serialises `released`
+/// A one-shot barrier a test parks an engine answer behind, and a signal for the exact moment it is released.
+final class HeldAnswer: @unchecked Sendable {   // `lock` serialises every field
     private let lock = NSLock()
     private var released = false
+    private var nextWaiterID = 0
+    private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var expectations: [XCTestExpectation] = []
 
-    var isReleased: Bool { lock.lock(); defer { lock.unlock() }; return released }
-    func release() { lock.lock(); released = true; lock.unlock() }
+    func release() {
+        lock.lock()
+        guard !released else { lock.unlock(); return }
+        released = true
+        let waiting = Array(waiters.values)
+        let expected = expectations
+        waiters = [:]
+        expectations = []
+        lock.unlock()
+        for waiter in waiting { waiter.resume() }
+        for expectation in expected { expectation.fulfill() }
+    }
 
+    /// Registers under the same lock as `release`, so a delivery immediately before registration is not lost.
+    func expectation(description: String) -> XCTestExpectation {
+        let expectation = XCTestExpectation(description: description)
+        lock.lock()
+        let alreadyReleased = released
+        if !alreadyReleased { expectations.append(expectation) }
+        lock.unlock()
+        if alreadyReleased { expectation.fulfill() }
+        return expectation
+    }
+
+    private func reserveWaiterID() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        nextWaiterID += 1
+        return nextWaiterID
+    }
+
+    /// The held operation parks without polling, but cancellation still releases it: bounded control requests
+    /// cancel their gate when the injected timeout wins and must not leave a task group open forever.
     func wait() async {
-        while !isReleased && !Task.isCancelled {
-            try? await Task.sleep(for: .milliseconds(2))
+        let id = reserveWaiterID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if released || Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    waiters[id] = continuation
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
+            lock.lock()
+            let waiter = waiters.removeValue(forKey: id)
+            lock.unlock()
+            waiter?.resume()
         }
     }
 }

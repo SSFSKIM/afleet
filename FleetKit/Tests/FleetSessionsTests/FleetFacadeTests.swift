@@ -155,6 +155,36 @@ final class FleetFacadeTests: XCTestCase {
         ChannelKey(configHome: harness.home.url, session: session)
     }
 
+    /// Starts observing before the stimulus. The expectation is fulfilled by the matching delivery itself.
+    private func expectStateDelivery(in fleet: Fleet, description: String,
+                                     where predicate: @escaping @Sendable (ChannelState) -> Bool)
+        -> (expectation: XCTestExpectation, observer: Task<Void, Never>) {
+        let delivered = expectation(description: description)
+        let observer = Task {
+            for await state in fleet.updates where predicate(state) {
+                delivered.fulfill()
+                return
+            }
+        }
+        return (delivered, observer)
+    }
+
+    /// `events(of:)` registers the subscriber before returning, so a push immediately after this call cannot be lost.
+    private func expectEventDelivery(in fleet: Fleet, on key: ChannelKey, description: String,
+                                     where predicate: @escaping @Sendable (WireEvent) -> Bool) async throws
+        -> (expectation: XCTestExpectation, observer: Task<Void, Never>) {
+        let available = await fleet.events(of: key)
+        let stream = try XCTUnwrap(available, "no event stream for the scripted channel")
+        let delivered = expectation(description: description)
+        let observer = Task {
+            for await event in stream where predicate(event) {
+                delivered.fulfill()
+                return
+            }
+        }
+        return (delivered, observer)
+    }
+
     private func fixtureSession() throws -> SessionID { try FakeClaudeLaunch.sessionID(of: Self.fixture) }
 
     // MARK: - Actions the facade owns
@@ -204,10 +234,13 @@ final class FleetFacadeTests: XCTestCase {
         _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
         let handle = try XCTUnwrap(harness.handles.all.first)
 
-        handle.push(.request(Self.decisionRequest(epoch: handle.epoch)))
-        try await harness.waitFor("the decision to be on screen") {
-            await fleet.state(of: k)?.pendingDecisions.count == 1
+        let decision = try await expectEventDelivery(in: fleet, on: k,
+                                                     description: "the decision request was delivered") {
+            if case .request = $0 { true } else { false }
         }
+        defer { decision.observer.cancel() }
+        handle.push(.request(Self.decisionRequest(epoch: handle.epoch)))
+        try await TestTiming.awaitDelivery([decision.expectation])
 
         do {
             _ = try await fleet.perform(.reap, on: k)
@@ -249,11 +282,14 @@ final class FleetFacadeTests: XCTestCase {
         // The channel the engine has announced a background shell on, and nothing else about it.
         let armed = keys[0]
         let taskID = "task-invented-armed-shell-1"
+        let armedFrame = try await expectEventDelivery(in: fleet, on: armed,
+                                                       description: "the armed task frame was delivered") {
+            if case .frame = $0 { true } else { false }
+        }
+        defer { armedFrame.observer.cancel() }
         handles[0].push(.frame(try Self.backgroundTasksChanged(taskIDs: [taskID], session: armed.session),
                                handles[0].epoch))
-        try await harness.waitFor("the armed task to reach the channel's own mirror") {
-            await fleet.isDormantEligible(armed) == false
-        }
+        try await TestTiming.awaitDelivery([armedFrame.expectation])
         await fleet.channel(armed)?.drainEligibility()
 
         do {
@@ -266,10 +302,13 @@ final class FleetFacadeTests: XCTestCase {
 
         // Everybody else is held by a decision, so the armed channel is the only channel an eviction could pick.
         for (index, k) in keys.enumerated().dropFirst() {
-            handles[index].push(.request(Self.decisionRequest(epoch: handles[index].epoch)))
-            try await harness.waitFor("the decision on channel \(index) to be on screen") {
-                await fleet.state(of: k)?.pendingDecisions.count == 1
+            let decision = try await expectEventDelivery(in: fleet, on: k,
+                                                         description: "channel \(index)'s decision was delivered") {
+                if case .request = $0 { true } else { false }
             }
+            handles[index].push(.request(Self.decisionRequest(epoch: handles[index].epoch)))
+            try await TestTiming.awaitDelivery([decision.expectation])
+            decision.observer.cancel()
             await fleet.channel(k)?.drainEligibility()
         }
 
@@ -303,10 +342,14 @@ final class FleetFacadeTests: XCTestCase {
         let handle = try XCTUnwrap(harness.handles.all.first)
 
         let taskID = "task-invented-running-shell-1"
-        handle.push(.frame(try Self.taskStarted(taskID: taskID, session: k.session), handle.epoch))
-        try await harness.waitFor("the started task to reach the channel's own mirror") {
-            await fleet.isDormantEligible(k) == false
+        let taskFrame = try await expectEventDelivery(in: fleet, on: k,
+                                                      description: "the started task frame was delivered") {
+            if case .frame = $0 { true } else { false }
         }
+        defer { taskFrame.observer.cancel() }
+        handle.push(.frame(try Self.taskStarted(taskID: taskID, session: k.session), handle.epoch))
+        try await TestTiming.awaitDelivery([taskFrame.expectation])
+        await fleet.channel(k)?.drainEligibility()
 
         do {
             _ = try await fleet.perform(.reap, on: k)
@@ -343,16 +386,22 @@ final class FleetFacadeTests: XCTestCase {
         _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
         let handle = try XCTUnwrap(harness.handles.all.first)
 
+        let taskFrame = try await expectEventDelivery(in: fleet, on: k,
+                                                      description: "the running task frame was delivered") {
+            if case .frame = $0 { true } else { false }
+        }
+        defer { taskFrame.observer.cancel() }
         handle.push(.frame(try Self.taskStarted(taskID: "task-invented-orphan-shell-1", session: k.session),
                            handle.epoch))
-        try await harness.waitFor("the running task to reach the channel's own mirror") {
-            await fleet.isDormantEligible(k) == false
-        }
+        try await TestTiming.awaitDelivery([taskFrame.expectation])
+        await fleet.channel(k)?.drainEligibility()
 
-        handle.push(.exited(.code(0, stderrTail: ""), handle.epoch))
-        try await harness.waitFor("the channel to rest after its child exited cleanly") {
-            await fleet.state(of: k)?.origin == .owned(.dormant)
+        let rested = expectStateDelivery(in: fleet, description: "the channel delivered its dormant state") {
+            $0.key == k && $0.origin == .owned(.dormant)
         }
+        defer { rested.observer.cancel() }
+        handle.push(.exited(.code(0, stderrTail: ""), handle.epoch))
+        try await TestTiming.awaitDelivery([rested.expectation])
         let eligible = await fleet.isDormantEligible(k)
         XCTAssertTrue(eligible, "the shell died with the child, so nothing is holding the channel any more")
     }
@@ -416,11 +465,13 @@ final class FleetFacadeTests: XCTestCase {
         _ = try await fleet.perform(.fork(at: nil), on: k)
         let forkHandle = try XCTUnwrap(harness.handles.all.last)
         let resolved = SessionID()
-        forkHandle.push(.sessionIdentityResolved(resolved, forkHandle.epoch))
         let forkKey = ChannelKey(configHome: harness.home.url, session: resolved)
-        try await harness.waitFor("the fork to be ready on its resolved id") {
-            await fleet.state(of: forkKey)?.origin == .owned(.ready)
+        let forkReady = expectStateDelivery(in: fleet, description: "the fork delivered ready on its resolved id") {
+            $0.key == forkKey && $0.origin == .owned(.ready)
         }
+        defer { forkReady.observer.cancel() }
+        forkHandle.push(.sessionIdentityResolved(resolved, forkHandle.epoch))
+        try await TestTiming.awaitDelivery([forkReady.expectation])
 
         _ = try await fleet.perform(.fork(at: nil), on: forkKey)
 
@@ -453,7 +504,14 @@ final class FleetFacadeTests: XCTestCase {
         let fleet = harness.fleet
         let k = key(try fixtureSession())
         let collected = Collected()
-        let drain = Task { for await state in fleet.updates { collected.append(state) } }
+        let secondTransition = expectation(description: "the merged stream delivered its second transition")
+        let readyTransition = expectation(description: "the merged stream delivered the ready transition")
+        let drain = Task {
+            for await state in fleet.updates {
+                if collected.append(state) == 2 { secondTransition.fulfill() }
+                if state.origin == .owned(.ready) { readyTransition.fulfill() }
+            }
+        }
         defer { drain.cancel() }
 
         await fleet.start()
@@ -467,8 +525,7 @@ final class FleetFacadeTests: XCTestCase {
         let unknown = await fleet.state(of: key(SessionID()))
         XCTAssertNil(unknown, "a key the fleet has never been told about")
 
-        try await harness.waitFor("the channel to be ready") { await fleet.state(of: k)?.origin == .owned(.ready) }
-        try await harness.waitFor("the merged stream to carry the transitions") { collected.count >= 2 }
+        try await TestTiming.awaitDelivery([secondTransition, readyTransition])
         XCTAssertTrue(collected.states.allSatisfy { $0.key == k })
         XCTAssertTrue(collected.states.contains { $0.origin == .owned(.ready) },
                       "the facade's `updates` merges every supervisor's stream")
@@ -508,12 +565,22 @@ final class FleetFacadeTests: XCTestCase {
         XCTAssertNil(none, "no supervisor, no stream")
 
         let one = Frames(), two = Frames()
-        let a = Task { for await event in first { one.append(event) } }
-        let b = Task { for await event in second { two.append(event) } }
+        let firstTwo = expectation(description: "the first subscriber delivered two replay events")
+        let secondTwo = expectation(description: "the second subscriber delivered two replay events")
+        let a = Task {
+            for await event in first {
+                if one.append(event) == 2 { firstTwo.fulfill() }
+            }
+        }
+        let b = Task {
+            for await event in second {
+                if two.append(event) == 2 { secondTwo.fulfill() }
+            }
+        }
         defer { a.cancel(); b.cancel() }
 
         _ = try await fleet.perform(.open, on: k)
-        try await harness.waitFor("both subscribers to see the replay") { one.count >= 2 && two.count >= 2 }
+        try await TestTiming.awaitDelivery([firstTwo, secondTwo])
         XCTAssertEqual(Array(one.names.prefix(2)), Array(two.names.prefix(2)),
                        "both subscribers see the same frames alike")
     }
@@ -592,10 +659,13 @@ final class FleetFacadeTests: XCTestCase {
         await fleet.start()
         try await harness.waitFor("the observer's first read") { await fleet.jobs().contains { $0.sessionID == session } }
 
-        await fleet.register(k, cwd: harness.cwd, recent: true)
-        try await harness.waitFor("the registered channel to read as a background job") {
-            await fleet.state(of: k)?.origin == .backgroundJob
+        let backgroundJob = expectStateDelivery(in: fleet,
+                                                description: "the registered channel delivered background-job state") {
+            $0.key == k && $0.origin == .backgroundJob
         }
+        defer { backgroundJob.observer.cancel() }
+        await fleet.register(k, cwd: harness.cwd, recent: true)
+        try await TestTiming.awaitDelivery([backgroundJob.expectation])
     }
 
     func testJobsListsAnExecJobAndAConversationJobAndTheVerbsActOnThem() async throws {
@@ -898,6 +968,36 @@ final class FleetFacadeTests: XCTestCase {
         XCTAssertLessThanOrEqual(size, 200 + 64, "the current log is bounded by the rotation threshold")
     }
 
+    /// *Delete diagnostics* unlinks `fleet.log` while the sink lives on, and `Fleet` builds its sink internally so
+    /// the app cannot reach it to reopen. Opening per write means the next record recreates the file rather than
+    /// writing into an unlinked inode nobody can read.
+    func testTheDiagnosticsLogIsRecreatedAfterItIsDeleted() throws {
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appending(path: "afleet-c4-unlink-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sink = FileFleetDiagnostics(directory: directory)
+        sink.record(.logout(step: "census", count: 1))
+        sink.flush()
+
+        let log = directory.appending(path: "fleet.log")
+        try FileManager.default.removeItem(at: log)
+
+        sink.record(.logout(step: "revoke", count: 2))
+        sink.flush()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path(percentEncoded: false)),
+                      "the deleted log was never recreated")
+        let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(lines.count, 1, "the recreated log holds exactly the record made after the deletion")
+        let only = try JSONDecoder().decode(JSONValue.self, from: Data(lines[0].utf8))
+        XCTAssertEqual(only["event"], .string("logout"))
+        XCTAssertEqual(only["step"], .string("revoke"))
+        XCTAssertEqual(only["count"], .integer(2))
+        let mode = try FileManager.default.attributesOfItem(
+            atPath: log.path(percentEncoded: false))[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600)
+    }
+
     // MARK: - The §6.12 decline, project-wide
 
     /// §6.12's precondition is about the *project*, not about the channel the sheet happens to be open in. Two
@@ -1035,15 +1135,20 @@ final class FleetFacadeTests: XCTestCase {
     private final class Collected: @unchecked Sendable {   // `lock` serialises `storage`
         private let lock = NSLock()
         private var storage: [ChannelState] = []
-        func append(_ state: ChannelState) { lock.lock(); storage.append(state); lock.unlock() }
+        @discardableResult
+        func append(_ state: ChannelState) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            storage.append(state)
+            return storage.count
+        }
         var states: [ChannelState] { lock.lock(); defer { lock.unlock() }; return storage }
-        var count: Int { states.count }
     }
 
     private final class Frames: @unchecked Sendable {   // `lock` serialises `storage`
         private let lock = NSLock()
         private var storage: [String] = []
-        func append(_ event: WireEvent) {
+        @discardableResult
+        func append(_ event: WireEvent) -> Int {
             let name: String
             switch event {
             case .frame(let frame, _): name = "frame:" + frame.typeName
@@ -1052,9 +1157,10 @@ final class FleetFacadeTests: XCTestCase {
             case .request(let request): name = "request:" + request.subtype
             default: name = "other"
             }
-            lock.lock(); storage.append(name); lock.unlock()
+            lock.lock(); defer { lock.unlock() }
+            storage.append(name)
+            return storage.count
         }
         var names: [String] { lock.lock(); defer { lock.unlock() }; return storage }
-        var count: Int { names.count }
     }
 }

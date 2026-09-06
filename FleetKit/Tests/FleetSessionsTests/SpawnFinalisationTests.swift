@@ -34,12 +34,14 @@ final class SpawnFinalisationTests: XCTestCase {
         let rig = try newRig()
         rig.useScriptedHandle()
         let held = HeldAnswer(), entered = HeldAnswer()
+        let reachedPIDRead = entered.expectation(description: "the spawn reached its post-handshake pid read")
         rig.configureScriptedHandles { handle in
             handle.pidGate = { entered.release(); await held.wait() }
         }
         let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         let spawning = Task { try await supervisor.spawn(reason: .open) }
-        try await rig.waitFor("the spawn to reach its post-handshake pid read") { entered.isReleased }
+        defer { held.release(); spawning.cancel() }
+        try await TestTiming.awaitDelivery([reachedPIDRead])
         let handle = try XCTUnwrap(rig.scriptedHandles.first)
 
         let published = await supervisor.publishedCount
@@ -68,12 +70,14 @@ final class SpawnFinalisationTests: XCTestCase {
         let rig = try newRig()
         rig.useScriptedHandle()
         let held = HeldAnswer(), entered = HeldAnswer()
+        let reachedPIDRead = entered.expectation(description: "the spawn reached its post-handshake pid read")
         rig.configureScriptedHandles { handle in
             handle.pidGate = { entered.release(); await held.wait() }
         }
         let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         let spawning = Task { try await supervisor.spawn(reason: .open) }
-        try await rig.waitFor("the spawn to reach its post-handshake pid read") { entered.isReleased }
+        defer { held.release(); spawning.cancel() }
+        try await TestTiming.awaitDelivery([reachedPIDRead])
         let handle = try XCTUnwrap(rig.scriptedHandles.first)
 
         let published = await supervisor.publishedCount
@@ -102,6 +106,7 @@ final class SpawnFinalisationTests: XCTestCase {
         let rig = try newRig()
         rig.useScriptedHandle()
         let held = HeldAnswer(), entered = HeldAnswer()
+        let parkedInHandshake = entered.expectation(description: "the first spawn parked inside its handshake")
         rig.configureScriptedHandles { handle in
             // The first child only: the respawn behind it has to run to completion for the overtake to happen.
             guard handle.epoch.rawValue == 1 else { handle.spawnGate = nil; return }
@@ -109,7 +114,8 @@ final class SpawnFinalisationTests: XCTestCase {
         }
         let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         let spawning = Task { try await supervisor.spawn(reason: .open) }
-        try await rig.waitFor("the first spawn to park inside its handshake") { entered.isReleased }
+        defer { held.release(); spawning.cancel() }
+        try await TestTiming.awaitDelivery([parkedInHandshake])
         let first = try XCTUnwrap(rig.scriptedHandles.first)
 
         let published = await supervisor.publishedCount
@@ -149,10 +155,12 @@ final class SpawnFinalisationTests: XCTestCase {
         let rig = try newRig()
         rig.useScriptedHandle()
         let held = HeldAnswer(), entered = HeldAnswer()
+        let parkedAfterConfirmation = entered.expectation(description: "the spawn parked past its confirmed slot")
         rig.onFinalising = { entered.release(); await held.wait() }
         let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         let spawning = Task { try await supervisor.spawn(reason: .open) }
-        try await rig.waitFor("the spawn to park past its confirmed slot") { entered.isReleased }
+        defer { held.release(); spawning.cancel() }
+        try await TestTiming.awaitDelivery([parkedAfterConfirmation])
         let handle = try XCTUnwrap(rig.scriptedHandles.first)
 
         let published = await supervisor.publishedCount
@@ -184,10 +192,12 @@ final class SpawnFinalisationTests: XCTestCase {
         let rig = try newRig()
         rig.useScriptedHandle()
         let held = HeldAnswer(), entered = HeldAnswer()
+        let parkedAfterConfirmation = entered.expectation(description: "the spawn parked past its confirmed slot")
         rig.onFinalising = { entered.release(); await held.wait() }
         let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         let spawning = Task { try await supervisor.spawn(reason: .open) }
-        try await rig.waitFor("the spawn to park past its confirmed slot") { entered.isReleased }
+        defer { held.release(); spawning.cancel() }
+        try await TestTiming.awaitDelivery([parkedAfterConfirmation])
         let handle = try XCTUnwrap(rig.scriptedHandles.first)
 
         let outcome = await supervisor.terminateForLogout()
