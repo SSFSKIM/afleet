@@ -502,9 +502,23 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     driver is the rate, not the size: C4 re-runs `claude agents` every few hundred milliseconds to
     observe foreign holders and each observation publishes a `ChannelState`, while the transcript
     index contributed one update in twenty seconds over the same window. So the two halves compound
-    at the holder-poll rate and the model's O(rows) rebuild is the load-bearing one. **This is the
-    single largest open item C5 leaves behind** and it is a battery-visible defect, not a
-    micro-optimisation; the closer above is unchanged and now has a profile naming every frame. Owner: whoever
+    at the holder-poll rate and the model's O(rows) rebuild is the load-bearing one.
+    **Closed at Task 5**, `712ff54`. Idle CPU against the same config home is 0.1 percent, measured
+    over five reads eight seconds apart on an uninstrumented build, against a sustained 100 percent
+    before. Three changes, each demonstrated: a `ChannelState` patches the row it names through a
+    row index instead of re-deriving, falling back to the full derivation only when the state
+    crosses `isArchived`, which is the one thing about a row's position a state can change; a state
+    for a session `listed` does not hold publishes nothing, because `rebuild()` derives from
+    `listed` alone and could not have produced a row for it; and the `updates` loop ingests and
+    defers, flushing on the first main-actor hop that brings no new arrival, bounded by 256
+    deferrals rather than by any duration. Measured coalescing on the real corpus: 87 publishes and
+    7 full rebuilds for 13,250 states.
+    One correction to the diagnosis above, from instrumenting the stream rather than inferring it:
+    the driver is **not** a steady holder poll. It is C4's registration seeding — 13,250 states over
+    2,671 distinct sessions, about five per registered channel, 99.5 percent of them `.archived`,
+    every one a first arrival — and it is a bounded burst that drains and stops. It looked endless
+    only because the old path consumed it more slowly than it arrived. `AppTests/SidebarUpdateCostTests.swift`
+    holds all of it, correctness clauses first. Owner: whoever
     next opens `FleetBrowserModel` — C6 is the likely one, since a live conversation is exactly
     the workload that emits states in a stream.
 56. **`FleetFacadeTests.testOpenListsTheChannelAndPublishesEveryTransition` is load-sensitive
