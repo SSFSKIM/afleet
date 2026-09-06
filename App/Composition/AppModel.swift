@@ -39,6 +39,17 @@ final class AppModel {
     /// decides them is built beside this one. `AfleetApp` reads it; the menu items move it.
     let shell = ShellModel()
 
+    /// The per-channel timeline owners (spec §8), one `ChannelTimelineModel` per channel.
+    ///
+    /// **One instance, app-scoped, and every consumer reads it from here** — `ChannelColumnView`
+    /// draws the model this registry holds and the panel host's recent-URL feed reads that same
+    /// model. A second registry constructed in either place would leave the Browser observing a
+    /// timeline that ingestion never touches, and no unit test over either half alone could see it.
+    ///
+    /// It outlives a launch: `attach(to:)` rebinds it to the workspace the launch reached and
+    /// releases every model built over the previous one.
+    let timelines = ChannelTimelineRegistry()
+
     /// Activity, the badges and the notification router (spec §5, §6). Nil until a launch reaches a
     /// workspace, and rebuilt by each one — *Check again* is the same call as the first launch, and
     /// a second Activity following the first fleet's channels would notify twice.
@@ -73,6 +84,9 @@ final class AppModel {
         }
         route = await configured.run()
         settingsReadout = route.workspace.map(SettingsReadout.init(workspace:))
+        // Before Activity, so a channel opened by the first paint already has a registry bound to
+        // the workspace this launch reached rather than to the one it replaced.
+        if let workspace = route.workspace { timelines.attach(to: workspace) }
         await startActivity()
     }
 

@@ -37,6 +37,14 @@ actor LifecycleDouble: LifecycleAPI {
     /// per call and one `yield` to all of them, which is `Fleet.events(of:)`'s own contract.
     private var opened: Set<ChannelKey> = []
     private var streams: [ChannelKey: [AsyncStream<WireEvent>.Continuation]] = [:]
+    /// Every `events(of:)` call, in order, whatever it answered. Two consumers of one channel are
+    /// legal and expected — the Activity pump takes one and `StreamIngestion` takes its own — so the
+    /// only way to say which of them subscribed, and how often, is to count the calls.
+    private(set) var eventSubscriptions: [ChannelKey] = []
+    /// The spawn seam, wired where `Fleet` wires it: `perform(.open, on:)` builds a process through
+    /// the factory. Nothing else in the lifecycle reaches a process, so a run in which this factory
+    /// was never invoked is a run in which nothing was spawned.
+    private var spawn: ProcessFactory?
 
     init() {
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
@@ -48,6 +56,9 @@ actor LifecycleDouble: LifecycleAPI {
     /// The answer every `perform` gets once the staged queue is empty.
     func always(_ outcome: Result<ChannelState, LifecycleError>) { fallback = outcome }
     func setJobs(_ jobs: [JobEntry]) { roster = jobs }
+    /// Installs the spawn seam. A test that asserts nothing spawned installs one and asserts it was
+    /// never called.
+    func setSpawn(_ factory: @escaping ProcessFactory) { spawn = factory }
     nonisolated func emit(_ state: ChannelState) { continuation.yield(state) }
     nonisolated func finish() { continuation.finish() }
 
@@ -58,6 +69,11 @@ actor LifecycleDouble: LifecycleAPI {
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         performed.append(key)
         actions.append((key, action))
+        if case .open = action, let spawn {
+            _ = spawn(.first, LaunchConfiguration(binary: URL(fileURLWithPath: "/invented/bin/claude"),
+                                                  cwd: URL(fileURLWithPath: "/invented/project"),
+                                                  session: .resume(key.session, fork: false)))
+        }
         let outcome = outcomes.isEmpty ? fallback : outcomes.removeFirst()
         guard let outcome else { unreachable("perform with no staged outcome") }
         let state = try outcome.get()
@@ -83,6 +99,10 @@ actor LifecycleDouble: LifecycleAPI {
     /// stream rather than nil.
     func openEvents(of key: ChannelKey) { opened.insert(key) }
 
+    /// How many fan-outs are live on one channel. Two is the shape the tap contract asks for: the
+    /// Activity pump's and `StreamIngestion`'s.
+    func fanOutCount(of key: ChannelKey) -> Int { streams[key]?.count ?? 0 }
+
     func push(_ event: WireEvent, to key: ChannelKey) {
         for continuation in streams[key] ?? [] { continuation.yield(event) }
     }
@@ -107,6 +127,7 @@ actor LifecycleDouble: LifecycleAPI {
     /// `Fleet`'s own contract: nil for a key the fleet owns no supervisor for, and a new stream on
     /// every call for one it does.
     func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? {
+        eventSubscriptions.append(key)
         guard opened.contains(key) else { return nil }
         let (stream, continuation) = AsyncStream<WireEvent>.makeStream(bufferingPolicy: .unbounded)
         streams[key, default: []].append(continuation)
@@ -225,5 +246,48 @@ enum SidebarFixtures {
     static func snapshot(configHome: URL, entries: [IndexEntry], builtAt: Date = Date()) -> IndexSnapshot {
         IndexSnapshot(configHome: configHome, builtAt: builtAt,
                       entries: Dictionary(uniqueKeysWithValues: entries.map { ($0.sessionID, $0) }))
+    }
+}
+
+
+/// A `ProcessHandle` that exists only to be *not* returned.
+///
+/// A `ProcessFactory` has to answer with one, so a test that asserts no process was ever built
+/// still needs a conformance to hand back. Every member traps: reaching one of them would mean the
+/// factory really did produce a process, and the assertion the factory exists for has already
+/// failed by then.
+final class NeverSpawnedHandle: ProcessHandle {
+    let epoch: ProcessEpoch = .first
+    var events: any AsyncSequence<WireEvent, Never> & Sendable { AsyncStream<WireEvent> { $0.finish() } }
+    var childProcessIdentifier: Int32 { get async { unreachable("childProcessIdentifier") } }
+    var sessionID: SessionID? { get async { unreachable("sessionID") } }
+    func spawn(handshakeTimeout: Duration) async throws -> Handshake { unreachable("spawn") }
+    func send(_ input: UserInput) async throws -> UUID { unreachable("send") }
+    func request<R: ControlRequestSpec>(_ spec: R, timeout: Duration?) async throws -> R.Response { unreachable("request") }
+    func requestRaw(subtype: String, payload: JSONValue, timeout: Duration?) async throws -> JSONValue { unreachable("requestRaw") }
+    func answer(_ id: RequestID, _ answer: InboundAnswer) async throws { unreachable("answer") }
+    func terminate() async -> TerminationReport { unreachable("terminate") }
+
+    private func unreachable(_ member: String) -> Never {
+        fatalError("NeverSpawnedHandle.\(member): a test that asserts nothing spawned built a process")
+    }
+}
+
+/// Counts the spawns a `ProcessFactory` was asked for.
+///
+/// `@unchecked Sendable` is sound because the one mutable field is `count`, read and written only
+/// inside `lock`, this instance's private `NSLock`. A `ProcessFactory` is a synchronous,
+/// non-isolated closure, so the counter cannot live on an actor.
+final class SpawnCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var invocations = 0
+
+    var count: Int { lock.lock(); defer { lock.unlock() }; return invocations }
+
+    var factory: ProcessFactory {
+        { [self] _, _ in
+            lock.lock(); invocations += 1; lock.unlock()
+            return NeverSpawnedHandle()
+        }
     }
 }
