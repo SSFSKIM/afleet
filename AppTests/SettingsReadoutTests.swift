@@ -209,6 +209,33 @@ final class SettingsReadoutTests: XCTestCase {
                        "a repeated type did not accumulate")
     }
 
+    /// Concurrent increments do not lose each other.
+    ///
+    /// `record` reads the tally, adds one and writes it back, and both halves suspend. Actor
+    /// isolation excludes concurrent execution but not interleaving across a suspension point, so
+    /// without the chain inside `record` two calls read the same pre-increment value and one
+    /// increment vanishes. Forty calls, one instance, and the total has to be forty.
+    func testConcurrentIncrementsDoNotLoseEachOther() async throws {
+        let temp = try TempTree()
+        let store = try FileStateStore(baseDirectory: temp.root.appending(path: "store"),
+                                       configHomes: [temp.root.appending(path: "home")])
+        let counter = UnknownFrameCounter(store: store)
+        let calls = 40
+
+        await withTaskGroup(of: Void.self) { group in
+            for number in 0..<calls {
+                group.addTask { await counter.record("invented_kind_\(number % 4)") }
+            }
+        }
+
+        let tally = await counter.snapshot()
+        XCTAssertEqual(tally.total, calls,
+                       "\(calls) concurrent increments left a total of \(tally.total)")
+        // The floor: the tally really is spread over the four types, so a single type absorbing
+        // everything could not pass on the total alone.
+        XCTAssertEqual(tally.counts.count, 4, "the four invented types are not all present: \(tally.counts)")
+    }
+
     // MARK: - Support
 
     private struct Built {

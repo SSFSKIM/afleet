@@ -102,25 +102,43 @@ struct UnknownFrameTally: Codable, Hashable, Sendable {
     var total: Int { counts.values.reduce(0, +) }
 }
 
-/// Reading and incrementing the tally. An actor because frames arrive from every channel at once
-/// and the increment below is a read and a write with a suspension between them.
+/// Reading and incrementing the tally.
 ///
-/// **Nothing is cached here.** An earlier draft kept the loaded tally in a field and returned it
-/// forever after, which froze Settings' count at whatever it was the first time the window was
-/// opened, and would have gone on freezing it for any second instance of this type — Settings
-/// builds its own. The store is the single copy; `FileStateStore` already holds the namespace's
-/// document in memory after the first touch, so reading it every time costs one actor hop and no
-/// file access.
+/// **Nothing is cached.** An earlier draft kept the loaded tally in a field and returned it forever
+/// after, which froze Settings' count at whatever it was the first time the window was opened, and
+/// would have gone on freezing it for any second instance of this type — Settings builds its own.
+/// The store is the single copy; `FileStateStore` already holds the namespace's document in memory
+/// after the first touch, so reading it every time costs one actor hop and no file access.
+///
+/// **What serialises an increment is the chain below, not the actor.** `record` reads, adds one and
+/// writes, and both the read and the write suspend. Actor isolation excludes concurrent execution;
+/// it does not exclude interleaving across a suspension point, so two `record` calls left to
+/// themselves would both read the same pre-increment value and one of the two increments would
+/// vanish. Each call therefore hangs its work off the previous call's task and waits for it: the
+/// three statements that build that chain run with no `await` between them, so they are atomic
+/// with respect to the actor's own reentrancy, and the read-modify-write inside the task cannot
+/// begin until the one before it has finished writing. `snapshot()` stays outside the chain and
+/// reads straight through, because a reader has nothing to lose.
 actor UnknownFrameCounter {
     private let store: any StateStore
+    /// The most recently enqueued increment. Every new one waits for it before reading.
+    private var tail: Task<Void, Never>?
 
     init(store: any StateStore) { self.store = store }
 
-    /// One frame of a type the corpus does not carry.
+    /// One frame of a type the corpus does not carry. Returns once this increment is in the store.
     func record(_ type: String) async {
-        var current = await snapshot()
-        current.counts[type, default: 0] += 1
-        try? await store.write(current, namespace: .afleet, key: AfleetStoreKeys.unknownFrames)
+        let previous = tail
+        let task = Task { [store] in
+            await previous?.value
+            let loaded = (try? await store.read(UnknownFrameTally.self, namespace: .afleet,
+                                                key: AfleetStoreKeys.unknownFrames)) ?? nil
+            var current = loaded ?? UnknownFrameTally()
+            current.counts[type, default: 0] += 1
+            try? await store.write(current, namespace: .afleet, key: AfleetStoreKeys.unknownFrames)
+        }
+        tail = task
+        await task.value
     }
 
     func snapshot() async -> UnknownFrameTally {
