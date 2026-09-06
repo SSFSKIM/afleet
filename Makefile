@@ -5,7 +5,7 @@ SCENARIO ?=
 SCRIPT ?=
 REVIEWER ?=
 
-.PHONY: test-tools probe census record redact verify-fixtures synthetic sign spike
+.PHONY: test-tools probe census record redact verify-fixtures synthetic sign spike check-x7
 
 # The fake-claude suite is empty until its task lands; exit 5 is 3.12+'s "no tests ran",
 # which is not a failure here. A missing start directory still fails (ImportError).
@@ -70,3 +70,9 @@ test: generate
 # Contract X1 over the app target, alone.
 check-imports: generate
 	xcodebuild test -scheme $(SCHEME) -destination '$(DESTINATION)' -only-testing:AfleetTests/ImportGraphTests
+
+# Does the shipped X7 protocol still match what the documents declare? C5's Task 2 review found
+# the same drift three times — a signature changed in code and left stale in a document another
+# child copies from — so it is checked mechanically rather than by reading. Needs no Xcode.
+check-x7:
+	$(PYTHON) Tools/c5/check-x7-drift.py

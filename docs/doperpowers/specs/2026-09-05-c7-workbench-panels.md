@@ -783,7 +783,9 @@ retrospect.
   handover path the method was added for — unregister a placeholder, then register the real tab
   under the same id — nothing would order the withdrawal before the replacement's registration.
   Measured rather than argued: the spawn-and-return shape was run five times and failed five
-  times, deterministically, and the symptom is not that the old tab wins but that the
+  times. Reproducible under test rather than strictly deterministic — the ordering is
+  scheduler-dependent and stable only because a test process is idle, so in a real app it would
+  be intermittent, which is worse. The symptom is not that the old tab wins but that the
   **replacement's target is removed and the link reaches nobody at all**, silently and with no
   error raised. Withdrawal is keyed by tab id, and after a handover both targets carry the same
   id.
