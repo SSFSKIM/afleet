@@ -659,3 +659,16 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     practice, since it owns the surface a routed click lands on. Deferred by C5 Task 6 and filed at
     the reviewer's instruction, because a deferral nobody recorded is indistinguishable from an
     omission.
+65. **A `ChannelTimelineModel` created by `attach` and never sent `open` stays blank forever.**
+    Reachable only if a caller attaches a model and then never opens the channel it belongs to,
+    which no C5 path does — the column opens on appearance. Recorded because C6 replaces that
+    view and may attach earlier or on a different trigger. Found at C5 Task 7. Closer: either
+    make `attach` imply the first `open`, or assert in the model that a `nil` projection with
+    `hasOpened` false is unreachable so a future caller trips it.
+66. **`hasOpened` is set before the index lookup, so a missing entry pins `failure` for the
+    model's life.** A channel whose index entry is absent at open time — a transcript deleted
+    between listing and opening — records the failure and never retries, because the guard that
+    prevents re-opening has already fired. No C5 path produces it: the sidebar lists from the
+    same snapshot the model reads. Found at C5 Task 7. Closer: set `hasOpened` after the lookup
+    succeeds, so a transient absence is retried on the next appearance.
+
