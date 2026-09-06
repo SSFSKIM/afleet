@@ -30,9 +30,13 @@ struct Workspace: Sendable {
 /// carries neither `start()` nor `register(_:cwd:recent:)` — both are `Fleet`'s own — and the
 /// composition root needs each. The protocol exists so `fleetFactory` can be a closure, which is
 /// what makes "no `Fleet` was ever constructed" an assertion a test can make.
-protocol AppFleet: LifecycleAPI {
+///
+/// Task 4 moved `register` into `ChannelRegistering` and refines this protocol by it rather than
+/// restating the member. The seam's purpose is unchanged — `register` is still absent from
+/// `LifecycleAPI`, so a `LifecycleAPI` double still cannot record a registration — and the
+/// refinement is what lets `Workspace.fleet` be handed to `ChannelRegistrar` without a cast.
+protocol AppFleet: LifecycleAPI, ChannelRegistering {
     func start() async
-    func register(_ key: ChannelKey, cwd: URL, recent: Bool) async
     func shutdown() async
 }
 
