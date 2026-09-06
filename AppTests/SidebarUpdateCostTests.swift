@@ -130,6 +130,69 @@ final class SidebarUpdateCostTests: XCTestCase {
         XCTAssertGreaterThan(rig.model.publishCount, 0, "nothing was published at all")
     }
 
+    /// **A `ChannelState` whose origin is `.archived` leaves the row in the Archived section.**
+    ///
+    /// This is the case the seeding burst is almost entirely made of: C4 registers every channel
+    /// and publishes a state for it, and a registered channel with no live process reports
+    /// `origin: .archived`. On the measured corpus 99.8 percent of 13,250 states carried it. A rule
+    /// that read only `state == nil` therefore emptied the dimmed section within a minute of the
+    /// app opening — every old channel on the machine reappearing under a project heading as though
+    /// something were running in it.
+    ///
+    /// Three clauses, and the third is the one that keeps this from being satisfied by a model that
+    /// simply never un-archives anything: a `.owned(.ready)` state on the same fixture still moves
+    /// the row out, because a live process is the thing that genuinely un-archives it.
+    func testAnArchivedOriginLeavesTheRowInTheArchive() throws {
+        let rig = Rig(rows: 1, ageInDays: 400)
+        XCTAssertEqual(rig.model.archived.map(\.id), [rig.session(0)],
+                       "the fixture row is not archived, so there is nothing to keep there")
+
+        rig.model.apply(rig.state(0, origin: .archived))
+
+        XCTAssertEqual(rig.model.archived.map(\.id), [rig.session(0)],
+                       "a state saying the channel is archived took its row out of the archive")
+        XCTAssertTrue(rig.model.sections.isEmpty, "an archived channel appeared under a project heading")
+        XCTAssertEqual(rig.model.row(rig.session(0))?.originGlyph, .archived,
+                       "the state did not reach the row at all")
+
+        // And the opposite fact still moves it, so the rule above is about the origin and not about
+        // a model that has stopped un-archiving.
+        rig.model.apply(rig.state(0, origin: .owned(.ready)))
+        XCTAssertTrue(rig.model.archived.isEmpty, "a live process did not un-archive the row")
+        XCTAssertEqual(rig.model.sections.flatMap(\.allRows).map(\.id), [rig.session(0)])
+    }
+
+    /// A trickle is published one state at a time, with nothing held back.
+    ///
+    /// The deferral in `scheduleFlush` exists to absorb a flood, and the risk it introduces is the
+    /// opposite failure: a fleet that speaks quietly having its updates batched, delayed or dropped.
+    /// Ten states arrive one at a time, each awaited before the next is sent, and each has to be
+    /// published on its own — `publishCount` rises by exactly one per state, which is what says
+    /// nothing was deferred into a later batch.
+    ///
+    /// Each wait is `whenChanged`, resumed by the publish that satisfies it, so the test has no
+    /// deadline in it. A stranded update would leave a wait unfulfilled rather than produce a wrong
+    /// number, which is the failure mode this shape reports honestly.
+    func testATrickleIsPublishedOneStateAtATime() async throws {
+        let count = 10
+        let lifecycle = LifecycleDouble()
+        let rig = Rig(rows: count, lifecycle: lifecycle)
+        rig.model.startUpdates()
+        defer { rig.model.stopUpdates() }
+        let before = rig.model.publishCount
+
+        for index in 0..<count {
+            lifecycle.emit(rig.state(index, origin: .owned(.ready)))
+            let session = rig.session(index)
+            await rig.model.whenChanged { $0.row(session)?.originGlyph == .ready }
+            XCTAssertEqual(rig.model.publishCount, before + index + 1,
+                           "state \(index + 1) of \(count) was not published on its own")
+        }
+
+        XCTAssertEqual(rig.model.ingestCount, count)
+        XCTAssertTrue(rig.model.allRows.allSatisfy { $0.originGlyph == .ready })
+    }
+
     // MARK: - The fixture
 
     /// One project, `rows` channels in it, no live half until the test supplies one.

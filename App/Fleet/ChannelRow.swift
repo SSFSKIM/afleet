@@ -63,8 +63,27 @@ struct ChannelRow: Identifiable, Sendable {
     var systemItem: SystemItem? { state?.systemItem }
     var channelBanner: ChannelBanner? { state?.banner }
 
-    /// A row with no live state is archived — spec §7.1's "otherwise".
-    var isArchived: Bool { state == nil && (!isRecent || cwd == nil) }
+    /// A row with nothing alive behind it is archived — spec §7.1's "otherwise", and §8.2's dimmed
+    /// section at the bottom of the sidebar.
+    ///
+    /// **"Nothing alive behind it" is two cases, not one.** The obvious one is no `ChannelState` at
+    /// all, which is how a row looks before the fleet has said anything about it. The other is a
+    /// state that says so in as many words: `origin: .archived`, a registered channel with no live
+    /// process. Reading only the first was a real defect and not a cosmetic one — C4 seeds every
+    /// registered channel at launch and 99.8 percent of those states carry `.archived`, so every
+    /// old channel on the machine left the Archived section the moment its first state landed and
+    /// the dimmed section drained to approximately empty within a minute of opening the app.
+    /// Found by Task 5's review; the earlier reading had never been run against a real fleet.
+    ///
+    /// This does not weaken ruling 3. The origin still arrives only on a `ChannelState` and a
+    /// restored row still carries none — that is the `.none` case below, and it behaves exactly as
+    /// it always did.
+    var isArchived: Bool {
+        switch origin {
+        case .none, .some(.archived): !isRecent || cwd == nil
+        case .some: false
+        }
+    }
 
     /// A teammate's transcript is read-only: the row offers open-in-terminal and nothing that
     /// would spawn against someone else's session.
