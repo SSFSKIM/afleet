@@ -39,6 +39,27 @@ struct ChannelColumnView: View {
     }
 }
 
+/// What re-runs the channel column's opening task.
+///
+/// **The channel alone is not enough, and that was a defect rather than a refinement.** The header
+/// shows origin, presence, banner and system item — §8's four, every one of them the live half of a
+/// `ChannelRow` — and `ChannelTimelineModel.open` is what assigns them. Keyed on the channel, the
+/// task ran once and never again while the channel stayed selected, so a channel that went busy,
+/// raised a banner or crashed under the cursor kept showing the state it had on arrival. Keying on
+/// the header too re-runs the task on exactly those changes and on nothing else.
+///
+/// It carries the channel as well as the header because two channels can have equal headers — a
+/// restored row carries no origin, no presence and no banner at all — and a switch between them
+/// must still re-open.
+struct ChannelColumnOpenKey: Hashable {
+    let channel: ChannelKey
+    let header: ChannelHeader
+    init(_ row: ChannelRow) {
+        channel = row.key
+        header = ChannelHeader(row: row)
+    }
+}
+
 /// One channel, drawn. Split out so the `task(id:)` that opens the channel is keyed by the channel
 /// and re-runs when the selection moves rather than on every parent body evaluation.
 private struct ChannelTimelineColumn: View {
@@ -60,9 +81,11 @@ private struct ChannelTimelineColumn: View {
                     .listStyle(.inset)
             }
         }
-        // Keyed by the channel: switching channels opens the new one, and coming back to a channel
-        // whose model is already open costs a header refresh and nothing more.
-        .task(id: row.key) { await model.open(row) }
+        // Keyed by the channel *and* the four live header fields. Switching channels opens the new
+        // one; a channel that goes busy, raises a banner or crashes while it stays selected re-runs
+        // the task, and `open` is header-only past its first call, so the extra runs cost a header
+        // assignment and nothing more.
+        .task(id: ChannelColumnOpenKey(row)) { await model.open(row) }
     }
 }
 

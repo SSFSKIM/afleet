@@ -187,6 +187,63 @@ final class ChannelTimelineModelTests: XCTestCase {
                              "the model holds \(model.items.count) items against \(first) before the change")
     }
 
+    // MARK: - The header's live half
+
+    /// The header follows a channel whose state changes while it stays selected.
+    ///
+    /// Two halves, because the defect spanned both. The model half is executable: a second `open`
+    /// with a changed row moves all four of §8's live fields and restarts no ingestion. The view
+    /// half is a **trace assertion** — a window cannot open in a headless runner, so what is
+    /// asserted is the identity the column's opening task is keyed by, which is the thing that
+    /// decides whether the second call happens at all. Keyed on the channel alone it never did.
+    func testTheHeaderFollowsAChannelWhoseStateChangesWhileItStaysSelected() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"], inventedChannels: 1)
+        let key = rig.keys[0]
+        let model = rig.registry.model(for: key)
+
+        let quiet = rig.row(0, state: SidebarFixtures.state(key, origin: .owned(.ready)))
+        await model.open(quiet)
+        let opened = model.items.count
+        XCTAssertGreaterThan(opened, 0, "the channel opened with 0 items")
+        XCTAssertEqual(model.header.origin, .owned(.ready), "the header did not take the row's origin")
+        XCTAssertEqual(model.header.presence, .unknown, "the header did not take the row's presence")
+        XCTAssertNil(model.header.banner, "a quiet channel's header carries a banner")
+        XCTAssertNil(model.header.systemItem, "a quiet channel's header carries a system item")
+
+        // The same channel, still selected, four live fields later.
+        var state = SidebarFixtures.state(key, origin: .owned(.contended))
+        state.presence = .busy
+        state.banner = .untrusted
+        state.systemItem = .crashed(exit: .code(1, stderrTail: ""), reopenOffered: true)
+        let loud = rig.row(0, state: state)
+        await model.open(loud)
+
+        XCTAssertEqual(model.header.origin, .owned(.contended), "the header's origin did not follow")
+        XCTAssertEqual(model.header.presence, .busy, "the header's presence did not follow")
+        XCTAssertEqual(model.header.banner, .untrusted, "the header's banner did not follow")
+        XCTAssertNotNil(model.header.systemItem, "the header's system item did not follow")
+        // Header-only: the second call restarted nothing.
+        XCTAssertEqual(model.items.count, opened,
+                       "the second open left \(model.items.count) items against \(opened)")
+        let subscriptions = await rig.lifecycle.eventSubscriptions
+        XCTAssertEqual(subscriptions.count, 1,
+                       "the second open took \(subscriptions.count) event subscription(s) in total, not 1")
+
+        // The view half. The identity the column's task is keyed by has to separate these two rows,
+        // or the second call above never happens in the running app.
+        // Spelled as booleans rather than `XCTAssertNotEqual`, whose default message prints both
+        // values: a `ChannelColumnOpenKey` carries a config-home path and a session id, and §11
+        // keeps both out of a failure message.
+        XCTAssertFalse(ChannelColumnOpenKey(quiet) == ChannelColumnOpenKey(loud),
+                       "one channel's quiet and loud rows share an opening key")
+        XCTAssertTrue(ChannelColumnOpenKey(quiet) == ChannelColumnOpenKey(quiet),
+                      "one row does not equal itself, so the task would re-run on every body pass")
+        // Two channels whose headers are equal — a restored row carries no origin, no presence and
+        // no banner — still have to re-open on a switch.
+        XCTAssertFalse(ChannelColumnOpenKey(rig.row(0)) == ChannelColumnOpenKey(rig.row(1)),
+                       "two channels with equal headers share an opening key")
+    }
+
     // MARK: - The registry
 
     /// One model per channel, retained across a switch away and back, and one registry per app.
@@ -372,8 +429,9 @@ private struct Rig {
         registry.attach(to: workspace, lifecycle: lifecycle)
     }
 
-    /// The row the channel column would hand the model.
-    func row(_ index: Int, origin: ChannelOrigin? = nil) -> ChannelRow {
+    /// The row the channel column would hand the model. `state` overrides `origin` when both are
+    /// given; the live half is what the header reads.
+    func row(_ index: Int, origin: ChannelOrigin? = nil, state: ChannelState? = nil) -> ChannelRow {
         let key = keys[index]
         return ChannelRow(key: key,
                           title: titles[index],
@@ -387,7 +445,7 @@ private struct Rig {
                           mode: .ownedCandidate,
                           decidingRule: "invented",
                           isProvisional: false,
-                          state: origin.map { SidebarFixtures.state(key, origin: $0) })
+                          state: state ?? origin.map { SidebarFixtures.state(key, origin: $0) })
     }
 
     /// Appends `count` further records to a channel's transcript, each with its own invented uuid.
