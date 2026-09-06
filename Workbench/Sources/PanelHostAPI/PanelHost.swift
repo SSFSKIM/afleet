@@ -28,8 +28,14 @@ public enum PanelHostError: Error, Hashable, Sendable {
     func available(for context: ChannelContext) -> [PanelTabID]
     var selected: PanelTabID? { get }
     func select(_ id: PanelTabID)
-    /// Cmd+1…7: 1-based over `available(for:)`, so Cmd+1 is the first tab the user can see.
-    func selectIndex(_ index: Int)
+    /// Cmd+1…7: 1-based over `available(for: context)`, so Cmd+1 is the first tab the user can see.
+    ///
+    /// The context is a parameter rather than state the host keeps, so the index cannot resolve
+    /// against a channel the user is not looking at. A host holding its own current channel
+    /// would have two sources of truth — that one and the context the render path passes to
+    /// `view(for:context:)` — with nothing saying who sets the first; the shortcut would then
+    /// pick the wrong panel only when the two had diverged. Passing it makes that unrepresentable.
+    func selectIndex(_ index: Int, in context: ChannelContext)
     func popOut(_ id: PanelTabID, channel: ChannelKey)
     /// The tab's session for this channel, created on first use and retained thereafter, so
     /// panes and editors survive switching away and back (C7's acceptance). The host also gives
