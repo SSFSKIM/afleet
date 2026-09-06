@@ -10,17 +10,23 @@ final class ImportGraphTests: XCTestCase {
     /// manifest allows. `ClaudeWire` and its four Wire modules are absent by design.
     private static let allowed: Set<String> = ["Foundation", "SwiftUI", "AfleetCore", "FleetKit"]
 
-    /// `Workbench/Sources/PanelHostAPI`, from this file's own location.
-    private static var sources: URL {
+    /// The package root, from this file's own location.
+    private static var workbench: URL {
         URL(filePath: #filePath)                     // .../Workbench/Tests/PanelHostAPITests/ImportGraphTests.swift
             .deletingLastPathComponent()             // .../PanelHostAPITests
             .deletingLastPathComponent()             // .../Tests
             .deletingLastPathComponent()             // .../Workbench
-            .appending(path: "Sources/PanelHostAPI")
+    }
+
+    private static var sources: URL { workbench.appending(path: "Sources/PanelHostAPI") }
+
+    /// The consumer fixture, asserted on as a single file rather than as a tree.
+    private static var consumerTab: URL {
+        workbench.appending(path: "Tests/PanelHostAPITests/ConsumerTab.swift")
     }
 
     func testPanelHostAPIImportsNothingFromClaudeWire() throws {
-        let (modules, files) = try Self.importedModules()
+        let (modules, files) = try Self.importedModules(under: Self.sources)
         XCTAssertGreaterThan(files, 0, "the grep found no Swift files at all")
         XCTAssertTrue(modules.isSubset(of: Self.allowed),
                       "imports outside the allowed set: \(modules.subtracting(Self.allowed).sorted())")
@@ -29,14 +35,38 @@ final class ImportGraphTests: XCTestCase {
                       "the grep did not find the FleetKit import this target certainly has")
     }
 
-    struct NoSources: Error, CustomStringConvertible {
-        var description: String { "Sources/PanelHostAPI could not be walked" }
+    /// `ConsumerTab.swift` claims in its header that a panel tab can be written importing
+    /// `PanelHostAPI` and `SwiftUI` and nothing else. Without this, that claim would live only in
+    /// the comment: the walk above covers `Sources/PanelHostAPI` and would stay green if the
+    /// fixture grew an `import FleetKit` — or an `import ClaudeWire`, which as this target has
+    /// demonstrated compiles. Equality, not subset, for the same reason the `Mirror` test uses it:
+    /// the whole point is that nothing else is there.
+    func testTheConsumerTabImportsPanelHostAPIAndSwiftUIAndNothingElse() throws {
+        let (modules, files) = try Self.importedModules(under: Self.consumerTab)
+        XCTAssertEqual(files, 1, "the walk did not read the consumer fixture")
+        XCTAssertEqual(modules, ["PanelHostAPI", "SwiftUI"],
+                       "the consumer fixture's import set changed")
     }
 
-    /// Every module name imported anywhere under the target, and how many files were read.
-    static func importedModules() throws -> (modules: Set<String>, files: Int) {
-        guard let enumerator = FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil) else {
-            throw NoSources()
+    struct NoSources: Error, CustomStringConvertible {
+        let path: String
+        var description: String { "\(path) could not be walked" }
+    }
+
+    /// Every module name imported anywhere under `root`, and how many files were read. `root` is a
+    /// directory to walk or a single Swift file to read.
+    static func importedModules(under root: URL) throws -> (modules: Set<String>, files: Int) {
+        let urls: [URL]
+        if root.pathExtension == "swift" {
+            guard FileManager.default.fileExists(atPath: root.path) else {
+                throw NoSources(path: root.lastPathComponent)
+            }
+            urls = [root]
+        } else {
+            guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
+                throw NoSources(path: root.lastPathComponent)
+            }
+            urls = enumerator.compactMap { $0 as? URL }
         }
         var modules: Set<String> = []
         var files = 0
@@ -44,7 +74,7 @@ final class ImportGraphTests: XCTestCase {
         // so a pattern written with it runs on past the end of the line and captures the next line's first word.
         let expression = try NSRegularExpression(pattern: #"^[ \t]*(?:@\w+[ \t]+)*import[ \t]+([A-Za-z_]\w*)"#,
                                                  options: [.anchorsMatchLines])
-        for case let url as URL in enumerator {
+        for url in urls {
             guard url.pathExtension == "swift" else { continue }
             files += 1
             let text = try String(contentsOf: url, encoding: .utf8)
