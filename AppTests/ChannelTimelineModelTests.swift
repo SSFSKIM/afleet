@@ -187,6 +187,47 @@ final class ChannelTimelineModelTests: XCTestCase {
                              "the model holds \(model.items.count) items against \(first) before the change")
     }
 
+    // MARK: - The ordering the change feed's window depends on
+
+    /// The change subscription is taken before the transcript is read.
+    ///
+    /// **Why this is not a black-box assertion.** The design is loss-free by recovery —
+    /// `StreamIngestion.fileChanged` reads from the stored offset to end of file, so a batch missed
+    /// in the window is replayed by the next write — and both orders therefore converge on the same
+    /// timeline. No observation of the *result* can separate them. The ordering itself can be
+    /// observed, by parking the model inside `subscribe()` and asking what has happened by then.
+    ///
+    /// The witness for "the read has not run" is the lifecycle double's `events(of:)` log, because
+    /// `open` calls `events(of:)` between the subscribe and the read; the item count is the second,
+    /// covering a subscribe moved below the publish as well as one moved below the read. Nothing
+    /// here races: the gate is a suspension the test releases.
+    func testTheChangeSubscriptionIsTakenBeforeTheFileIsRead() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"])
+        let key = rig.keys[0]
+        // An owned channel, so `events(of:)` really answers and the log would really fill.
+        await rig.lifecycle.openEvents(of: key)
+
+        let gate = SubscribeGate(feed: rig.feed)
+        rig.registry.changeFeed = gate.subscribe
+        let model = rig.registry.model(for: key)
+
+        let opening = Task { await model.open(rig.row(0, origin: .owned(.ready))) }
+        await XCTWaiter().fulfillment(of: [gate.reached], timeout: LaunchFixtures.hangGuard)
+
+        let calls = await rig.lifecycle.eventSubscriptions
+        XCTAssertTrue(calls.isEmpty,
+                      "\(calls.count) event subscription(s) were taken before the change subscription")
+        XCTAssertTrue(model.items.isEmpty,
+                      "\(model.items.count) items were read before the change subscription")
+
+        gate.release()
+        await opening.value
+        XCTAssertFalse(model.items.isEmpty, "the released open read 0 items")
+        let after = await rig.lifecycle.eventSubscriptions
+        XCTAssertEqual(after.count, 1, "the released open took \(after.count) event subscription(s), not 1")
+        await rig.lifecycle.finishEvents(of: key)
+    }
+
     // MARK: - The header's live half
 
     /// The header follows a channel whose state changes while it stays selected.
@@ -289,6 +330,36 @@ final class ChannelTimelineModelTests: XCTestCase {
 
 // MARK: - Support
 
+/// Parks the model inside its change-feed subscribe call until the test releases it.
+///
+/// `@unchecked Sendable` is sound because every stored property is a `let` and each is itself
+/// thread-safe: `XCTestExpectation` and an `AsyncStream.Continuation` are both safe to touch from
+/// any thread, and the iterator is made and consumed on the one task that calls `subscribe`.
+private final class SubscribeGate: @unchecked Sendable {
+    let reached = XCTestExpectation(description: "the model is inside subscribe()")
+    private let feed: TranscriptChangeFeed
+    private let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init(feed: TranscriptChangeFeed) {
+        self.feed = feed
+        (stream, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+    }
+
+    /// Lets the parked subscribe finish. Buffered, so a release issued before the gate is reached is
+    /// not lost.
+    func release() { continuation.yield(()) }
+
+    var subscribe: ChannelTimelineModel.ChangeFeedSubscribing {
+        { [self] in
+            reached.fulfill()
+            var iterator = stream.makeAsyncIterator()
+            _ = await iterator.next()
+            return await feed.subscribe()
+        }
+    }
+}
+
 /// A `Int` box a detached reader writes and the test reads.
 ///
 /// `@unchecked Sendable` is sound because the one mutable field is `stored`, read and written only
@@ -368,6 +439,9 @@ private struct Rig {
     let lifecycle: LifecycleDouble
     let registry: ChannelTimelineRegistry
     let watcher: StubWatcher
+    /// The real feed behind `workspace.changes`, so the ordering test's gate can return a genuine
+    /// subscription once it has been released.
+    let feed: TranscriptChangeFeed
     let keys: [ChannelKey]
     let paths: [URL]
     let titles: [String]
@@ -410,7 +484,7 @@ private struct Rig {
         let store = try FileStateStore(baseDirectory: temp.root.appending(path: "store", directoryHint: .isDirectory),
                                        configHomes: [home.root])
         watcher = StubWatcher()
-        let feed = TranscriptChangeFeed(source: watcher.changes)
+        feed = TranscriptChangeFeed(source: watcher.changes)
         await feed.start()
 
         lifecycle = LifecycleDouble()

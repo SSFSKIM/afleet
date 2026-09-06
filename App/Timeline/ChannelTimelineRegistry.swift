@@ -25,6 +25,11 @@ final class ChannelTimelineRegistry {
     /// replaces it with a `LifecycleAPI` double before opening a channel.
     @ObservationIgnored var lifecycle: (any LifecycleAPI)?
 
+    /// The change-feed seam handed to every model. Nil is the workspace's own feed; a test replaces
+    /// it with a double that can suspend inside `subscribe()`, which is the only place the
+    /// subscribe-before-read ordering is observable. Set before the channel's first `model(for:)`.
+    @ObservationIgnored var changeFeed: ChannelTimelineModel.ChangeFeedSubscribing?
+
     @ObservationIgnored private var models: [ChannelKey: ChannelTimelineModel] = [:]
 
     init() {}
@@ -32,16 +37,19 @@ final class ChannelTimelineRegistry {
     /// Binds the registry to the workspace a launch reached, releasing every model built over the
     /// previous one. *Check again* runs the whole launch again, and a model still driving the old
     /// workspace's ingestion would keep reading a store and a fleet nothing else refers to.
-    func attach(to workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
+    func attach(to workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil,
+                changeFeed: ChannelTimelineModel.ChangeFeedSubscribing? = nil) {
         releaseAll()
         self.workspace = workspace
         self.lifecycle = lifecycle ?? workspace.fleet
+        self.changeFeed = changeFeed
     }
 
     /// This channel's model, built on first ask and retained afterwards.
     func model(for key: ChannelKey) -> ChannelTimelineModel {
         if let existing = models[key] { return existing }
-        let model = ChannelTimelineModel(key: key, workspace: workspace, lifecycle: lifecycle)
+        let model = ChannelTimelineModel(key: key, workspace: workspace, lifecycle: lifecycle,
+                                         changeFeed: changeFeed)
         models[key] = model
         return model
     }

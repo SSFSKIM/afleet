@@ -112,6 +112,15 @@ struct TimelineRow: Identifiable, Hashable, Sendable {
 /// read, and a write after it is in the subscription's unbounded buffer. C3's tap does not close
 /// this window on its own — an archived or foreign channel has no tap at all — and relying on it
 /// would make the ordering correct for owned channels only.
+/// `testTheChangeSubscriptionIsTakenBeforeTheFileIsRead` holds the order, by parking the model
+/// inside `subscribe()` and asserting the read has not run.
+///
+/// Subscribing first does mean a `fileChanged` can enter this actor's ingestion before or during
+/// `open` — `open` suspends in its settle loop, which is a reentrancy point. That is benign and not
+/// a race this model has to serialise: the apply path is idempotent by `RecordKey`, and `open`'s own
+/// `StreamState` and whole-file read replace whatever an early `fileChanged` built. `StreamIngestion`
+/// documents only that a second `open` is a programmer error and says nothing about this
+/// interleaving, so it is written down here rather than assumed.
 @MainActor
 @Observable
 final class ChannelTimelineModel {
@@ -141,8 +150,17 @@ final class ChannelTimelineModel {
     nonisolated var timelineUpdates: AsyncStream<ChannelTimeline> { fanout.subscribe() }
 
     @ObservationIgnored private nonisolated let fanout = TimelineFanout()
+    /// How the model reaches the transcript change feed.
+    ///
+    /// A seam beside `lifecycle` because the subscribe-before-read ordering is only observable from
+    /// *inside* the subscribe call: both orders converge on the same timeline — a missed batch is
+    /// recovered by the next `fileChanged`, which reads from the stored offset — so no assertion
+    /// over the result can separate them, and a double that suspends here can.
+    typealias ChangeFeedSubscribing = @Sendable () async -> AsyncStream<TranscriptChangeBatch>?
+
     @ObservationIgnored private let workspace: Workspace?
     @ObservationIgnored private let lifecycle: (any LifecycleAPI)?
+    @ObservationIgnored private let subscribeToChanges: ChangeFeedSubscribing
     @ObservationIgnored private var ingestion: StreamIngestion?
     @ObservationIgnored private var effectsTask: Task<Void, Never>?
     @ObservationIgnored private var changesTask: Task<Void, Never>?
@@ -150,10 +168,17 @@ final class ChannelTimelineModel {
     /// `lifecycle` is the events seam. Production passes `workspace.fleet`, which is an `AppFleet`
     /// and therefore a `LifecycleAPI`; a test passes a `LifecycleAPI` double, which is the only way
     /// the `events(of:)` call log the tap-contract test asserts on can exist.
-    init(key: ChannelKey, workspace: Workspace?, lifecycle: (any LifecycleAPI)? = nil) {
+    init(key: ChannelKey, workspace: Workspace?, lifecycle: (any LifecycleAPI)? = nil,
+         changeFeed: ChangeFeedSubscribing? = nil) {
         self.key = key
         self.workspace = workspace
         self.lifecycle = lifecycle ?? workspace?.fleet
+        if let changeFeed {
+            subscribeToChanges = changeFeed
+        } else {
+            let feed = workspace?.changes
+            subscribeToChanges = { await feed?.subscribe() }
+        }
     }
 
     deinit {
@@ -193,8 +218,13 @@ final class ChannelTimelineModel {
             }
         }
 
-        // Before the read, deliberately: see the note on the type.
-        if let subscription = await workspace.changes?.subscribe() {
+        // Before the read, and the order is the guarantee rather than a preference: the change feed
+        // does not replay, so a subscription taken after the read never sees a batch that arrived in
+        // the window between them, and for an archived channel — no tap, nothing writing the file
+        // again — that batch is lost for as long as the channel stays open. Taken here, a write
+        // before the read is inside the read and a write after it is in this subscription's
+        // unbounded buffer. See the note on the type, and the test that holds this order.
+        if let subscription = await subscribeToChanges() {
             changesTask = Task { [weak ingestion] in
                 for await batch in subscription {
                     guard let ingestion else { return }
