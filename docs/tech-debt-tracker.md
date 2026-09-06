@@ -607,3 +607,35 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     every supervisor on every published set; and for seeding, publish the settled state per
     channel rather than each step toward it, or say why the intermediates are load-bearing.
 
+61. **`afleet.config-change` is answered but not acted on: the `get_settings` refresh §6.4 asks for
+    is owed.** The parent's protocol table says the callback "refreshes `get_settings` and answers
+    likewise". C5 Task 6 ships the answer — an empty continue, so the engine is never left blocked
+    on a registered hook callback that nothing routes — and deliberately not the refresh.
+    Why deferred rather than done: `get_settings` is a per-channel control request whose reader is
+    the channel's settings and permissions view, which is C6's. This child renders no engine
+    settings at all (`SettingsReadout` is the app's own config-home and diagnostics readout, not the
+    engine's), so a refresh here would fetch a value nothing draws and would have to invent a place
+    to keep it. The hang was the defect and the answer closes it; the behaviour is what remains.
+    Closer: when C6 owns a live per-channel settings view, make the `afleet.config-change` route
+    re-read `get_settings` for that channel and publish it, and keep the empty continue after it.
+    Owner: C6. Found by Task 6's review as finding C1; the answer landed in the same task.
+62. **§6's third notification source has no stored preference.** The spec names three toggleable
+    sources — a decision in a channel not in view, a completed turn in a channel not in view, and
+    every notification the engine raises through the `Notification` hook — and the persisted
+    `NotificationPreferences` carries `permissionRequests`, `turnCompleted` and `channelFailed`.
+    None of the three is the hook, so C5 gates decisions, completed turns and failed turns and
+    leaves the engine's own hook notification always on, which is the least surprising default: the
+    engine raised it deliberately. Not a defect, a gap between the document and the stored shape.
+    Closer: add a fourth field with a default, a Settings row beside the other three, and decide
+    whether `channelFailed` keeps its current meaning (a `result` frame with `is_error`) or is
+    renamed to say so. Owner: C6 or whoever next opens the Settings screen.
+63. **`ActivityModel.start()` reads every registered channel's state once per launch.** It seeds
+    itself from `LifecycleAPI.states()`, which on `Fleet` awaits each supervisor in turn — one
+    actor hop per registered channel, and the sidebar registers every listed transcript, so on a
+    real config home that is thousands of hops. It happens once, off the first paint, and the model
+    then keeps only the states that could produce a row, so nothing after the seed is fleet-wide.
+    Filed because it is a fleet-wide read where a per-channel feed would do, and because it grows
+    with the corpus. Not measured at three thousand channels. Closer: either a `states(of:)` taking
+    the keys the caller cares about, or seeding Activity from the same `updates` feed the sidebar
+    already consumes and dropping the initial pull. Owner: C4 for the first, C5's successor for the
+    second.
