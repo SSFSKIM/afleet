@@ -59,11 +59,17 @@ final class ProjectGroupingTests: XCTestCase {
     /// The launch-path cost guard.
     ///
     /// Not a threshold this is expected to approach: the scan reads this document in about ten
-    /// milliseconds, write included. The bound is 250 ms, which leaves the passing path a factor of
-    /// twenty-five and still fails the shape this replaced by a factor of six — that one measured
-    /// 1,537 ms here and 2,080 ms on the reviewer's machine. An earlier draft used one second, which
-    /// was safe against false failures but left only 1.5x against the pre-fix code, close enough
-    /// that a faster machine could have slipped under it and quietly stopped discriminating.
+    /// milliseconds, write included. The bound is 500 ms — a factor of fifty over the passing path,
+    /// and still a factor of three below the shape this replaced, which measured 1,537 ms here and
+    /// 2,080 ms on the reviewer's machine.
+    ///
+    /// Both margins are sized against a measured number rather than a guessed one. Tracker 56
+    /// records this suite taking over ten minutes under load where it normally takes thirty
+    /// seconds — a factor of twenty — so a passing-path margin has to clear twenty with room to
+    /// spare or it is a flake waiting for a busy machine. Two earlier drafts got this wrong in
+    /// opposite directions: one second left only 1.5x against the pre-fix code, close enough that a
+    /// faster machine could slip under it and leave the assertion unable to fail, and 250 ms left
+    /// only 25x on the passing path, which that same factor of twenty very nearly eats.
     ///
     /// The timing is the weaker of the two guards on this change and is here for the regression a
     /// correctness test cannot see. `testProjectOrderIsFileOrderAndIgnoresAPathAppearingAsAValue` is
@@ -91,7 +97,7 @@ final class ProjectGroupingTests: XCTestCase {
         XCTAssertEqual(order.count, projectCount)
         XCTAssertEqual(order.first, "/invented/repo-0")
         XCTAssertEqual(order.last, "/invented/repo-\(projectCount - 1)")
-        XCTAssertLessThan(elapsed, .milliseconds(250),
+        XCTAssertLessThan(elapsed, .milliseconds(500),
                           "reading \(projectCount) project keys from \(data.count) bytes took \(Self.ms(elapsed)) ms")
     }
 
