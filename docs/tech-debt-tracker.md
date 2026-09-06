@@ -429,3 +429,21 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     and every later C5 task with a refusal test meets it. The plan's Global Constraints now
     carry the rule, so this is a record rather than an open item.
 
+
+53. **Two file handles on `diagnostics.log` and two on `fleet.log`, each tracking its own
+    offset.** `Fleet.init` builds a `FileDiagnostics` and a `FileFleetDiagnostics` from the
+    `diagnosticsDirectory` it is handed, and C5's `DiagnosticsComposer` — which the plan's
+    Task 3 deliverable names explicitly — builds a second pair on the same directory. Each
+    sink opens its file with `FileHandle(forWritingTo:)` and seeks to the end **once**, then
+    keeps its own running offset, so it is not `O_APPEND`: if both pairs ever write, the
+    second writer overwrites the first writer's bytes from wherever it last left off rather
+    than appending after them. Today nothing writes through the composer's `wire` or `fleet`
+    sinks — C5 originates no `DiagnosticEvent` and no `FleetDiagnosticEvent` — so the two
+    extra handles are opened and never used and no line has been lost. The moment C6 or C7
+    reports its own wire or fleet event through the composer, `diagnostics.log` starts
+    corrupting. Only `timeline.log` is unambiguously the app's, because FleetKit ships no file
+    sink for `TimelineNotice` at all. Closer: either `Fleet.init` takes the two sinks instead
+    of a directory (one owner per file, which is also what would let the app install a
+    capturing sink), or the composer stops constructing that pair and exposes `Fleet`'s. The
+    first is a small FleetKit change and is the better shape. Owner: C6 (first writer), with
+    the FleetKit signature change belonging to whoever touches `Fleet.init` next.
