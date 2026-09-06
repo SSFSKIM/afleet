@@ -139,6 +139,45 @@ final class NotificationRouterTests: XCTestCase {
         XCTAssertEqual(harness.poster.count, 0, "the completed-turn preference was ignored")
     }
 
+    /// `afleet.config-change` is **registered**, and therefore surfaced to the app exactly as
+    /// `afleet.notification` is — so it must be answered, or the engine blocks on it until its
+    /// process dies. It is not a notification, so nothing is posted for it.
+    ///
+    /// Both clauses matter and the answer is the discriminating one: a router that dropped the
+    /// callback silently would pass a test that only checked nothing was posted, which is how the
+    /// hang survived the first pass over this file. The first assertion is the floor — it shows the
+    /// inbound policy really does hand this id to the app rather than answering it itself, so the
+    /// obligation the rest of the test is about is real.
+    func testAConfigChangeCallbackIsAnsweredAndPostsNothing() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        await harness.lifecycle.always(.success(ActivityFixtures.state(key)))
+
+        let callback = FixtureRunner.Invented.hookCallback(
+            id: "abababab-abab-4bab-8bab-abababababab",
+            callbackID: HookRoute.configChange,
+            message: "an invented settings change")
+        let event = FixtureRunner.event(for: callback)
+        guard case .request = event else {
+            return XCTFail("the policy answered afleet.config-change itself; it is registered and must surface")
+        }
+
+        harness.router.handle(event, on: key)
+        await harness.router.settle()
+
+        let actions = await harness.lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "the engine was left waiting on a registered hook callback")
+        let recorded = try XCTUnwrap(actions.first)
+        XCTAssertEqual(recorded.key, key)
+        guard case .answer(let id, let answer) = recorded.action else {
+            return XCTFail("the action was not an answer")
+        }
+        XCTAssertEqual(id, callback.id)
+        guard case .hookContinue(let output) = answer else { return XCTFail("not a hook continue") }
+        XCTAssertEqual(output, .empty)
+        XCTAssertEqual(harness.poster.count, 0, "a settings change was raised as a notification")
+    }
+
     /// A `hook_callback` whose id afleet never registered is answered by `InboundPolicy` itself, so
     /// the router never sees a `.request` for it and posts nothing.
     ///
