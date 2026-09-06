@@ -8,6 +8,15 @@ public protocol LifecycleAPI: Sendable {
     func states() async -> [ChannelState]
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState
+    /// The composer's line, routed against the channel's own handshake, `system/init` and runtime record. A key the
+    /// fleet owns no supervisor for routes against the local table alone.
+    func route(_ text: String, on key: ChannelKey) async -> Routed
+    /// One routed control request, on a channel.
+    @discardableResult func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue
+    /// One routed strategy, on a channel; `ui` is the browser tab and the confirmation sheet the multi-step
+    /// strategies need.
+    @discardableResult func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
+                                ui: any StrategyUI) async throws -> StrategyOutcome
     /// The §7.4 open-in-terminal row up to the handoff; purpose `.hatch`.
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest
     /// `claude attach <short>`; purpose `.attach`.

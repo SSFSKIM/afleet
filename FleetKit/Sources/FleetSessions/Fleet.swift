@@ -477,6 +477,41 @@ public actor Fleet: LifecycleAPI {
         return matches
     }
 
+    // MARK: - The composer's line
+
+    /// Routes one composer line for a channel, over that channel's own engine report.
+    ///
+    /// The three operations below are the router's, reached on a `ChannelKey`: the conversation surface holds a key
+    /// and nothing under it, and `CommandRouter` and `StrategyExecutor` both speak in supervisors, which the facade
+    /// owns and never hands out. Each resolves the key and delegates; no line is parsed here and no state the
+    /// supervisor already keeps is kept a second time.
+    ///
+    /// A key this fleet owns no supervisor for has no engine report to route against, so the local table alone
+    /// decides — which is what a line typed into a channel that has not opened yet must still do. Sending and
+    /// running are different: both act on a child, and a key with no child is refused.
+    public func route(_ text: String, on key: ChannelKey) async -> Routed {
+        guard let supervisor = supervisors[key] else { return CommandRouter.route(text) }
+        let context = await supervisor.routingContext()
+        return CommandRouter.route(text, handshake: context.handshake, systemInit: context.systemInit,
+                                   runtime: context.runtime)
+    }
+
+    /// One routed control request, on a channel.
+    @discardableResult
+    public func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
+        guard let supervisor = supervisors[key] else { throw LifecycleError.notOwned }
+        return try await StrategyExecutor.send(request, on: supervisor)
+    }
+
+    /// One routed strategy, on a channel. `ui` is the app's browser tab and confirmation sheet, which the
+    /// multi-step strategies need and the facade has no opinion about.
+    @discardableResult
+    public func run(_ strategy: RouteStrategy, arguments: [String] = [], on key: ChannelKey,
+                    ui: any StrategyUI) async throws -> StrategyOutcome {
+        guard let supervisor = supervisors[key] else { throw LifecycleError.notOwned }
+        return try await StrategyExecutor.run(strategy, arguments: arguments, on: supervisor, ui: ui)
+    }
+
     // MARK: - The restart's unresolved settings
 
     /// The user picked a value for a setting a quiescent restart could not read back.
