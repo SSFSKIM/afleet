@@ -169,3 +169,198 @@ not renumber anything above.
     as the consumer. Closer: declare `logicalParentUuid = "logical_parent_uuid"` as an optional
     field on `CompactBoundaryFields`, pass it through in `WireReducer`, and pin the fixture's frame
     decoding it.
+
+## From C4 (`child/c4-sessions-fleet`)
+
+Appended by C4, continuing after C3's block. Keep each child's entries under its own heading and
+do not renumber anything above.
+
+26. **`ChannelSupervisor.terminatedEpochs` entries are never consumed for an epoch whose exit
+    the pump filters out.** One `UInt64` stays in the set per wedge, and per exit that lands
+    after a respawn has already moved the epoch on. It is tidiness, not a leak, and it is
+    deliberately not being fixed; it is logged so the whole-branch review does not rediscover
+    it. Owner: C4. Closer: none planned.
+27. **`CLIVerbs`' twenty-second default may be too short for `claude --bg` against a cold or
+    contended daemon.** `Verbs/CLIVerbs.swift:64` defaults to twenty seconds and `Fleet` builds
+    its verbs with that default (`Fleet.swift:78-79`), so `sendToBackground`, `performJob` and
+    every `jobs()` reconcile run at twenty seconds in production. G5's live gate had to raise
+    its own separate instance to 180 s and still saw one failure: the daemon log of the failing
+    run shows about seventy seconds between the verb being invoked and
+    `[bg] bg spawned <short> (shell)` appearing, while earlier scenarios' workers and spares
+    were still settling in the same config home. Run from a shell against a warm daemon the same
+    command returns in 0.8 s whether its output is piped or redirected, so this is contention,
+    not pipe inheritance. Observed on `2.1.261`, 2026-09-05: the exec-job scenario passed at
+    9.1 s and 50.7 s and failed against ceilings of 90 s and 180 s. Owner: C4. Closer: measure
+    the verb under a deliberately cold daemon and set the default from that, rather than raising
+    it blind; consider whether a `--bg` verb should have a different budget from `agents --json`.
+    **Closed** 2026-09-06. The second merge-evidence run turned the guess into a failure with a
+    signature: `verbFailed(verb: "stop", exitCode: -1)`, where `-1` is the runner reporting that
+    the client had not exited when the settle fired — the timeout chain and nothing else. The
+    daemon log of that run shows job `5cfb47fd` spawned at 08:00:14.325 and `settled (killed)` at
+    08:00:36.206, twenty-two seconds later: the kill landed just after the runner had SIGTERMed the
+    `stop` client. A mutation abandoned at twenty seconds that the daemon then honours anyway is
+    the worst of both outcomes. Measured afterwards from a shell against 2.1.263 in the same
+    scratch home: `claude --bg --exec 'sleep 300'` returns in **1.1 s**; `claude stop <short>`
+    returns in **0.70 s**, with the daemon logging `settled (killed)` within a second and roster
+    and registry both empty two seconds later; `agents --json` **0.2 s**; `rm` **0.7 s**. The
+    engine's own stop is fast, so the budget is about reaching a daemon that may be cold — the
+    2.1.263 daemon is transient, exiting five idle seconds after its last client and booting again
+    in about 0.3 s — and about the seventy seconds this entry itself observed under load. The fix
+    splits the budgets rather than raising one: `CLIVerbs.readBudget` is twenty seconds for
+    `agents --json` and `auth status`, `CLIVerbs.mutationBudget` is ninety for the two `--bg`
+    forms, `stop`, `respawn`, `rm` and `auth logout`, and `CLIVerbsTests`'
+    `testReadsAndMutationsTakeTheirOwnBudgets` reads back the timeout each verb handed the runner.
+    G5's own `CLIVerbs` dropped its 180-second override at the same time, so the gate now measures
+    the production budgets.
+    **Corrected** 2026-09-06, same day. The third merge-evidence run failed the same scenario the
+    same way at ninety seconds, which falsifies the diagnosis above: the failure did not go away,
+    it moved to the new ceiling. The daemon log settles it — job `78a58ac5` spawned at
+    08:31:38.787 and `settled (killed)` at 08:31:39.873, so the spawn, the listing and the stop
+    all completed in 1.1 s, every client had disconnected by 08:31:39.9, and the daemon logged
+    nothing for the remaining eighty-nine seconds. The engine was never slow and this entry's
+    seventy-second observation was never contention. `ProcessRunner` learned each child's exit
+    from `waitUntilExit()` on `DispatchQueue.global()`, which does not overcommit; under a loaded
+    suite driving pty children every worker was blocked, the block never ran, the exit was never
+    observed, and the verb was failed by its own timer long after the child had exited
+    successfully — `liveness=gone pipesOpen=0 waitReturned=false`. Fixed by taking the exit from
+    `process.terminationHandler`, which needs no thread of ours and cannot be starved, with
+    `testTheChildsExitIsSeenEvenWithEveryDispatchWorkerBlocked` holding the pool deliberately: 7.06 s
+    and a false failure before, 0.005 s and exit 0 after. A separate latent defect found on the way
+    — settlement waiting for end-of-file on the pipes, which a surviving grandchild holds open — is
+    fixed too. With both in, the fourth merge-evidence run passed all eight scenarios and the
+    exec-and-stop scenario ran end to end in 5.287 s against 94.781 s failing. The budget split
+    stands and was worth making, but ninety was sized from an artefact; the mutation budget is now
+    **thirty seconds**, roughly twenty times the real measurements.
+28. **No net covers the sliver between a handoff's pre-launch recheck and its own transition.**
+    `Lifecycle/ChannelSupervisor.swift:566-581`: rule 1 is suppressed for the whole handoff, and the
+    designed nets are the release timeout into Contended and `beforeSpawn`'s recheck, both of which
+    run before the launch. A foreign holder appearing between the recheck and the `apply` — for
+    `sendToBackground` that stretch is the verb plus its roster confirmation, seconds rather than
+    milliseconds — is not surfaced, and `backgroundJob` has no route out on a foreign holder. This
+    widens an existing blind spot rather than opening a new one, and the alternative (a pid-precise
+    exclusion) would reopen a `transitionNotInTable` route from Contended. Found at the Task 10
+    re-review. Owner: C4. Closer: decide whether `backgroundJob` should have a foreign-holder route.
+29. **`handingOff` is a Bool, not a depth counter.** `Lifecycle/ChannelSupervisor.swift:112`,
+    `:534-535`. Two overlapping handoffs on one supervisor would have the first `defer` clear the
+    flag while the second is still inside. Overlapping handoffs are already ill-defined — the second
+    passes the owned-ready-or-dormant guard because the origin does not change until the end — so
+    this is a facet of a pre-existing hazard rather than a new one. Owner: C4. Closer: a counter, or
+    a guard that refuses a second concurrent handoff outright. **Closed** 2026-09-06 by the fix
+    wave's ruling 2: `handingOff` is gone, and a second entrant to any lifecycle operation is
+    refused with `LifecycleError.busy`.
+30. **The handoff row test proves the guard, not the delivery.**
+    `Tests/FleetSessionsTests/LifecycleRowTests.swift:1230-1236` pushes a `HolderSet` straight into
+    `holdersChanged` rather than through the observer, so it does not show that the observer would
+    produce such a set. The live run showed that, and the test's comment says so. Owner: C4.
+    Closer: none planned; noted so the coverage is not overread.
+
+The entries from here on come from the whole-branch review of 2026-09-06
+(`.doperpowers/sde/2026-09-05-c4-fleetkit-sessions-fleet/final-review-triage.md`, buckets as the
+architect's rulings settled them). Line numbers are as at `4f2102d`, before the fix wave.
+
+31. **A store-write failure after `claude --bg` leaves the job invisible to logout twice over.**
+    `scalpel-1#8`. The verb has already created the job when `rememberOwnJob` fails, so the short
+    is neither in the store nor in the census, and `/logout` neither stops it nor is blocked by it.
+    Reachable only when the store write itself fails. Owner: C4. Closer: compensate on the failure
+    — stop the job just created, or adopt it into the record on the next reconcile.
+32. **`resolveContended` filters every `isOwnChild` holder rather than this supervisor's process.**
+    `scalpel-1#13`. Another afleet channel's child is excluded from the contention it should cause.
+    The residual harm is a wrong displayed origin, not a wrong lifecycle decision. Owner: C4.
+    Closer: compare the holder's pid with this supervisor's own child pid.
+33. **The `.git` ownership check is the last path-after-resolution in the §6.12 writer.**
+    `scalpel-3#3`. `Preconditions/LocalSettingsStore.swift` asks `lstat(resolved + "/.git")` by name
+    after the root descriptor is open. The root descriptor's own ownership is already `fstat`-
+    verified, so a decoy can only suppress or fabricate a refusal for a directory the user owns.
+    Owner: C4. Closer: `case relative(Int32, String)` on `OwnershipSubject`, backed by
+    `fstatat(fd, name, …, AT_SYMLINK_NOFOLLOW)`.
+34. **The settings target descriptor is checked for type and mode but not `st_uid`.**
+    `scalpel-3#4`, at `LocalSettingsStore.swift:177`. Same-uid only, and the directory holding it
+    has been ownership-checked. Owner: C4. Closer: one guard after the `fstat`.
+35. **The post-rename `fsync` result is discarded, contradicting the file's own step-6 comment.**
+    `scalpel-3#5`. `Store/FileStateStore.swift:196` answers the same question the opposite way.
+    Owner: C4. Closer: settle it once, in whichever direction, and make both files say the same.
+36. **The writer's root-equality check compares an `F_GETPATH` string with a `realpath` string.**
+    `scalpel-3#1`'s second half, at `LocalSettingsStore.swift:140`. A project root spelled through
+    the data volume's firmlink therefore refuses `symlink` for ever. Fail-closed, so a wrong answer
+    costs a refusal and never a write. The *containment* half of the same finding was fixed in the
+    2026-09-06 wave by canonicalising both sides through `F_GETPATH`; this comparison is against
+    the resolution string the writer deliberately took *before* the open, which is what makes the
+    ancestor-swap refusal work, so it cannot take the same treatment without thought. Owner: C4.
+    Closer: canonicalise the resolution the same way, or compare device and inode for this one
+    check only.
+37. **Fork re-key destination collisions in `Fleet.publish` and `FleetCapCounter.rekey`.**
+    `scalpel-4#6` and `scalpel-4#7`. A fork whose real session id is already registered overwrites
+    the entry rather than refusing. Owner: C4, revisit with C5's registration model. Closer: a
+    diagnostic on the collision could land now; the resolution belongs with C5.
+38. **`RuntimeStateUpdater` has no `update_settings` case, and `applied.output_style` is a dead
+    branch.** `sweep#11` and `scalpel-5#12`. The engine does not emit `output_style` under
+    `applied`, so an output-style change made by an answer is never recorded and the *next* restart
+    re-reports the same stale mismatch. The same hole exists for `resolveSetting("effort", …)`,
+    which lands in `flagSettings` and never in `state.effort`; that half lives in
+    `Lifecycle/ChannelSupervisor.swift` and was left alone by the 2026-09-06 wave, which fixed only
+    the `get_settings` reader beside it. Owner: C4. Closer: add the `update_settings` case and read
+    the output style from the source that carries it.
+39. **`apply_flag_settings` deletes a null-valued key; the updater stores it as JSON null.**
+    `scalpel-5#13`. The engine merges and then deletes null-valued keys (2.1.258
+    `cli.pretty.js:152496`), so a restart would re-send a key the engine has dropped and fail its
+    readback for ever. Unreachable as shipped: `CommandRouter.flagValue` produces only strings and
+    bools, and the only other producer would need a picker that does not exist. Owner: C4. Closer:
+    drop a null value from `state.flagSettings` rather than storing it.
+40. **The state store re-resolves its base by name on every write.** `scalpel-3#2`. Not a privilege
+    boundary — the base lives under `~/Library/Application Support/afleet`, whose ancestors only the
+    user can swap, and a same-uid process can rewrite the document directly — and scoped out by the
+    child's ruling 7, whose only ask is that the constructor validate the base against the config
+    homes. Owner: C4. Closer: hold a verified directory descriptor for the base, if the store ever
+    holds something a same-uid process should not be able to redirect.
+
+41. **A channel's task mirror never forgets a finished row inside one child's life.**
+    Task 11's finding 2, now live: `FleetTimeline`'s `RegistryMirror` names its evictable rows
+    through `evictable(asOf:grace:)` but exposes no remover, so `ChannelTaskMirror` cannot act on
+    the answer. Nothing decides wrongly — the reading eligibility gets is C3's own `liveWork`, and
+    the whole mirror is reset when the child exits — so the cost is a completed row per background
+    task for the life of one process. Owner: C3 for the remover, C4 for the call. Closer: a
+    `mutating func forget(_ ids: [String])` on `RegistryMirror`, called with `evictable(asOf:)`
+    after each fold.
+42. **The per-channel mirror does not fold the Bash tool's own result sentence.**
+    `RegistryMirror.observe(bashToolResult:toolUseID:at:epoch:)` binds a background shell's id and
+    output file from the tool result, which is the first frame that names either — before
+    `task_started` arrives. `ChannelTaskMirror` folds the five task subtypes and `tool_progress`
+    only, so for the moment between the tool result and the first task frame the channel looks
+    idle to the reap. The window is one frame wide and both later frames arm the row, so nothing
+    survives it; a surface that wants the output file from the same mirror will need it. Owner:
+    C4, with C6's task pane. Closer: fold the assistant/user tool-result frames here as C3's own
+    ingest does, rather than re-deriving the sentence.
+
+43. **`Fleet.perform(.reap)` reads eligibility on the far side of the marker.** `sweep#1`. The
+    facade checks the verdict (`Fleet.swift:324`) and then awaits `supervisor.reap()` (`:329`),
+    which takes `inFlight` a hop later; a send admitted in between sets `turnRunning`, and the reap
+    never asks again. The gate lives at the facade deliberately — the rig uses `reap()` as
+    unconditional teardown — so the harm is bounded: the channel goes cleanly dormant, the
+    transcript survives and a resume continues. Owner: C4. Closer: a `reapIfEligible()` on the
+    supervisor that takes the marker, re-reads the verdict and terminates in one turn, leaving
+    `reap()` the teardown it is.
+44. **A restart request merged during a restart's own suspension is dropped.** `sweep#2`. A second
+    request folds into `pendingChange` (`ChannelSupervisor.swift:1337-1340`) while `restartNow`
+    runs, and the clear after the terminate discards it — after the composer has told the user the
+    change applies when the current work finishes. The window is as wide as a terminate. It loses a
+    settings request, not conversation state, and the user can ask again. Owner: C4. Closer: fold
+    `pendingChange` into the request being applied at the moment of the clear instead of dropping
+    it.
+45. **A launch that throws before `run()` leaves the channel connecting with no process.**
+    `scalpel-1#3`. `ClaudeProcess.spawn` evaluates `try launch.arguments()` outside the catch that
+    publishes `.exited` (`ClaudeProcess.swift:82`), and the supervisor's handshake catch restores
+    the resting state only for a `terminatedEpochs` member — so this one throw produces no exit and
+    no restore: sends queue for ever, no *Reopen* is offered, and only relaunching afleet moves the
+    channel. It violates ruling 1, but the trigger is narrow: `arguments()` throws only on a
+    caller-chosen value beginning with `-`, and every field that carries one is engine- or
+    picker-sourced except a typed `/model` argument. Owner: C4. Closer: restore the resting state
+    on a throw that arrived with no exit behind it.
+46. **`/logout`'s *Wait* and *Stop* both decide from the census-time blocker set.**
+    `scalpel-4#2`. `LogoutPlan.execute` re-reads task ids only for channels already in
+    `nonEligible` (`LogoutPlan.swift:153`, `:160`). *Stop* therefore terminates a channel that
+    became blocked after the census without stopping its work — the §7.4 harm — and *Wait* is a
+    dead end, because `Fleet.runLogout` keeps the same census after every waiting outcome, so a
+    channel that has since become eligible is waited on for ever. The *Wait* half errs safe: the
+    plan never signs out and the user can choose *Stop* or abandon. The *Stop* half needs the user
+    to drive another channel into a background task while the sheet is open. Owner: C4. Closer:
+    rebuild the blocker set from the live mirror at the moment each choice acts.

@@ -1,0 +1,65 @@
+import Foundation
+import FleetTimeline
+
+/// C3's registry-mirror entry, as much of X4 as eligibility reads. C3's `RegistryEntry` conforms at the foot of this
+/// file; `MirrorEntryStandIn` still serves the tests that state a mirror outright. Reading a protocol, not a concrete
+/// type, is what made G2 a swap rather than a rewrite.
+/// `isArmed` and `isRunning` are separate facts: an armed task has been announced and not started; a running one has
+/// started or updated and not yet been notified complete.
+public protocol TaskMirrorReading: Sendable {
+    var taskID: String { get }
+    var isRunning: Bool { get }
+    var isArmed: Bool { get }
+    var isBackground: Bool { get }
+}
+public struct MirrorEntryStandIn: TaskMirrorReading, Hashable, Sendable {
+    public var taskID: String; public var isRunning: Bool; public var isArmed: Bool; public var isBackground: Bool
+    public init(taskID: String, isRunning: Bool, isArmed: Bool = false, isBackground: Bool) { self.taskID = taskID; self.isRunning = isRunning; self.isArmed = isArmed; self.isBackground = isBackground }
+}
+
+public enum DormantEligibility {
+    public struct Input: Sendable {
+        public var turnRunning: Bool; public var pendingDecisions: Int; public var queuedInput: Int
+        public var mirror: [any TaskMirrorReading]; public var lastTaskFrameAge: Duration?; public var heartbeatInterval: Duration; public var wedged: Bool
+        public init(turnRunning: Bool, pendingDecisions: Int, queuedInput: Int, mirror: [any TaskMirrorReading], lastTaskFrameAge: Duration?, heartbeatInterval: Duration, wedged: Bool) {
+            self.turnRunning = turnRunning; self.pendingDecisions = pendingDecisions; self.queuedInput = queuedInput; self.mirror = mirror
+            self.lastTaskFrameAge = lastTaskFrameAge; self.heartbeatInterval = heartbeatInterval; self.wedged = wedged
+        }
+    }
+    public enum Blocker: Hashable, Sendable { case wedged, turnRunning, pendingDecision, queuedInput, taskRunning(String), taskArmed(String), taskStateUncertain(String) }
+    public enum Verdict: Hashable, Sendable { case eligible, blocked(Blocker); public var isEligible: Bool { self == .eligible } }
+    /// The parent's five conditions plus the wedged exclusion (ruling of 2026-09-05), in this order; the first blocker wins.
+    /// Uncertainty is a property of a *running* task whose last frame is older than its heartbeat: the mirror may have
+    /// missed the completion. With nothing running or armed, an old frame is history and blocks nothing.
+    public static func evaluate(_ i: Input) -> Verdict {
+        if i.wedged { return .blocked(.wedged) }
+        if i.turnRunning { return .blocked(.turnRunning) }
+        if i.pendingDecisions > 0 { return .blocked(.pendingDecision) }
+        if i.queuedInput > 0 { return .blocked(.queuedInput) }
+        if let running = i.mirror.first(where: { $0.isRunning }) {
+            if let age = i.lastTaskFrameAge, age > i.heartbeatInterval { return .blocked(.taskStateUncertain(running.taskID)) }
+            return .blocked(.taskRunning(running.taskID))
+        }
+        if let armed = i.mirror.first(where: { $0.isArmed }) { return .blocked(.taskArmed(armed.taskID)) }
+        return .eligible
+    }
+}
+
+/// C3's registry-mirror row, read as eligibility reads one (X4). This is the conformance G2 swaps in for
+/// `MirrorEntryStandIn`: the protocol was written so replacing the stand-in would be a swap rather than a rewrite.
+///
+/// Armed and running are separate facts, and C3's own live set is what separates both from finished: its mirror calls
+/// a row live until the `task_notification` hands its result back, "even once the status is terminal", so a terminal
+/// row the host has not been told about is still work in flight — and a row the host *has* been told about that the
+/// engine still calls running is live too. Before the first `task_started` the row is only announced — a
+/// `background_tasks_changed` listing, or the Bash tool's own sentence — and that is armed.
+extension RegistryEntry: TaskMirrorReading {
+    public var taskID: String { id }
+    /// C3's own live set, `liveWork(asOf:)`'s predicate exactly: still running, *or* not yet notified. The two
+    /// disagree on one row shape — notified and still `.running` — and C3 calls that row live, so C4 must too; the
+    /// other reading would reap a channel whose background shell is still working.
+    private var isLive: Bool { !notified || status == .running }
+    public var isRunning: Bool { isLive && startedCount > 0 }
+    public var isArmed: Bool { isLive && startedCount == 0 }
+    public var isBackground: Bool { placement == .background }
+}
