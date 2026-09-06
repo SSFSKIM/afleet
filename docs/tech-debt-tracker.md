@@ -492,7 +492,19 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     whole row tree on every update, so the model's cost and the view's cost compound. Closer,
     unchanged in shape and now with a profile behind it: `apply(_ state:)` changes one row's live
     half, so patch that row in place and re-derive only when its archived-ness or its section
-    membership changed. Owner: whoever
+    membership changed.
+    **Observed live at Task 5, and it is worse than the synthetic number suggested.** Running the
+    built app against a real config home — 306 projects, 3,006 transcripts, four foreign live
+    channels — pins one core at 100 percent indefinitely, not as a launch burst. A six-second
+    sample of the main thread: 39 percent inside the `updates` loop, `apply(_ state:)`,
+    `rebuild()`, `ProjectGrouping.sections` and its per-section sort; 60 percent inside
+    `OutlineListCoordinator.diffRows` re-diffing the section array that rebuild just replaced. The
+    driver is the rate, not the size: C4 re-runs `claude agents` every few hundred milliseconds to
+    observe foreign holders and each observation publishes a `ChannelState`, while the transcript
+    index contributed one update in twenty seconds over the same window. So the two halves compound
+    at the holder-poll rate and the model's O(rows) rebuild is the load-bearing one. **This is the
+    single largest open item C5 leaves behind** and it is a battery-visible defect, not a
+    micro-optimisation; the closer above is unchanged and now has a profile naming every frame. Owner: whoever
     next opens `FleetBrowserModel` — C6 is the likely one, since a live conversation is exactly
     the workload that emits states in a stream.
 56. **`FleetFacadeTests.testOpenListsTheChannelAndPublishesEveryTransition` is load-sensitive
