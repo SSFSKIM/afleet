@@ -66,16 +66,25 @@ public struct CLIVerbs: Sendable {
     public static let readBudget = Duration.seconds(20)
     /// A verb that changes the daemon's world: the two `--bg` forms, `stop`, `respawn`, `rm` and `auth logout`.
     ///
-    /// Each of these is fast on its own — measured from a shell against 2.1.263 in G5's scratch home,
-    /// `--bg --exec` returns in 1.1 s, `stop` in 0.70 s, `rm` in 0.7 s — but each also has to reach a daemon that
-    /// may be cold, and the daemon is transient: it exits five idle seconds after its last client and boots again
-    /// on the next one. Tracker entry 27 watched about seventy seconds pass between the verb being invoked and the
-    /// daemon logging the spawn while several earlier workers were still settling in the same home. Ninety seconds
-    /// is that observation with margin. The asymmetry is the point: a read that hangs costs a stale listing, while
-    /// a mutation abandoned mid-request leaves the daemon honouring a change afleet has already given up on —
-    /// exactly what the second merge-evidence run saw when a twenty-second `stop` was SIGTERMed two seconds before
-    /// the daemon logged `settled (killed)`.
-    public static let mutationBudget = Duration.seconds(90)
+    /// Each of these is fast: measured from a shell against 2.1.263 in G5's scratch home, `--bg --exec` returns in
+    /// 1.1 s, `stop` in 0.70 s, `rm` in 0.7 s, and the fourth merge-evidence run spawned a job, listed it, stopped
+    /// it and confirmed its removal in 5.287 s end to end with a cold daemon in that total. The only thing a
+    /// mutation waits on beyond its own work is reaching a daemon that may be cold, and the daemon is transient:
+    /// it exits five idle seconds after its last client and boots again on the next one, in about 0.3 s.
+    ///
+    /// This was ninety seconds for one commit, sized from the seventy tracker entry 27 observed between a verb
+    /// being invoked and the daemon logging the spawn. That observation was not the daemon being slow. It was the
+    /// runner learning a child's exit from `waitUntilExit()` on the global dispatch queue, which does not
+    /// overcommit: under a loaded suite every worker was blocked, the exit was never observed, and the verb was
+    /// failed by its own timer long after the child had succeeded. The exit now arrives on
+    /// `process.terminationHandler`, so no measurement behind ninety survives. Thirty seconds is the real numbers
+    /// with roughly twenty times their margin.
+    ///
+    /// The asymmetry is still the point: a read that hangs costs a stale listing, while a mutation abandoned
+    /// mid-request leaves the daemon honouring a change afleet has already given up on — exactly what the second
+    /// merge-evidence run saw when a twenty-second `stop` was SIGTERMed two seconds before the daemon logged
+    /// `settled (killed)`.
+    public static let mutationBudget = Duration.seconds(30)
 
     public init(runner: any DirectoryProcessRunner, binary: URL, configHome: ConfigHome,
                 environment: [String: String],

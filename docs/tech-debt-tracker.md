@@ -212,6 +212,25 @@ do not renumber anything above.
     `testReadsAndMutationsTakeTheirOwnBudgets` reads back the timeout each verb handed the runner.
     G5's own `CLIVerbs` dropped its 180-second override at the same time, so the gate now measures
     the production budgets.
+    **Corrected** 2026-09-06, same day. The third merge-evidence run failed the same scenario the
+    same way at ninety seconds, which falsifies the diagnosis above: the failure did not go away,
+    it moved to the new ceiling. The daemon log settles it — job `78a58ac5` spawned at
+    08:31:38.787 and `settled (killed)` at 08:31:39.873, so the spawn, the listing and the stop
+    all completed in 1.1 s, every client had disconnected by 08:31:39.9, and the daemon logged
+    nothing for the remaining eighty-nine seconds. The engine was never slow and this entry's
+    seventy-second observation was never contention. `ProcessRunner` learned each child's exit
+    from `waitUntilExit()` on `DispatchQueue.global()`, which does not overcommit; under a loaded
+    suite driving pty children every worker was blocked, the block never ran, the exit was never
+    observed, and the verb was failed by its own timer long after the child had exited
+    successfully — `liveness=gone pipesOpen=0 waitReturned=false`. Fixed by taking the exit from
+    `process.terminationHandler`, which needs no thread of ours and cannot be starved, with
+    `testTheChildsExitIsSeenEvenWithEveryDispatchWorkerBlocked` holding the pool deliberately: 7.06 s
+    and a false failure before, 0.005 s and exit 0 after. A separate latent defect found on the way
+    — settlement waiting for end-of-file on the pipes, which a surviving grandchild holds open — is
+    fixed too. With both in, the fourth merge-evidence run passed all eight scenarios and the
+    exec-and-stop scenario ran end to end in 5.287 s against 94.781 s failing. The budget split
+    stands and was worth making, but ninety was sized from an artefact; the mutation budget is now
+    **thirty seconds**, roughly twenty times the real measurements.
 28. **No net covers the sliver between a handoff's pre-launch recheck and its own transition.**
     `Lifecycle/ChannelSupervisor.swift:566-581`: rule 1 is suppressed for the whole handoff, and the
     designed nets are the release timeout into Contended and `beforeSpawn`'s recheck, both of which

@@ -236,7 +236,7 @@ final class CLIVerbsTests: XCTestCase {
             XCTAssertEqual(taken[mutation], CLIVerbs.mutationBudget, "\(mutation) did not take the mutation budget")
         }
         XCTAssertEqual(CLIVerbs.readBudget, .seconds(20))
-        XCTAssertEqual(CLIVerbs.mutationBudget, .seconds(90))
+        XCTAssertEqual(CLIVerbs.mutationBudget, .seconds(30))
         XCTAssertLessThan(CLIVerbs.readBudget, CLIVerbs.mutationBudget)
     }
 }
