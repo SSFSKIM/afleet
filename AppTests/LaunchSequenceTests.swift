@@ -324,7 +324,7 @@ final class LaunchSequenceTests: XCTestCase {
         // Task 7's subscription, taken after the composition root has taken the index's.
         let second = await feed.subscribe()
         let collected = BatchCollector()
-        let reader = Task { for await batch in second { await collected.append(batch) } }
+        let reader = Task { for await batch in second { await collected.append(batch.paths) } }
 
         let secondSawAll = await collected.expect(3)
         let indexSawAll = coordinator.expectDeltas(3)
@@ -376,6 +376,65 @@ final class LaunchSequenceTests: XCTestCase {
         await fulfillment(of: [allThree], timeout: LaunchFixtures.hangGuard)
         XCTAssertEqual(coordinator.deltas.count, 3,
                        "the index saw \(coordinator.deltas.count) of three batches; two of them were produced before the launch finished")
+        rig.watcher.finish()
+    }
+
+    // MARK: - The stall report
+
+    /// The change pump's stall rule, both directions, and that a healthy launch stays quiet.
+    ///
+    /// The rule exists because the waits in this file are now fulfilled by the delivery itself
+    /// rather than by a stopwatch — right for the tests, but it means a pump that stalls in
+    /// production would be silent everywhere. Both directions are asserted because a rule that
+    /// reported every delivery would be as useless as one that reported none: the log would be
+    /// nothing but change notices and nobody would read it.
+    @MainActor
+    func testALateDeliveryIsReportedAndATimelyOneIsNot() async throws {
+        let paths = [URL(filePath: "/invented/project/one.jsonl"), URL(filePath: "/invented/project/two.jsonl")]
+        let received = ContinuousClock.now
+
+        let late = TranscriptChangePump.notice(for: TranscriptChangeBatch(paths: paths, receivedAt: received),
+                                               handledAt: received + .seconds(3))
+        XCTAssertEqual(late, .transcriptChangeStalled(paths: 2, waitedMs: 3000))
+
+        // Just inside the threshold, and just outside it: the boundary is where a rule with the
+        // comparison backwards would show up.
+        XCTAssertNil(TranscriptChangePump.notice(for: TranscriptChangeBatch(paths: paths, receivedAt: received),
+                                                 handledAt: received + .milliseconds(1999)),
+                     "a delivery inside the threshold was reported")
+        XCTAssertNotNil(TranscriptChangePump.notice(for: TranscriptChangeBatch(paths: paths, receivedAt: received),
+                                                    handledAt: received + .milliseconds(2000)),
+                        "a delivery exactly at the threshold was not reported")
+        XCTAssertNil(TranscriptChangePump.notice(for: TranscriptChangeBatch(paths: paths, receivedAt: received),
+                                                 handledAt: received + .milliseconds(40)),
+                     "an ordinary delivery was reported")
+
+        // And end to end: a launch whose deliveries are prompt writes no stall line at all.
+        var rig = try makeRig()
+        let coordinator = RecordingCoordinator()
+        rig.sequence.makeCoordinator = { _ in coordinator }
+        let composerBox = DiagnosticsBox()
+        rig.sequence.makeDiagnostics = { directory in
+            let composer = DiagnosticsComposer(directory: directory)
+            composerBox.set(composer)
+            return composer
+        }
+
+        let delta = coordinator.expectDeltas(1)
+        let route = await rig.sequence.run()
+        let workspace = try XCTUnwrap(route.workspace)
+        rig.watcher.emit([workspace.configHome.root.appending(path: "projects/invented/one.jsonl")])
+        await fulfillment(of: [delta], timeout: LaunchFixtures.hangGuard)
+
+        let composer = try XCTUnwrap(composerBox.value)
+        composer.flush()
+        let log = composer.directory.appending(path: "app.log")
+        let written = String(decoding: (try? Data(contentsOf: log)) ?? Data(), as: UTF8.self)
+        XCTAssertTrue(written.isEmpty,
+                      "a launch with prompt deliveries wrote a stall line: \(written)")
+        // The floor: the file the emptiness is asserted over is the one the pump would have
+        // written to, and it exists.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path), "app.log was never created")
         rig.watcher.finish()
     }
 

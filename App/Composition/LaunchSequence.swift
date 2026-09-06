@@ -200,10 +200,16 @@ struct LaunchSequence: Sendable {
             // step with the filesystem, so its latency is a latency the user sees; the utility lane
             // is for work nobody is waiting on, and somebody is always waiting on this. Do not
             // lower it for tidiness — a starved pump does not report a slow sidebar, it reports
-            // nothing at all.
+            // nothing at all, which is why the stall notice below exists as well.
+            let appDiagnostics = diagnostics.app
             Task.detached(priority: .userInitiated) {
-                for await changed in subscription {
-                    let delta = await index.update(changed: changed)
+                for await batch in subscription {
+                    // A report, never a gate: computed after the batch is in hand, written from a
+                    // queue of its own, and nothing here waits on it or fails because of it.
+                    if let notice = TranscriptChangePump.notice(for: batch) {
+                        appDiagnostics.record(notice)
+                    }
+                    let delta = await index.update(changed: batch.paths)
                     await coordinator.indexChanged(delta)
                 }
             }

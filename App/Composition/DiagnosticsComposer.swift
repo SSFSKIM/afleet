@@ -2,13 +2,20 @@ import Foundation
 import ClaudeWire
 import FleetKit
 
-/// One diagnostics directory, three sinks (parent §11, spec §2's *Diagnostics*).
+/// One diagnostics directory, four sinks (parent §11, spec §2's *Diagnostics*).
 ///
 /// `DiagnosticEvent`, `FleetDiagnosticEvent` and `TimelineNotice` are three closed enums in three
 /// packages that cannot see each other, and C3 recorded that composing them is C5's work. The two
 /// that already have file sinks get theirs on the same directory `Fleet` uses; the third — C3's
 /// `TimelineNotice` — has none in FleetKit at all, so the app owns one, written in the same shape
 /// as the other two so a reader learns one format.
+///
+/// The fourth is the app's own. Nothing the app itself notices fits any of those three enums —
+/// they are closed, in packages below this one — so `AppNotice` and `app.log` exist for what the
+/// composition root has to say about its own machinery. Today that is one case, and it is there
+/// because the tests that used to watch the change pump with a stopwatch now wait on the delivery
+/// instead: correct for the tests, but it means a pump that stalls in production would be silent
+/// everywhere. This is what makes it visible.
 ///
 /// Every path this type touches is under `directory` and nowhere else. That is the whole of its
 /// filesystem contract, and it is what `testDiagnosticsComposerWritesOnlyUnderItsOwnDirectory`
@@ -17,13 +24,16 @@ import FleetKit
 ///
 /// `@unchecked Sendable` is sound here because the two mutable fields, `wireSink` and `fleetSink`,
 /// are read and written only inside `lock`, this instance's private `NSLock`. That lock is the
-/// serialising mechanism. `timeline` is immutable and recovers in place.
+/// serialising mechanism. `timeline` and `app` are immutable and recover in place.
 final class DiagnosticsComposer: @unchecked Sendable {
     let directory: URL
     /// The app's own `timeline.log`. A `let`, because `TranscriptIndex` is handed this instance at
     /// construction and keeps it for the life of the app, so it has to survive a deletion rather
     /// than be replaced by a new one.
     let timeline: FileTimelineDiagnostics
+    /// The app's own `app.log`, on the same terms as `timeline`: the composition root's pump holds
+    /// it for the life of the app.
+    let app: FileAppDiagnostics
 
     private let lock = NSLock()
     private var wireSink: FileDiagnostics
@@ -47,16 +57,18 @@ final class DiagnosticsComposer: @unchecked Sendable {
         wireSink = FileDiagnostics(directory: directory)
         fleetSink = FileFleetDiagnostics(directory: directory)
         timeline = FileTimelineDiagnostics(directory: directory)
+        app = FileAppDiagnostics(directory: directory)
     }
 
-    /// Every line of all three files is on disk when this returns.
+    /// Every line of all four files is on disk when this returns.
     func flush() {
         wire.flush()
         fleet.flush()
         timeline.flush()
+        app.flush()
     }
 
-    /// Settings' *Delete diagnostics*: the log files go and the three sinks keep working.
+    /// Settings' *Delete diagnostics*: the log files go and the four sinks keep working.
     ///
     /// Removing the files under the sinks is not enough on its own. Each of the three holds an open
     /// `FileHandle` and a running byte offset, so after an `unlink` it writes on into an inode with
@@ -74,6 +86,7 @@ final class DiagnosticsComposer: @unchecked Sendable {
         wireSink.flush()
         fleetSink.flush()
         timeline.flush()
+        app.flush()
 
         let manager = FileManager.default
         if let names = try? manager.contentsOfDirectory(atPath: directory.path) {
@@ -84,6 +97,95 @@ final class DiagnosticsComposer: @unchecked Sendable {
         fleetSink = FileFleetDiagnostics(directory: directory)
         lock.unlock()
         timeline.reopen()
+        app.reopen()
+    }
+}
+
+/// What the app notices about its own machinery. Counts, identifiers and timings only, like every
+/// other line in this directory (parent §11) — no path, no title, no session id.
+enum AppNotice: Sendable, Hashable {
+    /// A batch of transcript changes reached the index `waitedMs` after the change feed took it off
+    /// the watcher's stream. Reported only past `TranscriptChangePump.stallThreshold`; a delivery
+    /// inside the threshold says nothing, because saying it every time would drown the file.
+    case transcriptChangeStalled(paths: Int, waitedMs: Int)
+
+    var jsonValue: JSONValue {
+        var object: [String: JSONValue] = ["at": .string(ISO8601DateFormatter().string(from: Date()))]
+        switch self {
+        case .transcriptChangeStalled(let paths, let waitedMs):
+            object["event"] = .string("transcript_change_stalled")
+            object["paths"] = .integer(Int64(paths))
+            object["waited_ms"] = .integer(Int64(waitedMs))
+        }
+        return .object(object)
+    }
+}
+
+/// `AppNotice` as one JSON line each in `<directory>/app.log`, rotating once into `app.log.1` —
+/// the same shape and the same discipline as the three files beside it.
+///
+/// `@unchecked Sendable` is sound here because every mutable field is read and written only inside
+/// `queue`, a serial `DispatchQueue` that is the single owner of the handle and the running size.
+/// That queue is the serialising mechanism.
+final class FileAppDiagnostics: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "afleet.app-diagnostics")
+    private let directory: URL
+    private let rotateAt: Int
+    private var handle: FileHandle?
+    private var size = 0
+
+    init(directory: URL, rotateAt: Int = 25 * 1024 * 1024) {
+        self.directory = directory
+        self.rotateAt = rotateAt
+        queue.sync { open() }
+    }
+
+    private var logURL: URL { directory.appendingPathComponent("app.log") }
+
+    private func open() {
+        let manager = FileManager.default
+        try? manager.createDirectory(at: directory, withIntermediateDirectories: true,
+                                     attributes: [.posixPermissions: 0o700])
+        if !manager.fileExists(atPath: logURL.path) {
+            manager.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
+        handle = try? FileHandle(forWritingTo: logURL)
+        _ = try? handle?.seekToEnd()
+        size = (try? manager.attributesOfItem(atPath: logURL.path)[.size] as? Int) ?? 0
+    }
+
+    /// Never throws, never blocks the caller: the write is handed to `queue` and the caller returns.
+    /// The one caller is a delivery path, and a diagnostic that could delay a delivery would be
+    /// reporting a stall by causing one.
+    func record(_ notice: AppNotice) {
+        queue.async { [self] in
+            guard var data = try? notice.jsonValue.canonicalData() else { return }
+            data.append(0x0A)
+            if size + data.count > rotateAt { rotate() }
+            try? handle?.write(contentsOf: data)
+            size += data.count
+        }
+    }
+
+    private func rotate() {
+        try? handle?.close(); handle = nil
+        let old = directory.appendingPathComponent("app.log.1")
+        try? FileManager.default.removeItem(at: old)
+        try? FileManager.default.moveItem(at: logURL, to: old)
+        open()
+    }
+
+    /// Every line written so far is on disk when this returns.
+    func flush() { queue.sync { try? handle?.synchronize() } }
+
+    /// Closes the handle and opens the log again, recreating the file if it is gone.
+    func reopen() {
+        queue.sync {
+            try? handle?.close()
+            handle = nil
+            size = 0
+            open()
+        }
     }
 }
 

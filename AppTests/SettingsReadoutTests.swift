@@ -12,7 +12,7 @@ final class SettingsReadoutTests: XCTestCase {
 
     // MARK: - The diagnostics directory
 
-    /// The three sinks write into the directory they were handed and nowhere else.
+    /// The four sinks write into the directory they were handed and nowhere else.
     ///
     /// The refusal this guards is X9's: `Fleet` builds two of these three itself, eagerly, from a
     /// directory it does not check, so "the sinks write only under their own directory" and "the
@@ -31,13 +31,14 @@ final class SettingsReadoutTests: XCTestCase {
         composer.wire.record(.captureSkipped(reason: "invented"))
         composer.fleet.record(.verb(name: "invented", exitCode: 0, durationMs: 1))
         composer.timeline.record(.indexBuilt(files: 1, symlinkedProjectsSkipped: 0, durationMs: 1))
+        composer.app.record(.transcriptChangeStalled(paths: 1, waitedMs: 2100))
         composer.flush()
 
         XCTAssertEqual(try LaunchFixtures.manifest(of: configHome), before,
                        "driving the three sinks changed the config home")
 
         let written = try FileManager.default.contentsOfDirectory(atPath: logs.path).sorted()
-        XCTAssertEqual(written, ["diagnostics.log", "fleet.log", "timeline.log"])
+        XCTAssertEqual(written, ["app.log", "diagnostics.log", "fleet.log", "timeline.log"])
         for name in written {
             let size = try Data(contentsOf: logs.appending(path: name)).count
             XCTAssertGreaterThan(size, 0, "\(name) was created and never written to")
@@ -54,7 +55,7 @@ final class SettingsReadoutTests: XCTestCase {
     /// inode, and nothing anywhere says so — the user asked to clear the logs and silently got no
     /// logging for the rest of the session. The assertion is on the write *after* the deletion, in
     /// all three files, which is the one that fails when the sinks are not renewed.
-    func testDeletingDiagnosticsLeavesAllThreeSinksWriting() throws {
+    func testDeletingDiagnosticsLeavesAllFourSinksWriting() throws {
         let temp = try TempTree()
         let logs = temp.root.appending(path: "logs", directoryHint: .isDirectory)
         let composer = DiagnosticsComposer(directory: logs)
@@ -62,10 +63,11 @@ final class SettingsReadoutTests: XCTestCase {
         composer.wire.record(.captureSkipped(reason: "invented-before"))
         composer.fleet.record(.verb(name: "invented-before", exitCode: 0, durationMs: 1))
         composer.timeline.record(.indexUpdated(changed: 1, durationMs: 1))
+        composer.app.record(.transcriptChangeStalled(paths: 1, waitedMs: 2100))
         composer.flush()
         // The floor: all three wrote before the deletion, so an empty file afterwards is the
         // deletion's doing and not a sink that never worked.
-        for name in ["diagnostics.log", "fleet.log", "timeline.log"] {
+        for name in ["app.log", "diagnostics.log", "fleet.log", "timeline.log"] {
             XCTAssertGreaterThan(try Data(contentsOf: logs.appending(path: name)).count, 0,
                                  "\(name) was empty before the deletion")
         }
@@ -75,16 +77,17 @@ final class SettingsReadoutTests: XCTestCase {
         composer.wire.record(.captureSkipped(reason: "invented-after"))
         composer.fleet.record(.verb(name: "invented-after", exitCode: 0, durationMs: 2))
         composer.timeline.record(.indexUpdated(changed: 2, durationMs: 2))
+        composer.app.record(.transcriptChangeStalled(paths: 2, waitedMs: 2200))
         composer.flush()
 
-        for name in ["diagnostics.log", "fleet.log", "timeline.log"] {
+        for name in ["app.log", "diagnostics.log", "fleet.log", "timeline.log"] {
             let url = logs.appending(path: name)
             XCTAssertTrue(FileManager.default.fileExists(atPath: url.path),
                           "\(name) does not exist after the deletion, so the sink is writing into an unlinked inode")
             let text = String(decoding: try Data(contentsOf: url), as: UTF8.self)
-            XCTAssertTrue(text.contains("invented-after") || text.contains("index_updated"),
+            XCTAssertTrue(text.contains("invented-after") || text.contains("\"changed\":2") || text.contains("\"waited_ms\":2200"),
                           "\(name) does not carry the line written after the deletion")
-            XCTAssertFalse(text.contains("invented-before"),
+            XCTAssertFalse(text.contains("invented-before") || text.contains("\"waited_ms\":2100"),
                            "\(name) still carries a line from before the deletion, so nothing was deleted")
         }
     }

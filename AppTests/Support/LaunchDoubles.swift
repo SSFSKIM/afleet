@@ -262,6 +262,27 @@ final class IndexBuildSignal: TimelineDiagnosticsSink, @unchecked Sendable {
     }
 }
 
+/// The diagnostics composer a launch built, carried back out of the seam.
+///
+/// `@unchecked Sendable` is sound here because the one mutable field is written and read only
+/// inside `lock`, this instance's private `NSLock`.
+final class DiagnosticsBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: DiagnosticsComposer?
+
+    init() {}
+
+    func set(_ composer: DiagnosticsComposer) {
+        lock.lock(); defer { lock.unlock() }
+        storage = composer
+    }
+
+    var value: DiagnosticsComposer? {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+}
+
 // MARK: - Shared helpers
 
 enum LaunchFixtures {
