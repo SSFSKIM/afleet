@@ -7,6 +7,10 @@ import PanelHostAPI
 struct AfleetApp: App {
     @State private var model = AppModel()
 
+    /// Spike S-C5-1, on an environment variable nothing but the spike sets. An ordinary launch
+    /// reads one variable and does nothing else here.
+    init() { NotificationSpike.runIfRequested() }
+
     /// What the window is looking at. It lives here rather than inside a view because `commands`
     /// is a scene builder: the menu items below are constructed outside every view body and can
     /// only move state that is owned above the window.
