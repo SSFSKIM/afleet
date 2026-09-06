@@ -22,6 +22,9 @@ final class FleetCoordinator: WorkspaceCoordinating {
     private let registrar: any ChannelRegistering
     private let index: any IndexAccess
     private let configHome: URL
+    /// Where `.claude.json` really is. Carried separately from `configHome` because the two are
+    /// different directories on an ordinary installation (`ConfigHome.globalConfig`).
+    private let globalConfig: URL
     private let now: @Sendable () -> Date
 
     /// What each key was last registered with. A re-registration with an unchanged seed is a call
@@ -54,6 +57,7 @@ final class FleetCoordinator: WorkspaceCoordinating {
     convenience init(workspace: Workspace, now: @escaping @Sendable () -> Date = { Date() }) {
         let home = workspace.configHome.root
         self.init(configHome: home,
+                  globalConfig: workspace.configHome.globalConfig,
                   registrar: workspace.fleet,
                   index: workspace.index,
                   model: FleetBrowserModel(lifecycle: workspace.fleet, configHome: home, now: now),
@@ -65,12 +69,17 @@ final class FleetCoordinator: WorkspaceCoordinating {
     /// `register` is not a `LifecycleAPI` member and the test that proves a cold launch registers
     /// every listed channel has to record it somewhere a lifecycle double cannot.
     init(configHome: URL,
+         globalConfig: URL? = nil,
          registrar: any ChannelRegistering,
          index: any IndexAccess,
          model: FleetBrowserModel,
          store: (any StateStore)? = nil,
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.configHome = configHome
+        // The default is the `CLAUDE_CONFIG_DIR` layout, which is what every scratch home in the
+        // tests builds. Production never takes it: the convenience initialiser above passes the
+        // resolved location.
+        self.globalConfig = globalConfig ?? configHome.appending(path: ".claude.json")
         self.registrar = registrar
         self.index = index
         self.model = model
@@ -88,9 +97,9 @@ final class FleetCoordinator: WorkspaceCoordinating {
     /// synchronously inside the initialiser, which put a whole-file scan on the main actor inside
     /// `LaunchSequence.run()`.
     private func loadGrouping() async {
-        let home = configHome
+        let document = globalConfig
         let order = await Task.detached(priority: .userInitiated) {
-            ClaudeProjects.order(configHome: home)
+            ClaudeProjects.order(globalConfig: document)
         }.value
         var stored = SidebarGrouping()
         if let store, let persisted = try? await store.read(SidebarGrouping.self,

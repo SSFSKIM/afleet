@@ -36,8 +36,9 @@ struct LaunchSequence: Sendable {
     var makeIndex: @Sendable (ConfigHome, any StateStore, DiagnosticsComposer) -> any IndexAccess
     var fleetFactory: @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL) -> any AppFleet
     var makeWatcher: @Sendable (ConfigHome) -> any TranscriptWatching
-    /// `<configHome>/.claude.json`'s `hasCompletedOnboarding`.
-    var readClaudeJSON: @Sendable (URL) -> Bool
+    /// The global config document's `hasCompletedOnboarding`. It takes the whole `ConfigHome` and
+    /// not its root, because where that document lives depends on how the root was derived.
+    var readClaudeJSON: @Sendable (ConfigHome) -> Bool
     var makeCoordinator: @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating
 
     init(storeRoot: URL = LaunchSequence.defaultStoreRoot,
@@ -50,7 +51,7 @@ struct LaunchSequence: Sendable {
          makeIndex: @escaping @Sendable (ConfigHome, any StateStore, DiagnosticsComposer) -> any IndexAccess = LaunchSequence.makeTranscriptIndex,
          fleetFactory: @escaping @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL) -> any AppFleet = LaunchSequence.makeFleet,
          makeWatcher: @escaping @Sendable (ConfigHome) -> any TranscriptWatching = { TranscriptWatcher(configHome: $0.root) },
-         readClaudeJSON: @escaping @Sendable (URL) -> Bool = { ClaudeJSONReader.hasCompletedOnboarding(configHome: $0) },
+         readClaudeJSON: @escaping @Sendable (ConfigHome) -> Bool = { ClaudeJSONReader.hasCompletedOnboarding(in: $0) },
          makeCoordinator: @escaping @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating = { _ in NoopWorkspaceCoordinator() }) {
         self.storeRoot = storeRoot
         self.diagnosticsRoot = diagnosticsRoot
@@ -139,7 +140,7 @@ struct LaunchSequence: Sendable {
 
         // The sign-in gate. A home whose `.claude.json` does not report a completed onboarding has
         // no account behind it, and every spawn below would fail at the handshake.
-        guard readClaudeJSON(configHome.root) else {
+        guard readClaudeJSON(configHome) else {
             return .setup(.notSignedIn(configHome: configHome.root))
         }
 
@@ -269,7 +270,28 @@ enum CanonicalPath {
     }
 }
 
-/// `<configHome>/.claude.json`, read and never written (X9).
+extension ConfigHome {
+    /// Where `.claude.json` actually is, which is **not** always inside the config home.
+    ///
+    /// The engine resolves it as `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` —
+    /// 2.1.263 `cli.pretty.js:298330`, `Ot(e) { return { globalConfig: Xe(e || Mt(), ".claude.json"), … } }`
+    /// with `Mt` bound to `os.homedir`. The config home is `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")`
+    /// — a *different* expression — so the two coincide only when the variable is set. With it
+    /// unset, which is the ordinary installation, the config home is `~/.claude` and the document
+    /// is its sibling `~/.claude.json`, and `<configHome>/.claude.json` names a file that has
+    /// never existed.
+    ///
+    /// `ConfigHome.source` already records which of the two derivations produced the root, so this
+    /// needs nothing from the environment a second time.
+    var globalConfig: URL {
+        switch source {
+        case .environment: root.appending(path: ".claude.json")
+        case .default: root.deletingLastPathComponent().appending(path: ".claude.json")
+        }
+    }
+}
+
+/// The engine's global config document, read and never written (X9).
 ///
 /// The reading approach is `TrustReader`'s — the same file, opened for reading and taken apart with
 /// `JSONSerialization` rather than through a second `Codable` model of a document afleet does not
@@ -278,9 +300,8 @@ enum CanonicalPath {
 enum ClaudeJSONReader {
     /// True only for an explicit `hasCompletedOnboarding: true`. A missing file, a missing key, an
     /// explicit `false` and a non-boolean are all "not signed in".
-    static func hasCompletedOnboarding(configHome: URL) -> Bool {
-        let file = configHome.appending(path: ".claude.json")
-        guard let data = read(file),
+    static func hasCompletedOnboarding(in configHome: ConfigHome) -> Bool {
+        guard let data = read(configHome.globalConfig),
               let document = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return false }
         return document["hasCompletedOnboarding"] as? Bool == true

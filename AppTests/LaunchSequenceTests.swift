@@ -129,7 +129,7 @@ final class LaunchSequenceTests: XCTestCase {
         var refusedSequence = refused.sequence
         refusedSequence.readClaudeJSON = { root in
             // Read the real file, so this exercises the reader and not a boolean.
-            ClaudeJSONReader.hasCompletedOnboarding(configHome: root)
+            ClaudeJSONReader.hasCompletedOnboarding(in: root)
         }
         try refused.temp.file("home/.claude.json", #"{"hasCompletedOnboarding": false}"#)
 
@@ -139,7 +139,7 @@ final class LaunchSequenceTests: XCTestCase {
 
         let accepted = try makeRig()
         var acceptedSequence = accepted.sequence
-        acceptedSequence.readClaudeJSON = { ClaudeJSONReader.hasCompletedOnboarding(configHome: $0) }
+        acceptedSequence.readClaudeJSON = { ClaudeJSONReader.hasCompletedOnboarding(in: $0) }
         try accepted.temp.file("home/.claude.json", #"{"hasCompletedOnboarding": true}"#)
 
         let acceptedRoute = await acceptedSequence.run()

@@ -33,7 +33,7 @@ final class ProjectGroupingTests: XCTestCase {
         """
         try Data(text.utf8).write(to: home.root.appending(path: ".claude.json"))
 
-        let order = ClaudeProjects.order(configHome: home.root)
+        let order = ClaudeProjects.order(globalConfig: home.root.appending(path: ".claude.json"))
         XCTAssertEqual(order.count, 3, "the scan recovered \(order.count) project keys, not three")
         XCTAssertEqual(order, ["/invented/repo-alpha", "/invented/repo-beta", "/invented/repo-gamma"])
     }
@@ -50,7 +50,7 @@ final class ProjectGroupingTests: XCTestCase {
         """
         try Data(text.utf8).write(to: home.root.appending(path: ".claude.json"))
 
-        let order = ClaudeProjects.order(configHome: home.root)
+        let order = ClaudeProjects.order(globalConfig: home.root.appending(path: ".claude.json"))
         XCTAssertEqual(order, ["/invented/repo-alpha", "/invented/repo-beta"])
         XCTAssertFalse(order.contains("mcpServers"))
         XCTAssertFalse(order.contains("invented-tip"))
@@ -91,7 +91,7 @@ final class ProjectGroupingTests: XCTestCase {
 
         let clock = ContinuousClock()
         let start = clock.now
-        let order = ClaudeProjects.order(configHome: home.root)
+        let order = ClaudeProjects.order(globalConfig: home.root.appending(path: ".claude.json"))
         let elapsed = start.duration(to: clock.now)
 
         XCTAssertEqual(order.count, projectCount)

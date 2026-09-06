@@ -2,7 +2,7 @@ import Foundation
 import AfleetCore
 import FleetKit
 
-/// `<configHome>/.claude.json`'s `projects` map, read and never written (X9).
+/// The engine's global config document's `projects` map, read and never written (X9).
 ///
 /// The engine keys that map by absolute project path and afleet reads it for exactly one thing: the
 /// order the user's projects are already in. `TrustReader` reads the same file the same way one
@@ -24,8 +24,13 @@ enum ClaudeProjects {
     /// anywhere in the document meant a project path that happened to appear earlier as some other
     /// field's *value* sorted to that earlier position. This reads keys only from inside the
     /// top-level `projects` object, so a value cannot be mistaken for a key.
-    static func order(configHome: URL) -> [String] {
-        guard let data = ClaudeJSONReader.read(configHome.appending(path: ".claude.json")) else { return [] }
+    /// `globalConfig` is the document's resolved location and **not** a config-home root, because
+    /// the two are different directories whenever `CLAUDE_CONFIG_DIR` is unset — see
+    /// `ConfigHome.globalConfig`. Appending `.claude.json` to the root here is what made this read
+    /// find nothing at all on an ordinary installation, so the resolved URL is what crosses the
+    /// boundary and the caller does the resolving once.
+    static func order(globalConfig: URL) -> [String] {
+        guard let data = ClaudeJSONReader.read(globalConfig) else { return [] }
         return projectKeys(in: data)
     }
 
