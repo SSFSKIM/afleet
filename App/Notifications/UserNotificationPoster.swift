@@ -49,8 +49,14 @@ final class UserNotificationPoster: NotificationPosting {
         await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
     }
 
-    /// The identifiers the system is currently showing for this application. The spike's evidence
-    /// that a post was *delivered* rather than merely accepted.
+    /// The identifiers the centre has **accepted and filed** for this application.
+    ///
+    /// **It is not evidence that anybody was shown anything, and nothing may treat it as such.**
+    /// Spike S-C5-1 measured this returning our own identifier on three consecutive runs from a
+    /// centre the same process had just read as `denied`. It measures acceptance, which is
+    /// correlated with display and is not display. It exists for the spike to report and is read
+    /// nowhere else; what a notification actually reached is asserted through `NotificationPosting`
+    /// against a recording double.
     func deliveredIdentifiers() async -> [String] {
         await UNUserNotificationCenter.current().deliveredNotifications().map(\.request.identifier)
     }

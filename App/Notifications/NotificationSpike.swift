@@ -7,9 +7,15 @@ import OSLog
 /// It runs only when `AFLEET_NOTIFICATION_SPIKE` is set in the environment, so an ordinary launch
 /// never reaches it, and it writes one line per step to standard output and to the unified log —
 /// the launch that ran it is not attached to a terminal, so the log is where the verdict is read
-/// from. It posts one notification with an invented identifier and then reads back what the system
-/// says it is showing, because "the centre accepted the request" and "the user was told" are
-/// different facts and only the second one is what §8.7 promises.
+/// from. It posts one notification with an invented identifier and then reads back what the centre
+/// says it has filed.
+///
+/// **That readback is not the answer, and the spike's own result is why.** "The centre accepted the
+/// request" and "the user was told" are different facts; §8.7 promises the second, and the readback
+/// reports the first. On this build it reported our identifier three runs running while the same
+/// process read `authorizationStatus == denied` — so a green readback is compatible with a user who
+/// saw nothing. The line that decides the verdict is the authorisation status; the delivered count
+/// is printed beside it as the trap it turned out to be, not as corroboration.
 ///
 /// It is kept rather than deleted after the spike: it is the only way to re-run the check on a new
 /// macOS, and it costs an environment-variable read on launch.
