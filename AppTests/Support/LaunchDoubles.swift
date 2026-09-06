@@ -164,6 +164,13 @@ final class RecordingCoordinator: WorkspaceCoordinating {
     func indexChanged(_ delta: IndexDelta) async { deltas.append(delta) }
 }
 
+/// Batches a subscriber received, collected off whatever task read them.
+actor BatchCollector {
+    private(set) var batches: [[URL]] = []
+    func append(_ batch: [URL]) { batches.append(batch) }
+    var count: Int { batches.count }
+}
+
 // MARK: - Shared helpers
 
 enum LaunchFixtures {

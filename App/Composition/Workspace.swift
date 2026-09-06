@@ -15,6 +15,10 @@ struct Workspace: Sendable {
     let fleet: any AppFleet
     /// Nil when the Developer toggle left the watcher stopped (spec §2 step 10).
     let watcher: (any TranscriptWatching)?
+    /// The watcher's changes, fanned out. Nil exactly when `watcher` is. **Task 7 subscribes here**
+    /// for §2 step 10's second half; the composition root has already taken its own subscription
+    /// for the index and taking a second one costs nothing.
+    let changes: TranscriptChangeFeed?
     /// The three sinks on `~/Library/Logs/afleet`. Beyond the eight fields the plan named, because
     /// Settings' ConfigHome section reads the symlinked-project count out of the last
     /// `TimelineNotice.indexBuilt` and nothing else records it, and Settings' Developer section

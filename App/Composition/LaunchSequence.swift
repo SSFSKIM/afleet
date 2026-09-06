@@ -152,18 +152,25 @@ struct LaunchSequence: Sendable {
         let fleet = fleetFactory(configHome, environment, binary, store, diagnosticsRoot)
         await fleet.start()
 
-        // 10. The watcher, unless the Developer toggle left it stopped (item 56).
+        // 10. The watcher, unless the Developer toggle left it stopped (item 56). Its single
+        //     `changes` stream is fanned out at once: the index is one consumer and Task 7's
+        //     `StreamIngestion.fileChanged(_:)` is the other, and a second `for await` on one
+        //     `AsyncStream` splits the batches rather than duplicating them.
         var watcher: (any TranscriptWatching)?
+        var changes: TranscriptChangeFeed?
         if !settings.developer.transcriptWatcherStopped {
             let candidate = makeWatcher(configHome)
             // An unwatchable `projects/` is not a reason to refuse the workspace: the list is
             // simply not live until the next launch.
-            if (try? candidate.start()) != nil { watcher = candidate }
+            if (try? candidate.start()) != nil {
+                watcher = candidate
+                changes = TranscriptChangeFeed(source: candidate.changes)
+            }
         }
 
         let workspace = Workspace(configHome: configHome, environment: environment, binary: binary,
                                   installed: installed, store: store, index: index, fleet: fleet,
-                                  watcher: watcher, diagnostics: diagnostics)
+                                  watcher: watcher, changes: changes, diagnostics: diagnostics)
 
         // 9. Registration, through the coordinator seam, at all three points.
         let coordinator = await makeCoordinator(workspace)
@@ -183,9 +190,10 @@ struct LaunchSequence: Sendable {
             try? await index.persist()
         }
 
-        if let watcher {
+        if let changes {
+            let subscription = await changes.subscribe()
             Task.detached(priority: .utility) {
-                for await changed in watcher.changes {
+                for await changed in subscription {
                     let delta = await index.update(changed: changed)
                     await coordinator.indexChanged(delta)
                 }

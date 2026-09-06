@@ -292,6 +292,47 @@ final class LaunchSequenceTests: XCTestCase {
         cold.watcher.finish()
     }
 
+    // MARK: - The watcher's changes reach every consumer
+
+    /// Spec §2 step 10 has two consumers of one stream: the index, which the composition root
+    /// pumps, and `StreamIngestion.fileChanged(_:)` for the open channel, which is Task 7's.
+    ///
+    /// `TranscriptWatching.changes` is a single `AsyncStream`, and a second `for await` on one of
+    /// those splits its elements between the loops rather than duplicating them — so a composition
+    /// root that consumed the watcher directly would have taken the only subscription and left the
+    /// second consumer with nothing it could do that did not rewrite `LaunchSequence`. Both counts
+    /// below are asserted, because a split shows up as each consumer seeing *some* of the batches.
+    @MainActor
+    func testEveryWatcherChangeReachesEverySubscriber() async throws {
+        var rig = try makeRig()
+        let coordinator = RecordingCoordinator()
+        rig.sequence.makeCoordinator = { _ in coordinator }
+
+        let route = await rig.sequence.run()
+        let workspace = try XCTUnwrap(route.workspace)
+        let feed = try XCTUnwrap(workspace.changes,
+                                 "the workspace carries no change feed for a second consumer to subscribe to")
+
+        // Task 7's subscription, taken after the composition root has taken the index's.
+        let second = await feed.subscribe()
+        let collected = BatchCollector()
+        let reader = Task { for await batch in second { await collected.append(batch) } }
+
+        for number in 1...3 {
+            rig.watcher.emit([workspace.configHome.root.appending(path: "projects/invented/\(number).jsonl")])
+        }
+
+        let secondSawAll = await LaunchFixtures.waitAsync { await collected.count == 3 }
+        let secondCount = await collected.count
+        XCTAssertTrue(secondSawAll, "the second subscriber saw \(secondCount) of three batches")
+
+        let indexSawAll = await LaunchFixtures.wait { coordinator.deltas.count == 3 }
+        XCTAssertTrue(indexSawAll, "the index pump saw \(coordinator.deltas.count) of three batches")
+
+        reader.cancel()
+        rig.watcher.finish()
+    }
+
     // MARK: - The build is not awaited
 
     /// C3 measured that an index build awaited from a main-actor-bound caller runs at about a third
