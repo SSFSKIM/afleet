@@ -1,4 +1,5 @@
 import Foundation
+import XCTest
 import AfleetCore
 import FleetKit
 @testable import Afleet
@@ -19,9 +20,21 @@ actor RegistrarDouble: ChannelRegistering {
     }
 
     private(set) var calls: [Call] = []
+    private var waiters: [(needed: Int, expectation: XCTestExpectation)] = []
 
     func register(_ key: ChannelKey, cwd: URL, recent: Bool) async {
         calls.append(Call(key: key, cwd: cwd, recent: recent))
+        for waiter in waiters where waiter.needed <= calls.count { waiter.expectation.fulfill() }
+        waiters.removeAll { $0.needed <= calls.count }
+    }
+
+    /// Fulfilled the moment the `count`-th registration arrives. Nothing polls: the registration
+    /// itself ends the wait, so the verdict does not depend on how much of the machine a polling
+    /// task got. Safe to arm after the stimulus as well as before it.
+    func expect(_ count: Int) -> XCTestExpectation {
+        let expectation = XCTestExpectation(description: "\(count) registrations")
+        if calls.count >= count { expectation.fulfill() } else { waiters.append((count, expectation)) }
+        return expectation
     }
 
     var count: Int { calls.count }

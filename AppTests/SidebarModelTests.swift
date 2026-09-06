@@ -138,6 +138,34 @@ final class SidebarModelTests: XCTestCase {
         XCTAssertEqual(Set(model.allRows.map(\.id)), [staying, arriving])
     }
 
+    /// Minor 3: a snapshot that dropped the selected session drops the selection with it. A
+    /// selection pointing at a session with no row is a sidebar holding a reference it cannot draw.
+    func testASnapshotThatDropsTheSelectedSessionClearsTheSelection() async throws {
+        let home = URL(fileURLWithPath: "/invented/config-home", isDirectory: true)
+        let staying = SidebarFixtures.session("a")
+        let leaving = SidebarFixtures.session("8")
+        let now = Date()
+        let model = FleetBrowserModel(lifecycle: LifecycleDouble(), configHome: home)
+        model.apply(SidebarFixtures.snapshot(configHome: home, entries: [
+            SidebarFixtures.entry(staying, configHome: home, cwd: "/invented/project-alpha", mtime: now),
+            SidebarFixtures.entry(leaving, configHome: home, cwd: "/invented/project-alpha", mtime: now),
+        ]))
+        model.select(leaving)
+        XCTAssertEqual(model.selected, leaving)
+
+        model.apply(SidebarFixtures.snapshot(configHome: home, entries: [
+            SidebarFixtures.entry(staying, configHome: home, cwd: "/invented/project-alpha", mtime: now),
+        ]))
+        XCTAssertNil(model.selected, "the selection survived the snapshot that dropped its session")
+
+        // The floor: a selection whose session is still in the snapshot is left alone.
+        model.select(staying)
+        model.apply(SidebarFixtures.snapshot(configHome: home, entries: [
+            SidebarFixtures.entry(staying, configHome: home, cwd: "/invented/project-alpha", mtime: now),
+        ]))
+        XCTAssertEqual(model.selected, staying, "a still-listed selection was cleared")
+    }
+
     // MARK: - The two refusals
 
     /// `busy` becomes a banner naming the operation, and **the surface never retries**: the double

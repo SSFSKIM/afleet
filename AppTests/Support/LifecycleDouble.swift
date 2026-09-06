@@ -116,12 +116,38 @@ actor FleetDouble: AppFleet {
     }
 }
 
+/// A coordinator that records the composition root stopping it.
+///
+/// `AppModel.launch()` is re-entrant — *Check again* is the same call as the first launch — so a
+/// coordinator built by an earlier launch has to be stopped before a later one replaces it, or its
+/// `updates` loop outlives the model anything draws.
+@MainActor
+final class StoppableCoordinatorDouble: WorkspaceCoordinating {
+    private(set) var stops = 0
+    init() {}
+    func snapshotAvailable(_ snapshot: IndexSnapshot, origin: SnapshotOrigin) async {}
+    func indexChanged(_ delta: IndexDelta) async {}
+    func stop() { stops += 1 }
+}
+
 // MARK: - Values the sidebar tests build
 
 enum SidebarFixtures {
     /// Invented throughout. No identifier here comes from any real home (§11).
+    ///
+    /// `nibble` is one hex digit, repeated to fill a v4 UUID, so `session("1")` reads as one
+    /// recognisable session everywhere it appears. The precondition is not decoration: a
+    /// non-hex character makes `SessionID.init` return nil, and the force-unwrap that used to be
+    /// here turned a one-character typo in a test into a crash that took the whole bundle down and
+    /// reported as "Failing tests" with no assertion and no line number.
     static func session(_ nibble: String) -> SessionID {
-        SessionID("\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)-\(nibble)\(nibble)\(nibble)\(nibble)-4\(nibble)\(nibble)\(nibble)-8\(nibble)\(nibble)\(nibble)-\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)\(nibble)")!
+        precondition(nibble.count == 1 && nibble.first!.isHexDigit,
+                     "a session fixture's nibble must be a single hex digit; got \(nibble.count) character(s)")
+        let repeated = String(repeating: nibble, count: 12)
+        let head = String(repeating: nibble, count: 8)
+        let block = String(repeating: nibble, count: 4)
+        let three = String(repeating: nibble, count: 3)
+        return SessionID("\(head)-\(block)-4\(three)-8\(three)-\(repeated)")!
     }
 
     static func state(_ key: ChannelKey, origin: ChannelOrigin, at moment: Date = Date()) -> ChannelState {
