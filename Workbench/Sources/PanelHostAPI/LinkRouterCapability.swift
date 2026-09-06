@@ -33,5 +33,8 @@ public struct LinkTarget: Sendable {
 /// would see a module and a protocol competing for one name.
 public protocol LinkRouterCapability: Sendable {
     func register(_ target: LinkTarget) async
+    /// Drops every target registered for this tab. `PanelHost.unregister(_:)` calls it, so a
+    /// target never outlives the tab that registered it and cannot deliver into one that is gone.
+    func unregister(tab: PanelTabID) async
     func open(_ link: WorkspaceLink, from destination: LinkDestination) async
 }

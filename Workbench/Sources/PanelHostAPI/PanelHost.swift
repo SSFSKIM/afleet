@@ -10,7 +10,8 @@ public enum PanelHostError: Error, Hashable, Sendable {
 /// The panel-tab host. C5's app shell implements it; C6 and the C7 leaves register into it.
 @MainActor public protocol PanelHost: AnyObject {
     func register(_ tab: any PanelTab) throws
-    /// Removes a registered tab and releases every session it held. A later child replaces a
+    /// Removes a registered tab, releases every session it held, and calls
+    /// `LinkRouterCapability.unregister(tab:)` so no link target outlives it. A later child replaces a
     /// placeholder by unregistering it and then registering its own tab for the same id;
     /// without this, `register`'s duplicate check would make the seven ids permanently
     /// first-come, and C6 could never register Thread over C5's placeholder.

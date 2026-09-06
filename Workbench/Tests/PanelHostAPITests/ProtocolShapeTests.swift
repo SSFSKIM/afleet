@@ -71,6 +71,24 @@ final class ProtocolShapeTests: XCTestCase {
         XCTAssertEqual(exits, [fixture.paneExit])
     }
 
+    /// `LinkRouterCapability.unregister(tab:)` is the counterpart `PanelHost.unregister(_:)` calls.
+    /// Without it a `LinkTarget` would outlive the tab that registered it, keep winning the
+    /// specificity contest and deliver into a tab that is gone. The floor is that delivery is
+    /// proven to work first, so the second assertion is not a pair of empty collections.
+    func testAWithdrawnTabsLinkTargetNoLongerDelivers() async {
+        let fixture = await Self.makeContext()
+        let link = WorkspaceLink.url(URL(string: "https://example.invalid/withdrawn")!)
+
+        await fixture.context.links.open(link, from: .currentPanel)
+        var delivered = await fixture.router.delivered
+        XCTAssertEqual(delivered.count, 1, "the registered target was not reached to begin with")
+
+        await fixture.context.links.unregister(tab: .browser)
+        await fixture.context.links.open(link, from: .currentPanel)
+        delivered = await fixture.router.delivered
+        XCTAssertEqual(delivered.count, 1, "a withdrawn tab's target still delivered")
+    }
+
     // MARK: - Stubs
 
     struct Fixture: Sendable {
@@ -140,6 +158,7 @@ final class ProtocolShapeTests: XCTestCase {
         private var targets: [LinkTarget] = []
         private(set) var delivered: [(WorkspaceLink, LinkDestination)] = []
         func register(_ target: LinkTarget) async { targets.append(target) }
+        func unregister(tab: PanelTabID) async { targets.removeAll { $0.tab == tab } }
         func open(_ link: WorkspaceLink, from destination: LinkDestination) async {
             guard let target = targets.filter({ $0.handles(link) }).max(by: { $0.specificity < $1.specificity })
             else { return }
