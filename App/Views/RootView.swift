@@ -58,6 +58,11 @@ struct WorkspaceView: View {
     @Bindable var shell: ShellModel
     let workspace: Workspace
 
+    /// One switcher per workspace, built on first appearance. It reads the browser, which is the
+    /// same object for the life of a launch, so rebuilding it per body evaluation would throw away
+    /// the query the user is in the middle of typing.
+    @State private var switcher: QuickSwitcherModel?
+
     var body: some View {
         NavigationSplitView {
             Group {
@@ -83,5 +88,16 @@ struct WorkspaceView: View {
         }
         .navigationTitle("afleet")
         .frame(minWidth: 1000, minHeight: 640)
+        .onAppear {
+            guard switcher == nil, let browser = model.browser else { return }
+            switcher = QuickSwitcherModel(browser: browser)
+        }
+        .sheet(isPresented: $shell.isSwitcherPresented) {
+            if let switcher {
+                QuickSwitcherView(model: switcher, shell: shell) {
+                    shell.isSwitcherPresented = false
+                }
+            }
+        }
     }
 }
