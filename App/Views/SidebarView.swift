@@ -132,6 +132,11 @@ struct ChannelRowView: View {
 
     let row: ChannelRow
 
+    /// Activity's badge for this channel (spec §6, G2b), read through the environment because
+    /// `RootView` is closed and the sidebar is four levels below it. Optional: a preview or a test
+    /// that renders one row in isolation has no `AppModel`, and a row without a badge is a row.
+    @Environment(AppModel.self) private var app: AppModel?
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: (row.originGlyph ?? .archived).systemImage)
@@ -156,17 +161,29 @@ struct ChannelRowView: View {
                 }
             }
             Spacer(minLength: 4)
-            if row.pendingDecisionCount > 0 {
-                Text("\(row.pendingDecisionCount)")
+            // The count is Activity's, not `row.pendingDecisionCount`: a decision the user has
+            // already looked at is still pending, and a red count that survived looking at it
+            // would ask them to act on something they have acted on. Both halves clear together
+            // when the channel is selected, and both come back when the next thing arrives.
+            if badge.count > 0 {
+                Text("\(badge.count)")
                     .font(.caption2.monospacedDigit())
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(.red))
                     .foregroundStyle(.white)
-                    .accessibilityLabel(Text("\(row.pendingDecisionCount) waiting decisions"))
+                    .accessibilityLabel(Text("\(badge.count) waiting decisions"))
+            }
+            if badge.isUnread {
+                Circle()
+                    .fill(.tint)
+                    .frame(width: 7, height: 7)
+                    .accessibilityLabel(Text("unread"))
             }
         }
     }
+
+    private var badge: ChannelBadge { app?.activity?.badge(for: row.id) ?? .none }
 
     /// Presence when the channel is live, the transcript's own preview when it is not. A row with
     /// no `ChannelState` has no presence to report and saying "Idle" would be an invention.

@@ -20,6 +20,10 @@ struct AfleetApp: App {
     var body: some Scene {
         WindowGroup("afleet") {
             RootView(model: model, shell: shell)
+                // The sidebar's unread badge is Activity's answer, and `RootView` is closed to
+                // further edits, so the model reaches `ChannelRowView` through the environment
+                // rather than through four more initialiser arguments.
+                .environment(model)
         }
         .commands { shellCommands }
 
