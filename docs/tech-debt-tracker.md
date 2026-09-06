@@ -193,6 +193,25 @@ do not renumber anything above.
     9.1 s and 50.7 s and failed against ceilings of 90 s and 180 s. Owner: C4. Closer: measure
     the verb under a deliberately cold daemon and set the default from that, rather than raising
     it blind; consider whether a `--bg` verb should have a different budget from `agents --json`.
+    **Closed** 2026-09-06. The second merge-evidence run turned the guess into a failure with a
+    signature: `verbFailed(verb: "stop", exitCode: -1)`, where `-1` is the runner reporting that
+    the client had not exited when the settle fired — the timeout chain and nothing else. The
+    daemon log of that run shows job `5cfb47fd` spawned at 08:00:14.325 and `settled (killed)` at
+    08:00:36.206, twenty-two seconds later: the kill landed just after the runner had SIGTERMed the
+    `stop` client. A mutation abandoned at twenty seconds that the daemon then honours anyway is
+    the worst of both outcomes. Measured afterwards from a shell against 2.1.263 in the same
+    scratch home: `claude --bg --exec 'sleep 300'` returns in **1.1 s**; `claude stop <short>`
+    returns in **0.70 s**, with the daemon logging `settled (killed)` within a second and roster
+    and registry both empty two seconds later; `agents --json` **0.2 s**; `rm` **0.7 s**. The
+    engine's own stop is fast, so the budget is about reaching a daemon that may be cold — the
+    2.1.263 daemon is transient, exiting five idle seconds after its last client and booting again
+    in about 0.3 s — and about the seventy seconds this entry itself observed under load. The fix
+    splits the budgets rather than raising one: `CLIVerbs.readBudget` is twenty seconds for
+    `agents --json` and `auth status`, `CLIVerbs.mutationBudget` is ninety for the two `--bg`
+    forms, `stop`, `respawn`, `rm` and `auth logout`, and `CLIVerbsTests`'
+    `testReadsAndMutationsTakeTheirOwnBudgets` reads back the timeout each verb handed the runner.
+    G5's own `CLIVerbs` dropped its 180-second override at the same time, so the gate now measures
+    the production budgets.
 28. **No net covers the sliver between a handoff's pre-launch recheck and its own transition.**
     `Lifecycle/ChannelSupervisor.swift:566-581`: rule 1 is suppressed for the whole handoff, and the
     designed nets are the release timeout into Contended and `beforeSpawn`'s recheck, both of which

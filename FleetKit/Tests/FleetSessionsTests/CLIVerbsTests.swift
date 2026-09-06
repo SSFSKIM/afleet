@@ -176,4 +176,39 @@ final class CLIVerbsTests: XCTestCase {
         XCTAssertEqual(events.last?.jsonValue["exit_code"]?.intValue, 1)
         XCTAssertNotNil(events.last?.jsonValue["duration_ms"]?.intValue)
     }
+
+    /// The two budgets, and which verb takes which.
+    ///
+    /// A read asks the daemon a question it can answer off state it has already written; a mutation asks it to
+    /// change something and then has to wait for the change to land, against a daemon that may be cold. Giving both
+    /// one ceiling is what tracker entry 27 was: the live gate's `stop` was abandoned at twenty seconds and the
+    /// daemon honoured it two seconds later anyway, which is the worst of both outcomes. Neither budget is asserted
+    /// as a number the caller happened to pass — the defaults are what production runs — so this reads the timeout
+    /// each verb actually handed the runner.
+    func testReadsAndMutationsTakeTheirOwnBudgets() async throws {
+        try files.writeJob(short: "j00001", state: "working", sessionID: SessionID(),
+                           pid: ScriptedHolderFiles.livePID)
+        try files.addRosterWorker(short: "j00001", pid: ScriptedHolderFiles.livePID)
+
+        _ = try await verbs.agentsJSON()
+        _ = try await verbs.authStatus()
+        try await verbs.stop(JobShort(rawValue: "j00001"))
+        try? await verbs.respawn(JobShort(rawValue: "j00001"))
+        try? await verbs.remove(JobShort(rawValue: "j00001"))
+        try? await verbs.authLogout()
+        _ = try? await verbs.backgroundExec("true", cwd: home.url)
+        _ = try? await verbs.backgroundResume(SessionID(), cwd: home.url)
+
+        let taken = Dictionary(zip(calls.invocations.map { $0.prefix(2).joined(separator: " ") }, calls.timeouts),
+                               uniquingKeysWith: { first, _ in first })
+        XCTAssertEqual(taken["agents --json"], CLIVerbs.readBudget)
+        XCTAssertEqual(taken["auth status"], CLIVerbs.readBudget)
+        for mutation in ["stop j00001", "respawn j00001", "rm j00001", "auth logout", "--bg --exec",
+                         "--bg --resume"] {
+            XCTAssertEqual(taken[mutation], CLIVerbs.mutationBudget, "\(mutation) did not take the mutation budget")
+        }
+        XCTAssertEqual(CLIVerbs.readBudget, .seconds(20))
+        XCTAssertEqual(CLIVerbs.mutationBudget, .seconds(90))
+        XCTAssertLessThan(CLIVerbs.readBudget, CLIVerbs.mutationBudget)
+    }
 }

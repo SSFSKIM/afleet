@@ -55,16 +55,36 @@ public struct CLIVerbs: Sendable {
     /// `LaunchConfiguration.childEnvironment(over:configHome:)` for a dummy launch in `configHome`.
     private let environment: [String: String]
     private let diagnostics: any FleetDiagnosticsSink
-    private let timeout: Duration
+    private let readTimeout: Duration
+    private let mutationTimeout: Duration
     /// Drives the roster confirmation's bounded re-read. Production passes `ContinuousClock`.
     private let clock: any Clock<Duration>
 
+    /// A verb that only asks a question: `agents --json` and `auth status`. Both answer off state the daemon has
+    /// already written, and neither waits on a worker — G5 measured `agents --json` at 0.2 s against the installed
+    /// 2.1.263 — so twenty seconds is a generous ceiling and stays the one that was always here.
+    public static let readBudget = Duration.seconds(20)
+    /// A verb that changes the daemon's world: the two `--bg` forms, `stop`, `respawn`, `rm` and `auth logout`.
+    ///
+    /// Each of these is fast on its own — measured from a shell against 2.1.263 in G5's scratch home,
+    /// `--bg --exec` returns in 1.1 s, `stop` in 0.70 s, `rm` in 0.7 s — but each also has to reach a daemon that
+    /// may be cold, and the daemon is transient: it exits five idle seconds after its last client and boots again
+    /// on the next one. Tracker entry 27 watched about seventy seconds pass between the verb being invoked and the
+    /// daemon logging the spawn while several earlier workers were still settling in the same home. Ninety seconds
+    /// is that observation with margin. The asymmetry is the point: a read that hangs costs a stale listing, while
+    /// a mutation abandoned mid-request leaves the daemon honouring a change afleet has already given up on —
+    /// exactly what the second merge-evidence run saw when a twenty-second `stop` was SIGTERMed two seconds before
+    /// the daemon logged `settled (killed)`.
+    public static let mutationBudget = Duration.seconds(90)
+
     public init(runner: any DirectoryProcessRunner, binary: URL, configHome: ConfigHome,
                 environment: [String: String],
-                diagnostics: any FleetDiagnosticsSink, timeout: Duration = .seconds(20),
+                diagnostics: any FleetDiagnosticsSink, readTimeout: Duration = CLIVerbs.readBudget,
+                mutationTimeout: Duration = CLIVerbs.mutationBudget,
                 clock: any Clock<Duration> = ContinuousClock()) {
         self.runner = runner; self.binary = binary; self.configHome = configHome; self.environment = environment
-        self.diagnostics = diagnostics; self.timeout = timeout; self.clock = clock
+        self.diagnostics = diagnostics; self.readTimeout = readTimeout; self.mutationTimeout = mutationTimeout
+        self.clock = clock
     }
 
     /// How long the new job has to appear in `daemon/roster.json`, and how often that file is re-read. Whether the
@@ -77,29 +97,29 @@ public struct CLIVerbs: Sendable {
     // MARK: - Verbs
 
     public func agentsJSON() async throws -> [AgentsRow] {
-        let out = try await run("agents", ["agents", "--json"])
+        let out = try await run("agents", ["agents", "--json"], budget: readTimeout)
         return AgentsRow.decodeArray(out.stdout)
     }
 
     public func stop(_ short: JobShort) async throws {
-        _ = try await run("stop", ["stop", short.rawValue])
+        _ = try await run("stop", ["stop", short.rawValue], budget: mutationTimeout)
     }
 
     public func respawn(_ short: JobShort) async throws {
-        _ = try await run("respawn", ["respawn", short.rawValue])
+        _ = try await run("respawn", ["respawn", short.rawValue], budget: mutationTimeout)
     }
 
     public func remove(_ short: JobShort) async throws {
-        _ = try await run("rm", ["rm", short.rawValue])
+        _ = try await run("rm", ["rm", short.rawValue], budget: mutationTimeout)
     }
 
     public func authStatus() async throws -> JSONValue {
-        let out = try await run("auth status", ["auth", "status"])
+        let out = try await run("auth status", ["auth", "status"], budget: readTimeout)
         return (try? JSONDecoder().decode(JSONValue.self, from: out.stdout)) ?? .null
     }
 
     public func authLogout() async throws {
-        _ = try await run("auth logout", ["auth", "logout"])
+        _ = try await run("auth logout", ["auth", "logout"], budget: mutationTimeout)
     }
 
     /// Sends a session to the background and returns the short of the job the CLI created, found by diffing
@@ -109,7 +129,7 @@ public struct CLIVerbs: Sendable {
     /// tie-breaker between candidate job records.
     public func backgroundResume(_ id: SessionID, cwd: URL) async throws -> JobShort {
         let before = Set(jobShorts())
-        _ = try await run("--bg --resume", ["--bg", "--resume", id.description], cwd: cwd)
+        _ = try await run("--bg --resume", ["--bg", "--resume", id.description], cwd: cwd, budget: mutationTimeout)
         // `requireNew: false`, and that is the whole of the fix. The daemon reuses a session's existing short when
         // the same session is backgrounded again — the live gate watched it write
         // `bg claimed-spare fdb4e2d6 (fleet)` under the very short the job had been adopted from — so a newness
@@ -125,7 +145,7 @@ public struct CLIVerbs: Sendable {
     /// newness alone.
     public func backgroundExec(_ command: String, cwd: URL) async throws -> JobShort {
         let before = Set(jobShorts())
-        _ = try await run("--bg --exec", ["--bg", "--exec", command], cwd: cwd)
+        _ = try await run("--bg --exec", ["--bg", "--exec", command], cwd: cwd, budget: mutationTimeout)
         // `requireNew: true`: an exec job carries no session, so newness is the only thing that tells this call's
         // job from every other exec job in the home.
         return try await confirmed(matching: { _ in true }, notIn: before, requireNew: true,
@@ -135,8 +155,10 @@ public struct CLIVerbs: Sendable {
     // MARK: - Internals
 
     /// `cwd` nil is a verb that acts on the config home and cares nothing for where it runs; a verb that names one
-    /// runs there.
-    private func run(_ verb: String, _ arguments: [String], cwd: URL? = nil) async throws -> ProcessOutput {
+    /// runs there. `budget` is the caller's class of verb — `readBudget` or `mutationBudget` — rather than one
+    /// timeout for everything, so a `stop` is never abandoned on a ceiling chosen for a listing.
+    private func run(_ verb: String, _ arguments: [String], cwd: URL? = nil,
+                     budget: Duration) async throws -> ProcessOutput {
         // A monotonic counter, not a Clock instant: this measures a call that already happened rather than driving
         // a timer, and the package's clocks stay injected.
         let start = DispatchTime.now().uptimeNanoseconds
@@ -144,9 +166,9 @@ public struct CLIVerbs: Sendable {
         do {
             if let cwd {
                 out = try await runner.run(binary, arguments: arguments, environment: environment, cwd: cwd,
-                                           timeout: timeout)
+                                           timeout: budget)
             } else {
-                out = try await runner.run(binary, arguments: arguments, environment: environment, timeout: timeout)
+                out = try await runner.run(binary, arguments: arguments, environment: environment, timeout: budget)
             }
         } catch {
             diagnostics.record(.verb(name: verb, exitCode: -1, durationMs: elapsedMs(since: start)))

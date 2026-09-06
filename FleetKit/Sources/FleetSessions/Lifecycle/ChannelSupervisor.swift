@@ -1718,6 +1718,14 @@ public actor ChannelSupervisor {
         // whose registry record vanishes, and the channel is archived from both.
         if here == .foreignUsersTerminal || here == .backgroundJob {
             guard mine.isEmpty else { publish(); return }
+            // Not while an operation of ours is in flight, for the same reason rule 1 below is not. `adopt()` runs
+            // `claude stop <short>` and then waits for exactly this disappearance — the job's roster worker leaving
+            // and its pid dying *is* the release it is waiting for — and `.adopt` has one row, out of
+            // `.backgroundJob`. Archiving on the release therefore takes adopt's only from-state away between its
+            // wait and its transition, and adopt returns having spawned nothing and thrown nothing: §7.4's round
+            // trip silently does not happen. The observer re-reads every `pollInterval`, so a suppressed archive is
+            // taken by the next tick once the operation has finished and the channel really is nobody's.
+            guard inFlight == nil else { publish(); return }
             apply(.recordDisappeared, to: .archivedRecent)
             return
         }

@@ -73,6 +73,9 @@ final class LifecycleRowTests: XCTestCase {
             T(.capReached, .ready, .seventhSpawnNeeded, .dormant), T(.connectingClean, .connecting, .handshakeClean, .ready)],
         "testAdoptStopsTheJobWaitsForRosterRemovalThenResumes": [
             T(.jobAdopt, .backgroundJob, .adopt, .connecting), T(.connectingClean, .connecting, .handshakeClean, .ready)],
+        // The same two scenarios, driven with a holder poll landing on the job's own release.
+        "testAdoptSurvivesAHolderPollLandingOnTheJobsOwnRelease": [
+            T(.jobAdopt, .backgroundJob, .adopt, .connecting), T(.connectingClean, .connecting, .handshakeClean, .ready)],
         "testAStaleRecordSeenDuringAHandoffDoesNotTurnTheChannelContended": [
             T(.ownedSendToBackground, .ready, .sendToBackground, .backgroundJob)],
         "testSendToBackgroundTerminatesWaitsForRegistryRemovalThenStartsAJob": [
@@ -1034,6 +1037,46 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(adopted.origin, .owned(.ready))
         try await rig.drainPublished(of: supervisor)
         XCTAssertTrue(rig.published(of: supervisor).contains { $0.origin == .owned(.connecting) })
+        rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
+    }
+
+    /// The release `adopt()` waits for **is** the fact the observer archives on.
+    ///
+    /// `adopt()` runs `claude stop <short>` and then waits for the job's roster worker to leave and its pid to die.
+    /// A holder poll landing in that window sees no holder for the session at all, and the record-disappeared
+    /// branch of `holdersChanged` archived the channel on the spot — out of `.backgroundJob`, which is the only
+    /// from-state `.adopt` has. The transition was then refused, `adopt()` returned having spawned nothing and
+    /// thrown nothing, and the caller got back a channel resting archived: §7.4's round trip silently did not
+    /// happen. G5's second merge-evidence run failed exactly this way, and read the archived channel as a holder
+    /// the post-handshake check had found.
+    ///
+    /// The poll is pushed straight through `holdersChanged` from `OwnershipCheck`'s `onReleased` seam, which is the
+    /// one place the window can be hit deterministically rather than hoped for.
+    ///
+    /// Deliberate break: drop the `inFlight == nil` guard from that branch → the channel ends `archived`, nothing
+    /// launches, and this fails on the first assertion below.
+    func testAdoptSurvivesAHolderPollLandingOnTheJobsOwnRelease() async throws {
+        let rig = try newRig()
+        let session = try FakeClaudeLaunch.sessionID(of: Self.idleFixture)
+        let short = "j00001"
+        let worker = try rig.startHelper()
+        try rig.files.writeJob(short: short, state: "working", sessionID: session, resumeSessionID: session,
+                               pid: worker)
+        rig.files.onStopJob = { [weak rig] stopped in if stopped == short { rig?.killHelper(worker) } }
+        let supervisor = rig.supervisor(session: session, fixture: Self.idleFixture, origin: .backgroundJob)
+        _ = await rig.observer.reconcileNow()
+        // The poll that lands in the window: the job is gone, so the session has no holder of any kind.
+        rig.onReleased = { [weak supervisor] in
+            await supervisor?.holdersChanged(HolderSet(holders: [], observedAt: Date()))
+        }
+        rig.forgetTransitions()
+
+        try await rig.steppingClock { try await supervisor.adopt() }
+
+        let adopted = await supervisor.state
+        XCTAssertEqual(adopted.origin, .owned(.ready),
+                       "adopt did not reach owned/ready; a holder poll on its own release archived the channel")
+        XCTAssertEqual(rig.spawnCount, 1, "adopt spawned nothing")
         rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
     }
 

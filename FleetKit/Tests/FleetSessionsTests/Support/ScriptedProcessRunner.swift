@@ -25,16 +25,21 @@ struct ScriptedProcessRunner: DirectoryProcessRunner {
         private var storage: [[String]] = []
         private var envs: [[String: String]] = []
         private var directories: [URL?] = []
+        private var budgets: [Duration] = []
         init() {}
         var invocations: [[String]] { lock.lock(); defer { lock.unlock() }; return storage }
         var environments: [[String: String]] { lock.lock(); defer { lock.unlock() }; return envs }
         /// The working directory each invocation asked for, nil for a verb that named none: "where did the verb
         /// run" is a claim a caller has to be able to assert, and it is invisible in the arguments.
         var directoriesUsed: [URL?] { lock.lock(); defer { lock.unlock() }; return directories }
+        /// The timeout each invocation was given. `CLIVerbs` budgets a read differently from a mutation, and which
+        /// budget a verb took is invisible in its arguments and in its output.
+        var timeouts: [Duration] { lock.lock(); defer { lock.unlock() }; return budgets }
         @discardableResult func add(_ a: [String], environment: [String: String] = [:],
-                                    cwd: URL? = nil) -> Int {
+                                    cwd: URL? = nil, timeout: Duration = .zero) -> Int {
             lock.lock(); defer { lock.unlock() }
-            storage.append(a); envs.append(environment); directories.append(cwd); return storage.count - 1
+            storage.append(a); envs.append(environment); directories.append(cwd); budgets.append(timeout)
+            return storage.count - 1
         }
         /// How many invocations began with this prefix.
         func count(prefix: [String]) -> Int {
@@ -49,17 +54,17 @@ struct ScriptedProcessRunner: DirectoryProcessRunner {
 
     func run(_ executable: URL, arguments: [String], environment: [String: String],
              timeout: Duration) async throws -> ProcessOutput {
-        try answer(arguments, environment: environment, cwd: nil)
+        try answer(arguments, environment: environment, cwd: nil, timeout: timeout)
     }
 
     func run(_ executable: URL, arguments: [String], environment: [String: String], cwd: URL,
              timeout: Duration) async throws -> ProcessOutput {
-        try answer(arguments, environment: environment, cwd: cwd)
+        try answer(arguments, environment: environment, cwd: cwd, timeout: timeout)
     }
 
     private func answer(_ arguments: [String], environment: [String: String],
-                        cwd: URL?) throws -> ProcessOutput {
-        calls.add(arguments, environment: environment, cwd: cwd)
+                        cwd: URL?, timeout: Duration) throws -> ProcessOutput {
+        calls.add(arguments, environment: environment, cwd: cwd, timeout: timeout)
         for rule in rules where rule.match(arguments) { return try rule.respond(arguments) }
         return .exit(1)
     }

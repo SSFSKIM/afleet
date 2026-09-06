@@ -340,8 +340,12 @@ final class LiveFleetTests: XCTestCase {
             let rosterAfterAdopt = await rig.fleet.jobs()
             XCTAssertFalse(rosterAfterAdopt.contains { $0.short == job.short },
                            "the adopted job is still on the roster")
-            XCTAssertEqual(adopted.origin, .owned(.ready),
-                           "adopt did not reach owned/ready; the post-handshake check found a holder")
+            if adopted.origin != .owned(.ready) { await Self.dumpOnFailure(rig, key: key, label: "adopt") }
+            // Deliberately not "the post-handshake check found a holder": that branch lands the channel in
+            // `foreignUsersTerminal` or `contended` and never in `archived`, so naming it in the message sent the
+            // second merge-evidence run's diagnosis after a holder that was never there. What the assertion knows
+            // is the origin; `dumpOnFailure` above is what names the cause.
+            XCTAssertEqual(adopted.origin, .owned(.ready), "adopt did not reach owned/ready")
             XCTAssertEqual(adopted.identity.resolved, session)
 
             try await rig.fleet.perform(.reap, on: key)
@@ -759,6 +763,55 @@ final class LiveFleetTests: XCTestCase {
         return status
     }
 
+    /// What a lifecycle scenario saw at the moment it failed.
+    ///
+    /// A live failure that is only an origin mismatch names no cause, and by the time anyone reads the log the
+    /// scratch home is quiescent and the rig has deleted its diagnostics: the second merge-evidence run's adoption
+    /// failure had to be reconstructed from the engine's daemon log and the source. This prints the three things
+    /// that would have answered it outright — the channel's own state, who was holding the session and whether
+    /// those pids were alive, and the transitions the supervisor recorded, `transition_not_in_table` included.
+    ///
+    /// Identifiers, counts and shapes only: no path under a config home, no record contents, no stdout. The
+    /// diagnostics file is already structural by construction (`FleetDiagnosticEvent`), and only its structural
+    /// keys are echoed.
+    private static func dumpOnFailure(_ rig: LiveRig, key: ChannelKey, label: String) async {
+        let state = await rig.fleet.state(of: key)
+        let holders = state?.observed.holders ?? []
+        let described = holders.map { holder -> String in
+            let sources = holder.sources.map { String(describing: $0) }.sorted().joined(separator: "+")
+            return """
+                pid \(holder.pid) kind \(holder.kind) sources [\(sources)] job \(holder.isJob) \
+                own \(holder.isOwnChild) short \(holder.jobShort != nil) alive \
+                \(ProcessLiveness.isRunning(pid: holder.pid))
+                """
+        }
+        print("""
+            [G5] \(label) failed: origin \(String(describing: state?.origin)), presence \
+            \(String(describing: state?.presence)), banner \(state?.banner == nil ? "none" : "set"), \
+            holders \(holders.count) \(described)
+            """)
+        let verbs = rig.runner.calls.invocations.map { $0.prefix(2).joined(separator: " ") }
+        print("[G5] \(label) verbs in order: \(verbs); launches through the factory \(rig.launched.all.count)")
+        let log = rig.diagnosticsDirectory.appending(path: "fleet.log")
+        let lines = (try? String(contentsOf: log, encoding: .utf8))?.split(separator: "\n") ?? []
+        let wanted: Set<String> = ["transition", "transition_not_in_table", "handoff_wait", "ownership_check",
+                                   "cli_verb", "job_not_listed_after_background", "wedged"]
+        let rows = lines.compactMap { line -> String? in
+            guard let data = line.data(using: .utf8),
+                  let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+                  let object = value.objectValue,
+                  let name = object["event"]?.stringValue, wanted.contains(name) else { return nil }
+            let fields = ["row", "from", "transition_event", "to", "label", "outcome", "verb", "exit_code",
+                          "foreign_holders"]
+                .compactMap { field -> String? in
+                    guard let held = object[field] else { return nil }
+                    return "\(field)=\(held.stringValue ?? String(describing: held.intValue ?? 0))"
+                }
+            return "\(name)(\(fields.joined(separator: " ")))"
+        }
+        print("[G5] \(label) fleet diagnostics: \(rows)")
+    }
+
     /// Server names and status words only; the corpus records no shape for a rejected server.
     private static func describe(_ status: JSONValue) -> String {
         let servers = status["mcpServers"]?.arrayValue ?? []
@@ -977,7 +1030,9 @@ private final class LiveRig: @unchecked Sendable {   // every stored value is se
     let handles = LiveHandles()
     let launched = LaunchLog()
     private let storeDirectory: URL
-    private let diagnosticsDirectory: URL
+    /// `fleet.log` lives here. A scenario that fails reads it back: the transitions the supervisor recorded are the
+    /// only account of what the fleet did, and `shutdown()` deletes the directory.
+    let diagnosticsDirectory: URL
 
     static func resolveBinary() async throws -> (environment: ResolvedEnvironment, binary: URL) {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -1006,12 +1061,11 @@ private final class LiveRig: @unchecked Sendable {   // every stored value is se
         childEnvironment = template.childEnvironment(over: environment, configHome: configHome)
 
         let sink = FileFleetDiagnostics(directory: diagnosticsDirectory)
-        // Three minutes, not the twenty seconds a `CLIVerbs` defaults to. `claude --bg` returns in under a second
-        // against a warm daemon, but the live gate watched it take ninety seconds while the daemon was booting and
-        // several workers of earlier scenarios were still settling. The verb's own timeout is a production choice
-        // and not this test's to make; the gate simply refuses to read that contention as a verb failure.
+        // The production budgets, deliberately: this instance used to carry a 180-second override, which meant the
+        // gate measured a ceiling no user has. `CLIVerbs` now splits reads from mutations — twenty seconds and
+        // ninety — and the whole point of the gate is to find out whether those two hold against a real daemon.
         verbs = CLIVerbs(runner: runner, binary: binary, configHome: configHome, environment: childEnvironment,
-                         diagnostics: sink, timeout: .seconds(180))
+                         diagnostics: sink)
 
         let built = handles
         let record = launched
