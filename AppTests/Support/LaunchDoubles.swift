@@ -230,10 +230,15 @@ enum LaunchFixtures {
         guard let walk = manager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey]) else {
             return []
         }
-        // One directory has two spellings on macOS — `/var/…` and `/private/var/…` — and which one
-        // the enumerator reports is not the one the caller handed in. Both are stripped, so the
-        // relative path is relative however the root was spelled.
-        let prefixes = [root.standardizedFileURL.path, root.resolvingSymlinksInPath().standardizedFileURL.path]
+        // One directory has two spellings on macOS and which one the enumerator reports is not the
+        // one the caller handed in: a temporary directory is `/var/folders/…` as
+        // `FileManager.temporaryDirectory` gives it and as `resolvingSymlinksInPath()` returns it —
+        // that call *removes* a leading `/private` rather than adding one — while the enumerator
+        // reports `/private/var/folders/…`. Stripping only the first two spellings therefore
+        // matched nothing at all and every line fell back to its absolute path, which left this
+        // manifest's own guard clauses unable to fire. The `/private` spelling is the third.
+        let spellings = Set([root.standardizedFileURL.path, root.resolvingSymlinksInPath().standardizedFileURL.path])
+        let prefixes = spellings.flatMap { [$0, "/private" + $0] }.sorted { $0.count > $1.count }
         var lines: [String] = []
         for case let url as URL in walk {
             let path = url.path

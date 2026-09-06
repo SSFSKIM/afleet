@@ -37,6 +37,10 @@ final class LaunchSequenceTests: XCTestCase {
                          delta: IndexDelta = IndexDelta(added: [LaunchFixtures.sessionA])) throws -> Rig {
         let temp = try TempTree()
         let configHome = try temp.directory("home")
+        // One real transcript, so the refusal test's before-and-after manifest is a comparison of
+        // something rather than of two empty lists, and so its guard clauses have content to
+        // match against.
+        try LaunchFixtures.transcript(in: configHome, slug: "invented-project", session: LaunchFixtures.sessionA)
         let storeRoot = temp.root.appending(path: "store", directoryHint: .isDirectory)
         let diagnosticsRoot = temp.root.appending(path: "logs", directoryHint: .isDirectory)
         let log = SeamLog()
@@ -190,6 +194,13 @@ final class LaunchSequenceTests: XCTestCase {
         var diagnosticsRig = try makeRig()
         diagnosticsRig.sequence.diagnosticsRoot = diagnosticsRig.configHome.appending(path: "logs", directoryHint: .isDirectory)
         let beforeDiagnostics = try LaunchFixtures.manifest(of: diagnosticsRig.configHome)
+        // Three floors on the manifest itself, because the two assertions below are only as good
+        // as it is. It found something; its paths are relative to the home, so the `d /logs` guard
+        // is a clause that can actually match; and the directory the refusal must prevent is not
+        // already there.
+        XCTAssertFalse(beforeDiagnostics.isEmpty, "the manifest of the scratch config home is empty")
+        XCTAssertTrue(beforeDiagnostics.contains("d /projects"),
+                      "the manifest did not strip the root, so no relative guard below can fire: \(beforeDiagnostics)")
         XCTAssertFalse(beforeDiagnostics.contains { $0.hasPrefix("d /logs") },
                        "the scratch home already holds the logs directory the refusal must prevent")
 
