@@ -1706,9 +1706,78 @@ parent's §7.8.
 
 ## Outcomes & Retrospective
 
-Pending — written at finish.
+C4 is built. `FleetSessions` carries the namespaced store, the X5 value types, the lifecycle
+table as data, the channel supervisor with its ownership checks and cap counter, the handoffs
+and the terminal hatch, the quiescent restart and forking, the spawn preconditions with the one
+permitted project write, the command router and `/logout`, the Activity query, C3's
+`IndexStorage`, and the `Fleet` facade that C5, C6 and C7 call. The package builds clean at
+**412 tests, 10 skipped, 0 failures, zero warnings**.
+
+**Gates.** G1 passes, with a coverage gate proving all **58** lifecycle scenarios have a
+declaring test — a reviewer reproduced each of its three failure modes independently. G2 passes
+against C3's real registry mirror, five boundary cases agreeing case for case with the stand-in.
+G3 and G4 pass. G5 has all seven original scenarios green against the installed CLI; the eighth,
+the restart readback, is written and has not yet met an engine.
+
+**⟨PLACEHOLDER — the merge-evidence run.⟩** The one claim still unwitnessed is the set green
+*together* in a single invocation. When the scratch config home is restored and the run goes,
+this paragraph takes its per-scenario verdicts and times, its `budget.summary` line, its turns
+and cost, and the cumulative live spend. Until then the honest statement is: six scenarios green
+together in one 306.6 s invocation, adoption green in a filtered run after its recipe was
+remade, and the eighth never executed. Cumulative measured spend so far is `total_cost_usd
+0.610306`, plus two sub-cent prompt turns the harness could not see because they ran on `--bg`
+jobs rather than on an observed channel.
+
+**What the live gate bought, and why it was worth its cost.** Four product defects, every one in
+shipped lifecycle code and every one invisible to a unit suite that was already 190 tests green:
+an archived channel never learning it had a foreign holder; a supervisor built after its holder
+already existed never hearing about it, which is the *ordinary* case once C5 registers channels
+from C3's index; the daemon re-claiming a session's existing job short, which made §7.4's own
+adopt-then-send-back round trip impossible; and our own dying child read as a stranger inside
+the release window, leaving a channel holding a job it could not show. It also settled engine
+facts no fixture records — that a background conversation job given a prompt is a one-shot
+runner while a promptless one stays resident, that a transcript is written when the prompt is
+submitted rather than when the turn completes, and that the three `--resume` paths differ.
+
+**What the whole-branch reviews bought.** Three rounds, and the shape of them is the lesson. The
+first found **48** confirmed findings on a suite that was green: triage kept **33**, logged
+**12**, scoped out **3**, and refuted **0**. Five architect rulings and four workers landed
+them. The second review, over the fix diff alone, found **10** — four Criticals forming three
+fixes, one of which had been ruled fixable in round one and fell between two workers. The third
+round fixed all three and found nothing new. The sharpest single finding was that
+`effective_keys` existed only because the fixture redactor synthesised it: against a real engine
+every restart carrying a flag setting would have falsely reported the setting lost, and no
+fixture-driven test could have caught it, because the fixtures were the thing at fault.
+
+**The retrospective, in one sentence.** The defects clustered where a unit suite cannot reach —
+what happens when a child exits during an `await`, what a relaunch carries that a restart does
+not, and what the engine actually answers — and the suite was green because the stand-ins agreed
+with the code rather than with the engine. Three practices earned their keep against that: the
+discriminating-test rule, which made every fix show its own failure first; recording engine facts
+against a pinned CLI version with the bundle offset beside them; and running the live gate at all,
+which is the only reason the redactor artifact was ever found.
+
 
 ## Revision Notes
+
+- 2026-09-06: the whole-branch review rounds, after the twelve tasks were complete and green.
+  Round one, a Codex code-review panel over `main..HEAD` (77 files, 17,004 insertions; one native
+  sweep, five derived scalpel lenses, one binding verifier): verdict `incorrect`, **48**
+  verifier-confirmed findings, 33 at P1. Triage bucketed them **33 fix-now / 12 tech debt / 3 out
+  of scope / 0 wrong** — zero refutations after a deliberate hunt for them, because where a
+  finding failed it failed on scope or severity, never on the facts. The architect issued five
+  rulings (the resting state of a processless owned channel; one in-flight marker rather than a
+  FIFO lease; the rewind order; the redactor corrective and the eighth live scenario; wiring the
+  task mirror per channel), and a four-worker fix wave landed them. Round two, the same panel over
+  the fix diff (`--base 4f2102d`): **10** findings, four Criticals forming **three** fixes — the
+  logout barrier on background handoffs, which had been ruled fixable in round one and was dropped
+  between two workers, and two instances of "the last await is not the last guard", closed by one
+  shared helper. Round three fixed all **three** and raised nothing new. The wave is eight commits
+  on this branch — `5612fa8`, the merge `c8ffae4`, `83bd61e`, `7cdcbb8`, `26eeee9`, `732ef10`,
+  `8723846`, `8aac7a9` — and the merge brought two more from `main`, C1/C2's redactor corrective
+  `2b06be9` and its fixture re-signing `0733c8c`. Tracker entries 26 through 46 are C4's, with 29
+  closed by ruling 2. One note for the record: the coordinator's summary counted eleven fix-wave
+  commits; the branch carries eight of C4's own plus the two inherited through the merge.
 
 - 2026-09-05: v1, written at dispatch against parent commit `ee94449`.
 - 2026-09-05: v1 amended the same day, before any plan, with the coordinator's flow-back
