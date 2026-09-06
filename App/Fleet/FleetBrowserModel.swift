@@ -45,6 +45,16 @@ final class FleetBrowserModel {
     /// paint. Every row painted while it holds is `isProvisional`.
     private(set) var isProvisional = false
 
+    /// True once the composition root has applied the ordering inputs — `.claude.json`'s project
+    /// order and the persisted `SidebarGrouping`.
+    ///
+    /// Both are read off the main actor and land after the first paint, deliberately: the sidebar is
+    /// correct without them and falls back to activity order, so making the window wait for a file
+    /// read and a store hop buys nothing. What that costs is one visible re-sort, and this is how a
+    /// view knows which side of it a section list is on — and how a measurement knows when the read
+    /// it is timing has actually finished.
+    private(set) var hasGrouping = false
+
     // MARK: - Seams
 
     private let lifecycle: any LifecycleAPI
@@ -225,6 +235,7 @@ final class FleetBrowserModel {
 
     func updateGrouping(_ grouping: ProjectGrouping) {
         groupingModel = grouping
+        hasGrouping = true
         rebuild()
     }
 

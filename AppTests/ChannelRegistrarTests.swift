@@ -224,10 +224,15 @@ final class ChannelRegistrarTests: XCTestCase {
         XCTAssertEqual(coordinator.model.sections.count, 2,
                        "the model built \(coordinator.model.sections.count) sections, not two")
 
-        // The load is deliberately off the launch's critical path, so it lands after the paint.
-        await Self.until(coordinator.model, "the persisted grouping never reached the sections") {
-            $0.sections.first?.isPinned == true
-        }
+        // The load is deliberately off the launch's critical path, so it lands after the paint. The
+        // wait is on `hasGrouping` and the assertions that follow do not wait at all, which is what
+        // makes the flag load-bearing in both directions: a flag that is never set leaves the wait
+        // to the hang guard, and a flag that is always set lets these assertions run before the read
+        // has landed. It was briefly production state that only the environment-gated spike read,
+        // which is barely better than the fiction it was introduced to replace.
+        await Self.until(coordinator.model, "the ordering inputs were never applied") { $0.hasGrouping }
+        XCTAssertTrue(coordinator.model.sections.first?.isPinned == true,
+                      "the persisted grouping never reached the sections")
         XCTAssertEqual(coordinator.model.sections.map(\.title), ["repo-older", "repo-newer"])
     }
 

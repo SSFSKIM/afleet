@@ -190,7 +190,15 @@ final class RegistrationScaleSpikeTests: XCTestCase {
         let painted = start.duration(to: clock.now)
 
         // And the ordering inputs, which land off the critical path.
-        await coordinator.model.whenChanged { !$0.sections.isEmpty }
+        //
+        // This waited on `!sections.isEmpty` until the re-review pointed out that sections are
+        // non-empty from the very first rebuild, so the wait returned at once and measured nothing —
+        // an instrument whose stated purpose was fiction, the third in this suite. `hasGrouping` is
+        // set by `updateGrouping`, which is the call the detached read ends in, so the wait now ends
+        // when the thing it names has actually happened and the elapsed time is a number rather than
+        // a coincidence.
+        await coordinator.model.whenChanged { $0.hasGrouping }
+        let ordered = start.duration(to: clock.now)
         let sections = await MainActor.run { coordinator.model.sections.count }
         let rows = await MainActor.run { coordinator.model.allRows.count }
         let peak = Self.peakResidentBytes()
@@ -205,6 +213,7 @@ final class RegistrationScaleSpikeTests: XCTestCase {
           run() returned ............... \(Self.ms(returned)) ms
           sidebar fully painted ........ \(rows) rows in \(Self.ms(painted)) ms
           sections ..................... \(sections)
+          project order + grouping ..... applied at \(Self.ms(ordered)) ms
           peak resident ................ \(Self.mb(peak)) MB
         """)
 
