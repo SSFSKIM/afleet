@@ -469,4 +469,19 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     the first thing a view bound straight to `sections` would feel, so C5 Task 5 and C6 should
     know. Found at C5 Task 4. Closer: patch the affected section rather than rebuilding, if a
     profile ever shows it.
+56. **`FleetFacadeTests.testOpenListsTheChannelAndPublishesEveryTransition` is load-sensitive
+    and fails the whole-suite gate under load.** `FleetKit/Tests/FleetSessionsTests/FleetFacadeTests.swift:473`
+    waits with `harness.waitFor("the merged stream to carry the transitions") { collected.count >= 2 }`
+    — a polling helper on a wall-clock budget — over a merged `AsyncStream` whose delivery is
+    scheduled. Found while C5 was hunting a different flake: on an idle machine the full suite is
+    green, and under deliberate load (a concurrent full test run, a concurrent Release build,
+    twenty spinners, load average 32 rising to 75) this one test failed on both loaded runs.
+    Measured alongside it: an invocation that normally takes thirty seconds took over ten minutes
+    under that load, so a five-second budget is comfortably inside reach.
+    Why it matters beyond C4: `xcodebuild test -scheme afleet` runs FleetKit's suite, so this is
+    a flaky assertion inside C5's G1b gate and inside every later child's. The parent already
+    carries the shape as entry 2, from a C2 test whose starved-machine failure read as a product
+    bug. Owner: C4's file. Closer: fulfil the wait from the delivery — the collector signals when
+    it appends — rather than polling a deadline. C5 converted its own tests this way in `0f3ec6b`
+    and the pattern transfers directly.
 
