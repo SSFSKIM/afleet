@@ -968,6 +968,36 @@ final class FleetFacadeTests: XCTestCase {
         XCTAssertLessThanOrEqual(size, 200 + 64, "the current log is bounded by the rotation threshold")
     }
 
+    /// *Delete diagnostics* unlinks `fleet.log` while the sink lives on, and `Fleet` builds its sink internally so
+    /// the app cannot reach it to reopen. Opening per write means the next record recreates the file rather than
+    /// writing into an unlinked inode nobody can read.
+    func testTheDiagnosticsLogIsRecreatedAfterItIsDeleted() throws {
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appending(path: "afleet-c4-unlink-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sink = FileFleetDiagnostics(directory: directory)
+        sink.record(.logout(step: "census", count: 1))
+        sink.flush()
+
+        let log = directory.appending(path: "fleet.log")
+        try FileManager.default.removeItem(at: log)
+
+        sink.record(.logout(step: "revoke", count: 2))
+        sink.flush()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: log.path(percentEncoded: false)),
+                      "the deleted log was never recreated")
+        let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(lines.count, 1, "the recreated log holds exactly the record made after the deletion")
+        let only = try JSONDecoder().decode(JSONValue.self, from: Data(lines[0].utf8))
+        XCTAssertEqual(only["event"], .string("logout"))
+        XCTAssertEqual(only["step"], .string("revoke"))
+        XCTAssertEqual(only["count"], .integer(2))
+        let mode = try FileManager.default.attributesOfItem(
+            atPath: log.path(percentEncoded: false))[.posixPermissions] as? Int
+        XCTAssertEqual(mode, 0o600)
+    }
+
     // MARK: - The §6.12 decline, project-wide
 
     /// §6.12's precondition is about the *project*, not about the channel the sheet happens to be open in. Two
