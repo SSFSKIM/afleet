@@ -375,3 +375,37 @@ architect's rulings settled them). Line numbers are as at `4f2102d`, before the 
     where two values were replaced — visible in `zero-cost`, whose settings maps are empty. A reader who
     takes the number for "placeholders currently in the file" is misled; extends entry 10. Closer: a
     sentence in `Fixtures/REVIEW.md` and in the manifest's own key name if it is ever revised. Owner: C1.
+49. **The drift ritual's resume scenarios depend on the recording-time scratch home.** `make probe`
+    runs `session-mirror-resume` with the session id recorded in the `resume_of` fixture
+    (`Tools/probe/probe.py:326-336`), so it can only succeed while the transcript that recording
+    wrote still exists under the scratch config home. After the scratch home is recreated (a reboot
+    clears `/tmp`) the scenario fails with the engine's "No conversation found with session ID"
+    before any comparison runs (observed 2026-09-06 on 2.1.263). Not drift. Closer: run the
+    `resume_of` scenario first inside the same `diff` invocation and thread its live session id
+    through, so the ritual never resumes a recorded id; seeding the fixture's transcript into the
+    scratch home is not an option, because `Tools/` never writes under a config home. Owner: C1.
+50. **Two engine drifts on 2.1.263 against the 2.1.259 corpus, both benign for typed readers.**
+    `make probe` over the corpus on 2026-09-06 (installed CLI 2.1.263; zero-cost census exact)
+    reports for every turn-bearing fixture: (a) `removed pair rate_limit_event` — the recorded
+    sessions each carried one allowed-status `rate_limit_event` after a turn, the live sessions
+    carry none; the emitter and its single wrapper are unchanged between the bundles (2.1.258
+    `cli.pretty.js:366607/620572`, 2.1.263 `:746910/424400`), so the condition moved upstream or
+    the API no longer sends per-turn status for this account; and (b) `assistant: removed required
+    payload keys diagnostics` — streamed assistant frames no longer carry `message.diagnostics`.
+    ClaudeWire declares neither field (`RateLimitEventFields` is optional by construction;
+    `AssistantFrame` has no `diagnostics`), `WireReducer` and `ActivityQuery` treat the event as
+    occasional, and the fixtures still replay it, so nothing breaks. Consumers must not assume a
+    rate-limit event per turn. The corpus stays pinned at 2.1.259; re-pinning is a deliberate C1
+    re-recording, not a drift fix. Owner: C1 (re-pin decision), C6 (the §8 banner must not wait
+    for a per-turn event).
+51. **`RouteStrategy.applyFlagSetting`'s readback is declared and never executed.** The table row
+    documents the strategy as "`apply_flag_settings {settings: {key: value}}` then `get_settings`"
+    and gives it `ReadbackSource.getSettingsEffective`, but `CommandRouter.resolve` routes every
+    flag command to a `.controlRequest` and `StrategyExecutor.run` answers `.applyFlagSetting` with
+    `.notARequest`, so nothing anywhere sends the readback or reads `effective` after an applied
+    flag. `RouterTests.testEffortSendsApplyFlagSettingsAndReadsBackEffective` performs the
+    `get_settings` itself, which is why the gap is invisible. Deliberately left alone by the
+    2026-09-06 facade corrective (`ace7a7b`), whose scope was reaching the router from `Fleet` and
+    not changing what it does. Closer: C6 decides where the readback belongs — a second request
+    inside a strategy the executor runs, or the surface re-reading settings after a flag change —
+    and `ReadbackSource` either drives it or goes. Owner: C6.

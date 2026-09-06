@@ -28,16 +28,22 @@ final class FleetFacadeTests: XCTestCase {
         /// The handles the scripted factory built, in spawn order; empty unless the harness was asked for them.
         let handles = ScriptedHandles()
         private let storeDirectory: URL
+        private let scriptDirectory: URL
 
         /// `scriptedHandles` swaps the production factory for one that hands out a `ScriptedProcessHandle` per
         /// spawn, which is how a test reads back the control requests the facade sent.
-        init(scriptedHandles: Bool = false) throws {
+        ///
+        /// `replaying` are `FAKE_CLAUDE_SCRIPT` steps: the exchanges the replayed child answers the facade's own
+        /// control requests with. `RouterTests` builds them the same way, against a supervisor; a facade test needs
+        /// them here because the environment a `Fleet` launches its children with is fixed at construction.
+        init(scriptedHandles: Bool = false, replaying steps: [[String: Any]] = []) throws {
             home = try ScratchConfigHome()
             files = ScriptedHolderFiles(home: home)
             let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             cwd = temporary.appending(path: "afleet-c4-facade-cwd-\(UUID().uuidString)")
             storeDirectory = temporary.appending(path: "afleet-c4-facade-store-\(UUID().uuidString)")
             diagnosticsDirectory = temporary.appending(path: "afleet-c4-facade-diag-\(UUID().uuidString)")
+            scriptDirectory = temporary.appending(path: "afleet-c4-facade-script-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
             try home.trust(root: cwd)
 
@@ -47,8 +53,12 @@ final class FleetFacadeTests: XCTestCase {
                                            calls: recorder)
             store = try FileStateStore(baseDirectory: storeDirectory, configHomes: [home.url])
             let factory: ProcessFactory? = scriptedHandles ? Harness.scriptedFactory(into: handles) : nil
+            let script = steps.isEmpty
+                ? nil
+                : try ReplayScript.write(steps, fixture: FleetFacadeTests.fixture, into: scriptDirectory)
             fleet = Fleet(configHome: home.configHome,
-                              environment: FakeClaudeLaunch.environment(fixture: FleetFacadeTests.fixture),
+                              environment: FakeClaudeLaunch.environment(fixture: FleetFacadeTests.fixture,
+                                                                        script: script),
                               binary: FakeClaudeLaunch.binary, store: store,
                               diagnosticsDirectory: diagnosticsDirectory, clock: clock, factory: factory,
                               runner: runner)
@@ -84,6 +94,7 @@ final class FleetFacadeTests: XCTestCase {
             try? FileManager.default.removeItem(at: cwd)
             try? FileManager.default.removeItem(at: storeDirectory)
             try? FileManager.default.removeItem(at: diagnosticsDirectory)
+            try? FileManager.default.removeItem(at: scriptDirectory)
         }
 
         /// The suite's clock stepper and wall-clock wait, over this harness's manual clock. Both bodies live in
@@ -730,6 +741,139 @@ final class FleetFacadeTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? LifecycleError, .notOwned)
         }
+    }
+
+    // MARK: - The composer's line
+
+    /// The router is reachable through the facade, on a key, for every one of its three steps: routing a line
+    /// against the channel's own engine report, sending the control request the line named, and running the
+    /// strategy the line named.
+    ///
+    /// C6's composer holds a `ChannelKey` and nothing below it. Before this, `CommandRouter.route` and
+    /// `StrategyExecutor` both took a `ChannelSupervisor`, which the facade never hands out — so the first slash
+    /// command typed into the conversation surface had no way through, and every router test drove the executor on
+    /// a supervisor it had built itself.
+    ///
+    /// Recorded: the `apply_flag_settings` bare success and the `get_settings` whose `effective` names the flag just
+    /// applied are the `control-shapes` recording's own, and so is the `system/init` the script re-emits —
+    /// `resume-no-replay`, the one fixture that stays alive after the handshake, records none of its own, and the
+    /// terminal-only refusal is the half of `route` that reads one. The `mcp_status` answer is `zero-cost`'s.
+    ///
+    /// Deliberate break: drop `Fleet.route`, `Fleet.send` or `Fleet.run` → this test cannot compile, which is the
+    /// only red a missing method on the facade can show.
+    func testTheFacadeRoutesALineAndSendsAndRunsWhatItNames() async throws {
+        let settings = try FixtureAnswers.body("control-shapes", "get_settings")
+        let mcp = try FixtureAnswers.body("zero-cost", "mcp_status")
+        let systemInit = try Self.recordedFrame("control-shapes", type: "system", subtype: "init")
+        let steps = [["emit": systemInit]]
+            + ReplayScript.exchange("apply_flag_settings",
+                                    matching: ["request.settings.effortLevel": "low"])
+            + ReplayScript.exchange("get_settings", answer: settings)
+            + ReplayScript.exchange("mcp_status", answer: mcp)
+        await harness.tearDown()
+        harness = try Harness(replaying: steps)
+        let harness = self.harness!
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: try fixtureSession())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        // The `system/init` lands one frame past the handshake, and `apiKeySource` is the part of it the channel
+        // publishes: the routing context is only complete once it is here.
+        try await harness.waitFor("the engine's system/init to land") {
+            await fleet.state(of: k)?.apiKeySource != nil
+        }
+
+        // One: the line, routed on the key. `/effort low` is a single control request, and the facade builds it
+        // from the channel's own handshake, `system/init` and runtime record rather than from nothing.
+        guard case .controlRequest(let request) = await fleet.route("/effort low", on: k) else {
+            return XCTFail("/effort low did not route to a control request")
+        }
+        XCTAssertEqual(request.subtype, ApplyFlagSettings.subtype)
+        XCTAssertEqual(request.payload, .object(["settings": .object(["effortLevel": .string("low")])]))
+
+        // Two: that request, sent on the key. It goes through the supervisor's own `perform`, so the answer passes
+        // through `RuntimeStateUpdater` and the channel's runtime record is what the restart would relaunch from.
+        let answer = try await fleet.send(request, on: k)
+        XCTAssertEqual(answer, .object([:]), "the engine answers a bare success with no response key")
+        let channel = await fleet.channel(k)
+        let runtime = await (try XCTUnwrap(channel)).runtimeState()
+        XCTAssertEqual(runtime.flagSettings["effortLevel"], .string("low"))
+
+        // Three: a strategy, routed and then run on the same key. Bare `/permissions` is the read-only view over
+        // `get_settings`, whose `effective` object names the flag the send just applied.
+        guard case .strategy(let strategy, let arguments) = await fleet.route("/permissions", on: k) else {
+            return XCTFail("/permissions did not route to a strategy")
+        }
+        XCTAssertEqual(strategy, .permissionsView)
+        XCTAssertEqual(arguments, [])
+        let outcome = try await fleet.run(strategy, arguments: arguments, on: k,
+                                          ui: ScriptedStrategyUI(answers: .cancel))
+        guard case .permissions(let view) = outcome else { return XCTFail("the strategy gave \(outcome)") }
+        let effective = view.settings["effective"]?.objectValue.map { Array($0.keys) } ?? []
+        XCTAssertTrue(effective.contains("effortLevel"),
+                      "the readback names the key the flag set; got \(effective)")
+
+        // And one zero-cost request, sent as the routed value a `/mcp` popover's own strategy would not build:
+        // `send` is the facade's door for any `AnyControlRequest`, not only the ones `/effort` builds.
+        let status = try await fleet.send(AnyControlRequest(MCPStatus()), on: k)
+        XCTAssertEqual(status["mcpServers"]?.arrayValue?.count, (mcp["mcpServers"] as? [Any])?.count,
+                       "the engine's own answer came back through the facade")
+
+        // And the half of `route` that reads the channel's `system/init`: a command the engine says belongs to its
+        // terminal interface is refused here rather than sent for the engine to refuse (parent §7.7, contract X10).
+        // `/doctor` is one of the two this recording lists and is not in the local table.
+        guard case .refusedLocally(let explanation) = await fleet.route("/doctor", on: k) else {
+            return XCTFail("a terminal-only command was not refused through the facade")
+        }
+        XCTAssertEqual(explanation, RouterTable.explanation(forTerminalOnly: "/doctor"))
+    }
+
+    /// A key the fleet owns no supervisor for is not a channel to act on, and the two acting operations refuse it
+    /// with the error the facade already uses for that case. Routing is not one of them: it is a pure function of
+    /// the line, and a line typed into a channel that has not opened yet still resolves against the local table.
+    func testRoutedRequestsOnAChannelTheFleetDoesNotOwnAreRefused() async throws {
+        let fleet = harness.fleet
+        await fleet.start()
+        let unknown = key(SessionID())
+
+        if case .controlRequest(let request) = await fleet.route("/effort low", on: unknown) {
+            XCTAssertEqual(request.subtype, ApplyFlagSettings.subtype, "the local table alone decided")
+        } else {
+            XCTFail("/effort low did not route to a control request")
+        }
+
+        do {
+            _ = try await fleet.send(AnyControlRequest(MCPStatus()), on: unknown)
+            XCTFail("a request was sent to a channel that does not exist")
+        } catch {
+            XCTAssertEqual(error as? LifecycleError, .notOwned)
+        }
+        do {
+            _ = try await fleet.run(.permissionsView, arguments: [], on: unknown,
+                                    ui: ScriptedStrategyUI(answers: .cancel))
+            XCTFail("a strategy was run on a channel that does not exist")
+        } catch {
+            XCTAssertEqual(error as? LifecycleError, .notOwned)
+        }
+    }
+
+    /// One out-frame a fixture recorded, by type and subtype, for a script to re-emit. The bytes are the reviewed
+    /// recording's own; nothing here is composed (root `CLAUDE.md`, spec §11).
+    private static func recordedFrame(_ fixture: String, type: String, subtype: String) throws -> [String: Any] {
+        struct NotRecorded: Error, CustomStringConvertible {
+            let fixture: String, type: String, subtype: String
+            var description: String { "fixture \(fixture) records no \(type)/\(subtype) frame" }
+        }
+        let lines = try String(contentsOf: FakeClaudeLaunch.fixture(fixture).appending(path: "frames.ndjson"),
+                               encoding: .utf8)
+        for line in lines.split(separator: "\n") where !line.isEmpty {
+            guard let record = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  record["dropped"] == nil, record["dir"] as? String == "out",
+                  let frame = record["frame"] as? [String: Any],
+                  frame["type"] as? String == type, frame["subtype"] as? String == subtype else { continue }
+            return frame
+        }
+        throw NotRecorded(fixture: fixture, type: type, subtype: subtype)
     }
 
     // MARK: - Rotation

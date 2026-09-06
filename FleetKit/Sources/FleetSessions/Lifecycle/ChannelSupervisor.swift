@@ -138,6 +138,11 @@ public actor ChannelSupervisor {
     /// The newest handshake's initialize response, which is the source for the permission-mode and output-style
     /// readbacks.
     private var lastHandshake: InitializeResponse?
+    /// The newest `system/init`, kept for the same reason `lastHandshake` is: the router reads
+    /// `terminal_slash_commands` off it to refuse a command that belongs to the engine's terminal interface rather
+    /// than sending it for the engine to refuse (parent §7.7, contract X10). The seeding the frame also does is
+    /// `RuntimeStateUpdater`'s and happens once; this is the report itself, which every later frame replaces.
+    private var lastSystemInit: SystemInitFields?
     /// The names a restart's readbacks rejected, in `Readback.verify`'s order. The banner names the first; the user
     /// picking a value for it moves on to the next, and an empty list is what lets the channel become ready.
     private var unresolvedSettings: [String] = []
@@ -225,6 +230,14 @@ public actor ChannelSupervisor {
 
     /// The record a restart relaunches from.
     public func runtimeState() -> SessionRuntimeState { runtime }
+
+    /// Everything `CommandRouter.route` reads off a channel, in one hop: the engine's own report of what it offers
+    /// and what the channel is currently running. Nothing here is derived; each value is the newest one the engine
+    /// sent, kept where it arrived.
+    public func routingContext() -> (handshake: InitializeResponse?, systemInit: SystemInitFields?,
+                                     runtime: SessionRuntimeState) {
+        (lastHandshake, lastSystemInit, runtime)
+    }
 
     /// The tasks this channel has running or armed, by id. `/logout`'s census lists a channel that is not eligible
     /// together with the tasks that make it so, and *Stop* sends one `stop_task` per id.
@@ -1572,6 +1585,7 @@ public actor ChannelSupervisor {
                 publish()
             case .system(.initialize(let initFrame)):
                 state.apiKeySource = initFrame.apiKeySource
+                lastSystemInit = initFrame.fields
                 publish()
             default:
                 break

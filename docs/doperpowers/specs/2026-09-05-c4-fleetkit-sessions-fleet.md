@@ -1858,6 +1858,26 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-06, after the merge: the router had no door on the facade. `CommandRouter.route` and
+  `StrategyExecutor.send`/`.run` all take a `ChannelSupervisor`, which `Fleet` owns and never
+  hands out, so a surface holding a `ChannelKey` — which is all C6's composer holds — could not
+  route a slash command or execute what a routed line named. C5 found it while inventorying the
+  API; C6 would have hit it on its first slash command. Nothing failed at the time because the
+  router tests drive the executor on a supervisor they build themselves. Closed in `ace7a7b` by
+  three operations on `Fleet` and on `LifecycleAPI`, each resolving the key the way
+  `perform(_:on:)` does and delegating: `route(_ text: String, on: ChannelKey) async -> Routed`,
+  `send(_ request: AnyControlRequest, on: ChannelKey) async throws -> JSONValue` and
+  `run(_ strategy: RouteStrategy, arguments: [String], on: ChannelKey, ui: any StrategyUI) async
+  throws -> StrategyOutcome`. No routing logic is re-implemented and no state is kept twice.
+  `send` and `run` refuse an unregistered key with `LifecycleError.notOwned`; `route` is a pure
+  function of the line, so an unregistered key resolves against the local table alone. One field
+  was added under them, deliberately: `ChannelSupervisor` kept the newest handshake and the
+  runtime record but dropped each `system/init` after reading `apiKeySource` off it, and
+  `terminal_slash_commands` lives only there — without it §7.7's second resolution step is dead
+  through the facade and a command the engine says belongs to its terminal interface would be
+  sent for the engine to refuse. The report is now kept beside `lastHandshake` and handed out,
+  with the other two, by `routingContext()`.
+
 - 2026-09-06, later: the merge-evidence runs closed out at **eight of eight, twice**, and two
   product defects were found by running them that no unit suite had reached. Runs 1 and 2 were
   read at the time as tracker entry 27 — a cold or contended daemon — and the mutation budget was
