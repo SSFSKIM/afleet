@@ -639,3 +639,23 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     the keys the caller cares about, or seeding Activity from the same `updates` feed the sidebar
     already consumes and dropping the initial pull. Owner: C4 for the first, C5's successor for the
     second.
+64. **Nothing handles a notification being clicked.** C5 posts three kinds of notification and
+    carries the channel's session id on each (`AfleetNotification.session`), but no
+    `UNUserNotificationCenterDelegate` is set, so a click opens the app and lands wherever the
+    window already was. The channel the notification is about is one hop away and the user has to
+    find it themselves, which is most of the value of having been told.
+    **It is unreachable until authorisation can be granted, and that ordering is the useful part
+    of this entry.** Spike S-C5-1 did not promote: on an ad-hoc-signed, non-notarised build the
+    system prompt is presented but nothing unattended can answer it, and the status is `denied`
+    afterwards, so no system notification is drawn and there is nothing to click. Until somebody
+    with a screen grants authorisation, or the app is signed and notarised, a click handler could
+    be written but not exercised — which is why C5 left it rather than shipping a path no test and
+    no human could reach. The in-app fallback banner has the same gap and is reachable today: a
+    banner in the Activity list is not clickable either, and that half could be done now.
+    Closer, in the order they become reachable: give `BannerStack`'s rows a tap that calls
+    `ShellModel.select(_:)` with the notification's session; then, once a system notification can
+    be delivered, set a delegate whose `didReceive` response routes the same way, keyed by the
+    session already carried on the notification. Owner: whoever holds the shell after C5 — C6 in
+    practice, since it owns the surface a routed click lands on. Deferred by C5 Task 6 and filed at
+    the reviewer's instruction, because a deferral nobody recorded is indistinguishable from an
+    omission.
