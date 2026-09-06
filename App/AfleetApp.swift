@@ -16,6 +16,7 @@ struct AfleetApp: App {
         WindowGroup("afleet") {
             RootView(model: model, shell: shell)
         }
+        .commands { shellCommands }
 
         Settings {
             if let readout = model.settingsReadout {
@@ -27,5 +28,34 @@ struct AfleetApp: App {
                     .frame(width: 420)
             }
         }
+    }
+
+    /// §8.7's shortcuts, the four C5 owns.
+    ///
+    /// **Cmd+, is absent on purpose and is not missing.** SwiftUI gives a `Settings` scene the
+    /// standard *Settings…* item under the application menu with Cmd+, already bound; declaring a
+    /// second one would put two items in the menu bar competing for one key.
+    ///
+    /// Esc, Cmd+Enter, Shift+Tab and Cmd+Shift+Esc belong to the composer and are C6's;
+    /// Cmd+Shift+T is C7's. None is declared here, so neither child inherits a key already taken.
+    @CommandsBuilder
+    private var shellCommands: some Commands {
+        CommandGroup(after: .sidebar) {
+            Button("Quick Switcher…") { shell.presentSwitcher() }
+                .keyboardShortcut("k", modifiers: .command)
+            Button("Activity") { shell.showActivity() }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
+            Divider()
+            ForEach(Array(PanelTabID.allCases.enumerated()), id: \.element) { index, tab in
+                Button(tab.defaultTitle) { shell.selectPanelTab(at: index + 1) }
+                    .keyboardShortcut(Self.digit(index + 1), modifiers: .command)
+            }
+        }
+    }
+
+    /// `KeyEquivalent` for 1…7. The tab set is closed at seven cases by contract X7, so the
+    /// character always exists; a wider set would need a second modifier rather than a second digit.
+    private static func digit(_ number: Int) -> KeyEquivalent {
+        KeyEquivalent(Character("\(number)"))
     }
 }
