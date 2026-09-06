@@ -494,8 +494,10 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     unchanged in shape and now with a profile behind it: `apply(_ state:)` changes one row's live
     half, so patch that row in place and re-derive only when its archived-ness or its section
     membership changed.
-    **Observed live at Task 5, and it is worse than the synthetic number suggested.** Running the
-    built app against a real config home — 306 projects, 3,006 transcripts, four foreign live
+    **Observed live at Task 5, and it is worse than the synthetic number suggested.**
+    *(The attribution in this paragraph is superseded twice over — read the two paragraphs after it.
+    Kept because the profile split it reports is still the measurement that motivated the fix.)*
+    Running the built app against a real config home — 306 projects, 3,006 transcripts, four foreign live
     channels — pins one core at 100 percent indefinitely, not as a launch burst. A six-second
     sample of the main thread: 39 percent inside the `updates` loop, `apply(_ state:)`,
     `rebuild()`, `ProjectGrouping.sections` and its per-section sort; 60 percent inside
@@ -517,11 +519,20 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     One correction to the diagnosis above, from instrumenting the stream rather than inferring it:
     the driver is **not** a steady holder poll. It is C4's registration seeding — 13,250 states over
     2,671 distinct sessions, about five per registered channel, 99.5 percent of them `.archived`,
-    every one a first arrival — and it is a bounded burst that drains and stops. It looked endless
-    only because the old path consumed it more slowly than it arrived. `AppTests/SidebarUpdateCostTests.swift`
-    holds all of it, correctness clauses first. Owner: whoever
-    next opens `FleetBrowserModel` — C6 is the likely one, since a live conversation is exactly
-    the workload that emits states in a stream.
+    every one a first arrival. `AppTests/SidebarUpdateCostTests.swift` holds all of it, correctness
+    clauses first.
+    **And that correction was itself incomplete**, per Task 5's review, which traced the mechanism
+    to `Fleet.fanOut` (`Fleet.swift:135-137` walks every supervisor for every published `HolderSet`,
+    and `ChannelSupervisor.swift:1718-1720` assigns before testing for change). So the cost is one
+    published state **per registered channel per holder-set change**, recurring for the life of the
+    process, and registration seeding is its first and largest instance rather than the whole of it.
+    The consumer-side fix is unaffected and its value goes up: the coalescing absorbs a recurring
+    cost, not a draining one. The producer half is tracker 60, against C4. Two consequences of the
+    correction are worth keeping visible: "it is a bounded burst that drains and stops" was true of
+    seeding and is false in general, and `identical=0` was true of seeding — where every state is a
+    first arrival — so coalescing repeats is not the dead end it looked outside the burst.
+    Nothing is left open on this entry; the ownership line it used to carry ("whoever next opens
+    `FleetBrowserModel`") is retired with it.
 56. **`FleetFacadeTests.testOpenListsTheChannelAndPublishesEveryTransition` is load-sensitive
     and fails the whole-suite gate under load.** `FleetKit/Tests/FleetSessionsTests/FleetFacadeTests.swift:473`
     waits with `harness.waitFor("the merged stream to carry the transitions") { collected.count >= 2 }`

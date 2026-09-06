@@ -17,14 +17,17 @@ import PanelHostAPI
 /// views read it. No view below computes which rows the thirty-day default hides or which panel tab
 /// a number key means.
 ///
-/// **What actually pins the main thread, measured on a real config home of 306 projects and 3,006
-/// transcripts:** `LifecycleAPI.updates` delivers a `ChannelState` continuously — C4 re-runs
-/// `claude agents` every few hundred milliseconds to observe foreign holders — and every one of
-/// them makes `FleetBrowserModel.rebuild()` re-derive all 306 sections, which then makes SwiftUI
-/// re-diff the whole row tree. A six-second sample of the shipped build put 39 percent of the main
-/// thread in `rebuild()` and its sort and 60 percent in `OutlineListCoordinator.diffRows`. That is
-/// tech-debt entry 55, whose closer is an incremental rebuild in `FleetBrowserModel`, and it is not
-/// something the shell can fix from up here.
+/// **On what a `ChannelState` costs the sidebar — closed, and the note kept because C6 opens this
+/// file first.** An earlier version of this comment blamed a continuous holder poll and said the
+/// cost was not something the shell could fix. Both halves were wrong. Instrumenting the stream
+/// showed the load is `Fleet.fanOut` broadcasting each observer publication to *every* supervisor,
+/// so one holder-set change costs one published state per registered channel — thousands of them,
+/// recurring for the life of the process, of which the registration burst is the first and largest
+/// instance rather than the whole. It is fixed in `FleetBrowserModel`: a state patches the row it
+/// names instead of re-deriving, a state for a session with no row publishes nothing, and the
+/// `updates` loop ingests and defers so a flood becomes a handful of paints. Idle CPU against a
+/// real config home went from a sustained 100 percent to 0.1 percent, tech-debt entry 55 is closed,
+/// and the remaining half — the fan-out itself — is tracker 60 against C4.
 @MainActor
 @Observable
 final class ShellModel {
