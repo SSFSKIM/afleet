@@ -222,29 +222,41 @@ enum LaunchFixtures {
     }
 
     /// A recursive manifest of `root`: every path relative to it, with a directory's marker or a
-    /// file's size and SHA-ish digest. Compared before and after a refusal, it is what proves the
-    /// refusal wrote nothing (X9).
+    /// file's size and a stable digest of its bytes. Compared before and after a refusal, it is
+    /// what proves the refusal wrote nothing (X9). Counts and digests rather than contents, so a
+    /// failure message stays readable and carries no file's bytes.
     static func manifest(of root: URL) throws -> [String] {
         let manager = FileManager.default
         guard let walk = manager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey]) else {
             return []
         }
-        // The enumerator reports `/private/var/…` where the handed-in root spells `/var/…`, so the
-        // root is canonicalised before the prefix is stripped; otherwise every relative path keeps
-        // eight characters of the absolute one.
-        let base = root.resolvingSymlinksInPath().standardizedFileURL.path
+        // One directory has two spellings on macOS — `/var/…` and `/private/var/…` — and which one
+        // the enumerator reports is not the one the caller handed in. Both are stripped, so the
+        // relative path is relative however the root was spelled.
+        let prefixes = [root.standardizedFileURL.path, root.resolvingSymlinksInPath().standardizedFileURL.path]
         var lines: [String] = []
         for case let url as URL in walk {
-            let relative = url.path.hasPrefix(base) ? String(url.path.dropFirst(base.count)) : url.path
+            let path = url.path
+            let relative = prefixes.compactMap { path.hasPrefix($0) ? String(path.dropFirst($0.count)) : nil }.first ?? path
             let values = try url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
             if values.isDirectory == true {
                 lines.append("d \(relative)")
             } else {
                 let data = (try? Data(contentsOf: url)) ?? Data()
-                lines.append("f \(relative) \(values.fileSize ?? -1) \(data.base64EncodedString())")
+                lines.append("f \(relative) \(values.fileSize ?? -1) \(digest(data))")
             }
         }
         return lines.sorted()
+    }
+
+    /// FNV-1a, so the same bytes give the same short string in every process.
+    private static func digest(_ data: Data) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in data {
+            hash ^= UInt64(byte)
+            hash &*= 0x0000_0100_0000_01b3
+        }
+        return String(hash, radix: 16)
     }
 
     /// Polls `condition` until it holds or `timeout` elapses. Returns whether it held.

@@ -23,6 +23,10 @@ final class AppModel {
     /// The coordinator the last successful launch built, kept so the app can reach it.
     private(set) var coordinator: (any WorkspaceCoordinating)?
 
+    /// Settings' readout over the workspace the last launch reached, built once so the scene does
+    /// not make a new one on every body evaluation.
+    private(set) var settingsReadout: SettingsReadout?
+
     init(sequence: LaunchSequence = LaunchSequence(),
          coordinatorFactory: @escaping @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating = { _ in NoopWorkspaceCoordinator() }) {
         self.sequence = sequence
@@ -42,5 +46,6 @@ final class AppModel {
             return coordinator
         }
         route = await configured.run()
+        settingsReadout = route.workspace.map(SettingsReadout.init(workspace:))
     }
 }

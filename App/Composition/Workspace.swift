@@ -15,6 +15,11 @@ struct Workspace: Sendable {
     let fleet: any AppFleet
     /// Nil when the Developer toggle left the watcher stopped (spec §2 step 10).
     let watcher: (any TranscriptWatching)?
+    /// The three sinks on `~/Library/Logs/afleet`. Beyond the eight fields the plan named, because
+    /// Settings' ConfigHome section reads the symlinked-project count out of the last
+    /// `TimelineNotice.indexBuilt` and nothing else records it, and Settings' Developer section
+    /// reveals and deletes this directory.
+    let diagnostics: DiagnosticsComposer
 }
 
 /// The fleet as the app uses it. `LifecycleAPI` is what C4 published for C5, C6 and C7, but it

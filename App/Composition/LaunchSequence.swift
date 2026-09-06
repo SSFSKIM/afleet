@@ -163,7 +163,7 @@ struct LaunchSequence: Sendable {
 
         let workspace = Workspace(configHome: configHome, environment: environment, binary: binary,
                                   installed: installed, store: store, index: index, fleet: fleet,
-                                  watcher: watcher)
+                                  watcher: watcher, diagnostics: diagnostics)
 
         // 9. Registration, through the coordinator seam, at all three points.
         let coordinator = await makeCoordinator(workspace)

@@ -1,0 +1,184 @@
+import SwiftUI
+import AppKit
+import Observation
+import ClaudeWire
+import FleetKit
+
+/// Spec §9's five sections as one readout, so what Settings shows is asserted without a window.
+///
+/// Every number here comes from something that already exists: the resolved environment, the
+/// version gate's verdict, C3's index snapshot, the last `TimelineNotice.indexBuilt`, the store's
+/// own schema statuses and the `afleet` namespace. Nothing is recomputed and nothing is a second
+/// copy of a value another namespace owns.
+@MainActor
+@Observable
+final class SettingsReadout {
+    let workspace: Workspace
+    private let counter: UnknownFrameCounter
+
+    // Engine
+    private(set) var lastCensus: CensusSummary?
+    private(set) var unknownFrames = UnknownFrameTally()
+    // ConfigHome
+    private(set) var projectCount = 0
+    private(set) var transcriptCount = 0
+    private(set) var symlinkedProjectsSkipped = 0
+    /// The sessions the sidebar would list, from the resolved config home and no other.
+    private(set) var sessions: [IndexEntry] = []
+    // Storage
+    private(set) var schemaStatuses: [StoreNamespace: SchemaStatus] = [:]
+    // Developer
+    var settings = AfleetSettings()
+
+    init(workspace: Workspace) {
+        self.workspace = workspace
+        counter = UnknownFrameCounter(store: workspace.store)
+    }
+
+    // MARK: - Environment
+
+    var shell: String { workspace.environment.shell }
+    var captureMode: ResolvedEnvironment.CaptureMode { workspace.environment.mode }
+    var pathEntryCount: Int { workspace.environment.path.count }
+    var capturedAt: Date { workspace.environment.capturedAt }
+
+    // MARK: - Engine
+
+    var binary: URL { workspace.binary }
+    var installedVersion: SemanticVersion { workspace.installed }
+    var protocolBaseline: String { ProtocolBaseline.version }
+    /// The launch reached a workspace, so the gate accepted; the route is the verdict.
+    var gateVerdict: String { "accepted" }
+
+    // MARK: - ConfigHome
+
+    var configHomeRoot: URL { workspace.configHome.root }
+    var configHomeSource: ConfigHome.Source { workspace.configHome.source }
+
+    // MARK: - Reading
+
+    func refresh() async {
+        let snapshot = await workspace.index.currentSnapshot
+        let listed = snapshot.entries.values.filter {
+            if case .listed = ListingPolicy.include(ListingPolicy.IndexEntry($0)) { return true }
+            return false
+        }
+        sessions = listed.sorted { $0.mtime > $1.mtime }
+        transcriptCount = snapshot.entries.count
+        projectCount = Set(snapshot.entries.values.map(\.slug)).count
+        symlinkedProjectsSkipped = workspace.diagnostics.timeline.lastIndexBuild?.symlinkedProjectsSkipped ?? 0
+
+        lastCensus = (try? await workspace.store.read(CensusSummary.self, namespace: .fleetKit,
+                                                      key: FleetKitKeys.lastCensus)) ?? nil
+        unknownFrames = await counter.snapshot()
+        settings = await AfleetSettingsStore.read(from: workspace.store)
+
+        if let file = workspace.store as? FileStateStore {
+            var statuses: [StoreNamespace: SchemaStatus] = [:]
+            for namespace in StoreNamespace.allCases {
+                statuses[namespace] = await file.schemaStatus(of: namespace)
+            }
+            schemaStatuses = statuses
+        }
+    }
+
+    // MARK: - Writing
+
+    /// The Developer section's edits. The binary override is read by
+    /// `BinaryLocator.locate(in:override:)` at launch, so it takes effect on the next launch and
+    /// not live — which is what item 33 points at a `fake-claude`.
+    func save() async {
+        try? await AfleetSettingsStore.write(settings, to: workspace.store)
+    }
+
+    /// Removes every file in the diagnostics directory. The directory itself stays, because the
+    /// three sinks are holding open handles into it.
+    func deleteDiagnostics() {
+        let directory = workspace.diagnostics.directory
+        let manager = FileManager.default
+        guard let names = try? manager.contentsOfDirectory(atPath: directory.path) else { return }
+        for name in names {
+            try? manager.removeItem(at: directory.appending(path: name))
+        }
+    }
+
+    func revealDiagnostics() {
+        NSWorkspace.shared.activateFileViewerSelecting([workspace.diagnostics.directory])
+    }
+}
+
+/// Spec §9's five sections.
+struct SettingsView: View {
+    @Bindable var readout: SettingsReadout
+
+    var body: some View {
+        Form {
+            Section("Environment") {
+                LabeledContent("Shell", value: readout.shell)
+                LabeledContent("Capture", value: readout.captureMode.rawValue)
+                LabeledContent("PATH entries", value: "\(readout.pathEntryCount)")
+                LabeledContent("Captured", value: readout.capturedAt.formatted(date: .abbreviated, time: .shortened))
+            }
+
+            Section("Engine") {
+                LabeledContent("Binary", value: readout.binary.path)
+                LabeledContent("Installed version", value: readout.installedVersion.description)
+                LabeledContent("Protocol baseline", value: readout.protocolBaseline)
+                LabeledContent("Gate verdict", value: readout.gateVerdict)
+                LabeledContent("Last census", value: censusSummary)
+                LabeledContent("Unknown frame types seen", value: "\(readout.unknownFrames.total)")
+            }
+
+            Section("Config home") {
+                LabeledContent("Root", value: readout.configHomeRoot.path)
+                LabeledContent("Source", value: readout.configHomeSource.rawValue)
+                LabeledContent("Projects", value: "\(readout.projectCount)")
+                LabeledContent("Transcripts", value: "\(readout.transcriptCount)")
+                LabeledContent("Symlinked project directories skipped",
+                               value: "\(readout.symlinkedProjectsSkipped)")
+            }
+
+            Section("Storage") {
+                ForEach(StoreNamespace.allCases, id: \.self) { namespace in
+                    LabeledContent(namespace.rawValue, value: Self.describe(readout.schemaStatuses[namespace]))
+                }
+                Button("Delete diagnostics", role: .destructive) { readout.deleteDiagnostics() }
+            }
+
+            Section("Developer") {
+                TextField("Binary path override", text: Binding(
+                    get: { readout.settings.developer.binaryPathOverride ?? "" },
+                    set: { readout.settings.developer.binaryPathOverride = $0.isEmpty ? nil : $0 }))
+                Text("Takes effect on the next launch.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Capture raw frames", isOn: $readout.settings.developer.rawFrameCapture)
+                Toggle("Leave the transcript watcher stopped",
+                       isOn: $readout.settings.developer.transcriptWatcherStopped)
+                Toggle("Isolated settings for new channels",
+                       isOn: $readout.settings.developer.isolatedSettingsForNewChannels)
+                Button("Reveal the diagnostics log") { readout.revealDiagnostics() }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 560, height: 620)
+        .task { await readout.refresh() }
+        .onChange(of: readout.settings) { _, _ in
+            Task { await readout.save() }
+        }
+    }
+
+    private var censusSummary: String {
+        guard let census = readout.lastCensus else { return "none" }
+        return "\(census.cliVersion), \(census.newInboundSubtypes.count) new inbound subtypes"
+    }
+
+    private static func describe(_ status: SchemaStatus?) -> String {
+        switch status {
+        case .current: "current"
+        case .migrated(let from): "migrated from \(from)"
+        case .newer(let found): "written by a newer build (schema \(found))"
+        case .absent, nil: "absent"
+        }
+    }
+}
