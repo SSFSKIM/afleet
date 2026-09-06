@@ -112,8 +112,11 @@ extension LifecycleRowTests {
         let held = HeldAnswer()
         parkedRig.holdNextSpawn { await held.wait() }
         let parked = parkedRig.supervisor(session: SessionID(), isRecent: true, origin: .archived)
+        let parkedChild = parkedRig.expectScriptedHandles(1, description: "the parked spawn built its child")
         let opening = Task { try? await parked.open() }
-        try await parkedRig.waitFor("the parked spawn") { parkedRig.scriptedHandles.count == 1 }
+        defer { held.release(); opening.cancel() }
+        try await TestTiming.awaitDelivery([parkedChild])
+        guard !parkedRig.scriptedHandles.isEmpty else { return XCTFail("the parked spawn built no child") }
         let connecting = await parked.state
         XCTAssertEqual(connecting.origin, .owned(.connecting), "connecting, with a live process of its own")
 

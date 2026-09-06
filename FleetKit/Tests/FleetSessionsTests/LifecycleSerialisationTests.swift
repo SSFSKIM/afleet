@@ -65,12 +65,15 @@ final class LifecycleSerialisationTests: XCTestCase {
         rig.useScriptedHandle()
         let supervisor = try await readyScripted(rig)
         let handle = rig.scriptedHandles[0]
-        let held = OneShotGate()
+        let held = OneShotGate(), entered = HeldAnswer()
+        let reachedReleaseWait = entered.expectation(description: "the first handoff reached its release wait")
         // The window the finding is about: past the terminate, before the launch.
-        rig.onReleased = { await held.wait() }
+        rig.onReleased = { entered.release(); await held.wait() }
 
         let first = Task { try await rig.steppingClock { try await supervisor.sendToBackground() } }
-        try await rig.waitFor("the first handoff to reach its release wait") { handle.terminateCount == 1 }
+        // A throwing wait leaves the test here, so the gate is opened and the parked call let go either way.
+        defer { held.release(); first.cancel() }
+        try await TestTiming.awaitDelivery([reachedReleaseWait])
 
         // Inside the stepper as well: the refusal is synchronous, but a second handoff that is *not* refused runs
         // the verb, and the verb's own roster wait is on the injected clock.
@@ -99,9 +102,9 @@ final class LifecycleSerialisationTests: XCTestCase {
         let rig = try newRig()
         rig.useScriptedHandle()
         let supervisor = try await readyScripted(rig)
-        let handle = rig.scriptedHandles[0]
-        let held = OneShotGate()
-        rig.onReleased = { await held.wait() }
+        let held = OneShotGate(), entered = HeldAnswer()
+        let reachedReleaseWait = entered.expectation(description: "the restart reached its release wait")
+        rig.onReleased = { entered.release(); await held.wait() }
 
         let a = rig.scratch.appending(path: "a")
         let b = rig.scratch.appending(path: "b")
@@ -111,7 +114,8 @@ final class LifecycleSerialisationTests: XCTestCase {
                 try await supervisor.quiescentRestart(RestartRequest(addDirectories: [a]))
             }
         }
-        try await rig.waitFor("the restart to reach its release wait") { handle.terminateCount == 1 }
+        defer { held.release(); first.cancel() }
+        try await TestTiming.awaitDelivery([reachedReleaseWait])
 
         try await supervisor.quiescentRestart(RestartRequest(addDirectories: [b]))
         try await supervisor.quiescentRestart(RestartRequest(addDirectories: [c]))
@@ -136,11 +140,13 @@ final class LifecycleSerialisationTests: XCTestCase {
         rig.useScriptedHandle()
         let supervisor = try await readyScripted(rig)
         let handle = rig.scriptedHandles[0]
-        let held = HeldAnswer()
-        handle.sendGate = { await held.wait() }
+        let held = HeldAnswer(), entered = HeldAnswer()
+        let reachedWrite = entered.expectation(description: "the send reached the write")
+        handle.sendGate = { entered.release(); await held.wait() }
 
         let sending = Task { try await supervisor.send(UserInput(text: "hi")) }
-        try await rig.waitFor("the send to reach the write") { handle.sent.count == 1 }
+        defer { held.release(); sending.cancel() }
+        try await TestTiming.awaitDelivery([reachedWrite])
 
         let outcome = await supervisor.evict()
 
@@ -161,11 +167,13 @@ final class LifecycleSerialisationTests: XCTestCase {
         rig.useScriptedHandle()
         let supervisor = try await readyScripted(rig)
         let handle = rig.scriptedHandles[0]
-        let held = HeldAnswer()
-        handle.terminateGate = { await held.wait() }
+        let held = HeldAnswer(), entered = HeldAnswer()
+        let reachedTerminate = entered.expectation(description: "the reap reached terminate")
+        handle.terminateGate = { entered.release(); await held.wait() }
 
         let reaping = Task { await supervisor.reap() }
-        try await rig.waitFor("the reap to reach its terminate") { handle.terminateCount == 1 }
+        defer { held.release(); reaping.cancel() }
+        try await TestTiming.awaitDelivery([reachedTerminate])
 
         var thrown: (any Error)?
         do { _ = try await supervisor.send(UserInput(text: "hi")) } catch { thrown = error }

@@ -983,16 +983,16 @@ final class PreconditionTests: XCTestCase {
         let forkHandle = try XCTUnwrap(rig.scriptedHandles.last)
 
         try await rig.waitForSleeper(due: .seconds(30))
+        let published = await fork.publishedCount
         await rig.clock.advance(by: .seconds(30))
-        try await rig.waitFor("the identity deadline to fire") { forkHandle.terminateCount == 1 }
+        try await rig.waitForPublish(fork, above: published)
 
-        try await rig.waitFor("the expiry to be recorded") {
-            rig.diagnostics.forkIdentityDeadlines.contains { $0 == provisional.session.description }
-        }
-        try await rig.waitFor("an item the user can see") {
-            let item = await fork.state.systemItem
-            return item != nil
-        }
+        XCTAssertEqual(forkHandle.terminateCount, 1, "the identity deadline terminated its child")
+        XCTAssertTrue(rig.diagnostics.forkIdentityDeadlines.contains {
+            $0 == provisional.session.description
+        }, "the expiry was recorded")
+        let item = await fork.state.systemItem
+        XCTAssertNotNil(item, "the expiry left an item the user can see")
     }
 
     // MARK: - Async throwing assertion

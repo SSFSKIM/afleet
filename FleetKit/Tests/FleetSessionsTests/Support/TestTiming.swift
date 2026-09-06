@@ -8,6 +8,41 @@ import XCTest
 /// helper drift: this suite has already been bitten twice by waits that looked equivalent and were not.
 enum TestTiming {
 
+    /// A failure guard for delivery-driven XCTest expectations; no passing path waits on this clock.
+    static let hangGuard: TimeInterval = 30
+
+    struct DeliveryTimeout: Error {}
+
+    /// Records the deliveries the waiter was still missing, so a failure names those rather than the whole set.
+    private final class UnfulfilledDeliveries: NSObject, XCTWaiterDelegate, @unchecked Sendable {
+        // `lock` serialises `missing`.
+        private let lock = NSLock()
+        private var missing: [String] = []
+        func waiter(_ waiter: XCTWaiter,
+                    didTimeoutWithUnfulfilledExpectations unfulfilledExpectations: [XCTestExpectation]) {
+            let names = unfulfilledExpectations.map(\.expectationDescription)
+            lock.lock(); missing = names; lock.unlock()
+        }
+        var names: [String] { lock.lock(); defer { lock.unlock() }; return missing }
+    }
+
+    /// Waits for delivery-driven expectations, and *throws* when one never arrives so the safety deadline aborts
+    /// the test instead of letting it run on into an unbounded await. Nothing polls: the delivery fulfils the
+    /// expectation and `hangGuard` is only the guard.
+    static func awaitDelivery(_ expectations: [XCTestExpectation],
+                              file: StaticString = #filePath, line: UInt = #line) async throws {
+        let waiter = XCTWaiter()
+        let unfulfilled = UnfulfilledDeliveries()
+        waiter.delegate = unfulfilled
+        let result = await waiter.fulfillment(of: expectations, timeout: hangGuard)
+        guard result == .completed else {
+            let named = unfulfilled.names.isEmpty ? expectations.map(\.expectationDescription) : unfulfilled.names
+            XCTFail("timed out waiting for delivery of \(named.joined(separator: ", ")) (\(result))",
+                    file: file, line: line)
+            throw DeliveryTimeout()
+        }
+    }
+
     /// A flag one task sets and another reads, for a loop that has to stop when the work it is driving is done.
     final class LockedFlag: @unchecked Sendable {   // `lock` serialises `flag`
         private let lock = NSLock()

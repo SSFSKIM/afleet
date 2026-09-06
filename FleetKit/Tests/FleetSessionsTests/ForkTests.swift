@@ -162,12 +162,12 @@ final class ForkTests: XCTestCase {
         let published = await fork.publishedCount
         await rig.clock.advance(by: Self.handshakeTimeout)
 
-        try await rig.waitFor("the identity deadline to fire") { forkHandle.terminateCount == 1 }
         // `terminateCount` rises *inside* `terminateOrWedge`, which is before the reservation goes back, so it is
         // not a synchronisation point for anything the handler does afterwards. The expiry publishes once, after
         // the whole decision, and that is the point to wait on — reading the occupancy off the terminate count
         // alone is a race that happens to pass most of the time.
         try await rig.waitForPublish(fork, above: published)
+        XCTAssertEqual(forkHandle.terminateCount, 1, "the identity deadline terminated its child")
         let occupiedAfter = await rig.fleet.occupancy
         XCTAssertEqual(occupiedAfter, occupiedBefore - 1, "the provisional reservation went back")
         let stillProvisional = await rig.fleet.isLive(provisional)
@@ -246,8 +246,10 @@ final class ForkTests: XCTestCase {
         handle.push(.exited(.code(1, stderrTail: ""), handle.epoch))
         try await rig.waitForPublish(fork, above: published)
         try await rig.waitForSleeper(due: .seconds(1))
+        let thirdChild = rig.expectScriptedHandles(3, description: "the respawn launched its child")
         await rig.clock.advance(by: .seconds(1))
-        try await rig.waitFor("the respawn to launch") { rig.launches.count == 3 }
+        try await TestTiming.awaitDelivery([thirdChild])
+        guard rig.launches.count >= 3 else { return XCTFail("the respawn built no third child") }
 
         XCTAssertEqual(rig.launches[2].session, .resume(resolved, fork: false),
                        "the respawn resumes the fork's own session and forks nothing")
@@ -269,6 +271,7 @@ final class ForkTests: XCTestCase {
         let occupiedBeforeTheFork = await rig.fleet.occupancy
 
         let held = HeldAnswer(), entered = HeldAnswer()
+        let reachedPIDRead = entered.expectation(description: "the identity check reached the pid read")
         rig.configureScriptedHandles { handle in
             handle.pidGate = { entered.release(); await held.wait() }
         }
@@ -276,19 +279,25 @@ final class ForkTests: XCTestCase {
         let fork = try XCTUnwrap(rig.supervisor(for: provisional))
         let handle = try XCTUnwrap(rig.scriptedHandles.last)
 
-        handle.push(.sessionIdentityResolved(SessionID(), handle.epoch))
-        try await rig.waitFor("the identity check to reach the pid read") { entered.isReleased }
+        let resolutionFinished = expectation(description: "the identity handler completed its rollback")
+        let resolving = Task {
+            await fork.handle(event: .sessionIdentityResolved(SessionID(), handle.epoch))
+            resolutionFinished.fulfill()
+        }
+        defer { held.release(); resolving.cancel() }
+        try await TestTiming.awaitDelivery([reachedPIDRead])
         let published = await fork.publishedCount
-        // Delivered on the actor: the pump is still inside the identity event, parked on the pid read, so an exit
-        // pushed onto the same stream would queue behind the very handler it is meant to race.
+        // Delivered on the actor: the identity handler is parked on the pid read, so an exit pushed onto the same
+        // stream would queue behind the very handler it is meant to race.
         await fork.handle(event: .exited(.code(1, stderrTail: ""), handle.epoch))
         let afterTheExit = await fork.publishedCount
         XCTAssertGreaterThan(afterTheExit, published, "the exit was taken")
         held.release()
 
-        try await rig.waitFor("the fork's reservation to go back", timeout: .seconds(5)) {
-            await rig.fleet.occupancy == occupiedBeforeTheFork
-        }
+        try await TestTiming.awaitDelivery([resolutionFinished])
+        await resolving.value
+        let occupiedAfterRollback = await rig.fleet.occupancy
+        XCTAssertEqual(occupiedAfterRollback, occupiedBeforeTheFork, "the fork's reservation went back")
         try await rig.drainPublished(of: fork)
         XCTAssertFalse(rig.published(of: fork).contains { $0.origin == .owned(.ready) },
                        "nothing is ready on a process that has already exited")
@@ -312,8 +321,10 @@ final class ForkTests: XCTestCase {
         let held = HeldAnswer()
         rig.holdNextSpawn { await held.wait() }
         let fork = rig.supervisor(session: provisional, origin: .owned(.connecting), template: template)
+        let firstChild = rig.expectScriptedHandles(1, description: "the fork built its first child")
         let spawning = Task { try await fork.spawn(reason: .open) }
-        try await rig.waitFor("the fork's first child to park in its handshake") { !rig.scriptedHandles.isEmpty }
+        defer { held.release(); spawning.cancel() }
+        try await TestTiming.awaitDelivery([firstChild])
         let first = try XCTUnwrap(rig.scriptedHandles.first)
 
         // Delivered on the actor rather than through the pump, so the order of the two events is the test's.
@@ -324,8 +335,9 @@ final class ForkTests: XCTestCase {
         _ = try? await spawning.value
 
         try await rig.waitForSleeper(due: .seconds(1))
+        let secondChild = rig.expectScriptedHandles(2, description: "the respawn built its child")
         await rig.clock.advance(by: .seconds(1))
-        try await rig.waitFor("the respawn's child") { rig.scriptedHandles.count == 2 }
+        try await TestTiming.awaitDelivery([secondChild])
         // The second child has announced nothing, so the fork is still waiting for an id and its deadline is armed.
         // Without the epoch beside the stash there is no deadline: the channel went ready on the dead child's id.
         try await rig.waitForSleeper(due: Self.handshakeTimeout)
@@ -363,21 +375,28 @@ final class ForkTests: XCTestCase {
         // Set after the source's own spawn and the fork's: neither reaches the finalisation this parks at — a
         // fork's spawn returns at the awaiting-fork branch, before the counter turn.
         let held = HeldAnswer(), entered = HeldAnswer()
+        let parkedAfterRekey = entered.expectation(description: "the identity resolution parked past the rekey")
         rig.onFinalising = { entered.release(); await held.wait() }
-        handle.push(.sessionIdentityResolved(resolved, handle.epoch))
-        try await rig.waitFor("the identity resolution to park past the rekey") { entered.isReleased }
+        let resolutionFinished = expectation(description: "the identity handler completed its rollback")
+        let resolving = Task {
+            await fork.handle(event: .sessionIdentityResolved(resolved, handle.epoch))
+            resolutionFinished.fulfill()
+        }
+        defer { held.release(); resolving.cancel() }
+        try await TestTiming.awaitDelivery([parkedAfterRekey])
 
-        // Delivered on the actor: the pump is inside the identity event, so an exit pushed onto the same stream
-        // would queue behind the very handler it is meant to race.
+        // Delivered on the actor: the identity handler is parked past the rekey, so an exit pushed onto the same
+        // stream would queue behind the very handler it is meant to race.
         let published = await fork.publishedCount
         await fork.handle(event: .exited(.code(0, stderrTail: ""), handle.epoch))
         let afterTheExit = await fork.publishedCount
         XCTAssertGreaterThan(afterTheExit, published, "the exit was taken")
         held.release()
 
-        try await rig.waitFor("the fork's slot to go back", timeout: .seconds(5)) {
-            await rig.fleet.occupancy == occupiedBeforeTheFork
-        }
+        try await TestTiming.awaitDelivery([resolutionFinished])
+        await resolving.value
+        let occupiedAfterRollback = await rig.fleet.occupancy
+        XCTAssertEqual(occupiedAfterRollback, occupiedBeforeTheFork, "the fork's slot went back")
         let holdsResolved = await rig.fleet.isLive(resolvedKey)
         XCTAssertFalse(holdsResolved, "a slot confirmed under the resolved key of a dead child is never released")
         let holdsProvisional = await rig.fleet.isLive(provisional)
@@ -411,9 +430,10 @@ final class ForkTests: XCTestCase {
         let resolvedKey = ChannelKey(configHome: provisional.configHome, session: resolved)
 
         let held = HeldAnswer(), entered = HeldAnswer()
+        let parkedAfterRekey = entered.expectation(description: "the identity resolution parked past the rekey")
         rig.onFinalising = { entered.release(); await held.wait() }
         handle.push(.sessionIdentityResolved(resolved, handle.epoch))
-        try await rig.waitFor("the identity resolution to park past the rekey") { entered.isReleased }
+        try await TestTiming.awaitDelivery([parkedAfterRekey])
 
         await fork.reap()
         XCTAssertEqual(handle.terminateCount, 0, "a reap ran inside the fork's own resolution")

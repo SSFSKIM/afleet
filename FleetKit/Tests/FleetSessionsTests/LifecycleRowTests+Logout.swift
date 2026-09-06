@@ -28,13 +28,16 @@ extension LifecycleRowTests {
             let ghost = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
             let held = HeldAnswer()
             var parked: Task<Void, Never>?
+            defer { held.release(); parked?.cancel() }
             if from == .ready {
                 try await ghost.spawn(reason: .open)
             } else {
                 rig.holdNextSpawn { await held.wait() }
+                let parkedChild = rig.expectScriptedHandles(2, description: "the parked spawn built its child")
                 parked = Task { try? await ghost.spawn(reason: .open) }
-                try await rig.waitFor("the parked spawn") { rig.scriptedHandles.count == 2 }
+                try await TestTiming.awaitDelivery([parkedChild])
             }
+            guard rig.scriptedHandles.count >= 2 else { return XCTFail("the ghost built no second child") }
             let ghostHandle = rig.scriptedHandles[1]
 
             let fleet = LogoutContext(channels: [healthy, ghost], observer: rig.observer, verbs: rig.verbs,

@@ -866,9 +866,11 @@ final class LifecycleRowTests: XCTestCase {
         // Parked between the victim wedging and the report of it: the one window where the ghost could be counted
         // both as a pending eviction and as a wedged slot, which would make the fleet look full when it is not.
         rig.holdEviction(of: sups[2].key)
+        let victimHeld = rig.expectHeldEvictions(1, description: "the wedged victim reached the barrier")
         let seventh = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         let spawning = Task { try await seventh.spawn(reason: .open) }
-        try await rig.waitFor("the wedged victim to reach the barrier") { rig.evictionIsHeld }
+        defer { rig.releaseEviction(); spawning.cancel() }
+        try await TestTiming.awaitDelivery([victimHeld])
         let midWedge = await rig.fleet.occupancy
         XCTAssertEqual(midWedge, 6, "the ghost occupies the slot it was already occupying, and not a second one")
         rig.releaseEviction()
@@ -936,9 +938,10 @@ final class LifecycleRowTests: XCTestCase {
         }
         // Either both opens reached an eviction of their own — the healthy shape — or one of them got a slot with no
         // eviction at all, which is the break this test exists to catch and which shows up as a seventh process.
-        try await rig.waitFor("both opens to be decided") {
-            rig.heldEvictionCount == 2 || rig.spawnCount > 6
-        }
+        let opensDecided = rig.expectHeldEvictions(2, orScriptedHandles: 7,
+                                                   description: "both opens reached a decision point")
+        defer { rig.releaseEviction(); opens.cancel() }
+        try await TestTiming.awaitDelivery([opensDecided])
         rig.releaseEviction()
         failures = await opens.value
 
@@ -968,9 +971,11 @@ final class LifecycleRowTests: XCTestCase {
 
         let victim = sups[0].key
         rig.holdEviction(of: victim)
+        let victimHeld = rig.expectHeldEvictions(1, description: "the eviction parked at the barrier")
         let seventh = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
         let spawning = Task { try await seventh.spawn(reason: .open) }
-        try await rig.waitFor("the eviction to park at the barrier") { rig.evictionIsHeld }
+        defer { rig.releaseEviction(); spawning.cancel() }
+        try await TestTiming.awaitDelivery([victimHeld])
         XCTAssertEqual(rig.scriptedHandles[0].terminateCount, 1, "the victim was reaped before the barrier")
 
         await rig.fleet.release(victim)
@@ -1700,10 +1705,12 @@ final class LifecycleRowTests: XCTestCase {
         rig.forgetTransitions()
 
         rig.holdEviction(of: sups[0].key)
+        let victimHeld = rig.expectHeldEvictions(1, description: "the seventh channel parked inside its spawn")
         let session = SessionID()
         let seventh = rig.supervisor(session: session, isRecent: true)
         let opening = Task { try await seventh.open() }
-        try await rig.waitFor("the seventh to park inside its spawn") { rig.evictionIsHeld }
+        defer { rig.releaseEviction(); opening.cancel() }
+        try await TestTiming.awaitDelivery([victimHeld])
         let connecting = await seventh.state
         XCTAssertEqual(connecting.origin, .owned(.connecting))
         XCTAssertEqual(connecting.desired, .owned, "the intent is set, so the disagreement rule would otherwise fire")
