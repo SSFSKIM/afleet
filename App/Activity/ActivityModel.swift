@@ -243,6 +243,41 @@ final class ActivityModel {
         return ActivityItem.PermissionAsk(id: id, toolName: tool.toolName)
     }
 
+    // MARK: - Answering
+
+    /// *Allow once*: `allow`, classified `user_temporary` (§8.4's binding mapping).
+    ///
+    /// *Always allow* is deliberately absent. It needs the request's `permission_suggestions` and a
+    /// choice of destination, and that card is C6's.
+    func allowOnce(_ ask: ActivityItem.PermissionAsk, on key: ChannelKey) async {
+        await answer(.permission(.allow(updatedInput: nil, updatedPermissions: nil,
+                                        classification: .userTemporary)),
+                     to: ask.id, on: key)
+    }
+
+    /// *Deny*: `deny`, classified `user_reject`, without interrupting the turn.
+    func deny(_ ask: ActivityItem.PermissionAsk, on key: ChannelKey) async {
+        await answer(.permission(.deny(message: "Denied from Activity.", interrupt: false,
+                                       classification: .userReject)),
+                     to: ask.id, on: key)
+    }
+
+    /// The one path an answer leaves by. `LifecycleAPI` has no `answer` member; the action is
+    /// `LifecycleAction.answer(RequestID, InboundAnswer)`.
+    private func answer(_ answer: InboundAnswer, to id: RequestID, on key: ChannelKey) async {
+        do {
+            let state = try await lifecycle.perform(.answer(id, answer), on: key)
+            answerFailure = nil
+            pumps[key]?.forget(id)
+            apply(state)
+            rebuild()
+        } catch let error as LifecycleError {
+            answerFailure = RowBanner(error).text
+        } catch {
+            answerFailure = "The answer failed: \(type(of: error))."
+        }
+    }
+
     // MARK: - Badges and the unread cursor
 
     /// What the sidebar draws beside a channel (G2b).
