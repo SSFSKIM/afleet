@@ -1711,60 +1711,99 @@ table as data, the channel supervisor with its ownership checks and cap counter,
 and the terminal hatch, the quiescent restart and forking, the spawn preconditions with the one
 permitted project write, the command router and `/logout`, the Activity query, C3's
 `IndexStorage`, and the `Fleet` facade that C5, C6 and C7 call. The package builds clean at
-**412 tests, 10 skipped, 0 failures, zero warnings**.
+**415 tests, 10 skipped, 0 failures, zero warnings**.
 
 **Gates.** G1 passes, with a coverage gate proving all **58** lifecycle scenarios have a
 declaring test — a reviewer reproduced each of its three failure modes independently. G2 passes
 against C3's real registry mirror, five boundary cases agreeing case for case with the stand-in.
-G3 and G4 pass. G5 has all seven original scenarios green against the installed CLI; the eighth,
-the restart readback, is written and has not yet met an engine.
+G3 and G4 pass. G5 has **all eight scenarios green together** against the installed CLI,
+twice — the eighth, the restart readback, has now met an engine and is what proves ruling 4's
+`effective_keys` corrective.
 
-**The merge-evidence run, 2026-09-06, against installed CLI 2.1.263.** Run twice. The CLI
-auto-updated from 2.1.261 to 2.1.263 between the child's earlier live work and this run; the
-2.1.263 bundle is extracted and every engine fact this document cites holds there.
+**The merge-evidence runs, 2026-09-06, against installed CLI 2.1.263.** Run five times. The CLI
+auto-updated from 2.1.261 to 2.1.263 between the child's earlier live work and these runs; the
+2.1.263 bundle is extracted and every engine fact this document cites holds there. The first four
+failures across runs one to three had four causes, all now named and none of them the engine
+being slow.
 
-*First attempt* — five of eight, on a config home restored and logged in minutes earlier. Three
-failures, all timeouts: `verbFailed(verb: "--bg --resume", exitCode: -1)`,
-`verbFailed(verb: "rm", exitCode: -1)`, and the pty child writing no registry record within
-thirty seconds. Two causes, both environmental and both since fixed: the browser-flow
-`claude auth login` stores credentials but never sets `hasCompletedOnboarding`, so the
-interactive child sat on the theme picker and never reached its registry write; and the daemon
-cold-started in a fresh home, roughly sixty seconds, which is tracker entry 27.
+| run | at | verdict | wall | turns | spend |
+| --- | --- | --- | --- | --- | --- |
+| 1 | pre-`66b3832` | five of eight | — | 5 of 5 | — |
+| 2 | pre-`66b3832` | six of eight | 246.464 s | 5 of 5 | 0.248624 |
+| 3 | `66b3832` | seven of eight | 240.628 s | 5 of 5 | 0.173372 |
+| 4 | `aa8d791` | **eight of eight** | 136.568 s | 5 of 5 | 0.170528 |
+| 5 | `883860f` | **eight of eight** | 132.279 s | 5 of 5 | 0.185419 |
 
-*Second attempt*, after the onboarding wizard was completed interactively and the daemon warmed
-— **six of eight**:
+Run 4 is the merge evidence. Run 5 is the tip's own witness, taken after the mutation budget came
+down to thirty seconds, so the gate has been measured at the budgets that ship.
+
+*Run 5, at the tip:*
 
 | scenario | verdict | wall |
 | --- | --- | --- |
-| declined project server (G3's engine proof) | passed | 40.812 s |
-| adopting a conversation job and sending it back | **failed** | 46.020 s |
-| foreign interactive session detected and archived | passed | 3.332 s |
-| exec job listed and stopped | **failed** | 45.239 s |
-| quiescent restart, the engine reads its settings back | passed | 43.401 s |
-| the allowlist names nothing the engine is not known to write | passed | 0.019 s |
-| the write allowlist across hooks, a background shell, a subagent and relocation | passed | 67.390 s |
-| two overlapping scenarios, atomic accounting | passed | 0.251 s |
+| declined project server (G3's engine proof) | passed | 19.841 s |
+| adopting a conversation job and sending it back | passed | 26.772 s |
+| foreign interactive session detected and archived | passed | 3.589 s |
+| exec job listed and stopped | passed | 5.129 s |
+| quiescent restart, the engine reads its settings back | passed | 22.785 s |
+| the allowlist names nothing the engine is not known to write | passed | 0.018 s |
+| the write allowlist across hooks, a background shell, a subagent and relocation | passed | 53.895 s |
+| two overlapping scenarios, atomic accounting | passed | 0.249 s |
 
-`Executed 8 tests, with 2 failures in 246.464 seconds`, and
-`budget.summary: turns used 5 of 5; total_cost_usd 0.248624; wall time 244.331 s of 1200.0;
-launches decorated 13, bypassed 0`.
+`Executed 8 tests, with 0 failures in 132.279 seconds`, and
+`budget.summary: turns used 5 of 5; total_cost_usd 0.185419; wall time 130.318 s of 1200.0;
+launches decorated 14, bypassed 0`.
 
-The onboarding fix was decisive for the foreign-session scenario: it went from failing at 42.3 s
-to passing at **3.332 s**, comfortably inside G5's five-second detection claim.
+**The four causes, none of them a guess.**
 
-The two remaining failures are both in the `--bg` verb family, and they differ in kind. The exec
-job is tracker 27 again, `verbFailed(verb: "stop", exitCode: -1)` — a verb timing out rather than
-answering wrongly. Adoption is the one that is not a timeout:
-`("archived") is not equal to ("owned(...ready)") — adopt did not reach owned/ready; the
-post-handshake check found a holder`. The channel resting in **archived** is the fix wave's own
-ruling 1 behaving correctly — a spawn that does not complete returns the channel to the resting
-origin it left, and for a channel registered but never opened that is archived-older — so what
-the assertion records is that the spawn was refused because a holder was still observed, which is
-the same roster-latency family as entry 27 seen one step later. Whether the wait for roster
-removal needs to be longer, or the check needs to distinguish the job it just stopped, is a
-question for a warm-daemon run to answer; it is recorded rather than guessed at here.
+1. **The browser-flow login never completes onboarding.** `claude auth login` stores credentials
+   but does not set `hasCompletedOnboarding`, so run 1's interactive child sat on the theme
+   picker and never reached its registry write. Completing the wizard interactively moved the
+   foreign-session scenario from failing at 42.3 s to passing at **3.332 s**, comfortably inside
+   G5's five-second detection claim, and it holds at 3.589 s at the tip. Environmental, not a
+   product defect, but it is a precondition the gate depends on and C5 should expect it too.
+2. **The transient daemon's first-ever start in a fresh home**, roughly sixty seconds on run 1.
+   Also environmental, and it does not recur once the home has been used: the 2.1.263 daemon
+   exits five idle seconds after its last client and boots again in about 0.3 s.
+3. **The observer consumed adopt's own release.** `adopt()` runs `claude stop <short>` and waits
+   for the job's holder to disappear, and `holdersChanged` archives on exactly that
+   disappearance, taking `.backgroundJob` — the only from-state `.adopt` has — away between the
+   wait and the transition. `adopt()` then returned having spawned nothing and thrown nothing:
+   §7.4's round trip silently did not happen, and the caller was handed a channel resting
+   archived. Fixed in `66b3832` by giving the record-disappeared branch the same `inFlight == nil`
+   guard rule 1 already carried; the observer's own poll re-drives the archive once the operation
+   has finished. `LifecycleRowTests.testAdoptSurvivesAHolderPollLandingOnTheJobsOwnRelease` drives
+   the poll deterministically through `OwnershipCheck`'s `onReleased` seam. The scenario went
+   46.020 s failing to 32.333 s passing.
+4. **The runner learned a child's exit on a starved dispatch worker.** `ProcessRunner` called
+   Foundation's `waitUntilExit()` from a block on `DispatchQueue.global()`, which does not
+   overcommit. A live suite of eight scenarios driving pty children fills that pool, the block
+   never runs, the exit is never observed, and the verb is failed by its own timer long after the
+   child has exited successfully — reported as `exitCode: -1`. The daemon log of run 3 settles
+   it: job `78a58ac5` spawned at 08:31:38.787 and `settled (killed)` at 08:31:39.873, so the
+   spawn, the listing and the stop all finished inside 1.1 s, every client had disconnected by
+   08:31:39.9, and the daemon logged nothing for the remaining eighty-nine seconds of a 94.781 s
+   failure. Fixed in `aa8d791` by taking the exit from `process.terminationHandler`, which needs
+   no thread of ours and cannot be starved;
+   `testTheChildsExitIsSeenEvenWithEveryDispatchWorkerBlocked` holds the pool deliberately and
+   measures 7.06 s with a false failure before against 0.005 s and exit 0 after. A second latent
+   defect found on the way — settlement waiting for end-of-file on the pipes, which a surviving
+   grandchild holds open — is fixed in `fdb4446`. Both live in the process runner every verb
+   shares, so this is a C2 corrective this branch carries.
 
-What both runs establish, independently of those two:
+**A correction this document owes its reader.** Runs 1 and 2 were read at the time as tracker
+entry 27, a cold or contended daemon, and the mutation budget was raised from twenty seconds to
+ninety on that reading. Run 3 falsified it: the same scenario failed the same way at the new
+ceiling, which is what a budget that was never the constraint looks like. Entry 27's seventy
+seconds was cause 4, not contention. With cause 4 fixed the mutation budget is **thirty seconds**
+against measurements of about one — `--bg --exec` 1.1 s, `stop` 0.70 s, `rm` 0.7 s from a shell,
+and 5.129 s for the whole spawn-list-stop-confirm scenario with a cold daemon inside it — and
+reads stay at twenty. The split itself stands on its own reasoning: a read that hangs costs a
+stale listing, while a mutation abandoned mid-request leaves the daemon honouring a change afleet
+has already given up on, which is precisely what run 2 recorded when a twenty-second `stop` was
+SIGTERMed two seconds before the daemon logged `settled (killed)`.
+
+What the runs establish beyond the eight verdicts:
 
 - **The eighth scenario passes.** It reports `get_settings keys ["applied", "effective",
   "sources"]; effective is an object` — the live witness that ruling 4's corrective was right and
@@ -1773,19 +1812,19 @@ What both runs establish, independently of those two:
 - **The write-allowlist claim holds**, across a hook, a background shell, a subagent and a
   relocation, with both witness readings explained, and the deliberate narrowing still
   discriminates (`without projects/ the final reading leaves 3 path(s) unexplained`).
-- **Both zero-cost launches read zero** on both runs, and every launch was decorated with none
-  bypassed, so no child escaped its turn cap.
+- **Both zero-cost launches read zero** on every run, and every launch was decorated with none
+  bypassed — 14 of 14 on runs 4 and 5 — so no child escaped its turn cap.
 - Two delegated unknowns are answered: an exec job **does** carry a session id on 2.1.263, and
   `mcp_status` reports a rejected project server by omitting it rather than listing it with a
   status word.
 
-Cumulative measured live spend across the whole child is `total_cost_usd 1.047150`, plus two
-sub-cent prompt turns the harness could not see because they ran on `--bg` jobs rather than on an
-observed channel.
+Cumulative measured live spend across the whole child is `total_cost_usd 1.576469` over five
+runs, plus two sub-cent prompt turns the harness could not see because they ran on `--bg` jobs
+rather than on an observed channel. No run exceeded five turns or came near the twenty-minute
+wall ceiling; the longest was 244.3 s.
 
-**Still unwitnessed:** the eight green *together*. Every scenario has now been green at least
-once, and the trend across the two attempts is environmental rather than behavioural — five, then
-six, with each fix removing a named cause. Re-running spends turns and is not decided here.
+**Previously unwitnessed, now witnessed:** the eight green *together*, twice, at
+`aa8d791` and again at the tip.
 
 **What the live gate bought, and why it was worth its cost.** Four product defects, every one in
 shipped lifecycle code and every one invisible to a unit suite that was already 190 tests green:
@@ -1818,6 +1857,20 @@ which is the only reason the redactor artifact was ever found.
 
 
 ## Revision Notes
+
+- 2026-09-06, later: the merge-evidence runs closed out at **eight of eight, twice**, and two
+  product defects were found by running them that no unit suite had reached. Runs 1 and 2 were
+  read at the time as tracker entry 27 — a cold or contended daemon — and the mutation budget was
+  raised to ninety seconds on that reading. Run 3 falsified it by failing the same scenario the
+  same way at the new ceiling. The real causes were the observer archiving a channel on the very
+  release `adopt()` was waiting for, which made §7.4's round trip a silent no-op (`66b3832`), and
+  `ProcessRunner` learning a child's exit from `waitUntilExit()` on the non-overcommitting global
+  dispatch queue, so a loaded suite starved the pool and failed verbs whose children had already
+  succeeded (`aa8d791`, with the end-of-file settlement defect found alongside it in `fdb4446` —
+  both C2 correctives this branch carries). The mutation budget came down to thirty seconds on
+  the corrected measurements (`883860f`) and run 5 re-measured the gate at the budgets that ship.
+  The lesson worth carrying to C5: a timeout is a symptom, and widening one that then fails at
+  the new boundary is evidence that the waiting party is not waiting on what you think.
 
 - 2026-09-06: the whole-branch review rounds, after the twelve tasks were complete and green.
   Round one, a Codex code-review panel over `main..HEAD` (77 files, 17,004 insertions; one native
