@@ -60,8 +60,14 @@ struct WorkspaceView: View {
 
     var body: some View {
         NavigationSplitView {
-            PlaceholderColumn(title: "Fleet", detail: "The fleet browser lands here.")
-                .navigationSplitViewColumnWidth(min: 220, ideal: 280, max: 420)
+            Group {
+                if let browser = model.browser {
+                    SidebarView(browser: browser, shell: shell)
+                } else {
+                    ProgressView()
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 220, ideal: 280, max: 420)
         } content: {
             Group {
                 if shell.focus.isActivity {

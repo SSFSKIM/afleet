@@ -231,6 +231,62 @@ final class FleetBrowserModel {
         rebuild()
     }
 
+    // MARK: - Background jobs
+
+    /// Why the last action on a background job did not happen, by `JobShort.rawValue`. Separate
+    /// from `banners` because a job is not a row: an exec job has no session id at all, so there is
+    /// no `SessionID` to key its failure under.
+    private(set) var jobBanners: [String: String] = [:]
+
+    /// *Adopt*: take over a job's session through X5. A job that runs no session — an exec job —
+    /// has nothing to adopt, and says so rather than silently doing nothing.
+    func adopt(_ job: JobEntry) async {
+        guard let session = job.sessionID else {
+            jobBanners[job.short.rawValue] = "This job runs no session, so there is nothing to adopt."
+            return
+        }
+        let key = ChannelKey(configHome: configHome, session: session)
+        do {
+            let state = try await lifecycle.perform(.adopt, on: key)
+            jobBanners[job.short.rawValue] = nil
+            apply(state)
+        } catch {
+            jobBanners[job.short.rawValue] = Self.sentence(for: error)
+        }
+        await refreshBackground()
+    }
+
+    /// *Attach*: the `PaneRequest` X5 hands back for the job's pane. **C5 renders no pane** — the
+    /// Terminal panel is C7's — so the request is returned to the caller, which holds it, rather
+    /// than being dropped on the floor as though attaching had happened.
+    func attach(_ job: JobEntry) async -> PaneRequest? {
+        do {
+            let request = try await lifecycle.attach(job.short)
+            jobBanners[job.short.rawValue] = nil
+            return request
+        } catch {
+            jobBanners[job.short.rawValue] = Self.sentence(for: error)
+            return nil
+        }
+    }
+
+    /// *Stop*: `claude stop <short>` through X5's job verb, never a signal of our own.
+    func stop(_ job: JobEntry) async {
+        do {
+            try await lifecycle.performJob(.stop, job.short)
+            jobBanners[job.short.rawValue] = nil
+        } catch {
+            jobBanners[job.short.rawValue] = Self.sentence(for: error)
+        }
+        await refreshBackground()
+    }
+
+    /// The same sentences a row's banner uses, so a refusal reads identically wherever it surfaced.
+    private static func sentence(for error: any Error) -> String {
+        if let lifecycle = error as? LifecycleError { return RowBanner(lifecycle).text }
+        return "The action failed: \(type(of: error))."
+    }
+
     // MARK: - Grouping
 
     func updateGrouping(_ grouping: ProjectGrouping) {
