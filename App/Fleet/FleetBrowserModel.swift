@@ -66,6 +66,34 @@ final class FleetBrowserModel {
     /// than once per rebuild.
     private let paths = PathMemo()
 
+    /// Where each row currently sits, rebuilt whenever `sections` and `archived` are. It is what
+    /// makes `apply(_ state:)` a patch rather than a re-derivation.
+    ///
+    /// Every read of it re-checks the row's own id at the position it names, so a stale index
+    /// cannot write a state into the wrong channel: a mismatch falls back to the full rebuild.
+    private var rowIndex: [SessionID: RowLocation] = [:]
+
+    /// Sessions whose live half has been ingested and not yet written into the row that draws it.
+    private var dirty: Set<SessionID> = []
+    /// How many states have been ingested. Only ever compared for change.
+    private(set) var ingestCount = 0
+    private var flushTask: Task<Void, Never>?
+
+    /// How many times the model has written a live half into the rows a view reads, and how many
+    /// of those were full re-derivations.
+    ///
+    /// Counts, never identifiers (§11). They are here because the difference between them is the
+    /// property this model is now built around and the only thing a test can hold it to: three
+    /// thousand states that produce three thousand publishes are the defect, and asserting on
+    /// elapsed time instead would be a stopwatch measuring a proxy.
+    private(set) var publishCount = 0
+    private(set) var rebuildCount = 0
+
+    private enum RowLocation {
+        case section(Int, worktree: Int?, row: Int)
+        case archived(Int)
+    }
+
     // MARK: - The join's three sides
 
     /// **The one map that decides whether a session has a row.** It holds listed sessions only, with
@@ -172,13 +200,22 @@ final class FleetBrowserModel {
     // MARK: - The lifecycle feed
 
     /// Starts the `updates` loop (spec §2 step 11). Idempotent.
+    ///
+    /// **The loop ingests and defers; it does not publish per state.** Registering the fleet makes
+    /// C4 seed every registered channel's holders, so a launch against a real config home delivers
+    /// roughly three thousand `ChannelState`s over the following minutes — one per channel, all of
+    /// them first-time, almost all `.archived`. Publishing each one separately means SwiftUI walks
+    /// the whole row tree once per state, which is what held the main thread at 100 percent for the
+    /// length of the drain. Ingesting is a dictionary write; the flush that follows is scheduled
+    /// once and merges every state that arrived before it ran.
     func startUpdates() {
         guard updatesTask == nil else { return }
         let stream = lifecycle.updates
         updatesTask = Task { [weak self] in
             for await state in stream {
                 guard let self else { return }
-                self.apply(state)
+                self.ingest(state)
+                self.scheduleFlush()
             }
         }
     }
@@ -189,12 +226,134 @@ final class FleetBrowserModel {
     func stopUpdates() {
         updatesTask?.cancel()
         updatesTask = nil
+        flushTask?.cancel()
+        flushTask = nil
     }
 
     /// One channel's live half. The only way an origin ever enters this model.
+    ///
+    /// **It patches one row rather than re-deriving the fleet, whenever the row cannot move.**
+    /// A `ChannelState` changes a row's origin, presence, badge, banner and system item, and none
+    /// of those is a sort key or a grouping key: the sections are ordered by pin, by the user's
+    /// order, by `.claude.json`'s order and then by `mtime`, and every one of those comes from the
+    /// static half. The one thing a state *can* move is whether the row is archived at all —
+    /// `ChannelRow.isArchived` reads `state == nil` — so that is the condition the fast path
+    /// checks, and a row that crosses it falls back to the full derivation.
+    ///
+    /// Why it matters, measured on a real config home: registering the fleet makes C4 seed each
+    /// channel's holders in a detached task, so roughly three thousand first-time states arrive
+    /// over several minutes, one per registered channel. Re-deriving 306 sections for each of them
+    /// held the main thread at 100 percent for as long as the drain lasted, and made SwiftUI
+    /// re-diff the whole row tree once per state because each rebuild got its own run-loop turn.
     func apply(_ state: ChannelState) {
-        states[state.key.session] = state
-        rebuild()
+        ingest(state)
+        flush()
+    }
+
+    /// Records a live half without touching anything a view reads.
+    ///
+    /// `states` is private and no view reads it, so writing it publishes nothing. **A state for a
+    /// session with no row is recorded and goes no further**: `rebuild()` derives rows from
+    /// `listed` alone, so a session the listing policy did not list produces the same output before
+    /// and after, and re-deriving for it is work with no possible effect on the screen. On this
+    /// machine's own corpus 231 of the first 1,150 seeded states were of exactly that kind.
+    private func ingest(_ state: ChannelState) {
+        ingestCount &+= 1
+        let id = state.key.session
+        states[id] = state
+        guard listed[id] != nil else { return }
+        dirty.insert(id)
+    }
+
+    /// Writes every pending live half into the row that is drawn, or re-derives once if any of them
+    /// has to move between `sections` and `archived`.
+    private func flush() {
+        guard !dirty.isEmpty else { return }
+        publishCount &+= 1
+        var mustRebuild = false
+        for id in dirty where !patchLiveHalf(of: id) { mustRebuild = true }
+        dirty.removeAll(keepingCapacity: true)
+        if mustRebuild { rebuild() } else { releaseWaiters() }
+    }
+
+    /// Arranges for one flush, after the main actor has run whatever else is ready.
+    ///
+    /// The hop is the whole mechanism: every state the stream can hand over without suspending is
+    /// ingested before this task gets its turn, so a burst of three thousand becomes a handful of
+    /// publishes instead of three thousand. **It is not a deadline** — nothing here waits for a
+    /// duration, and a single state arriving on a quiet fleet is published on the very next turn of
+    /// the main actor, which is what keeps an origin, a badge or a presence change prompt.
+    private func scheduleFlush() {
+        guard flushTask == nil, !dirty.isEmpty else { return }
+        flushTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var seen = self.ingestCount
+            var deferrals = 0
+            // Hand the main actor back so the stream can deliver whatever it already holds. Each
+            // hop that brings more work starts another; the first hop that brings none means the
+            // fleet has gone quiet and the batch is whole.
+            while deferrals < Self.flushDeferralCeiling {
+                await Task.yield()
+                if Task.isCancelled {
+                    self.flushTask = nil
+                    return
+                }
+                if self.ingestCount == seen { break }
+                seen = self.ingestCount
+                deferrals += 1
+            }
+            self.flushTask = nil
+            self.flush()
+        }
+    }
+
+    /// How many times a flush will stand aside for more arrivals before publishing anyway.
+    ///
+    /// A bound on **arrivals, not on time** — nothing here waits for a duration, so nothing here
+    /// can be slow on a loaded machine or fast on an idle one. Its job is to keep a fleet that
+    /// never goes quiet from starving the sidebar of paints: at worst the screen lags the model by
+    /// this many states, and C4's seeding burst of roughly three thousand becomes a dozen paints
+    /// rather than three thousand.
+    private static let flushDeferralCeiling = 256
+
+    /// Rewrites one row's live half where it already sits, or reports that it could not.
+    ///
+    /// Returns false — and the caller re-derives — when the row is not in the index, when the index
+    /// has gone stale under it, or when the new live half changes `isArchived`, which is the only
+    /// way a `ChannelState` can move a row between the two collections.
+    private func patchLiveHalf(of id: SessionID) -> Bool {
+        guard let location = rowIndex[id] else { return false }
+        switch location {
+        case .section(let section, let worktree, let row):
+            guard section < sections.count else { return false }
+            if let worktree {
+                guard worktree < sections[section].worktrees.count,
+                      row < sections[section].worktrees[worktree].rows.count,
+                      sections[section].worktrees[worktree].rows[row].id == id else { return false }
+                var patched = sections[section].worktrees[worktree].rows[row]
+                patched.state = states[id]
+                patched.banner = banners[id]
+                guard !patched.isArchived else { return false }
+                sections[section].worktrees[worktree].rows[row] = patched
+            } else {
+                guard row < sections[section].rows.count,
+                      sections[section].rows[row].id == id else { return false }
+                var patched = sections[section].rows[row]
+                patched.state = states[id]
+                patched.banner = banners[id]
+                guard !patched.isArchived else { return false }
+                sections[section].rows[row] = patched
+            }
+            return true
+        case .archived(let row):
+            guard row < archived.count, archived[row].id == id else { return false }
+            var patched = archived[row]
+            patched.state = states[id]
+            patched.banner = banners[id]
+            guard patched.isArchived else { return false }
+            archived[row] = patched
+            return true
+        }
     }
 
     func refreshBackground() async {
@@ -298,6 +457,11 @@ final class FleetBrowserModel {
     // MARK: - Derivation
 
     private func rebuild() {
+        rebuildCount &+= 1
+        // A full derivation reads every live half out of `states`, so anything still waiting to be
+        // patched has just been written by definition. Leaving it queued would make the next flush
+        // re-derive again for rows that are already correct.
+        dirty.removeAll(keepingCapacity: true)
         let moment = now()
         var live: [ChannelRow] = []
         var old: [ChannelRow] = []
@@ -311,7 +475,27 @@ final class FleetBrowserModel {
         }
         archived = old.sorted { $0.mtime > $1.mtime }
         sections = groupingModel.sections(from: live, paths: paths)
+        reindex()
         releaseWaiters()
+    }
+
+    /// Records where every row landed, so the next `ChannelState` can be written in place.
+    private func reindex() {
+        rowIndex.removeAll(keepingCapacity: true)
+        rowIndex.reserveCapacity(archived.count + sections.reduce(0) { $0 + $1.allRows.count })
+        for (position, row) in archived.enumerated() {
+            rowIndex[row.id] = .archived(position)
+        }
+        for (section, project) in sections.enumerated() {
+            for (position, row) in project.rows.enumerated() {
+                rowIndex[row.id] = .section(section, worktree: nil, row: position)
+            }
+            for (worktree, group) in project.worktrees.enumerated() {
+                for (position, row) in group.rows.enumerated() {
+                    rowIndex[row.id] = .section(section, worktree: worktree, row: position)
+                }
+            }
+        }
     }
 
     // MARK: - Being told, rather than asked
@@ -346,3 +530,4 @@ final class FleetBrowserModel {
         waiters = remaining
     }
 }
+
