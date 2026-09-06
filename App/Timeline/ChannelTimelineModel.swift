@@ -135,6 +135,12 @@ final class ChannelTimelineModel {
     /// Why the transcript could not be read, as a shape and never a path (§11).
     private(set) var failure: String?
 
+    /// Every applied timeline, from this call onward. A fresh fan-out per call, like
+    /// `LifecycleAPI.events(of:)`: the panel host's recent-URL feed is one consumer and a test is
+    /// another, and a single shared `AsyncStream` would split the elements between them.
+    nonisolated var timelineUpdates: AsyncStream<ChannelTimeline> { fanout.subscribe() }
+
+    @ObservationIgnored private nonisolated let fanout = TimelineFanout()
     @ObservationIgnored private let workspace: Workspace?
     @ObservationIgnored private let lifecycle: (any LifecycleAPI)?
     @ObservationIgnored private var ingestion: StreamIngestion?
@@ -217,17 +223,63 @@ final class ChannelTimelineModel {
         let ingestion = self.ingestion
         self.ingestion = nil
         Task { await ingestion?.close() }
+        fanout.finish()
     }
 
     // MARK: - Publishing
 
     private func publish() async {
         guard let ingestion else { return }
-        timeline = ChannelTimeline(durable: await ingestion.projection)
+        let next = ChannelTimeline(durable: await ingestion.projection)
+        timeline = next
+        fanout.yield(next)
     }
 
     /// The archived channel's tap: a sequence that is over before anybody reads it.
     private static func finishedEvents() -> AsyncStream<WireEvent> {
         AsyncStream { $0.finish() }
+    }
+}
+
+/// The fan-out behind `timelineUpdates`.
+///
+/// `@unchecked Sendable` is sound because the one mutable field is `continuations`, and every read
+/// and every write of it happens between `lock.lock()` and `lock.unlock()` of this instance's
+/// private `NSLock`. That lock is the serialising mechanism.
+final class TimelineFanout: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuations: [UUID: AsyncStream<ChannelTimeline>.Continuation] = [:]
+    private var finished = false
+
+    func subscribe() -> AsyncStream<ChannelTimeline> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<ChannelTimeline>.makeStream(bufferingPolicy: .unbounded)
+        lock.lock()
+        let over = finished
+        if !over { continuations[id] = continuation }
+        lock.unlock()
+        if over { continuation.finish(); return stream }
+        continuation.onTermination = { [weak self] _ in self?.drop(id) }
+        return stream
+    }
+
+    func yield(_ timeline: ChannelTimeline) {
+        lock.lock()
+        let targets = Array(continuations.values)
+        lock.unlock()
+        for continuation in targets { continuation.yield(timeline) }
+    }
+
+    func finish() {
+        lock.lock()
+        finished = true
+        let targets = Array(continuations.values)
+        continuations = [:]
+        lock.unlock()
+        for continuation in targets { continuation.finish() }
+    }
+
+    private func drop(_ id: UUID) {
+        lock.lock(); continuations[id] = nil; lock.unlock()
     }
 }
