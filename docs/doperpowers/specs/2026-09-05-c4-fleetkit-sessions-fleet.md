@@ -1719,14 +1719,55 @@ against C3's real registry mirror, five boundary cases agreeing case for case wi
 G3 and G4 pass. G5 has all seven original scenarios green against the installed CLI; the eighth,
 the restart readback, is written and has not yet met an engine.
 
-**⟨PLACEHOLDER — the merge-evidence run.⟩** The one claim still unwitnessed is the set green
-*together* in a single invocation. When the scratch config home is restored and the run goes,
-this paragraph takes its per-scenario verdicts and times, its `budget.summary` line, its turns
-and cost, and the cumulative live spend. Until then the honest statement is: six scenarios green
-together in one 306.6 s invocation, adoption green in a filtered run after its recipe was
-remade, and the eighth never executed. Cumulative measured spend so far is `total_cost_usd
-0.610306`, plus two sub-cent prompt turns the harness could not see because they ran on `--bg`
-jobs rather than on an observed channel.
+**The merge-evidence run, 2026-09-06.** All eight scenarios in one invocation against the
+installed CLI, on a scratch config home restored and freshly trusted that morning. **Five of
+eight passed; three failed, every one of them on a timeout rather than on an assertion about
+behaviour.**
+
+| scenario | verdict | wall |
+| --- | --- | --- |
+| declined project server (G3's engine proof) | passed | 20.808 s |
+| adopting a conversation job and sending it back | **failed** | 63.789 s |
+| foreign interactive session detected and archived | **failed** | 42.315 s |
+| exec job listed and stopped | **failed** | 47.330 s |
+| quiescent restart, the engine reads its settings back | passed | 42.435 s |
+| the allowlist names nothing the engine is not known to write | passed | 0.016 s |
+| the write allowlist across hooks, a background shell, a subagent and relocation | passed | 47.426 s |
+| two overlapping scenarios, atomic accounting | passed | 0.248 s |
+
+`Executed 8 tests, with 3 failures in 264.366 seconds`, and
+`budget.summary: turns used 5 of 5; total_cost_usd 0.188220; wall time 262.357 s of 1200.0;
+launches decorated 12, bypassed 0`.
+
+The three failures are one cause, and it is the one already carried as tracker entry 27: a cold
+daemon. Two are `verbFailed(verb: "--bg --resume", exitCode: -1)` and `verbFailed(verb: "rm",
+exitCode: -1)` — the verb timing out, not answering wrongly — and the third is the pty child
+writing no registry record within thirty seconds. The config home had been created and logged in
+minutes earlier, so the daemon had never run in it; the same exec-job scenario has passed twice
+and failed twice before against a cold or contended daemon, which is why entry 27 exists. No
+scenario failed an assertion about what the product does.
+
+What the run does establish, and it is the more valuable half:
+
+- **The eighth scenario passed on its first contact with an engine.** It reports
+  `get_settings keys ["applied", "effective", "sources"]; effective is an object` — the live
+  witness that ruling 4's corrective was right and that `effective_keys` was a redactor artifact.
+  That is the one class of defect a fixture-driven suite structurally cannot catch, now caught by
+  an engine rather than by a stand-in.
+- **The write-allowlist claim held**, across a hook, a background shell, a subagent and a
+  relocation, with both witness readings explained; the deliberate narrowing still discriminates
+  (`without projects/ the final reading leaves 3 path(s) unexplained`).
+- **Both zero-cost launches read zero** (`get_session_cost reads zero, session.total_cost_usd = 0.0`).
+- Every launch was decorated and none bypassed, so no child escaped its turn cap.
+
+Cumulative measured live spend across the whole child is therefore `total_cost_usd 0.798526`
+(0.610306 before this run, 0.188220 in it), plus two sub-cent prompt turns the harness could not
+see because they ran on `--bg` jobs rather than on an observed channel.
+
+**Still unwitnessed:** the eight green *together*. Adoption and the exec job have each been green
+in earlier runs, and the foreign-session scenario has been green twice; what has never happened is
+all eight in one invocation, and on this evidence the obstacle is daemon warmth rather than the
+product. Re-running is a turn-spending decision and is deliberately not taken here.
 
 **What the live gate bought, and why it was worth its cost.** Four product defects, every one in
 shipped lifecycle code and every one invisible to a unit suite that was already 190 tests green:
