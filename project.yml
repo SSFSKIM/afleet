@@ -49,6 +49,10 @@ targets:
       base:
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Afleet.app/Contents/MacOS/Afleet"
         BUNDLE_LOADER: "$(TEST_HOST)"
+        # A test bundle still has to be code-signed, and code signing needs a plist. The
+        # app's plist is a contract and is written out; a test bundle's is nobody's, so it
+        # is generated rather than committed.
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   afleet:
     build:
