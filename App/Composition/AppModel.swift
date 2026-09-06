@@ -15,20 +15,25 @@ final class AppModel {
     /// cares about.
     var sequence: LaunchSequence
 
-    /// **Task 4 replaces this** with the registrar that turns each listed entry into a
-    /// `Fleet.register(_:cwd:recent:)`. Task 3's default registers nothing, which is why the
-    /// coordinator seam is declared here and filled there rather than left to fall between them.
+    /// The registrar that turns each listed entry into a `Fleet.register(_:cwd:recent:)` and owns
+    /// the fleet browser's model. A seam rather than a direct construction because the cold-launch
+    /// test replaces the thing that records registrations without replacing the sequence that drives
+    /// it.
     var coordinatorFactory: @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating
 
     /// The coordinator the last successful launch built, kept so the app can reach it.
     private(set) var coordinator: (any WorkspaceCoordinating)?
+
+    /// The fleet browser's model, when the last launch reached a workspace. The window's sidebar
+    /// reads it; Tasks 5, 6, 8 and 9 all arrive here.
+    var browser: FleetBrowserModel? { (coordinator as? FleetCoordinator)?.model }
 
     /// Settings' readout over the workspace the last launch reached, built once so the scene does
     /// not make a new one on every body evaluation.
     private(set) var settingsReadout: SettingsReadout?
 
     init(sequence: LaunchSequence = LaunchSequence(),
-         coordinatorFactory: @escaping @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating = { _ in NoopWorkspaceCoordinator() }) {
+         coordinatorFactory: @escaping @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating = { FleetCoordinator(workspace: $0) }) {
         self.sequence = sequence
         self.coordinatorFactory = coordinatorFactory
     }

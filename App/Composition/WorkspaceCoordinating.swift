@@ -19,9 +19,9 @@ protocol WorkspaceCoordinating: AnyObject, Sendable {
     func indexChanged(_ delta: IndexDelta) async
 }
 
-/// Task 3's conformance, so the app builds and the composition root has something to drive.
-/// **Task 4 ships the real one** — the registrar that turns each listed entry into a
-/// `Fleet.register(_:cwd:recent:)` — and wires it into `AppModel.coordinatorFactory`.
+/// The conformance that registers nothing. `FleetCoordinator` is the real one and is what
+/// `AppModel.coordinatorFactory` now builds; this is kept for the tests that assert the composition
+/// root drives the seam without asserting anything about what registration does with it.
 @MainActor
 final class NoopWorkspaceCoordinator: WorkspaceCoordinating {
     init() {}
