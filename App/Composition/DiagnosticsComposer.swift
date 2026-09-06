@@ -14,19 +14,38 @@ import FleetKit
 /// filesystem contract, and it is what `testDiagnosticsComposerWritesOnlyUnderItsOwnDirectory`
 /// asserts: the write-root overlap check in `LaunchSequence` runs first and refuses to construct
 /// this at all when `directory` would sit inside a config home (X9).
-final class DiagnosticsComposer: Sendable {
+///
+/// `@unchecked Sendable` is sound here because the two mutable fields, `wireSink` and `fleetSink`,
+/// are read and written only inside `lock`, this instance's private `NSLock`. That lock is the
+/// serialising mechanism. `timeline` is immutable and recovers in place.
+final class DiagnosticsComposer: @unchecked Sendable {
     let directory: URL
-    /// C2's `diagnostics.log`.
-    let wire: FileDiagnostics
-    /// FleetKit's `fleet.log`.
-    let fleet: FileFleetDiagnostics
-    /// The app's own `timeline.log`.
+    /// The app's own `timeline.log`. A `let`, because `TranscriptIndex` is handed this instance at
+    /// construction and keeps it for the life of the app, so it has to survive a deletion rather
+    /// than be replaced by a new one.
     let timeline: FileTimelineDiagnostics
+
+    private let lock = NSLock()
+    private var wireSink: FileDiagnostics
+    private var fleetSink: FileFleetDiagnostics
+
+    /// C2's `diagnostics.log`. Read at the point of use, never stored by a caller, because
+    /// `deleteLogs()` replaces the instance.
+    var wire: FileDiagnostics {
+        lock.lock(); defer { lock.unlock() }
+        return wireSink
+    }
+
+    /// FleetKit's `fleet.log`, on the same terms.
+    var fleet: FileFleetDiagnostics {
+        lock.lock(); defer { lock.unlock() }
+        return fleetSink
+    }
 
     init(directory: URL) {
         self.directory = directory
-        wire = FileDiagnostics(directory: directory)
-        fleet = FileFleetDiagnostics(directory: directory)
+        wireSink = FileDiagnostics(directory: directory)
+        fleetSink = FileFleetDiagnostics(directory: directory)
         timeline = FileTimelineDiagnostics(directory: directory)
     }
 
@@ -35,6 +54,36 @@ final class DiagnosticsComposer: Sendable {
         wire.flush()
         fleet.flush()
         timeline.flush()
+    }
+
+    /// Settings' *Delete diagnostics*: the log files go and the three sinks keep working.
+    ///
+    /// Removing the files under the sinks is not enough on its own. Each of the three holds an open
+    /// `FileHandle` and a running byte offset, so after an `unlink` it writes on into an inode with
+    /// no name — the user asked to clear the logs and silently got logging turned off until the
+    /// next launch, with the rotation counters wrong as well. So each sink is renewed: the two from
+    /// the packages by replacing the instance, and the app's own by reopening in place, because
+    /// `TranscriptIndex` is holding a reference to it.
+    ///
+    /// One caveat, and it is not fixable from here: `Fleet` builds a **second** `FileDiagnostics`
+    /// and a second `FileFleetDiagnostics` on this same directory, internally and eagerly, and the
+    /// app cannot reach either. Those two keep writing into unlinked inodes until the app is
+    /// relaunched. That is the same root cause as tracker entry 53 and closes with it.
+    func deleteLogs() {
+        lock.lock()
+        wireSink.flush()
+        fleetSink.flush()
+        timeline.flush()
+
+        let manager = FileManager.default
+        if let names = try? manager.contentsOfDirectory(atPath: directory.path) {
+            for name in names { try? manager.removeItem(at: directory.appending(path: name)) }
+        }
+
+        wireSink = FileDiagnostics(directory: directory)
+        fleetSink = FileFleetDiagnostics(directory: directory)
+        lock.unlock()
+        timeline.reopen()
     }
 }
 
@@ -108,6 +157,18 @@ final class FileTimelineDiagnostics: TimelineDiagnosticsSink, @unchecked Sendabl
 
     /// Every line written so far is on disk when this returns.
     func flush() { queue.sync { try? handle?.synchronize() } }
+
+    /// Closes the handle and opens the log again, recreating the file if it is gone. What
+    /// *Delete diagnostics* calls: this sink is handed to `TranscriptIndex` at construction and
+    /// kept for the life of the app, so it recovers in place rather than being replaced.
+    func reopen() {
+        queue.sync {
+            try? handle?.close()
+            handle = nil
+            size = 0
+            open()
+        }
+    }
 
     /// The last completed build's report, or nil before the first one lands.
     var lastIndexBuild: IndexBuildSummary? { queue.sync { lastBuild } }

@@ -91,15 +91,11 @@ final class SettingsReadout {
         try? await AfleetSettingsStore.write(settings, to: workspace.store)
     }
 
-    /// Removes every file in the diagnostics directory. The directory itself stays, because the
-    /// three sinks are holding open handles into it.
+    /// Removes every log in the diagnostics directory and leaves the three sinks writing. The
+    /// renewal is the composer's, because deleting a file out from under an open handle turns
+    /// logging off silently rather than clearing it.
     func deleteDiagnostics() {
-        let directory = workspace.diagnostics.directory
-        let manager = FileManager.default
-        guard let names = try? manager.contentsOfDirectory(atPath: directory.path) else { return }
-        for name in names {
-            try? manager.removeItem(at: directory.appending(path: name))
-        }
+        workspace.diagnostics.deleteLogs()
     }
 
     func revealDiagnostics() {

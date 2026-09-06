@@ -48,6 +48,47 @@ final class SettingsReadoutTests: XCTestCase {
                        ["home", "logs"])
     }
 
+    /// *Delete diagnostics* clears the logs; it does not turn logging off.
+    ///
+    /// Deleting a file out from under an open `FileHandle` leaves the sink writing into an unlinked
+    /// inode, and nothing anywhere says so — the user asked to clear the logs and silently got no
+    /// logging for the rest of the session. The assertion is on the write *after* the deletion, in
+    /// all three files, which is the one that fails when the sinks are not renewed.
+    func testDeletingDiagnosticsLeavesAllThreeSinksWriting() throws {
+        let temp = try TempTree()
+        let logs = temp.root.appending(path: "logs", directoryHint: .isDirectory)
+        let composer = DiagnosticsComposer(directory: logs)
+
+        composer.wire.record(.captureSkipped(reason: "invented-before"))
+        composer.fleet.record(.verb(name: "invented-before", exitCode: 0, durationMs: 1))
+        composer.timeline.record(.indexUpdated(changed: 1, durationMs: 1))
+        composer.flush()
+        // The floor: all three wrote before the deletion, so an empty file afterwards is the
+        // deletion's doing and not a sink that never worked.
+        for name in ["diagnostics.log", "fleet.log", "timeline.log"] {
+            XCTAssertGreaterThan(try Data(contentsOf: logs.appending(path: name)).count, 0,
+                                 "\(name) was empty before the deletion")
+        }
+
+        composer.deleteLogs()
+
+        composer.wire.record(.captureSkipped(reason: "invented-after"))
+        composer.fleet.record(.verb(name: "invented-after", exitCode: 0, durationMs: 2))
+        composer.timeline.record(.indexUpdated(changed: 2, durationMs: 2))
+        composer.flush()
+
+        for name in ["diagnostics.log", "fleet.log", "timeline.log"] {
+            let url = logs.appending(path: name)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path),
+                          "\(name) does not exist after the deletion, so the sink is writing into an unlinked inode")
+            let text = String(decoding: try Data(contentsOf: url), as: UTF8.self)
+            XCTAssertTrue(text.contains("invented-after") || text.contains("index_updated"),
+                          "\(name) does not carry the line written after the deletion")
+            XCTAssertFalse(text.contains("invented-before"),
+                           "\(name) still carries a line from before the deletion, so nothing was deleted")
+        }
+    }
+
     // MARK: - G3b
 
     /// The resolved root, its source, the baseline, the installed version and the count of
