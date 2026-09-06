@@ -1,0 +1,73 @@
+# The Xcode project is generated from this file; `Afleet.xcodeproj` is never committed.
+# Sources are declared as directories so a later task adds a file under `App/` or
+# `AppTests/` without editing this manifest.
+name: afleet
+options:
+  deploymentTarget: { macOS: "26.0" }
+  createIntermediateGroups: true
+  groupSortPosition: top
+packages:
+  AfleetCore: { path: AfleetCore }
+  ClaudeWire: { path: ClaudeWire }
+  FleetKit:   { path: FleetKit }
+  Workbench:  { path: Workbench }
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    ENABLE_HARDENED_RUNTIME: NO
+    MARKETING_VERSION: "0.1.0"
+targets:
+  Afleet:
+    type: application
+    platform: macOS
+    sources: [App]
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: afleet
+        LSMinimumSystemVersion: "26.0"
+        NSPrincipalClass: NSApplication
+        NSHighResolutionCapable: true
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.afleet.app
+    dependencies:
+      - package: AfleetCore
+      - package: ClaudeWire
+      - package: FleetKit
+      - package: Workbench
+  AfleetTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [AppTests]
+    dependencies: [{ target: Afleet }]
+    settings:
+      base:
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Afleet.app/Contents/MacOS/Afleet"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+schemes:
+  afleet:
+    build:
+      targets: { Afleet: all }
+    run:
+      executable: Afleet
+    test:
+      targets:
+        - AfleetTests
+        - package: AfleetCore/AfleetCoreTests
+        - package: ClaudeWire/WireFramesTests
+        - package: ClaudeWire/WireMCPTests
+        - package: ClaudeWire/WireEnvironmentTests
+        - package: ClaudeWire/WireDiagnosticsTests
+        - package: ClaudeWire/WireTransportTests
+        - package: ClaudeWire/ClaudeWireTests
+        - package: FleetKit/FleetTimelineTests
+        - package: FleetKit/FleetSessionsTests
+        - package: Workbench/TerminalCoreTests
+        - package: Workbench/EditorCoreTests
+        - package: Workbench/LinkRoutingTests
+        - package: Workbench/SourceControlCoreTests
