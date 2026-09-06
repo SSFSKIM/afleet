@@ -15,8 +15,31 @@ import FleetKit
 /// `Sendable`, but `any WorkspaceCoordinating` is not unless the protocol says so.
 @MainActor
 protocol WorkspaceCoordinating: AnyObject, Sendable {
-    func snapshotAvailable(_ snapshot: IndexSnapshot) async
+    func snapshotAvailable(_ snapshot: IndexSnapshot, origin: SnapshotOrigin) async
     func indexChanged(_ delta: IndexDelta) async
+    /// Ends whatever the coordinator started. `AppModel.launch()` is re-entrant — *Check again* is
+    /// the same call as the first launch — so the coordinator a previous launch built is stopped
+    /// before a new one replaces it, rather than left with a live `updates` loop nothing reads.
+    func stop()
+}
+
+extension WorkspaceCoordinating {
+    func stop() {}
+}
+
+/// Which of the composition root's two snapshots this is.
+///
+/// The distinction is load-bearing and was not always here. A coordinator that inferred "restored"
+/// from "the first snapshot I have seen" is right on a warm launch and wrong on a cold one, where
+/// there is no persisted snapshot and the *fresh build* is the first thing to arrive — so a
+/// first-ever launch painted every row as provisional and nothing ever cleared it, because the
+/// second full snapshot that would have cleared it never comes on that path. The sequence knows
+/// which is which; it says so rather than leaving it to be guessed.
+enum SnapshotOrigin: Hashable, Sendable {
+    /// `loadPersisted()`: last launch's index, painted at once so the window is not empty.
+    case restored
+    /// `build()`: this launch's own read of the config home.
+    case built
 }
 
 /// The conformance that registers nothing. `FleetCoordinator` is the real one and is what
@@ -25,6 +48,6 @@ protocol WorkspaceCoordinating: AnyObject, Sendable {
 @MainActor
 final class NoopWorkspaceCoordinator: WorkspaceCoordinating {
     init() {}
-    func snapshotAvailable(_ snapshot: IndexSnapshot) async {}
+    func snapshotAvailable(_ snapshot: IndexSnapshot, origin: SnapshotOrigin) async {}
     func indexChanged(_ delta: IndexDelta) async {}
 }

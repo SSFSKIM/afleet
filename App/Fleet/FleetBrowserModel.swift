@@ -52,12 +52,27 @@ final class FleetBrowserModel {
     private let now: @Sendable () -> Date
     private var groupingModel: ProjectGrouping
     private var updatesTask: Task<Void, Never>?
+    /// The filesystem answers grouping needs, paid once per distinct directory per launch rather
+    /// than once per rebuild.
+    private let paths = PathMemo()
 
     // MARK: - The join's three sides
 
-    private var entries: [SessionID: IndexEntry] = [:]
+    /// **The one map that decides whether a session has a row.** It holds listed sessions only, with
+    /// the entry and the verdict that listed them together. An earlier shape iterated `entries` and
+    /// gated on `decisions`, so a row could be dropped by clearing either — two independent switches
+    /// for one fact, which is a standing trap for anyone editing the delta path and which once made
+    /// a mutation of the removal path invisible to its own test.
+    private var listed: [SessionID: Listed] = [:]
     private var states: [SessionID: ChannelState] = [:]
     private var banners: [SessionID: RowBanner] = [:]
+
+    /// One listed session: what to draw and which rule said to draw it.
+    private struct Listed {
+        var entry: IndexEntry
+        var mode: ListingPolicy.Mode
+        var rule: String
+    }
 
     init(lifecycle: any LifecycleAPI,
          configHome: URL,
@@ -80,26 +95,35 @@ final class FleetBrowserModel {
 
     /// The persisted snapshot's paint. Rows are marked provisional and carry no origin.
     func restore(from snapshot: IndexSnapshot) {
-        isProvisional = true
-        ingest(snapshot)
+        paint(snapshot, listing: nil, origin: .restored)
     }
 
     /// The fresh build's swap. Same join, provisional cleared.
     func apply(_ snapshot: IndexSnapshot) {
-        isProvisional = false
-        ingest(snapshot)
+        paint(snapshot, listing: nil, origin: .built)
     }
 
-    private func ingest(_ snapshot: IndexSnapshot) {
-        let listing = ChannelRegistrar.listed(snapshot, configHome: configHome, now: now())
-        entries = snapshot.entries
+    /// The form the composition root uses: it has already run the listing join to decide what to
+    /// register, and running it a second time here would be a second full pass and a second set of
+    /// row allocations over every entry in the snapshot — twice, on a warm launch.
+    func paint(_ snapshot: IndexSnapshot, listing: ChannelRegistrar.Listing?, origin: SnapshotOrigin) {
+        let listing = listing ?? ChannelRegistrar.listed(snapshot, configHome: configHome, now: now())
+        isProvisional = origin == .restored
         decisions = listing.decisions
         listedWithoutCWD = listing.rows.filter { $0.cwd == nil }.count
-        // A session that left the index has no row, so its live half and its banner are dropped with
-        // it; keeping them would resurrect a row the moment an unrelated update rebuilt the sections.
-        let known = Set(snapshot.entries.keys)
+        listed = [:]
+        listed.reserveCapacity(listing.rows.count)
+        for (id, decision) in listing.decisions {
+            guard let mode = decision.listedMode, let entry = snapshot.entries[id] else { continue }
+            listed[id] = Listed(entry: entry, mode: mode, rule: decision.rule)
+        }
+        // A session that left the index has no row, so its live half, its banner and the selection
+        // pointing at it go with it; keeping any of them would leave the sidebar holding a reference
+        // to a channel it can no longer draw.
+        let known = Set(listed.keys)
         states = states.filter { known.contains($0.key) }
         banners = banners.filter { known.contains($0.key) }
+        if let selected, !known.contains(selected) { self.selected = nil }
         rebuild()
     }
 
@@ -107,7 +131,7 @@ final class FleetBrowserModel {
     /// resolve is dropped rather than left stale.
     func apply(_ delta: IndexDelta, resolving: (SessionID) async -> IndexEntry?) async {
         for id in delta.removed {
-            entries[id] = nil
+            listed[id] = nil
             decisions[id] = nil
             states[id] = nil
             banners[id] = nil
@@ -115,12 +139,22 @@ final class FleetBrowserModel {
         }
         for id in delta.added + delta.updated {
             guard let entry = await resolving(id) else {
-                entries[id] = nil
+                listed[id] = nil
                 decisions[id] = nil
                 continue
             }
-            entries[id] = entry
-            decisions[id] = ChannelRegistrar.decide(entry)
+            let decision = ChannelRegistrar.decide(entry)
+            decisions[id] = decision
+            if let mode = decision.listedMode {
+                listed[id] = Listed(entry: entry, mode: mode, rule: decision.rule)
+            } else {
+                // A transcript that was listed and now is not — a fork's source gaining its
+                // `continued-in` line is the ordinary way this happens — loses its row here.
+                listed[id] = nil
+                states[id] = nil
+                banners[id] = nil
+                if selected == id { selected = nil }
+            }
         }
         rebuild()
     }
@@ -200,16 +234,48 @@ final class FleetBrowserModel {
         let moment = now()
         var live: [ChannelRow] = []
         var old: [ChannelRow] = []
-        for (id, entry) in entries {
-            guard let decision = decisions[id], let mode = decision.listedMode else { continue }
-            var row = ChannelRegistrar.row(for: entry, configHome: configHome, mode: mode,
-                                           rule: decision.rule, now: moment,
+        for (id, entry) in listed {
+            var row = ChannelRegistrar.row(for: entry.entry, configHome: configHome, mode: entry.mode,
+                                           rule: entry.rule, now: moment,
                                            isProvisional: isProvisional)
             row.state = states[id]
             row.banner = banners[id]
             if row.isArchived { old.append(row) } else { live.append(row) }
         }
         archived = old.sorted { $0.mtime > $1.mtime }
-        sections = groupingModel.sections(from: live)
+        sections = groupingModel.sections(from: live, paths: paths)
+        releaseWaiters()
+    }
+
+    // MARK: - Being told, rather than asked
+
+    /// Suspends until `predicate` holds of this model, resumed by the rebuild that makes it true.
+    ///
+    /// The alternative a consumer outside SwiftUI is otherwise left with is re-reading the model on
+    /// a timer, which makes the answer depend on how much of the machine the polling task got. This
+    /// is the same rule the composition root's own test doubles follow: the thing that satisfies the
+    /// wait is what ends it. Returns immediately when the predicate already holds, so there is no
+    /// ordering to lose between arming the wait and causing the change.
+    func whenChanged(_ predicate: @escaping @MainActor (FleetBrowserModel) -> Bool) async {
+        if predicate(self) { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(Waiter(predicate: predicate, continuation: continuation))
+        }
+    }
+
+    private struct Waiter {
+        let predicate: @MainActor (FleetBrowserModel) -> Bool
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private var waiters: [Waiter] = []
+
+    private func releaseWaiters() {
+        guard !waiters.isEmpty else { return }
+        var remaining: [Waiter] = []
+        for waiter in waiters {
+            if waiter.predicate(self) { waiter.continuation.resume() } else { remaining.append(waiter) }
+        }
+        waiters = remaining
     }
 }

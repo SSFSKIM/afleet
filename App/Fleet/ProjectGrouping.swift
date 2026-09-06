@@ -12,25 +12,101 @@ enum ClaudeProjects {
 
     /// Every project root in the map, in the order its key appears in the file.
     ///
-    /// JSON objects carry no order and `JSONSerialization` returns an unordered dictionary, so the
-    /// keys are recovered by parsing and then sorted by where each key's own quoted spelling first
-    /// occurs in the bytes. A project key is an absolute filesystem path, which does not occur
-    /// earlier in the document by accident; where two keys somehow tie, the tie is broken
-    /// lexicographically so the order is at least stable across launches.
+    /// A single left-to-right pass over the **bytes**, not the characters. The first version of
+    /// this parsed the document, then located each key by `String.range(of:)` and
+    /// `String.distance(from:to:)` over the whole text — both grapheme-level, both restarted per
+    /// key, so the work was O(projects x file length) with Unicode segmentation on the inner loop.
+    /// Against a config home of 514 KB holding 306 projects that measured 2.08 seconds, on the main
+    /// actor, inside the launch: 42 percent of the five-second first-paint budget spent deciding
+    /// what order to draw section headers in. The scan below is O(file length) once.
+    ///
+    /// It is also **correct where the search was only usually correct**. Matching a quoted key
+    /// anywhere in the document meant a project path that happened to appear earlier as some other
+    /// field's *value* sorted to that earlier position. This reads keys only from inside the
+    /// top-level `projects` object, so a value cannot be mistaken for a key.
     static func order(configHome: URL) -> [String] {
-        let file = configHome.appending(path: ".claude.json")
-        guard let data = ClaudeJSONReader.read(file),
-              let document = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let projects = document["projects"] as? [String: Any]
-        else { return [] }
-        let text = String(decoding: data, as: UTF8.self)
-        let offsets: [(key: String, offset: Int)] = projects.keys.map { key in
-            let quoted = "\"" + key.replacingOccurrences(of: "\\", with: "\\\\")
-                                   .replacingOccurrences(of: "\"", with: "\\\"") + "\""
-            let offset = text.range(of: quoted).map { text.distance(from: text.startIndex, to: $0.lowerBound) }
-            return (key, offset ?? Int.max)
+        guard let data = ClaudeJSONReader.read(configHome.appending(path: ".claude.json")) else { return [] }
+        return projectKeys(in: data)
+    }
+
+    /// The keys of the top-level `projects` object, in document order.
+    ///
+    /// Deliberately not a full JSON parser: it tracks container depth and string boundaries, which
+    /// is all that is needed to tell a key of one particular object from every other string in the
+    /// file. A malformed document yields whatever it read before the malformation, which for a
+    /// display order is the right failure — the sidebar falls back to activity order and nothing
+    /// refuses to launch.
+    static func projectKeys(in data: Data) -> [String] {
+        let bytes = [UInt8](data)
+        let quote = UInt8(ascii: "\""), backslash = UInt8(ascii: "\\"), colon = UInt8(ascii: ":")
+        let openBrace = UInt8(ascii: "{"), closeBrace = UInt8(ascii: "}")
+        let openBracket = UInt8(ascii: "["), closeBracket = UInt8(ascii: "]")
+
+        var keys: [String] = []
+        var depth = 0
+        /// The depth at which this object's keys sit, once `projects` has been entered.
+        var projectKeyDepth: Int?
+        /// Set between reading the `projects` key and consuming the `{` that opens its object.
+        var awaitingProjectsObject = false
+        var index = 0
+
+        while index < bytes.count {
+            let byte = bytes[index]
+            switch byte {
+            case openBrace, openBracket:
+                depth += 1
+                if awaitingProjectsObject {
+                    // An array here would mean `"projects": [...]`, which is not a shape this file
+                    // has; either way the keys we want are not in it.
+                    if byte == openBrace { projectKeyDepth = depth }
+                    awaitingProjectsObject = false
+                }
+                index += 1
+            case closeBrace, closeBracket:
+                // The projects object closing: every key it had has been read.
+                if let wanted = projectKeyDepth, depth == wanted { return keys }
+                depth -= 1
+                index += 1
+            case quote:
+                var scan = index + 1
+                while scan < bytes.count {
+                    if bytes[scan] == backslash { scan += 2; continue }
+                    if bytes[scan] == quote { break }
+                    scan += 1
+                }
+                guard scan < bytes.count else { return keys }
+                let raw = bytes[(index + 1)..<scan]
+                var after = scan + 1
+                while after < bytes.count, isWhitespace(bytes[after]) { after += 1 }
+                let isKey = after < bytes.count && bytes[after] == colon
+                if isKey {
+                    if depth == projectKeyDepth {
+                        if let key = string(from: raw) { keys.append(key) }
+                    } else if projectKeyDepth == nil, depth == 1, raw.elementsEqual("projects".utf8) {
+                        awaitingProjectsObject = true
+                    }
+                }
+                index = scan + 1
+            default:
+                index += 1
+            }
         }
-        return offsets.sorted { $0.offset == $1.offset ? $0.key < $1.key : $0.offset < $1.offset }.map(\.key)
+        return keys
+    }
+
+    private static func isWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+    }
+
+    /// A JSON string body as a Swift string. The overwhelmingly common case — an absolute path with
+    /// nothing to escape — decodes straight from UTF-8; anything carrying a backslash goes back
+    /// through `JSONSerialization` rather than growing a second, subtly different unescaper here.
+    private static func string(from raw: ArraySlice<UInt8>) -> String? {
+        if !raw.contains(UInt8(ascii: "\\")) { return String(decoding: raw, as: UTF8.self) }
+        var quoted = Data([UInt8(ascii: "\"")])
+        quoted.append(contentsOf: raw)
+        quoted.append(UInt8(ascii: "\""))
+        return (try? JSONSerialization.jsonObject(with: quoted, options: [.fragmentsAllowed])) as? String
     }
 }
 
@@ -42,7 +118,8 @@ enum ClaudeProjects {
 /// exists to prevent.
 ///
 /// Neither pinning nor collapse is modelled here. Both are `FleetKitKeys.grouping`'s
-/// `SidebarGrouping`, already C4's, and are read from the value handed in.
+/// `SidebarGrouping`, already C4's, and are read from the value handed in — which the composition
+/// root loads from the store, so a user's pin and a user's section order survive a relaunch.
 struct ProjectGrouping: Sendable {
     /// `.claude.json`'s project order, longest-standing first.
     var projectOrder: [String]
@@ -57,31 +134,21 @@ struct ProjectGrouping: Sendable {
 
     /// Sections, ordered: pinned first, then the user's own `sectionOrder`, then `.claude.json`'s
     /// order, then most recently active first.
-    func sections(from rows: [ChannelRow]) -> [ProjectSection] {
-        // cwd -> its own root, and root -> the repository that owns it. Both resolutions hit the
-        // filesystem, so they are memoised across the rows of one build; a fleet of three thousand
-        // channels holds a few dozen distinct directories.
-        var rootOfCWD: [String: String] = [:]
-        var repositoryOfRoot: [String: String] = [:]
+    ///
+    /// `paths` is the filesystem memo and is **required**, not a convenience. Grouping a row means a
+    /// `realpath` plus an upward walk of `fileExists` per path component, and then a read of the
+    /// candidate's `.git`. Memoising that only inside one call meant the whole set of probes was
+    /// repeated from scratch on every rebuild — and a rebuild happens on every `ChannelState`, every
+    /// delta, every failed action and every dismissed banner, all on the main actor. The cache
+    /// outlives the call so the probes are paid once per distinct directory per launch.
+    @MainActor
+    func sections(from rows: [ChannelRow], paths: PathMemo) -> [ProjectSection] {
         var buckets: [String: [String: [ChannelRow]]] = [:]   // repository -> root -> rows
 
         for row in rows {
             guard let cwd = row.cwd else { continue }
-            let cwdPath = CanonicalPath.string(cwd)
-            let root: String
-            if let known = rootOfCWD[cwdPath] {
-                root = known
-            } else {
-                root = CanonicalPath.string(ProjectRoot.canonical(for: cwd).root)
-                rootOfCWD[cwdPath] = root
-            }
-            let repository: String
-            if let known = repositoryOfRoot[root] {
-                repository = known
-            } else {
-                repository = WorktreeLink.mainRepository(of: root) ?? root
-                repositoryOfRoot[root] = repository
-            }
+            let root = paths.root(of: cwd)
+            let repository = paths.repository(of: root)
             buckets[repository, default: [:]][root, default: []].append(row)
         }
 
@@ -139,6 +206,53 @@ struct ProjectGrouping: Sendable {
         for (position, key) in order.enumerated() where map[key] == nil { map[key] = position }
         return map
     }
+}
+
+/// The filesystem answers grouping needs, remembered for the life of the model that owns it.
+///
+/// Two questions, each of which costs syscalls: which directory is a working directory's project
+/// root, and which repository owns that root. Both answers are properties of the filesystem rather
+/// than of the fleet, so they are the same on every rebuild and are cached across all of them.
+///
+/// The cache is deliberately not invalidated. A project root moving under a running app is rare and
+/// its consequence is cosmetic — a section drawn under the directory the channel was started in —
+/// where re-probing three thousand rows on every state transition is a stall the user feels. A
+/// relaunch re-reads everything.
+@MainActor
+final class PathMemo {
+    private var rootOfCWD: [String: String] = [:]
+    private var repositoryOfRoot: [String: String] = [:]
+
+    /// How many times the filesystem was actually consulted — a miss, not an entry.
+    ///
+    /// Counting entries instead would measure how many distinct directories the cache knows about,
+    /// which is the same number whether the cache was read or not: a memo that resolved afresh every
+    /// time and overwrote the same keys has the same entry count as one that never re-probed. This
+    /// counts the probes themselves, which is the thing the cache exists to avoid and the only
+    /// number a test can hold it to. A count, per §11 — never a path.
+    private(set) var probeCount = 0
+
+    init() {}
+
+    /// The canonical project root of a working directory: up to the first `.git`, else the directory.
+    func root(of cwd: URL) -> String {
+        let key = cwd.path
+        if let known = rootOfCWD[key] { return known }
+        probeCount += 1
+        let resolved = CanonicalPath.string(ProjectRoot.canonical(for: cwd).root)
+        rootOfCWD[key] = resolved
+        return resolved
+    }
+
+    /// The repository a root belongs to: itself, or the main checkout when the root is a worktree.
+    func repository(of root: String) -> String {
+        if let known = repositoryOfRoot[root] { return known }
+        probeCount += 1
+        let resolved = WorktreeLink.mainRepository(of: root) ?? root
+        repositoryOfRoot[root] = resolved
+        return resolved
+    }
+
 }
 
 /// A git worktree's link back to the repository that owns it.

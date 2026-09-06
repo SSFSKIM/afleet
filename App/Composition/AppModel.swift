@@ -46,6 +46,10 @@ final class AppModel {
         var configured = sequence
         let factory = coordinatorFactory
         configured.makeCoordinator = { [weak self] workspace in
+            // *Check again* runs the whole sequence again, so a previous launch's coordinator is
+            // stopped before this one replaces it. Leaving it alive would leave a second `updates`
+            // loop reading the same stream into a model nothing draws.
+            self?.coordinator?.stop()
             let coordinator = factory(workspace)
             self?.coordinator = coordinator
             return coordinator

@@ -176,7 +176,7 @@ struct LaunchSequence: Sendable {
         let coordinator = await makeCoordinator(workspace)
 
         if let restored = try? await index.loadPersisted() {
-            await coordinator.snapshotAvailable(restored)
+            await coordinator.snapshotAvailable(restored, origin: .restored)
         }
 
         // Detached, because C3 measured that a build awaited from a main-actor-bound caller runs
@@ -186,7 +186,7 @@ struct LaunchSequence: Sendable {
         // registered supervisors.
         Task.detached(priority: .userInitiated) {
             guard let built = try? await index.build() else { return }
-            await coordinator.snapshotAvailable(built)
+            await coordinator.snapshotAvailable(built, origin: .built)
             try? await index.persist()
         }
 

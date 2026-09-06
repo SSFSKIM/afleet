@@ -30,16 +30,25 @@ final class FleetCoordinator: WorkspaceCoordinating {
     /// change (the user moved the project, the channel aged out of the recency window) is registered
     /// again, which is the point of keeping the value rather than a `Set` of keys.
     private var seeds: [ChannelKey: Seed] = [:]
-    private var hasPainted = false
 
     private struct Seed: Hashable {
         var cwd: URL
         var recent: Bool
     }
 
+    /// The store the persisted `SidebarGrouping` comes from, and the task that loads it. Nil in the
+    /// tests that do not care about grouping.
+    private let store: (any StateStore)?
+    private var groupingLoad: Task<Void, Never>?
+
     /// Counts only, for the diagnostics line and for Settings (§11).
     private(set) var registeredCount = 0
-    private(set) var skippedWithoutCWDCount = 0
+    /// The listed channels this launch declined to register because their transcript named no
+    /// working directory. A **set**, not a running total: a warm launch hands the coordinator the
+    /// restored snapshot and then the fresh build, and a `+=` counted the same rows twice and
+    /// reported a number the model's own `listedWithoutCWD` disagreed with.
+    private var withoutCWD: Set<ChannelKey> = []
+    var skippedWithoutCWDCount: Int { withoutCWD.count }
 
     /// The production initialiser: everything from the workspace the launch resolved.
     convenience init(workspace: Workspace, now: @escaping @Sendable () -> Date = { Date() }) {
@@ -47,10 +56,8 @@ final class FleetCoordinator: WorkspaceCoordinating {
         self.init(configHome: home,
                   registrar: workspace.fleet,
                   index: workspace.index,
-                  model: FleetBrowserModel(lifecycle: workspace.fleet,
-                                           configHome: home,
-                                           grouping: ProjectGrouping(projectOrder: ClaudeProjects.order(configHome: home)),
-                                           now: now),
+                  model: FleetBrowserModel(lifecycle: workspace.fleet, configHome: home, now: now),
+                  store: workspace.store,
                   now: now)
     }
 
@@ -61,27 +68,56 @@ final class FleetCoordinator: WorkspaceCoordinating {
          registrar: any ChannelRegistering,
          index: any IndexAccess,
          model: FleetBrowserModel,
+         store: (any StateStore)? = nil,
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.configHome = configHome
         self.registrar = registrar
         self.index = index
         self.model = model
+        self.store = store
         self.now = now
         model.startUpdates()
+        groupingLoad = Task { [weak self] in await self?.loadGrouping() }
+    }
+
+    /// The sidebar's ordering inputs, both read off the main actor and applied when they land.
+    ///
+    /// Neither is on the launch's critical path. `.claude.json` is a file read and the store is an
+    /// actor hop, and the sidebar is correct without either — it falls back to most-recent-activity
+    /// order — so making the window wait for them buys nothing. The first version did do this
+    /// synchronously inside the initialiser, which put a whole-file scan on the main actor inside
+    /// `LaunchSequence.run()`.
+    private func loadGrouping() async {
+        let home = configHome
+        let order = await Task.detached(priority: .userInitiated) {
+            ClaudeProjects.order(configHome: home)
+        }.value
+        var stored = SidebarGrouping()
+        if let store, let persisted = try? await store.read(SidebarGrouping.self,
+                                                            namespace: .fleetKit,
+                                                            key: FleetKitKeys.grouping) {
+            stored = persisted
+        }
+        guard !Task.isCancelled else { return }
+        model.updateGrouping(ProjectGrouping(projectOrder: order, grouping: stored))
+    }
+
+    /// Ends the model's `updates` loop and abandons the grouping read.
+    func stop() {
+        groupingLoad?.cancel()
+        groupingLoad = nil
+        model.stopUpdates()
     }
 
     // MARK: - WorkspaceCoordinating
 
-    func snapshotAvailable(_ snapshot: IndexSnapshot) async {
+    func snapshotAvailable(_ snapshot: IndexSnapshot, origin: SnapshotOrigin) async {
         let moment = now()
         let listing = ChannelRegistrar.listed(snapshot, configHome: configHome, now: moment)
-        await register(listing.rows, at: moment)
-        if hasPainted {
-            model.apply(snapshot)
-        } else {
-            hasPainted = true
-            model.restore(from: snapshot)
-        }
+        await register(listing.rows, at: moment, replacingSkips: true)
+        // The listing is handed on rather than recomputed: the model would otherwise run the same
+        // join a second time over every entry in the snapshot.
+        model.paint(snapshot, listing: listing, origin: origin)
     }
 
     func indexChanged(_ delta: IndexDelta) async {
@@ -94,20 +130,28 @@ final class FleetCoordinator: WorkspaceCoordinating {
             rows.append(ChannelRegistrar.row(for: entry, configHome: configHome, mode: mode,
                                              rule: decision.rule, now: moment))
         }
-        await register(rows, at: moment)
-        for id in delta.removed { seeds[ChannelKey(configHome: configHome, session: id)] = nil }
+        await register(rows, at: moment, replacingSkips: false)
+        for id in delta.removed {
+            let key = ChannelKey(configHome: configHome, session: id)
+            seeds[key] = nil
+            withoutCWD.remove(key)
+        }
         await model.apply(delta) { [index] id in await index.entry(id) }
     }
 
     // MARK: - Registration
 
-    private func register(_ rows: [ChannelRow], at moment: Date) async {
+    /// `replacingSkips` is true for a snapshot, which is the whole picture, and false for a delta,
+    /// which is a patch on it.
+    private func register(_ rows: [ChannelRow], at moment: Date, replacingSkips: Bool) async {
         var fresh: [ChannelRow] = []
+        if replacingSkips { withoutCWD = [] }
         for row in rows {
             guard let cwd = row.cwd else {
-                skippedWithoutCWDCount += 1
+                withoutCWD.insert(row.key)
                 continue
             }
+            withoutCWD.remove(row.key)
             let seed = Seed(cwd: cwd, recent: ChannelRegistrar.isRecent(row.mtime, now: moment))
             guard seeds[row.key] != seed else { continue }
             seeds[row.key] = seed

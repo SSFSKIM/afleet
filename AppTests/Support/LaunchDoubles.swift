@@ -179,8 +179,11 @@ final class RecordingCoordinator: WorkspaceCoordinating {
 
     init() {}
 
-    func snapshotAvailable(_ snapshot: IndexSnapshot) async {
+    private(set) var origins: [SnapshotOrigin] = []
+
+    func snapshotAvailable(_ snapshot: IndexSnapshot, origin: SnapshotOrigin) async {
         snapshots.append(snapshot)
+        origins.append(origin)
         Self.release(&snapshotWaiters, reached: snapshots.count)
     }
 
