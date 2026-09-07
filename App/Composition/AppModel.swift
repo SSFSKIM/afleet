@@ -38,7 +38,7 @@ final class AppModel {
     /// It is owned here rather than by the scene because Activity's notifications have to know
     /// which channel is in view whether or not the Activity view is on screen, and the model that
     /// decides them is built beside this one. `AfleetApp` reads it; the menu items move it.
-    let shell = ShellModel()
+    let shell: ShellModel
 
     /// The per-channel timeline owners (spec §8), one `ChannelTimelineModel` per channel.
     ///
@@ -85,6 +85,7 @@ final class AppModel {
          coordinatorFactory: (@MainActor @Sendable (Workspace) -> any WorkspaceCoordinating)? = nil) {
         let panels = PanelHostModel()
         self.panels = panels
+        self.shell = ShellModel(panels: panels)
         self.sequence = sequence
         self.coordinatorFactory = coordinatorFactory ?? { [timelines] workspace in
             FleetCoordinator(workspace: workspace, panels: panels, timelines: timelines)
@@ -98,6 +99,7 @@ final class AppModel {
         // disappear quietly.
         do {
             try panels.register(PlaceholderTab())
+            panels.select(.thread)
         } catch {
             assertionFailure("the placeholder is the first registration on a freshly built host")
         }

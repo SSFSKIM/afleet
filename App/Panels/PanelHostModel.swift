@@ -177,17 +177,15 @@ final class PanelHostModel: PanelHost {
     }
 
     func select(_ id: PanelTabID) {
-        guard tabs[id] != nil else { return }
+        guard tabs[id] != nil, selected != id else { return }
         selected = id
     }
 
     /// The tab Cmd+N names for this channel, or nil when the index is past what the channel can
     /// show.
     ///
-    /// `selectIndex(_:in:)` is this plus the selection. It exists as a value-returning member
-    /// because the shell owns which tab the window draws — Cmd+1…7 is a menu shortcut declared
-    /// above the window — so the panel column has to be able to ask what an index names before it
-    /// moves that selection, and one indexing in one place is what keeps the two answers equal.
+    /// `selectIndex(_:in:)` is this plus the host-owned selection. The panel column also returns
+    /// the chosen id to its shortcut caller, so both paths use this one indexing operation.
     func tab(at index: Int, in context: ChannelContext) -> PanelTabID? {
         let ids = available(for: context)
         guard index >= 1, index <= ids.count else { return nil }
@@ -362,7 +360,7 @@ final class PanelHostModel: PanelHost {
         guard let tab, let runner = runners[tab] else { throw PanelHostError.noPaneRunner(.terminal) }
         // Selecting or creating the Terminal tab is spec §7's wording; a runner registered for a
         // tab that is not registered runs without a selection moving.
-        if tabs[tab] != nil { selected = tab }
+        select(tab)
         await runner.run(request)
     }
 }

@@ -26,7 +26,12 @@ public enum PanelHostError: Error, Hashable, Sendable {
     func registerPaneRunner(_ runner: any PaneRunning, for tab: PanelTabID)
     /// Registered tabs that report themselves available for this channel, in PanelTabID order.
     func available(for context: ChannelContext) -> [PanelTabID]
+    /// The main panel's selection, owned by the host rather than mirrored by the window.
     var selected: PanelTabID? { get }
+    /// Synchronously selects a registered tab and invalidates the main panel's rendered selection.
+    /// The next render shows that tab, or its unavailable placeholder for the current channel.
+    /// An unregistered id is a no-op; selecting the current id is also a no-op. Pop-outs keep
+    /// their own tab and channel. Callers need no separate window-selection write-back.
     func select(_ id: PanelTabID)
     /// Cmd+1…7: 1-based over `available(for: context)`, so Cmd+1 is the first tab the user can see.
     ///

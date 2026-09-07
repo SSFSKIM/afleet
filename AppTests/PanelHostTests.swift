@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import SwiftUI
 import XCTest
 import AfleetCore
@@ -19,6 +20,47 @@ import PanelHostAPI
 /// operands into the failure output, and that output is what a report quotes.
 @MainActor
 final class PanelHostTests: XCTestCase {
+
+    /// R2: a protocol selection must invalidate the exact property the window renders.
+    /// Reading host.selected alone would miss the original shell/host split entirely.
+    func testProtocolSelectionUpdatesTheRenderedSelection() async throws {
+        let app = AppModel()
+        try app.panels.register(StubPanelTab(.files))
+        let changed = expectation(description: "rendered selection invalidated")
+        withObservationTracking {
+            _ = app.shell.panelTab
+        } onChange: {
+            changed.fulfill()
+        }
+        let host: any PanelHost = app.panels
+        host.select(.files)
+        let result = await XCTWaiter.fulfillment(of: [changed], timeout: 1)
+        XCTAssertEqual(result, .completed, "protocol selection did not invalidate the rendered tab")
+        XCTAssertEqual(app.shell.panelTab, .files, "window still renders the old selection")
+
+        // Tab-bar writes use the same owner, and a refused id cannot split the two views.
+        app.shell.panelTab = .thread
+        XCTAssertEqual(host.selected, .thread, "tab-bar selection did not reach the host")
+        host.select(.github)
+        XCTAssertEqual(app.shell.panelTab, .thread, "an unregistered tab moved the window")
+        XCTAssertEqual(host.selected, .thread, "an unregistered tab moved the host")
+    }
+
+    /// R2: run must select the visible terminal, not just start a pane behind Thread.
+    func testPaneRunUpdatesTheRenderedSelection() async throws {
+        let app = AppModel()
+        try app.panels.register(StubPanelTab(.terminal))
+        let runner = RecordingPaneRunner()
+        app.panels.registerPaneRunner(runner, for: .terminal)
+        XCTAssertEqual(app.shell.panelTab, .thread, "test must begin on another tab")
+
+        try await app.panels.run(PanelFixtures.paneRequest())
+
+        let count = await runner.received.count
+        XCTAssertEqual(count, 1, "the registered runner never received the pane")
+        XCTAssertEqual(app.shell.panelTab, .terminal, "pane ran behind the old visible tab")
+        XCTAssertEqual(app.panels.selected, .terminal, "run did not select its registered tab")
+    }
 
     // MARK: - G4a: registration and order
 
@@ -879,7 +921,7 @@ private struct PanelRig {
     let host: PanelHostModel
     let timelines: ChannelTimelineRegistry
     let browser: FleetBrowserModel
-    let shell = ShellModel()
+    let shell: ShellModel
     let watcher: StubWatcher
     let keys: [ChannelKey]
     let paths: [URL]
@@ -931,6 +973,7 @@ private struct PanelRig {
         timelines = ChannelTimelineRegistry()
         timelines.attach(to: workspace, lifecycle: lifecycle)
         host = PanelHostModel()
+        shell = ShellModel(panels: host)
         host.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
         browser = FleetBrowserModel(lifecycle: lifecycle, configHome: configHome.root)
         browser.paint(LaunchFixtures.snapshot(configHome: configHome.root, ids: keys.map(\.session)),

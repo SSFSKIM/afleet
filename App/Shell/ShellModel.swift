@@ -84,9 +84,20 @@ final class ShellModel {
     /// Cmd+K's sheet.
     var isSwitcherPresented = false
 
-    /// Which panel tab the right-hand column shows. Task 8 owns what is drawn in it; which one is
-    /// selected is the shell's, because Cmd+1…7 is a shell shortcut.
-    var panelTab: PanelTabID = .thread
+    private let panels: PanelHostModel
+
+    init(panels: PanelHostModel = PanelHostModel()) {
+        self.panels = panels
+    }
+
+    /// The host is the sole selection owner. This synchronous projection is what the window
+    /// reads and its tab bar writes; observation tracks the host's `selected` getter directly.
+    /// No stored mirror or asynchronous write-back exists, so selection cannot ping-pong.
+    /// With no selection (including an unregistered tab), Thread names the empty placeholder.
+    var panelTab: PanelTabID {
+        get { panels.selected ?? .thread }
+        set { panels.select(newValue) }
+    }
 
     /// The project sections whose *Show all (N)* has been pressed, by `ProjectSection.id`.
     var expandedProjects: Set<String> = []

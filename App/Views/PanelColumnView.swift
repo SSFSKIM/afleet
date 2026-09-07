@@ -5,10 +5,10 @@ import PanelHostAPI
 
 /// The panel column: contract X7's tab bar and the selected tab's pane (spec §7).
 ///
-/// Which tab is selected is `shell.panelTab`, because Cmd+1…7 is a shell shortcut and the menu item
-/// that carries it lives above the window — so the host is *told* the selection rather than owning
-/// it. What the host owns is everything below the selection: the registered tabs, the per-channel
-/// sessions, the context and its capabilities, and the link routing.
+/// The host owns selection; `shell.panelTab` is a synchronous projection of that same value,
+/// not a mirror. Tab clicks, shortcuts and X7 callers therefore move what this column renders
+/// without a two-way synchronization loop. The host also owns the registered tabs, per-channel
+/// sessions, context capabilities and link routing.
 ///
 /// The context is resolved from `app.panels` by the selected channel's key, and never built here.
 /// The host caches one per channel, so the tab this column draws and a popped-out window drawing
@@ -54,7 +54,7 @@ struct PanelColumnView: View {
     }
 
     /// Resolves a pending Cmd+N against the channel in view: the host indexes one-based over
-    /// `available(for:)`, and the shell's selection follows whatever it named.
+    /// `available(for:)`, and the shell renders that same host-owned selection.
     ///
     /// **This is the whole of the keyboard half of G4a, and it is a function for that reason.** The
     /// shortcut is declared in a `Scene`'s `commands`, above the window, where no `ChannelContext`
@@ -70,7 +70,6 @@ struct PanelColumnView: View {
         guard let index = shell.takePendingPanelIndex() else { return nil }
         guard let chosen = host.tab(at: index, in: context) else { return nil }
         host.selectIndex(index, in: context)
-        shell.panelTab = chosen
         return chosen
     }
 }
@@ -93,9 +92,6 @@ private struct PanelTabColumn: View {
                                   detail: "This tab is not available for this channel.")
             }
         }
-        // The host's own selection follows the shell's, so `available(for:)` and `selectIndex` —
-        // which C6 and C7 call through the protocol — agree with what the window is showing.
-        .task(id: shell.panelTab) { host.select(shell.panelTab) }
         // What the menu above the window is allowed to write beside Cmd+1…7. In a task rather than
         // in `body`, because `mainWindowTabs` is observed.
         .task(id: available) { host.mainWindowShows(available) }
