@@ -469,6 +469,47 @@ final class ChannelTimelineModelTests: XCTestCase {
                              "the moved channel holds \(model.items.count) items against \(opened) before the move")
     }
 
+    /// A channel absent from a replacement snapshot is released.
+    ///
+    /// A warm launch paints the restored snapshot and then the freshly built one on top of it. A
+    /// channel opened from the restored one and missing from the fresh build never generates a
+    /// removal delta — the rebuilt index has no entry to remove — so the timeline model and the
+    /// panel sessions it holds would live until the next launch replaced the workspace.
+    ///
+    /// The floor is the survivor: a coordinator that released everything on every snapshot would
+    /// pass an assertion that only counted what disappeared.
+    func testAChannelAbsentFromAReplacementSnapshotIsReleased() async throws {
+        let rig = try await Rig(inventedChannels: 2)
+        let host = PanelHostModel()
+        host.attach(to: rig.workspace, timelines: rig.registry, lifecycle: rig.lifecycle)
+        try host.register(PlaceholderTab())
+        let coordinator = rig.coordinator(panels: host)
+
+        let home = rig.workspace.configHome.root
+        let restored = LaunchFixtures.snapshot(configHome: home, ids: rig.keys.map(\.session))
+        let built = LaunchFixtures.snapshot(configHome: home, ids: [rig.keys[1].session])
+        await coordinator.snapshotAvailable(restored, origin: .restored)
+
+        for key in rig.keys {
+            let context = try XCTUnwrap(host.context(for: key, cwd: URL(fileURLWithPath: "/invented/project")),
+                                        "the host built no context for a restored channel")
+            _ = host.session(for: .thread, context: context)
+        }
+        XCTAssertEqual(rig.registry.openChannels.count, 2,
+                       "the registry holds \(rig.registry.openChannels.count) models for the 2 restored channels")
+        XCTAssertEqual(host.liveChannelCount, 2,
+                       "the host holds \(host.liveChannelCount) channels for the 2 restored channels")
+
+        // The fresh build lands on top, and one of the two channels is not in it.
+        await coordinator.snapshotAvailable(built, origin: .built)
+        coordinator.stop()
+
+        XCTAssertEqual(rig.registry.openChannels, [rig.keys[1]],
+                       "the replacement snapshot left \(rig.registry.openChannels.count) timeline model(s) behind, not the 1 it still lists")
+        XCTAssertEqual(host.liveChannelCount, 1,
+                       "the replacement snapshot left \(host.liveChannelCount) channel(s) in the panel host, not 1")
+    }
+
     // MARK: - The registry
 
     /// One model per channel, retained across a switch away and back, and one registry per app.
