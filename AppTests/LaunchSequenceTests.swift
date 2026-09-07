@@ -737,6 +737,45 @@ final class LaunchSequenceTests: XCTestCase {
                      "disjoint roots were reported as overlapping")
     }
 
+    /// R4 from the other side: a prefix that fails to open is not a prefix that is absent.
+    /// A config home reached through a symlink whose target is searchable and writable but not
+    /// readable (mode `0300`) refuses `O_RDONLY` with `EACCES` although `realpath(3)` resolves it
+    /// with search permission alone. Canonicalising by descriptor only, and reading every open
+    /// failure as absence, rebuilds the link's own spelling from the parent and loses the
+    /// resolution: a diagnostics root under the target then looks disjoint from the config home
+    /// and the guard admits an overlap the pre-descriptor check refused. Failing first, both
+    /// assertions below fail — the check answers nil, and the two spellings canonicalise apart.
+    ///
+    /// Nothing here names a real config home; the tree is scratch, and the mode is restored so it
+    /// can be removed. Root ignores mode bits, so the test skips there.
+    func testUnreadableConfigHomeTargetStillResolvesThroughItsSymlink() throws {
+        try XCTSkipIf(getuid() == 0, "root opens a directory whose mode forbids reading")
+        let temp = try TempTree()
+        let target = try temp.directory("target")
+        let logs = try temp.directory("target/logs")
+        let home = temp.root.appending(path: "home", directoryHint: .isDirectory)
+        try FileManager.default.createSymbolicLink(at: home, withDestinationURL: target)
+        try FileManager.default.setAttributes([.posixPermissions: 0o300], ofItemAtPath: target.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700],
+                                                   ofItemAtPath: target.path)
+        }
+        let probe = home.path.withCString { open($0, O_RDONLY | O_DIRECTORY) }
+        if probe >= 0 { close(probe) }
+        try XCTSkipUnless(probe < 0, "this filesystem ignores the mode that forbids reading")
+
+        XCTAssertEqual(LaunchSequence.overlappingWriteRoot(
+            configHome: home,
+            storeRoot: URL(filePath: "/invented/store"),
+            diagnosticsRoot: logs), .diagnostics,
+                       "a diagnostics root inside the unreadable config home was allowed")
+
+        // The floor: the link and its target canonicalise to one path rather than the check
+        // answering "contained" for everything.
+        XCTAssertEqual(WriteRootPath.string(home), WriteRootPath.string(target),
+                       "the link and its target did not canonicalise to one path")
+    }
+
     // MARK: - The launch retires the launch it replaces
 
     /// R5: a second launch replaces the workspace, and the background work the first one owns —

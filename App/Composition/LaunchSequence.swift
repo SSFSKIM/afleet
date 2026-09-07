@@ -337,7 +337,7 @@ enum WriteRootPath {
         var trailing: [String] = []
         var probe = url.standardizedFileURL.path
         while true {
-            if let resolved = descriptorPath(probe) {
+            if let resolved = resolvedPrefix(probe) {
                 var out = resolved
                 for component in trailing.reversed() {
                     out = (out as NSString).appendingPathComponent(component)
@@ -351,21 +351,53 @@ enum WriteRootPath {
         }
     }
 
-    /// Where the kernel says this directory is, or nil when it is not a directory that can be
-    /// opened. Nil is not a failure: the caller walks up and puts the component back on the end,
-    /// and a root that cannot be opened at all falls back to `CanonicalPath`, which is the answer
-    /// this check had before.
-    private static func descriptorPath(_ path: String) -> String? {
+    /// The canonical spelling of a prefix that exists, or nil only when it does not exist.
+    ///
+    /// A descriptor answers first, because `F_GETPATH` is the one form that collapses a firmlink's
+    /// two spellings. But `open(2)` fails for reasons other than absence — a directory that is
+    /// searchable and writable but not readable (mode `0300`) refuses `O_RDONLY` with `EACCES`
+    /// while still being a real directory, and a symlink to one resolves perfectly well. Treating
+    /// that as absence would reconstruct the link's own spelling lexically and lose the
+    /// resolution, so the guard would call an overlap disjoint — worse than the `realpath(3)`
+    /// check this replaced. Anything that is not `ENOENT` or `ENOTDIR` therefore falls back to
+    /// `realpath`, which resolves symlinks with search permission alone. Only a genuinely missing
+    /// component returns nil, and the caller puts it back on the end.
+    private static func resolvedPrefix(_ path: String) -> String? {
+        switch descriptorPath(path) {
+        case .at(let resolved):
+            return resolved
+        case .absent:
+            return nil
+        case .unopenable:
+            guard let resolved = realpath(path, nil) else { return nil }
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+    }
+
+    /// What an attempted open of a prefix found: the kernel's spelling for it, nothing at all, or
+    /// something that is there but did not open.
+    private enum Prefix {
+        case at(String)
+        case absent
+        case unopenable
+    }
+
+    /// Where the kernel says this directory is, or which of the two other answers applies.
+    private static func descriptorPath(_ path: String) -> Prefix {
         let descriptor = path.withCString { open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC) }
-        guard descriptor >= 0 else { return nil }
+        guard descriptor >= 0 else {
+            return errno == ENOENT || errno == ENOTDIR ? .absent : .unopenable
+        }
         defer { close(descriptor) }
         var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
         let answered = buffer.withUnsafeMutableBufferPointer { pointer -> Bool in
             guard let base = pointer.baseAddress else { return false }
             return fcntl(descriptor, F_GETPATH, base) != -1
         }
-        guard answered else { return nil }
-        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        guard answered else { return .unopenable }
+        return .at(String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                          as: UTF8.self))
     }
 }
 
