@@ -162,6 +162,11 @@ final class FleetCoordinator: WorkspaceCoordinating {
         var rows: [ChannelRow] = []
         for id in delta.added + delta.updated {
             guard let entry = await index.entry(id) else { continue }
+            // Where the transcript is *now*. A slug rename moves the file and the index
+            // re-arbitrates the survivor; a channel already being ingested has to be told, or every
+            // later change is read from a path that no longer exists. `relocate` is a comparison
+            // for a channel that did not move and a no-op for one no model was built for.
+            await timelines?.relocate(ChannelKey(configHome: configHome, session: id), to: entry.path)
             let decision = ChannelRegistrar.decide(entry)
             guard let mode = decision.listedMode else { continue }
             rows.append(ChannelRegistrar.row(for: entry, configHome: configHome, mode: mode,

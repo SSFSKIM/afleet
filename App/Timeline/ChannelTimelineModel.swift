@@ -144,6 +144,11 @@ final class ChannelTimelineModel {
     /// Why the transcript could not be read, as a shape and never a path (§11).
     private(set) var failure: String?
 
+    /// The transcript the ingestion is reading, as the index spelled it. Held so a relocation is a
+    /// comparison rather than a call: the coordinator hands the entry's path on every update to a
+    /// channel, and only a path that actually moved is worth rebinding.
+    @ObservationIgnored private var transcriptPath: URL?
+
     /// Set by `close()`, and never cleared: a released model is over. The opening task's awaits are
     /// checked against it, because cancelling that task only ends it where the code looks.
     @ObservationIgnored private var isTerminated = false
@@ -270,6 +275,7 @@ final class ChannelTimelineModel {
                                         mode: .filePrimary,
                                         diagnostics: workspace.diagnostics.timeline)
         self.ingestion = ingestion
+        transcriptPath = entry.path
 
         // The one consumer of `effects` — the stream is documented single-consumer — started before
         // the read so nothing the open publishes is dropped.
@@ -311,6 +317,19 @@ final class ChannelTimelineModel {
             failure = "the channel's transcript could not be opened"
         }
         await publish()
+    }
+
+    /// Rebinds the ingestion to the transcript's new path.
+    ///
+    /// The engine renames a project's slug directory and the index re-arbitrates the survivor;
+    /// `FleetCoordinator` forwards the entry's path here on every update. `StreamIngestion`
+    /// resolves the *logical* stream from a changed path and then reads the path its own state
+    /// holds, so without this the channel would keep reading a file that is no longer there and a
+    /// channel with no live tap would go quietly stale.
+    func transcriptMoved(to path: URL) async {
+        guard let ingestion, transcriptPath != path else { return }
+        transcriptPath = path
+        await ingestion.relocated(mainPath: path)
     }
 
     /// Releases the ingestion and both loops. The registry calls it when a new launch replaces the

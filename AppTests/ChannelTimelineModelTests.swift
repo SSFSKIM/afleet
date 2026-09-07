@@ -412,6 +412,63 @@ final class ChannelTimelineModelTests: XCTestCase {
         await rig.lifecycle.finishEvents(of: key)
     }
 
+    // MARK: - The coordinator's release and relocation seams
+
+    /// A transcript that moves between slugs is read from its new path.
+    ///
+    /// The move is the ordinary one: the engine renames a project's slug directory, the index
+    /// arbitrates the survivor and reports the session as updated, and the composition root hands
+    /// that delta to `FleetCoordinator`. `StreamIngestion.fileChanged` resolves the *logical*
+    /// stream from the path it is given and then reads the path its own `StreamState` holds, so
+    /// without a `relocated` call every later change keeps reading a file that is no longer there
+    /// and a file-only channel goes silently stale.
+    ///
+    /// Driven through `indexChanged` rather than through the model, because `relocated` existed and
+    /// nothing in the app called it — the same defect class §8's release path was found by. The
+    /// append lands on the new path only; the wait is fulfilled by the delivery itself.
+    func testATranscriptThatMovesIsReadFromItsNewPath() async throws {
+        let rig = try await Rig(inventedChannels: 1)
+        let key = rig.keys[0]
+        let model = rig.registry.model(for: key)
+        await model.open(rig.row(0))
+        let opened = model.items.count
+        XCTAssertGreaterThan(opened, 0, "the invented transcript opened with 0 items")
+
+        let old = rig.paths[0]
+        let projects = rig.home.root.appending(path: "projects", directoryHint: .isDirectory)
+        let moved = projects.appending(path: "invented-moved", directoryHint: .isDirectory)
+        try FileManager.default.moveItem(at: old.deletingLastPathComponent(), to: moved)
+        let new = moved.appending(path: old.lastPathComponent)
+
+        let delta = await rig.workspace.index.update(changed: [old, new])
+        XCTAssertTrue(delta.updated.contains(key.session) || delta.added.contains(key.session),
+                      "the index reported \(delta.updated.count) updated and \(delta.added.count) added session(s) for the move")
+        let coordinator = rig.coordinator()
+        await coordinator.indexChanged(delta)
+        coordinator.stop()
+
+        let updates = model.timelineUpdates
+        let grew = XCTestExpectation(description: "a timeline with more than \(opened) items")
+        let seen = CountBox()
+        let reader = Task {
+            for await timeline in updates where timeline.items.count > opened {
+                seen.set(timeline.items.count)
+                grew.fulfill()
+                return
+            }
+        }
+
+        try rig.appendRecords(at: new, session: key.session, count: 2)
+        rig.watcher.emit([new])
+
+        let outcome = await XCTWaiter().fulfillment(of: [grew], timeout: LaunchFixtures.hangGuard)
+        reader.cancel()
+        XCTAssertEqual(outcome, .completed,
+                       "the change to the moved transcript published no timeline holding the appended items")
+        XCTAssertGreaterThan(model.items.count, opened,
+                             "the moved channel holds \(model.items.count) items against \(opened) before the move")
+    }
+
     // MARK: - The registry
 
     /// One model per channel, retained across a switch away and back, and one registry per app.
@@ -730,6 +787,23 @@ private struct Rig {
                           state: state ?? origin.map { SidebarFixtures.state(key, origin: $0) })
     }
 
+    /// The coordinator the composition root builds over this workspace, holding this rig's one
+    /// timeline registry.
+    ///
+    /// Built here rather than in each test because what the two tests below are about is the
+    /// production seam: a registry told to release or to relocate only by a test leaves the running
+    /// app holding what it should have let go, which is the defect class §8's release path exists
+    /// for.
+    func coordinator(panels: PanelHostModel? = nil) -> FleetCoordinator {
+        FleetCoordinator(configHome: workspace.configHome.root,
+                         registrar: RegistrarDouble(),
+                         index: workspace.index,
+                         model: FleetBrowserModel(lifecycle: lifecycle,
+                                                  configHome: workspace.configHome.root),
+                         panels: panels,
+                         timelines: registry)
+    }
+
     /// Appends one assistant record naming `url`, and moves the projected leaf onto it.
     ///
     /// An assistant record rather than a user one because `URLSources.contributing` excludes user
@@ -752,11 +826,15 @@ private struct Rig {
 
     /// Appends `count` further records to a channel's transcript, each with its own invented uuid.
     func appendRecords(to index: Int, count: Int) throws {
-        let url = paths[index]
+        try appendRecords(at: paths[index], session: keys[index].session, count: count)
+    }
+
+    /// The same append against a named file, for a channel whose transcript has moved out from
+    /// under `paths[i]`.
+    func appendRecords(at url: URL, session: SessionID, count: Int) throws {
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
         try handle.seekToEnd()
-        let session = keys[index].session
         // Chained onto the assistant record `LaunchFixtures.transcript` wrote. A record with a nil
         // `parentUuid` starts a second root, and the reducer keeps one branch: two unparented
         // appends applied cleanly and changed no item at all, which is how this was found.
