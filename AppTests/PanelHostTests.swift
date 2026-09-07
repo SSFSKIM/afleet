@@ -68,6 +68,34 @@ final class PanelHostTests: XCTestCase {
                        "the host reports the placeholder's title after the handover")
     }
 
+    /// Unregistering a tab releases every session it held, and a re-registered tab gets fresh ones.
+    func testUnregisterReleasesTheTabsSessions() async throws {
+        let host = PanelHostModel()
+        let counter = SessionCounter()
+        try host.register(StubPanelTab(.thread, counter: counter))
+        let channels = (0..<3).map { PanelFixtures.context(PanelFixtures.key($0)) }
+        for context in channels { _ = host.session(for: .thread, context: context) }
+
+        XCTAssertEqual(counter.created, 3, "the tab made \(counter.created) sessions for 3 channels")
+        XCTAssertEqual(counter.released, 0, "\(counter.released) sessions were released before the unregister")
+        XCTAssertEqual(host.liveSessionCount, 3, "the host holds \(host.liveSessionCount) sessions, not 3")
+
+        await host.unregister(.thread)
+
+        XCTAssertEqual(counter.released, 3,
+                       "the unregister released \(counter.released) of the 3 sessions the tab held")
+        XCTAssertEqual(host.liveSessionCount, 0, "the host still holds \(host.liveSessionCount) sessions")
+
+        // The replacement gets its own sessions rather than the retired tab's. Identity cannot be
+        // compared — the old objects are gone, which is the point — so the witness is the second
+        // tab's own creation count.
+        let second = SessionCounter()
+        try host.register(StubPanelTab(.thread, counter: second))
+        _ = host.session(for: .thread, context: channels[0])
+        XCTAssertEqual(second.created, 1, "the re-registered tab made \(second.created) sessions, not 1")
+        XCTAssertEqual(counter.created, 3, "the retired tab made \(counter.created) sessions after being dropped")
+    }
+
     /// Cmd+1…7 is one-based over `available(for:)`, and an index outside it changes nothing.
     func testSelectIndexIsOneBasedOverAvailable() throws {
         let host = PanelHostModel()
@@ -105,6 +133,110 @@ final class PanelHostTests: XCTestCase {
     }
 
     // MARK: - The session cache
+
+    /// A session survives a channel switch, and two channels do not share one.
+    ///
+    /// Both clauses are needed: a host holding one global session would pass the first alone, and a
+    /// host rebuilding on every switch would pass the second alone.
+    func testTheSessionSurvivesAChannelSwitchAndIsPerChannel() throws {
+        let host = PanelHostModel()
+        let counter = SessionCounter()
+        try host.register(StubPanelTab(.files, counter: counter))
+        let a = PanelFixtures.context(PanelFixtures.key(0))
+        let b = PanelFixtures.context(PanelFixtures.key(1))
+
+        let first = host.session(for: .files, context: a)
+        let other = host.session(for: .files, context: b)
+        let again = host.session(for: .files, context: a)
+
+        XCTAssertTrue(first === again, "the host rebuilt the channel's session on the way back")
+        XCTAssertFalse(first === other, "two channels were handed one session")
+        XCTAssertEqual(counter.created, 2, "the tab made \(counter.created) sessions for 2 channels")
+        XCTAssertEqual(counter.released, 0, "\(counter.released) sessions were released across a switch")
+    }
+
+    /// The cache is bounded at sixteen channels, and the selected and popped-out channels are exempt.
+    ///
+    /// The last clause — an `.archived` origin evicts nothing — is the discriminating one, because
+    /// evicting on `.archived` is the plausible wrong rule and would destroy state for nearly every
+    /// channel. It is asserted against the surface a wrong host would have hooked: an archived
+    /// `ChannelState` published to the fleet, observed reaching the browser's own row, with the
+    /// host's session count unmoved on the other side of it.
+    func testTheSessionCacheIsBoundedAndExemptsTheSelectedAndPoppedOutChannels() async throws {
+        let host = PanelHostModel()
+        let counter = SessionCounter()
+        try host.register(StubPanelTab(.files, counter: counter))
+        let total = 20
+        let keys = (0..<total).map { PanelFixtures.key($0) }
+
+        // The two exemptions, declared before anything is rendered so both are also the *least*
+        // recently rendered channels by the end.
+        host.focusChannel(keys[0])
+        host.popOut(.files, channel: keys[1])
+
+        // Only the two exempt sessions are held. Holding all twenty would keep every evicted one
+        // alive and the release counter would read zero however well the eviction worked — the
+        // instrument would be measuring the test's own retention rather than the cache's.
+        var selectedSession: (any PanelTabSession)?
+        var poppedSession: (any PanelTabSession)?
+        var highWater = 0
+        for (index, key) in keys.enumerated() {
+            let session = host.session(for: .files, context: PanelFixtures.context(key))
+            if index == 0 { selectedSession = session }
+            if index == 1 { poppedSession = session }
+            highWater = max(highWater, host.liveChannelCount)
+        }
+
+        XCTAssertEqual(highWater, PanelHostModel.channelCapacity,
+                       "the cache reached \(highWater) channels against a bound of \(PanelHostModel.channelCapacity)")
+        XCTAssertEqual(counter.created, total, "the tab made \(counter.created) sessions for \(total) channels")
+        XCTAssertEqual(counter.released, total - PanelHostModel.channelCapacity,
+                       "\(counter.released) sessions were released, not \(total - PanelHostModel.channelCapacity)")
+        XCTAssertTrue(host.session(for: .files, context: PanelFixtures.context(keys[0])) === selectedSession,
+                      "the selected channel's session was evicted although it was exempt")
+        XCTAssertTrue(host.session(for: .files, context: PanelFixtures.context(keys[1])) === poppedSession,
+                      "the popped-out channel's session was evicted although it was exempt")
+
+        // The archived clause. An archived `ChannelState` is published to the fleet the browser
+        // reads, and the wait is fulfilled by the row observing it — so the signal demonstrably
+        // reached the app before the assertion below is made.
+        let rig = try CoordinatorRig(host: host, sessions: keys.map(\.session))
+        await rig.coordinator.snapshotAvailable(rig.snapshot, origin: .built)
+        let releasedBefore = counter.released
+        let liveBefore = host.liveChannelCount
+        rig.lifecycle.emit(SidebarFixtures.state(keys[0], origin: .archived))
+        await rig.browser.whenChanged { $0.row(keys[0].session)?.origin == .archived }
+
+        XCTAssertEqual(counter.released, releasedBefore,
+                       "an archived origin released \(counter.released - releasedBefore) session(s)")
+        XCTAssertEqual(host.liveChannelCount, liveBefore,
+                       "an archived origin left \(host.liveChannelCount) channels against \(liveBefore)")
+    }
+
+    /// A channel removed from the index releases its session at once, without LRU pressure.
+    ///
+    /// Driven through `FleetCoordinator.indexChanged(_:)`, the seam the composition root actually
+    /// calls. Invoking the host directly would let this pass while production never evicted, which
+    /// is a defect shape this plan has already produced once.
+    func testAChannelRemovedFromTheIndexReleasesItsSessionAtOnce() async throws {
+        let host = PanelHostModel()
+        let counter = SessionCounter()
+        try host.register(StubPanelTab(.files, counter: counter))
+        let keys = (0..<2).map { PanelFixtures.key($0) }
+        for key in keys { _ = host.session(for: .files, context: PanelFixtures.context(key)) }
+        let rig = try CoordinatorRig(host: host, sessions: keys.map(\.session))
+
+        XCTAssertEqual(host.liveChannelCount, 2, "the host holds \(host.liveChannelCount) channels, not 2")
+        XCTAssertLessThan(host.liveChannelCount, PanelHostModel.channelCapacity,
+                          "the bound was already reached, so an eviction would prove nothing")
+
+        await rig.coordinator.indexChanged(IndexDelta(removed: [keys[0].session]))
+
+        XCTAssertEqual(counter.released, 1,
+                       "the removed channel released \(counter.released) session(s), not 1")
+        XCTAssertEqual(host.liveChannelCount, 1,
+                       "the host holds \(host.liveChannelCount) channels after one was removed, not 1")
+    }
 
     // MARK: - G4c: the popped-out window keeps its channel
 
@@ -236,3 +368,27 @@ private struct NullRecentURLFeed: RecentURLFeed {
 }
 
 // MARK: - Rigs
+
+/// A coordinator and the browser behind it, wired to the host under test.
+///
+/// It exists so the two tests that need a production seam — an index delta, and an origin reaching
+/// a row — drive the object the composition root drives rather than the host directly.
+@MainActor
+private struct CoordinatorRig {
+    let coordinator: FleetCoordinator
+    let browser: FleetBrowserModel
+    let lifecycle: LifecycleDouble
+    let snapshot: IndexSnapshot
+
+    init(host: PanelHostModel, sessions: [SessionID]) throws {
+        let home = PanelFixtures.configHome
+        snapshot = LaunchFixtures.snapshot(configHome: home, ids: sessions)
+        lifecycle = LifecycleDouble()
+        browser = FleetBrowserModel(lifecycle: lifecycle, configHome: home)
+        coordinator = FleetCoordinator(configHome: home,
+                                       registrar: RegistrarDouble(),
+                                       index: StubIndex(persisted: nil, built: snapshot),
+                                       model: browser,
+                                       panels: host)
+    }
+}

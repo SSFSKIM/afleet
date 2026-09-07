@@ -33,11 +33,23 @@ struct PoppedOutPanel: Codable, Hashable, Sendable {
 @Observable
 final class PanelHostModel: PanelHost {
 
+    /// How many channels may hold sessions before the least recently rendered ones are released.
+    ///
+    /// C4's live-process cap of six plus room for the pop-outs and the recently visited. Advisory:
+    /// a measured reason to change it is a Revision Note, not an edit. The alternative — retaining
+    /// a session per channel browsed — accumulates one per channel across a three-thousand-channel
+    /// config home, each potentially holding a PTY.
+    static let channelCapacity = 16
+
     private(set) var selected: PanelTabID?
 
     /// The popped-out windows, in the order they were popped. Every channel named here is exempt
     /// from LRU eviction: a window on screen must not lose the state it is drawing.
     private(set) var poppedOut: [PoppedOutPanel] = []
+
+    /// The channel the main window is looking at, which is exempt from eviction however long ago
+    /// it was last rendered. The panel column sets it; a headless host has none.
+    private(set) var selectedChannel: ChannelKey?
 
     /// How a popped-out window is actually opened. Set by the panel column, which is the only place
     /// SwiftUI's `openWindow` action is reachable from; nil in a headless test, where the pop-out
@@ -52,6 +64,12 @@ final class PanelHostModel: PanelHost {
 
     @ObservationIgnored private var tabs: [PanelTabID: any PanelTab] = [:]
     @ObservationIgnored private var runners: [PanelTabID: any PaneRunning] = [:]
+    @ObservationIgnored private var sessions: [SessionSlot: any PanelTabSession] = [:]
+    /// The channels that hold sessions, least recently rendered first. The eviction order.
+    @ObservationIgnored private var recency: [ChannelKey] = []
+    /// The working directory each channel was last rendered with, so a popped-out window can
+    /// rebuild a context for a channel the main window has moved off.
+    @ObservationIgnored private var cwds: [ChannelKey: URL] = [:]
     init() {}
 
     // MARK: - Registration and order
@@ -61,7 +79,7 @@ final class PanelHostModel: PanelHost {
         tabs[tab.id] = tab
     }
 
-    /// Drops the tab.
+    /// Drops the tab and releases every session it held for every channel.
     ///
     /// It is `async` because contract X7 declares it so: the deliverable that gives the host its
     /// link registry adds the **awaited** withdrawal of the tab's targets here, and the await is
@@ -69,6 +87,8 @@ final class PanelHostModel: PanelHost {
     func unregister(_ id: PanelTabID) async {
         tabs[id] = nil
         runners[id] = nil
+        for slot in sessions.keys where slot.tab == id { sessions[slot] = nil }
+        forgetChannelsWithNoSessions()
         poppedOut.removeAll { $0.tab == id }
         if selected == id { selected = nil }
     }
@@ -119,16 +139,24 @@ final class PanelHostModel: PanelHost {
         presentWindow?(entry)
     }
 
+    /// The window closed. Its channel loses its eviction exemption; its session is not released
+    /// here, because the main window may be drawing the same channel.
+    func closePopOut(_ entry: PoppedOutPanel) {
+        poppedOut.removeAll { $0 == entry }
+        evictIfNeeded()
+    }
+
     // MARK: - Sessions
 
-    /// The tab's session for this channel.
-    ///
-    /// Contract X7 requires the host to *retain* one of these per (tab, channel) and hand it back
-    /// on every render; the cache that does so is the next deliverable. Here the tab is simply
-    /// asked for one, which satisfies the protocol and preserves nothing across a channel switch.
     func session(for id: PanelTabID, context: ChannelContext) -> any PanelTabSession {
+        remember(context)
+        let slot = SessionSlot(tab: id, channel: context.key)
+        if let existing = sessions[slot] { return existing }
         guard let tab = tabs[id] else { return UnregisteredTabSession() }
-        return tab.makeSession(for: context)
+        let made = tab.makeSession(for: context)
+        sessions[slot] = made
+        evictIfNeeded()
+        return made
     }
 
     func view(for id: PanelTabID, context: ChannelContext) -> AnyView {
@@ -138,6 +166,65 @@ final class PanelHostModel: PanelHost {
         // discard the subtree and take the tab's `@State` with it.
         return AnyView(tab.makeView(session: session, context: context)
             .id(SessionSlot(tab: id, channel: context.key)))
+    }
+
+    /// How many sessions are live, for a diagnostic line and for the bound's own test. A count,
+    /// never a key (§11).
+    var liveSessionCount: Int { sessions.count }
+
+    /// How many channels hold at least one session.
+    var liveChannelCount: Int { Set(sessions.keys.map(\.channel)).count }
+
+    /// The channel left the index (`IndexDelta.removed`). Its sessions go at once rather than
+    /// waiting for LRU pressure, and any window popped out for it goes with them.
+    ///
+    /// `FleetCoordinator` calls this, which is the seam the composition root already drives; a host
+    /// released only from a test would leave production accumulating sessions for channels that no
+    /// longer exist.
+    func releaseChannel(_ key: ChannelKey) {
+        releaseSessions(of: key)
+        cwds[key] = nil
+        poppedOut.removeAll { $0.channel == key }
+        if selectedChannel == key { selectedChannel = nil }
+    }
+
+    /// The main window moved to this channel. Exempts it from eviction; nil when the window is
+    /// showing Activity or no channel at all.
+    func focusChannel(_ key: ChannelKey?) {
+        selectedChannel = key
+    }
+
+    private func remember(_ context: ChannelContext) {
+        cwds[context.key] = context.cwd
+        recency.removeAll { $0 == context.key }
+        recency.append(context.key)
+    }
+
+    /// Releases the least recently rendered channels until the bound is met, skipping the selected
+    /// channel and every popped-out one. If the exempt channels alone exceed the bound, nothing is
+    /// released: a window on screen keeps what it is drawing.
+    private func evictIfNeeded() {
+        var live = Set(sessions.keys.map(\.channel))
+        guard live.count > Self.channelCapacity else { return }
+        var exempt = Set(poppedOut.map(\.channel))
+        if let selectedChannel { exempt.insert(selectedChannel) }
+        for key in recency {
+            guard live.count > Self.channelCapacity else { break }
+            guard !exempt.contains(key), live.contains(key) else { continue }
+            releaseSessions(of: key)
+            live.remove(key)
+        }
+    }
+
+    private func releaseSessions(of key: ChannelKey) {
+        for slot in sessions.keys where slot.channel == key { sessions[slot] = nil }
+        recency.removeAll { $0 == key }
+    }
+
+    /// Keeps the eviction order to the channels that still hold something.
+    private func forgetChannelsWithNoSessions() {
+        let live = Set(sessions.keys.map(\.channel))
+        recency.removeAll { !live.contains($0) }
     }
 
     // MARK: - The pane seam

@@ -53,8 +53,19 @@ final class FleetCoordinator: WorkspaceCoordinating {
     private var withoutCWD: Set<ChannelKey> = []
     var skippedWithoutCWDCount: Int { withoutCWD.count }
 
+    /// Contract X7's host, so a channel that leaves the index releases the panel sessions it held
+    /// (spec §7). Optional because most of this type's tests are about registration and hold no
+    /// host; nil means there is nothing to tell, not a wire left off.
+    ///
+    /// **The forwarding lives here rather than inside the host** because this is the seam the
+    /// composition root actually drives. A host that released a removed channel only when a test
+    /// called it directly would accumulate a session per removed channel in the running app, each
+    /// potentially holding a PTY, and every unit test over the host alone would still be green.
+    private let panels: PanelHostModel?
+
     /// The production initialiser: everything from the workspace the launch resolved.
-    convenience init(workspace: Workspace, now: @escaping @Sendable () -> Date = { Date() }) {
+    convenience init(workspace: Workspace, panels: PanelHostModel? = nil,
+                     now: @escaping @Sendable () -> Date = { Date() }) {
         let home = workspace.configHome.root
         self.init(configHome: home,
                   globalConfig: workspace.configHome.globalConfig,
@@ -62,6 +73,7 @@ final class FleetCoordinator: WorkspaceCoordinating {
                   index: workspace.index,
                   model: FleetBrowserModel(lifecycle: workspace.fleet, configHome: home, now: now),
                   store: workspace.store,
+                  panels: panels,
                   now: now)
     }
 
@@ -74,8 +86,10 @@ final class FleetCoordinator: WorkspaceCoordinating {
          index: any IndexAccess,
          model: FleetBrowserModel,
          store: (any StateStore)? = nil,
+         panels: PanelHostModel? = nil,
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.configHome = configHome
+        self.panels = panels
         // The default is the `CLAUDE_CONFIG_DIR` layout, which is what every scratch home in the
         // tests builds. Production never takes it: the convenience initialiser above passes the
         // resolved location.
@@ -144,6 +158,9 @@ final class FleetCoordinator: WorkspaceCoordinating {
             let key = ChannelKey(configHome: configHome, session: id)
             seeds[key] = nil
             withoutCWD.remove(key)
+            // The channel left the index, so whatever panel state it held goes now rather than
+            // waiting for sixteen further channels of LRU pressure (spec §7).
+            panels?.releaseChannel(key)
         }
         await model.apply(delta) { [index] id in await index.entry(id) }
     }
