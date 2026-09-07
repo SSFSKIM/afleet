@@ -841,6 +841,10 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     extra CLI reconciliation. Owner: C4 for `FleetObserver`/`LifecycleAPI` and its X5 amendment;
     C5's fleet browser for the consumer once that signal exists.
 
+**R3 correction, 2026-09-07:** entry 78's two-guard statement excludes the filesystem-root
+case: C5 now handles it by path components; the C4 guard still misses it (entry 80). The
+symlink-containment debt in entry 78 is unchanged.
+
 78. **The X9 app-side claim rests on root containment, which a symlink planted inside a write
     root would escape.** `AppFileWrites` observes every path app code chooses, and
     `testEveryFilesystemWriteInTheAppIsBehindTheSeam` keeps that observation complete. It does
@@ -874,3 +878,14 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     reviewer field an exception and §11 says so, or `make sign` takes a handle that is not a
     personal one and the eighteen fixtures are re-signed. Owner: the parent at merge, since the
     fixtures are C1's and the rule is §11's.
+
+80. **`FileStateStore` permits descendants when a config home is the filesystem root (C5 review R3).**
+    `FleetKit/Sources/FleetSessions/Store/FileStateStore.swift:31` compares canonical strings
+    using equality or `hasPrefix(homePath + "/")`. For a config home of `/`, the prefix is
+    `//`, so an ordinary descendant passes the never-write guard. C5 corrected its own
+    `LaunchSequence.overlappingWriteRoot` before any store or diagnostics construction, but
+    the package constructor remains unsafe for other callers. This is outside C5's fence,
+    like entry 75, and was not edited in the app-shell fix wave. Closer: retain canonicalization
+    and compare path-component prefixes instead of string prefixes; demonstrate the refusal
+    with a non-writing seam so a removed guard cannot create anything beneath a config home.
+    Owner: C4 (`FileStateStore`, X6/X9).

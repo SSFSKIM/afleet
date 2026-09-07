@@ -248,10 +248,12 @@ struct LaunchSequence: Sendable {
     /// directory. The store root is checked first only so the report is stable; a home that
     /// contains both is a collision either way.
     static func overlappingWriteRoot(configHome: URL, storeRoot: URL, diagnosticsRoot: URL) -> WriteRoot? {
-        let home = CanonicalPath.string(configHome)
+        // Components preserve the filesystem-root case: appending "/" to "/" would produce
+        // "//", which no descendant matches. Component prefixes also exclude sibling names.
+        let home = (CanonicalPath.string(configHome) as NSString).pathComponents
         for (root, path) in [(WriteRoot.store, storeRoot), (WriteRoot.diagnostics, diagnosticsRoot)] {
-            let candidate = CanonicalPath.string(path)
-            if candidate == home || candidate.hasPrefix(home + "/") { return root }
+            let candidate = (CanonicalPath.string(path) as NSString).pathComponents
+            if candidate.starts(with: home) { return root }
         }
         return nil
     }

@@ -125,6 +125,36 @@ final class LaunchSequenceTests: XCTestCase {
         rig.watcher.finish()
     }
 
+    /// R3: a synthetic CLAUDE_CONFIG_DIR=/ must refuse before entering a write-producing seam.
+    /// No process environment is changed and no filesystem write is performed: the store seam
+    /// records then throws even if the guard is removed. That mutation fails BOTH the route
+    /// and trace assertions, rather than reaching C4's identical (out-of-fence) guard.
+    func testFilesystemRootConfigHomeRefusesBeforeAnyStoreConstruction() async {
+        let log = SeamLog()
+        let sequence = LaunchSequence(
+            storeRoot: URL(filePath: "/invented/store"),
+            diagnosticsRoot: URL(filePath: "/invented/logs"),
+            resolveEnvironment: {
+                log.note("resolveEnvironment")
+                return LaunchFixtures.environment(home: URL(filePath: "/invented/home"),
+                                                  configHome: URL(filePath: "/"))
+            },
+            makeStore: { _, _ in
+                log.note("makeStore")
+                throw CocoaError(.fileWriteUnknown)
+            })
+
+        let route = await sequence.run()
+
+        if case .writeRootInsideConfigHome(root: .store, configHome: _) = route.setupState {
+            // The case carries a path; assert its shape without printing that aggregate.
+        } else {
+            XCTFail("filesystem-root config home did not receive the write-root refusal")
+        }
+        XCTAssertEqual(log.count("resolveEnvironment"), 1, "launch never resolved its environment")
+        XCTAssertEqual(log.count("makeStore"), 0, "launch entered a write-producing seam")
+    }
+
     // MARK: - The four refusals
 
     /// G3c. The route assertion alone would pass against code that builds a `Fleet` and then throws
