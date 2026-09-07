@@ -235,6 +235,32 @@ final class ActivityModelTests: XCTestCase {
         harness.model.stop()
     }
 
+    // F5: query rendering puts decisions before history; that is not arrival order.
+    func testNewDecisionIsUnreadAfterHistoricalFrameWasSeen() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        await arm(harness, key)
+        await harness.model.start()
+        harness.model.pump(for: key)?.ingest(.frame(FixtureRunner.Invented.authStatus(
+            error: "invented failure", uuid: "invented-history", session: key.session), .first))
+        harness.model.rebuild()
+        XCTAssertEqual(harness.model.items.count, 1, "the historical row is absent")
+        harness.model.markSeen(key.session)
+        XCTAssertEqual(harness.model.badge(for: key.session), .none, "history was not marked seen")
+        for id in ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"] {
+            let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool", id: id)
+            harness.model.apply(ActivityFixtures.state(key, pending: [ActivityFixtures.pending(ask)]))
+            harness.model.pump(for: key)?.ingest(.request(ask))
+            harness.model.rebuild()
+            XCTAssertEqual(harness.model.items.count, 2, "decision or history was lost")
+            XCTAssertEqual(harness.model.badge(for: key.session), ChannelBadge(count: 1, isUnread: true),
+                           "seen history masked a new decision identity")
+            harness.model.markSeen(key.session)
+            XCTAssertEqual(harness.model.badge(for: key.session), .none, "viewing did not clear the new decision")
+        }
+        harness.model.stop()
+    }
+
     // MARK: - G2a
 
     /// Two channels at a `can_use_tool`, the `rate-limited-turn` fixture on a third, and an

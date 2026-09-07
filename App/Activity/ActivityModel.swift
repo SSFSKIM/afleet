@@ -339,21 +339,16 @@ final class ActivityModel {
         return ChannelBadge(count: states[key]?.pendingDecisions.count ?? 0, isUnread: true)
     }
 
-    /// The newest thing that has happened on a channel, as one token.
-    ///
-    /// A pending decision has no transcript item — `PendingDecision` carries an id, not a uuid — so
-    /// the token is the request id where there is no uuid. What matters is only that it changes
-    /// when something new arrives and does not change when nothing does.
+    /// The historical frame marker plus every outstanding decision identity. The query renders
+    /// decisions before history, not in arrival order: taking the last row lets a seen frame hide
+    /// a new permission ask. Sorting decisions keeps a state-only reorder from moving the cursor.
     private func marker(of key: ChannelKey) -> String? {
-        var token: String?
-        for row in items where row.key == key {
-            if let uuid = row.row.itemUUID {
-                token = uuid
-            } else if case .decision(let id) = row.row.kind {
-                token = id.rawValue
-            }
-        }
-        return token
+        let frame = items.last { $0.key == key && $0.row.itemUUID != nil }?.row.itemUUID
+        let decisions = states[key]?.pendingDecisions.map { $0.id.rawValue }.sorted() ?? []
+        let parts = [frame].compactMap { $0 } + decisions
+        guard !parts.isEmpty else { return nil }
+        // Length-prefix opaque identifiers, so delimiters inside an engine id cannot collide.
+        return parts.map { "\($0.utf8.count):\($0)" }.joined()
     }
 
     /// The user looked at this channel: its badge clears, and the cursor is persisted so a rebuilt
