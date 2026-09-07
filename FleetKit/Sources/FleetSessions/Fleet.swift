@@ -56,9 +56,15 @@ public actor Fleet: LifecycleAPI {
     /// `factory` nil is production: a real `ClaudeProcess` per spawn, with the `CapturingDiagnostics` every factory
     /// must install so the wedged row has its escalation steps. `runner` is the CLI seam; `clock` drives every timer
     /// in the package.
+    ///
+    /// `capture` is parent §11's opt-in raw frame capture, asked once per spawn rather than read once here: the
+    /// setting behind it is a live toggle, so a channel opened after it is switched on captures and one opened
+    /// before it does not. It defaults to off, and an explicit `factory` wins outright — a caller that builds its
+    /// own processes decides their capture too.
     public init(configHome: ConfigHome, environment: ResolvedEnvironment, binary: URL, store: any StateStore,
                 diagnosticsDirectory: URL, clock: any Clock<Duration> = ContinuousClock(),
                 factory: ProcessFactory? = nil,
+                capture: @escaping @Sendable () -> RawCapture? = { nil },
                 runner: any DirectoryProcessRunner = FoundationDirectoryRunner()) {
         self.configHome = configHome
         self.environment = environment
@@ -88,17 +94,32 @@ public actor Fleet: LifecycleAPI {
                                       ownPIDs: { await pids.value() })
         self.ownership = OwnershipCheck(observer: observer, clock: clock, diagnostics: sink)
 
-        self.factory = factory ?? { epoch, launch in
+        self.factory = factory ?? Self.liveFactory(environment: environment, configHome: configHome,
+                                                   wireSink: wireSink, capture: capture)
+        (updates, updatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        pids.fleet = self
+    }
+
+    /// Production's `ProcessFactory`: one real `ClaudeProcess` per spawn, under this fleet's environment and config
+    /// home, with the in-process MCP server and the `CapturingDiagnostics` that holds the wedged row's escalation
+    /// steps.
+    ///
+    /// It is a member rather than a closure inside `init` because it is the only thing that decides what a spawned
+    /// process is given, `FleetVersion` and the tool list it names are internal to this package, and a caller outside
+    /// it — the app's composition root — therefore cannot rebuild it to change one argument. Naming it here is also
+    /// what lets a test watch that argument arrive without spawning anything.
+    static func liveFactory(environment: ResolvedEnvironment, configHome: ConfigHome,
+                            wireSink: any DiagnosticsSink,
+                            capture: @escaping @Sendable () -> RawCapture?) -> ProcessFactory {
+        { epoch, launch in
             let capturing = CapturingDiagnostics(forwardingTo: wireSink)
             let process = ClaudeProcess(epoch: epoch, launch: launch, environment: environment,
                                         configHome: configHome,
                                         mcpServer: AfleetMCPServer(serverVersion: FleetVersion.server,
                                                                    cwd: launch.cwd, tools: [SendUserFileTool()]),
-                                        diagnostics: capturing, capture: nil)
+                                        diagnostics: capturing, capture: capture())
             return LiveProcessHandle(process, epoch: epoch, diagnostics: capturing)
         }
-        (updates, updatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
-        pids.fleet = self
     }
 
     /// The live child pids of every supervisor, for `Holder.isOwnChild`. A box because the observer needs the
