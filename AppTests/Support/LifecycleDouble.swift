@@ -46,6 +46,8 @@ actor LifecycleDouble: LifecycleAPI {
     /// was never invoked is a run in which nothing was spawned.
     private var spawn: ProcessFactory?
     private var actionEvents: [WireEvent] = []
+    private var performInterlude: (@Sendable () async -> Void)?
+    func duringPerform(_ body: @escaping @Sendable () async -> Void) { performInterlude = body }
     func emitDuringPerform(_ events: [WireEvent]) { actionEvents = events }
 
     init() {
@@ -71,6 +73,7 @@ actor LifecycleDouble: LifecycleAPI {
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         performed.append(key)
         actions.append((key, action))
+        await performInterlude?()
         // Like the supervisor: only current subscribers receive an event; no replay.
         for event in actionEvents { push(event, to: key) }
         actionEvents = []

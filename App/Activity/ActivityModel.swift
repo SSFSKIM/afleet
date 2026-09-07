@@ -110,6 +110,9 @@ final class ActivityModel {
     private var cursorWrite: Task<Void, Never>?
     private var focusTask: Task<Void, Never>?
     private var starting: [ChannelKey: Task<Void, Never>] = [:]
+    /// Adoption may publish a still-background state while waiting for the worker to exit.
+    /// Prepared pumps outlive those intermediate states until the enclosing action finishes.
+    private var preparedActions: [ChannelKey: Int] = [:]
 
     /// How many times the rows a view reads have been rewritten. A count, for the tests that assert
     /// a burst does not become a paint each (§11: counts, never identifiers).
@@ -161,14 +164,19 @@ final class ActivityModel {
     /// on. Wired here rather than in the browser so the browser knows nothing about Activity.
     func attach(to browser: FleetBrowserModel) {
         browser.stateObserver = { [weak self] state in self?.apply(state) }
-        browser.beforeAction = { [weak self] key in await self?.follow(key) }
+        browser.beforeAction = { [weak self] key in
+            guard let self else { return {} }
+            self.preparedActions[key, default: 0] += 1
+            await self.follow(key)
+            return { [weak self] in self?.finishAction(on: key) }
+        }
     }
 
     /// One channel's state. Also the return value of an answered decision, which is why it is not
     /// private.
     func apply(_ state: ChannelState) {
         if !isLive(state) {
-            retire(state.key)
+            if preparedActions[state.key] == nil { retire(state.key) }
         } else if pumps[state.key] == nil {
             Task {
                 guard isLive(states[state.key]) else { return }
@@ -228,6 +236,16 @@ final class ActivityModel {
         starting[key] = pending
         await pending.value
         if starting[key] == pending { starting[key] = nil }
+    }
+
+    private func finishAction(on key: ChannelKey) {
+        let remaining = (preparedActions[key] ?? 1) - 1
+        if remaining > 0 { preparedActions[key] = remaining; return }
+        preparedActions[key] = nil
+        if !isLive(states[key]) {
+            retire(key)
+            scheduleRebuild()
+        }
     }
 
     private func retire(_ key: ChannelKey) {

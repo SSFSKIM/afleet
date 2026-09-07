@@ -187,6 +187,53 @@ final class ActivityModelTests: XCTestCase {
         harness.model.stop()
     }
 
+    // F2 + F1: C4 publishes a still-background state when the job worker disappears
+    // during adopt's release wait. A prepared subscription must survive until perform ends.
+    func testAdoptKeepsSubscriptionAcrossInterimBackgroundState() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        let browser = FleetBrowserModel(lifecycle: harness.lifecycle, configHome: harness.configHome)
+        harness.model.attach(to: browser)
+        await harness.lifecycle.openEvents(of: key)
+        await harness.model.start()
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        await harness.lifecycle.stage(.success(ActivityFixtures.state(key, pending: [ActivityFixtures.pending(ask)])))
+        await harness.lifecycle.duringPerform {
+            await browser.apply(ActivityFixtures.state(key, origin: .backgroundJob))
+        }
+        await harness.lifecycle.emitDuringPerform([.request(ask)])
+        let card = expectation(description: "request after interim background state answerable")
+        Task {
+            await harness.model.whenSettled { $0.items.contains { $0.key == key && $0.ask != nil } }
+            card.fulfill()
+        }
+        await browser.adopt(JobEntry(short: JobShort(rawValue: "invented-job"), state: "running", kind: "session",
+                                     sessionID: key.session, cwd: nil, name: nil))
+        let result = await XCTWaiter.fulfillment(of: [card], timeout: 3)
+        XCTAssertEqual(result, .completed, "interim background state discarded the prepared subscription")
+        XCTAssertEqual(harness.model.items.compactMap(\.ask).count, 1, "the first request lost its payload")
+        harness.model.stop()
+    }
+
+    // F2: preparation is a lease, not a subscription retained after a refused action.
+    func testRefusedAdoptReleasesPreparedSubscription() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        let browser = FleetBrowserModel(lifecycle: harness.lifecycle, configHome: harness.configHome)
+        harness.model.attach(to: browser)
+        await harness.lifecycle.openEvents(of: key)
+        await harness.model.start()
+        await harness.lifecycle.stage(.failure(.notOwned))
+        await browser.adopt(JobEntry(short: JobShort(rawValue: "invented-job"), state: "running", kind: "session",
+                                     sessionID: key.session, cwd: nil, name: nil))
+        let calls = await harness.lifecycle.performCount
+        XCTAssertEqual(calls, 1, "the refused action never reached the lifecycle")
+        XCTAssertEqual(browser.jobBanners.count, 1, "the refusal was not surfaced")
+        XCTAssertTrue(harness.model.pump(for: key) == nil, "refusal left an inactive subscription behind")
+        harness.model.stop()
+    }
+
     // F4: focus already on the channel is not a focus-change event when an ask arrives.
     func testNewActivityInTheViewedChannelIsAlreadySeen() async throws {
         let harness = try Harness()

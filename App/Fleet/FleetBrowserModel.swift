@@ -82,8 +82,9 @@ final class FleetBrowserModel {
     /// to the thing that wants it so that the sidebar keeps knowing nothing about Activity.
     var stateObserver: (@MainActor (ChannelState) -> Void)?
     /// Lets a consumer install its non-replaying event subscription before an action can spawn.
-    /// Awaited, like preparation rather than a state notification; the browser owns no consumer.
-    var beforeAction: (@MainActor (ChannelKey) async -> Void)?
+    /// The returned cleanup brackets the action, including intermediate states and refusals.
+    /// The browser owns no consumer and awaits preparation before anything can spawn.
+    var beforeAction: (@MainActor (ChannelKey) async -> (@MainActor () -> Void))?
 
     /// Sessions whose live half has been ingested and not yet written into the row that draws it.
     private var dirty: Set<SessionID> = []
@@ -383,8 +384,9 @@ final class FleetBrowserModel {
     /// attempt from the surface would be a second entrant; `notEligible` means a precondition the
     /// user has to clear. Both become a banner on the row and the user decides what to do next.
     func perform(_ action: LifecycleAction, on row: ChannelRow) async {
+        let finish = await beforeAction?(row.key)
+        defer { finish?() }
         do {
-            await beforeAction?(row.key)
             let state = try await lifecycle.perform(action, on: row.key)
             banners[row.id] = nil
             apply(state)
@@ -419,8 +421,9 @@ final class FleetBrowserModel {
             return
         }
         let key = ChannelKey(configHome: configHome, session: session)
+        let finish = await beforeAction?(key)
+        defer { finish?() }
         do {
-            await beforeAction?(key)
             let state = try await lifecycle.perform(.adopt, on: key)
             jobBanners[job.short.rawValue] = nil
             apply(state)
