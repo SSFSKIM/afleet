@@ -108,7 +108,7 @@ final class ActivityModel {
     /// cannot write the older cursor last.
     private var cursorWrite: Task<Void, Never>?
     private var focusTask: Task<Void, Never>?
-    private var starting: Set<ChannelKey> = []
+    private var starting: [ChannelKey: Task<Void, Never>] = [:]
 
     /// How many times the rows a view reads have been rewritten. A count, for the tests that assert
     /// a burst does not become a paint each (§11: counts, never identifiers).
@@ -151,12 +151,15 @@ final class ActivityModel {
         focusTask?.cancel(); focusTask = nil
         for pump in pumps.values { pump.stop() }
         pumps.removeAll()
+        for task in starting.values { task.cancel() }
+        starting.removeAll()
     }
 
     /// The one feed of `ChannelState`s: `FleetBrowserModel` consumes `updates` and hands each state
     /// on. Wired here rather than in the browser so the browser knows nothing about Activity.
     func attach(to browser: FleetBrowserModel) {
         browser.stateObserver = { [weak self] state in self?.apply(state) }
+        browser.beforeAction = { [weak self] key in await self?.follow(key) }
     }
 
     /// One channel's state. Also the return value of an answered decision, which is why it is not
@@ -165,7 +168,10 @@ final class ActivityModel {
         if !isLive(state) {
             retire(state.key)
         } else if pumps[state.key] == nil {
-            Task { await follow(state.key) }
+            Task {
+                guard isLive(states[state.key]) else { return }
+                await follow(state.key)
+            }
         }
         // Activity is O(what is happening), not O(the fleet). Registering a real config home makes
         // C4 seed a `ChannelState` for every channel on the machine — thousands, almost all of them
@@ -199,24 +205,31 @@ final class ActivityModel {
     }
 
     private func follow(_ key: ChannelKey) async {
-        guard pumps[key] == nil, !starting.contains(key) else { return }
-        starting.insert(key)
-        defer { starting.remove(key) }
-        guard let stream = await lifecycle.events(of: key), isLive(states[key]) else { return }
+        if let pending = starting[key] { await pending.value; return }
         guard pumps[key] == nil else { return }
-        let pump = ChannelEventPump(key: key, recent: history.removeValue(forKey: key) ?? [],
-                                    onFinish: { [weak self] pump in
-            guard let self, self.pumps[key] === pump else { return }
-            self.retire(key)
-            self.scheduleRebuild()
-        }) { [weak self] pump, event in
-            self?.pumpDelivered(event, from: pump)
+        // Share the awaited preparation with an overlapping state update. Returning just because
+        // another subscription is starting would reopen the pre-action delivery gap.
+        let pending = Task { @MainActor [weak self] in
+            guard let self, let stream = await self.lifecycle.events(of: key),
+                  !Task.isCancelled else { return }
+            let pump = ChannelEventPump(key: key, recent: self.history.removeValue(forKey: key) ?? [],
+                                        onFinish: { [weak self] pump in
+                guard let self, self.pumps[key] === pump else { return }
+                self.retire(key)
+                self.scheduleRebuild()
+            }) { [weak self] pump, event in
+                self?.pumpDelivered(event, from: pump)
+            }
+            self.pumps[key] = pump
+            pump.start(stream)
         }
-        pumps[key] = pump
-        pump.start(stream)
+        starting[key] = pending
+        await pending.value
+        if starting[key] == pending { starting[key] = nil }
     }
 
     private func retire(_ key: ChannelKey) {
+        starting.removeValue(forKey: key)?.cancel()
         guard let pump = pumps.removeValue(forKey: key) else { return }
         if !pump.recent.isEmpty { history[key] = pump.recent }
         pump.stop()

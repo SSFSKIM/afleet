@@ -81,6 +81,9 @@ final class FleetBrowserModel {
     /// notification router behind it — is told from here. It is a closure rather than a reference
     /// to the thing that wants it so that the sidebar keeps knowing nothing about Activity.
     var stateObserver: (@MainActor (ChannelState) -> Void)?
+    /// Lets a consumer install its non-replaying event subscription before an action can spawn.
+    /// Awaited, like preparation rather than a state notification; the browser owns no consumer.
+    var beforeAction: (@MainActor (ChannelKey) async -> Void)?
 
     /// Sessions whose live half has been ingested and not yet written into the row that draws it.
     private var dirty: Set<SessionID> = []
@@ -381,6 +384,7 @@ final class FleetBrowserModel {
     /// user has to clear. Both become a banner on the row and the user decides what to do next.
     func perform(_ action: LifecycleAction, on row: ChannelRow) async {
         do {
+            await beforeAction?(row.key)
             let state = try await lifecycle.perform(action, on: row.key)
             banners[row.id] = nil
             apply(state)
@@ -416,6 +420,7 @@ final class FleetBrowserModel {
         }
         let key = ChannelKey(configHome: configHome, session: session)
         do {
+            await beforeAction?(key)
             let state = try await lifecycle.perform(.adopt, on: key)
             jobBanners[job.short.rawValue] = nil
             apply(state)

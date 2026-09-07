@@ -45,6 +45,8 @@ actor LifecycleDouble: LifecycleAPI {
     /// the factory. Nothing else in the lifecycle reaches a process, so a run in which this factory
     /// was never invoked is a run in which nothing was spawned.
     private var spawn: ProcessFactory?
+    private var actionEvents: [WireEvent] = []
+    func emitDuringPerform(_ events: [WireEvent]) { actionEvents = events }
 
     init() {
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
@@ -69,6 +71,9 @@ actor LifecycleDouble: LifecycleAPI {
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         performed.append(key)
         actions.append((key, action))
+        // Like the supervisor: only current subscribers receive an event; no replay.
+        for event in actionEvents { push(event, to: key) }
+        actionEvents = []
         if case .open = action, let spawn {
             _ = spawn(.first, LaunchConfiguration(binary: URL(fileURLWithPath: "/invented/bin/claude"),
                                                   cwd: URL(fileURLWithPath: "/invented/project"),

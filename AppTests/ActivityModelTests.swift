@@ -160,6 +160,32 @@ final class ActivityModelTests: XCTestCase {
         harness.model.stop()
     }
 
+    // F2: an ask emitted inside perform is lost unless attach installs an awaited
+    // pre-action subscription. Waiting for the card is asserted, never just a delay.
+    func testAdoptSubscribesBeforeTheFirstRequest() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        let browser = FleetBrowserModel(lifecycle: harness.lifecycle, configHome: harness.configHome)
+        harness.model.attach(to: browser)
+        await harness.lifecycle.openEvents(of: key)
+        await harness.model.start()
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        await harness.lifecycle.stage(.success(ActivityFixtures.state(key, pending: [ActivityFixtures.pending(ask)])))
+        await harness.lifecycle.emitDuringPerform([.request(ask)])
+        let card = expectation(description: "adopted request answerable")
+        Task {
+            await harness.model.whenSettled { $0.items.contains { $0.key == key && $0.ask != nil } }
+            card.fulfill()
+        }
+        await browser.adopt(JobEntry(short: JobShort(rawValue: "invented-job"), state: "running", kind: "session",
+                                     sessionID: key.session, cwd: nil, name: nil))
+        let result = await XCTWaiter.fulfillment(of: [card], timeout: 3)
+        XCTAssertEqual(result, .completed, "the first adopted request was lost")
+        XCTAssertEqual(harness.model.items.compactMap(\.ask).count, 1, "no answerable card")
+        harness.model.stop()
+    }
+
     // MARK: - G2a
 
     /// Two channels at a `can_use_tool`, the `rate-limited-turn` fixture on a third, and an
