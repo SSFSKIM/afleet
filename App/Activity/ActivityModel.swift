@@ -122,6 +122,16 @@ final class ActivityModel {
     private var cursorWrite: Task<Void, Never>?
     private var focusTask: Task<Void, Never>?
     private var starting: [ChannelKey: Task<Void, Never>] = [:]
+    /// The channels a live `apply(_:)` reached while `start()` was sampling the fleet. Non-nil only
+    /// for the duration of that sample. `LifecycleAPI.states()` asks each supervisor in turn, so a
+    /// state published during the sample is *newer* than the entry the sample carries for it, and
+    /// assigning the sample unconditionally would hide a pending decision or restore an answered
+    /// one.
+    private var liveDuringSample: Set<ChannelKey>?
+    /// The pumps whose stream is being drained before it is let go, by channel. A retired pump is
+    /// kept here until the frames already queued on its stream have been folded; nothing else may
+    /// consult it, which is why it is not `pumps`.
+    private var draining: [ChannelKey: (pump: ChannelEventPump, task: Task<Void, Never>)] = [:]
     /// Adoption may publish a still-background state while waiting for the worker to exit.
     /// Prepared pumps outlive those intermediate states until the enclosing action finishes.
     private var preparedActions: [ChannelKey: Int] = [:]
@@ -143,6 +153,11 @@ final class ActivityModel {
         self.store = store
         self.unknownFrames = store.map { UnknownFrameCounter(store: $0) }
         self.now = now
+        // The engine sends no frame back for an answer and a successful one is never cancelled, so
+        // the pump learns a router-answered request is closed only by being told. This is the same
+        // seam the inline permission path uses; without it every completed payload the router
+        // answered would sit in `requests` until the process exits.
+        router.onAnswered = { [weak self] id, key in self?.pumps[key]?.forget(id) }
     }
 
     // MARK: - Starting
@@ -154,11 +169,15 @@ final class ActivityModel {
            let persisted = try? await store.read([String: String].self,
                                                  namespace: .fleetKit,
                                                  key: FleetKitKeys.unreadCursors) {
-            cursors = (persisted ?? [:]).compactMapValues {
+            cursors = persisted.compactMapValues {
                 try? JSONDecoder().decode(SeenActivity.self, from: Data($0.utf8))
             }
         }
-        for state in await lifecycle.states() { states[state.key] = state }
+        liveDuringSample = []
+        let sampled = await lifecycle.states()
+        let live = liveDuringSample ?? []
+        liveDuringSample = nil
+        for state in sampled where !live.contains(state.key) { states[state.key] = state }
         for key in states.keys where isLive(states[key]) { await follow(key) }
         states = states.filter { isWorthKeeping($0.value) }
         rebuild()
@@ -172,6 +191,8 @@ final class ActivityModel {
         pumps.removeAll()
         for task in starting.values { task.cancel() }
         starting.removeAll()
+        for entry in draining.values { entry.task.cancel(); entry.pump.stop() }
+        draining.removeAll()
     }
 
     /// The one feed of `ChannelState`s: `FleetBrowserModel` consumes `updates` and hands each state
@@ -189,6 +210,7 @@ final class ActivityModel {
     /// One channel's state. Also the return value of an answered decision, which is why it is not
     /// private.
     func apply(_ state: ChannelState) {
+        liveDuringSample?.insert(state.key)
         if !isLive(state) {
             if preparedActions[state.key] == nil { retire(state.key) }
         } else if pumps[state.key] == nil {
@@ -217,7 +239,8 @@ final class ActivityModel {
     /// prepared before an action. Do not impose a second process cap on event listeners here.
     private func isWorthKeeping(_ state: ChannelState) -> Bool {
         !state.pendingDecisions.isEmpty || state.systemItem != nil
-            || pumps[state.key] != nil || history[state.key] != nil || isLive(state)
+            || pumps[state.key] != nil || history[state.key] != nil || draining[state.key] != nil
+            || isLive(state)
     }
 
     private func isLive(_ state: ChannelState?) -> Bool {
@@ -262,11 +285,32 @@ final class ActivityModel {
         }
     }
 
+    /// Lets a channel go, **after** the pump has folded what its stream had already queued.
+    ///
+    /// The lifecycle states and the wire events are two independently consumed streams, so the
+    /// dormant state that ends a channel can overtake the last frames of it. Cancelling consumption
+    /// on the spot drops those frames from the retained history and from the notifications they
+    /// would have raised. The drain is bounded — a few turns of the main actor, ending as soon as
+    /// the pump goes quiet — never a wait on the process.
     private func retire(_ key: ChannelKey) {
         starting.removeValue(forKey: key)?.cancel()
         guard let pump = pumps.removeValue(forKey: key) else { return }
         if !pump.recent.isEmpty { history[key] = pump.recent }
-        pump.stop()
+        if let superseded = draining.removeValue(forKey: key) {
+            superseded.task.cancel()
+            superseded.pump.stop()
+        }
+        let task = Task { @MainActor [weak self] in
+            await pump.drainQueued()
+            pump.stop()
+            guard let self, !Task.isCancelled, self.draining[key]?.pump === pump else { return }
+            self.draining[key] = nil
+            // A pump started again in the meantime already owns this channel's history.
+            if self.pumps[key] == nil, !pump.recent.isEmpty { self.history[key] = pump.recent }
+            if let state = self.states[key], !self.isWorthKeeping(state) { self.states[key] = nil }
+            self.scheduleRebuild()
+        }
+        draining[key] = (pump, task)
     }
 
     /// This channel's pump, or nil if the app is not following it. Read by a test that has to know

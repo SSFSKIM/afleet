@@ -235,6 +235,105 @@ final class ActivityModelTests: XCTestCase {
         harness.model.stop()
     }
 
+    // A snapshot entry must not overwrite a state that arrived live after sampling began.
+    // `Fleet.states()` asks each supervisor in turn, so a decision published during the sample is
+    // newer than the sample that follows it, and assigning the sample unconditionally hides it.
+    func testALiveDecisionDuringTheInitialSampleSurvivesTheSnapshot() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        // What the sample will carry: this channel, with nothing pending.
+        await harness.lifecycle.setStates([ActivityFixtures.state(key)])
+        await harness.lifecycle.openEvents(of: key)
+        let model = harness.model
+        await harness.lifecycle.duringStates {
+            await model.apply(ActivityFixtures.state(key, pending: [ActivityFixtures.pending(ask)]))
+        }
+
+        await harness.model.start()
+
+        XCTAssertEqual(kindNames(harness.model).filter { $0 == "decision" }.count, 1,
+                       "the initial snapshot overwrote a decision that arrived while it was sampling")
+    }
+
+    // The same rule in the other direction: a decision answered while the sample was being taken
+    // must not be restored by the entry that sample carries.
+    func testADecisionAnsweredDuringTheInitialSampleIsNotRestored() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        await harness.lifecycle.setStates([ActivityFixtures.state(key, pending: [ActivityFixtures.pending(ask)])])
+        await harness.lifecycle.openEvents(of: key)
+        let model = harness.model
+        await harness.lifecycle.duringStates {
+            await model.apply(ActivityFixtures.state(key))
+        }
+
+        await harness.model.start()
+
+        XCTAssertEqual(kindNames(harness.model).filter { $0 == "decision" }.count, 0,
+                       "the initial snapshot restored a decision that had already been answered")
+    }
+
+    // Wire events and lifecycle states reach Activity on independently consumed streams, so a
+    // dormant state can arrive while final frames are still queued on the pump. Retiring before
+    // the pump has folded what was already queued loses them from the retained history.
+    func testFramesQueuedBeforeADormantStateSurviveRetirement() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        await arm(harness, key)
+        await harness.model.start()
+        XCTAssertNotNil(harness.model.pump(for: key), "no subscription was established")
+
+        // Enqueued without yielding the main actor, so the pump has folded none of them when the
+        // dormant state lands on the line after.
+        for index in 1...4 {
+            harness.lifecycle.enqueue(
+                .frame(FixtureRunner.Invented.authStatus(error: "invented failure",
+                                                         uuid: "invented-queued-\(index)",
+                                                         session: key.session), .first),
+                to: key)
+        }
+        XCTAssertEqual(harness.model.pump(for: key)?.recent.count, 0,
+                       "the frames were folded before the state arrived, so this test proves nothing")
+        harness.model.apply(ActivityFixtures.state(key, origin: .owned(.dormant)))
+
+        let kept = expectation(description: "queued frames retained")
+        Task {
+            await harness.model.whenSettled { model in
+                model.items.filter { $0.key == key && Self.name(of: $0.row.kind) == "authProblem" }.count == 4
+            }
+            kept.fulfill()
+        }
+        let result = await XCTWaiter.fulfillment(of: [kept], timeout: 3)
+        XCTAssertEqual(result, .completed, "frames queued before the dormant state were dropped with the pump")
+        harness.model.stop()
+    }
+
+    // The router answers a surfaced hook callback through `lifecycle.perform`, and a successful
+    // answer emits no `requestCancelled`. Without a forget on that path every completed payload
+    // stays in the pump until the process exits.
+    func testARouterAnsweredHookCallbackIsForgottenByItsPump() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        await arm(harness, key)
+        await harness.lifecycle.always(.success(ActivityFixtures.state(key)))
+        await harness.model.start()
+        let pump = try XCTUnwrap(harness.model.pump(for: key))
+        let hook = FixtureRunner.Invented.hookCallback(id: "abababab-abab-4bab-8bab-abababababab",
+                                                       callbackID: HookRoute.notification,
+                                                       message: "an invented notification")
+
+        pump.ingest(.request(hook))
+        XCTAssertEqual(pump.requests.count, 1, "the surfaced request never reached the pump")
+        await harness.router.settle()
+
+        XCTAssertEqual(pump.requests.count, 0, "an answered hook callback stayed in the pump")
+        harness.model.stop()
+    }
+
     // F4: focus already on the channel is not a focus-change event when an ask arrives.
     func testNewActivityInTheViewedChannelIsAlreadySeen() async throws {
         let harness = try Harness()
