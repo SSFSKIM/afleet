@@ -197,9 +197,9 @@ actor FleetDouble: AppFleet {
 
 /// A coordinator that records the composition root stopping it.
 ///
-/// `AppModel.launch()` is re-entrant — *Check again* is the same call as the first launch — so a
-/// coordinator built by an earlier launch has to be stopped before a later one replaces it, or its
-/// `updates` loop outlives the model anything draws.
+/// An explicit sequential workspace replacement stops the previous coordinator's browser loop.
+/// Concurrent `AppModel.launch()` callers instead share one in-flight task; *Check again* is
+/// the narrower sequential retry from setup/upgrade, where no workspace was built.
 @MainActor
 final class StoppableCoordinatorDouble: WorkspaceCoordinating {
     private(set) var stops = 0

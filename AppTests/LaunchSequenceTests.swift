@@ -73,6 +73,58 @@ final class LaunchSequenceTests: XCTestCase {
                    log: log, fleet: fleet, index: index, watcher: watcher, sequence: sequence)
     }
 
+    /// R1: removing the shared in-flight task re-enters the resolver and builds two workspaces.
+    /// Returning early instead of awaiting it fails the inverted completion wait. Both callers
+    /// must observe a fully bound workspace, not merely a route changed by the other caller.
+    @MainActor
+    func testConcurrentLaunchesAwaitOneWorkspace() async throws {
+        var rig = try makeRig()
+        let entered = expectation(description: "first launch entered resolver")
+        let reentered = expectation(description: "second launch entered resolver")
+        reentered.isInverted = true
+        let premature = expectation(description: "second caller returned before launch completed")
+        premature.isInverted = true
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        let log = rig.log
+        let environment = LaunchFixtures.environment(home: rig.temp.root, configHome: rig.configHome)
+        rig.sequence.resolveEnvironment = {
+            log.note("resolveEnvironment")
+            if log.count("resolveEnvironment") == 1 { entered.fulfill() }
+            else { reentered.fulfill() }
+            for await _ in gate { break }
+            return environment
+        }
+        let app = AppModel(sequence: rig.sequence, coordinatorFactory: { _ in
+            log.note("makeCoordinator")
+            return RecordingCoordinator()
+        })
+        let first = Task { await app.launch() }
+        let started = await XCTWaiter.fulfillment(of: [entered], timeout: 3)
+        XCTAssertEqual(started, .completed, "first launch never reached the resolver")
+        let secondEntered = expectation(description: "second caller started")
+        var held = true
+        let second = Task {
+            secondEntered.fulfill()
+            await app.launch()
+            if held { premature.fulfill() }
+            XCTAssertTrue(app.route.workspace != nil, "second caller returned without a workspace")
+            XCTAssertTrue(app.settingsReadout != nil, "second caller returned before workspace binding")
+        }
+        let startedSecond = await XCTWaiter.fulfillment(of: [secondEntered], timeout: 3)
+        XCTAssertEqual(startedSecond, .completed, "second caller never started")
+        let blocked = await XCTWaiter.fulfillment(of: [reentered, premature], timeout: 0.2)
+        XCTAssertEqual(blocked, .completed, "concurrent launch restarted or returned before completion")
+        held = false
+        release.finish()
+        await first.value
+        await second.value
+        XCTAssertTrue(app.route.workspace != nil, "launch did not reach a workspace")
+        for seam in ["resolveEnvironment", "makeStore", "fleetFactory", "makeWatcher", "makeCoordinator"] {
+            XCTAssertEqual(log.count(seam), 1, "launch must construct each dependency exactly once")
+        }
+        rig.watcher.finish()
+    }
+
     // MARK: - The four refusals
 
     /// G3c. The route assertion alone would pass against code that builds a `Fleet` and then throws

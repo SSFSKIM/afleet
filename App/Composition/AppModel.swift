@@ -75,6 +75,9 @@ final class AppModel {
     /// for. Nothing waits on it — see `ActivityLaunch`.
     private var authorisationRequest: Task<Bool, Never>?
 
+    /// Shared by every window until launch and workspace binding have both completed.
+    private var launchTask: Task<Void, Never>?
+
     /// `coordinatorFactory` defaults to nil rather than to a literal closure because the production
     /// coordinator has to be handed *this* model's panel host — a delta that removed a channel
     /// releases that channel's panel sessions — and a default argument cannot reach `self`.
@@ -112,17 +115,31 @@ final class AppModel {
         panels.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
     }
 
-    /// Runs the launch and routes on its outcome. Re-entrant by design: *Check again* calls it
-    /// again, and it starts nothing that would have to be torn down first, because every route
-    /// that offers *Check again* is one where no store, no fleet and no watcher was constructed.
+    /// Runs the launch and routes on its outcome. Concurrent windows await the same task;
+    /// they must not build independent stores, fleets or watcher pumps.
+    /// Sequential retry is supported for *Check again* on setup/upgrade routes, where no
+    /// workspace (and therefore no fleet or watcher) was constructed.
     func launch() async {
+        if let launchTask {
+            await launchTask.value
+            return
+        }
+        // Main-actor isolation installs the task before another caller can enter. Only its
+        // creator clears it, after binding and Activity setup, so joiners await the whole launch.
+        let task = Task { await performLaunch() }
+        launchTask = task
+        await task.value
+        launchTask = nil
+    }
+
+    private func performLaunch() async {
         route = .launching
         var configured = sequence
         let factory = coordinatorFactory
         configured.makeCoordinator = { [weak self] workspace in
-            // *Check again* runs the whole sequence again, so a previous launch's coordinator is
-            // stopped before this one replaces it. Leaving it alive would leave a second `updates`
-            // loop reading the same stream into a model nothing draws.
+            // If a caller explicitly replaces a workspace, retire its browser loop before
+            // replacing the coordinator. This is not launch deduplication: the shared task
+            // above prevents concurrent launches from creating abandoned workspace pumps.
             self?.coordinator?.stop()
             let coordinator = factory(workspace)
             self?.coordinator = coordinator
