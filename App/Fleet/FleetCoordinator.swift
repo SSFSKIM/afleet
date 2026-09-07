@@ -63,8 +63,19 @@ final class FleetCoordinator: WorkspaceCoordinating {
     /// potentially holding a PTY, and every unit test over the host alone would still be green.
     private let panels: PanelHostModel?
 
+    /// The app's one timeline registry, so a channel that leaves the index releases the
+    /// `ChannelTimelineModel` it was ingesting through (spec §8).
+    ///
+    /// **Found by sweeping for the same defect class as the panel host's:** `release(_:)` existed,
+    /// was tested, and nothing in the app called it, so every channel ever opened kept its model —
+    /// and with it a `StreamIngestion`, an effects loop and a change-feed loop — until the next
+    /// launch replaced the workspace. The panel host releasing its context drops the *feed's*
+    /// reference; the registry's own is what this closes.
+    private let timelines: ChannelTimelineRegistry?
+
     /// The production initialiser: everything from the workspace the launch resolved.
     convenience init(workspace: Workspace, panels: PanelHostModel? = nil,
+                     timelines: ChannelTimelineRegistry? = nil,
                      now: @escaping @Sendable () -> Date = { Date() }) {
         let home = workspace.configHome.root
         self.init(configHome: home,
@@ -74,6 +85,7 @@ final class FleetCoordinator: WorkspaceCoordinating {
                   model: FleetBrowserModel(lifecycle: workspace.fleet, configHome: home, now: now),
                   store: workspace.store,
                   panels: panels,
+                  timelines: timelines,
                   now: now)
     }
 
@@ -87,9 +99,11 @@ final class FleetCoordinator: WorkspaceCoordinating {
          model: FleetBrowserModel,
          store: (any StateStore)? = nil,
          panels: PanelHostModel? = nil,
+         timelines: ChannelTimelineRegistry? = nil,
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.configHome = configHome
         self.panels = panels
+        self.timelines = timelines
         // The default is the `CLAUDE_CONFIG_DIR` layout, which is what every scratch home in the
         // tests builds. Production never takes it: the convenience initialiser above passes the
         // resolved location.
@@ -158,9 +172,11 @@ final class FleetCoordinator: WorkspaceCoordinating {
             let key = ChannelKey(configHome: configHome, session: id)
             seeds[key] = nil
             withoutCWD.remove(key)
-            // The channel left the index, so whatever panel state it held goes now rather than
-            // waiting for sixteen further channels of LRU pressure (spec §7).
+            // The channel left the index, so whatever state the app held for it goes now: the
+            // panel host's sessions and context, rather than waiting for sixteen further channels
+            // of LRU pressure (spec §7), and the timeline model it was ingesting through (spec §8).
             panels?.releaseChannel(key)
+            timelines?.release(key)
         }
         await model.apply(delta) { [index] id in await index.entry(id) }
     }

@@ -83,8 +83,8 @@ final class AppModel {
         let panels = PanelHostModel()
         self.panels = panels
         self.sequence = sequence
-        self.coordinatorFactory = coordinatorFactory ?? { workspace in
-            FleetCoordinator(workspace: workspace, panels: panels)
+        self.coordinatorFactory = coordinatorFactory ?? { [timelines] workspace in
+            FleetCoordinator(workspace: workspace, panels: panels, timelines: timelines)
         }
         // C5's one shipped tab, under `.thread`. C6 takes that id by `unregister(.thread)` and then
         // its own `register`; `register` refuses a duplicate, so the pair is the handover.
