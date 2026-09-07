@@ -312,6 +312,28 @@ final class ActivityModelTests: XCTestCase {
         harness.model.stop()
     }
 
+    // The router answers a surfaced hook callback through `lifecycle.perform`, and a successful
+    // answer emits no `requestCancelled`. Without a forget on that path every completed payload
+    // stays in the pump until the process exits.
+    func testARouterAnsweredHookCallbackIsForgottenByItsPump() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        await arm(harness, key)
+        await harness.lifecycle.always(.success(ActivityFixtures.state(key)))
+        await harness.model.start()
+        let pump = try XCTUnwrap(harness.model.pump(for: key))
+        let hook = FixtureRunner.Invented.hookCallback(id: "abababab-abab-4bab-8bab-abababababab",
+                                                       callbackID: HookRoute.notification,
+                                                       message: "an invented notification")
+
+        pump.ingest(.request(hook))
+        XCTAssertEqual(pump.requests.count, 1, "the surfaced request never reached the pump")
+        await harness.router.settle()
+
+        XCTAssertEqual(pump.requests.count, 0, "an answered hook callback stayed in the pump")
+        harness.model.stop()
+    }
+
     // F4: focus already on the channel is not a focus-change event when an ask arrives.
     func testNewActivityInTheViewedChannelIsAlreadySeen() async throws {
         let harness = try Harness()

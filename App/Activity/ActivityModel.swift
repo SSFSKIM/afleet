@@ -153,6 +153,11 @@ final class ActivityModel {
         self.store = store
         self.unknownFrames = store.map { UnknownFrameCounter(store: $0) }
         self.now = now
+        // The engine sends no frame back for an answer and a successful one is never cancelled, so
+        // the pump learns a router-answered request is closed only by being told. This is the same
+        // seam the inline permission path uses; without it every completed payload the router
+        // answered would sit in `requests` until the process exits.
+        router.onAnswered = { [weak self] id, key in self?.pumps[key]?.forget(id) }
     }
 
     // MARK: - Starting

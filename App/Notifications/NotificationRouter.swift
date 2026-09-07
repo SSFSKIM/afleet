@@ -37,6 +37,10 @@ final class NotificationRouter {
     /// The answer in flight. Each waits for the one before it, so the engine is answered in ask
     /// order; a test awaits it rather than waiting on a duration.
     private var answerTask: Task<Void, Never>?
+    /// Told after each answer this router performs, with the request it closed. `ChannelEventPump`
+    /// holds every surfaced request and the engine sends nothing back for an answer, so the pump
+    /// that surfaced this one learns it is closed here or not at all.
+    var onAnswered: (@MainActor (RequestID, ChannelKey) -> Void)?
 
     /// Returns once every answer this router has sent has been performed.
     func settle() async { await answerTask?.value }
@@ -124,9 +128,10 @@ final class NotificationRouter {
         hookAnswerCount += 1
         let lifecycle = self.lifecycle
         let previous = answerTask
-        answerTask = Task {
+        answerTask = Task { [weak self] in
             await previous?.value
-            _ = try? await lifecycle.perform(.answer(id, .hookContinue(.empty)), on: key)
+            guard (try? await lifecycle.perform(.answer(id, .hookContinue(.empty)), on: key)) != nil else { return }
+            self?.onAnswered?(id, key)
         }
     }
 
