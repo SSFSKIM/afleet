@@ -42,6 +42,17 @@ final class AfleetCoreTests: XCTestCase {
         XCTAssertEqual(ConfigHome.Source.default.rawValue, "default")
     }
 
+    /// The global config document is a *sibling* of a default-derived home and a *child* of an
+    /// environment-derived one, because the engine derives the two from different expressions
+    /// (2.1.263 `cli.pretty.js:298330` against `:298581`).
+    func testGlobalConfigFollowsTheSourceOfTheHome() {
+        let named = ConfigHome(root: URL(fileURLWithPath: "/tmp/invented/cfg"), source: .environment)
+        XCTAssertEqual(named.globalConfig.path, "/tmp/invented/cfg/.claude.json")
+
+        let byDefault = ConfigHome(root: URL(fileURLWithPath: "/tmp/invented/home/.claude"), source: .default)
+        XCTAssertEqual(byDefault.globalConfig.path, "/tmp/invented/home/.claude.json")
+    }
+
     func testChannelOriginCases() {
         let origins: [ChannelOrigin] = [.owned(.connecting), .owned(.ready), .owned(.dormant), .owned(.contended),
                                         .foreignLive(.usersTerminal), .foreignLive(.ownTerminalTab), .backgroundJob, .archived]

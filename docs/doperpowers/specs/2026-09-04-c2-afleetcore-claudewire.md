@@ -993,6 +993,24 @@ turn was spent outside the live gate and its one wasted retry.
 
 ## Revision Notes
 
+- 2026-09-07: `childEnvironment` set `CLAUDE_CONFIG_DIR` on every launch, including one whose
+  home was derived by default. The engine resolves its global config document as
+  `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263 `cli.pretty.js:298330`,
+  `Ot(e)`) but the config home as `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")` (`:298581`,
+  `:428858`), and the macOS keychain service is `Claude Code` unsuffixed with the variable unset
+  against `Claude Code-<sha256(configDir)[0:8]>` when it is set (`:338499`); two daemon paths
+  also return false whenever it is set (`:363645`, `:363679`). So on an ordinary installation
+  every afleet child was pointed at `~/.claude/.claude.json` — a stub with no onboarding, no
+  trust and no projects — and at a different keychain item, leaving it logged out and
+  un-onboarded while the user's own terminal sessions were neither. `ConfigHome.globalConfig`
+  now applies the sibling rule (`.environment` → inside the root, `.default` → beside it), and
+  `childEnvironment` announces the home only for an override or an `.environment` home; a
+  `.default` home stays absent after the prefix scrub and the child derives `<HOME>/.claude`
+  from the same `HOME` the resolved environment carries, so the two views agree by construction.
+  C5 found it (its tracker entry 59). No test could see it because every live test sets the
+  variable, which makes the two expressions coincide; the new `.default` case in
+  `LaunchConfigurationTests` was written red first.
+
 - 2026-09-07: `FileDiagnostics` held one `FileHandle` open for the sink's whole life and
   tracked its own offset. The app's *Delete diagnostics* unlinks `diagnostics.log`, and the
   sink is constructed inside the objects that own it rather than handed to the app, so
