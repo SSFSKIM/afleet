@@ -35,6 +35,7 @@ final class DiagnosticsComposer: @unchecked Sendable {
     /// it for the life of the app.
     let app: FileAppDiagnostics
 
+    private let writes: AppFileWrites
     private let lock = NSLock()
     private var wireSink: FileDiagnostics
     private var fleetSink: FileFleetDiagnostics
@@ -52,12 +53,18 @@ final class DiagnosticsComposer: @unchecked Sendable {
         return fleetSink
     }
 
-    init(directory: URL) {
+    /// Every path this type or its two own sinks touch is reported to `writes` before it is
+    /// touched, and the directory the two *package* sinks are handed is reported as a delegated
+    /// write root: `FileDiagnostics` and `FileFleetDiagnostics` live in packages below the app and
+    /// write their own bytes, so the root is the whole of the app's part in them (X9's seam).
+    init(directory: URL, writes: AppFileWrites = .none) {
         self.directory = directory
+        self.writes = writes
+        writes.willDelegate(directory)
         wireSink = FileDiagnostics(directory: directory)
         fleetSink = FileFleetDiagnostics(directory: directory)
-        timeline = FileTimelineDiagnostics(directory: directory)
-        app = FileAppDiagnostics(directory: directory)
+        timeline = FileTimelineDiagnostics(directory: directory, writes: writes)
+        app = FileAppDiagnostics(directory: directory, writes: writes)
     }
 
     /// Every line of all four files is on disk when this returns.
@@ -90,7 +97,11 @@ final class DiagnosticsComposer: @unchecked Sendable {
 
         let manager = FileManager.default
         if let names = try? manager.contentsOfDirectory(atPath: directory.path) {
-            for name in names { try? manager.removeItem(at: directory.appending(path: name)) }
+            for name in names {
+                let file = directory.appending(path: name)
+                writes.willWrite(file)
+                try? manager.removeItem(at: file)
+            }
         }
 
         wireSink = FileDiagnostics(directory: directory)
@@ -131,12 +142,14 @@ final class FileAppDiagnostics: @unchecked Sendable {
     private let queue = DispatchQueue(label: "afleet.app-diagnostics")
     private let directory: URL
     private let rotateAt: Int
+    private let writes: AppFileWrites
     private var handle: FileHandle?
     private var size = 0
 
-    init(directory: URL, rotateAt: Int = 25 * 1024 * 1024) {
+    init(directory: URL, rotateAt: Int = 25 * 1024 * 1024, writes: AppFileWrites = .none) {
         self.directory = directory
         self.rotateAt = rotateAt
+        self.writes = writes
         queue.sync { open() }
     }
 
@@ -144,6 +157,10 @@ final class FileAppDiagnostics: @unchecked Sendable {
 
     private func open() {
         let manager = FileManager.default
+        // Reported before it is touched, and once per open: every byte this sink writes goes to the
+        // handle below, so the file named here is the whole of its write surface (X9's seam).
+        writes.willWrite(directory)
+        writes.willWrite(logURL)
         try? manager.createDirectory(at: directory, withIntermediateDirectories: true,
                                      attributes: [.posixPermissions: 0o700])
         if !manager.fileExists(atPath: logURL.path) {
@@ -170,6 +187,7 @@ final class FileAppDiagnostics: @unchecked Sendable {
     private func rotate() {
         try? handle?.close(); handle = nil
         let old = directory.appendingPathComponent("app.log.1")
+        writes.willWrite(old)
         try? FileManager.default.removeItem(at: old)
         try? FileManager.default.moveItem(at: logURL, to: old)
         open()
@@ -211,13 +229,15 @@ final class FileTimelineDiagnostics: TimelineDiagnosticsSink, @unchecked Sendabl
     private let queue = DispatchQueue(label: "afleet.timeline-diagnostics")
     private let directory: URL
     private let rotateAt: Int
+    private let writes: AppFileWrites
     private var handle: FileHandle?
     private var size = 0
     private var lastBuild: IndexBuildSummary?
 
-    init(directory: URL, rotateAt: Int = 25 * 1024 * 1024) {
+    init(directory: URL, rotateAt: Int = 25 * 1024 * 1024, writes: AppFileWrites = .none) {
         self.directory = directory
         self.rotateAt = rotateAt
+        self.writes = writes
         queue.sync { open() }
     }
 
@@ -225,6 +245,10 @@ final class FileTimelineDiagnostics: TimelineDiagnosticsSink, @unchecked Sendabl
 
     private func open() {
         let manager = FileManager.default
+        // Reported before it is touched, and once per open: every byte this sink writes goes to the
+        // handle below, so the file named here is the whole of its write surface (X9's seam).
+        writes.willWrite(directory)
+        writes.willWrite(logURL)
         try? manager.createDirectory(at: directory, withIntermediateDirectories: true,
                                      attributes: [.posixPermissions: 0o700])
         if !manager.fileExists(atPath: logURL.path) {
@@ -252,6 +276,7 @@ final class FileTimelineDiagnostics: TimelineDiagnosticsSink, @unchecked Sendabl
     private func rotate() {
         try? handle?.close(); handle = nil
         let old = directory.appendingPathComponent("timeline.log.1")
+        writes.willWrite(old)
         try? FileManager.default.removeItem(at: old)
         try? FileManager.default.moveItem(at: logURL, to: old)
         open()

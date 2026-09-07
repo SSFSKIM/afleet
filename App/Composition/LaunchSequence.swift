@@ -33,6 +33,9 @@ struct LaunchSequence: Sendable {
     var checkVersion: @Sendable (URL, ResolvedEnvironment) async -> VersionVerdict
     var makeStore: @Sendable (URL, [URL]) throws -> any StateStore
     var makeDiagnostics: @Sendable (URL) -> DiagnosticsComposer
+    /// X9's app-side seam. Every path afleet's own code writes, and every root it hands to a
+    /// package that writes under it, is reported here before the write. `.none` in production.
+    var writes: AppFileWrites
     var makeIndex: @Sendable (ConfigHome, any StateStore, DiagnosticsComposer) -> any IndexAccess
     var fleetFactory: @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL) -> any AppFleet
     var makeWatcher: @Sendable (ConfigHome) -> any TranscriptWatching
@@ -46,8 +49,9 @@ struct LaunchSequence: Sendable {
          resolveEnvironment: @escaping @Sendable () async -> ResolvedEnvironment = LaunchSequence.resolveLoginShellEnvironment,
          locateBinary: @escaping @Sendable (ResolvedEnvironment, URL?) -> URL? = { BinaryLocator.locate(in: $0, override: $1) },
          checkVersion: @escaping @Sendable (URL, ResolvedEnvironment) async -> VersionVerdict = { await VersionGate().check(binary: $0, environment: $1) },
-         makeStore: @escaping @Sendable (URL, [URL]) throws -> any StateStore = { try FileStateStore(baseDirectory: $0, configHomes: $1) },
-         makeDiagnostics: @escaping @Sendable (URL) -> DiagnosticsComposer = { DiagnosticsComposer(directory: $0) },
+         writes: AppFileWrites = .none,
+         makeStore: (@Sendable (URL, [URL]) throws -> any StateStore)? = nil,
+         makeDiagnostics: (@Sendable (URL) -> DiagnosticsComposer)? = nil,
          makeIndex: @escaping @Sendable (ConfigHome, any StateStore, DiagnosticsComposer) -> any IndexAccess = LaunchSequence.makeTranscriptIndex,
          fleetFactory: @escaping @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL) -> any AppFleet = LaunchSequence.makeFleet,
          makeWatcher: @escaping @Sendable (ConfigHome) -> any TranscriptWatching = { TranscriptWatcher(configHome: $0.root) },
@@ -58,8 +62,14 @@ struct LaunchSequence: Sendable {
         self.resolveEnvironment = resolveEnvironment
         self.locateBinary = locateBinary
         self.checkVersion = checkVersion
-        self.makeStore = makeStore
-        self.makeDiagnostics = makeDiagnostics
+        self.writes = writes
+        // The two production defaults are built here rather than declared as parameter defaults,
+        // because each has to carry the seam and a parameter default cannot see another parameter.
+        self.makeStore = makeStore ?? { base, homes in
+            try FileStateStore(baseDirectory: base, configHomes: homes,
+                               fileOperations: SeamedStoreFileOperations(writes: writes))
+        }
+        self.makeDiagnostics = makeDiagnostics ?? { DiagnosticsComposer(directory: $0, writes: writes) }
         self.makeIndex = makeIndex
         self.fleetFactory = fleetFactory
         self.makeWatcher = makeWatcher
@@ -114,6 +124,8 @@ struct LaunchSequence: Sendable {
         }
 
         // 4. The store. Its `configHomes:` argument is the X9 guard and is never an empty array.
+        //    The base directory is a root a package writes under, so it is declared to the seam.
+        writes.willDelegate(storeRoot)
         let store: any StateStore
         do {
             store = try makeStore(storeRoot, [configHome.root])
@@ -149,7 +161,9 @@ struct LaunchSequence: Sendable {
         // 7. C3's index over this home, persisting through the store.
         let index = makeIndex(configHome, store, diagnostics)
 
-        // 8. The fleet.
+        // 8. The fleet. `Fleet` builds two diagnostics sinks of its own, internally and eagerly,
+        //    from the directory it is handed; that root is the app's whole part in those bytes.
+        writes.willDelegate(diagnosticsRoot)
         let fleet = fleetFactory(configHome, environment, binary, store, diagnosticsRoot)
         await fleet.start()
 
