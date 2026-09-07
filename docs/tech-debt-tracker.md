@@ -706,7 +706,7 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     Unexploited in C4 today: the scratch `.claude.json` carries no such entry, and the fixture would
     have to name one for the hole to open. Closer: take the same fix in C4's copy. Owner: C4's
     maintainer, or whoever next touches that file.
-69. **The app never calls `AppFleet.shutdown()`.** `Workspace.swift` declares it on the protocol
+71. **The app never calls `AppFleet.shutdown()`.** `Workspace.swift` declares it on the protocol
     and every call site is a test's teardown; no path in `App/` invokes it, so quitting afleet
     leaves whatever `Fleet.shutdown()` does — ending owned children and closing their streams —
     undone. Found at C5 Task 8's review follow-up, by sweeping `App/` for members whose only
@@ -719,7 +719,7 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     architect's call. Closer: an `NSApplicationDelegate.applicationWillTerminate` (or a
     `ScenePhase` observer) that awaits `workspace.fleet.shutdown()`, once that question is answered.
     Owner: C6, which owns the surface where a running conversation is visible when the user quits.
-70. **A member declared in `App/` whose only callers are in `AppTests/` is not detectable by any
+72. **A member declared in `App/` whose only callers are in `AppTests/` is not detectable by any
     check this repo runs.** Two real defects in one review cycle had that exact shape:
     `PanelHost.selectIndex(_:in:)`, correct and tested with no production caller while the menu
     called something that indexed a different list, and `ChannelTimelineRegistry.release(_:)`,
