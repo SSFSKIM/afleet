@@ -465,6 +465,11 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     consumer that joins those two by key — C6 and C7 both will. Found at C5 Task 4. Closer:
     settle one spelling at the seam, or have both sides canonicalise identically, rather than
     each caller remembering to bridge it.
+**Historical correction, 2026-09-07 (F1 claim sweep):** entry 55 and its dated amendments
+below preserve the investigation before the sidebar fix. The six-process cap does **not**
+bound how many channels publish states; registered processless supervisors publish too.
+The rebuild defect is closed by row patching and coalescing, as the later closer records.
+
 55. **`FleetBrowserModel.rebuild()` re-derives every section on every `ChannelState`.** Harmless
     at C4's cap of six live processes, which is the only thing that pushes states today. It is
     the first thing a view bound straight to `sections` would feel, so C5 Task 5 and C6 should
