@@ -410,3 +410,17 @@ architect's rulings settled them). Line numbers are as at `4f2102d`, before the 
     not changing what it does. Closer: C6 decides where the readback belongs — a second request
     inside a strategy the executor runs, or the surface re-reading settings after a flag change —
     and `ReadbackSource` either drives it or goes. Owner: C6.
+70. **Every fixture and live gate ran under a `CLAUDE_CONFIG_DIR` scratch home, which is not the
+    shape of an ordinary installation.** With the variable set the engine reads
+    `$CLAUDE_CONFIG_DIR/.claude.json`, names its keychain credential item with a path-hash suffix
+    (2.1.263 `cli.pretty.js:338499`) and ignores an installed launchd daemon (`:363645`, `:363679`);
+    with it unset — every default installation — it reads `~/.claude.json`, the unsuffixed keychain
+    item, and an installed daemon if there is one. Two `main` defects hid behind this for four
+    children (the always-injected home and `TrustReader`'s document path, corrected 2026-09-07), and
+    the daemon observations in C4's spec were all taken with the installed-daemon path closed
+    (correctives `6b3fc23`, `1c19d52`).
+    Closer: the next fixture re-pin (entry 50) also records under a default-shaped scratch `HOME`
+    (a temporary `HOME` with `.claude/` inside and `.claude.json` beside it, `CLAUDE_CONFIG_DIR`
+    unset), and at least one live gate per spawning child runs in that shape. The cost is that such
+    a child authenticates through the unsuffixed keychain item, the author's own; the gate must
+    stay zero-turn. Owner: C1's maintainer at the re-pin; C6 for the first spawning gate.
