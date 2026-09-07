@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 import XCTest
 import AfleetCore
 import ClaudeWire
@@ -41,6 +42,30 @@ final class NotificationRouterTests: XCTestCase {
         }
 
         func key(_ nibble: String) -> ChannelKey { ActivityFixtures.key(nibble, configHome: configHome) }
+    }
+
+    /// T3: authorisation does not imply foreground delivery. Exercise all four combinations
+    /// through the production poster: an always-in-app or always-system mutation must fail too.
+    func testForegroundUsesInAppEvenWhenSystemNotificationsAreAuthorised() async {
+        for authorised in [false, true] {
+            for active in [false, true] {
+                let system = RecordingPoster()
+                system.isAuthorised = authorised
+                var banners: [AfleetNotification] = []
+                let poster = SystemOrInAppPoster(system: system, isApplicationActive: { active }) {
+                    banners.append($0)
+                }
+                let granted = await poster.requestAuthorisation()
+                XCTAssertEqual(granted, authorised)
+                let notification = AfleetNotification(identifier: "invented-notification", source: .decision,
+                                                      title: "Invented decision", body: "Invented tool")
+                await poster.post(notification)
+                let useSystem = authorised && !active
+                XCTAssertEqual(system.count, useSystem ? 1 : 0, "wrong system route for activity/authorisation")
+                XCTAssertEqual(banners.count, useSystem ? 0 : 1, "foreground or unauthorised notification was lost")
+                XCTAssertEqual(system.posted + banners, [notification], "notification was lost, changed or duplicated")
+            }
+        }
     }
 
     // MARK: - G2c
@@ -214,4 +239,9 @@ final class NotificationRouterTests: XCTestCase {
         await harness.router.settle()
         XCTAssertEqual(harness.poster.count, 1)
     }
+}
+
+/// No notification centre, permission prompt or system post is reached by the poster matrix.
+extension RecordingPoster: SystemNotificationPosting {
+    func authorisationStatus() async -> UNAuthorizationStatus { isAuthorised ? .authorized : .denied }
 }

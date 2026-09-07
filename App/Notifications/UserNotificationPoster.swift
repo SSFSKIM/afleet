@@ -9,7 +9,11 @@ import UserNotifications
 /// notification to, and an XCTest bundle hosted by the app is a different process shape than the
 /// app; every G2c assertion therefore runs against `RecordingPoster`. What this type is checked by
 /// is spike S-C5-1, which launches the built application and watches what the system does with it.
-final class UserNotificationPoster: NotificationPosting {
+protocol SystemNotificationPosting: NotificationPosting {
+    func authorisationStatus() async -> UNAuthorizationStatus
+}
+
+final class UserNotificationPoster: SystemNotificationPosting {
 
     private let log = Logger(subsystem: "com.afleet.app", category: "notifications")
 
@@ -43,8 +47,8 @@ final class UserNotificationPoster: NotificationPosting {
         }
     }
 
-    /// What the system currently says about this application's authorisation. Read by the spike;
-    /// nothing in the product branches on it, because a refusal is already the `false` above.
+    /// What the system currently says about this application's authorisation. Read by the spike
+    /// and by `SystemOrInAppPoster` after requesting authorisation.
     func authorisationStatus() async -> UNAuthorizationStatus {
         await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
     }

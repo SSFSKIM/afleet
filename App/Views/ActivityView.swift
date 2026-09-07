@@ -62,7 +62,7 @@ struct ActivityView: View {
     }
 }
 
-/// Spike S-C5-1's in-app fallback, drawn. Present only when the system declined to deliver.
+/// Spike S-C5-1's in-app fallback, drawn. Used when system authorisation is absent or afleet is foregrounded.
 private struct BannerStack: View {
 
     let activity: ActivityModel
