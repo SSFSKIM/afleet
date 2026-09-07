@@ -693,3 +693,16 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     different leaf, say. Found at C5 Task 8. Closer: when a second runner appears, route on
     `request.purpose` and let a runner declare the purposes it accepts; the protocol member's `for
     tab:` parameter stays, because a runner still belongs to a tab. Owner: C7, at its second runner.
+69. **C4's `trustedDirectory(_:)` excludes the config home with a comparison that fails open.**
+    `FleetKit/Tests/FleetSessionsTests/LiveFleetTests.swift` canonicalises both sides of its
+    config-home exclusion with `URL.resolvingSymlinksInPath()`. Foundation rewrites `/private/tmp/…`
+    to `/tmp/…` only when the resulting path **exists**, so a trust entry naming a directory
+    *beneath* the scratch config home that has not been created yet stays `/private/tmp/…` while the
+    config home itself becomes `/tmp/…`; no prefix matches, the entry survives the exclusion, and the
+    live suite would then create a directory inside a config home — the one act X9 forbids
+    absolutely. Found at C5 Task 9 by porting the rule and testing the exclusion for the first time
+    (`AppTests/Support/ScratchLiveGateTests.swift`); C5's port is fixed and uses
+    `CanonicalPath.string`, which resolves as much of a path as exists and puts the rest back.
+    Unexploited in C4 today: the scratch `.claude.json` carries no such entry, and the fixture would
+    have to name one for the hole to open. Closer: take the same fix in C4's copy. Owner: C4's
+    maintainer, or whoever next touches that file.
