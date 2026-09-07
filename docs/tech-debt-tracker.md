@@ -672,3 +672,24 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     same snapshot the model reads. Found at C5 Task 7. Closer: set `hasOpened` after the lookup
     succeeds, so a transient absence is retried on the next appearance.
 
+67. **The panel column resolves its `ChannelContext` inside `body`, which mutates the host.**
+    `PanelHostModel.context(for:cwd:)` records the channel's working directory and caches the
+    context it built, and `view(for:context:)` touches the eviction order and can create a session
+    — all from inside a SwiftUI view evaluation. It is sound today and deliberately so: every field
+    those paths write is `@ObservationIgnored`, so none of them invalidates a view and none can
+    produce "modifying state during view update". The debt is that the safety rests on that
+    property of five stored properties rather than on the shape of the call, and the first of them
+    to become observed — a host that wanted the tab bar to redraw when a context is rebuilt, say —
+    reintroduces the hazard silently. Found at C5 Task 8. Closer: resolve the context in an
+    `onChange` or a `task(id:)` and hold it in view state, the same move C5 Task 7's fix made for
+    the channel header; or keep the caches behind a type whose API cannot be called from `body`.
+    Owner: whoever next adds observed state to the host — C6 or C7 in practice.
+68. **`PanelHost.run(_:)` picks a pane runner by tab rather than by the request's purpose.**
+    `registerPaneRunner(_:for:)` is keyed by `PanelTabID`, and `run` prefers the runner registered
+    for `.terminal`, falling back to the first registered in canonical order and throwing
+    `noPaneRunner(.terminal)` when there is none. Only C7's Terminal leaf registers a runner, so the
+    fallback arm is unexercised and the choice is unambiguous today. `PaneRequest` already carries a
+    `PanePurpose`, which is what a second runner would want to be routed by — a logs pane in a
+    different leaf, say. Found at C5 Task 8. Closer: when a second runner appears, route on
+    `request.purpose` and let a runner declare the purposes it accepts; the protocol member's `for
+    tab:` parameter stays, because a runner still belongs to a tab. Owner: C7, at its second runner.
