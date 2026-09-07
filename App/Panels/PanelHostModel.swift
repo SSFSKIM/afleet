@@ -54,6 +54,17 @@ final class PanelHostModel: PanelHost {
     /// it was last rendered. The panel column sets it; a headless host has none.
     private(set) var selectedChannel: ChannelKey?
 
+    /// The tabs the main window can currently show, in canonical order, for the menu that carries
+    /// Cmd+1…7.
+    ///
+    /// **Presentation only, and never a second source of truth for what an index names.** The
+    /// shortcut still resolves through `selectIndex(_:in:)` against the context the panel column
+    /// holds — that is why the context is a parameter of that member rather than state kept here —
+    /// and this exists so the label the menu writes beside Cmd+2 is the tab Cmd+2 actually selects.
+    /// Empty when the window is on Activity or on a channel with no context, where the shortcut has
+    /// nothing to select and the menu correctly offers nothing.
+    private(set) var mainWindowTabs: [PanelTabID] = []
+
     /// The one link registry in the running app (spec §7, C7's W5). The host hands *this* object
     /// into every `ChannelContext`, so a tab holds one routing seam rather than two, and when
     /// C7.2's `LinkRouting` target lands its reusable registry this delegates to it rather than a
@@ -170,12 +181,32 @@ final class PanelHostModel: PanelHost {
         selected = id
     }
 
+    /// The tab Cmd+N names for this channel, or nil when the index is past what the channel can
+    /// show.
+    ///
+    /// `selectIndex(_:in:)` is this plus the selection. It exists as a value-returning member
+    /// because the shell owns which tab the window draws — Cmd+1…7 is a menu shortcut declared
+    /// above the window — so the panel column has to be able to ask what an index names before it
+    /// moves that selection, and one indexing in one place is what keeps the two answers equal.
+    func tab(at index: Int, in context: ChannelContext) -> PanelTabID? {
+        let ids = available(for: context)
+        guard index >= 1, index <= ids.count else { return nil }
+        return ids[index - 1]
+    }
+
     /// Cmd+1…7, one-based over `available(for:)` so Cmd+1 is the first tab the user can see. An
     /// index outside the set changes nothing: a key combination is not an assertion.
     func selectIndex(_ index: Int, in context: ChannelContext) {
-        let ids = available(for: context)
-        guard index >= 1, index <= ids.count else { return }
-        select(ids[index - 1])
+        guard let id = tab(at: index, in: context) else { return }
+        select(id)
+    }
+
+    /// The panel column reports what it is showing, so the menu above the window can name the tabs
+    /// its shortcuts select. Called from a `task(id:)` rather than from `body`, because this one is
+    /// observed and writing it during a view evaluation is the shape that invalidates mid-update.
+    func mainWindowShows(_ ids: [PanelTabID]) {
+        guard ids != mainWindowTabs else { return }
+        mainWindowTabs = ids
     }
 
     // MARK: - Pop-out
@@ -230,8 +261,6 @@ final class PanelHostModel: PanelHost {
     /// longer exist.
     func releaseChannel(_ key: ChannelKey) {
         releaseSessions(of: key)
-        cwds[key] = nil
-        contexts[key] = nil
         poppedOut.removeAll { $0.channel == key }
         if selectedChannel == key { selectedChannel = nil }
     }
@@ -264,9 +293,21 @@ final class PanelHostModel: PanelHost {
         }
     }
 
+    /// Everything the host holds for one channel: its sessions, its place in the eviction order,
+    /// and the context it was rendering with.
+    ///
+    /// **The context goes too.** It holds the channel's `TimelineRecentURLFeed`, which holds that
+    /// channel's `ChannelTimelineModel`, so a cache that bounded the sessions at sixteen and kept
+    /// every context would still accumulate one timeline model per channel browsed — the
+    /// unbounded growth the bound exists to prevent, one indirection further out. Its callers are
+    /// both channel-level: LRU pressure, which never touches an exempt channel, and a channel
+    /// leaving the index. `unregister` releases one tab's slots itself and does not come here,
+    /// because another tab may still be rendering the same channel.
     private func releaseSessions(of key: ChannelKey) {
         for slot in sessions.keys where slot.channel == key { sessions[slot] = nil }
         recency.removeAll { $0 == key }
+        contexts[key] = nil
+        cwds[key] = nil
     }
 
     /// Keeps the eviction order to the channels that still hold something.

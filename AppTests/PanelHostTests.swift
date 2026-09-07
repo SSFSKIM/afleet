@@ -143,6 +143,53 @@ final class PanelHostTests: XCTestCase {
         XCTAssertEqual(host.selected, .terminal, "an out-of-range index moved the selection")
     }
 
+    /// Cmd+N selects the Nth *registered and available* tab, along the path the app actually takes.
+    ///
+    /// **The path is the point.** `PanelHost.selectIndex(_:in:)` was correct and tested and had no
+    /// production caller: the menu item called `ShellModel.selectPanelTab(at:)`, which indexed
+    /// `PanelTabID.allCases`, so Cmd+N could name a tab the channel cannot show while the tested
+    /// method that gets it right was never invoked. So this test presses the key the way the menu
+    /// presses it and resolves it the way the column resolves it, and touches `selectIndex`
+    /// only through them.
+    ///
+    /// **The channel is chosen so the two indexings disagree.** With `.files` and `.terminal`
+    /// registered, index 2 over `allCases` is `.agents` — which this channel cannot show — and over
+    /// `available(for:)` it is `.terminal`. A channel where all seven were available could not tell
+    /// the two apart, and the test would pass against the wiring it exists to reject.
+    func testCmdNSelectsTheNthAvailableTabAlongThePathTheAppTakes() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let host = rig.host
+        try host.register(StubPanelTab(.files))
+        try host.register(StubPanelTab(.terminal))
+        let context = try XCTUnwrap(host.context(for: rig.keys[0], cwd: PanelFixtures.cwd),
+                                    "the host built no context")
+        XCTAssertEqual(PanelTabID.allCases[1], .agents,
+                       "index 2 over allCases is not a tab this channel lacks, so the test cannot discriminate")
+        XCTAssertEqual(host.available(for: context), [.files, .terminal],
+                       "the channel does not show the two tabs this test registered")
+
+        rig.shell.selectPanelTab(at: 2)          // the menu item
+        let chosen = PanelColumnView.resolvePendingPanelIndex(shell: rig.shell, host: host,
+                                                              context: context)  // the panel column
+
+        XCTAssertEqual(chosen, .terminal, "Cmd+2 named the wrong tab for this channel")
+        XCTAssertEqual(rig.shell.panelTab, .terminal, "the window's selection is not the second available tab")
+        XCTAssertEqual(host.selected, .terminal, "the host's selection is not the second available tab")
+
+        // Inside `allCases`, past what this channel can show: nothing moves.
+        rig.shell.selectPanelTab(at: 3)
+        let none = PanelColumnView.resolvePendingPanelIndex(shell: rig.shell, host: host, context: context)
+        XCTAssertNil(none, "an index past the available tabs named a tab")
+        XCTAssertEqual(rig.shell.panelTab, .terminal, "an index past the available tabs moved the window")
+        XCTAssertEqual(host.selected, .terminal, "an index past the available tabs moved the host")
+
+        // And the menu's labels are drawn from the same list the index resolves against, so the
+        // name beside Cmd+2 is the tab Cmd+2 selects.
+        host.mainWindowShows(host.available(for: context))
+        XCTAssertEqual(host.mainWindowTabs, [.files, .terminal],
+                       "the menu would name a different list from the one Cmd+N indexes")
+    }
+
     /// A tab that reports itself unavailable is absent for that channel and present for another.
     ///
     /// Both directions, so a tab that reported unavailable everywhere — or a host that ignored
@@ -455,6 +502,70 @@ final class PanelHostTests: XCTestCase {
         XCTAssertTrue(exits.first?.request.id == request.id,
                       "the exit reaching the lifecycle carries a different request id")
         XCTAssertTrue(exits.first?.request == request, "the exit's request is not the one that was run")
+    }
+    /// The tab reads the channel's identity, its working directory and X11's environment out of the
+    /// context, and each is asserted.
+    ///
+    /// Gate G4b names these three beside the store and the feed, and until now they were *rendered*
+    /// and never asserted — `PlaceholderTab` drew them, and nothing exercised the tab. The
+    /// assertion goes through `PlaceholderReadout`, which is the value the view's four lines are
+    /// formatted from, so what is asserted is what the window shows.
+    ///
+    /// The session id and the environment are spelled as booleans: `XCTAssertEqual` prints both
+    /// operands, and the environment carries `HOME` and `CLAUDE_CONFIG_DIR` rooted in a scratch
+    /// tree, which resolve under the author's own account (§11).
+    func testTheTabReadsTheChannelsIdentityCwdAndEnvironment() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let key = rig.keys[0]
+        let tab = PlaceholderTab()
+        try rig.host.register(tab)
+        let context = try XCTUnwrap(rig.host.context(for: key, cwd: PanelFixtures.cwd),
+                                    "the host built no context")
+
+        let session = try XCTUnwrap(rig.host.session(for: .thread, context: context) as? PlaceholderTabSession,
+                                    "the placeholder's session is not the type it makes")
+        let readout = PlaceholderReadout(session: session, context: context)
+
+        XCTAssertTrue(context.session == key.session, "the context names a different session from the channel")
+        XCTAssertTrue(readout.session == key.session.description,
+                      "the tab draws a different session from the one the context carries")
+        XCTAssertEqual(readout.cwd, PanelFixtures.cwd.path, "the tab draws a different working directory")
+        XCTAssertTrue(context.cwd == PanelFixtures.cwd, "the context carries a different working directory")
+        XCTAssertTrue(context.environment == rig.workspace.environment,
+                      "the context's environment is not the one the launch resolved")
+        XCTAssertEqual(readout.environmentVariables, rig.workspace.environment.variables.count,
+                       "the tab counts \(readout.environmentVariables) environment variables, not the resolved capture's")
+        XCTAssertGreaterThan(readout.environmentVariables, 0,
+                             "the resolved environment holds 0 variables, so the count proves nothing")
+    }
+
+    /// The host `FleetCoordinator` was handed is the host the app resolves its panels from.
+    ///
+    /// "One host" is the property five children inherit, and an assertion that compares a `let` to
+    /// itself cannot fail. This one can: it takes the coordinator `AppModel`'s own factory builds,
+    /// drives an index removal through it, and asserts the session released was one held by
+    /// `app.panels` — the instance the panel column and the popped-out scene resolve from. A model
+    /// that built the coordinator over a second host would release nothing here.
+    func testTheAppResolvesOnePanelHost() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let app = AppModel()
+        app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
+        let counter = SessionCounter()
+        try app.panels.register(StubPanelTab(.files, counter: counter))
+        let key = rig.keys[0]
+        _ = app.panels.session(for: .files, context: PanelFixtures.context(key))
+        XCTAssertEqual(app.panels.liveChannelCount, 1,
+                       "the host holds \(app.panels.liveChannelCount) channels, not 1")
+
+        let coordinator = try XCTUnwrap(app.coordinatorFactory(rig.workspace) as? FleetCoordinator,
+                                        "the app's factory did not build a FleetCoordinator")
+        await coordinator.indexChanged(IndexDelta(removed: [key.session]))
+
+        XCTAssertEqual(counter.released, 1,
+                       "the coordinator the app builds released \(counter.released) sessions from app.panels, not 1")
+        XCTAssertEqual(app.panels.liveChannelCount, 0,
+                       "the host the app resolves from still holds \(app.panels.liveChannelCount) channels")
+        coordinator.stop()
     }
 }
 

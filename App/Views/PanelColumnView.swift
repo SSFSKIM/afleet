@@ -52,6 +52,27 @@ struct PanelColumnView: View {
         guard let session = shell.focus.session else { return nil }
         return browser?.row(session)
     }
+
+    /// Resolves a pending Cmd+N against the channel in view: the host indexes one-based over
+    /// `available(for:)`, and the shell's selection follows whatever it named.
+    ///
+    /// **This is the whole of the keyboard half of G4a, and it is a function for that reason.** The
+    /// shortcut is declared in a `Scene`'s `commands`, above the window, where no `ChannelContext`
+    /// exists; the context lives here. A line that existed only inside an `onChange` could not be
+    /// asserted without a window, and this child has already recorded once what that costs — so the
+    /// modifier below is one call to this, and the test is the same call.
+    ///
+    /// Returns the tab it selected, or nil when the index names none — which is the ordinary
+    /// outcome of Cmd+5 on a channel showing two tabs, and changes nothing.
+    @discardableResult
+    static func resolvePendingPanelIndex(shell: ShellModel, host: PanelHostModel,
+                                        context: ChannelContext) -> PanelTabID? {
+        guard let index = shell.takePendingPanelIndex() else { return nil }
+        guard let chosen = host.tab(at: index, in: context) else { return nil }
+        host.selectIndex(index, in: context)
+        shell.panelTab = chosen
+        return chosen
+    }
 }
 
 /// The tab bar and the selected tab's pane, for one channel.
@@ -75,6 +96,15 @@ private struct PanelTabColumn: View {
         // The host's own selection follows the shell's, so `available(for:)` and `selectIndex` —
         // which C6 and C7 call through the protocol — agree with what the window is showing.
         .task(id: shell.panelTab) { host.select(shell.panelTab) }
+        // What the menu above the window is allowed to write beside Cmd+1…7. In a task rather than
+        // in `body`, because `mainWindowTabs` is observed.
+        .task(id: available) { host.mainWindowShows(available) }
+        // Cmd+1…7. The shortcut is declared above the window and records the press; this is the
+        // only place that holds both the shell and a resolved context, so this is where it lands.
+        .onChange(of: shell.pendingPanelIndex) { _, pending in
+            guard pending != nil else { return }
+            PanelColumnView.resolvePendingPanelIndex(shell: shell, host: host, context: context)
+        }
     }
 
     private var available: [PanelTabID] { host.available(for: context) }

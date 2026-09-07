@@ -63,8 +63,14 @@ struct AfleetApp: App {
             Button("Activity") { shell.showActivity() }
                 .keyboardShortcut("a", modifiers: [.command, .shift])
             Divider()
-            ForEach(Array(PanelTabID.allCases.enumerated()), id: \.element) { index, tab in
-                Button(tab.defaultTitle) { shell.selectPanelTab(at: index + 1) }
+            // **Over the tabs the panel host says this channel can show, not over `allCases`.**
+            // Cmd+N is the Nth *registered and available* tab (X7, gate G4a), so the item that
+            // carries Cmd+2 has to be labelled with the tab Cmd+2 selects — indexing `allCases`
+            // here wrote a name beside a key that would select something else. When the window is
+            // on Activity, or on a channel with no context, the list is empty and the menu offers
+            // no panel shortcuts, which is honest: there is nothing for them to select.
+            ForEach(Array(model.panels.mainWindowTabs.enumerated()), id: \.element) { index, tab in
+                Button(model.panels.title(for: tab)) { shell.selectPanelTab(at: index + 1) }
                     .keyboardShortcut(Self.digit(index + 1), modifiers: .command)
             }
         }

@@ -106,14 +106,46 @@ final class ShellModel {
         focus = next
     }
 
-    /// Cmd+1…7. **One-based over `PanelTabID.allCases`**, which is the canonical order contract X7
-    /// closes at seven cases, so the mapping cannot drift from the tab bar's. An index outside the
-    /// set changes nothing rather than trapping: a key combination is not an assertion.
+    /// One press of Cmd+N, waiting for the panel column to resolve it against the channel in view.
+    ///
+    /// The sequence number is what makes two presses of one key two events: without it a second
+    /// Cmd+2 would write the value the property already holds and no observer would move.
+    struct PendingPanelIndex: Hashable {
+        let index: Int
+        let sequence: Int
+    }
+
+    private(set) var pendingPanelIndex: PendingPanelIndex?
+    private var panelIndexSequence = 0
+
+    /// Cmd+1…7. **One-based over the tabs the panel host reports available for the channel in
+    /// view**, which is what X7 and gate G4a say.
+    ///
+    /// That answer is not this model's to compute: availability is `PanelTab.isAvailable(in:)` over
+    /// a `ChannelContext`, and the context lives in the panel column. So the shortcut *records* the
+    /// press and `PanelColumnView.resolvePendingPanelIndex` resolves it through
+    /// `PanelHost.selectIndex(_:in:)`.
+    ///
+    /// **It used to index `PanelTabID.allCases` here, and that was a different shortcut from the one
+    /// the gate names.** With one tab registered, Cmd+2 set `panelTab` to a tab the channel could
+    /// not show; the column drew "not available", the host refused the selection, and the two
+    /// disagreed — while the host's `selectIndex(_:in:)`, which gets it right and is tested, had no
+    /// production caller at all. The bound below stays `allCases.count` because seven is the closed
+    /// size of the key range; which of the seven an index names is the host's answer, not this one.
     func selectPanelTab(at index: Int) {
         guard index >= 1, index <= PanelTabID.allCases.count else { return }
-        let next = PanelTabID.allCases[index - 1]
-        guard next != panelTab else { return }
-        panelTab = next
+        panelIndexSequence += 1
+        pendingPanelIndex = PendingPanelIndex(index: index, sequence: panelIndexSequence)
+    }
+
+    /// Takes the pending press, if there is one.
+    ///
+    /// A press nobody resolves — no channel in view, so no context and no available tabs — is
+    /// dropped rather than queued: a shortcut is not a command, and replaying one the user pressed
+    /// while looking at Activity would move a panel they have since navigated away from.
+    func takePendingPanelIndex() -> Int? {
+        defer { pendingPanelIndex = nil }
+        return pendingPanelIndex?.index
     }
 
     func toggleShowAll(_ sectionID: String) {
