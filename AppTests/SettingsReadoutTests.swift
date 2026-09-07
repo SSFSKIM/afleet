@@ -242,6 +242,80 @@ final class SettingsReadoutTests: XCTestCase {
 
     // MARK: - Support
 
+    // F7: the production Activity ingestion path, not a test's call to record, must
+    // feed Settings. Two subscribers see both frames, but only one owns the tally.
+    @MainActor
+    func testReceivedUnknownFramesReachSettingsExactlyOnce() async throws {
+        let temp = try TempTree()
+        let home = try temp.directory("home")
+        let built = try await Self.workspace(temp: temp, configHome: home)
+        let persisted = expectation(description: "two unknown-frame increments persisted")
+        let store = TallyWriteWitness(store: built.workspace.store, completed: persisted)
+        let source = built.workspace
+        let workspace = Workspace(configHome: source.configHome, environment: source.environment,
+                                  binary: source.binary, installed: source.installed, store: store,
+                                  index: source.index, fleet: source.fleet, watcher: nil, changes: nil,
+                                  diagnostics: source.diagnostics)
+        let lifecycle = LifecycleDouble()
+        let key = ActivityFixtures.key("1", configHome: home)
+        await lifecycle.setStates([ActivityFixtures.state(key)])
+        await lifecycle.openEvents(of: key)
+        let shell = ShellModel()
+        let router = NotificationRouter(poster: RecordingPoster(), lifecycle: lifecycle,
+                                        isInView: { shell.isInView($0) }, preferences: { NotificationPreferences() })
+        let activity = ActivityModel(lifecycle: lifecycle, configHome: home, shell: shell, router: router, store: store)
+        await activity.start()
+        let secondaryReceived = expectation(description: "secondary subscription received both frames")
+        let secondary = ChannelEventPump(key: key) { pump, _ in
+            if pump.recent.count == 2 { secondaryReceived.fulfill() }
+        }
+        let stream = await lifecycle.events(of: key)
+        secondary.start(try XCTUnwrap(stream))
+        let subscribers = await lifecycle.fanOutCount(of: key)
+        XCTAssertEqual(subscribers, 2, "the test did not establish two subscribers")
+        // Invented protocol input, never captured from an engine.
+        let frame = FrameDecoder.decode(line: Data(#"{"type":"invented_unknown_frame"}"#.utf8))
+        await lifecycle.push(.frame(frame, .first), to: key)
+        await lifecycle.push(.frame(frame, .first), to: key)
+        let received = await XCTWaiter.fulfillment(of: [secondaryReceived, persisted], timeout: 3)
+        XCTAssertEqual(received, .completed, "received frames never reached the persisted tally")
+        let readout = SettingsReadout(workspace: workspace)
+        await readout.refresh()
+        XCTAssertEqual(readout.unknownFrames.total, 2, "unknown frames were missed or counted per subscriber")
+        XCTAssertEqual(readout.unknownFrames.counts["invented_unknown_frame"], 2, "the received type was not counted")
+        let reopened = UnknownFrameCounter(store: source.store)
+        let tally = await reopened.snapshot()
+        XCTAssertEqual(tally.total, 2, "a fresh reader lost the cumulative tally")
+        activity.stop()
+        secondary.stop()
+    }
+
+    /// Forwards every operation to the real store. The signal follows successful persistence,
+    /// so a dead ingestion owner fails the asserted wait rather than passing on a later read.
+    private actor TallyWriteWitness: StateStore {
+        let store: any StateStore
+        let completed: XCTestExpectation
+        private var writes = 0
+        init(store: any StateStore, completed: XCTestExpectation) {
+            self.store = store; self.completed = completed
+        }
+        func read<T: Codable & Sendable>(_ type: T.Type, namespace: StoreNamespace, key: String) async throws -> T? {
+            try await store.read(type, namespace: namespace, key: key)
+        }
+        func write<T: Codable & Sendable>(_ value: T, namespace: StoreNamespace, key: String) async throws {
+            try await store.write(value, namespace: namespace, key: key)
+            if namespace == .afleet && key == AfleetStoreKeys.unknownFrames {
+                writes += 1
+                if writes == 2 { completed.fulfill() }
+            }
+        }
+        func remove(namespace: StoreNamespace, key: String) async throws { try await store.remove(namespace: namespace, key: key) }
+        func keys(in namespace: StoreNamespace) async throws -> [String] { try await store.keys(in: namespace) }
+        func appendUnique(_ element: String, namespace: StoreNamespace, key: String) async throws {
+            try await store.appendUnique(element, namespace: namespace, key: key)
+        }
+    }
+
     private struct Built {
         let workspace: Workspace
         let diagnostics: DiagnosticsComposer

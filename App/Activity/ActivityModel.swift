@@ -91,6 +91,7 @@ final class ActivityModel {
     private let store: (any StateStore)?
     private let shell: ShellModel
     private let router: NotificationRouter
+    private let unknownFrames: UnknownFrameCounter?
     private let now: @Sendable () -> Date
 
     // MARK: - State
@@ -125,6 +126,7 @@ final class ActivityModel {
         self.shell = shell
         self.router = router
         self.store = store
+        self.unknownFrames = store.map { UnknownFrameCounter(store: $0) }
         self.now = now
     }
 
@@ -241,6 +243,12 @@ final class ActivityModel {
     func pump(for key: ChannelKey) -> ChannelEventPump? { pumps[key] }
 
     private func pumpDelivered(_ event: WireEvent, from pump: ChannelEventPump) {
+        // One ingestion owner for the install-wide tally. The timeline's independent fan-out
+        // must not record again. Only unknown types count here, not malformed known frames.
+        if case .frame(.opaque(let frame), _) = event,
+           case .unknownType = frame.reason, let type = frame.type, let unknownFrames {
+            Task { await unknownFrames.record(type) }
+        }
         router.handle(event, on: pump.key)
         scheduleRebuild()
     }
