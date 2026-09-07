@@ -175,12 +175,20 @@ final class AppModel {
             self?.coordinator = coordinator
             return coordinator
         }
-        route = await configured.run()
-        settingsReadout = route.workspace.map(SettingsReadout.init(workspace:))
+        let reached = await configured.run()
+        settingsReadout = reached.workspace.map(SettingsReadout.init(workspace:))
         // Before Activity, so a channel opened by the first paint already has a registry bound to
         // the workspace this launch reached rather than to the one it replaced.
-        if let workspace = route.workspace { bindWorkspace(workspace) }
-        await startActivity()
+        if let workspace = reached.workspace { bindWorkspace(workspace) }
+        await startActivity(over: reached)
+        // **Last.** Publishing the route is what puts the actionable surfaces on screen — the
+        // sidebar's Background section and its *Adopt*, every row's action menu — and supervisor
+        // events are not replayed. An action taken before Activity's hooks are installed emits its
+        // request to nobody: the card loses the payload that would have let it be answered, and a
+        // surfaced hook callback can be left with nothing to answer it. Nothing between the
+        // sequence returning and this line reaches the user, so the cost is a few more frames of
+        // the launch screen and the gain is that no window is ever actionable ahead of Activity.
+        route = reached
     }
 
     /// Builds Activity over the workspace the launch reached, and starts it.
@@ -190,7 +198,7 @@ final class AppModel {
     /// reference back to it. Nothing here retains a cycle — `ActivityModel` owns the router, the
     /// router owns the poster, and the poster reaches the model only through a closure that holds
     /// it weakly.
-    private func startActivity() async {
+    private func startActivity(over route: AppRoute) async {
         activity?.stop()
         activity = nil
         guard let workspace = route.workspace, let browser else { return }
