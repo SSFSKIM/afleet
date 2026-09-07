@@ -375,6 +375,43 @@ final class ChannelTimelineModelTests: XCTestCase {
         XCTAssertTrue(model.hasOpened, "the channel does not report itself open")
     }
 
+    /// Closing a model while its open is still in flight leaves nothing behind it.
+    ///
+    /// `close()` cancels the opening task and drops the ingestion, but the open is a sequence of
+    /// awaits and cancellation only takes effect where the code looks for it. Parked inside
+    /// `subscribe()` — the same gate the ordering test uses, so the close lands *inside* the open
+    /// rather than near it — a resumption that checked neither cancellation nor the closed flag
+    /// went on to install a change-feed loop, take an event subscription and read the file into a
+    /// model the registry no longer holds.
+    ///
+    /// The witnesses are the two things such a resumption does that a closed model must not: the
+    /// lifecycle's `events(of:)` log, taken between the subscribe and the read, and the items the
+    /// read would have published.
+    func testClosingDuringAnOpenLeavesNothingSubscribed() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"])
+        let key = rig.keys[0]
+        await rig.lifecycle.openEvents(of: key)
+        let gate = SubscribeGate(feed: rig.feed)
+        rig.registry.changeFeed = gate.subscribe
+        let model = rig.registry.model(for: key)
+
+        let opening = Task { await model.open(rig.row(0, origin: .owned(.ready))) }
+        let reached = await XCTWaiter().fulfillment(of: [gate.reached], timeout: LaunchFixtures.hangGuard)
+        XCTAssertEqual(reached, .completed, "the open never reached the gate, so nothing was closed inside it")
+
+        // The production seam: the channel left the index while its first open was in flight.
+        rig.registry.release(key)
+        gate.release()
+        await opening.value
+
+        let calls = await rig.lifecycle.eventSubscriptions
+        XCTAssertTrue(calls.isEmpty,
+                      "a closed model went on to take \(calls.count) event subscription(s)")
+        XCTAssertTrue(model.items.isEmpty,
+                      "a closed model went on to read \(model.items.count) items")
+        await rig.lifecycle.finishEvents(of: key)
+    }
+
     // MARK: - The registry
 
     /// One model per channel, retained across a switch away and back, and one registry per app.

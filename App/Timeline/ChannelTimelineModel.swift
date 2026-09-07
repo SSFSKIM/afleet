@@ -144,6 +144,10 @@ final class ChannelTimelineModel {
     /// Why the transcript could not be read, as a shape and never a path (§11).
     private(set) var failure: String?
 
+    /// Set by `close()`, and never cleared: a released model is over. The opening task's awaits are
+    /// checked against it, because cancelling that task only ends it where the code looks.
+    @ObservationIgnored private var isTerminated = false
+
     /// Every applied timeline, from this call onward. A fresh fan-out per call, like
     /// `LifecycleAPI.events(of:)`: the panel host's recent-URL feed is one consumer and a test is
     /// another, and a single shared `AsyncStream` would split the elements between them.
@@ -244,6 +248,13 @@ final class ChannelTimelineModel {
             failure = "this channel has no transcript in the index"
             return
         }
+        // Every `await` below is a point where `close()` can run — the registry releases a channel
+        // that left the index, and the model it releases must not go on to build what the release
+        // just took down. Cancellation alone is not the test: `close()` cancels the opening task,
+        // but a resumption that installed a change-feed loop, took an event subscription and read
+        // the file would leave a released model subscribed and publishing.
+        guard !isTerminated else { return }
+
         // **The index's spelling of the config home, not the workspace's.** `TranscriptIndex`
         // canonicalises its root and every path it discovers, `TranscriptPath.resolve` is a lexical
         // prefix check, and `StreamIngestion.open` traps rather than fails when the path it is given
@@ -252,6 +263,8 @@ final class ChannelTimelineModel {
         // the first channel opened. Read from the index rather than re-canonicalised here, so there
         // is one derivation of the canonical root and not a second that can drift from it.
         let canonicalHome = await workspace.index.currentSnapshot.configHome
+        guard !isTerminated else { return }
+
         let ingestion = StreamIngestion(session: key.session,
                                         configHome: canonicalHome,
                                         mode: .filePrimary,
@@ -274,7 +287,11 @@ final class ChannelTimelineModel {
         // again — that batch is lost for as long as the channel stays open. Taken here, a write
         // before the read is inside the read and a write after it is in this subscription's
         // unbounded buffer. See the note on the type, and the test that holds this order.
-        if let subscription = await subscribeToChanges() {
+        let subscription = await subscribeToChanges()
+        // `close()` cancelled the effects loop and dropped the ingestion while this call was in
+        // flight; installing a loop over that subscription now would resurrect both.
+        guard !isTerminated else { return }
+        if let subscription {
             changesTask = Task { [weak ingestion] in
                 for await batch in subscription {
                     guard let ingestion else { return }
@@ -286,6 +303,7 @@ final class ChannelTimelineModel {
         // The one path, both origins: a live fan-out for a channel the fleet owns a supervisor for,
         // and a stream that is already over for one it does not.
         let events = await lifecycle.events(of: key) ?? Self.finishedEvents()
+        guard !isTerminated else { return }
 
         do {
             _ = try await ingestion.open(file: entry.path, events: events)
@@ -298,6 +316,7 @@ final class ChannelTimelineModel {
     /// Releases the ingestion and both loops. The registry calls it when a new launch replaces the
     /// workspace this model was built over.
     func close() {
+        isTerminated = true
         openingTask?.cancel(); openingTask = nil
         effectsTask?.cancel(); effectsTask = nil
         changesTask?.cancel(); changesTask = nil
