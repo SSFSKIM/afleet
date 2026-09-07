@@ -291,6 +291,38 @@ final class PanelHostTests: XCTestCase {
                        "an archived origin left \(host.liveChannelCount) channels against \(liveBefore)")
     }
 
+    /// A channel evicted under LRU pressure releases its context as well as its sessions.
+    ///
+    /// The bound is on sessions, but a context holds the channel's `TimelineRecentURLFeed` and that
+    /// holds its `ChannelTimelineModel` — so a host that bounded the sessions at sixteen and kept
+    /// every context would still accumulate one timeline model per channel browsed, which is the
+    /// unbounded growth the bound exists to prevent, one indirection further out. The exempt
+    /// channel is asserted in the same test, because a host that dropped every context on eviction
+    /// pressure — including the selected channel's — would pass the first clause alone and blank
+    /// the panel the user is looking at.
+    func testAnEvictedChannelReleasesItsContextToo() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let host = rig.host
+        try host.register(StubPanelTab(.files))
+        let total = PanelHostModel.channelCapacity + 4
+        let keys = (0..<total).map { PanelFixtures.key($0) }
+        host.focusChannel(keys[0])
+
+        for key in keys {
+            let context = try XCTUnwrap(host.context(for: key, cwd: PanelFixtures.cwd),
+                                        "the host built no context for a channel")
+            _ = host.session(for: .files, context: context)
+        }
+
+        XCTAssertEqual(host.liveChannelCount, PanelHostModel.channelCapacity,
+                       "the cache holds \(host.liveChannelCount) channels against a bound of \(PanelHostModel.channelCapacity)")
+        // keys[1] is the least recently rendered channel that is not exempt, so it is the first out.
+        XCTAssertNil(host.context(for: keys[1]),
+                     "an evicted channel kept the context that pins its timeline model")
+        XCTAssertNotNil(host.context(for: keys[0]),
+                        "the selected channel lost its context, so its panel would draw nothing")
+    }
+
     /// A channel removed from the index releases its session at once, without LRU pressure.
     ///
     /// Driven through `FleetCoordinator.indexChanged(_:)`, the seam the composition root actually
