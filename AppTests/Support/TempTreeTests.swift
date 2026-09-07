@@ -57,9 +57,9 @@ final class TempTreeTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: linkedHome, withDestinationURL: realHome)
 
         // The floor: if the two spellings already coincided this case would prove nothing.
-        XCTAssertNotEqual(linkedHome.standardizedFileURL.path(percentEncoded: false),
-                          linkedHome.resolvingSymlinksInPath().standardizedFileURL.path(percentEncoded: false),
-                          "the symlink did not survive, so this case is not discriminating")
+        XCTAssertTrue(linkedHome.standardizedFileURL.path(percentEncoded: false)
+                          != linkedHome.resolvingSymlinksInPath().standardizedFileURL.path(percentEncoded: false),
+                      "the symlink did not survive, so this case is not discriminating")
 
         // The tree is asked for a directory inside the linked home, and the home is injected in
         // its unresolved spelling. Only canonicalising both sides catches it.

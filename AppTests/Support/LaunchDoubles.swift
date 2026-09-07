@@ -375,7 +375,12 @@ enum LaunchFixtures {
         var lines: [String] = []
         for case let url as URL in walk {
             let path = url.path
-            let relative = prefixes.compactMap { path.hasPrefix($0) ? String(path.dropFirst($0.count)) : nil }.first ?? path
+            // The fallback is a marker, never the absolute path. Three assertions in this suite
+            // compare two manifests and print both on failure; a fallback that emitted the real
+            // path would put the temporary directory's account hash into the failure message the
+            // moment the stripping above stopped matching — which is the case it exists for.
+            let relative = prefixes.compactMap { path.hasPrefix($0) ? String(path.dropFirst($0.count)) : nil }.first
+                ?? "! unstripped .../\(url.lastPathComponent)"
             let values = try url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
             if values.isDirectory == true {
                 lines.append("d \(relative)")

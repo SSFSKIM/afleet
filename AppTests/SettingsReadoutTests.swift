@@ -121,7 +121,8 @@ final class SettingsReadoutTests: XCTestCase {
         let readout = SettingsReadout(workspace: built.workspace)
         await readout.refresh()
 
-        XCTAssertEqual(readout.configHomeRoot.path, configHome.path)
+        XCTAssertTrue(readout.configHomeRoot.path == configHome.path,
+                      "the readout reported a config home other than the workspace's")
         XCTAssertEqual(readout.configHomeSource, .environment)
         XCTAssertEqual(readout.protocolBaseline, "2.1.259")
         XCTAssertEqual(readout.installedVersion, SemanticVersion(major: 2, minor: 1, patch: 263))

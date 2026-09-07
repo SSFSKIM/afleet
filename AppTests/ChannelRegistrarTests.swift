@@ -143,8 +143,10 @@ final class ChannelRegistrarTests: XCTestCase {
 
         await fulfillment(of: [bothRegistered], timeout: LaunchFixtures.hangGuard)
         let keys = await registrar.keys
-        XCTAssertEqual(keys, expected,
-                       "the cold launch registered \(keys.count) of \(expected.count) listed channels")
+        // A boolean, not an equality: `ChannelKey` carries the config home, and this test's home is
+        // the scratch tree's, so printing either set would print a runtime-derived path.
+        XCTAssertTrue(keys == expected,
+                      "the cold launch registered \(keys.count) of \(expected.count) listed channels")
         let calls = await registrar.count
         XCTAssertEqual(calls, expected.count, "each listed channel is registered exactly once")
 

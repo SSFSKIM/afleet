@@ -263,7 +263,9 @@ final class ActivityModelTests: XCTestCase {
         let actions = await harness.lifecycle.actions
         XCTAssertEqual(actions.count, 1, "expected exactly one lifecycle action")
         let recorded = try XCTUnwrap(actions.first)
-        XCTAssertEqual(recorded.key, one)
+        // A boolean: `ChannelKey` carries the harness's config home, which is under the temporary
+        // directory, and an equality failure prints both keys.
+        XCTAssertTrue(recorded.key == one, "the answer was recorded against a different channel")
         guard case .answer(let id, let answer) = recorded.action else {
             return XCTFail("the action was not an answer")
         }

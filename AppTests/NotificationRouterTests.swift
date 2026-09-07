@@ -100,7 +100,7 @@ final class NotificationRouterTests: XCTestCase {
         let actions = await harness.lifecycle.actions
         XCTAssertEqual(actions.count, 1, "the engine was left waiting, or answered twice")
         let recorded = try XCTUnwrap(actions.first)
-        XCTAssertEqual(recorded.key, key)
+        XCTAssertTrue(recorded.key == key, "the answer was recorded against a different channel")
         guard case .answer(let id, let answer) = recorded.action else {
             return XCTFail("the action was not an answer")
         }
@@ -168,7 +168,7 @@ final class NotificationRouterTests: XCTestCase {
         let actions = await harness.lifecycle.actions
         XCTAssertEqual(actions.count, 1, "the engine was left waiting on a registered hook callback")
         let recorded = try XCTUnwrap(actions.first)
-        XCTAssertEqual(recorded.key, key)
+        XCTAssertTrue(recorded.key == key, "the answer was recorded against a different channel")
         guard case .answer(let id, let answer) = recorded.action else {
             return XCTFail("the action was not an answer")
         }

@@ -28,9 +28,10 @@ final class GlobalConfigLocationTests: XCTestCase {
         let configHome = ConfigHome(root: home.appending(path: ".claude", directoryHint: .isDirectory),
                                     source: .default)
 
-        XCTAssertEqual(configHome.globalConfig.path,
-                       home.appending(path: ".claude.json").path,
-                       "the resolved document is not the config home's sibling")
+        // Spelled as a boolean, not an equality: both operands are rooted in the temporary
+        // directory, and `XCTAssertEqual` prints both on failure.
+        XCTAssertTrue(configHome.globalConfig.path == home.appending(path: ".claude.json").path,
+                      "the resolved document is not the config home's sibling")
 
         // The wrong location alone does not satisfy the gate. Written first, so the assertion below
         // cannot pass by reading it.
@@ -57,9 +58,8 @@ final class GlobalConfigLocationTests: XCTestCase {
         let root = try temp.directory("invented-config-dir")
         let configHome = ConfigHome(root: root, source: .environment)
 
-        XCTAssertEqual(configHome.globalConfig.path,
-                       root.appending(path: ".claude.json").path,
-                       "the resolved document is not inside the named config directory")
+        XCTAssertTrue(configHome.globalConfig.path == root.appending(path: ".claude.json").path,
+                      "the resolved document is not inside the named config directory")
 
         _ = try temp.file(".claude.json", #"{"hasCompletedOnboarding": true}"#)
         XCTAssertFalse(ClaudeJSONReader.hasCompletedOnboarding(in: configHome),

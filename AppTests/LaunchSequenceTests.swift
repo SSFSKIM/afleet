@@ -134,7 +134,13 @@ final class LaunchSequenceTests: XCTestCase {
         try refused.temp.file("home/.claude.json", #"{"hasCompletedOnboarding": false}"#)
 
         let refusedRoute = await refusedSequence.run()
-        XCTAssertEqual(refusedRoute.setupState, .notSignedIn(configHome: LaunchFixtures.directoryURL(refusedHome)))
+        // Narrowed to the case and then to a boolean: `SetupState.notSignedIn` carries the scratch
+        // config home, so an equality failure would print it.
+        guard case let .notSignedIn(configHome: named) = refusedRoute.setupState else {
+            return XCTFail("a home with no account did not route to .notSignedIn")
+        }
+        XCTAssertTrue(named.path == LaunchFixtures.directoryURL(refusedHome).path,
+                      "the setup screen named a config home other than the one the launch resolved")
         XCTAssertFalse(refused.log.reached("fleetFactory"), "a Fleet was constructed for a home with no account")
 
         let accepted = try makeRig()
@@ -169,7 +175,8 @@ final class LaunchSequenceTests: XCTestCase {
         let route = await rig.sequence.run()
 
         let workspace = try XCTUnwrap(route.workspace, "the accepted binary did not reach a workspace")
-        XCTAssertEqual(workspace.configHome.root.path, configHome.path)
+        XCTAssertTrue(workspace.configHome.root.path == configHome.path,
+                      "the workspace resolved a config home other than the one it was handed")
         XCTAssertEqual(workspace.configHome.source, .environment)
         XCTAssertEqual(workspace.installed, SemanticVersion(major: 2, minor: 1, patch: 263))
         XCTAssertEqual(workspace.binary, fake)
@@ -208,9 +215,13 @@ final class LaunchSequenceTests: XCTestCase {
 
         let diagnosticsRoute = await diagnosticsRig.sequence.run()
 
-        XCTAssertEqual(diagnosticsRoute.setupState,
-                       .writeRootInsideConfigHome(root: .diagnostics,
-                                                  configHome: LaunchFixtures.directoryURL(diagnosticsRig.configHome)))
+        guard case let .writeRootInsideConfigHome(root: refusedRoot, configHome: refusedConfigHome)
+                = diagnosticsRoute.setupState else {
+            return XCTFail("a diagnostics root under the config home did not route to .writeRootInsideConfigHome")
+        }
+        XCTAssertEqual(refusedRoot, .diagnostics)
+        XCTAssertTrue(refusedConfigHome.path == LaunchFixtures.directoryURL(diagnosticsRig.configHome).path,
+                      "the refusal named a config home other than the rig's")
         XCTAssertFalse(diagnosticsRig.log.reached("makeStore"), "the store was constructed under a config home")
         XCTAssertFalse(diagnosticsRig.log.reached("makeDiagnostics"), "the diagnostics sinks were constructed under a config home")
         XCTAssertFalse(diagnosticsRig.log.reached("fleetFactory"), "a Fleet was constructed for a colliding write root")
@@ -226,9 +237,13 @@ final class LaunchSequenceTests: XCTestCase {
 
         let storeRoute = await storeRig.sequence.run()
 
-        XCTAssertEqual(storeRoute.setupState,
-                       .writeRootInsideConfigHome(root: .store,
-                                                  configHome: LaunchFixtures.directoryURL(storeRig.configHome)))
+        guard case let .writeRootInsideConfigHome(root: storeRefusedRoot, configHome: storeRefusedHome)
+                = storeRoute.setupState else {
+            return XCTFail("a store root under the config home did not route to .writeRootInsideConfigHome")
+        }
+        XCTAssertEqual(storeRefusedRoot, .store)
+        XCTAssertTrue(storeRefusedHome.path == LaunchFixtures.directoryURL(storeRig.configHome).path,
+                      "the refusal named a config home other than the rig's")
         XCTAssertFalse(storeRig.log.reached("makeStore"), "FileStateStore was reached for a store root under a config home")
         XCTAssertFalse(storeRig.log.reached("makeDiagnostics"))
         XCTAssertFalse(storeRig.log.reached("fleetFactory"))
