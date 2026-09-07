@@ -758,3 +758,54 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     test`. Owner: C5 Task 10 if the merge wants it, otherwise the first child that adds a `Tools`
     check of its own. **The general form is worth more than the check**: a gate clause is only as
     true as the path the app takes to it, and nothing in the suite says which path that is.
+73. **Six counts and three accessors are declared in `App/` for a diagnostics line, a report or a
+    screen that never reads them.** Found at C5 Task 10 by the sweep tracker 72 asked for, now
+    `Tools/c5/check-app-wiring.py`. `PanelHostModel.liveSessionCount` and `liveChannelCount`,
+    `HostLinkRouter.targetCount`, `ChannelTimelineRegistry.openChannels` and
+    `FleetCoordinator.skippedWithoutCWDCount` each say in their own doc comment that they exist
+    "for a diagnostics line" or "for a report"; no such line is written, so the numbers the app
+    would state about itself are computable and never stated. `FleetBrowserModel.restore(from:)`
+    is superseded by `paint(_:listing:origin:)`, which is what `FleetCoordinator` actually calls,
+    and `AppRoute.setupState` / `upgradeVersions` are unread because `RootView` switches on the
+    enum directly — all three remain the suite's assertion surface, which is why they are here
+    and not deleted. Nothing is wrong with the app: every one of these is a read-only accessor and
+    no behaviour depends on it. Closer, two halves: write the diagnostics line the five counts were
+    declared for, through `DiagnosticsComposer.app`, at the points the composer already records
+    (launch complete, channel released); and delete `restore(from:)` in favour of the call the
+    coordinator makes, moving the two tests that use it onto `paint`. Owner: C6, which is the first
+    child with a reason to read those numbers back. Until then each is allowlisted in the check
+    with this entry's number as its reason.
+74. **`ChannelRow.offersOwnedActions` and `readOnlyReason` have no consumer, because C5's sidebar
+    offers no channel action at all.** `ListingPolicy` decides the mode, `ChannelRegistrar` carries
+    it onto the row, `SidebarModelTests` asserts a teammate transcript is listed read-only — and
+    `ChannelRowView` draws a glyph, a title, a subtitle and a badge, with no context menu and no
+    button. So G1c's read-only clause is true of the model and unobservable in the app, which is
+    correct for this child rather than wrong: with no affordance to gate there is nothing that
+    could spawn against someone else's session, and X5 refuses it a second time regardless. Filed
+    because the first child to add a channel action inherits a row that already knows the answer
+    and a codebase where nothing has ever asked it — the shape that produced tracker 72's two
+    defects. Closer: the context menu C6 adds reads `offersOwnedActions` for what it offers and
+    `readOnlyReason` for the sentence it shows instead, and a test asserts a read-only row offers
+    no owned action. Owner: C6, which owns the surface where a channel action first appears.
+75. **The assertion-leak class is unfixed in three package test targets, and it is the one class
+    the app's own suite was swept for.** C5 Task 10 swept every test target in the tree for
+    assertions whose failure message would print a path derived from `FileManager.temporaryDirectory`
+    — which carries the account hash of the machine that ran the suite. `AppTests` had ten and they
+    are fixed. Outside C5's fence the sweep counted **fifteen** in `FleetSessionsTests`, **twelve**
+    in `FleetTimelineTests` and **seven** in `ClaudeWireTests`, of which the confirmed ones are
+    `PreconditionTests` (nine sites plus two failure messages that interpolate a resolved temporary
+    path outright), `FleetFacadeTests` (one), `TranscriptIndexTests` (the entry-path comparisons)
+    and `LiveCLITests` (one). Every one is an `XCTAssertEqual` or `XCTAssertNotEqual` over two
+    temporary-directory-rooted paths, so a failure prints both. Not fixed here because these files
+    belong to C2, C3 and C4 and a merge-time diff across three other children's suites is the wrong
+    place to land it. Closer: spell each as a boolean with a message that names counts, the way
+    `AppTests` now does; the sweep is mechanical and reproducible from the class statement above.
+    Owner: C4 for `FleetSessionsTests`, C3 for `FleetTimelineTests`, C2 for `ClaudeWireTests`.
+76. **`LaunchFixtures.wait(upTo:for:)` and `waitAsync(upTo:for:)` are declared and called by
+    nothing.** Two polling waiters in `AppTests/Support/LaunchDoubles.swift`, each returning a
+    `Bool` nobody reads because there is no caller. Found by C5 Task 10's sweep for awaits whose
+    result is discarded; they are the inverse case, a result nobody can discard because nobody asks
+    for one. Harmless, and worth removing rather than leaving as a pattern the next executor copies:
+    every wait in this suite is fulfilled by the event it waits for and none of them polls, which is
+    the rule these two would quietly break. Closer: delete both. Owner: the next task that opens
+    `LaunchDoubles.swift`.
