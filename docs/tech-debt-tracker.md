@@ -819,3 +819,19 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     every wait in this suite is fulfilled by the event it waits for and none of them polls, which is
     the rule these two would quietly break. Closer: delete both. Owner: the next task that opens
     `LaunchDoubles.swift`.
+
+77. **Background roster changes outside afleet have no complete app-consumable signal (C5 review F6).**
+    `SidebarView` loads the roster once; afleet's Adopt and Stop refresh it, but external exec
+    jobs and job-state changes can remain invisible until relaunch. The existing
+    `LifecycleAPI.updates` carries channel states, not roster changes: `HolderReader` omits
+    exec jobs from channel holders, and `FleetObserver.perform` publishes only when holders
+    change, ignoring changes in `HolderSnapshot.jobs`. Session jobs with registered supervisors
+    can produce channel-origin transitions, but those cannot cover exec jobs, job-state text,
+    or sessions without supervisors. Refreshing on every channel state would also call
+    `Fleet.jobs()` → `reconcileNow` → `agents --json`, booting the CLI on the state stream's
+    registration burst. C5 therefore adds neither a polling timer nor a partial channel-only
+    refresh and does not claim this finding fixed. Closer: C4 publishes roster changes from
+    the observer's existing watch/reconcile cycle through X5, carrying the current `[JobEntry]`
+    (including exec jobs and state changes), so C5 can update its Background list without an
+    extra CLI reconciliation. Owner: C4 for `FleetObserver`/`LifecycleAPI` and its X5 amendment;
+    C5's fleet browser for the consumer once that signal exists.
