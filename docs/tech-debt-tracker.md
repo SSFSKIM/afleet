@@ -706,3 +706,29 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     Unexploited in C4 today: the scratch `.claude.json` carries no such entry, and the fixture would
     have to name one for the hole to open. Closer: take the same fix in C4's copy. Owner: C4's
     maintainer, or whoever next touches that file.
+69. **The app never calls `AppFleet.shutdown()`.** `Workspace.swift` declares it on the protocol
+    and every call site is a test's teardown; no path in `App/` invokes it, so quitting afleet
+    leaves whatever `Fleet.shutdown()` does — ending owned children and closing their streams —
+    undone. Found at C5 Task 8's review follow-up, by sweeping `App/` for members whose only
+    callers are in `AppTests/` (the same sweep that found `ChannelTimelineRegistry.release(_:)`
+    uncalled, which was fixed rather than filed because it had an owner and a seam already). This
+    one is filed rather than fixed because it is a decision, not an omission: X5's invariant is that
+    afleet never stops a session running in the user's terminal, so what an app-termination hook may
+    end is exactly the set `Fleet` owns, and whether quitting the window should end an owned
+    conversation at all — rather than releasing it the way *Open in terminal* does — is the
+    architect's call. Closer: an `NSApplicationDelegate.applicationWillTerminate` (or a
+    `ScenePhase` observer) that awaits `workspace.fleet.shutdown()`, once that question is answered.
+    Owner: C6, which owns the surface where a running conversation is visible when the user quits.
+70. **A member declared in `App/` whose only callers are in `AppTests/` is not detectable by any
+    check this repo runs.** Two real defects in one review cycle had that exact shape:
+    `PanelHost.selectIndex(_:in:)`, correct and tested with no production caller while the menu
+    called something that indexed a different list, and `ChannelTimelineRegistry.release(_:)`,
+    correct and tested and never called, so every channel ever opened kept its ingestion. Both were
+    found by hand. The sweep is mechanical — declarations in `App/`, call sites counted in `App/`
+    versus `AppTests/` — and would have found both, plus entry 69, in one run. Closer: add it to
+    `Tools/c5/` beside `check-x7-drift.py` with an explicit allowlist for the members that are
+    legitimately unexercised (`registerPaneRunner`, whose caller is C7's Terminal leaf, and the
+    test-only probes `pump`, `settle`, `whenChanged`, `cursorsPersisted`), and run it from `make
+    test`. Owner: C5 Task 10 if the merge wants it, otherwise the first child that adds a `Tools`
+    check of its own. **The general form is worth more than the check**: a gate clause is only as
+    true as the path the app takes to it, and nothing in the suite says which path that is.
