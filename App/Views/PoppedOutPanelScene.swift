@@ -19,7 +19,11 @@ struct PoppedOutPanelScene: View {
 
     var body: some View {
         Group {
-            if let panel, let context = app.panels.context(for: panel.channel) {
+            // The caches are deliberately ObservationIgnored (tracker 67). Membership is
+            // the observable validity signal: release/unregister/close removes it, causing
+            // this body to drop the old view and the session that view retains.
+            if let panel, app.panels.poppedOut.contains(panel),
+               let context = app.panels.context(for: panel.channel) {
                 app.panels.view(for: panel.tab, context: context)
                     .navigationTitle(panel.tab.defaultTitle)
             } else {

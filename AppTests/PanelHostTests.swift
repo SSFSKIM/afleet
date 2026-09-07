@@ -466,6 +466,43 @@ final class PanelHostTests: XCTestCase {
         XCTAssertTrue(host.selectedChannel == b, "the host's selected channel did not follow the main window")
     }
 
+    /// T5: track the scene's actual body dependencies, not a fresh dictionary read after
+    /// release. The tab view retains its session, as real panels do. Only an invalidation
+    /// permits a redraw, so a stale window cannot pass by querying the host directly.
+    func testRemovedPopOutInvalidatesItsSceneAndReleasesTheRetainedSession() async throws {
+        let rig = try await PanelRig(channels: 2)
+        let app = AppModel()
+        app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
+        let counter = SessionCounter()
+        try app.panels.register(StubPanelTab(.files, counter: counter))
+        let key = rig.keys[0]
+        _ = app.panels.context(for: key, cwd: PanelFixtures.cwd)
+        app.panels.popOut(.files, channel: key)
+        let panel = PoppedOutPanel(tab: .files, channel: key)
+        let scene = PoppedOutPanelScene(app: app, panel: panel)
+        let coordinator = try XCTUnwrap(app.coordinatorFactory(rig.workspace) as? FleetCoordinator)
+        defer { coordinator.stop() }
+
+        // Removing another channel must not remove this panel, nor follow main-window focus.
+        app.shell.select(rig.keys[1].session)
+        await coordinator.indexChanged(IndexDelta(removed: [rig.keys[1].session]))
+        let changed = expectation(description: "popped-out scene invalidated by channel release")
+        var body = withObservationTracking { scene.body } onChange: { changed.fulfill() }
+        XCTAssertTrue(ViewTree.values(of: PlaceholderColumn.self, in: body).isEmpty,
+                      "the valid pop-out already showed the missing-channel placeholder")
+        XCTAssertEqual(counter.created, 1, "the scene never built a tab session")
+        XCTAssertEqual(counter.released, 0, "the valid scene did not retain its session")
+
+        await coordinator.indexChanged(IndexDelta(removed: [key.session]))
+        let result = await XCTWaiter.fulfillment(of: [changed], timeout: 1)
+        XCTAssertEqual(result, .completed, "release did not invalidate the popped-out scene")
+        if result == .completed { body = scene.body }
+        XCTAssertEqual(ViewTree.values(of: PlaceholderColumn.self, in: body).count, 1,
+                       "the window did not redraw its missing-channel placeholder")
+        XCTAssertEqual(counter.released, 1, "the removed window body still retained its session")
+        XCTAssertTrue(app.panels.context(for: key) == nil, "release kept a removed context")
+    }
+
     // MARK: - G4b: the context's capabilities
 
     /// The context's store writes into `workbench` and reaches no other namespace.
@@ -720,8 +757,14 @@ private final class StubPanelTab: PanelTab {
     }
 
     func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
-        AnyView(Text(verbatim: "a stub tab"))
+        AnyView(SessionHoldingPanel(session: session))
     }
+}
+
+/// A real panel's view retains its session; the regression must do the same.
+private struct SessionHoldingPanel: View {
+    let session: any PanelTabSession
+    var body: some View { Text(verbatim: "a stub tab") }
 }
 
 /// A session that says when it is made and when it goes.
