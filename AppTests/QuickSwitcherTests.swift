@@ -127,6 +127,54 @@ final class QuickSwitcherTests: XCTestCase {
         XCTAssertEqual(results.compactMap(\.session),
                        (0..<QuickSwitcherModel.emptyQueryLimit).map { Switcher.session(1_000 + $0) })
     }
+
+    /// An archived channel's recency is its transcript's, not the moment afleet happened to
+    /// register it.
+    ///
+    /// C4 seeds a supervisor's `lastActivity` with the clock at registration even for a channel
+    /// with no process behind it, and the registrar registers rows newest-first, so the oldest
+    /// transcript on the machine carries the newest seeded timestamp. Ranking on that put the least
+    /// recently used channels at the top of Cmd+K's empty query — the exact inversion of what the
+    /// list is for.
+    ///
+    /// The fixture is that inversion and nothing else: the two channels differ in `mtime`, and the
+    /// older one is registered last so its seeded timestamp is the newer of the two. Both states
+    /// carry `.archived`, which is C4's word for "registered, no process".
+    func testArchivedChannelsRankByTranscriptMtimeAndNotByRegistrationTime() throws {
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let recent = Switcher.session(11)
+        let ancient = Switcher.session(12)
+        let browser = Switcher.browser(now: now, entries: [
+            Switcher.entry(recent, mtime: now.addingTimeInterval(-86_400),
+                           cwd: "/invented/questor-repo", title: "planner"),
+            Switcher.entry(ancient, mtime: now.addingTimeInterval(-500 * 86_400),
+                           // The same title deliberately: both score identically, so the query's
+                           // ordering below is decided by the recency tie-break and by nothing else.
+                           cwd: "/invented/questor-repo", title: "planner"),
+        ])
+        let home = URL(fileURLWithPath: "/invented/config-home", isDirectory: true)
+        // Newest-first registration: the recent transcript is seeded first, the ancient one last,
+        // so the ancient row holds the later registration timestamp.
+        browser.apply(SidebarFixtures.state(ChannelKey(configHome: home, session: recent),
+                                            origin: .archived, at: now.addingTimeInterval(-2)))
+        browser.apply(SidebarFixtures.state(ChannelKey(configHome: home, session: ancient),
+                                            origin: .archived, at: now))
+        let ancientRow = try XCTUnwrap(browser.row(ancient))
+        let recentRow = try XCTUnwrap(browser.row(recent))
+        // The floor: the inversion is really present in the states, so the ordering below is a
+        // choice between two timestamps rather than a fixture with only one.
+        XCTAssertGreaterThan(try XCTUnwrap(ancientRow.state).lastActivity,
+                             try XCTUnwrap(recentRow.state).lastActivity)
+        XCTAssertGreaterThan(recentRow.mtime, ancientRow.mtime)
+
+        let switcher = QuickSwitcherModel(browser: browser)
+        let empty = switcher.results(for: "").compactMap(\.session)
+        XCTAssertEqual(empty, [recent, ancient],
+                       "the empty query ranked archived channels by registration time")
+        let queried = switcher.results(for: "planner").filter { $0.kind == .channel }
+        XCTAssertEqual(queried.compactMap(\.session), [recent, ancient],
+                       "the recency tie-break ranked archived channels by registration time")
+    }
 }
 
 /// The switcher tests' invented corpus.
