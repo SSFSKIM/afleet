@@ -751,7 +751,17 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     called something that indexed a different list, and `ChannelTimelineRegistry.release(_:)`,
     correct and tested and never called, so every channel ever opened kept its ingestion. Both were
     found by hand. The sweep is mechanical — declarations in `App/`, call sites counted in `App/`
-    versus `AppTests/` — and would have found both, plus entry 69, in one run. Closer: add it to
+    versus `AppTests/` — and would have found both, plus entry 69, in one run.
+    **DONE at C5 Task 10 (`138c58a`), and the closer below is what was built** —
+    `Tools/c5/check-app-wiring.py`, run from `make test-tools`, with its own gate in
+    `Tools/c5/tests/`. Two corrections to the closer as it was written. The allowlist needed
+    **eighteen** entries rather than six: the four probes named below plus `whenSettled`, and
+    twelve current findings, each carrying the tracker number that owns it (71, 73, 74) rather
+    than an exemption. And the check keys on a bare name, so it cannot see a member whose name is
+    also used elsewhere under `App/` — `PanelHostModel.run(_:)` has no production caller and the
+    check will never say so, because `LaunchSequence.run()` shares the name. Per-clause wiring is
+    still read by hand at a merge; this closes the mechanical half only.
+    Closer: add it to
     `Tools/c5/` beside `check-x7-drift.py` with an explicit allowlist for the members that are
     legitimately unexercised (`registerPaneRunner`, whose caller is C7's Terminal leaf, and the
     test-only probes `pump`, `settle`, `whenChanged`, `cursorsPersisted`), and run it from `make
