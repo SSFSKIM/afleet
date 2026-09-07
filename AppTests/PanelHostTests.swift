@@ -317,8 +317,12 @@ final class PanelHostTests: XCTestCase {
         XCTAssertEqual(host.liveChannelCount, PanelHostModel.channelCapacity,
                        "the cache holds \(host.liveChannelCount) channels against a bound of \(PanelHostModel.channelCapacity)")
         // keys[1] is the least recently rendered channel that is not exempt, so it is the first out.
-        XCTAssertNil(host.context(for: keys[1]),
-                     "an evicted channel kept the context that pins its timeline model")
+        // A boolean, not `XCTAssertNil`, whose default message prints the operand — and a
+        // `ChannelContext` prints its whole `ResolvedEnvironment`, including `HOME` and
+        // `CLAUDE_CONFIG_DIR` under the scratch tree, which resolve inside the author's own
+        // account (§11). Demonstrating this test failing is what showed it.
+        XCTAssertTrue(host.context(for: keys[1]) == nil,
+                      "an evicted channel kept the context that pins its timeline model")
         XCTAssertNotNil(host.context(for: keys[0]),
                         "the selected channel lost its context, so its panel would draw nothing")
     }
@@ -346,6 +350,48 @@ final class PanelHostTests: XCTestCase {
                        "the removed channel released \(counter.released) session(s), not 1")
         XCTAssertEqual(host.liveChannelCount, 1,
                        "the host holds \(host.liveChannelCount) channels after one was removed, not 1")
+    }
+
+    /// A channel removed from the index releases the timeline model it was ingesting through.
+    ///
+    /// **Found by sweeping for the defect the review named**: `ChannelTimelineRegistry.release(_:)`
+    /// existed, was tested, and no production path called it, so every channel ever opened kept its
+    /// model — a `StreamIngestion`, an effects loop and a change-feed loop each — until a relaunch
+    /// replaced the workspace. Driven through `FleetCoordinator.indexChanged(_:)`, the seam the
+    /// composition root calls, for the same reason its sibling above is: a registry released only
+    /// from a test leaves production holding everything.
+    ///
+    /// The floor is that the model was there to lose. The panel host's own release is asserted
+    /// beside it, because the two owners of a removed channel have to let go together — the host's
+    /// context holds the feed that reads this model, and either one left behind pins it.
+    func testAChannelRemovedFromTheIndexReleasesItsTimelineModel() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let key = rig.keys[0]
+        _ = rig.timelines.model(for: key)
+        XCTAssertEqual(rig.timelines.openChannels.count, 1,
+                       "the registry holds \(rig.timelines.openChannels.count) models, not the 1 to be released")
+        let host = rig.host
+        try host.register(StubPanelTab(.files))
+        let context = try XCTUnwrap(host.context(for: key, cwd: PanelFixtures.cwd),
+                                    "the host built no context")
+        _ = host.session(for: .files, context: context)
+
+        let coordinator = FleetCoordinator(configHome: rig.workspace.configHome.root,
+                                           registrar: RegistrarDouble(),
+                                           index: StubIndex(persisted: nil,
+                                                            built: LaunchFixtures.snapshot(configHome: rig.workspace.configHome.root,
+                                                                                           ids: [key.session])),
+                                           model: FleetBrowserModel(lifecycle: rig.lifecycle,
+                                                                    configHome: rig.workspace.configHome.root),
+                                           panels: host,
+                                           timelines: rig.timelines)
+        await coordinator.indexChanged(IndexDelta(removed: [key.session]))
+        coordinator.stop()
+
+        XCTAssertEqual(rig.timelines.openChannels.count, 0,
+                       "the removed channel left \(rig.timelines.openChannels.count) timeline model(s) behind")
+        XCTAssertEqual(host.liveChannelCount, 0,
+                       "the removed channel left \(host.liveChannelCount) channel(s) in the panel host")
     }
 
     // MARK: - G4c: the popped-out window keeps its channel
