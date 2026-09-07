@@ -46,6 +46,13 @@ struct LaunchSequence: Sendable {
     var settingsLoaded: @MainActor @Sendable (any StateStore, AfleetSettings) -> Void = { _, _ in }
     var makeCoordinator: @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating
 
+    /// The background work the last launch of this sequence started, so the next one can retire it.
+    ///
+    /// A reference, held by every copy of this struct — `AppModel` keeps one `LaunchSequence` and
+    /// copies it per launch to install its seams — because the thing being replaced belongs to the
+    /// launch before, not to the value that runs now.
+    let started = LaunchWorkRegistry()
+
     init(storeRoot: URL = LaunchSequence.defaultStoreRoot,
          diagnosticsRoot: URL = LaunchSequence.defaultDiagnosticsRoot,
          resolveEnvironment: @escaping @Sendable () async -> ResolvedEnvironment = LaunchSequence.resolveLoginShellEnvironment,
@@ -208,6 +215,7 @@ struct LaunchSequence: Sendable {
             try? await index.persist()
         }
 
+        var pump: Task<Void, Never>?
         if let changes {
             // `changes.changes` is the feed's primary subscription and was created by its
             // initialiser, so it has been collecting since before the feed read anything. Starting
@@ -220,7 +228,7 @@ struct LaunchSequence: Sendable {
             // lower it for tidiness — a starved pump does not report a slow sidebar, it reports
             // nothing at all, which is why the stall notice below exists as well.
             let appDiagnostics = diagnostics.app
-            Task.detached(priority: .userInitiated) {
+            pump = Task.detached(priority: .userInitiated) {
                 // TranscriptIndex.build is reentrant: it replaces candidates/current across
                 // suspension points. The primary subscription buffers batches until BOTH the
                 // build and the coordinator's snapshot paint finish; only then may deltas mutate
@@ -239,6 +247,14 @@ struct LaunchSequence: Sendable {
             await changes.start()
         }
 
+        // The launch this one replaces stops here, and not before: its watcher retains itself
+        // until `stop()`, its feed's pump is a task nobody else holds, and its index pump would go
+        // on delivering deltas into hosts that have just been rebound to this workspace.
+        // `coordinator.stop` retires the browser's loop and nothing else, so these three handles
+        // are retired by whoever created them, which is this sequence.
+        await started.replace(with: LaunchWork(watcher: watcher, changes: changes,
+                                               tasks: [builtSnapshotDelivered, pump].compactMap { $0 }))
+
         return .workspace(workspace)
     }
 
@@ -253,9 +269,9 @@ struct LaunchSequence: Sendable {
     static func overlappingWriteRoot(configHome: URL, storeRoot: URL, diagnosticsRoot: URL) -> WriteRoot? {
         // Components preserve the filesystem-root case: appending "/" to "/" would produce
         // "//", which no descendant matches. Component prefixes also exclude sibling names.
-        let home = (CanonicalPath.string(configHome) as NSString).pathComponents
+        let home = (WriteRootPath.string(configHome) as NSString).pathComponents
         for (root, path) in [(WriteRoot.store, storeRoot), (WriteRoot.diagnostics, diagnosticsRoot)] {
-            let candidate = (CanonicalPath.string(path) as NSString).pathComponents
+            let candidate = (WriteRootPath.string(path) as NSString).pathComponents
             if candidate.starts(with: home) || home.starts(with: candidate) { return root }
         }
         return nil
@@ -267,6 +283,89 @@ struct LaunchSequence: Sendable {
     static func shape(of error: any Error) -> String {
         if let store = error as? StoreError { return String(describing: store) }
         return String(describing: type(of: error))
+    }
+}
+
+/// The background work one launch owns and the next one retires: the transcript watcher, its change
+/// feed, and the detached index build and change pump.
+struct LaunchWork: Sendable {
+    var watcher: (any TranscriptWatching)?
+    var changes: TranscriptChangeFeed?
+    var tasks: [Task<Void, Never>]
+
+    /// Cancels before it closes, so a pump woken by the feed finishing finds itself cancelled
+    /// rather than delivering one more batch into a workspace nobody is looking at.
+    func stop() async {
+        for task in tasks { task.cancel() }
+        await changes?.stop()
+        watcher?.stop()
+    }
+}
+
+/// The one place a launch's background work is held between launches.
+actor LaunchWorkRegistry {
+    private var current: LaunchWork?
+
+    /// Installs this launch's work and retires the launch it replaced.
+    func replace(with work: LaunchWork?) async {
+        let previous = current
+        current = work
+        await previous?.stop()
+    }
+}
+
+/// `CanonicalPath` for the three paths of the write-root check, resolved through a descriptor
+/// rather than through `realpath(3)`.
+///
+/// On macOS a firmlinked location has two spellings — `/Users/…` and
+/// `/System/Volumes/Data/Users/…`, and likewise everything beneath them — that name one directory
+/// with one device and one inode. A firmlink is not a symlink, so `realpath` has nothing to
+/// resolve and hands back whichever spelling it was given; two spellings of one directory then
+/// compare as disjoint, and a guard that rests on that comparison fails open. `F_GETPATH` answers
+/// where the descriptor actually is, which collapses both spellings and still resolves symlinks.
+/// `LocalSettingsStore` opens a descriptor for the same mismatch.
+///
+/// **Confined to this guard, deliberately.** `open(2)` is privacy-gated: opening a directory under
+/// a protected location such as `~/Documents` raises the system's consent dialog and blocks the
+/// caller until somebody answers it. Measured, not reasoned — canonicalising real project
+/// directories this way stalled a whole test process on one such open. The paths here are afleet's
+/// own two write roots and the config home, none of them protected; every other caller of
+/// `CanonicalPath` walks the user's project directories and keeps the `realpath` form, which asks
+/// the kernel nothing that needs consent.
+enum WriteRootPath {
+    static func string(_ url: URL) -> String {
+        var trailing: [String] = []
+        var probe = url.standardizedFileURL.path
+        while true {
+            if let resolved = descriptorPath(probe) {
+                var out = resolved
+                for component in trailing.reversed() {
+                    out = (out as NSString).appendingPathComponent(component)
+                }
+                return out
+            }
+            let parent = (probe as NSString).deletingLastPathComponent
+            if parent == probe || parent.isEmpty { return CanonicalPath.string(url) }
+            trailing.append((probe as NSString).lastPathComponent)
+            probe = parent
+        }
+    }
+
+    /// Where the kernel says this directory is, or nil when it is not a directory that can be
+    /// opened. Nil is not a failure: the caller walks up and puts the component back on the end,
+    /// and a root that cannot be opened at all falls back to `CanonicalPath`, which is the answer
+    /// this check had before.
+    private static func descriptorPath(_ path: String) -> String? {
+        let descriptor = path.withCString { open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC) }
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let answered = buffer.withUnsafeMutableBufferPointer { pointer -> Bool in
+            guard let base = pointer.baseAddress else { return false }
+            return fcntl(descriptor, F_GETPATH, base) != -1
+        }
+        guard answered else { return nil }
+        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 }
 

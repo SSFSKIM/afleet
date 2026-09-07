@@ -103,11 +103,13 @@ final class LaunchSequenceTests: XCTestCase {
         let started = await XCTWaiter.fulfillment(of: [entered], timeout: 3)
         XCTAssertEqual(started, .completed, "first launch never reached the resolver")
         let secondEntered = expectation(description: "second caller started")
-        var held = true
+        // A box rather than a local: the closure below is sendable, so a captured `var` is read
+        // from outside the isolation that writes it even when both happen on the main actor.
+        let held = HeldFlag()
         let second = Task {
             secondEntered.fulfill()
             await app.launch()
-            if held { premature.fulfill() }
+            if held.isHeld { premature.fulfill() }
             XCTAssertTrue(app.route.workspace != nil, "second caller returned without a workspace")
             XCTAssertTrue(app.settingsReadout != nil, "second caller returned before workspace binding")
         }
@@ -115,7 +117,7 @@ final class LaunchSequenceTests: XCTestCase {
         XCTAssertEqual(startedSecond, .completed, "second caller never started")
         let blocked = await XCTWaiter.fulfillment(of: [reentered, premature], timeout: 0.2)
         XCTAssertEqual(blocked, .completed, "concurrent launch restarted or returned before completion")
-        held = false
+        held.release()
         release.finish()
         await first.value
         await second.value
@@ -693,6 +695,98 @@ final class LaunchSequenceTests: XCTestCase {
         _ = await running.value
     }
 
+    // MARK: - Canonicalisation across a firmlink alias
+
+    /// R4: on macOS a firmlinked location has two spellings — `/Users/…` and
+    /// `/System/Volumes/Data/Users/…` — that name one directory with one device and one inode,
+    /// and `realpath(3)` preserves whichever spelling it was given rather than collapsing them.
+    /// A config home named through the alias and a write root named through the other spelling
+    /// are therefore the same place, and the overlap check has to refuse in both directions.
+    /// Comparing `realpath` output component-wise does not: pre-fix both calls answer nil and
+    /// the launch places the store and the diagnostics sinks inside a config home.
+    ///
+    /// The alias is derived from a scratch tree, never from a config home, and the test skips
+    /// when this machine has no such firmlink.
+    func testFirmlinkAliasSpellingsAreOneDirectoryForTheOverlapCheck() throws {
+        let temp = try TempTree()
+        let home = try temp.directory("alias-home")
+        let alias = URL(filePath: "/System/Volumes/Data" + CanonicalPath.string(home))
+        try XCTSkipUnless(Self.sameFile(home, alias),
+                          "this machine has no firmlink alias for the scratch tree")
+
+        XCTAssertEqual(LaunchSequence.overlappingWriteRoot(
+            configHome: alias,
+            storeRoot: home.appending(path: "store", directoryHint: .isDirectory),
+            diagnosticsRoot: URL(filePath: "/invented/logs")), .store,
+                       "a store root inside the alias spelling of the config home was allowed")
+
+        XCTAssertEqual(LaunchSequence.overlappingWriteRoot(
+            configHome: home,
+            storeRoot: URL(filePath: "/invented/store"),
+            diagnosticsRoot: alias.appending(path: "logs", directoryHint: .isDirectory)), .diagnostics,
+                       "a diagnostics root inside the alias spelling of the config home was allowed")
+
+        // The floor: canonicalisation collapses the two spellings rather than the check
+        // answering "contained" for everything.
+        XCTAssertEqual(WriteRootPath.string(alias), WriteRootPath.string(home),
+                       "the two spellings did not canonicalise to one path")
+        XCTAssertNil(LaunchSequence.overlappingWriteRoot(
+            configHome: alias,
+            storeRoot: URL(filePath: "/invented/store"),
+            diagnosticsRoot: URL(filePath: "/invented/logs")),
+                     "disjoint roots were reported as overlapping")
+    }
+
+    // MARK: - The launch retires the launch it replaces
+
+    /// R5: a second launch replaces the workspace, and the background work the first one owns —
+    /// its watcher, its change feed and its detached index pump — has to stop with it. Without a
+    /// handle for them the first watcher is never stopped (it retains itself until `stop()`) and
+    /// its pump goes on delivering deltas into hosts that are now bound to the second workspace.
+    ///
+    /// The positive control runs first, so the inverted wait afterwards is a statement about a
+    /// pump that was demonstrably alive rather than one that never started.
+    @MainActor
+    func testReplacingAWorkspaceRetiresTheWatcherAndPumpItReplaces() async throws {
+        let rig = try makeRig()
+        let first = RetirableWatcher()
+        let second = RetirableWatcher()
+        let handed = SeamLog()
+        var sequence = rig.sequence
+        sequence.makeWatcher = { _ in
+            handed.note("makeWatcher")
+            return handed.count("makeWatcher") == 1 ? first : second
+        }
+
+        // Both routes are held for the whole test: the workspace owns the change feed, so a
+        // released route would stop the first launch's pump by deallocation and the inverted
+        // wait below would pass against the very leak it is there to catch.
+        let firstRoute = await sequence.run()
+        guard case .workspace = firstRoute else {
+            return XCTFail("the first launch did not reach a workspace")
+        }
+        let live = expectation(description: "the first launch's pump consumed a batch")
+        await rig.index.observeUpdates { live.fulfill() }
+        first.emit([rig.configHome.appending(path: "projects/invented/live.jsonl")])
+        await fulfillment(of: [live], timeout: LaunchFixtures.hangGuard)
+
+        let secondRoute = await sequence.run()
+        guard case .workspace = secondRoute else {
+            return XCTFail("the replacing launch did not reach a workspace")
+        }
+        XCTAssertEqual(first.stopCount, 1, "the replaced workspace's watcher was never stopped")
+        XCTAssertEqual(second.stopCount, 0, "the launch stopped the watcher it had just started")
+
+        let leaked = expectation(description: "the replaced launch's pump consumed a batch")
+        leaked.isInverted = true
+        await rig.index.observeUpdates { leaked.fulfill() }
+        first.emit([rig.configHome.appending(path: "projects/invented/leaked.jsonl")])
+        let quiet = await XCTWaiter.fulfillment(of: [leaked], timeout: 0.2)
+        XCTAssertEqual(quiet, .completed, "a replaced workspace's pump was still consuming batches")
+        withExtendedLifetime((firstRoute, secondRoute)) {}
+        second.finish()
+    }
+
     // MARK: - Support
 
     /// `Tools/fake-claude/fake-claude`, from this file: AppTests/ → the repository root.
@@ -701,6 +795,49 @@ final class LaunchSequenceTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appending(path: "Tools/fake-claude/fake-claude")
+    }
+
+    /// Whether two spellings name one file: same device, same inode.
+    private static func sameFile(_ lhs: URL, _ rhs: URL) -> Bool {
+        var left = Darwin.stat()
+        var right = Darwin.stat()
+        guard lhs.path.withCString({ stat($0, &left) }) == 0,
+              rhs.path.withCString({ stat($0, &right) }) == 0 else { return false }
+        return left.st_dev == right.st_dev && left.st_ino == right.st_ino
+    }
+
+    /// A watcher whose `stop()` is counted, so the retirement of a replaced launch is observable.
+    /// Local to this file rather than a change to the shared double, which other tests read.
+    private final class RetirableWatcher: TranscriptWatching, @unchecked Sendable {
+        let changes: AsyncStream<[URL]>
+        private let continuation: AsyncStream<[URL]>.Continuation
+        private let lock = NSLock()
+        private var stops = 0
+
+        init() { (changes, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded) }
+        func start() throws {}
+        func stop() {
+            lock.lock(); stops += 1; lock.unlock()
+            continuation.finish()
+        }
+        var stopCount: Int {
+            lock.lock(); defer { lock.unlock() }
+            return stops
+        }
+        func emit(_ paths: [URL]) { continuation.yield(paths) }
+        func finish() { continuation.finish() }
+    }
+
+    /// Whether the second caller is still expected to be waiting: written by the test, read by the
+    /// task it is asserting about.
+    private final class HeldFlag: @unchecked Sendable {   // `lock` serialises `held`
+        private let lock = NSLock()
+        private var held = true
+        var isHeld: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return held
+        }
+        func release() { lock.lock(); held = false; lock.unlock() }
     }
 
     /// A route written from one task and read from another.
