@@ -180,7 +180,17 @@ final class FleetBrowserModel {
 
     /// One watcher delta. `resolving` is the index's `entry(_:)`; a session the index can no longer
     /// resolve is dropped rather than left stale.
+    ///
+    /// **A delta that names nothing returns without touching anything a view reads.** `IndexDelta`
+    /// is not always a change: `TranscriptIndex.update` reconciles every candidate and emits a
+    /// delta carrying only its own duration when each one came back `.skipped`, and it does the same
+    /// for a subagent-only write whose session's `hasSubagents` was already what the write makes it.
+    /// That is the ordinary shape of a running subagent, so the empty deltas arrive at the watcher's
+    /// rate for as long as the work lasts. Re-deriving every row and every section on the main actor
+    /// for them is the whole of tracker entry 55's cost with none of its output: `rebuild()` reads
+    /// `listed`, and nothing above this line can have changed it.
     func apply(_ delta: IndexDelta, resolving: (SessionID) async -> IndexEntry?) async {
+        guard !delta.added.isEmpty || !delta.updated.isEmpty || !delta.removed.isEmpty else { return }
         for id in delta.removed {
             listed[id] = nil
             decisions[id] = nil

@@ -164,8 +164,17 @@ final class QuickSwitcherModel {
     /// A row's activity: the live half's when there is one, the transcript's mtime otherwise. A
     /// channel with a running process is more recent than its file, and the file is all a restored
     /// row has.
+    ///
+    /// **`.archived` is not a live half, so its timestamp is not activity.** C4 gives a supervisor a
+    /// `lastActivity` of the clock at registration whether or not there is a process behind it, and
+    /// the sidebar registers every listed transcript on the machine — so an archived channel's
+    /// `lastActivity` says when afleet looked at it, not when anyone last used it. Rows are
+    /// registered newest-first, which makes the *oldest* transcript carry the newest seeded
+    /// timestamp, and ranking on it inverted Cmd+K's empty query exactly. The transcript's mtime is
+    /// the honest answer for a channel with nothing running, and it is the only one such a row has.
     private static func activity(of row: ChannelRow) -> Date {
-        max(row.state?.lastActivity ?? .distantPast, row.mtime)
+        guard let state = row.state, state.origin != .archived else { return row.mtime }
+        return max(state.lastActivity, row.mtime)
     }
 
     /// Score first, recency second, then a stable name and id so two identical rows do not swap
