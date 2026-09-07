@@ -19,7 +19,10 @@ public struct SpawnPreconditions: Sendable {
         self.consent = ProjectMCPConsent(settings: settings)
     }
 
-    public func evaluate(key: ChannelKey, cwd: URL, launch: LaunchConfiguration,
+    /// `configHome` is the launch's own home record, and the trust read needs the record rather than
+    /// `key.configHome`'s bare root: the global config document sits inside the home only when
+    /// `CLAUDE_CONFIG_DIR` named it, and beside it otherwise (`ConfigHome.globalConfig`).
+    public func evaluate(key: ChannelKey, cwd: URL, launch: LaunchConfiguration, configHome: ConfigHome,
                          wedged: EscalationTrace?, foreignHolders: [Holder],
                          store: (any StateStore)?) async -> (SpawnPrecondition, LaunchConfiguration) {
         var launch = launch
@@ -31,7 +34,7 @@ public struct SpawnPreconditions: Sendable {
             return (.managedSettingsPending, launch)
         }
         let project = ProjectRoot.canonical(for: cwd)
-        guard TrustReader.isTrusted(root: project.root, configHome: key.configHome) else {
+        guard TrustReader.isTrusted(root: project.root, globalConfig: configHome.globalConfig) else {
             return (.untrusted(root: project.root), launch)
         }
 

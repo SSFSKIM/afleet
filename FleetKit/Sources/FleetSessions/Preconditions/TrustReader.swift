@@ -62,11 +62,17 @@ public enum ProjectRoot {
 /// Read-only. afleet never writes trust: the only in-protocol trust write is `set_cwd`'s `needs_trust` handshake,
 /// and the app re-reads this value after a terminal pane exits (parent §6.11, §6.12).
 public enum TrustReader {
-    /// `projects[<root>].hasTrustDialogAccepted == true` in `<configHome>/.claude.json`. Anything else — a missing
-    /// file, a missing entry, an explicit `false`, a non-boolean — is untrusted.
-    public static func isTrusted(root: URL, configHome: URL) -> Bool {
-        let file = configHome.appending(path: ".claude.json")
-        guard let data = try? Data(contentsOf: file),
+    /// `projects[<root>].hasTrustDialogAccepted == true` in the engine's global config document. Anything else —
+    /// a missing file, a missing entry, an explicit `false`, a non-boolean — is untrusted.
+    ///
+    /// The document is passed in rather than derived from the config home, because it is not always inside one:
+    /// the engine resolves it as `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")`
+    /// (2.1.263 `cli.pretty.js:298330`) while the home is `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")`
+    /// (`:298581`). With the variable unset — every ordinary installation — the document is the home's sibling
+    /// `~/.claude.json`, and `<home>/.claude.json` names a file the engine never reads. `ConfigHome.globalConfig`
+    /// applies that rule; this reader only opens what it is given.
+    public static func isTrusted(root: URL, globalConfig: URL) -> Bool {
+        guard let data = try? Data(contentsOf: globalConfig),
               let document = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let projects = document["projects"] as? [String: Any],
               let entry = projects[RealPath.string(root)] as? [String: Any] else { return false }

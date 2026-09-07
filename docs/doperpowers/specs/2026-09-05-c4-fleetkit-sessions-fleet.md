@@ -1858,6 +1858,21 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-07: `TrustReader.isTrusted` read `<configHome>/.claude.json`, but the engine resolves
+  that document as `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263
+  `cli.pretty.js:298330`) while the config home is `CLAUDE_CONFIG_DIR ?? join(homedir(),
+  ".claude")` (`:298581`) — two different expressions, coinciding only when the variable is set.
+  On an ordinary installation the document is therefore `~/.claude.json`, the home's *sibling*,
+  and `<configHome>/.claude.json` names a file the engine never reads: every project resolved
+  untrusted and no channel could spawn owned. The reader now takes the document location
+  (`isTrusted(root:globalConfig:)`) and `SpawnPreconditions.evaluate` takes the launch's
+  `ConfigHome` and derives it through `ConfigHome.globalConfig`; `ManagedSettingsReader` and the
+  consent resolver still take `key.configHome`, which is a bare root and genuinely names the
+  home. C5 found it (its tracker entry 59). No test could see it because every home a test
+  builds is environment-shaped, so the two spellings coincided; the new default-shaped case in
+  `PreconditionTests` — a temporary stand-in for `HOME` with `.claude/` as the root and
+  `.claude.json` beside it — was red at `.untrusted` before the fix and `.ready` after.
+
 - 2026-09-07: G5's trusted-directory selector excluded the config home by comparing paths
   canonicalised with `resolvingSymlinksInPath()`, which resolves `/private/tmp/X` back to
   `/tmp/X` only when `X` exists. A trust entry naming a not-yet-created directory beneath the

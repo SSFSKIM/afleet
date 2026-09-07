@@ -127,22 +127,56 @@ final class PreconditionTests: XCTestCase {
         let witness = TreeWitness(project.root)
 
         var (missing, _) = await preconditions.evaluate(key: key, cwd: project.root,
-                                                        launch: launch(cwd: project.root), wedged: nil,
+                                                        launch: launch(cwd: project.root), configHome: home.configHome, wedged: nil,
                                                         foreignHolders: [], store: store)
         XCTAssertEqual(missing, .untrusted(root: URL(filePath: TemporaryProject.realpath(project.root))))
 
         try home.setTrust(root: project.root, false)
         (missing, _) = await preconditions.evaluate(key: key, cwd: project.root,
-                                                    launch: launch(cwd: project.root), wedged: nil,
+                                                    launch: launch(cwd: project.root), configHome: home.configHome, wedged: nil,
                                                     foreignHolders: [], store: store)
         guard case .untrusted = missing else { return XCTFail("an explicit false is untrusted, not \(missing)") }
 
         try home.trust(root: project.root)
         let (ready, _) = await preconditions.evaluate(key: key, cwd: project.root,
-                                                      launch: launch(cwd: project.root), wedged: nil,
+                                                      launch: launch(cwd: project.root), configHome: home.configHome, wedged: nil,
                                                       foreignHolders: [], store: store)
         XCTAssertEqual(ready, .ready, "a trusted project with no `.mcp.json` passes to the next check")
         witness.assertUnchanged("the project tree across the trust reads")
+    }
+
+    /// The ordinary installation: `CLAUDE_CONFIG_DIR` unset, so the home is `<HOME>/.claude` and the global
+    /// config document is its **sibling** `<HOME>/.claude.json`, never `<HOME>/.claude/.claude.json`.
+    ///
+    /// The engine derives the two from different expressions — the document from
+    /// `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263 `cli.pretty.js:298330`) and the home
+    /// from `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")` (`:298581`) — and they coincide only when the
+    /// variable is set. Every live test here sets it, which is why a reader that appended `.claude.json` to
+    /// the home passed everywhere and would have found every project untrusted on a real installation.
+    func testTrustIsReadFromTheDocumentBesideADefaultShapedHome() async throws {
+        let fm = FileManager.default
+        let simulatedHome = fm.temporaryDirectory.resolvingSymlinksInPath()
+            .appending(path: "afleet-c4-default-home-\(UUID().uuidString)")
+        try fm.createDirectory(at: simulatedHome.appending(path: ".claude"), withIntermediateDirectories: true)
+        stores.append(simulatedHome)
+        let root = simulatedHome.appending(path: ".claude")
+        let home = ConfigHome(root: root, source: .default)
+
+        let project = try newProject()
+        let document = ["projects": [TemporaryProject.realpath(project.root): ["hasTrustDialogAccepted": true]]]
+        try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
+            .write(to: home.globalConfig, options: .atomic)
+
+        let storeDirectory = fm.temporaryDirectory.resolvingSymlinksInPath()
+            .appending(path: "afleet-c4-store-\(UUID().uuidString)")
+        stores.append(storeDirectory)
+        let store = try FileStateStore(baseDirectory: storeDirectory, configHomes: [root])
+
+        let key = ChannelKey(configHome: root, session: SessionID())
+        let (verdict, _) = await SpawnPreconditions().evaluate(key: key, cwd: project.root,
+                                                               launch: launch(cwd: project.root), configHome: home, wedged: nil,
+                                                               foreignHolders: [], store: store)
+        XCTAssertEqual(verdict, .ready, "the document beside the home says the project is trusted")
     }
 
     // MARK: - Consent
@@ -801,7 +835,7 @@ final class PreconditionTests: XCTestCase {
 
         let key = ChannelKey(configHome: home.url, session: SessionID())
         let (result, _) = await preconditions.evaluate(key: key, cwd: project.root,
-                                                       launch: launch(cwd: project.root), wedged: nil,
+                                                       launch: launch(cwd: project.root), configHome: home.configHome, wedged: nil,
                                                        foreignHolders: [], store: store)
         XCTAssertEqual(result, .ready)
         XCTAssertEqual(resolves.value, 2, "and the spawn re-read it through the same resolver")
@@ -882,7 +916,7 @@ final class PreconditionTests: XCTestCase {
 
         func step(wedged: EscalationTrace?, holders: [Holder]) async -> SpawnPrecondition {
             await preconditions.evaluate(key: key, cwd: project.root, launch: launch(cwd: project.root),
-                                         wedged: wedged, foreignHolders: holders, store: store).0
+                                         configHome: home.configHome, wedged: wedged, foreignHolders: holders, store: store).0
         }
 
         let first = await step(wedged: trace, holders: [holder])
@@ -925,19 +959,19 @@ final class PreconditionTests: XCTestCase {
         let key = ChannelKey(configHome: home.url, session: SessionID())
 
         _ = ProjectRoot.canonical(for: project.root.appending(path: "nowhere"))
-        _ = TrustReader.isTrusted(root: root.root, configHome: home.url)
+        _ = TrustReader.isTrusted(root: root.root, globalConfig: home.configHome.globalConfig)
         _ = ManagedSettingsReader.isPending(configHome: home.url)
         _ = LocalSettingsStore().resolve(gitRoot: root.gitRoot, cwd: project.root)
         _ = consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root, configHome: home.url,
                              settingSources: nil, acceptances: [])
         _ = await preconditions.evaluate(key: key, cwd: project.root, launch: launch(cwd: project.root),
-                                         wedged: nil, foreignHolders: [], store: store)
+                                         configHome: home.configHome, wedged: nil, foreignHolders: [], store: store)
         try home.trust(root: project.root)
         let verdicts = consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root,
                                         configHome: home.url, settingSources: nil, acceptances: [])
         for pending in verdicts.keys { try await preconditions.accept(pending, root: root.root, store: store) }
         _ = await preconditions.evaluate(key: key, cwd: project.root, launch: launch(cwd: project.root),
-                                         wedged: nil, foreignHolders: [], store: store)
+                                         configHome: home.configHome, wedged: nil, foreignHolders: [], store: store)
 
         witness.assertUnchanged("the project tree across every precondition path but the decline")
     }

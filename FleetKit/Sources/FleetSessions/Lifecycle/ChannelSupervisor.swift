@@ -950,7 +950,7 @@ public actor ChannelSupervisor {
         var template = launchOverride ?? composedFromRuntime()
         if let preconditions {
             let (verdict, resolved) = await preconditions.evaluate(
-                key: key, cwd: template.cwd, launch: template, wedged: state.wedged,
+                key: key, cwd: template.cwd, launch: template, configHome: configHome, wedged: state.wedged,
                 foreignHolders: state.observed.foreign, store: store)
             diagnostics.record(.precondition(verdict: Self.name(of: verdict), session: key.session.description))
             guard verdict == .ready else {
