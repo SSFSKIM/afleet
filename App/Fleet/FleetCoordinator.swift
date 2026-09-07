@@ -34,6 +34,11 @@ final class FleetCoordinator: WorkspaceCoordinating {
     /// again, which is the point of keeping the value rather than a `Set` of keys.
     private var seeds: [ChannelKey: Seed] = [:]
 
+    /// Every session the app has been told about and not yet told to let go: a snapshot's entries,
+    /// plus what each delta added or updated. What a replacement snapshot no longer names is what
+    /// this launch has to release.
+    private var known: Set<SessionID> = []
+
     private struct Seed: Hashable {
         var cwd: URL
         var recent: Bool
@@ -152,6 +157,14 @@ final class FleetCoordinator: WorkspaceCoordinating {
         let moment = now()
         let listing = ChannelRegistrar.listed(snapshot, configHome: configHome, now: moment)
         await register(listing.rows, at: moment, replacingSkips: true)
+        // A snapshot replaces the picture rather than patching it, so a session the app knew about
+        // and this one does not name is gone — and it will never arrive as a delta, because the
+        // rebuilt index has no entry whose removal could generate one. A warm launch is exactly
+        // this shape: the restored snapshot is painted, a channel is opened from it, and the fresh
+        // build lands on top without it. Released through the same path a removal takes.
+        let vanished = known.subtracting(snapshot.entries.keys)
+        known = Set(snapshot.entries.keys)
+        for id in vanished { release(id) }
         // The listing is handed on rather than recomputed: the model would otherwise run the same
         // join a second time over every entry in the snapshot.
         model.paint(snapshot, listing: listing, origin: origin)
@@ -162,23 +175,36 @@ final class FleetCoordinator: WorkspaceCoordinating {
         var rows: [ChannelRow] = []
         for id in delta.added + delta.updated {
             guard let entry = await index.entry(id) else { continue }
+            known.insert(id)
+            // Where the transcript is *now*. A slug rename moves the file and the index
+            // re-arbitrates the survivor; a channel already being ingested has to be told, or every
+            // later change is read from a path that no longer exists. `relocate` is a comparison
+            // for a channel that did not move and a no-op for one no model was built for.
+            await timelines?.relocate(ChannelKey(configHome: configHome, session: id), to: entry.path)
             let decision = ChannelRegistrar.decide(entry)
             guard let mode = decision.listedMode else { continue }
             rows.append(ChannelRegistrar.row(for: entry, configHome: configHome, mode: mode,
                                              rule: decision.rule, now: moment))
         }
         await register(rows, at: moment, replacingSkips: false)
-        for id in delta.removed {
-            let key = ChannelKey(configHome: configHome, session: id)
-            seeds[key] = nil
-            withoutCWD.remove(key)
-            // The channel left the index, so whatever state the app held for it goes now: the
-            // panel host's sessions and context, rather than waiting for sixteen further channels
-            // of LRU pressure (spec §7), and the timeline model it was ingesting through (spec §8).
-            panels?.releaseChannel(key)
-            timelines?.release(key)
-        }
+        for id in delta.removed { release(id) }
         await model.apply(delta) { [index] id in await index.entry(id) }
+    }
+
+    /// Everything the app held for one channel, let go together (spec §7, §8).
+    ///
+    /// The panel host's sessions and context go rather than waiting for sixteen further channels of
+    /// LRU pressure, and the timeline model it was ingesting through goes with them — the host's
+    /// context holds the feed that reads that model, and either owner left behind pins it. One
+    /// method rather than two call sites, because a removal and a replacement snapshot are two
+    /// routes to one event and a release written twice drifts once.
+    private func release(_ id: SessionID) {
+        let key = ChannelKey(configHome: configHome, session: id)
+        seeds[key] = nil
+        withoutCWD.remove(key)
+        known.remove(id)
+        panels?.releaseChannel(key)
+        timelines?.release(key)
     }
 
     // MARK: - Registration

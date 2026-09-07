@@ -63,6 +63,12 @@ final class ChannelTimelineRegistry {
         models.removeValue(forKey: key)?.close()
     }
 
+    /// Tells a channel already being ingested where its transcript is now. A channel no model has
+    /// been built for has nothing to rebind, which is why this does not build one.
+    func relocate(_ key: ChannelKey, to path: URL) async {
+        await models[key]?.transcriptMoved(to: path)
+    }
+
     private func releaseAll() {
         for model in models.values { model.close() }
         models = [:]

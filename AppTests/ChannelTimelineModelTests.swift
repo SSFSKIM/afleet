@@ -48,6 +48,28 @@ final class ChannelTimelineModelTests: XCTestCase {
                        "opening an archived channel invoked the process factory \(spawns.count) time(s)")
     }
 
+    /// A config home reached through a symlink opens.
+    ///
+    /// `TranscriptIndex` canonicalises the root it was given and every path it discovers, so an
+    /// entry's path is spelled through the resolved directory. Ingestion constructed with the
+    /// workspace's own — unresolved — root then meets `TranscriptPath.resolve`, which is a lexical
+    /// prefix check: the two spellings share no prefix, the path names no stream, and
+    /// `StreamIngestion.open` reaches its `preconditionFailure` and takes the process down. Not a
+    /// contrived home: a linked `TMPDIR` or a linked home is the ordinary case (tracker entry 54).
+    ///
+    /// What it asserts is that the channel is *readable*, not merely that nothing trapped, so a
+    /// version that resolved the path and then read nothing fails too.
+    func testAConfigHomeReachedThroughASymlinkOpens() async throws {
+        let rig = try await Rig(inventedChannels: 1, throughSymlink: true)
+        let model = rig.registry.model(for: rig.keys[0])
+
+        await model.open(rig.row(0))
+
+        XCTAssertNil(model.failure, "a symlinked config home reported a failure")
+        XCTAssertGreaterThan(model.items.count, 0,
+                             "a channel under a symlinked config home rendered \(model.items.count) items")
+    }
+
     // MARK: - Every category reaches a row
 
     /// Over the corpus, the categories the view renders and the categories the projection holds are
@@ -353,6 +375,141 @@ final class ChannelTimelineModelTests: XCTestCase {
         XCTAssertTrue(model.hasOpened, "the channel does not report itself open")
     }
 
+    /// Closing a model while its open is still in flight leaves nothing behind it.
+    ///
+    /// `close()` cancels the opening task and drops the ingestion, but the open is a sequence of
+    /// awaits and cancellation only takes effect where the code looks for it. Parked inside
+    /// `subscribe()` — the same gate the ordering test uses, so the close lands *inside* the open
+    /// rather than near it — a resumption that checked neither cancellation nor the closed flag
+    /// went on to install a change-feed loop, take an event subscription and read the file into a
+    /// model the registry no longer holds.
+    ///
+    /// The witnesses are the two things such a resumption does that a closed model must not: the
+    /// lifecycle's `events(of:)` log, taken between the subscribe and the read, and the items the
+    /// read would have published.
+    func testClosingDuringAnOpenLeavesNothingSubscribed() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"])
+        let key = rig.keys[0]
+        await rig.lifecycle.openEvents(of: key)
+        let gate = SubscribeGate(feed: rig.feed)
+        rig.registry.changeFeed = gate.subscribe
+        let model = rig.registry.model(for: key)
+
+        let opening = Task { await model.open(rig.row(0, origin: .owned(.ready))) }
+        let reached = await XCTWaiter().fulfillment(of: [gate.reached], timeout: LaunchFixtures.hangGuard)
+        XCTAssertEqual(reached, .completed, "the open never reached the gate, so nothing was closed inside it")
+
+        // The production seam: the channel left the index while its first open was in flight.
+        rig.registry.release(key)
+        gate.release()
+        await opening.value
+
+        let calls = await rig.lifecycle.eventSubscriptions
+        XCTAssertTrue(calls.isEmpty,
+                      "a closed model went on to take \(calls.count) event subscription(s)")
+        XCTAssertTrue(model.items.isEmpty,
+                      "a closed model went on to read \(model.items.count) items")
+        await rig.lifecycle.finishEvents(of: key)
+    }
+
+    // MARK: - The coordinator's release and relocation seams
+
+    /// A transcript that moves between slugs is read from its new path.
+    ///
+    /// The move is the ordinary one: the engine renames a project's slug directory, the index
+    /// arbitrates the survivor and reports the session as updated, and the composition root hands
+    /// that delta to `FleetCoordinator`. `StreamIngestion.fileChanged` resolves the *logical*
+    /// stream from the path it is given and then reads the path its own `StreamState` holds, so
+    /// without a `relocated` call every later change keeps reading a file that is no longer there
+    /// and a file-only channel goes silently stale.
+    ///
+    /// Driven through `indexChanged` rather than through the model, because `relocated` existed and
+    /// nothing in the app called it — the same defect class §8's release path was found by. The
+    /// append lands on the new path only; the wait is fulfilled by the delivery itself.
+    func testATranscriptThatMovesIsReadFromItsNewPath() async throws {
+        let rig = try await Rig(inventedChannels: 1)
+        let key = rig.keys[0]
+        let model = rig.registry.model(for: key)
+        await model.open(rig.row(0))
+        let opened = model.items.count
+        XCTAssertGreaterThan(opened, 0, "the invented transcript opened with 0 items")
+
+        let old = rig.paths[0]
+        let projects = rig.home.root.appending(path: "projects", directoryHint: .isDirectory)
+        let moved = projects.appending(path: "invented-moved", directoryHint: .isDirectory)
+        try FileManager.default.moveItem(at: old.deletingLastPathComponent(), to: moved)
+        let new = moved.appending(path: old.lastPathComponent)
+
+        let delta = await rig.workspace.index.update(changed: [old, new])
+        XCTAssertTrue(delta.updated.contains(key.session) || delta.added.contains(key.session),
+                      "the index reported \(delta.updated.count) updated and \(delta.added.count) added session(s) for the move")
+        let coordinator = rig.coordinator()
+        await coordinator.indexChanged(delta)
+        coordinator.stop()
+
+        let updates = model.timelineUpdates
+        let grew = XCTestExpectation(description: "a timeline with more than \(opened) items")
+        let seen = CountBox()
+        let reader = Task {
+            for await timeline in updates where timeline.items.count > opened {
+                seen.set(timeline.items.count)
+                grew.fulfill()
+                return
+            }
+        }
+
+        try rig.appendRecords(at: new, session: key.session, count: 2)
+        rig.watcher.emit([new])
+
+        let outcome = await XCTWaiter().fulfillment(of: [grew], timeout: LaunchFixtures.hangGuard)
+        reader.cancel()
+        XCTAssertEqual(outcome, .completed,
+                       "the change to the moved transcript published no timeline holding the appended items")
+        XCTAssertGreaterThan(model.items.count, opened,
+                             "the moved channel holds \(model.items.count) items against \(opened) before the move")
+    }
+
+    /// A channel absent from a replacement snapshot is released.
+    ///
+    /// A warm launch paints the restored snapshot and then the freshly built one on top of it. A
+    /// channel opened from the restored one and missing from the fresh build never generates a
+    /// removal delta — the rebuilt index has no entry to remove — so the timeline model and the
+    /// panel sessions it holds would live until the next launch replaced the workspace.
+    ///
+    /// The floor is the survivor: a coordinator that released everything on every snapshot would
+    /// pass an assertion that only counted what disappeared.
+    func testAChannelAbsentFromAReplacementSnapshotIsReleased() async throws {
+        let rig = try await Rig(inventedChannels: 2)
+        let host = PanelHostModel()
+        host.attach(to: rig.workspace, timelines: rig.registry, lifecycle: rig.lifecycle)
+        try host.register(PlaceholderTab())
+        let coordinator = rig.coordinator(panels: host)
+
+        let home = rig.workspace.configHome.root
+        let restored = LaunchFixtures.snapshot(configHome: home, ids: rig.keys.map(\.session))
+        let built = LaunchFixtures.snapshot(configHome: home, ids: [rig.keys[1].session])
+        await coordinator.snapshotAvailable(restored, origin: .restored)
+
+        for key in rig.keys {
+            let context = try XCTUnwrap(host.context(for: key, cwd: URL(fileURLWithPath: "/invented/project")),
+                                        "the host built no context for a restored channel")
+            _ = host.session(for: .thread, context: context)
+        }
+        XCTAssertEqual(rig.registry.openChannels.count, 2,
+                       "the registry holds \(rig.registry.openChannels.count) models for the 2 restored channels")
+        XCTAssertEqual(host.liveChannelCount, 2,
+                       "the host holds \(host.liveChannelCount) channels for the 2 restored channels")
+
+        // The fresh build lands on top, and one of the two channels is not in it.
+        await coordinator.snapshotAvailable(built, origin: .built)
+        coordinator.stop()
+
+        XCTAssertEqual(rig.registry.openChannels, [rig.keys[1]],
+                       "the replacement snapshot left \(rig.registry.openChannels.count) timeline model(s) behind, not the 1 it still lists")
+        XCTAssertEqual(host.liveChannelCount, 1,
+                       "the replacement snapshot left \(host.liveChannelCount) channel(s) in the panel host, not 1")
+    }
+
     // MARK: - The registry
 
     /// One model per channel, retained across a switch away and back, and one registry per app.
@@ -585,7 +742,12 @@ private struct Rig {
 
     /// `fixtures` are copied out of the committed corpus; `inventedChannels` are transcripts this
     /// test wrote itself. The two lists concatenate in that order, and `keys[i]` names `paths[i]`.
-    init(fixtures: [String] = [], inventedChannels: Int = 0) async throws {
+    ///
+    /// `throughSymlink` names the config home through a symlink pointing at it, rather than by the
+    /// directory's own resolved path. One directory, two spellings — the disagreement tracker entry
+    /// 54 records between the index and the fleet, and the shape of any config home reached through
+    /// a linked `TMPDIR` or a linked home in the running app.
+    init(fixtures: [String] = [], inventedChannels: Int = 0, throughSymlink: Bool = false) async throws {
         temp = try TempTree()
         home = try ScratchConfigHome(tree: temp)
         let projects = home.root.appending(path: "projects", directoryHint: .isDirectory)
@@ -593,7 +755,14 @@ private struct Rig {
         var keys: [ChannelKey] = []
         var paths: [URL] = []
         var titles: [String] = []
-        let configHome = home.configHome
+        let configHome: ConfigHome
+        if throughSymlink {
+            let link = temp.root.appending(path: "config-home-link")
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: home.root)
+            configHome = ConfigHome(root: URL(fileURLWithPath: link.path), source: .environment)
+        } else {
+            configHome = home.configHome
+        }
 
         for name in fixtures {
             guard let main = try Corpus.mainTranscript(of: name) else {
@@ -659,6 +828,23 @@ private struct Rig {
                           state: state ?? origin.map { SidebarFixtures.state(key, origin: $0) })
     }
 
+    /// The coordinator the composition root builds over this workspace, holding this rig's one
+    /// timeline registry.
+    ///
+    /// Built here rather than in each test because what the two tests below are about is the
+    /// production seam: a registry told to release or to relocate only by a test leaves the running
+    /// app holding what it should have let go, which is the defect class §8's release path exists
+    /// for.
+    func coordinator(panels: PanelHostModel? = nil) -> FleetCoordinator {
+        FleetCoordinator(configHome: workspace.configHome.root,
+                         registrar: RegistrarDouble(),
+                         index: workspace.index,
+                         model: FleetBrowserModel(lifecycle: lifecycle,
+                                                  configHome: workspace.configHome.root),
+                         panels: panels,
+                         timelines: registry)
+    }
+
     /// Appends one assistant record naming `url`, and moves the projected leaf onto it.
     ///
     /// An assistant record rather than a user one because `URLSources.contributing` excludes user
@@ -681,11 +867,15 @@ private struct Rig {
 
     /// Appends `count` further records to a channel's transcript, each with its own invented uuid.
     func appendRecords(to index: Int, count: Int) throws {
-        let url = paths[index]
+        try appendRecords(at: paths[index], session: keys[index].session, count: count)
+    }
+
+    /// The same append against a named file, for a channel whose transcript has moved out from
+    /// under `paths[i]`.
+    func appendRecords(at url: URL, session: SessionID, count: Int) throws {
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
         try handle.seekToEnd()
-        let session = keys[index].session
         // Chained onto the assistant record `LaunchFixtures.transcript` wrote. A record with a nil
         // `parentUuid` starts a second root, and the reducer keeps one branch: two unparented
         // appends applied cleanly and changed no item at all, which is how this was found.
