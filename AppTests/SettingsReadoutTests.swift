@@ -288,7 +288,11 @@ final class SettingsReadoutTests: XCTestCase {
         let composer = try XCTUnwrap(composerBox.value, "the diagnostics composer was never built")
         let signal = try XCTUnwrap(signalBox.value, "the index was never built through the seam")
 
-        await XCTWaiter().fulfillment(of: [signal.built], timeout: LaunchFixtures.hangGuard)
+        // The outcome is asserted, not just awaited: this helper builds the fixture every readout
+        // test then measures, so a wait that timed out silently would hand each of them a workspace
+        // whose index had never been built.
+        let built = await XCTWaiter().fulfillment(of: [signal.built], timeout: LaunchFixtures.hangGuard)
+        XCTAssertEqual(built, .completed, "the index was never built through the seam")
         XCTAssertNotNil(composer.timeline.lastIndexBuild, "the index build never reported an indexBuilt notice")
         watcher.finish()
         return Built(workspace: workspace, diagnostics: composer)

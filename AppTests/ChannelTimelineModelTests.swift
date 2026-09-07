@@ -191,8 +191,12 @@ final class ChannelTimelineModelTests: XCTestCase {
         try rig.appendRecords(to: 0, count: 2)
         rig.watcher.emit([rig.paths[0]])
 
-        await XCTWaiter().fulfillment(of: [grew], timeout: LaunchFixtures.hangGuard)
+        // The outcome is asserted, not just awaited. A dropped result makes the wait look like the
+        // assertion when it is not one: on a timeout the run would fall through to the clauses
+        // below, and the second of them reads the model directly rather than the published feed.
+        let outcome = await XCTWaiter().fulfillment(of: [grew], timeout: LaunchFixtures.hangGuard)
         reader.cancel()
+        XCTAssertEqual(outcome, .completed, "the model published no timeline holding the appended items")
         XCTAssertGreaterThan(seen.value, first,
                              "the published timeline held \(seen.value) items against \(first) before the change")
         XCTAssertGreaterThan(model.items.count, first,
