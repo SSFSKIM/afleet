@@ -345,11 +345,12 @@ final class ChannelTimelineModelTests: XCTestCase {
 
     /// One model per channel, retained across a switch away and back, and one registry per app.
     ///
-    /// The shared-registry assertion the brief pairs with Task 8 —a URL ingested through the model
+    /// The shared-registry assertion the brief pairs with Task 8 — a URL ingested through the model
     /// `ChannelColumnView` draws arriving through the exact `RecentURLFeed` handed to that
-    /// channel's `ChannelContext` — lands with Task 8, which is what builds the feed and the
-    /// context. What is assertable now is the half that closes the same defect: `AppModel` exposes
-    /// exactly one registry, and a channel's model survives a switch.
+    /// channel's `ChannelContext` — is
+    /// `testTheChannelColumnAndThePanelContextShareOneRegistry` below, which Task 8 wrote once the
+    /// feed and the context existed. This test holds the half that does not need them: a channel's
+    /// model survives a switch, and there is one model per channel.
     func testOneModelPerChannelSurvivesASwitch() async throws {
         let rig = try await Rig(fixtures: ["plain-two-turn"], inventedChannels: 1)
         let first = rig.registry.model(for: rig.keys[0])
@@ -373,14 +374,68 @@ final class ChannelTimelineModelTests: XCTestCase {
     /// `AppModel` carries the one app-scoped registry, and it is the same object across reads.
     ///
     /// Constructing a registry in the channel column and a second one in the panel host is the
-    /// defect this instance exists to make unrepresentable; the assertion that `AppModel.timelines`
-    /// is one object is the part of it a test can reach before Task 8 lands.
+    /// defect this instance exists to make unrepresentable; that one object is reachable from
+    /// `AppModel` is this test, and that ingestion through it reaches the panel's feed is the
+    /// end-to-end test below.
     func testAppModelExposesOneRegistry() async throws {
         let app = AppModel()
         XCTAssertTrue(app.timelines === app.timelines, "AppModel handed back two registries")
         XCTAssertNil(app.timelines.workspace, "an unlaunched registry is already bound to a workspace")
         XCTAssertEqual(app.timelines.openChannels.count, 0,
                        "an unlaunched registry already holds \(app.timelines.openChannels.count) model(s)")
+    }
+
+    /// A URL ingested through the model the channel column draws arrives through the **exact**
+    /// `RecentURLFeed` instance handed to that channel's panel context.
+    ///
+    /// **Both sides are resolved from one `AppModel`** — `app.timelines` for the model, `app.panels`
+    /// for the context — and neither is constructed here, because constructing either is precisely
+    /// the mistake this assertion exists to catch. A second registry in the panel host would pass
+    /// every unit test over either half and hand the Browser a feed watching a timeline that
+    /// ingestion never touches.
+    ///
+    /// The subscription is taken before the file changes, and the wait is fulfilled by the delivery
+    /// itself; the timeout is a hang guard. The floor is that the feed is empty before the change
+    /// and holds the new URL after it, so a feed that answered the same list either way fails.
+    func testTheChannelColumnAndThePanelContextShareOneRegistry() async throws {
+        let rig = try await Rig(inventedChannels: 1)
+        let app = AppModel()
+        // The one production seam that binds both owners to a workspace.
+        app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
+        let key = rig.keys[0]
+
+        // The model `ChannelColumnView` draws, and the context `PanelColumnView` draws.
+        let model = app.timelines.model(for: key)
+        await model.open(rig.row(0))
+        let context = try XCTUnwrap(app.panels.context(for: key,
+                                                       cwd: URL(fileURLWithPath: "/invented/project")),
+                                    "the panel host built no context for the channel")
+        let feed = context.recentURLs
+
+        let before = await feed.current(limit: 10)
+        XCTAssertTrue(before.isEmpty, "the channel began with \(before.count) URLs, so the change proves nothing")
+
+        let expected = URL(string: "https://invented.example/shared-registry")!
+        let updates = feed.updates
+        let arrived = XCTestExpectation(description: "the ingested URL reaches the panel's feed")
+        let reader = Task {
+            for await urls in updates where urls.contains(where: { $0.url == expected }) {
+                arrived.fulfill()
+                return
+            }
+        }
+
+        try rig.appendAssistantURL(to: 0, url: expected)
+        rig.watcher.emit([rig.paths[0]])
+
+        await XCTWaiter().fulfillment(of: [arrived], timeout: LaunchFixtures.hangGuard)
+        reader.cancel()
+        let after = await feed.current(limit: 10)
+        XCTAssertEqual(after.count, 1, "the feed holds \(after.count) URLs after the change, not 1")
+        XCTAssertTrue(after.contains { $0.url == expected },
+                      "the URL the column's model ingested did not reach the panel context's feed")
+        XCTAssertEqual(model.timeline.recentURLs(limit: 10).count, after.count,
+                       "the feed and the model the column draws disagree on how many URLs the channel has")
     }
 }
 
@@ -576,6 +631,26 @@ private struct Rig {
                           decidingRule: "invented",
                           isProvisional: false,
                           state: state ?? origin.map { SidebarFixtures.state(key, origin: $0) })
+    }
+
+    /// Appends one assistant record naming `url`, and moves the projected leaf onto it.
+    ///
+    /// An assistant record rather than a user one because `URLSources.contributing` excludes user
+    /// messages — the person typed those — so a URL appended as a user record would ingest cleanly
+    /// and never reach `recentURLs`, and the test would fail for a reason that is not the defect.
+    func appendAssistantURL(to index: Int, url: URL) throws {
+        let handle = try FileHandle(forWritingTo: paths[index])
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        let session = keys[index].session
+        let me = "00000000-0000-4000-8000-000000000003"
+        // Chained onto the assistant record `LaunchFixtures.transcript` wrote, so the leaf named
+        // below carries the whole chain rather than starting a second root.
+        let parent = "00000000-0000-4000-8000-000000000002"
+        let text = "invented reply naming \(url.absoluteString)"
+        let record = #"{"type":"assistant","sessionId":"\#(session)","uuid":"\#(me)","parentUuid":"\#(parent)","isSidechain":false,"cwd":"/invented/project","timestamp":"2026-01-01T00:00:03.000Z","message":{"id":"msg_invented3","role":"assistant","content":[{"type":"text","text":"\#(text)"}]}}"# + "\n"
+        let leaf = #"{"type":"last-prompt","sessionId":"\#(session)","leafUuid":"\#(me)","lastPrompt":"invented prompt"}"# + "\n"
+        try handle.write(contentsOf: Data((record + leaf).utf8))
     }
 
     /// Appends `count` further records to a channel's transcript, each with its own invented uuid.

@@ -53,7 +53,7 @@ final class PanelHostTests: XCTestCase {
     /// first-come and C6 could never register Thread over C5's placeholder.
     func testUnregisterThenRegisterHandsTheIDOver() async throws {
         let host = PanelHostModel()
-        try host.register(StubPanelTab(.thread, title: "C5's placeholder"))
+        try host.register(PlaceholderTab())
         let successor = StubPanelTab(.thread, title: "a later child's thread")
 
         XCTAssertThrowsError(try host.register(successor),

@@ -86,6 +86,9 @@ final class AppModel {
         self.coordinatorFactory = coordinatorFactory ?? { workspace in
             FleetCoordinator(workspace: workspace, panels: panels)
         }
+        // C5's one shipped tab, under `.thread`. C6 takes that id by `unregister(.thread)` and then
+        // its own `register`; `register` refuses a duplicate, so the pair is the handover.
+        try? panels.register(PlaceholderTab())
     }
 
     /// Binds the two app-scoped, workspace-dependent owners to the workspace a launch reached.
