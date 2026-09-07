@@ -24,6 +24,12 @@ struct AfleetApp: App {
                 // further edits, so the model reaches `ChannelRowView` through the environment
                 // rather than through four more initialiser arguments.
                 .environment(model)
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    shell.isApplicationActive = NSApplication.shared.isActive
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+                    shell.isApplicationActive = NSApplication.shared.isActive
+                }
         }
         .commands { shellCommands }
 

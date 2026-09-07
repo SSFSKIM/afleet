@@ -41,12 +41,13 @@ final class ActivityModelTests: XCTestCase {
             tree = try TempTree()
             configHome = try tree.directory("config-home")
             let shell = self.shell
+            shell.isApplicationActive = true
             let poster = self.poster
             let lifecycle = self.lifecycle
             let preferences = self.preferences
             router = NotificationRouter(poster: poster,
                                         lifecycle: lifecycle,
-                                        isInView: { key in shell.focus.session == key.session },
+                                        isInView: { key in shell.isInView(key) },
                                         preferences: { preferences.value })
             model = ActivityModel(lifecycle: lifecycle,
                                   configHome: configHome,
@@ -183,6 +184,54 @@ final class ActivityModelTests: XCTestCase {
         let result = await XCTWaiter.fulfillment(of: [card], timeout: 3)
         XCTAssertEqual(result, .completed, "the first adopted request was lost")
         XCTAssertEqual(harness.model.items.compactMap(\.ask).count, 1, "no answerable card")
+        harness.model.stop()
+    }
+
+    // F4: focus already on the channel is not a focus-change event when an ask arrives.
+    func testNewActivityInTheViewedChannelIsAlreadySeen() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        harness.shell.select(key.session)
+        await arm(harness, key)
+        await harness.model.start()
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        harness.model.apply(ActivityFixtures.state(key, pending: [ActivityFixtures.pending(ask)]))
+        harness.model.pump(for: key)?.ingest(.request(ask))
+        harness.model.rebuild()
+        XCTAssertEqual(harness.model.items.count, 1, "no activity arrived")
+        XCTAssertEqual(harness.router.postCount, 0, "a viewed request raised a notification")
+        XCTAssertEqual(harness.model.badge(for: key.session), .none, "a viewed request raised an unread badge")
+        harness.shell.showActivity()
+        XCTAssertEqual(harness.model.badge(for: key.session), .none, "looking away resurrected seen activity")
+        harness.model.stop()
+    }
+
+    // F4: selection in an inactive app neither suppresses notification nor clears unread;
+    // activation then clears the badge without changing selection.
+    func testInactiveSelectionNotifiesAndActivationMarksSeen() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        harness.shell.isApplicationActive = false
+        harness.shell.select(key.session)
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        await arm(harness, key, pending: [ActivityFixtures.pending(ask)])
+        await harness.model.start()
+        harness.model.pump(for: key)?.ingest(.request(ask))
+        harness.model.rebuild()
+        XCTAssertEqual(harness.router.postCount, 1, "inactive selection suppressed a notification")
+        XCTAssertEqual(harness.model.badge(for: key.session), ChannelBadge(count: 1, isUnread: true),
+                       "inactive selection cleared unread activity")
+        let seen = expectation(description: "activation marks selected channel seen")
+        Task {
+            await harness.model.whenChanged { $0.badge(for: key.session).isEmpty }
+            seen.fulfill()
+        }
+        harness.shell.isApplicationActive = true
+        let result = await XCTWaiter.fulfillment(of: [seen], timeout: 3)
+        XCTAssertEqual(result, .completed, "activation did not mark activity seen")
+        XCTAssertEqual(harness.model.badge(for: key.session), .none, "activation left an unread badge")
         harness.model.stop()
     }
 

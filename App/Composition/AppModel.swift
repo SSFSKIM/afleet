@@ -156,7 +156,7 @@ final class AppModel {
         let poster = SystemOrInAppPoster { [sink] notification in sink.present(notification) }
         let router = NotificationRouter(poster: poster,
                                         lifecycle: workspace.fleet,
-                                        isInView: { [shell] key in shell.focus.session == key.session },
+                                        isInView: { [shell] key in shell.isInView(key) },
                                         preferences: { [weak self] in
                                             self?.notificationPreferences ?? NotificationPreferences()
                                         })

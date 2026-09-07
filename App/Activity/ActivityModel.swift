@@ -274,6 +274,7 @@ final class ActivityModel {
         items = rows.enumerated().map { position, row in
             ActivityItem(row: row, ask: ask(for: row), position: position)
         }
+        markViewedChannelSeen()
         releaseWaiters()
     }
 
@@ -379,10 +380,17 @@ final class ActivityModel {
     /// Watches what the window is looking at and marks that channel seen. `withObservationTracking`
     /// re-arms itself on each change, which is how a non-SwiftUI observer follows an `@Observable`
     /// without polling it.
+    private func markViewedChannelSeen() {
+        guard let session = shell.focus.session,
+              shell.isInView(ChannelKey(configHome: configHome, session: session)) else { return }
+        markSeen(session)
+    }
+
     private func observeFocus() {
-        if let session = shell.focus.session { markSeen(session) }
+        markViewedChannelSeen()
         withObservationTracking {
             _ = shell.focus
+            _ = shell.isApplicationActive
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }

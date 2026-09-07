@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Observation
 import AfleetCore
 import FleetKit
@@ -50,6 +51,15 @@ final class ShellModel {
     }
 
     var focus: Focus = .activity
+
+    /// C5's single-window approximation: app activation plus selection. NSApplication activity
+    /// does not prove this particular window is key and visible; C6's multi-window work owns
+    /// that refinement. Both notifications and unread cursors read this one predicate.
+    var isApplicationActive = NSApplication.shared.isActive
+
+    func isInView(_ key: ChannelKey) -> Bool {
+        isApplicationActive && focus.session == key.session
+    }
 
     /// `List(selection:)` wants an optional and the shell always shows something, so a deselection
     /// — which AppKit produces on a click in the empty space below the last row — leaves the focus
