@@ -398,6 +398,31 @@ final class PanelHostTests: XCTestCase {
 
     // MARK: - G4d: the pane seam
 
+    /// The request reaches the runner unchanged and the exit reaches the lifecycle with the same id.
+    ///
+    /// The `id` is the clause that matters: two requests with identical other fields are two
+    /// requests, and C4 discards an exit whose id it is not waiting on.
+    func testPaneRequestAndExitPassThroughUnchanged() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let context = try XCTUnwrap(rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd),
+                                    "the host built no context")
+        let runner = RecordingPaneRunner()
+        await runner.bind(context.reportPaneExit)
+        rig.host.registerPaneRunner(runner, for: .terminal)
+        let request = PanelFixtures.paneRequest()
+
+        try await rig.host.run(request)
+
+        let received = await runner.received
+        XCTAssertEqual(received.count, 1, "the runner received \(received.count) requests, not 1")
+        XCTAssertTrue(received.first?.id == request.id, "the host handed the runner a different request id")
+        XCTAssertTrue(received.first == request, "the host edited the request on its way to the runner")
+        let exits = await rig.lifecycle.paneExits
+        XCTAssertEqual(exits.count, 1, "the lifecycle received \(exits.count) pane exits, not 1")
+        XCTAssertTrue(exits.first?.request.id == request.id,
+                      "the exit reaching the lifecycle carries a different request id")
+        XCTAssertTrue(exits.first?.request == request, "the exit's request is not the one that was run")
+    }
 }
 
 // MARK: - Doubles
@@ -482,6 +507,21 @@ private final class LinkRecorder {
     }
 }
 
+/// A `PaneRunning` that records what it was given and reports an exit through the context.
+private actor RecordingPaneRunner: PaneRunning {
+    private(set) var received: [PaneRequest] = []
+    private var report: (@Sendable (PaneExit) async -> Void)?
+
+    func bind(_ report: @escaping @Sendable (PaneExit) async -> Void) { self.report = report }
+
+    func run(_ request: PaneRequest) async {
+        received.append(request)
+        // The exit carries the request the runner was handed, unedited. Whether that is the request
+        // the host was given is what the test asserts.
+        await report?(PaneExit(request: request, code: 0, observedAt: Date()))
+    }
+}
+
 /// A `[String]` box a detached reader writes and the test reads.
 ///
 /// `@unchecked Sendable` is sound because the one mutable field is `stored`, read and written only
@@ -547,6 +587,13 @@ private enum PanelFixtures {
                    })
     }
 
+    static func paneRequest() -> PaneRequest {
+        PaneRequest(executable: URL(fileURLWithPath: "/invented/bin/claude"),
+                    arguments: ["--invented"],
+                    cwd: cwd,
+                    environment: ["PATH": "/usr/bin"],
+                    purpose: .shell)
+    }
 }
 
 /// Capabilities that answer and do nothing, for a context built to exercise the host.

@@ -118,7 +118,13 @@ actor LifecycleDouble: LifecycleAPI {
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
     func attach(_ job: JobShort) async throws -> PaneRequest { unreachable("attach") }
     func logs(_ job: JobShort) async throws -> PaneRequest { unreachable("logs") }
-    func paneExited(_ exit: PaneExit) async {}
+    /// Every `PaneExit` the app forwarded, in order.
+    ///
+    /// Recorded rather than dropped because G4d's discriminating clause is the `request.id`: C4
+    /// accepts an exit only when its id is the one it is waiting on, so a host that minted a fresh
+    /// request would have every exit discarded and no other assertion would notice.
+    private(set) var paneExits: [PaneExit] = []
+    func paneExited(_ exit: PaneExit) async { paneExits.append(exit) }
     func performJob(_ verb: JobVerb, _ short: JobShort) async throws { unreachable("performJob") }
     func isDormantEligible(_ key: ChannelKey) async -> Bool { unreachable("isDormantEligible") }
     func declineProjectServers(_ names: [String], project: URL) async throws { unreachable("declineProjectServers") }
