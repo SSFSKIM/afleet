@@ -576,42 +576,28 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     registered runner, or the button is disabled with a sentence until C7.3 lands. Owner: C5
     Task 8 for the first option, which is the cheaper of the two and is already building the seam.
 
-59. **`TrustReader.isTrusted` reads `<configHome>/.claude.json`, which on an ordinary installation
-    is a file that has never existed.** Same defect as the one C5 Task 5 fixed on the app side and
-    the same evidence: the engine resolves the global config document as
-    `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263 `cli.pretty.js:298330`) while
-    the config home is `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")`, so the two coincide only
-    when the variable is set. `FleetKit/Sources/FleetSessions/Preconditions/TrustReader.swift:68`
-    appends to the root unconditionally, so with the variable unset every project reads as
-    untrusted and `SpawnPrecondition.untrusted` refuses every spawn. Not observed as a failure yet
-    because C5 spawns nothing; C6 is the first child that will. **Outside C5's fence** — the file
-    is C4's, inside the FleetKit package — which is why this is an entry and not a commit.
-    Closer: `isTrusted` takes the resolved document location, or a `ConfigHome` rather than a URL,
-    the same shape the app now uses. Owner: C4, before C6 spawns.
-60. **One holder change publishes a state to every registered channel, so the cost recurs.**
-    Measured at C5 Task 5 by instrumenting `LifecycleAPI.updates` during a launch over a real
-    config home: **13,250 states across 2,671 distinct sessions**, `identical=0` — not one was a
-    repeat of a state already held — 99.8% carrying the `.archived` origin, and 2,669 of them for
-    sessions the listing policy never lists.
-    **It is not a one-off seeding burst, which is what the first version of this entry said.**
-    C5 Task 5's review found the mechanism and the controller verified it in C4's source:
-    `Fleet.fanOut` (`Fleet.swift:135-137`) walks **every** supervisor for **every** published
-    `HolderSet`, and `ChannelSupervisor.holdersChanged` (`ChannelSupervisor.swift:1718-1720`)
-    assigns `state.observed` before any test of whether anything changed. The observer publishes
-    only sets that differ, but one differing set costs **one published state per registered
-    channel** — and the sidebar registers every listed transcript, so a holder change affecting a
-    single session costs thousands. The cost therefore recurs for the life of the process
-    whenever holders move; seeding is merely the first and largest instance.
-    Not a C5 problem any more: the sidebar patches by row, drops states for unlisted sessions and
-    coalesces a burst, so 13,250 states now cost 87 publishes and 7 rebuilds, and idle CPU is
-    0.1%. Filed because the amplification is real and the next consumer will not have that
-    machinery — C6 subscribes to the same stream. Note also that coalescing *duplicates* would
-    have saved nothing here, since there were none; the cost is in how many distinct intermediate
-    states seeding emits per channel. Owner: C4. Closer, two halves — the recurring one first:
-    publish from a supervisor only when its own holder view actually changed, rather than from
-    every supervisor on every published set; and for seeding, publish the settled state per
-    channel rather than each step toward it, or say why the intermediates are load-bearing.
-
+59. **Closed 2026-09-07 (`1c19d52`).** `TrustReader.isTrusted` read `<configHome>/.claude.json`, a file
+    that does not exist on an ordinary installation, so every project resolved untrusted and no
+    channel could spawn owned. The engine resolves the document as
+    `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263 `cli.pretty.js:298330`) while the
+    config home is `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")`; the two coincide only with the
+    variable set, which every scratch-home test does. `ConfigHome.globalConfig` (AfleetCore) now
+    carries the rule, `isTrusted(root:globalConfig:)` reads through it, and a default-shaped test
+    (document beside the home) was shown failing first. The wider consequence — `childEnvironment`
+    injecting the variable for a default home moved the keychain credential item and the document
+    for every child — is `6b3fc23` and parent §6.1/§6.9/X11. Found by C5 Task 5.
+60. **Seeding publishes each intermediate state per channel, and a contended channel republishes on
+    every fan-out.** What remains of the amplification C5 measured at Task 5 (13,250 states across
+    2,671 sessions on one launch over a real config home, `identical=0`, 99.8% `.archived`). The
+    recurring half is closed 2026-09-07 by `f9da990`: `ChannelSupervisor.holdersChanged` now publishes
+    on a fanned-out holder set only when its own narrowed holder view changed or a transition was
+    taken (two-channel test in `HolderFanOutTests.swift`, failing first at 2 publishes where 1 was
+    expected). Still open, two shapes: seeding emits every step toward a channel's settled state
+    rather than the settled state once, or should say why the intermediates are load-bearing; and
+    `resolveContended`'s `publish()` on the two-or-more-foreign-holders path is the same
+    unconditional shape, bounded by how few channels are ever contended. C5's sidebar coalesces
+    (13,250 states cost 87 publishes and 7 rebuilds); C6 subscribes to the same stream without that
+    machinery. Owner: C4, the seeding half before C6's conversation surface subscribes.
 61. **`afleet.config-change` is answered but not acted on: the `get_settings` refresh §6.4 asks for
     is owed.** The parent's protocol table says the callback "refreshes `get_settings` and answers
     likewise". C5 Task 6 ships the answer — an empty continue, so the engine is never left blocked
@@ -698,19 +684,15 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     different leaf, say. Found at C5 Task 8. Closer: when a second runner appears, route on
     `request.purpose` and let a runner declare the purposes it accepts; the protocol member's `for
     tab:` parameter stays, because a runner still belongs to a tab. Owner: C7, at its second runner.
-69. **C4's `trustedDirectory(_:)` excludes the config home with a comparison that fails open.**
-    `FleetKit/Tests/FleetSessionsTests/LiveFleetTests.swift` canonicalises both sides of its
-    config-home exclusion with `URL.resolvingSymlinksInPath()`. Foundation rewrites `/private/tmp/…`
-    to `/tmp/…` only when the resulting path **exists**, so a trust entry naming a directory
-    *beneath* the scratch config home that has not been created yet stays `/private/tmp/…` while the
-    config home itself becomes `/tmp/…`; no prefix matches, the entry survives the exclusion, and the
-    live suite would then create a directory inside a config home — the one act X9 forbids
-    absolutely. Found at C5 Task 9 by porting the rule and testing the exclusion for the first time
-    (`AppTests/Support/ScratchLiveGateTests.swift`); C5's port is fixed and uses
-    `CanonicalPath.string`, which resolves as much of a path as exists and puts the rest back.
-    Unexploited in C4 today: the scratch `.claude.json` carries no such entry, and the fixture would
-    have to name one for the hole to open. Closer: take the same fix in C4's copy. Owner: C4's
-    maintainer, or whoever next touches that file.
+69. **Closed 2026-09-07 (`c4997a9`).** C4's live-test trusted-directory selector canonicalised both
+    sides of its config-home exclusion with `URL.resolvingSymlinksInPath()`, which rewrites
+    `/private/tmp/…` to `/tmp/…` only when the result exists, so a trust entry naming a not-yet-created
+    directory beneath the scratch config home survived the exclusion — the live suite would then have
+    created a directory inside a config home. The selector is now `LiveGate.trustedDirectories(…)`,
+    canonicalised by `realpath` over the longest existing prefix with the missing components put back
+    (a local copy of C5's `CanonicalPath`; FleetKit's tests cannot import the App target), with a
+    CLI-free test shown failing first (two candidates where one was expected). Found by C5 Task 9
+    through its port's own test; unexploited in C4 because no fixture entry named such a path.
 70. **Every fixture and live gate ran under a `CLAUDE_CONFIG_DIR` scratch home, which is not the
     shape of an ordinary installation.** With the variable set the engine reads
     `$CLAUDE_CONFIG_DIR/.claude.json`, names its keychain credential item with a path-hash suffix
@@ -862,23 +844,13 @@ symlink-containment debt in entry 78 is unchanged.
     with `O_NOFOLLOW`. Owner: C6 if it ships the Settings control for either root; otherwise the
     child that does.
 
-79. **The author's own handle is committed in eighteen fixture `review.reviewer` fields and one
-    probe test input.** C5's X9 leak-risk pass swept every tracked file for the recording
-    machine's account name, its home directory and the author's handles. Four of the six
-    patterns matched nothing anywhere. One matched 23 tracked files, 19 of them outside `docs/`:
-    eighteen `Fixtures/*/fixture.json` `review.reviewer` values and one literal in
-    `Tools/probe/tests/test_fixture_verify.py`. **None of them is C5's** — every one predates
-    this child, introduced 2026-09-04 by C1's fixture-layout and first-fixture commits, and no
-    file carrying one is touched on this branch. They are also not engine bytes: the reviewer
-    field is a human signature the `make sign` gate writes on purpose, so the question is
-    whether §11's "no identifier from the author's home in a committed file" admits a
-    deliberate provenance signature. C5 does not answer that; it records that the sweep is
-    otherwise clean and that every identifier C5's own test inputs use is invented (20 distinct
-    UUIDs, all repeated-nibble or `5c50`-prefixed patterns). Closer: either the parent rules the
-    reviewer field an exception and §11 says so, or `make sign` takes a handle that is not a
-    personal one and the eighteen fixtures are re-signed. Owner: the parent at merge, since the
-    fixtures are C1's and the rule is §11's.
-
+79. **Closed 2026-09-07 by ruling: the reviewer signature is admitted.** Eighteen fixture
+    `review.reviewer` values and one probe test input carry the author's handle. None is an engine
+    byte, a path or an account identifier; the field is the human attestation §11's review gate
+    exists to record, and it is the identity git's author field already carries on every commit.
+    §11 now says so in one sentence (parent, C5 merge). The C5 leak-risk sweep that found them was
+    otherwise clean: four of six identity patterns matched nothing anywhere, and every identifier
+    C5's own test inputs use is invented.
 80. **`FileStateStore` permits descendants when a config home is the filesystem root (C5 review R3).**
     `FleetKit/Sources/FleetSessions/Store/FileStateStore.swift:31` compares canonical strings
     using equality or `hasPrefix(homePath + "/")`. For a config home of `/`, the prefix is
