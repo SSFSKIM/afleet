@@ -840,3 +840,37 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     (including exec jobs and state changes), so C5 can update its Background list without an
     extra CLI reconciliation. Owner: C4 for `FleetObserver`/`LifecycleAPI` and its X5 amendment;
     C5's fleet browser for the consumer once that signal exists.
+
+78. **The X9 app-side claim rests on root containment, which a symlink planted inside a write
+    root would escape.** `AppFileWrites` observes every path app code chooses, and
+    `testEveryFilesystemWriteInTheAppIsBehindTheSeam` keeps that observation complete. It does
+    not observe the bytes `FileStateStore` and the package diagnostics sinks write beneath a
+    root the app handed them; for those the app declares the root, and the claim that nothing
+    lands under a config home follows from `LaunchSequence.overlappingWriteRoot` and
+    `FileStateStore`'s `configHomes:` both refusing a root that canonicalises to or under the
+    resolved config home. Containment therefore assumes a package writes only beneath the root
+    it was given. A symlink inside a write root pointing into a config home defeats both guards,
+    because both canonicalise the root and neither walks its descendants. Not reachable through
+    anything C5 ships — every write root is a directory afleet creates — and left unfixed rather
+    than papered over with a second guard in the seam, which would be a third answer to a
+    question two places already answer. Closer: whichever child first accepts a user-chosen
+    store or diagnostics root resolves each write path, not only the root, or opens its files
+    with `O_NOFOLLOW`. Owner: C6 if it ships the Settings control for either root; otherwise the
+    child that does.
+
+79. **The author's own handle is committed in eighteen fixture `review.reviewer` fields and one
+    probe test input.** C5's X9 leak-risk pass swept every tracked file for the recording
+    machine's account name, its home directory and the author's handles. Four of the six
+    patterns matched nothing anywhere. One matched 23 tracked files, 19 of them outside `docs/`:
+    eighteen `Fixtures/*/fixture.json` `review.reviewer` values and one literal in
+    `Tools/probe/tests/test_fixture_verify.py`. **None of them is C5's** — every one predates
+    this child, introduced 2026-09-04 by C1's fixture-layout and first-fixture commits, and no
+    file carrying one is touched on this branch. They are also not engine bytes: the reviewer
+    field is a human signature the `make sign` gate writes on purpose, so the question is
+    whether §11's "no identifier from the author's home in a committed file" admits a
+    deliberate provenance signature. C5 does not answer that; it records that the sweep is
+    otherwise clean and that every identifier C5's own test inputs use is invented (20 distinct
+    UUIDs, all repeated-nibble or `5c50`-prefixed patterns). Closer: either the parent rules the
+    reviewer field an exception and §11 says so, or `make sign` takes a handle that is not a
+    personal one and the eighteen fixtures are re-signed. Owner: the parent at merge, since the
+    fixtures are C1's and the rule is §11's.
