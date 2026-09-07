@@ -1858,6 +1858,25 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-07: `Fleet.fanOut` hands every published `HolderSet` to every supervisor, and
+  `ChannelSupervisor.holdersChanged` narrowed the set to its own session, wrote `state.observed`
+  and then published on every path where no transition applied. One holder change anywhere
+  therefore cost one published `ChannelState` per registered channel, for the life of the
+  process. C5 measured it against a real config home: 13,250 published states across 2,671
+  sessions on one launch, none of them a repeat, 99.8% of them for channels whose narrowed
+  holder view had not changed at all (its tracker entry 60). `updates` is "every transition,
+  coalesced per channel", and a state whose only difference is a fresh `observed.observedAt` is
+  not a transition — C6 subscribes to the same stream and has none of the sidebar's coalescing.
+  The rule now enforced: a supervisor publishes on a holder set only when its own narrowed view
+  changed (compared as a `Set<Holder>`, ignoring the stamp) or a transition was taken. Every
+  transition still publishes through `apply`, every evaluation in the method still runs on every
+  call — the suppressed archive depends on the next tick re-evaluating — and `state.observed` is
+  still written on every call, stamp included. `fanOut` still walks every supervisor; the walk is
+  a filter per supervisor and was never the cost. `HolderFanOutTests` pins both halves: a holder
+  change on A's session publishes nothing on B, and the same set read twice publishes once. The
+  seeding half of C5's entry 60 — a channel publishing each intermediate step of its own
+  seeding — remains open there.
+
 - 2026-09-07: `TrustReader.isTrusted` read `<configHome>/.claude.json`, but the engine resolves
   that document as `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263
   `cli.pretty.js:298330`) while the config home is `CLAUDE_CONFIG_DIR ?? join(homedir(),
