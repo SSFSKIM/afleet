@@ -5,7 +5,7 @@ SCENARIO ?=
 SCRIPT ?=
 REVIEWER ?=
 
-.PHONY: test-tools probe census record redact verify-fixtures synthetic sign spike check-x7
+.PHONY: test-tools probe census record redact verify-fixtures synthetic sign spike check-x7 check-wiring
 
 # The fake-claude suite is empty until its task lands; exit 5 is 3.12+'s "no tests ran",
 # which is not a failure here. A missing start directory still fails (ImportError).
@@ -14,6 +14,7 @@ test-tools:
 	$(PYTHON) -m unittest discover -s Tools/fake-claude/tests -t Tools/fake-claude/tests -p 'test_*.py' || test $$? -eq 5
 	$(PYTHON) -m unittest discover -s Tools/c5/tests -t Tools/c5/tests -p 'test_*.py'
 	$(MAKE) check-x7
+	$(MAKE) check-wiring
 
 probe:
 	$(PYTHON) Tools/probe/probe.py diff --claude "$(CLAUDE)" $(if $(FIXTURE),--fixture "$(FIXTURE)") $(if $(SCRIPT),--script "$(SCRIPT)")
@@ -86,3 +87,9 @@ check-imports: generate
 # child copies from — so it is checked mechanically rather than by reading. Needs no Xcode.
 check-x7:
 	$(PYTHON) Tools/c5/check-x7-drift.py
+
+# Tracker entry 72: a member declared in `App/` whose only callers are in `AppTests/`. Two defects
+# in one C5 review cycle had that shape — correct, tested, and never on the path the app takes —
+# and both were found by hand. Needs no Xcode.
+check-wiring:
+	$(PYTHON) Tools/c5/check-app-wiring.py
