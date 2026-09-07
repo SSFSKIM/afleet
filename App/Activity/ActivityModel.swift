@@ -128,6 +128,10 @@ final class ActivityModel {
     /// assigning the sample unconditionally would hide a pending decision or restore an answered
     /// one.
     private var liveDuringSample: Set<ChannelKey>?
+    /// The pumps whose stream is being drained before it is let go, by channel. A retired pump is
+    /// kept here until the frames already queued on its stream have been folded; nothing else may
+    /// consult it, which is why it is not `pumps`.
+    private var draining: [ChannelKey: (pump: ChannelEventPump, task: Task<Void, Never>)] = [:]
     /// Adoption may publish a still-background state while waiting for the worker to exit.
     /// Prepared pumps outlive those intermediate states until the enclosing action finishes.
     private var preparedActions: [ChannelKey: Int] = [:]
@@ -182,6 +186,8 @@ final class ActivityModel {
         pumps.removeAll()
         for task in starting.values { task.cancel() }
         starting.removeAll()
+        for entry in draining.values { entry.task.cancel(); entry.pump.stop() }
+        draining.removeAll()
     }
 
     /// The one feed of `ChannelState`s: `FleetBrowserModel` consumes `updates` and hands each state
@@ -228,7 +234,8 @@ final class ActivityModel {
     /// prepared before an action. Do not impose a second process cap on event listeners here.
     private func isWorthKeeping(_ state: ChannelState) -> Bool {
         !state.pendingDecisions.isEmpty || state.systemItem != nil
-            || pumps[state.key] != nil || history[state.key] != nil || isLive(state)
+            || pumps[state.key] != nil || history[state.key] != nil || draining[state.key] != nil
+            || isLive(state)
     }
 
     private func isLive(_ state: ChannelState?) -> Bool {
@@ -273,11 +280,32 @@ final class ActivityModel {
         }
     }
 
+    /// Lets a channel go, **after** the pump has folded what its stream had already queued.
+    ///
+    /// The lifecycle states and the wire events are two independently consumed streams, so the
+    /// dormant state that ends a channel can overtake the last frames of it. Cancelling consumption
+    /// on the spot drops those frames from the retained history and from the notifications they
+    /// would have raised. The drain is bounded — a few turns of the main actor, ending as soon as
+    /// the pump goes quiet — never a wait on the process.
     private func retire(_ key: ChannelKey) {
         starting.removeValue(forKey: key)?.cancel()
         guard let pump = pumps.removeValue(forKey: key) else { return }
         if !pump.recent.isEmpty { history[key] = pump.recent }
-        pump.stop()
+        if let superseded = draining.removeValue(forKey: key) {
+            superseded.task.cancel()
+            superseded.pump.stop()
+        }
+        let task = Task { @MainActor [weak self] in
+            await pump.drainQueued()
+            pump.stop()
+            guard let self, !Task.isCancelled, self.draining[key]?.pump === pump else { return }
+            self.draining[key] = nil
+            // A pump started again in the meantime already owns this channel's history.
+            if self.pumps[key] == nil, !pump.recent.isEmpty { self.history[key] = pump.recent }
+            if let state = self.states[key], !self.isWorthKeeping(state) { self.states[key] = nil }
+            self.scheduleRebuild()
+        }
+        draining[key] = (pump, task)
     }
 
     /// This channel's pump, or nil if the app is not following it. Read by a test that has to know

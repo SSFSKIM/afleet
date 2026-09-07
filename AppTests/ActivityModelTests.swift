@@ -277,6 +277,41 @@ final class ActivityModelTests: XCTestCase {
                        "the initial snapshot restored a decision that had already been answered")
     }
 
+    // Wire events and lifecycle states reach Activity on independently consumed streams, so a
+    // dormant state can arrive while final frames are still queued on the pump. Retiring before
+    // the pump has folded what was already queued loses them from the retained history.
+    func testFramesQueuedBeforeADormantStateSurviveRetirement() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        await arm(harness, key)
+        await harness.model.start()
+        XCTAssertNotNil(harness.model.pump(for: key), "no subscription was established")
+
+        // Enqueued without yielding the main actor, so the pump has folded none of them when the
+        // dormant state lands on the line after.
+        for index in 1...4 {
+            harness.lifecycle.enqueue(
+                .frame(FixtureRunner.Invented.authStatus(error: "invented failure",
+                                                         uuid: "invented-queued-\(index)",
+                                                         session: key.session), .first),
+                to: key)
+        }
+        XCTAssertEqual(harness.model.pump(for: key)?.recent.count, 0,
+                       "the frames were folded before the state arrived, so this test proves nothing")
+        harness.model.apply(ActivityFixtures.state(key, origin: .owned(.dormant)))
+
+        let kept = expectation(description: "queued frames retained")
+        Task {
+            await harness.model.whenSettled { model in
+                model.items.filter { $0.key == key && Self.name(of: $0.row.kind) == "authProblem" }.count == 4
+            }
+            kept.fulfill()
+        }
+        let result = await XCTWaiter.fulfillment(of: [kept], timeout: 3)
+        XCTAssertEqual(result, .completed, "frames queued before the dormant state were dropped with the pump")
+        harness.model.stop()
+    }
+
     // F4: focus already on the channel is not a focus-change event when an ask arrives.
     func testNewActivityInTheViewedChannelIsAlreadySeen() async throws {
         let harness = try Harness()

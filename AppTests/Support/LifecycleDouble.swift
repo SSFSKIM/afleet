@@ -36,7 +36,7 @@ actor LifecycleDouble: LifecycleAPI {
     /// The channels `events(of:)` will answer for, and every fan-out taken on each. A fresh stream
     /// per call and one `yield` to all of them, which is `Fleet.events(of:)`'s own contract.
     private var opened: Set<ChannelKey> = []
-    private var streams: [ChannelKey: [AsyncStream<WireEvent>.Continuation]] = [:]
+    private nonisolated let sink = EventSink()
     /// Every `events(of:)` call, in order, whatever it answered. Two consumers of one channel are
     /// legal and expected — the Activity pump takes one and `StreamIngestion` takes its own — so the
     /// only way to say which of them subscribed, and how often, is to count the calls.
@@ -120,15 +120,19 @@ actor LifecycleDouble: LifecycleAPI {
 
     /// How many fan-outs are live on one channel. Two is the shape the tap contract asks for: the
     /// Activity pump's and `StreamIngestion`'s.
-    func fanOutCount(of key: ChannelKey) -> Int { streams[key]?.count ?? 0 }
+    func fanOutCount(of key: ChannelKey) -> Int { sink.count(of: key) }
 
-    func push(_ event: WireEvent, to key: ChannelKey) {
-        for continuation in streams[key] ?? [] { continuation.yield(event) }
-    }
-    func finishEvents(of key: ChannelKey) {
-        for continuation in streams[key] ?? [] { continuation.finish() }
-        streams[key] = nil
-    }
+    func push(_ event: WireEvent, to key: ChannelKey) { sink.push(event, to: key) }
+
+    /// The same enqueue without entering the actor.
+    ///
+    /// A test that has to leave frames *queued* — buffered on the stream and not yet folded by the
+    /// consumer — cannot afford the suspension `await push(_:to:)` costs: the main actor is free
+    /// while that call is in flight and the pump's own task takes it. This one is synchronous, so
+    /// nothing runs between the enqueue and the next line of the test.
+    nonisolated func enqueue(_ event: WireEvent, to key: ChannelKey) { sink.push(event, to: key) }
+
+    func finishEvents(of key: ChannelKey) { sink.finish(key) }
 
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition { unreachable("preconditions") }
     func route(_ text: String, on key: ChannelKey) async -> Routed { unreachable("route") }
@@ -155,12 +159,46 @@ actor LifecycleDouble: LifecycleAPI {
         eventSubscriptions.append(key)
         guard opened.contains(key) else { return nil }
         let (stream, continuation) = AsyncStream<WireEvent>.makeStream(bufferingPolicy: .unbounded)
-        streams[key, default: []].append(continuation)
+        sink.add(continuation, for: key)
         return stream
     }
 
     private nonisolated func unreachable(_ member: String) -> Never {
         fatalError("LifecycleDouble.\(member) is not part of the fleet browser's surface")
+    }
+}
+
+/// The event continuations `LifecycleDouble` hands out, held outside the actor.
+///
+/// `@unchecked Sendable` is sound because the one mutable field is read and written only between
+/// `lock.lock()` and `lock.unlock()` of this instance's private `NSLock`; an
+/// `AsyncStream.Continuation` is itself thread-safe and is yielded to outside the lock.
+final class EventSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var streams: [ChannelKey: [AsyncStream<WireEvent>.Continuation]] = [:]
+
+    func add(_ continuation: AsyncStream<WireEvent>.Continuation, for key: ChannelKey) {
+        lock.lock(); defer { lock.unlock() }
+        streams[key, default: []].append(continuation)
+    }
+
+    func count(of key: ChannelKey) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return streams[key]?.count ?? 0
+    }
+
+    func push(_ event: WireEvent, to key: ChannelKey) {
+        lock.lock()
+        let continuations = streams[key] ?? []
+        lock.unlock()
+        for continuation in continuations { continuation.yield(event) }
+    }
+
+    func finish(_ key: ChannelKey) {
+        lock.lock()
+        let continuations = streams.removeValue(forKey: key) ?? []
+        lock.unlock()
+        for continuation in continuations { continuation.finish() }
     }
 }
 

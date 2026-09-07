@@ -37,6 +37,9 @@ final class ChannelEventPump {
     private(set) var requests: [RequestID: InboundRequest] = [:]
     /// The last epoch an event carried, for a frame that needs one.
     private(set) var epoch: ProcessEpoch = .first
+    /// How many events have been folded. A count, and the only thing `drainQueued()` needs to know:
+    /// whether the stream is still handing over what it had buffered (§11: counts, never contents).
+    private(set) var ingestCount = 0
 
     /// Called after every event, once the three summaries above are already updated, so a consumer
     /// that re-reads the pump sees the event it is being told about.
@@ -71,6 +74,35 @@ final class ChannelEventPump {
     func stop() {
         task?.cancel()
         task = nil
+    }
+
+    /// Gives the consuming task the main actor for as long as it keeps folding, so the frames the
+    /// stream had **already** buffered are counted before the caller lets this pump go.
+    ///
+    /// Bounded twice over: it stops as soon as `quietTurns` consecutive turns fold nothing, and it
+    /// never takes more than `turns` of them. That is deliberate — a pump whose process is still
+    /// writing would otherwise hold a retirement open for as long as the engine kept talking, and
+    /// the frames this exists for are the ones already queued when the channel ended.
+    ///
+    /// The quiet threshold is above one because handing a buffered element to a suspended
+    /// `for await` is itself scheduled work: on a loaded machine a turn can pass with the next
+    /// element in hand and not yet delivered, and a threshold of one or two turned that into frames
+    /// dropped under load rather than a bound doing its job.
+    func drainQueued(turns: Int = 64, quietTurns: Int = 4) async {
+        guard task != nil else { return }
+        var quiet = 0
+        var folded = ingestCount
+        for _ in 0..<turns {
+            await Task.yield()
+            if Task.isCancelled { return }
+            if ingestCount == folded {
+                quiet += 1
+                if quiet == quietTurns { return }
+            } else {
+                quiet = 0
+                folded = ingestCount
+            }
+        }
     }
 
     /// Folds one event. Synchronous and public to the app so a test drives the pump with the frames
@@ -108,6 +140,7 @@ final class ChannelEventPump {
         case .policyAnswered, .unansweredDialog, .sessionIdentityResolved, .stderr:
             break
         }
+        ingestCount &+= 1
         onEvent(self, event)
     }
 
