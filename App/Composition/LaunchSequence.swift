@@ -46,6 +46,13 @@ struct LaunchSequence: Sendable {
     var settingsLoaded: @MainActor @Sendable (any StateStore, AfleetSettings) -> Void = { _, _ in }
     var makeCoordinator: @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating
 
+    /// The background work the last launch of this sequence started, so the next one can retire it.
+    ///
+    /// A reference, held by every copy of this struct — `AppModel` keeps one `LaunchSequence` and
+    /// copies it per launch to install its seams — because the thing being replaced belongs to the
+    /// launch before, not to the value that runs now.
+    let started = LaunchWorkRegistry()
+
     init(storeRoot: URL = LaunchSequence.defaultStoreRoot,
          diagnosticsRoot: URL = LaunchSequence.defaultDiagnosticsRoot,
          resolveEnvironment: @escaping @Sendable () async -> ResolvedEnvironment = LaunchSequence.resolveLoginShellEnvironment,
@@ -208,6 +215,7 @@ struct LaunchSequence: Sendable {
             try? await index.persist()
         }
 
+        var pump: Task<Void, Never>?
         if let changes {
             // `changes.changes` is the feed's primary subscription and was created by its
             // initialiser, so it has been collecting since before the feed read anything. Starting
@@ -220,7 +228,7 @@ struct LaunchSequence: Sendable {
             // lower it for tidiness — a starved pump does not report a slow sidebar, it reports
             // nothing at all, which is why the stall notice below exists as well.
             let appDiagnostics = diagnostics.app
-            Task.detached(priority: .userInitiated) {
+            pump = Task.detached(priority: .userInitiated) {
                 // TranscriptIndex.build is reentrant: it replaces candidates/current across
                 // suspension points. The primary subscription buffers batches until BOTH the
                 // build and the coordinator's snapshot paint finish; only then may deltas mutate
@@ -238,6 +246,14 @@ struct LaunchSequence: Sendable {
             }
             await changes.start()
         }
+
+        // The launch this one replaces stops here, and not before: its watcher retains itself
+        // until `stop()`, its feed's pump is a task nobody else holds, and its index pump would go
+        // on delivering deltas into hosts that have just been rebound to this workspace.
+        // `coordinator.stop` retires the browser's loop and nothing else, so these three handles
+        // are retired by whoever created them, which is this sequence.
+        await started.replace(with: LaunchWork(watcher: watcher, changes: changes,
+                                               tasks: [builtSnapshotDelivered, pump].compactMap { $0 }))
 
         return .workspace(workspace)
     }
@@ -267,6 +283,34 @@ struct LaunchSequence: Sendable {
     static func shape(of error: any Error) -> String {
         if let store = error as? StoreError { return String(describing: store) }
         return String(describing: type(of: error))
+    }
+}
+
+/// The background work one launch owns and the next one retires: the transcript watcher, its change
+/// feed, and the detached index build and change pump.
+struct LaunchWork: Sendable {
+    var watcher: (any TranscriptWatching)?
+    var changes: TranscriptChangeFeed?
+    var tasks: [Task<Void, Never>]
+
+    /// Cancels before it closes, so a pump woken by the feed finishing finds itself cancelled
+    /// rather than delivering one more batch into a workspace nobody is looking at.
+    func stop() async {
+        for task in tasks { task.cancel() }
+        await changes?.stop()
+        watcher?.stop()
+    }
+}
+
+/// The one place a launch's background work is held between launches.
+actor LaunchWorkRegistry {
+    private var current: LaunchWork?
+
+    /// Installs this launch's work and retires the launch it replaced.
+    func replace(with work: LaunchWork?) async {
+        let previous = current
+        current = work
+        await previous?.stop()
     }
 }
 
