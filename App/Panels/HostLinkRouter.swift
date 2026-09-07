@@ -59,8 +59,18 @@ final class HostLinkRouter: LinkRouterCapability {
             fallback(link)
             return
         }
-        if destination == .newWindow, let host, let channel = host.selectedChannel {
-            host.popOut(target.tab, channel: channel)
+        if destination == .newWindow {
+            if let host, let channel = host.selectedChannel {
+                host.popOut(target.tab, channel: channel)
+            } else {
+                // The handler is still told `.newWindow` below, so it would render for a window
+                // that was never opened. Nothing here can open one — the host's notion of the
+                // current channel is the only channel this capability has, and there is none when
+                // the window is on Activity — so the mismatch is reported rather than hidden.
+                // `LinkRouterCapability.open(_:from:)` carrying the channel would remove the case
+                // altogether, and that is an X7 amendment: see this child's Parent revisions.
+                diagnostic("a new-window link had no channel to pop its tab out for")
+            }
         }
         await target.open(link, destination)
     }
