@@ -2,8 +2,8 @@ import Foundation
 import AppKit
 import UserNotifications
 
-/// Where a notification actually goes, decided per launch by what the system says about this
-/// application's authorisation — spike S-C5-1's fallback, taken *beside* the native path rather
+/// Where a notification actually goes, decided per post from app activation and the launch
+/// authorisation result — spike S-C5-1's fallback, taken *beside* the native path rather
 /// than instead of it.
 ///
 /// The spike measured, on macOS 26.5.2 against this ad-hoc-signed build: the authorisation prompt

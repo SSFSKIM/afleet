@@ -53,7 +53,7 @@ enum SetupState: Hashable, Sendable {
     case engineUnreadable(output: String)
     /// `<configHome>/.claude.json` does not report `hasCompletedOnboarding: true`.
     case notSignedIn(configHome: URL)
-    /// X9: one of afleet's own write roots is the config home or lies beneath it. Nothing was
+    /// X9: one of afleet's own write roots overlaps the config home in either direction. Nothing was
     /// constructed — no store, no diagnostics, no `Fleet`.
     case writeRootInsideConfigHome(root: WriteRoot, configHome: URL)
     /// `FileStateStore.init` threw. Carries the error's own shape, which is already path-free.

@@ -252,7 +252,8 @@ final class PanelHostModel: PanelHost {
     var liveChannelCount: Int { Set(sessions.keys.map(\.channel)).count }
 
     /// The channel left the index (`IndexDelta.removed`). Its sessions go at once rather than
-    /// waiting for LRU pressure, and any window popped out for it goes with them.
+    /// waiting for LRU pressure. Pop-out membership invalidates any window drawing it,
+    /// replacing its retained panel view with the missing-channel placeholder.
     ///
     /// `FleetCoordinator` calls this, which is the seam the composition root already drives; a host
     /// released only from a test would leave production accumulating sessions for channels that no

@@ -16,7 +16,7 @@ final class SettingsReadoutTests: XCTestCase {
     ///
     /// The refusal this guards is X9's: `Fleet` builds two of these three itself, eagerly, from a
     /// directory it does not check, so "the sinks write only under their own directory" and "the
-    /// directory is never inside a config home" are the two halves of one guarantee. The other half
+    /// directory never overlaps a config home in either direction" are the two halves of one guarantee. The other half
     /// is `LaunchSequence`'s overlap check; this half is that the sinks are not creating anything
     /// outside what they were pointed at.
     func testDiagnosticsComposerWritesOnlyUnderItsOwnDirectory() throws {
