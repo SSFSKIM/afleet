@@ -20,7 +20,7 @@ import FleetKit
 /// Every path this type touches is under `directory` and nowhere else. That is the whole of its
 /// filesystem contract, and it is what `testDiagnosticsComposerWritesOnlyUnderItsOwnDirectory`
 /// asserts: the write-root overlap check in `LaunchSequence` runs first and refuses to construct
-/// this at all when `directory` would sit inside a config home (X9).
+/// this at all when `directory` and a config home contain one another (X9).
 ///
 /// `@unchecked Sendable` is sound here because the two mutable fields, `wireSink` and `fleetSink`,
 /// are read and written only inside `lock`, this instance's private `NSLock`. That lock is the
@@ -77,17 +77,10 @@ final class DiagnosticsComposer: @unchecked Sendable {
 
     /// Settings' *Delete diagnostics*: the log files go and the four sinks keep working.
     ///
-    /// Removing the files under the sinks is not enough on its own. Each of the three holds an open
-    /// `FileHandle` and a running byte offset, so after an `unlink` it writes on into an inode with
-    /// no name — the user asked to clear the logs and silently got logging turned off until the
-    /// next launch, with the rotation counters wrong as well. So each sink is renewed: the two from
-    /// the packages by replacing the instance, and the app's own by reopening in place, because
-    /// `TranscriptIndex` is holding a reference to it.
-    ///
-    /// One caveat, and it is not fixable from here: `Fleet` builds a **second** `FileDiagnostics`
-    /// and a second `FileFleetDiagnostics` on this same directory, internally and eagerly, and the
-    /// app cannot reach either. Those two keep writing into unlinked inodes until the app is
-    /// relaunched. That is the same root cause as tracker entry 53 and closes with it.
+    /// The app-owned sinks reopen in place because their consumers retain them. The package
+    /// sinks open per append, including the independent instances owned by Fleet.
+    /// Only the four known logs and their single rotations are ours to delete. Never recurse:
+    /// an unrelated directory (even one named like a log) is not a diagnostics artefact.
     func deleteLogs() {
         lock.lock()
         wireSink.flush()
@@ -96,9 +89,11 @@ final class DiagnosticsComposer: @unchecked Sendable {
         app.flush()
 
         let manager = FileManager.default
-        if let names = try? manager.contentsOfDirectory(atPath: directory.path) {
-            for name in names {
-                let file = directory.appending(path: name)
+        for name in ["diagnostics.log", "fleet.log", "timeline.log", "app.log"] {
+            for suffix in ["", ".1"] {
+                let file = directory.appending(path: name + suffix)
+                guard let attributes = try? manager.attributesOfItem(atPath: file.path),
+                      attributes[.type] as? FileAttributeType == .typeRegular else { continue }
                 writes.willWrite(file)
                 try? manager.removeItem(at: file)
             }

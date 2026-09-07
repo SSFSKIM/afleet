@@ -155,6 +155,30 @@ final class LaunchSequenceTests: XCTestCase {
         XCTAssertEqual(log.count("makeStore"), 0, "launch entered a write-producing seam")
     }
 
+    /// T1: reverse containment must refuse before the first writer is reached. The paths are
+    /// invented and the seam throws without touching disk, even on the failing pre-fix run.
+    func testConfigHomeInsideEitherWriteRootRefusesBeforeConstruction() async {
+        for root in [WriteRoot.store, .diagnostics] {
+            let store = URL(filePath: "/invented/store")
+            let logs = URL(filePath: "/invented/logs")
+            let home = (root == .store ? store : logs).appending(path: "nested-home")
+            let log = SeamLog()
+            let sequence = LaunchSequence(
+                storeRoot: store, diagnosticsRoot: logs,
+                resolveEnvironment: { LaunchFixtures.environment(home: URL(filePath: "/invented"), configHome: home) },
+                makeStore: { _, _ in log.note("makeStore"); throw CocoaError(.fileWriteUnknown) })
+            let route = await sequence.run()
+            if case .writeRootInsideConfigHome(root: let refused, configHome: _) = route.setupState {
+                XCTAssertEqual(refused, root)
+            } else { XCTFail("reverse containment did not receive the write-root refusal") }
+            XCTAssertEqual(log.count("makeStore"), 0, "launch entered a write-producing seam")
+        }
+        // Prefix siblings are not containment; canonical components, not string prefixes.
+        XCTAssertNil(LaunchSequence.overlappingWriteRoot(
+            configHome: URL(filePath: "/invented/logs-sibling/home"),
+            storeRoot: URL(filePath: "/invented/store"), diagnosticsRoot: URL(filePath: "/invented/logs")))
+    }
+
     // MARK: - The four refusals
 
     /// G3c. The route assertion alone would pass against code that builds a `Fleet` and then throws

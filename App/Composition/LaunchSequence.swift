@@ -115,7 +115,7 @@ struct LaunchSequence: Sendable {
 
         // 3. The write-root overlap check, ahead of everything that writes. `FileStateStore`'s
         //    `configHomes:` guard covers the store alone, and `Fleet` builds its two diagnostics
-        //    sinks itself, eagerly and unguarded, so a home that contains either root has to be
+        //    sinks itself, eagerly and unguarded, so containment in either direction has to be
         //    refused here or not at all (X9).
         if let collision = Self.overlappingWriteRoot(configHome: configHome.root,
                                                      storeRoot: storeRoot,
@@ -241,7 +241,7 @@ struct LaunchSequence: Sendable {
 
     // MARK: - The overlap check
 
-    /// The write root that is the config home or lies beneath it, or nil when neither does.
+    /// The write root that overlaps the config home in either direction, or nil when disjoint.
     ///
     /// Every path is canonicalised first, because `CLAUDE_CONFIG_DIR` is an arbitrary string and
     /// `~/Library/Logs`, `/Users/x/../x/Library/Logs` and a symlink to either all name one
@@ -253,7 +253,7 @@ struct LaunchSequence: Sendable {
         let home = (CanonicalPath.string(configHome) as NSString).pathComponents
         for (root, path) in [(WriteRoot.store, storeRoot), (WriteRoot.diagnostics, diagnosticsRoot)] {
             let candidate = (CanonicalPath.string(path) as NSString).pathComponents
-            if candidate.starts(with: home) { return root }
+            if candidate.starts(with: home) || home.starts(with: candidate) { return root }
         }
         return nil
     }

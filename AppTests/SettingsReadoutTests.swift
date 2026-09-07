@@ -92,6 +92,32 @@ final class SettingsReadoutTests: XCTestCase {
         }
     }
 
+    /// T1: deletion is an allowlist of files, not a recursive directory purge. All artefacts
+    /// here are ordinary invented scratch data, NOT a config home. The opposite direction
+    /// asserts that known rotated logs really are removed, so a no-op cannot pass.
+    func testDeletingDiagnosticsPreservesUnrelatedFilesAndDirectories() throws {
+        let temp = try TempTree()
+        let logs = try temp.directory("logs")
+        let composer = DiagnosticsComposer(directory: logs)
+        let preserved = ["notes.txt", "nested/keep.txt", "app.log.1/keep.txt", "fleet.log.2"]
+        for name in preserved { try temp.file("logs/" + name, "invented survivor") }
+        let rotations = ["diagnostics.log.1", "fleet.log.1", "timeline.log.1"]
+        for name in rotations { try temp.file("logs/" + name, "invented old log") }
+        XCTAssertEqual(preserved.count, 4)
+        XCTAssertEqual(rotations.count, 3)
+
+        composer.deleteLogs()
+
+        for name in preserved {
+            let data = try? Data(contentsOf: logs.appending(path: name))
+            XCTAssertTrue(data == Data("invented survivor".utf8), "deletion changed an unrelated artefact")
+        }
+        for name in rotations {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: logs.appending(path: name).path),
+                           "deletion retained a known rotated log")
+        }
+    }
+
     // MARK: - G3b
 
     /// The resolved root, its source, the baseline, the installed version and the count of

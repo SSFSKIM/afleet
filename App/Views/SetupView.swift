@@ -58,7 +58,7 @@ struct SetupView: View {
         case .notSignedIn:
             "This Claude Code config home has no signed-in account."
         case .writeRootInsideConfigHome(let root, _):
-            "afleet's \(root == .store ? "state" : "diagnostics") directory is inside the Claude Code config home."
+            "afleet's \(root == .store ? "state" : "diagnostics") directory overlaps the Claude Code config home."
         case .storeUnavailable:
             "afleet could not open its own state directory."
         }
@@ -84,7 +84,7 @@ struct SetupView: View {
         case .writeRootInsideConfigHome:
             """
             afleet never writes inside a Claude Code config home. Point CLAUDE_CONFIG_DIR somewhere \
-            that does not contain ~/Library/Application Support/afleet or ~/Library/Logs/afleet, \
+            outside, and not containing, ~/Library/Application Support/afleet or ~/Library/Logs/afleet, \
             then check again. Nothing was created.
             """
         case .storeUnavailable(let reason):
