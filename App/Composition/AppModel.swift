@@ -88,7 +88,16 @@ final class AppModel {
         }
         // C5's one shipped tab, under `.thread`. C6 takes that id by `unregister(.thread)` and then
         // its own `register`; `register` refuses a duplicate, so the pair is the handover.
-        try? panels.register(PlaceholderTab())
+        //
+        // Not `try?`. On a host constructed one line above this cannot throw, and the only way it
+        // could is a future initialiser registering something first — in which case the placeholder
+        // would vanish with no signal, and the tab C6 hands itself is the last thing that should
+        // disappear quietly.
+        do {
+            try panels.register(PlaceholderTab())
+        } catch {
+            assertionFailure("the placeholder is the first registration on a freshly built host")
+        }
     }
 
     /// Binds the two app-scoped, workspace-dependent owners to the workspace a launch reached.
