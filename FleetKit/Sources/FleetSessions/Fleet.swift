@@ -281,7 +281,7 @@ public actor Fleet: LifecycleAPI {
                                                           session: .resume(key.session, fork: false))
         let current = await state(of: key)
         let (verdict, _) = await preconditionsGate.evaluate(key: key, cwd: launch.cwd, launch: launch,
-                                                            wedged: current?.wedged,
+                                                            configHome: configHome, wedged: current?.wedged,
                                                             foreignHolders: current?.observed.foreign ?? [],
                                                             store: store)
         return verdict

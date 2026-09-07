@@ -1858,6 +1858,53 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-07: `Fleet.fanOut` hands every published `HolderSet` to every supervisor, and
+  `ChannelSupervisor.holdersChanged` narrowed the set to its own session, wrote `state.observed`
+  and then published on every path where no transition applied. One holder change anywhere
+  therefore cost one published `ChannelState` per registered channel, for the life of the
+  process. C5 measured it against a real config home: 13,250 published states across 2,671
+  sessions on one launch, none of them a repeat, 99.8% of them for channels whose narrowed
+  holder view had not changed at all (its tracker entry 60). `updates` is "every transition,
+  coalesced per channel", and a state whose only difference is a fresh `observed.observedAt` is
+  not a transition — C6 subscribes to the same stream and has none of the sidebar's coalescing.
+  The rule now enforced: a supervisor publishes on a holder set only when its own narrowed view
+  changed (compared as a `Set<Holder>`, ignoring the stamp) or a transition was taken. Every
+  transition still publishes through `apply`, every evaluation in the method still runs on every
+  call — the suppressed archive depends on the next tick re-evaluating — and `state.observed` is
+  still written on every call, stamp included. `fanOut` still walks every supervisor; the walk is
+  a filter per supervisor and was never the cost. `HolderFanOutTests` pins both halves: a holder
+  change on A's session publishes nothing on B, and the same set read twice publishes once. The
+  seeding half of C5's entry 60 — a channel publishing each intermediate step of its own
+  seeding — remains open there.
+
+- 2026-09-07: `TrustReader.isTrusted` read `<configHome>/.claude.json`, but the engine resolves
+  that document as `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263
+  `cli.pretty.js:298330`) while the config home is `CLAUDE_CONFIG_DIR ?? join(homedir(),
+  ".claude")` (`:298581`) — two different expressions, coinciding only when the variable is set.
+  On an ordinary installation the document is therefore `~/.claude.json`, the home's *sibling*,
+  and `<configHome>/.claude.json` names a file the engine never reads: every project resolved
+  untrusted and no channel could spawn owned. The reader now takes the document location
+  (`isTrusted(root:globalConfig:)`) and `SpawnPreconditions.evaluate` takes the launch's
+  `ConfigHome` and derives it through `ConfigHome.globalConfig`; `ManagedSettingsReader` and the
+  consent resolver still take `key.configHome`, which is a bare root and genuinely names the
+  home. C5 found it (its tracker entry 59). No test could see it because every home a test
+  builds is environment-shaped, so the two spellings coincided; the new default-shaped case in
+  `PreconditionTests` — a temporary stand-in for `HOME` with `.claude/` as the root and
+  `.claude.json` beside it — was red at `.untrusted` before the fix and `.ready` after.
+
+- 2026-09-07: G5's trusted-directory selector excluded the config home by comparing paths
+  canonicalised with `resolvingSymlinksInPath()`, which resolves `/private/tmp/X` back to
+  `/tmp/X` only when `X` exists. A trust entry naming a not-yet-created directory beneath the
+  scratch home therefore kept its `/private/tmp` spelling while the home itself lost it, no
+  prefix matched, and the exclusion failed open on exactly the path it exists to refuse — the
+  live suite would have created a directory inside a config home. C5 found it through its own
+  port's test (C5 tracker entry 69) and fixed its copy by canonicalising through `realpath(3)`
+  over the longest existing prefix with the missing components put back; the same helper is now
+  local to `Support/LiveGate.swift`, and the selector is extracted there as
+  `trustedDirectories(inDocument:underRoot:excluding:)` with `LiveGateTrustSelectorTests`
+  pinning it — red at two candidates before the fix, green at one after. It was never exploited:
+  no fixture trust entry has ever named such a path.
+
 - 2026-09-07: `FileFleetDiagnostics` held one `FileHandle` open for the sink's whole life and
   tracked its own offset, the same fault C2's `FileDiagnostics` carried and fixed in the same
   commit. The app's *Delete diagnostics* unlinks `fleet.log`, and `Fleet` builds this sink

@@ -706,19 +706,45 @@ corrective's; C5 numbers from 52 and renumbers nothing above.
     Unexploited in C4 today: the scratch `.claude.json` carries no such entry, and the fixture would
     have to name one for the hole to open. Closer: take the same fix in C4's copy. Owner: C4's
     maintainer, or whoever next touches that file.
+70. **Every fixture and live gate ran under a `CLAUDE_CONFIG_DIR` scratch home, which is not the
+    shape of an ordinary installation.** With the variable set the engine reads
+    `$CLAUDE_CONFIG_DIR/.claude.json`, names its keychain credential item with a path-hash suffix
+    (2.1.263 `cli.pretty.js:338499`) and ignores an installed launchd daemon (`:363645`, `:363679`);
+    with it unset — every default installation — it reads `~/.claude.json`, the unsuffixed keychain
+    item, and an installed daemon if there is one. Two `main` defects hid behind this for four
+    children (the always-injected home and `TrustReader`'s document path, corrected 2026-09-07), and
+    the daemon observations in C4's spec were all taken with the installed-daemon path closed
+    (correctives `6b3fc23`, `1c19d52`).
+    Closer: the next fixture re-pin (entry 50) also records under a default-shaped scratch `HOME`
+    (a temporary `HOME` with `.claude/` inside and `.claude.json` beside it, `CLAUDE_CONFIG_DIR`
+    unset), and at least one live gate per spawning child runs in that shape. The cost is that such
+    a child authenticates through the unsuffixed keychain item, the author's own; the gate must
+    stay zero-turn. Owner: C1's maintainer at the re-pin; C6 for the first spawning gate.
+
 71. **The app never calls `AppFleet.shutdown()`.** `Workspace.swift` declares it on the protocol
     and every call site is a test's teardown; no path in `App/` invokes it, so quitting afleet
-    leaves whatever `Fleet.shutdown()` does — ending owned children and closing their streams —
-    undone. Found at C5 Task 8's review follow-up, by sweeping `App/` for members whose only
+    leaves its streams unfinished, its timers uncancelled and its diagnostics unflushed.
+    **Corrected 2026-09-07 by the architect's ruling: `shutdown()` terminates nothing** — its own
+    doc comment says so. What ends an owned child on quit is the **pipe**: an owned channel is the
+    engine on afleet's stdio, and the engine treats stream close as wind-down, killing every
+    still-running local shell and abandoning its other background tasks (parent §7 near line 981,
+    and the Decision Log entry near 2805). So an owned conversation cannot outlive afleet, "keep
+    it running" is not something a quit dialog could offer, and the only way to keep one is to
+    release it first with *Open in terminal*. Found at C5 Task 8's review follow-up, by sweeping `App/` for members whose only
     callers are in `AppTests/` (the same sweep that found `ChannelTimelineRegistry.release(_:)`
     uncalled, which was fixed rather than filed because it had an owner and a seam already). This
     one is filed rather than fixed because it is a decision, not an omission: X5's invariant is that
     afleet never stops a session running in the user's terminal, so what an app-termination hook may
     end is exactly the set `Fleet` owns, and whether quitting the window should end an owned
     conversation at all — rather than releasing it the way *Open in terminal* does — is the
-    architect's call. Closer: an `NSApplicationDelegate.applicationWillTerminate` (or a
-    `ScenePhase` observer) that awaits `workspace.fleet.shutdown()`, once that question is answered.
-    Owner: C6, which owns the surface where a running conversation is visible when the user quits.
+    architect's call. **That call is made**, and goes into parent §7.4 as a binding *Quit* clause
+    at C5's merge: on `applicationShouldTerminate`, if any owned channel has a turn running or
+    running local shells, afleet asks **once**, naming those channels, before ending them — the
+    same warning rule X9 already imposes per channel for `end_session`; on confirmation, or when
+    nothing is busy, it runs `terminate()` on each owned channel that has a process, then
+    `Fleet.shutdown()`, then exits. Foreign and background-job channels are never touched.
+    Closer: implement that clause. Owner: C6, which owns the surface where a running conversation
+    is visible when the user quits.
 72. **A member declared in `App/` whose only callers are in `AppTests/` is not detectable by any
     check this repo runs.** Two real defects in one review cycle had that exact shape:
     `PanelHost.selectIndex(_:in:)`, correct and tested with no production caller while the menu

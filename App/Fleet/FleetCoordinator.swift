@@ -107,7 +107,7 @@ final class FleetCoordinator: WorkspaceCoordinating {
         // The default is the `CLAUDE_CONFIG_DIR` layout, which is what every scratch home in the
         // tests builds. Production never takes it: the convenience initialiser above passes the
         // resolved location.
-        self.globalConfig = globalConfig ?? configHome.appending(path: ".claude.json")
+        self.globalConfig = globalConfig ?? ConfigHome(root: configHome, source: .environment).globalConfig
         self.registrar = registrar
         self.index = index
         self.model = model

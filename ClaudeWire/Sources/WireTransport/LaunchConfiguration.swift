@@ -51,9 +51,8 @@ public struct LaunchConfiguration: Hashable, Sendable {
     public var maxTurns: Int?
     public var environment: ChildEnvironmentOptions
     /// Tests and recordings only: the config home to put in the child in place of the launch's own resolved
-    /// one. `childEnvironment` sets `CLAUDE_CONFIG_DIR` on every launch (§6.9: one ConfigHome per launch, and
-    /// the child is told which one); this field only redirects it, and is how a recording points a child at a
-    /// scratch home instead of the user's.
+    /// one. This is how a recording points a child at a scratch home instead of the user's, and it sets
+    /// `CLAUDE_CONFIG_DIR` even when the resolved home was derived by default.
     public var configHomeOverride: URL?
 
     public init(binary: URL, cwd: URL, session: SessionStart, model: String? = nil, permissionMode: PermissionMode? = nil, agent: String? = nil,
@@ -130,9 +129,17 @@ public struct LaunchConfiguration: Hashable, Sendable {
     /// The scrub lives here rather than at capture because §6.9 derives ConfigHome from the captured
     /// `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_PROJECT_DIR_NAME`.
     ///
-    /// `configHome` is the home this launch resolved, and it is always put back after the scrub. A home is
-    /// always chosen, so the child is always told which one: letting it re-derive its own default is how
-    /// afleet's view of the config home and the child's come apart.
+    /// `configHome` is the home this launch resolved, and it is announced to the child **only** when it was
+    /// named — an override, or a `CLAUDE_CONFIG_DIR` the resolved environment already carried. Setting the
+    /// variable is not a neutral restatement of the default: the engine reads its global config document at
+    /// `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263 `cli.pretty.js:298330`) while the
+    /// config home is `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")` (`:298581`), so a child told its own
+    /// default home reads `~/.claude/.claude.json`, a stub it creates itself with no onboarding, no trust and
+    /// no projects. The keychain service name moves with it — `Claude Code` with the variable unset, and
+    /// `Claude Code-<sha256(configDir)[0:8]>` when it is set (`:338499`) — so such a child is also logged out,
+    /// and two daemon paths turn off (`:363645`, `:363679`). For a default home the variable therefore stays
+    /// absent after the scrub, and the child derives `<HOME>/.claude` from the same `HOME` this environment
+    /// carries, which is the same `HOME` `ConfigHome.derive` read: the two views agree by construction.
     public func childEnvironment(over base: ResolvedEnvironment, configHome: ConfigHome) -> [String: String] {
         var env = base.variables
         for key in Array(env.keys) where key.hasPrefix("CLAUDE") { env[key] = nil }
@@ -147,19 +154,23 @@ public struct LaunchConfiguration: Hashable, Sendable {
         if let f = environment.questionPreviewFormat { env["CLAUDE_CODE_QUESTION_PREVIEW_FORMAT"] = f }
         if environment.forkSubagents { env["CLAUDE_CODE_FORK_SUBAGENT"] = "1" }
         if environment.automodeDecisionLog { env["AUTOMODE_DECISION_LOG"] = "1" } else { env["AUTOMODE_DECISION_LOG"] = nil }
-        // The scrub took the config home with it, so it is put back — always, and from the home this launch
-        // resolved rather than from whatever the shell happened to hold. An override redirects it and nothing
-        // else; that is what a recording uses to point a child at a scratch home.
-        env["CLAUDE_CONFIG_DIR"] = (configHomeOverride ?? configHome.root).path
+        // The scrub took the config home with it. It goes back only when it was named — from the home this
+        // launch resolved rather than from whatever the shell happened to hold, or from an override. A
+        // default home is left for the child to derive, which is what keeps its document and its keychain
+        // item the user's own.
+        if let override = configHomeOverride {
+            env["CLAUDE_CONFIG_DIR"] = override.path
+        } else if configHome.source == .environment {
+            env["CLAUDE_CONFIG_DIR"] = configHome.root.path
+        }
         // §6.9 reads the project directory name together with the config home, so it travels with the home
         // or not at all — and it is read from the **resolved record**, never from the captured environment.
         //
         // The engine honours this variable only when `CLAUDE_CONFIG_DIR` is present in the environment it
-        // sees, and afleet now always injects that home, so inside an afleet child the engine's gate is
-        // always open. `ConfigHome.derive` mirrors the same gate against the *captured* environment, where
-        // the home is often absent: a default-home channel would therefore record no project name while
-        // handing the shell's one to a child that would go on to honour it. Reading the record closes that —
-        // the child gets the name exactly when afleet's own view of the home has one.
+        // sees, and `derive` records a name only for an `.environment` home — the same gate, applied to the
+        // captured environment. So the record already carries a name exactly when the child will be given a
+        // home to open the gate with, and reading the record rather than the capture is what keeps the two
+        // in step: a default-home channel records no name and hands the child none.
         if let projectDirName = configHome.projectDirName {
             env["CLAUDE_CODE_PROJECT_DIR_NAME"] = projectDirName
         }

@@ -843,26 +843,15 @@ final class LiveFleetTests: XCTestCase {
 
     /// Directories the scratch `.claude.json` already trusts, under `/private/tmp/afleet-fixtures/`, in a stable
     /// order. The test never writes trust; a directory the file names but that is gone is recreated, which is a
-    /// write under `/private/tmp`, not under a config home.
+    /// write under `/private/tmp`, not under a config home. The selection itself, and the config-home exclusion
+    /// it carries, live in `LiveGate.trustedDirectories(inDocument:underRoot:excluding:)`.
     private static func trustedDirectory(_ index: Int) throws -> URL {
-        let file = LiveGate.scratchHome.appending(path: ".claude.json")
-        let document = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any]
-        let projects = document?["projects"] as? [String: Any] ?? [:]
-        // `/tmp` is a symlink to `/private/tmp`, so the scratch config home lies under this prefix too. A stray
-        // trust entry naming it, or anything beneath it, would let this test create directories and write
-        // `.mcp.json` inside a config home — the one thing this child must never do — so it is excluded by code
-        // rather than by the fixture's good manners.
-        let home = LiveGate.scratchHome.resolvingSymlinksInPath().path(percentEncoded: false)
-        let trusted = projects.compactMap { path, value -> String? in
-            guard let entry = value as? [String: Any], entry["hasTrustDialogAccepted"] as? Bool == true,
-                  path.hasPrefix("/private/tmp/afleet-fixtures/") else { return nil }
-            let resolved = URL(filePath: path).resolvingSymlinksInPath().path(percentEncoded: false)
-            guard resolved != home, !resolved.hasPrefix(home + "/") else { return nil }
-            return path
-        }.sorted()
+        let trusted = LiveGate.trustedDirectories(inDocument: LiveGate.scratchHome.appending(path: ".claude.json"),
+                                                  underRoot: "/private/tmp/afleet-fixtures/",
+                                                  excluding: LiveGate.scratchHome)
         guard index < trusted.count else { throw XCTSkip("no trusted scratch directory at index \(index)") }
-        let url = URL(filePath: trusted[index])
-        if !FileManager.default.fileExists(atPath: trusted[index]) {
+        let url = trusted[index]
+        if !FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         }
         return url

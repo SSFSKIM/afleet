@@ -950,7 +950,7 @@ public actor ChannelSupervisor {
         var template = launchOverride ?? composedFromRuntime()
         if let preconditions {
             let (verdict, resolved) = await preconditions.evaluate(
-                key: key, cwd: template.cwd, launch: template, wedged: state.wedged,
+                key: key, cwd: template.cwd, launch: template, configHome: configHome, wedged: state.wedged,
                 foreignHolders: state.observed.foreign, store: store)
             diagnostics.record(.precondition(verdict: Self.name(of: verdict), session: key.session.description))
             guard verdict == .ready else {
@@ -1717,6 +1717,14 @@ public actor ChannelSupervisor {
     /// The fleet fans every published `HolderSet` to every supervisor; the supervisor narrows it to its own session.
     public func holdersChanged(_ set: HolderSet) async {
         let mine = set.holders.filter { $0.sessionID == key.session }
+        // Every fan-out reaches every supervisor, and almost none of them are about this channel. A state whose only
+        // difference is a fresh `observedAt` is not a transition, and `updates` promises transitions: publishing one
+        // per fan-out costs one published `ChannelState` per registered channel for every holder change anywhere in
+        // the fleet, which every subscriber then has to coalesce again. So the no-transition publishes below are
+        // taken only when this channel's *own* narrowed view moved. The stamp is still written on every call — it is
+        // read elsewhere — and every evaluation below still runs on every call, because a suppressed archive depends
+        // on the next tick re-evaluating.
+        let viewChanged = Set(mine) != Set(state.observed.holders)
         state.observed = HolderSet(holders: mine, observedAt: set.observedAt)
 
         // A ghost stops costing a slot when its record is gone and its pid is dead — and only then.
@@ -1731,7 +1739,7 @@ public actor ChannelSupervisor {
         // which kind of holder it was: a background job whose roster worker leaves is the same fact as a terminal
         // whose registry record vanishes, and the channel is archived from both.
         if here == .foreignUsersTerminal || here == .backgroundJob {
-            guard mine.isEmpty else { publish(); return }
+            guard mine.isEmpty else { if viewChanged { publish() }; return }
             // Not while an operation of ours is in flight, for the same reason rule 1 below is not. `adopt()` runs
             // `claude stop <short>` and then waits for exactly this disappearance — the job's roster worker leaving
             // and its pid dying *is* the release it is waiting for — and `.adopt` has one row, out of
@@ -1739,11 +1747,11 @@ public actor ChannelSupervisor {
             // wait and its transition, and adopt returns having spawned nothing and thrown nothing: §7.4's round
             // trip silently does not happen. The observer re-reads every `pollInterval`, so a suppressed archive is
             // taken by the next tick once the operation has finished and the channel really is nobody's.
-            guard inFlight == nil else { publish(); return }
+            guard inFlight == nil else { if viewChanged { publish() }; return }
             apply(.recordDisappeared, to: .archivedRecent)
             return
         }
-        guard !mine.isEmpty else { publish(); return }
+        guard !mine.isEmpty else { if viewChanged { publish() }; return }
 
         // Rule 1: afleet wants this channel and somebody else has it. Its own event, never a handoff timeout — the
         // two are raised from different places and G1 has to see both fire. A channel afleet does not want owned
@@ -1771,7 +1779,10 @@ public actor ChannelSupervisor {
         // session is the same fact as it taking a dormant one. Restricting this to dormant left an archived channel
         // archived forever with a live foreign holder against its name, which is what G5's foreign-session scenario
         // found.
-        guard here == .dormant || here == .archivedRecent || here == .archivedOlder else { publish(); return }
+        guard here == .dormant || here == .archivedRecent || here == .archivedOlder else {
+            if viewChanged { publish() }
+            return
+        }
         let (origin, presence) = OriginResolver.resolve(key: key, ownedState: nil, holders: mine, pendingHatch: false)
         state.presence = presence
         switch origin {

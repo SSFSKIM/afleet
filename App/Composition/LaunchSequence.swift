@@ -284,26 +284,9 @@ enum CanonicalPath {
     }
 }
 
-extension ConfigHome {
-    /// Where `.claude.json` actually is, which is **not** always inside the config home.
-    ///
-    /// The engine resolves it as `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` —
-    /// 2.1.263 `cli.pretty.js:298330`, `Ot(e) { return { globalConfig: Xe(e || Mt(), ".claude.json"), … } }`
-    /// with `Mt` bound to `os.homedir`. The config home is `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")`
-    /// — a *different* expression — so the two coincide only when the variable is set. With it
-    /// unset, which is the ordinary installation, the config home is `~/.claude` and the document
-    /// is its sibling `~/.claude.json`, and `<configHome>/.claude.json` names a file that has
-    /// never existed.
-    ///
-    /// `ConfigHome.source` already records which of the two derivations produced the root, so this
-    /// needs nothing from the environment a second time.
-    var globalConfig: URL {
-        switch source {
-        case .environment: root.appending(path: ".claude.json")
-        case .default: root.deletingLastPathComponent().appending(path: ".claude.json")
-        }
-    }
-}
+// `ConfigHome.globalConfig` is AfleetCore's as of `6b3fc23`. C5 declared its own copy here
+// while the engine fact was still C5's finding; keeping it after the corrective would make a
+// same-named member ambiguous at every use site.
 
 /// The engine's global config document, read and never written (X9).
 ///

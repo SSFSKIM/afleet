@@ -233,13 +233,9 @@ final class LaunchConfigurationTests: XCTestCase {
     /// §6.9 reads the project directory name together with the config home, and the source is the resolved
     /// record rather than the captured environment.
     ///
-    /// This test previously asserted the opposite — that a captured `CLAUDE_CODE_PROJECT_DIR_NAME` reaches
-    /// the child whatever the record says — and that rule is now wrong rather than merely superseded. The
-    /// engine honours the name only when it also sees `CLAUDE_CONFIG_DIR`, and afleet always injects one, so
-    /// the engine's gate is open inside every afleet child. A default-home channel handed the shell's name
-    /// would honour it while `ConfigHome.derive`, which applies the same gate to the captured environment
-    /// where the home was absent, recorded nothing: afleet's view of the session and the session's own
-    /// behaviour would disagree, which is the split the config-home fix just closed, displaced by one field.
+    /// The engine honours the name only when it also sees `CLAUDE_CONFIG_DIR`, and `derive` records a name
+    /// only for an `.environment` home — the same gate. So the record carries a name exactly when the child
+    /// is given a home to open the gate with, and a captured name must not leak past a record that has none.
     func testTheProjectDirNameComesFromTheResolvedRecordNotTheCapture() {
         let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid))
         let captured = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "HOME": "/Users/x", "CLAUDE_CODE_PROJECT_DIR_NAME": "afleet-work"],
@@ -252,8 +248,8 @@ final class LaunchConfigurationTests: XCTestCase {
         let defaultChild = c.childEnvironment(over: captured, configHome: defaultHome)
         XCTAssertNil(defaultChild["CLAUDE_CODE_PROJECT_DIR_NAME"],
                      "a record with no project name handed the child the shell's one")
-        XCTAssertEqual(defaultChild["CLAUDE_CONFIG_DIR"], defaultHome.root.path,
-                       "and the home is injected regardless, which is what opens the engine's gate")
+        XCTAssertNil(defaultChild["CLAUDE_CONFIG_DIR"],
+                     "and a default home is not announced either, so the engine's gate stays shut")
 
         // A home that came from the environment records the name, and the child is given both.
         let named = ConfigHome.derive(from: ResolvedEnvironment(
@@ -268,6 +264,39 @@ final class LaunchConfigurationTests: XCTestCase {
         // And the record, not the capture, decides which name: a capture that disagrees does not win.
         let other = ConfigHome(root: URL(fileURLWithPath: "/Users/x/.claude-scratch"), source: .environment, projectDirName: "from-the-record")
         XCTAssertEqual(c.childEnvironment(over: captured, configHome: other)["CLAUDE_CODE_PROJECT_DIR_NAME"], "from-the-record")
+    }
+
+    /// A default-derived home is *not* announced to the child, and an environment-derived one is.
+    ///
+    /// Setting `CLAUDE_CONFIG_DIR` is not a neutral restatement of the default. It moves the global config
+    /// document from `~/.claude.json` to `<home>/.claude.json` (2.1.263 `cli.pretty.js:298330`), and it
+    /// changes the keychain service name from `Claude Code` to `Claude Code-<sha256(dir)[0:8]>`
+    /// (`:338499`), so a child told its own default home reads an empty document and a different
+    /// credential item than the user's terminal sessions. The child derives `<HOME>/.claude` from the same
+    /// `HOME` afleet did, so leaving the variable absent is what keeps the two views identical.
+    func testADefaultHomeIsLeftForTheChildToDeriveAndAnEnvironmentHomeIsInjected() {
+        let base = ResolvedEnvironment(variables: ["PATH": "/usr/bin", "HOME": "/Users/x", "CLAUDE_CONFIG_DIR": "/Users/x/.claude"],
+                                       shell: "/bin/zsh", capturedAt: .init(), mode: .login)
+        let c = LaunchConfiguration(binary: bin, cwd: cwd, session: .new(sid))
+
+        let byDefault = ConfigHome(root: URL(fileURLWithPath: "/Users/x/.claude"), source: .default)
+        let defaultChild = c.childEnvironment(over: base, configHome: byDefault)
+        XCTAssertNil(defaultChild["CLAUDE_CONFIG_DIR"],
+                     "a default home must not be announced: setting the variable moves the document and the keychain item")
+        XCTAssertEqual(defaultChild["HOME"], "/Users/x", "and the child derives the same home from the same HOME")
+        XCTAssertEqual(ConfigHome.derive(from: ResolvedEnvironment(variables: defaultChild, shell: "/bin/zsh",
+                                                                  capturedAt: .init(), mode: .login)).root.path,
+                       byDefault.root.path)
+
+        XCTAssertEqual(c.childEnvironment(over: base, configHome: resolved)["CLAUDE_CONFIG_DIR"], resolved.root.path)
+
+        // An override redirects both, which is how a recording points a child at a scratch home.
+        var withOverride = c
+        withOverride.configHomeOverride = URL(fileURLWithPath: "/tmp/afleet-fixtures/config-home")
+        XCTAssertEqual(withOverride.childEnvironment(over: base, configHome: byDefault)["CLAUDE_CONFIG_DIR"],
+                       "/tmp/afleet-fixtures/config-home")
+        XCTAssertEqual(withOverride.childEnvironment(over: base, configHome: resolved)["CLAUDE_CONFIG_DIR"],
+                       "/tmp/afleet-fixtures/config-home")
     }
 
     /// Configuration the engine reads survives the scrub; a marker it sets on its own children does not.

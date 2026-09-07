@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 import AfleetCore
 import ClaudeWire
@@ -510,4 +511,64 @@ struct RecordingDirectoryRunner: DirectoryProcessRunner {
 struct LiveGateFailure: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
+}
+
+// MARK: - the trusted-directory selector
+
+extension LiveGate {
+
+    /// Directories `globalConfig` (a `.claude.json`) already trusts, under `root`, in a stable order, with
+    /// `configHome` and everything beneath it removed.
+    ///
+    /// `/tmp` is a symlink to `/private/tmp`, so a scratch config home lies under the fixtures root too. A stray
+    /// trust entry naming it, or anything beneath it, would let the live suite create directories and write
+    /// `.mcp.json` inside a config home — the one thing this child must never do — so it is excluded by code
+    /// rather than by the fixture's good manners.
+    ///
+    /// Both sides are canonicalised with `TrustedPath.canonical`, not `resolvingSymlinksInPath()`. Foundation
+    /// resolves `/private/tmp/X` back to `/tmp/X` only when `X` exists, so an entry naming a directory the suite
+    /// has not created yet keeps its `/private/tmp` spelling while the config home, which does exist, loses it:
+    /// no prefix matches and the exclusion fails open on exactly the path it is here to refuse. Canonicalisation
+    /// has to resolve as much of a path as exists and carry the rest through unchanged.
+    static func trustedDirectories(inDocument globalConfig: URL, underRoot root: String,
+                                   excluding configHome: URL) -> [URL] {
+        let document = (try? JSONSerialization.jsonObject(with: Data(contentsOf: globalConfig))) as? [String: Any]
+        let projects = document?["projects"] as? [String: Any] ?? [:]
+        let home = TrustedPath.canonical(configHome)
+        return projects.compactMap { path, value -> String? in
+            guard let entry = value as? [String: Any], entry["hasTrustDialogAccepted"] as? Bool == true,
+                  path.hasPrefix(root) else { return nil }
+            let resolved = TrustedPath.canonical(URL(filePath: path))
+            guard resolved != home, !resolved.hasPrefix(home + "/") else { return nil }
+            return path
+        }.sorted().map { URL(filePath: $0) }
+    }
+}
+
+/// Canonicalises a path that may not exist yet.
+///
+/// `realpath(3)` over the longest existing ancestor, with the components below it appended back; the standardized
+/// path if not even the root of it exists. Mirrors C5's `CanonicalPath.string` in the App target, which FleetKit's
+/// tests cannot import — a local copy is the right dependency here, which is none.
+private enum TrustedPath {
+
+    static func canonical(_ url: URL) -> String {
+        let standardized = url.standardizedFileURL.path(percentEncoded: false)
+        var missing: [String] = []
+        var probe = standardized
+        while !probe.isEmpty, probe != "/" {
+            if let resolved = realpath(probe) {
+                return ([resolved] + missing.reversed()).joined(separator: "/")
+            }
+            missing.append((probe as NSString).lastPathComponent)
+            probe = (probe as NSString).deletingLastPathComponent
+        }
+        return standardized
+    }
+
+    private static func realpath(_ path: String) -> String? {
+        guard let buffer = Darwin.realpath(path, nil) else { return nil }
+        defer { free(buffer) }
+        return String(cString: buffer)
+    }
 }

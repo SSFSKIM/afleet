@@ -265,18 +265,29 @@ Child environment, on top of the resolved login-shell environment (§6.9):
 
 The child environment carries **no variable beginning with `CLAUDE`** from the resolved
 environment (§6.9); the table's own entries and `CLAUDE_CONFIG_DIR` — set to the resolved
-ConfigHome root on **every** spawn, not only when a test override is chosen, so the child's
-home equals afleet's view by construction — are added back on purpose, with
-`CLAUDE_CODE_PROJECT_DIR_NAME` set beside it exactly when the resolved ConfigHome record
+ConfigHome root when the home came from the environment or a test override is chosen, and
+**withheld for a default home** (corrected 2026-09-07, below) — are added back on purpose,
+with `CLAUDE_CODE_PROJECT_DIR_NAME` set beside it exactly when the resolved ConfigHome record
 carries it, never read from the capture directly: the engine honours that name only when
-`CLAUDE_CONFIG_DIR` is present in its environment (§6.9), and since afleet now always
-injects the home, the engine's gate is always open inside an afleet child, so afleet's
-record must be the single source or the two views split again one field over. A
+`CLAUDE_CONFIG_DIR` is present in its environment (§6.9), and afleet injects the home for
+exactly the homes whose record can carry a name, so the gate is open exactly when there is a
+name to honour and afleet's record is the single source. The default home is withheld because
+an explicit `CLAUDE_CONFIG_DIR` changes more than the root: the engine resolves the global
+config document as `(CLAUDE_CONFIG_DIR ?? $HOME)/.claude.json` (2.1.263 `cli.pretty.js:298330`,
+`:828780`), names its keychain credential item with a `-sha256(dir)[0:8]` suffix only when the
+variable is set (`:338499`), and closes two daemon paths on it (`:363645`, `:363679`) — so a
+default-home child told `~/.claude` explicitly reads a stub `~/.claude/.claude.json` the engine
+creates, looks up a keychain item that does not exist, and starts logged out and un-onboarded
+while the user's terminal sessions are neither. The child derives `<HOME>/.claude` from the
+same `HOME` afleet derived it from, so the two views still agree by construction. A
 prefix rule, not a list: every marker the CLI sets on its own children changes its
 behaviour somewhere — `CLAUDE_CODE_REMOTE`
 disables auto-memory and changes compaction, `CLAUDE_CODE_CONTAINER_ID` auto-backgrounds
 every command, `CLAUDE_CODE_CHILD_SESSION` turns transcript saving off in the interactive
-CLI and hid a spike observation for a whole run (spike-contention) — a list needs extending
+CLI and switches session registration off with it (no `sessions/<pid>.json` at all: 2.1.263
+`:96526` returns before the write unless `:96608`'s gate holds, and `:193423` closes it on
+the marker; found by C5 2026-09-07) and hid a spike observation for a whole run
+(spike-contention) — a list needs extending
 each time the CLI gains one, and the markers reach afleet through the process-environment
 fallback of §6.9 whenever afleet itself was launched from inside a Claude Code session.
 None of them carries tool output anyway (*Parity F-23*).
@@ -612,8 +623,16 @@ in the channel header whenever it is anything but the OAuth login.
 
 **ConfigHome** is derived from the same capture: `CLAUDE_CONFIG_DIR` when set, else
 `~/.claude`; `CLAUDE_CODE_PROJECT_DIR_NAME` is honored only together with it
-(*SPEC 35.2.2*). Every registry, roster, transcript, daemon and `.claude.json` path the app
-reads routes through this value, and channels are keyed by ConfigHome plus session id.
+(*SPEC 35.2.2*). Every registry, roster, transcript and daemon path the app reads routes
+through this value, and channels are keyed by ConfigHome plus session id. The global config
+document is the one exception, and it is **not** under the config home unless
+`CLAUDE_CONFIG_DIR` is set: the engine resolves it as `(CLAUDE_CONFIG_DIR ?? $HOME)/.claude.json`
+(2.1.263 `cli.pretty.js:298330`), a different expression from the home's
+`CLAUDE_CONFIG_DIR ?? $HOME/.claude`, so on a default installation it is `~/.claude.json`, the
+home's sibling, and `<configHome>/.claude.json` names a file the engine never reads. Every
+reader takes it from `ConfigHome.globalConfig`, which applies the rule from the record's
+source (corrected 2026-09-07 from C5's filing; the scratch-home tests all set the variable,
+where the two expressions coincide, which is why no test saw it).
 There is one ConfigHome per app launch. A project whose own environment (for example a
 `.envrc`) would set a different value is warned about and is unsupported in v1.
 
@@ -648,7 +667,9 @@ hooks from settings, project plugins, project and local allow rules and related 
 are skipped (*SPEC 03 §15*, the "behaviour while untrusted" table), so an untrusted
 project launched headless would silently run a reduced harness. Before any owned spawn,
 afleet reads `projects[<canonical root>].hasTrustDialogAccepted` from
-`<configHome>/.claude.json`, read-only, where the canonical root is the git toplevel of
+the global config document (`ConfigHome.globalConfig`, §6.9: `~/.claude.json` on a default
+installation, `$CLAUDE_CONFIG_DIR/.claude.json` otherwise; corrected 2026-09-07), read-only,
+where the canonical root is the git toplevel of
 the channel's directory, else the directory itself. If it is not `true`, the channel opens
 history-only with a banner "This project has not been trusted in Claude Code" and a
 *Review trust in terminal* action that runs `claude` interactively in a Terminal tab in
@@ -1872,7 +1893,9 @@ doperpowers:writing-plans turns them into tasks.
   banner wording.
 - **S13 Trust over the wire.** Run `set_cwd` with `trust_accepted: true` for an untrusted
   directory and check whether `projects[<root>].hasTrustDialogAccepted` becomes `true`
-  in `<configHome>/.claude.json`. This covers only a directory change, never the startup
+  in the global config document [`<configHome>/.claude.json` as written; that spelling holds
+  only with `CLAUDE_CONFIG_DIR` set, which the scratch home does — §6.9, corrected
+  2026-09-07]. This covers only a directory change, never the startup
   cwd, so the terminal flow stays for new projects regardless; the spike decides whether
   `/cd` into an untrusted directory can use a native dialog. Settled 2026-09-04 (fixtures
   `session-mirror-relocation`, `control-shapes`): it can, through the two-step exchange of
@@ -2398,8 +2421,10 @@ SwiftPM package or target that builds and tests without the children above it, p
 - **X11 Environment injection.** `ResolvedEnvironment` is captured once by ClaudeWire,
   carried as a Core value and handed to Workbench by the app; every git, gh, shell and
   claude process inherits it. The claude child's environment is composed as §6.1 says:
-  prefix scrub, then `CLAUDE_CONFIG_DIR` set to the resolved ConfigHome root on every
-  spawn, then the table's entries and the pass-through set. Owner: C2. Binds C2, C5, C7.
+  prefix scrub, then `CLAUDE_CONFIG_DIR` set to the resolved ConfigHome root when the home
+  came from the environment or an override was chosen and withheld for a default home
+  (2026-09-07; §6.1 has the engine facts), then the table's entries and the pass-through
+  set. Owner: C2. Binds C2, C5, C7.
 
 ### 17.6 Ordering and dependency map
 
@@ -4474,3 +4499,27 @@ Pending — written at finish.
   supervisor and delegating to `CommandRouter` and `StrategyExecutor`, which until now took a
   supervisor the facade never handed out. C6's composer can route a slash command and execute what
   it named through the facade alone.
+- 2026-09-07 correctives on `main` from C5's Task 9 filings (`6b3fc23` ClaudeWire and AfleetCore,
+  `1c19d52` FleetKit, `c4997a9` the live-test selector), applied by the architect. (a) The
+  2026-09-05 rule that `CLAUDE_CONFIG_DIR` is injected on **every** spawn overshot the finding it
+  answered (the scrub had been deleting an environment-derived home; restoring that was right,
+  extending it to the default home was not): the engine keys the global config document
+  (`:298330`, `:828780`), the keychain credential item's suffix (`:338499`) and two daemon paths
+  (`:363645`, `:363679`) on the variable being *set*, so a default-home child told its home
+  explicitly reads a stub document and a missing keychain item — logged out and un-onboarded on
+  every ordinary installation. §6.1 and X11 now withhold the variable for a default home; the
+  child derives the same `<HOME>/.claude`. (b) `.claude.json` is the config home's sibling on a
+  default installation, not its child (§6.9, §6.12, S13 corrected); `ConfigHome.globalConfig`
+  carries the rule and `TrustReader` reads through it — before this, every project on a default
+  installation resolved untrusted and no channel could spawn owned (C5's tracker entry 59; C6
+  would have been the first child to hit it). (c) §6.10: `CLAUDE_CODE_CHILD_SESSION` also switches
+  session registration off (`:193423`); C4's live rig was already safe because it spawns through
+  `childEnvironment`'s prefix scrub — the rule for a test that spawns an engine *without* the
+  template, as C5's foreign-session gate must, is to scrub `CLAUDE*` itself. (d) C4's live-test
+  trusted-directory selector compared a resolved path against an unresolved one and failed open on
+  a not-yet-existing path beneath the config home (`c4997a9`, C5's tracker entry 69). Fidelity
+  caveat recorded as tracker entry 70: every fixture and live gate so far ran under a
+  `CLAUDE_CONFIG_DIR` scratch home, where the engine uses the suffixed keychain item, the in-home
+  document and never an installed launchd daemon; a default-shaped scratch `HOME` has never been
+  recorded. Neither C5 nor C4 needs re-flagging: C5 spawns nothing and already reads the document
+  correctly on its branch, C4's fix is on `main`.
