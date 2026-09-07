@@ -103,7 +103,19 @@ final class ActivityModel {
     /// The last marker the user has seen on each channel, by session id. Persisted under
     /// `FleetKitKeys.unreadCursors`; the store sits beside one config home, so the session alone
     /// identifies the channel in it.
-    private var cursors: [String: String] = [:]
+    private struct SeenActivity: Codable, Equatable {
+        var frames: Set<String>
+        var decisions: Set<String>
+
+        func containsArrivals(since seen: SeenActivity) -> Bool {
+            !frames.isSubset(of: seen.frames) || !decisions.isSubset(of: seen.decisions)
+        }
+
+        // X6 keeps [String: String] at this key; each value is an app-owned opaque cursor.
+        // Encoding sets of strings cannot fail (no floating-point values or custom encoders).
+        var encoded: String { String(decoding: try! JSONEncoder().encode(self), as: UTF8.self) }
+    }
+    private var cursors: [String: SeenActivity] = [:]
     private var rebuildTask: Task<Void, Never>?
     /// The last cursor write. Each waits for the one before it, so two viewings in quick succession
     /// cannot write the older cursor last.
@@ -142,7 +154,9 @@ final class ActivityModel {
            let persisted = try? await store.read([String: String].self,
                                                  namespace: .fleetKit,
                                                  key: FleetKitKeys.unreadCursors) {
-            cursors = persisted ?? [:]
+            cursors = (persisted ?? [:]).compactMapValues {
+                try? JSONDecoder().decode(SeenActivity.self, from: Data($0.utf8))
+            }
         }
         for state in await lifecycle.states() { states[state.key] = state }
         for key in states.keys where isLive(states[key]) { await follow(key) }
@@ -361,20 +375,19 @@ final class ActivityModel {
     func badge(for session: SessionID) -> ChannelBadge {
         let key = ChannelKey(configHome: configHome, session: session)
         guard let marker = marker(of: key) else { return .none }
-        guard cursors[session.description] != marker else { return .none }
+        if let seen = cursors[session.description], !marker.containsArrivals(since: seen) { return .none }
         return ChannelBadge(count: states[key]?.pendingDecisions.count ?? 0, isUnread: true)
     }
 
-    /// The historical frame marker plus every outstanding decision identity. The query renders
-    /// decisions before history, not in arrival order: taking the last row lets a seen frame hide
-    /// a new permission ask. Sorting decisions keeps a state-only reorder from moving the cursor.
-    private func marker(of key: ChannelKey) -> String? {
-        let frame = items.last { $0.key == key && $0.row.itemUUID != nil }?.row.itemUUID
-        let decisions = states[key]?.pendingDecisions.map { $0.id.rawValue }.sorted() ?? []
-        let parts = [frame].compactMap { $0 } + decisions
-        guard !parts.isEmpty else { return nil }
-        // Length-prefix opaque identifiers, so delimiters inside an engine id cannot collide.
-        return parts.map { "\($0.utf8.count):\($0)" }.joined()
+    /// Compare current identities with what was seen, not two whole pending-set snapshots.
+    /// An identity's departure (answer, cancellation or row removal) cannot be an arrival.
+    /// Frames and decisions have separate identity domains so a seen frame cannot hide an ask.
+    /// Both sets are bounded by the current query/pending table, not an ever-growing event log.
+    private func marker(of key: ChannelKey) -> SeenActivity? {
+        let frames = Set(items.filter { $0.key == key }.compactMap { $0.row.itemUUID })
+        let decisions = Set(states[key]?.pendingDecisions.map { $0.id.rawValue } ?? [])
+        guard !frames.isEmpty || !decisions.isEmpty else { return nil }
+        return SeenActivity(frames: frames, decisions: decisions)
     }
 
     /// The user looked at this channel: its badge clears, and the cursor is persisted so a rebuilt
@@ -383,7 +396,7 @@ final class ActivityModel {
         let key = ChannelKey(configHome: configHome, session: session)
         guard let marker = marker(of: key), cursors[session.description] != marker else { return }
         cursors[session.description] = marker
-        let snapshot = cursors
+        let snapshot = cursors.mapValues(\.encoded)
         if let store {
             let previous = cursorWrite
             cursorWrite = Task {

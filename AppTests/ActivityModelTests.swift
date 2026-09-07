@@ -309,6 +309,71 @@ final class ActivityModelTests: XCTestCase {
         harness.model.stop()
     }
 
+    /// T6: departure is not arrival, before or after cursor persistence. Also cancel an
+    /// unseen newcomer: the already-seen survivor must not inherit its unread state.
+    /// Round one's seen-history/new-request assertion remains a separate regression above.
+    func testAnswerAndCancellationDoNotMakeSeenSurvivorsUnread() async throws {
+        for answer in [false, true] {
+            let tree = try TempTree()
+            let store = try FileStateStore(baseDirectory: tree.root.appending(path: "store"), configHomes: [])
+            let harness = try Harness(store: store)
+            let key = harness.key("1")
+            let a = try FixtureRunner.request("permission-allow", subtype: "can_use_tool", id: "invented-a")
+            let b = try FixtureRunner.request("permission-allow", subtype: "can_use_tool", id: "invented-b")
+            let c = try FixtureRunner.request("permission-allow", subtype: "can_use_tool", id: "invented-c")
+            await arm(harness, key, pending: [ActivityFixtures.pending(a), ActivityFixtures.pending(b)])
+            await harness.model.start()
+            harness.model.pump(for: key)?.ingest(.request(a))
+            harness.model.pump(for: key)?.ingest(.request(b))
+            harness.model.pump(for: key)?.ingest(.frame(FixtureRunner.Invented.authStatus(
+                error: "invented failure", uuid: "invented-history", session: key.session), .first))
+            harness.model.rebuild()
+            XCTAssertEqual(harness.model.items.count, 3, "the two decisions and history were not present")
+            XCTAssertEqual(harness.model.badge(for: key.session), ChannelBadge(count: 2, isUnread: true))
+            harness.model.markSeen(key.session)
+            await harness.model.cursorsPersisted()
+            harness.model.apply(ActivityFixtures.state(key, pending: [ActivityFixtures.pending(b), ActivityFixtures.pending(a)]))
+            harness.model.rebuild()
+            XCTAssertEqual(harness.model.badge(for: key.session), .none, "reordering seen decisions made them unread")
+
+            let remaining = ActivityFixtures.state(key, pending: [ActivityFixtures.pending(b)])
+            if answer {
+                await harness.lifecycle.stage(.success(remaining))
+                let ask = try XCTUnwrap(harness.model.items.first { $0.ask?.id == a.id }?.ask)
+                await harness.model.allowOnce(ask, on: key)
+                let actions = await harness.lifecycle.actions
+                XCTAssertEqual(actions.count, 1, "the answer path was not exercised")
+            } else {
+                harness.model.pump(for: key)?.ingest(.requestCancelled(a.id, .first))
+                harness.model.apply(remaining)
+                harness.model.rebuild()
+            }
+            XCTAssertEqual(harness.model.items.compactMap(\.ask).count, 1, "the wrong number of permission rows survived")
+            XCTAssertEqual(harness.model.badge(for: key.session), .none, "a departure made the seen survivor unread")
+            harness.model.stop()
+
+            await harness.lifecycle.setStates([remaining])
+            let rebuilt = ActivityModel(lifecycle: harness.lifecycle, configHome: harness.configHome,
+                                        shell: harness.shell, router: harness.router, store: store)
+            await rebuilt.start()
+            XCTAssertEqual(rebuilt.items.count, 1, "the remaining decision was absent after restart")
+            XCTAssertEqual(rebuilt.badge(for: key.session), .none, "persisted seen identities were lost on departure")
+            rebuilt.apply(ActivityFixtures.state(key, pending: [ActivityFixtures.pending(b), ActivityFixtures.pending(c)]))
+            rebuilt.pump(for: key)?.ingest(.request(c))
+            rebuilt.rebuild()
+            XCTAssertEqual(rebuilt.badge(for: key.session), ChannelBadge(count: 2, isUnread: true),
+                           "the seen survivor masked a newly arrived request")
+            rebuilt.pump(for: key)?.ingest(.requestCancelled(c.id, .first))
+            rebuilt.apply(remaining)
+            rebuilt.rebuild()
+            XCTAssertEqual(rebuilt.badge(for: key.session), .none, "the cancelled newcomer left a seen survivor unread")
+            rebuilt.apply(ActivityFixtures.state(key, pending: []))
+            rebuilt.rebuild()
+            XCTAssertEqual(rebuilt.badge(for: key.session), .none, "an empty channel retained an unread marker")
+            rebuilt.stop()
+        }
+    }
+
     // MARK: - G2a
 
     /// Two channels at a `can_use_tool`, the `rate-limited-turn` fixture on a third, and an
