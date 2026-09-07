@@ -355,7 +355,7 @@ final class ChannelRegistrarTests: XCTestCase {
             makeStore: { base, homes in try FileStateStore(baseDirectory: base, configHomes: homes) },
             makeDiagnostics: { DiagnosticsComposer(directory: $0) },
             makeIndex: { _, _, _ in index },
-            fleetFactory: { _, _, _, _, _ in fleet },
+            fleetFactory: { _, _, _, _, _, _ in fleet },
             makeWatcher: { _ in StubWatcher() },
             readClaudeJSON: { _ in true })
     }

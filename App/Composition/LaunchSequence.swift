@@ -37,7 +37,11 @@ struct LaunchSequence: Sendable {
     /// package that writes under it, is reported here before the write. `.none` in production.
     var writes: AppFileWrites
     var makeIndex: @Sendable (ConfigHome, any StateStore, DiagnosticsComposer) -> any IndexAccess
-    var fleetFactory: @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL) -> any AppFleet
+    /// The last argument is parent §11's capture provider, which `Fleet`'s default process factory asks at every
+    /// spawn. It is a seam argument rather than something `makeFleet` resolves for itself because the Developer
+    /// toggle behind it is read here, from the store this launch opened.
+    var fleetFactory: @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL,
+                                 @escaping @Sendable () -> RawCapture?) -> any AppFleet
     var makeWatcher: @Sendable (ConfigHome) -> any TranscriptWatching
     /// The global config document's `hasCompletedOnboarding`. It takes the whole `ConfigHome` and
     /// not its root, because where that document lives depends on how the root was derived.
@@ -62,7 +66,8 @@ struct LaunchSequence: Sendable {
          makeStore: (@Sendable (URL, [URL]) throws -> any StateStore)? = nil,
          makeDiagnostics: (@Sendable (URL) -> DiagnosticsComposer)? = nil,
          makeIndex: @escaping @Sendable (ConfigHome, any StateStore, DiagnosticsComposer) -> any IndexAccess = LaunchSequence.makeTranscriptIndex,
-         fleetFactory: @escaping @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL) -> any AppFleet = LaunchSequence.makeFleet,
+         fleetFactory: @escaping @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL,
+                                            @escaping @Sendable () -> RawCapture?) -> any AppFleet = LaunchSequence.makeFleet,
          makeWatcher: @escaping @Sendable (ConfigHome) -> any TranscriptWatching = { TranscriptWatcher(configHome: $0.root) },
          readClaudeJSON: @escaping @Sendable (ConfigHome) -> Bool = { ClaudeJSONReader.hasCompletedOnboarding(in: $0) },
          makeCoordinator: @escaping @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating = { _ in NoopWorkspaceCoordinator() }) {
@@ -108,9 +113,11 @@ struct LaunchSequence: Sendable {
                         diagnostics: diagnostics.timeline)
     }
 
-    static let makeFleet: @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL) -> any AppFleet = { home, environment, binary, store, diagnosticsRoot in
+    static let makeFleet: @Sendable (ConfigHome, ResolvedEnvironment, URL, any StateStore, URL,
+                                     @escaping @Sendable () -> RawCapture?) -> any AppFleet = {
+        home, environment, binary, store, diagnosticsRoot, capture in
         Fleet(configHome: home, environment: environment, binary: binary, store: store,
-              diagnosticsDirectory: diagnosticsRoot)
+              diagnosticsDirectory: diagnosticsRoot, capture: capture)
     }
 
     // MARK: - The launch
@@ -174,7 +181,13 @@ struct LaunchSequence: Sendable {
         // 8. The fleet. `Fleet` builds two diagnostics sinks of its own, internally and eagerly,
         //    from the directory it is handed; that root is the app's whole part in those bytes.
         writes.willDelegate(diagnosticsRoot)
-        let fleet = fleetFactory(configHome, environment, binary, store, diagnosticsRoot)
+        // §11's capture tree, which is C2's to write and the app's to declare and to switch on and off. The
+        // provider is what the fleet's default process factory asks at every spawn, so the Developer toggle
+        // takes effect on the next channel opened rather than the next launch.
+        let rawCapture = RawCaptureSwitch(diagnosticsRoot: diagnosticsRoot, configHome: configHome,
+                                          enabled: settings.developer.rawFrameCapture)
+        writes.willDelegate(RawCaptureSwitch.captureRoot(under: diagnosticsRoot))
+        let fleet = fleetFactory(configHome, environment, binary, store, diagnosticsRoot, rawCapture.provider)
         await fleet.start()
 
         // 10. The watcher, unless the Developer toggle left it stopped (item 56). Its single
@@ -195,7 +208,8 @@ struct LaunchSequence: Sendable {
 
         let workspace = Workspace(configHome: configHome, environment: environment, binary: binary,
                                   installed: installed, store: store, index: index, fleet: fleet,
-                                  watcher: watcher, changes: changes, diagnostics: diagnostics)
+                                  watcher: watcher, changes: changes, diagnostics: diagnostics,
+                                  rawCapture: rawCapture)
 
         // 9. Registration, through the coordinator seam, at all three points.
         let coordinator = await makeCoordinator(workspace)

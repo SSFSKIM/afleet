@@ -89,12 +89,19 @@ final class SettingsReadout {
     /// not live — which is what item 33 points at a `fake-claude`.
     func save() async {
         try? await AfleetSettingsStore.write(settings, to: workspace.store)
+        // Raw frame capture is the one Developer setting that is live: the spawn path asks the switch at every
+        // spawn, so the next channel opened captures. Channels already running keep what they were spawned with.
+        workspace.rawCapture?.isOn = settings.developer.rawFrameCapture
     }
 
-    /// Removes only known diagnostics files and leaves the four sinks writing. The
-    /// renewal is the composer's, because deleting a file out from under an open handle turns
+    /// Removes only known diagnostics files — the four logs and §11's capture tree — and leaves the four sinks
+    /// writing. The renewal is the composer's, because deleting a file out from under an open handle turns
     /// logging off silently rather than clearing it.
-    func deleteDiagnostics() {
+    ///
+    /// The capture's own handles are closed first, for that same reason turned around: a capture writing into a
+    /// file that has just been unlinked goes on filling an inode nobody can reach or account for.
+    func deleteDiagnostics() async {
+        await workspace.rawCapture?.capture.prune(keeping: [])
         workspace.diagnostics.deleteLogs()
     }
 
@@ -138,7 +145,7 @@ struct SettingsView: View {
                 ForEach(StoreNamespace.allCases, id: \.self) { namespace in
                     LabeledContent(namespace.rawValue, value: Self.describe(readout.schemaStatuses[namespace]))
                 }
-                Button("Delete diagnostics", role: .destructive) { readout.deleteDiagnostics() }
+                Button("Delete diagnostics", role: .destructive) { Task { await readout.deleteDiagnostics() } }
             }
 
             Section("Developer") {

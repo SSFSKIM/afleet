@@ -803,7 +803,8 @@ private struct Rig {
                               fleet: StubFleet(),
                               watcher: watcher,
                               changes: feed,
-                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)))
+                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)),
+                              rawCapture: nil)
 
         registry = ChannelTimelineRegistry()
         registry.attach(to: workspace, lifecycle: lifecycle)

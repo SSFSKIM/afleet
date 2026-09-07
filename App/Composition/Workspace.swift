@@ -24,6 +24,9 @@ struct Workspace: Sendable {
     /// `TimelineNotice.indexBuilt` and nothing else records it, and Settings' Developer section
     /// reveals and deletes this directory.
     let diagnostics: DiagnosticsComposer
+    /// The Developer *raw frame capture* toggle as the spawn path sees it (§11): the launch built one and handed
+    /// its provider to the fleet, and Settings moves it here. Nil only where a test builds a workspace by hand.
+    let rawCapture: RawCaptureSwitch?
 }
 
 /// The fleet as the app uses it. `LifecycleAPI` is what C4 published for C5, C6 and C7, but it

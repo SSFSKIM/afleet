@@ -281,7 +281,7 @@ final class SettingsReadoutTests: XCTestCase {
         let workspace = Workspace(configHome: source.configHome, environment: source.environment,
                                   binary: source.binary, installed: source.installed, store: store,
                                   index: source.index, fleet: source.fleet, watcher: nil, changes: nil,
-                                  diagnostics: source.diagnostics)
+                                  diagnostics: source.diagnostics, rawCapture: source.rawCapture)
         let lifecycle = LifecycleDouble()
         let key = ActivityFixtures.key("1", configHome: home)
         await lifecycle.setStates([ActivityFixtures.state(key)])
@@ -380,7 +380,7 @@ final class SettingsReadoutTests: XCTestCase {
                                        storage: StoreIndexStorage(store: store),
                                        diagnostics: signal)
             },
-            fleetFactory: { _, _, _, _, _ in fleet },
+            fleetFactory: { _, _, _, _, _, _ in fleet },
             makeWatcher: { _ in watcher },
             readClaudeJSON: { _ in true })
 

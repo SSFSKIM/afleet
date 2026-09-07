@@ -46,8 +46,9 @@ final class LiveForeignChannelTests: XCTestCase {
             storeRoot: try tree.directory("store"),
             diagnosticsRoot: try tree.directory("logs"),
             resolveEnvironment: { environment },
-            fleetFactory: { configHome, resolved, binary, store, diagnostics in
-                RecordingAppFleet(inner: LaunchSequence.makeFleet(configHome, resolved, binary, store, diagnostics),
+            fleetFactory: { configHome, resolved, binary, store, diagnostics, capture in
+                RecordingAppFleet(inner: LaunchSequence.makeFleet(configHome, resolved, binary, store, diagnostics,
+                                                                 capture),
                                   log: recorder)
             })
         let box = ModelBox()
