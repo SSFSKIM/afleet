@@ -103,11 +103,13 @@ final class LaunchSequenceTests: XCTestCase {
         let started = await XCTWaiter.fulfillment(of: [entered], timeout: 3)
         XCTAssertEqual(started, .completed, "first launch never reached the resolver")
         let secondEntered = expectation(description: "second caller started")
-        var held = true
+        // A box rather than a local: the closure below is sendable, so a captured `var` is read
+        // from outside the isolation that writes it even when both happen on the main actor.
+        let held = HeldFlag()
         let second = Task {
             secondEntered.fulfill()
             await app.launch()
-            if held { premature.fulfill() }
+            if held.isHeld { premature.fulfill() }
             XCTAssertTrue(app.route.workspace != nil, "second caller returned without a workspace")
             XCTAssertTrue(app.settingsReadout != nil, "second caller returned before workspace binding")
         }
@@ -115,7 +117,7 @@ final class LaunchSequenceTests: XCTestCase {
         XCTAssertEqual(startedSecond, .completed, "second caller never started")
         let blocked = await XCTWaiter.fulfillment(of: [reentered, premature], timeout: 0.2)
         XCTAssertEqual(blocked, .completed, "concurrent launch restarted or returned before completion")
-        held = false
+        held.release()
         release.finish()
         await first.value
         await second.value
@@ -824,6 +826,18 @@ final class LaunchSequenceTests: XCTestCase {
         }
         func emit(_ paths: [URL]) { continuation.yield(paths) }
         func finish() { continuation.finish() }
+    }
+
+    /// Whether the second caller is still expected to be waiting: written by the test, read by the
+    /// task it is asserting about.
+    private final class HeldFlag: @unchecked Sendable {   // `lock` serialises `held`
+        private let lock = NSLock()
+        private var held = true
+        var isHeld: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return held
+        }
+        func release() { lock.lock(); held = false; lock.unlock() }
     }
 
     /// A route written from one task and read from another.

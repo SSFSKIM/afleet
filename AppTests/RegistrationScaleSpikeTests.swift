@@ -38,7 +38,7 @@ final class RegistrationScaleSpikeTests: XCTestCase {
             for n in 0..<Self.transcriptCount {
                 let session = Self.session(n)
                 let age: TimeInterval = n.isMultiple(of: 2) ? 3600 : 60 * 24 * 3600
-                try? home.write(ScratchConfigHome.Transcript(
+                _ = try? home.write(ScratchConfigHome.Transcript(
                     session: session,
                     slug: "invented-project-\(n % projectCount)",
                     cwd: "/invented/project-\(n % projectCount)",
