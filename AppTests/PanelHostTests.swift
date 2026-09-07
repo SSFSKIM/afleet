@@ -186,9 +186,13 @@ final class PanelHostTests: XCTestCase {
     ///
     /// The last clause — an `.archived` origin evicts nothing — is the discriminating one, because
     /// evicting on `.archived` is the plausible wrong rule and would destroy state for nearly every
-    /// channel. It is asserted against the surface a wrong host would have hooked: an archived
-    /// `ChannelState` published to the fleet, observed reaching the browser's own row, with the
-    /// host's session count unmoved on the other side of it.
+    /// channel. **It is a trace assertion and is stated as one**, per the plan's rule for a break
+    /// that cannot be executed: no mutation of this code can make the clause fail, because nothing
+    /// in `PanelHostModel` reads a `ChannelOrigin` at all — that absence *is* the property. What is
+    /// asserted instead is the surface a wrong host would have had to hook: an archived
+    /// `ChannelState` is published to the fleet and observed reaching the browser's own row, so the
+    /// signal demonstrably arrived in the app, and the host's session count is unmoved on the other
+    /// side of it.
     func testTheSessionCacheIsBoundedAndExemptsTheSelectedAndPoppedOutChannels() async throws {
         let host = PanelHostModel()
         let counter = SessionCounter()
@@ -368,8 +372,9 @@ final class PanelHostTests: XCTestCase {
         try rig.appendURL(to: 0, index: 1)
         rig.watcher.emit([rig.paths[0]])
 
-        await XCTWaiter().fulfillment(of: [arrived], timeout: LaunchFixtures.hangGuard)
+        let outcome = await XCTWaiter().fulfillment(of: [arrived], timeout: LaunchFixtures.hangGuard)
         reader.cancel()
+        XCTAssertEqual(outcome, .completed, "the feed published nothing holding the new URL")
         XCTAssertEqual(seen.value.count, 2, "the published list held \(seen.value.count) URLs, not 2")
         XCTAssertTrue(seen.value.contains(PanelFixtures.url(1).absoluteString),
                       "the published list does not hold the URL the change added")

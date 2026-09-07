@@ -428,8 +428,13 @@ final class ChannelTimelineModelTests: XCTestCase {
         try rig.appendAssistantURL(to: 0, url: expected)
         rig.watcher.emit([rig.paths[0]])
 
-        await XCTWaiter().fulfillment(of: [arrived], timeout: LaunchFixtures.hangGuard)
+        // The outcome is asserted, not just awaited. Without this clause a feed that never
+        // published would wait out the hang guard and then pass on `current(limit:)` alone, which
+        // reads the model directly — the publishing half would be untested. Found by mutation.
+        let outcome = await XCTWaiter().fulfillment(of: [arrived], timeout: LaunchFixtures.hangGuard)
         reader.cancel()
+        XCTAssertEqual(outcome, .completed,
+                       "the ingested URL never arrived through the panel context's feed")
         let after = await feed.current(limit: 10)
         XCTAssertEqual(after.count, 1, "the feed holds \(after.count) URLs after the change, not 1")
         XCTAssertTrue(after.contains { $0.url == expected },
