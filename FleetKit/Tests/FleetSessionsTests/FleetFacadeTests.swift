@@ -477,8 +477,9 @@ final class FleetFacadeTests: XCTestCase {
 
         let launches = harness.handles.launches
         XCTAssertEqual(launches.count, 3, "the channel, its fork and the fork's fork")
-        XCTAssertEqual(launches[2].cwd.standardizedFileURL, harness.cwd.standardizedFileURL,
-                       "the grandchild runs in the project, not in the config home")
+        // A boolean: both operands are under the harness's temporary tree (tracker entry 75, §6.3).
+        XCTAssertTrue(launches[2].cwd.standardizedFileURL == harness.cwd.standardizedFileURL,
+                      "the grandchild runs in the project, not in the config home")
         XCTAssertEqual(launches[2].session, .resume(resolved, fork: true),
                        "and forks the session its source is actually running")
     }
@@ -516,12 +517,13 @@ final class FleetFacadeTests: XCTestCase {
 
         await fleet.start()
         let state = try await fleet.open(k, cwd: harness.cwd, recent: true)
-        XCTAssertEqual(state.key, k)
+        // Booleans: `ChannelKey` carries the harness's config home, which is under the temporary directory.
+        XCTAssertTrue(state.key == k, "open returned a state on a different key")
 
         let listed = await fleet.states()
-        XCTAssertEqual(listed.map(\.key), [k])
+        XCTAssertTrue(listed.map(\.key) == [k], "the fleet lists \(listed.count) channels, not the 1 opened")
         let read = await fleet.state(of: k)
-        XCTAssertEqual(read?.key, k)
+        XCTAssertTrue(read?.key == k, "reading the key back gave a state on a different key")
         let unknown = await fleet.state(of: key(SessionID()))
         XCTAssertNil(unknown, "a key the fleet has never been told about")
 
@@ -619,7 +621,8 @@ final class FleetFacadeTests: XCTestCase {
         XCTAssertEqual(request.purpose, PanePurpose.hatch(k.session))
         XCTAssertEqual(request.arguments, ["--resume", k.session.description])
         XCTAssertEqual(request.executable, FakeClaudeLaunch.binary)
-        XCTAssertEqual(request.environment["CLAUDE_CONFIG_DIR"], harness.home.url.path)
+        XCTAssertTrue(request.environment["CLAUDE_CONFIG_DIR"] == harness.home.url.path,
+                      "the hatch names a config home other than the harness's")
         let handedOff = await fleet.state(of: k)?.origin
         XCTAssertEqual(handedOff, .foreignLive(.ownTerminalTab))
 
@@ -756,7 +759,8 @@ final class FleetFacadeTests: XCTestCase {
             while path.count > 1, path.hasSuffix("/") { path.removeLast() }
             return path
         }
-        XCTAssertEqual(real(reported), real(harness.cwd))
+        XCTAssertTrue(real(reported) == real(harness.cwd),
+                      "the child's own `pwd` is not the working directory the harness launched it in")
     }
 
     // MARK: - A restart's unresolved settings

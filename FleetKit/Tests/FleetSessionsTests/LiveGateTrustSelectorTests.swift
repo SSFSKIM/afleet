@@ -45,8 +45,12 @@ final class LiveGateTrustSelectorTests: XCTestCase {
 
         // The floor first: a selector that returned nothing would satisfy every exclusion below and prove none.
         XCTAssertFalse(selected.isEmpty, "the selector returned no candidate at all, so it proves no exclusion")
-        XCTAssertEqual(selected.map { $0.path(percentEncoded: false) }, ["\(base)/invented-trusted"],
-                       "expected exactly 1 candidate, got \(selected.count)")
+        // Both sides are built off the assertion line: `base` is this test's temporary root, so neither the
+        // operands nor the message may carry it (tracker 75, §6.3).
+        let paths = selected.map { $0.path(percentEncoded: false) }
+        let wanted = ["\(base)/invented-trusted"]
+        XCTAssertTrue(paths == wanted,
+                      "expected exactly 1 candidate under the test's own root, got \(selected.count)")
     }
 
     func testAnEmptyProjectsMapYieldsNoCandidate() throws {

@@ -44,15 +44,17 @@ extension LifecycleRowTests {
                                       barrier: rig.spawnBarrier, ownJobShorts: [], diagnostics: rig.diagnostics,
                                       clock: rig.clock)
             let census = await LogoutPlan.build(fleet: fleet)
-            XCTAssertEqual(Set(census.owned), [healthy.key, ghost.key])
+            // Booleans: `ChannelKey` carries the rig's config home, under the temporary directory (tracker 75).
+            XCTAssertTrue(Set(census.owned) == [healthy.key, ghost.key],
+                          "the census owns \(census.owned.count) channels, not the 2 this rig opened")
             rig.forgetTransitions()
 
             let outcome = try await rig.steppingClock {
                 await LogoutPlan.execute(census, choice: .stop, fleet: fleet)
             }
 
-            XCTAssertEqual(outcome, .blocked(wedged: [ghost.key], jobsStillListed: []),
-                           "the plan names the channel that would not go")
+            XCTAssertTrue(outcome == .blocked(wedged: [ghost.key], jobsStillListed: []),
+                          "the plan names the channel that would not go")
             XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 0,
                            "a live process must not lose its credentials mid-turn")
             XCTAssertEqual(ghostHandle.terminateCount, 1)

@@ -45,7 +45,11 @@ final class LogoutPlanTests: XCTestCase {
         let fleet = context(rig, channels: [a, b])
 
         let census = await LogoutPlan.build(fleet: fleet)
-        XCTAssertEqual(Set(census.owned), [a.key, b.key])
+        // Booleans over `ChannelKey` throughout this file: the key carries the rig's config home, which is under
+        // the temporary directory, so an equality failure would print the running machine's account hash
+        // (tracker entry 75, §6.3). The messages name counts, never keys.
+        XCTAssertTrue(Set(census.owned) == [a.key, b.key],
+                      "the census owns \(census.owned.count) channels, not the 2 this rig opened")
         XCTAssertTrue(census.nonEligible.isEmpty, "two idle channels block nothing")
         XCTAssertTrue(census.ownJobs.isEmpty)
         XCTAssertTrue(census.foreign.isEmpty)
@@ -113,10 +117,12 @@ final class LogoutPlanTests: XCTestCase {
 
         let fleet = context(rig, channels: [ghost, healthy])
         let census = await LogoutPlan.build(fleet: fleet)
-        XCTAssertEqual(Set(census.owned), [ghost.key, healthy.key], "a wedged channel is still owned")
+        XCTAssertTrue(Set(census.owned) == [ghost.key, healthy.key],
+                      "a wedged channel is still owned; the census owns \(census.owned.count) of 2")
 
         let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
-        XCTAssertEqual(outcome, .blocked(wedged: [ghost.key], jobsStillListed: []))
+        XCTAssertTrue(outcome == .blocked(wedged: [ghost.key], jobsStillListed: []),
+                      "the plan did not stop on the wedged channel")
         XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 0,
                        "a live ghost must not lose its credentials")
         XCTAssertEqual(rig.scriptedHandles[1].terminateCount, 0,
@@ -147,7 +153,8 @@ final class LogoutPlanTests: XCTestCase {
         XCTAssertNotNil(wedged.wedged)
 
         let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
-        XCTAssertEqual(outcome, .blocked(wedged: [ghost.key], jobsStillListed: []))
+        XCTAssertTrue(outcome == .blocked(wedged: [ghost.key], jobsStillListed: []),
+                      "the plan did not stop on the wedged channel")
         XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 0,
                        "a live ghost must not lose its credentials")
         XCTAssertFalse(rig.spawnBarrier.isRaised)
@@ -194,7 +201,8 @@ final class LogoutPlanTests: XCTestCase {
         guard case .signOutFailed(let exited, let reason) = outcome else {
             return XCTFail("a refused sign-out gave \(outcome)")
         }
-        XCTAssertEqual(exited, [channel.key], "the channel did go, and the report says so")
+        XCTAssertTrue(exited == [channel.key],
+                      "the channel did go, and the report says so: \(exited.count) exited, not 1")
         XCTAssertTrue(reason.contains("auth logout"), "the report names the verb that failed; got \(reason)")
         XCTAssertEqual(rig.runnerCalls.count(prefix: ["auth", "logout"]), 1, "it was attempted")
         let state = await channel.state
@@ -223,7 +231,8 @@ final class LogoutPlanTests: XCTestCase {
         let fleet = context(rig, channels: [channel])
 
         let census = await LogoutPlan.build(fleet: fleet)
-        XCTAssertEqual(census.nonEligible.map(\.key), [channel.key])
+        XCTAssertTrue(census.nonEligible.map(\.key) == [channel.key],
+                      "\(census.nonEligible.count) channels block the sign-out, not the 1 with a running task")
         XCTAssertEqual(census.nonEligible.first?.tasks, [running], "the census names the task it saw")
 
         // The user reads the sheet; the engine arms a second background task in the meantime.
@@ -233,7 +242,8 @@ final class LogoutPlanTests: XCTestCase {
         await channel.mirrorChanged()
 
         let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
-        XCTAssertEqual(outcome, .success(exited: [channel.key], foreignLeftRunning: []))
+        XCTAssertTrue(outcome == .success(exited: [channel.key], foreignLeftRunning: []),
+                      "the plan did not report the one channel exited with nothing foreign left running")
         XCTAssertEqual(handle.controlRequests.map(\.subtype), ["interrupt", "stop_task", "stop_task"],
                        "the turn first, then one stop per task the channel has now")
         XCTAssertEqual(handle.controlRequests.filter { $0.subtype == "stop_task" }
@@ -270,8 +280,10 @@ final class LogoutPlanTests: XCTestCase {
 
         let fleet = context(rig, channels: [channel], ownJobShorts: [short])
         let census = await LogoutPlan.build(fleet: fleet)
-        XCTAssertEqual(census.owned, [channel.key])
-        XCTAssertEqual(census.nonEligible.map(\.key), [channel.key])
+        XCTAssertTrue(census.owned == [channel.key],
+                      "the census owns \(census.owned.count) channels, not the 1 this rig opened")
+        XCTAssertTrue(census.nonEligible.map(\.key) == [channel.key],
+                      "\(census.nonEligible.count) channels block the sign-out, not 1")
         XCTAssertEqual(census.nonEligible.first?.tasks, [taskID])
         XCTAssertEqual(census.ownJobs, [short])
         XCTAssertEqual(census.foreign.map(\.sessionID), [foreignSession])
@@ -302,7 +314,8 @@ final class LogoutPlanTests: XCTestCase {
         rig.diagnostics.mark("act")
         let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
         _ = await removal.value
-        XCTAssertEqual(outcome, .success(exited: [channel.key], foreignLeftRunning: [foreignSession]))
+        XCTAssertTrue(outcome == .success(exited: [channel.key], foreignLeftRunning: [foreignSession]),
+                      "the plan did not report one channel exited and the foreign session left running")
 
         let timeline = Array(rig.diagnostics.timeline.drop { $0 != "act" })
         func at(_ tag: String) throws -> Int {
@@ -343,7 +356,8 @@ final class LogoutPlanTests: XCTestCase {
 
         let fleet = context(rig, channels: [supervisor])
         let census = await LogoutPlan.build(fleet: fleet)
-        XCTAssertEqual(census.nonEligible.map(\.key), [supervisor.key], "a turn in flight is a blocker")
+        XCTAssertTrue(census.nonEligible.map(\.key) == [supervisor.key],
+                      "a turn in flight is a blocker; \(census.nonEligible.count) channels block, not 1")
         XCTAssertEqual(census.nonEligible.first?.tasks, [], "and it names no task; the mirror is empty")
 
         let outcome = await LogoutPlan.execute(census, choice: .wait, fleet: fleet)
@@ -379,13 +393,14 @@ final class LogoutPlanTests: XCTestCase {
 
         let fleet = context(rig, channels: [registered, opened])
         let census = await LogoutPlan.build(fleet: fleet)
-        XCTAssertEqual(census.owned, [opened.key], "the never-opened channel owns no process")
+        XCTAssertTrue(census.owned == [opened.key],
+                      "the never-opened channel owns no process; the census owns \(census.owned.count), not 1")
         XCTAssertEqual(census.foreign.map(\.sessionID), [neverOpened],
                        "a terminal on a registered session is still somebody else's session")
 
         let outcome = try await rig.steppingClock { await LogoutPlan.execute(census, choice: .stop, fleet: fleet) }
-        XCTAssertEqual(outcome, .success(exited: [opened.key], foreignLeftRunning: [neverOpened]),
-                       "the report names the session that kept its token")
+        XCTAssertTrue(outcome == .success(exited: [opened.key], foreignLeftRunning: [neverOpened]),
+                      "the report names the session that kept its token")
     }
 
     /// The background hatch is the terminal hatch's twin, and the barrier is what makes both safe. A
