@@ -77,12 +77,20 @@ final class PlaceholderTabSession: PanelTabSession {
 
     /// Reads the feed once and then follows it. Idempotent: a re-render does not start a second
     /// reader.
+    ///
+    /// **The subscription is taken before the snapshot**, the same ordering the timeline takes
+    /// against its change feed and for the same reason: `updates` does not replay, `current(limit:)`
+    /// is an actor hop, and a publication landing in the window between them reaches nobody. This
+    /// object is retained by the host and `follow` refuses to run twice, so a count lost there is
+    /// lost for the life of the channel. Taken in this order, what is published before the snapshot
+    /// is in the snapshot and what is published after the subscription is in its unbounded buffer.
     func follow(_ feed: any RecentURLFeed, limit: Int) {
         guard watcher == nil else { return }
+        let updates = feed.updates
         watcher = Task { [weak self] in
             let current = await feed.current(limit: limit)
             self?.recentURLCount = current.count
-            for await urls in feed.updates {
+            for await urls in updates {
                 guard let self else { return }
                 self.recentURLCount = urls.count
             }
