@@ -1858,6 +1858,19 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-07: G5's trusted-directory selector excluded the config home by comparing paths
+  canonicalised with `resolvingSymlinksInPath()`, which resolves `/private/tmp/X` back to
+  `/tmp/X` only when `X` exists. A trust entry naming a not-yet-created directory beneath the
+  scratch home therefore kept its `/private/tmp` spelling while the home itself lost it, no
+  prefix matched, and the exclusion failed open on exactly the path it exists to refuse — the
+  live suite would have created a directory inside a config home. C5 found it through its own
+  port's test (C5 tracker entry 69) and fixed its copy by canonicalising through `realpath(3)`
+  over the longest existing prefix with the missing components put back; the same helper is now
+  local to `Support/LiveGate.swift`, and the selector is extracted there as
+  `trustedDirectories(inDocument:underRoot:excluding:)` with `LiveGateTrustSelectorTests`
+  pinning it — red at two candidates before the fix, green at one after. It was never exploited:
+  no fixture trust entry has ever named such a path.
+
 - 2026-09-07: `FileFleetDiagnostics` held one `FileHandle` open for the sink's whole life and
   tracked its own offset, the same fault C2's `FileDiagnostics` carried and fixed in the same
   commit. The app's *Delete diagnostics* unlinks `fleet.log`, and `Fleet` builds this sink
