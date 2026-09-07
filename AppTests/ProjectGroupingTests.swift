@@ -135,6 +135,41 @@ final class ProjectGroupingTests: XCTestCase {
         XCTAssertTrue(beta.worktrees.isEmpty)
     }
 
+    /// A worktree's `gitdir` may be relative, and it is relative to the worktree, not to whatever
+    /// directory the app happens to have been launched from.
+    ///
+    /// `git worktree add` writes a relative `gitdir` whenever the repository was cloned or the
+    /// worktree created with relative paths configured, so this is an ordinary checkout and not a
+    /// contrived one. Resolving it against the process's working directory names a repository that
+    /// is somewhere else entirely — usually nowhere — so both checkouts group under a path that
+    /// does not exist and the real repository becomes a section of its own.
+    ///
+    /// The discriminating clause is the identity, not the count: the one section's id is the real
+    /// repository directory, which no resolution against the process's own directory can produce.
+    func testARelativeGitdirResolvesAgainstTheWorktreeAndNotTheProcess() throws {
+        let tree = try TempTree()
+        let repository = try tree.directory("repo-alpha")
+        try tree.directory("repo-alpha/.git")
+        let first = try tree.directory("worktrees/feature-one")
+        let second = try tree.directory("worktrees/feature-two")
+        // Relative to the worktree directory that holds the `.git` file, which is what git writes.
+        try Data("gitdir: ../../repo-alpha/.git/worktrees/feature-one\n".utf8)
+            .write(to: first.appending(path: ".git"))
+        try Data("gitdir: ../../repo-alpha/.git/worktrees/feature-two\n".utf8)
+            .write(to: second.appending(path: ".git"))
+
+        let rows = [Self.row("1", cwd: repository), Self.row("2", cwd: first), Self.row("3", cwd: second)]
+        let sections = ProjectGrouping().sections(from: rows, paths: PathMemo())
+
+        XCTAssertEqual(sections.count, 1, "grouping produced \(sections.count) sections, not one")
+        let alpha = try XCTUnwrap(sections.first)
+        XCTAssertEqual(alpha.id, CanonicalPath.string(repository),
+                       "the section is not the repository the worktrees point at")
+        XCTAssertEqual(alpha.rows.count, 1, "the repository root's own row is not in the section body")
+        XCTAssertEqual(alpha.worktrees.map(\.title), ["feature-one", "feature-two"])
+        XCTAssertEqual(alpha.allRows.count, 3)
+    }
+
     /// One checkout is not a sub-grouping: a lone worktree's rows sit in its section's body.
     func testASingleCheckoutIsNotSubGrouped() throws {
         let tree = try TempTree()

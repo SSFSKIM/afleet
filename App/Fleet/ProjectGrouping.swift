@@ -282,6 +282,12 @@ final class PathMemo {
 /// A worktree's `.git` is a *file* holding `gitdir: <repo>/.git/worktrees/<name>`, where an ordinary
 /// checkout's is a directory. That one difference is the whole detection: no `git` process is run,
 /// nothing is written, and a `.git` that is neither shape simply is not a worktree.
+///
+/// **The `gitdir` may be relative, and it is relative to the worktree.** `git worktree add` writes a
+/// relative path whenever the repository is configured for one, so this is an ordinary checkout
+/// rather than an exotic one; resolving it as though it were relative to the process names a
+/// directory that depends on where the app was launched from and is usually nowhere. The worktree
+/// then groups under a repository that does not exist, apart from the real one.
 enum WorktreeLink {
     static func mainRepository(of root: String) -> String? {
         let dotGit = root + "/.git"
@@ -296,6 +302,8 @@ enum WorktreeLink {
         let gitDir = line.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
         guard let separator = gitDir.range(of: "/.git/worktrees/") else { return nil }
         let repository = String(gitDir[gitDir.startIndex..<separator.lowerBound])
-        return repository.isEmpty ? nil : CanonicalPath.string(URL(fileURLWithPath: repository))
+        guard !repository.isEmpty else { return nil }
+        let base = URL(fileURLWithPath: root, isDirectory: true)
+        return CanonicalPath.string(URL(fileURLWithPath: repository, isDirectory: true, relativeTo: base))
     }
 }
