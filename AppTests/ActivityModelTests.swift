@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 import AfleetCore
 import ClaudeWire
@@ -436,6 +437,36 @@ final class ActivityModelTests: XCTestCase {
                        "the event produced no rate-limit row, or more than one")
         XCTAssertFalse(after.contains("rateLimitRefused"),
                        "an allowed window with rejected overage was drawn as a refusal (§7.6)")
+    }
+
+    /// T4: two permission rows in the same channel must identify their own requested tools
+    /// beside the answer controls. Inspect Text nodes, not the item's stored toolName, so
+    /// removing the rendered name fails. Non-permission rows keep their text and navigation.
+    func testPermissionRowsRenderTheirRequestedToolBesideAnswerControls() throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        for (index, name) in ["InventedRead", "InventedWrite"].enumerated() {
+            let id = RequestID(rawValue: "invented-request-\(index)")
+            let item = ActivityItem(row: ActivityRow(key: key, kind: .decision(id), text: "can_use_tool"),
+                                    ask: .init(id: id, toolName: name), position: index)
+            let body = ActivityRowView(item: item, title: "Invented channel",
+                                       activity: harness.model, shell: harness.shell).body
+            let text = ViewTree.values(of: Text.self, in: body).flatMap { ViewTree.values(of: String.self, in: $0) }
+            XCTAssertFalse(text.isEmpty, "the row body contained no text")
+            XCTAssertTrue(text.contains(name), "the permission row did not render its requested tool")
+            XCTAssertFalse(text.contains(name == "InventedRead" ? "InventedWrite" : "InventedRead"),
+                           "the row rendered the other request's tool")
+            XCTAssertTrue(ViewTree.button("Allow once", in: body) != nil, "the permission row lost Allow once")
+            XCTAssertTrue(ViewTree.button("Deny", in: body) != nil, "the permission row lost Deny")
+        }
+        let notice = ActivityItem(row: ActivityRow(key: key, kind: .authProblem, text: "Invented auth problem"),
+                                  ask: nil, position: 2)
+        let body = ActivityRowView(item: notice, title: "Invented channel",
+                                   activity: harness.model, shell: harness.shell).body
+        let text = ViewTree.values(of: Text.self, in: body).flatMap { ViewTree.values(of: String.self, in: $0) }
+        XCTAssertTrue(text.contains("Invented auth problem"), "non-permission text was replaced")
+        XCTAssertTrue(ViewTree.button("Go to channel", in: body) != nil, "non-permission navigation disappeared")
+        XCTAssertTrue(ViewTree.button("Allow once", in: body) == nil, "a non-permission row offered approval")
     }
 
     // MARK: - Answering

@@ -89,7 +89,7 @@ private struct BannerStack: View {
 
 /// One row. Two shapes: a plain permission ask, which is answered here, and everything else, which
 /// opens its channel — §5's rule that Activity *lists* every decision kind and *answers* one.
-private struct ActivityRowView: View {
+struct ActivityRowView: View {
 
     let item: ActivityItem
     let title: String
@@ -103,6 +103,9 @@ private struct ActivityRowView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 92, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
+                if let ask = item.ask {
+                    Text(ask.toolName).font(.body.weight(.semibold))
+                }
                 Text(item.row.text.isEmpty ? item.kindLabel : item.row.text)
                 Text(title).font(.caption).foregroundStyle(.secondary)
             }
