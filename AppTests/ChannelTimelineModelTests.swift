@@ -224,7 +224,11 @@ final class ChannelTimelineModelTests: XCTestCase {
         let model = rig.registry.model(for: key)
 
         let opening = Task { await model.open(rig.row(0, origin: .owned(.ready))) }
-        await XCTWaiter().fulfillment(of: [gate.reached], timeout: LaunchFixtures.hangGuard)
+        // The outcome is asserted, not just awaited. On a timeout the model never entered
+        // `subscribe()`, nothing had happened yet, and both clauses below would pass on an open
+        // that had not started — the two things they exist to separate would be untested.
+        let reached = await XCTWaiter().fulfillment(of: [gate.reached], timeout: LaunchFixtures.hangGuard)
+        XCTAssertEqual(reached, .completed, "the model never reached its change-feed subscription")
 
         let calls = await rig.lifecycle.eventSubscriptions
         XCTAssertTrue(calls.isEmpty,
@@ -325,7 +329,11 @@ final class ChannelTimelineModelTests: XCTestCase {
         let model = rig.registry.model(for: rig.keys[0])
 
         let opening = Task { await model.open(rig.row(0)) }
-        await XCTWaiter().fulfillment(of: [gate.reached], timeout: LaunchFixtures.hangGuard)
+        // The outcome is asserted, not just awaited. The discriminating property of this test is
+        // that the cancellation lands *inside* the open; on a timeout it would land on one that had
+        // already finished, and the closing assertions would pass off the second `open` instead.
+        let reached = await XCTWaiter().fulfillment(of: [gate.reached], timeout: LaunchFixtures.hangGuard)
+        XCTAssertEqual(reached, .completed, "the open never reached the gate, so nothing was cancelled inside it")
 
         // Exactly what `.task(id:)` does to its body when the selection moves.
         opening.cancel()
@@ -379,10 +387,19 @@ final class ChannelTimelineModelTests: XCTestCase {
     /// end-to-end test below.
     func testAppModelExposesOneRegistry() async throws {
         let app = AppModel()
-        XCTAssertTrue(app.timelines === app.timelines, "AppModel handed back two registries")
         XCTAssertNil(app.timelines.workspace, "an unlaunched registry is already bound to a workspace")
         XCTAssertEqual(app.timelines.openChannels.count, 0,
                        "an unlaunched registry already holds \(app.timelines.openChannels.count) model(s)")
+        // Not `app.timelines === app.timelines`, which compares a `let` to itself and cannot fail in
+        // any implementation. What can fail is that one channel resolves to one model through the
+        // registry the app hands every consumer — the property a second registry breaks. Asserted
+        // last, because resolving a model is what puts the first one in the registry.
+        let key = ChannelKey(configHome: URL(fileURLWithPath: "/invented/config-home"),
+                             session: SidebarFixtures.session("a"))
+        XCTAssertTrue(app.timelines.model(for: key) === app.timelines.model(for: key),
+                      "the registry handed back two models for one channel")
+        XCTAssertEqual(app.timelines.openChannels.count, 1,
+                       "one channel left \(app.timelines.openChannels.count) models in the registry")
     }
 
     /// A URL ingested through the model the channel column draws arrives through the **exact**
