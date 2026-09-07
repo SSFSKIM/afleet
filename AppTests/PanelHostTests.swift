@@ -96,6 +96,33 @@ final class PanelHostTests: XCTestCase {
         XCTAssertEqual(counter.created, 3, "the retired tab made \(counter.created) sessions after being dropped")
     }
 
+    /// Unregistering a tab withdraws its link targets, even the most specific one.
+    ///
+    /// Specificity is the discriminating clause: a host that released the sessions and left the
+    /// registry alone would still route a `.file` link into a tab that no longer exists, and every
+    /// other test here would stay green.
+    func testUnregisterWithdrawsTheTabsLinkTargets() async throws {
+        let host = PanelHostModel()
+        try host.register(StubPanelTab(.thread))
+        try host.register(StubPanelTab(.files))
+        let recorder = LinkRecorder()
+        await host.links.register(PanelFixtures.fileTarget(.thread, specificity: 10, into: recorder))
+        await host.links.register(PanelFixtures.fileTarget(.files, specificity: 1, into: recorder))
+
+        await host.links.open(PanelFixtures.fileLink, from: .currentPanel)
+        XCTAssertEqual(recorder.tabs, [.thread], "the most specific target did not win the first open")
+
+        await host.unregister(.thread)
+        await host.links.open(PanelFixtures.fileLink, from: .currentPanel)
+
+        XCTAssertEqual(recorder.tabs, [.thread, .files],
+                       "after the unregister the link did not fall through to the next target")
+        XCTAssertEqual(recorder.tabs.filter { $0 == .thread }.count, 1,
+                       "the withdrawn tab received \(recorder.tabs.filter { $0 == .thread }.count) links, not 1")
+        XCTAssertEqual(host.links.targetCount, 1,
+                       "the registry holds \(host.links.targetCount) targets after one tab was withdrawn")
+    }
+
     /// Cmd+1…7 is one-based over `available(for:)`, and an index outside it changes nothing.
     func testSelectIndexIsOneBasedOverAvailable() throws {
         let host = PanelHostModel()
@@ -242,7 +269,132 @@ final class PanelHostTests: XCTestCase {
 
     // MARK: - G4b: the context's capabilities
 
+    /// The context's store writes into `workbench` and reaches no other namespace.
+    func testScopedStoreCannotReachAnotherNamespace() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let context = try XCTUnwrap(rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd),
+                                    "the host built no context")
+        let key = "panel.invented"
+
+        try await context.store.write(7, key: key)
+
+        let workbench = try await rig.workspace.store.read(Int.self, namespace: .workbench, key: key)
+        XCTAssertEqual(workbench, 7, "the value did not read back under the workbench namespace")
+        let afleet = try await rig.workspace.store.read(Int.self, namespace: .afleet, key: key)
+        XCTAssertNil(afleet, "the panel's write reached the afleet namespace")
+        let fleetKit = try await rig.workspace.store.read(Int.self, namespace: .fleetKit, key: key)
+        XCTAssertNil(fleetKit, "the panel's write reached the fleetKit namespace")
+        let keys = try await context.store.keys()
+        XCTAssertTrue(keys.contains(key), "the scoped store lists \(keys.count) keys and not the one it wrote")
+    }
+
+    /// The feed answers exactly what `ChannelTimeline.recentURLs(limit:)` answers, over a non-empty
+    /// list.
+    ///
+    /// The floor is what makes the comparison mean anything: two empty collections are equal, and a
+    /// channel that failed to ingest would compare two of them.
+    func testRecentURLFeedMatchesTheTimelineQuery() async throws {
+        let rig = try await PanelRig(channels: 1, urlsPerChannel: 1)
+        let key = rig.keys[0]
+        let context = try XCTUnwrap(rig.host.context(for: key, cwd: PanelFixtures.cwd),
+                                    "the host built no context")
+        let model = rig.timelines.model(for: key)
+        await model.open(rig.row(0))
+
+        let expected = model.timeline.recentURLs(limit: 10)
+        let actual = await context.recentURLs.current(limit: 10)
+
+        XCTAssertFalse(expected.isEmpty, "the channel's timeline holds 0 URLs, so the comparison is empty")
+        XCTAssertEqual(actual.map(\.url.absoluteString), expected.map(\.url.absoluteString),
+                       "the feed and the timeline query disagree")
+        XCTAssertTrue(actual == expected, "the feed's list differs from the timeline query's beyond the URLs")
+    }
+
+    /// A subscriber attached before the timeline gains a URL receives one containing it.
+    ///
+    /// Without this the Browser could hold a feed that never changes while `current(limit:)` still
+    /// passes — publishing is the feed's whole purpose. Nothing polls: the wait is fulfilled by the
+    /// delivery, and the timeout is a hang guard.
+    func testRecentURLFeedPublishesWhenTheTimelineChanges() async throws {
+        let rig = try await PanelRig(channels: 1, urlsPerChannel: 1)
+        let key = rig.keys[0]
+        let context = try XCTUnwrap(rig.host.context(for: key, cwd: PanelFixtures.cwd),
+                                    "the host built no context")
+        let model = rig.timelines.model(for: key)
+        await model.open(rig.row(0))
+        let before = await context.recentURLs.current(limit: 10)
+        XCTAssertEqual(before.count, 1, "the channel opened with \(before.count) URLs, not 1")
+
+        // Before the change, and before anything is written.
+        let updates = context.recentURLs.updates
+        let arrived = XCTestExpectation(description: "a published list holding the second URL")
+        let seen = URLBox()
+        let reader = Task {
+            for await urls in updates where urls.contains(where: { $0.url == PanelFixtures.url(1) }) {
+                seen.set(urls.map(\.url.absoluteString))
+                arrived.fulfill()
+                return
+            }
+        }
+
+        try rig.appendURL(to: 0, index: 1)
+        rig.watcher.emit([rig.paths[0]])
+
+        await XCTWaiter().fulfillment(of: [arrived], timeout: LaunchFixtures.hangGuard)
+        reader.cancel()
+        XCTAssertEqual(seen.value.count, 2, "the published list held \(seen.value.count) URLs, not 2")
+        XCTAssertTrue(seen.value.contains(PanelFixtures.url(1).absoluteString),
+                      "the published list does not hold the URL the change added")
+    }
+
     // MARK: - Link routing
+
+    /// `.newWindow` pops the target's tab out *before* the target delivers.
+    ///
+    /// Asserted from one shared recorder, because a host that delivered first and popped out
+    /// afterwards would show the file in the wrong window and no count-only assertion would see it.
+    func testNewWindowPopsTheTargetTabOutBeforeDelivering() async throws {
+        let host = PanelHostModel()
+        try host.register(StubPanelTab(.files))
+        let channel = PanelFixtures.key(0)
+        host.focusChannel(channel)
+        let recorder = LinkRecorder()
+        host.presentWindow = { _ in recorder.note("window") }
+        await host.links.register(PanelFixtures.fileTarget(.files, specificity: 5, host: host,
+                                                           into: recorder, note: "delivered"))
+
+        await host.links.open(PanelFixtures.fileLink, from: .newWindow)
+
+        XCTAssertEqual(recorder.notes, ["window", "delivered"],
+                       "the pop-out and the delivery happened in the wrong order")
+        XCTAssertEqual(host.poppedOut.count, 1,
+                       "the host recorded \(host.poppedOut.count) pop-outs, not 1")
+        XCTAssertEqual(host.poppedOut.first?.tab, .files, "the wrong tab was popped out")
+        XCTAssertEqual(recorder.poppedOutAtDelivery, 1,
+                       "\(recorder.poppedOutAtDelivery) pop-outs were recorded when the target ran, not 1")
+    }
+
+    /// The handler receives the destination for both cases.
+    ///
+    /// A host that hard-coded `.currentPanel` would satisfy every other routing test and silently
+    /// drop the distinction C7's binding W5 requires; destination-dependent delivery would then
+    /// fail only at integration.
+    func testTheHandlerReceivesTheDestinationForBothCases() async throws {
+        let host = PanelHostModel()
+        try host.register(StubPanelTab(.files))
+        host.focusChannel(PanelFixtures.key(0))
+        let recorder = LinkRecorder()
+        await host.links.register(PanelFixtures.fileTarget(.files, specificity: 5, into: recorder))
+
+        await host.links.open(PanelFixtures.fileLink, from: .currentPanel)
+        await host.links.open(PanelFixtures.fileLink, from: .newWindow)
+
+        XCTAssertEqual(recorder.destinations, [.currentPanel, .newWindow],
+                       "the handler did not receive both destinations in order")
+        XCTAssertEqual(recorder.links.count, 2, "the handler ran \(recorder.links.count) times, not 2")
+        XCTAssertTrue(recorder.links.allSatisfy { $0 == PanelFixtures.fileLink },
+                      "the handler received a link the test did not open")
+    }
 
     // MARK: - G4d: the pane seam
 
@@ -308,6 +460,39 @@ private final class SessionCounter: @unchecked Sendable {
     func wentAway() { lock.lock(); releases += 1; lock.unlock() }
 }
 
+/// What a link target saw, in the order it saw it.
+@MainActor
+private final class LinkRecorder {
+    private(set) var tabs: [PanelTabID] = []
+    private(set) var links: [WorkspaceLink] = []
+    private(set) var destinations: [LinkDestination] = []
+    private(set) var notes: [String] = []
+    /// How many pop-outs the host had recorded at the moment the target ran.
+    private(set) var poppedOutAtDelivery = 0
+
+    func note(_ text: String) { notes.append(text) }
+
+    func delivered(tab: PanelTabID, link: WorkspaceLink, destination: LinkDestination,
+                   poppedOut: Int, note: String?) {
+        tabs.append(tab)
+        links.append(link)
+        destinations.append(destination)
+        poppedOutAtDelivery = poppedOut
+        if let note { notes.append(note) }
+    }
+}
+
+/// A `[String]` box a detached reader writes and the test reads.
+///
+/// `@unchecked Sendable` is sound because the one mutable field is `stored`, read and written only
+/// inside `lock`, this instance's private `NSLock`.
+private final class URLBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    var value: [String] { lock.lock(); defer { lock.unlock() }; return stored }
+    func set(_ next: [String]) { lock.lock(); stored = next; lock.unlock() }
+}
+
 // MARK: - Values
 
 /// Every identifier these tests use. Invented throughout: a session is a hex-formatted index, a
@@ -344,6 +529,22 @@ private enum PanelFixtures {
                        links: NullLinkRouter(),
                        recentURLs: NullRecentURLFeed(),
                        reportPaneExit: { _ in })
+    }
+
+    /// A target for `.file` links, recording what it received.
+    ///
+    /// `host` is read *inside* the handler, so what the recorder stores is the number of pop-outs
+    /// that existed at the moment of delivery — which is the ordering the `.newWindow` rule is
+    /// about, and a constant here would make that assertion unable to fail.
+    @MainActor
+    static func fileTarget(_ tab: PanelTabID, specificity: Int, host: PanelHostModel? = nil,
+                           into recorder: LinkRecorder, note: String? = nil) -> LinkTarget {
+        LinkTarget(tab: tab, specificity: specificity,
+                   handles: { link in if case .file = link { true } else { false } },
+                   open: { link, destination in
+                       recorder.delivered(tab: tab, link: link, destination: destination,
+                                          poppedOut: host?.poppedOut.count ?? 0, note: note)
+                   })
     }
 
 }
@@ -390,5 +591,137 @@ private struct CoordinatorRig {
                                        index: StubIndex(persisted: nil, built: snapshot),
                                        model: browser,
                                        panels: host)
+    }
+}
+
+/// A workspace over a scratch config home, with the host and the timeline registry attached to it
+/// exactly as `AppModel.bindWorkspace` attaches them.
+///
+/// Built by hand rather than through `LaunchSequence` because what is under test is the panel host,
+/// and a launch would add a binary probe, a version gate and a sign-in gate, each of which can fail
+/// for reasons that say nothing about §7.
+@MainActor
+private struct PanelRig {
+
+    let temp: TempTree
+    let home: ScratchConfigHome
+    let workspace: Workspace
+    let lifecycle: LifecycleDouble
+    let host: PanelHostModel
+    let timelines: ChannelTimelineRegistry
+    let browser: FleetBrowserModel
+    let shell = ShellModel()
+    let watcher: StubWatcher
+    let keys: [ChannelKey]
+    let paths: [URL]
+
+    /// `urlsPerChannel` transcripts carry that many assistant messages naming an invented URL each;
+    /// zero writes the plain two-record transcript.
+    init(channels: Int, urlsPerChannel: Int = 0) async throws {
+        temp = try TempTree()
+        home = try ScratchConfigHome(tree: temp)
+        let configHome = home.configHome
+
+        var keys: [ChannelKey] = []
+        var paths: [URL] = []
+        for index in 0..<channels {
+            let session = PanelFixtures.session(index)
+            let url: URL
+            if urlsPerChannel > 0 {
+                url = try PanelRig.transcriptWithURLs(in: home.root, slug: "invented-\(index)",
+                                                      session: session, urls: urlsPerChannel)
+            } else {
+                url = try LaunchFixtures.transcript(in: home.root, slug: "invented-\(index)", session: session)
+            }
+            keys.append(ChannelKey(configHome: configHome.root, session: session))
+            paths.append(url)
+        }
+        self.keys = keys
+        self.paths = paths
+
+        let index = TranscriptIndex(configHome: configHome, storage: InMemoryIndexStorage())
+        _ = try await index.build()
+        let store = try FileStateStore(baseDirectory: temp.root.appending(path: "store", directoryHint: .isDirectory),
+                                       configHomes: [home.root])
+        watcher = StubWatcher()
+        let feed = TranscriptChangeFeed(source: watcher.changes)
+        await feed.start()
+
+        lifecycle = LifecycleDouble()
+        workspace = Workspace(configHome: configHome,
+                              environment: LaunchFixtures.environment(home: temp.root, configHome: home.root),
+                              binary: try temp.file("bin/claude", "#!/bin/sh\nexit 0\n"),
+                              installed: SemanticVersion(major: 2, minor: 1, patch: 263),
+                              store: store,
+                              index: index,
+                              fleet: StubFleet(),
+                              watcher: watcher,
+                              changes: feed,
+                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)))
+
+        timelines = ChannelTimelineRegistry()
+        timelines.attach(to: workspace, lifecycle: lifecycle)
+        host = PanelHostModel()
+        host.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
+        browser = FleetBrowserModel(lifecycle: lifecycle, configHome: configHome.root)
+        browser.paint(LaunchFixtures.snapshot(configHome: configHome.root, ids: keys.map(\.session)),
+                      listing: nil, origin: .built)
+    }
+
+    /// The row the channel column would hand the timeline model.
+    func row(_ index: Int) -> ChannelRow {
+        ChannelRow(key: keys[index],
+                   title: "an invented channel",
+                   titleSource: .firstPrompt,
+                   preview: "invented preview",
+                   cwd: PanelFixtures.cwd,
+                   gitBranch: nil,
+                   agentName: nil,
+                   mtime: Date(),
+                   isRecent: true,
+                   mode: .ownedCandidate,
+                   decidingRule: "invented",
+                   isProvisional: false,
+                   state: nil)
+    }
+
+    /// Appends one assistant message naming `PanelFixtures.url(index)`, and moves the leaf onto it.
+    ///
+    /// The leaf has to move: `RecordReducer` projects the chain the closing `last-prompt` names, so
+    /// a record appended past the named leaf applies cleanly and appears in no projection.
+    func appendURL(to channel: Int, index: Int) throws {
+        let handle = try FileHandle(forWritingTo: paths[channel])
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(PanelRig.assistantWithURL(session: keys[channel].session,
+                                                                    index: index).utf8))
+    }
+
+    /// One user record and `count` assistant records, each naming its own invented URL, with the
+    /// leaf on the last of them.
+    private static func transcriptWithURLs(in configHome: URL, slug: String, session: SessionID,
+                                           urls count: Int) throws -> URL {
+        let directory = configHome.appending(path: "projects/\(slug)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var body = #"{"type":"user","sessionId":"\#(session)","uuid":"\#(uuid(0))","parentUuid":null,"isSidechain":false,"cwd":"/invented/project","timestamp":"2026-01-01T00:00:00.000Z","message":{"role":"user","content":"invented prompt"}}"# + "\n"
+        for index in 0..<count { body += assistantWithURL(session: session, index: index) }
+        let file = directory.appending(path: "\(session).jsonl")
+        try Data(body.utf8).write(to: file)
+        return file
+    }
+
+    /// An assistant record naming one invented URL, followed by the `last-prompt` that makes it the
+    /// projected leaf. Its parent is the record before it, so the chain stays one branch.
+    private static func assistantWithURL(session: SessionID, index: Int) -> String {
+        let me = uuid(index + 1)
+        let parent = uuid(index)
+        let text = "invented reply naming \(PanelFixtures.url(index).absoluteString)"
+        let record = #"{"type":"assistant","sessionId":"\#(session)","uuid":"\#(me)","parentUuid":"\#(parent)","isSidechain":false,"cwd":"/invented/project","timestamp":"2026-01-01T00:00:0\#(index + 1).000Z","message":{"id":"msg_invented\#(index)","role":"assistant","content":[{"type":"text","text":"\#(text)"}]}}"# + "\n"
+        let leaf = #"{"type":"last-prompt","sessionId":"\#(session)","leafUuid":"\#(me)","lastPrompt":"invented prompt"}"# + "\n"
+        return record + leaf
+    }
+
+    private static func uuid(_ index: Int) -> String {
+        String(format: "00000000-0000-4000-8000-%012x", index)
     }
 }

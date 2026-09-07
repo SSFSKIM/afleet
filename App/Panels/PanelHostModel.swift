@@ -41,6 +41,9 @@ final class PanelHostModel: PanelHost {
     /// config home, each potentially holding a PTY.
     static let channelCapacity = 16
 
+    /// How many URLs a context's feed republishes on each timeline change.
+    static let recentURLLimit = 100
+
     private(set) var selected: PanelTabID?
 
     /// The popped-out windows, in the order they were popped. Every channel named here is exempt
@@ -50,6 +53,12 @@ final class PanelHostModel: PanelHost {
     /// The channel the main window is looking at, which is exempt from eviction however long ago
     /// it was last rendered. The panel column sets it; a headless host has none.
     private(set) var selectedChannel: ChannelKey?
+
+    /// The one link registry in the running app (spec §7, C7's W5). The host hands *this* object
+    /// into every `ChannelContext`, so a tab holds one routing seam rather than two, and when
+    /// C7.2's `LinkRouting` target lands its reusable registry this delegates to it rather than a
+    /// second registry coming into being.
+    @ObservationIgnored let links = HostLinkRouter()
 
     /// How a popped-out window is actually opened. Set by the panel column, which is the only place
     /// SwiftUI's `openWindow` action is reachable from; nil in a headless test, where the pop-out
@@ -70,7 +79,42 @@ final class PanelHostModel: PanelHost {
     /// The working directory each channel was last rendered with, so a popped-out window can
     /// rebuild a context for a channel the main window has moved off.
     @ObservationIgnored private var cwds: [ChannelKey: URL] = [:]
-    init() {}
+    /// One context per channel, rebuilt when the channel's working directory changes. Cached so the
+    /// main window and a popped-out window hand a tab the *same* capabilities — in particular the
+    /// same `RecentURLFeed` instance — rather than two feeds over one timeline.
+    @ObservationIgnored private var contexts: [ChannelKey: ChannelContext] = [:]
+
+    @ObservationIgnored private var workspace: Workspace?
+    @ObservationIgnored private var timelines: ChannelTimelineRegistry?
+    @ObservationIgnored private var lifecycle: (any LifecycleAPI)?
+
+    init() {
+        links.host = self
+    }
+
+    // MARK: - The workspace
+
+    /// Binds the host to the workspace a launch reached and to the app's one timeline registry.
+    ///
+    /// Every session and every context built over the previous workspace is released: *Check again*
+    /// runs the whole launch again, and a pane holding the store and fleet of a workspace nothing
+    /// else refers to is a leak with a PTY in it.
+    ///
+    /// `lifecycle` is the seam pane exits leave through. Production passes nil and gets
+    /// `workspace.fleet`; a test passes a double, which is the only way an exit's journey can be
+    /// asserted on.
+    func attach(to workspace: Workspace, timelines: ChannelTimelineRegistry,
+                lifecycle: (any LifecycleAPI)? = nil) {
+        self.workspace = workspace
+        self.timelines = timelines
+        self.lifecycle = lifecycle ?? workspace.fleet
+        sessions = [:]
+        recency = []
+        cwds = [:]
+        contexts = [:]
+        poppedOut = []
+        selectedChannel = nil
+    }
 
     // MARK: - Registration and order
 
@@ -79,11 +123,13 @@ final class PanelHostModel: PanelHost {
         tabs[tab.id] = tab
     }
 
-    /// Drops the tab and releases every session it held for every channel.
+    /// Drops the tab, releases every session it held for every channel, and **awaits** the
+    /// withdrawal of its link targets.
     ///
-    /// It is `async` because contract X7 declares it so: the deliverable that gives the host its
-    /// link registry adds the **awaited** withdrawal of the tab's targets here, and the await is
-    /// load-bearing on the handover path this method exists for.
+    /// The await is load-bearing rather than incidental. This is the handover path — a later child
+    /// takes an id C5's placeholder holds by unregistering and then registering — and a withdrawal
+    /// that landed after the replacement's registration would delete the *replacement's* target,
+    /// because withdrawal is keyed by a tab id both tabs share.
     func unregister(_ id: PanelTabID) async {
         tabs[id] = nil
         runners[id] = nil
@@ -91,6 +137,7 @@ final class PanelHostModel: PanelHost {
         forgetChannelsWithNoSessions()
         poppedOut.removeAll { $0.tab == id }
         if selected == id { selected = nil }
+        await links.unregister(tab: id)
     }
 
     func registerPaneRunner(_ runner: any PaneRunning, for tab: PanelTabID) {
@@ -184,6 +231,7 @@ final class PanelHostModel: PanelHost {
     func releaseChannel(_ key: ChannelKey) {
         releaseSessions(of: key)
         cwds[key] = nil
+        contexts[key] = nil
         poppedOut.removeAll { $0.channel == key }
         if selectedChannel == key { selectedChannel = nil }
     }
@@ -225,6 +273,39 @@ final class PanelHostModel: PanelHost {
     private func forgetChannelsWithNoSessions() {
         let live = Set(sessions.keys.map(\.channel))
         recency.removeAll { !live.contains($0) }
+    }
+
+    // MARK: - The channel context
+
+    /// The context for a channel the host is rendering, recording the working directory so a
+    /// popped-out window can rebuild it later.
+    func context(for key: ChannelKey, cwd: URL) -> ChannelContext? {
+        if let cached = contexts[key], cached.cwd == cwd { return cached }
+        cwds[key] = cwd
+        guard let built = makeContext(key: key, cwd: cwd) else { return nil }
+        contexts[key] = built
+        return built
+    }
+
+    /// The context for a channel by key alone — the popped-out scene's resolution. Nil for a
+    /// channel this host has never rendered, which is what a window outliving its channel gets.
+    func context(for key: ChannelKey) -> ChannelContext? {
+        if let cached = contexts[key] { return cached }
+        guard let cwd = cwds[key] else { return nil }
+        return context(for: key, cwd: cwd)
+    }
+
+    private func makeContext(key: ChannelKey, cwd: URL) -> ChannelContext? {
+        guard let workspace, let timelines, let lifecycle else { return nil }
+        return ChannelContext(key: key,
+                              session: key.session,
+                              cwd: cwd,
+                              environment: workspace.environment,
+                              store: WorkbenchScopedStore(store: workspace.store),
+                              links: links,
+                              recentURLs: TimelineRecentURLFeed(registry: timelines, key: key,
+                                                                limit: Self.recentURLLimit),
+                              reportPaneExit: { exit in await lifecycle.paneExited(exit) })
     }
 
     // MARK: - The pane seam

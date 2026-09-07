@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import FleetKit
 
 /// The one state machine over the four routes, and the only thing the window observes.
 ///
@@ -50,6 +51,15 @@ final class AppModel {
     /// releases every model built over the previous one.
     let timelines = ChannelTimelineRegistry()
 
+    /// Contract X7's host (spec §7), the app's only conformance to `PanelHost`.
+    ///
+    /// **One instance, app-scoped**, for the same reason the registry above is: the panel column
+    /// resolves its context from here, a popped-out window resolves the *same* context from here by
+    /// key, and `FleetCoordinator` releases a removed channel's sessions here. A second host would
+    /// hand a popped-out window a different session for the channel it is drawing, and the recent-URL
+    /// feed in its context would watch a timeline nothing updates.
+    let panels: PanelHostModel
+
     /// Activity, the badges and the notification router (spec §5, §6). Nil until a launch reaches a
     /// workspace, and rebuilt by each one — *Check again* is the same call as the first launch, and
     /// a second Activity following the first fleet's channels would notify twice.
@@ -65,10 +75,29 @@ final class AppModel {
     /// for. Nothing waits on it — see `ActivityLaunch`.
     private var authorisationRequest: Task<Bool, Never>?
 
+    /// `coordinatorFactory` defaults to nil rather than to a literal closure because the production
+    /// coordinator has to be handed *this* model's panel host — a delta that removed a channel
+    /// releases that channel's panel sessions — and a default argument cannot reach `self`.
     init(sequence: LaunchSequence = LaunchSequence(),
-         coordinatorFactory: @escaping @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating = { FleetCoordinator(workspace: $0) }) {
+         coordinatorFactory: (@MainActor @Sendable (Workspace) -> any WorkspaceCoordinating)? = nil) {
+        let panels = PanelHostModel()
+        self.panels = panels
         self.sequence = sequence
-        self.coordinatorFactory = coordinatorFactory
+        self.coordinatorFactory = coordinatorFactory ?? { workspace in
+            FleetCoordinator(workspace: workspace, panels: panels)
+        }
+    }
+
+    /// Binds the two app-scoped, workspace-dependent owners to the workspace a launch reached.
+    ///
+    /// One call rather than two at the call site, because the pair is a unit: the host reads the
+    /// registry for every context's recent-URL feed, and a host bound to one workspace's registry
+    /// while the registry was rebound to another is exactly the split the single instances exist to
+    /// prevent. `lifecycle` is the seam pane exits leave through; production passes nil and gets
+    /// `workspace.fleet`.
+    func bindWorkspace(_ workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
+        timelines.attach(to: workspace, lifecycle: lifecycle)
+        panels.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
     }
 
     /// Runs the launch and routes on its outcome. Re-entrant by design: *Check again* calls it
@@ -91,7 +120,7 @@ final class AppModel {
         settingsReadout = route.workspace.map(SettingsReadout.init(workspace:))
         // Before Activity, so a channel opened by the first paint already has a registry bound to
         // the workspace this launch reached rather than to the one it replaced.
-        if let workspace = route.workspace { timelines.attach(to: workspace) }
+        if let workspace = route.workspace { bindWorkspace(workspace) }
         await startActivity()
     }
 
