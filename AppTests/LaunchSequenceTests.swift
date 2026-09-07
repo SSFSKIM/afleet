@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 import ClaudeWire
 import FleetKit
@@ -177,6 +178,48 @@ final class LaunchSequenceTests: XCTestCase {
         XCTAssertNil(LaunchSequence.overlappingWriteRoot(
             configHome: URL(filePath: "/invented/logs-sibling/home"),
             storeRoot: URL(filePath: "/invented/store"), diagnosticsRoot: URL(filePath: "/invented/logs")))
+    }
+
+    /// T2: the shipped Settings body must expose recovery on both refusal routes. Pressing
+    /// its button must clear the persisted override and retry with ordinary binary lookup.
+    @MainActor
+    func testSettingsCanResetAnOverrideWithoutAWorkspace() async throws {
+        for unreadable in [false, true] {
+            let rig = try makeRig()
+            let store = try FileStateStore(baseDirectory: rig.storeRoot, configHomes: [rig.configHome])
+            var settings = AfleetSettings()
+            settings.developer.binaryPathOverride = "/invented/old-engine"
+            settings.developer.rawFrameCapture = true
+            try await AfleetSettingsStore.write(settings, to: store)
+            var sequence = rig.sequence
+            sequence.locateBinary = { _, override in override }
+            sequence.checkVersion = { _, _ in
+                unreadable ? .unparseable(output: "invented") : .tooOld(
+                    installed: SemanticVersion(major: 2, minor: 1, patch: 200),
+                    baseline: SemanticVersion(major: 2, minor: 1, patch: 259))
+            }
+            let model = AppModel(sequence: sequence)
+            await model.launch()
+            XCTAssertTrue(model.route.workspace == nil, "the refusal unexpectedly built a workspace")
+            XCTAssertTrue(model.settingsReadout == nil, "the test must exercise pre-workspace settings")
+            let body = AppSettingsView(model: model).body
+            XCTAssertFalse(ViewTree.values(of: Text.self, in: body).isEmpty, "the Settings body contained no text")
+            let reset = try XCTUnwrap(ViewTree.button("Reset binary override and check again", in: body),
+                                     "Settings has no recovery control on a refused launch")
+            let retried = expectation(description: "ordinary lookup after reset")
+            model.sequence.locateBinary = { _, override in
+                if override == nil { retried.fulfill() }
+                return nil
+            }
+            XCTAssertTrue(ViewTree.press(reset), "the recovery button did not accept a press")
+            await fulfillment(of: [retried], timeout: 5)
+            let reopened = try FileStateStore(baseDirectory: rig.storeRoot, configHomes: [rig.configHome])
+            let saved = await AfleetSettingsStore.read(from: reopened)
+            XCTAssertTrue(saved.developer.binaryPathOverride == nil, "reset did not persist")
+            XCTAssertTrue(saved.developer.rawFrameCapture, "reset discarded an unrelated preference")
+            XCTAssertTrue(ViewTree.button("Reset binary override and check again", in: AppSettingsView(model: model).body) == nil,
+                          "Settings still offered a reset after the override was cleared")
+        }
     }
 
     // MARK: - The four refusals

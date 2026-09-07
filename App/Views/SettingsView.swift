@@ -91,7 +91,7 @@ final class SettingsReadout {
         try? await AfleetSettingsStore.write(settings, to: workspace.store)
     }
 
-    /// Removes every log in the diagnostics directory and leaves the three sinks writing. The
+    /// Removes only known diagnostics files and leaves the four sinks writing. The
     /// renewal is the composer's, because deleting a file out from under an open handle turns
     /// logging off silently rather than clearing it.
     func deleteDiagnostics() {
@@ -176,5 +176,31 @@ struct SettingsView: View {
         case .newer(let found): "written by a newer build (schema \(found))"
         case .absent, nil: "absent"
         }
+    }
+}
+
+/// The Settings scene, including routes that have not constructed a workspace.
+struct AppSettingsView: View {
+    @Bindable var model: AppModel
+    var body: some View {
+            if let readout = model.settingsReadout {
+                SettingsView(readout: readout)
+            } else {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Workspace details become available after setup.")
+                        .foregroundStyle(.secondary)
+                    if model.canResetBinaryOverride {
+                        Text("The saved binary override can be cleared without opening a workspace.")
+                        Button("Reset binary override and check again") {
+                            Task { await model.resetBinaryOverrideAndRetry() }
+                        }
+                    }
+                    if let error = model.settingsRecoveryError {
+                        Text(error).foregroundStyle(.red)
+                    }
+                }
+                .padding(40)
+                .frame(width: 420)
+            }
     }
 }

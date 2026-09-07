@@ -42,6 +42,8 @@ struct LaunchSequence: Sendable {
     /// The global config document's `hasCompletedOnboarding`. It takes the whole `ConfigHome` and
     /// not its root, because where that document lives depends on how the root was derived.
     var readClaudeJSON: @Sendable (ConfigHome) -> Bool
+    /// Settings recovery must survive a binary/version refusal, without constructing a workspace.
+    var settingsLoaded: @MainActor @Sendable (any StateStore, AfleetSettings) -> Void = { _, _ in }
     var makeCoordinator: @MainActor @Sendable (Workspace) -> any WorkspaceCoordinating
 
     init(storeRoot: URL = LaunchSequence.defaultStoreRoot,
@@ -133,6 +135,7 @@ struct LaunchSequence: Sendable {
             return .setup(.storeUnavailable(reason: Self.shape(of: error)))
         }
         let settings = await AfleetSettingsStore.read(from: store)
+        await settingsLoaded(store, settings)
 
         // 5. The engine binary, with the Developer override ahead of the captured PATH.
         guard let binary = locateBinary(environment, settings.developer.overrideURL) else {

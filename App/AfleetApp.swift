@@ -42,14 +42,7 @@ struct AfleetApp: App {
         }
 
         Settings {
-            if let readout = model.settingsReadout {
-                SettingsView(readout: readout)
-            } else {
-                Text("Settings become available once afleet has reached a workspace.")
-                    .foregroundStyle(.secondary)
-                    .padding(40)
-                    .frame(width: 420)
-            }
+            AppSettingsView(model: model)
         }
     }
 

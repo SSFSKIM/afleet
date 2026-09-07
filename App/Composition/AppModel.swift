@@ -32,6 +32,27 @@ final class AppModel {
     /// Settings' readout over the workspace the last launch reached, built once so the scene does
     /// not make a new one on every body evaluation.
     private(set) var settingsReadout: SettingsReadout?
+    @ObservationIgnored private var launchStore: (any StateStore)?
+    private(set) var canResetBinaryOverride = false
+    private(set) var settingsRecoveryError: String?
+
+    /// Uses only the app store that already passed the launch overlap guard. No engine call,
+    /// no workspace prerequisite, and no unrelated preference is reset.
+    func resetBinaryOverrideAndRetry() async {
+        guard let store = launchStore, canResetBinaryOverride else { return }
+        canResetBinaryOverride = false
+        settingsRecoveryError = nil
+        var settings = await AfleetSettingsStore.read(from: store)
+        settings.developer.binaryPathOverride = nil
+        do {
+            try await AfleetSettingsStore.write(settings, to: store)
+        } catch {
+            canResetBinaryOverride = true
+            settingsRecoveryError = "Could not reset the binary override: \(LaunchSequence.shape(of: error))."
+            return
+        }
+        await launch()
+    }
 
     /// What the window is looking at (spec §6).
     ///
@@ -136,7 +157,14 @@ final class AppModel {
 
     private func performLaunch() async {
         route = .launching
+        launchStore = nil
+        canResetBinaryOverride = false
+        settingsRecoveryError = nil
         var configured = sequence
+        configured.settingsLoaded = { [weak self] store, settings in
+            self?.launchStore = store
+            self?.canResetBinaryOverride = settings.developer.binaryPathOverride != nil
+        }
         let factory = coordinatorFactory
         configured.makeCoordinator = { [weak self] workspace in
             // If a caller explicitly replaces a workspace, retire its browser loop before

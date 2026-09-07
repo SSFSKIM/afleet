@@ -889,3 +889,13 @@ symlink-containment debt in entry 78 is unchanged.
     and compare path-component prefixes instead of string prefixes; demonstrate the refusal
     with a non-writing seam so a removed guard cannot create anything beneath a config home.
     Owner: C4 (`FileStateStore`, X6/X9).
+
+81. **SwiftUI body/action inspection is tied to framework storage (C5 review T2).**
+    `AppTests/Support/ViewTree.swift` exercises the shipped Settings body and its actual
+    button closure without a separate presentation model. The local hosted accessibility
+    instrument exposed no SwiftUI children, so it could not prove control reachability.
+    Reflection is test-only and prints no values. Its action adapter checks isolation,
+    signature and size before bridging SwiftUI's Swift-5 closure metadata to Swift 6;
+    the missing-control and press assertions fail closed if the framework shape changes.
+    This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
+    accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
