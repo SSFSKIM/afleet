@@ -453,6 +453,51 @@ final class LaunchSequenceTests: XCTestCase {
         rig.watcher.finish()
     }
 
+    // F3: an index mutation is forbidden during both the build and snapshot delivery.
+    // The inverted wait detects the forbidden call; its result is asserted. The final
+    // positive wait and ordered path comparison prove all buffered batches are replayed.
+    @MainActor
+    func testWatcherBatchesWaitForBuildAndSnapshotDelivery() async throws {
+        for blockDelivery in [false, true] {
+            let rig = try makeRig(blockingBuild: !blockDelivery)
+            let coordinator = RecordingCoordinator()
+            let (gate, release) = AsyncStream<Void>.makeStream()
+            let delivering = XCTestExpectation(description: "snapshot delivery entered")
+            if blockDelivery {
+                coordinator.beforeSnapshotDelivery = {
+                    delivering.fulfill()
+                    for await _ in gate { break }
+                }
+            }
+            var sequence = rig.sequence
+            sequence.makeCoordinator = { _ in coordinator }
+            let forbidden = expectation(description: "index updated before snapshot delivery completed")
+            forbidden.isInverted = true
+            await rig.index.observeUpdates { forbidden.fulfill() }
+            let route = await sequence.run()
+            guard case .workspace = route else { return XCTFail("launch did not reach workspace") }
+            if blockDelivery {
+                let result = await XCTWaiter.fulfillment(of: [delivering], timeout: 3)
+                XCTAssertEqual(result, .completed, "snapshot delivery never entered")
+            }
+            let paths = [rig.configHome.appending(path: "projects/invented/early-one.jsonl"),
+                         rig.configHome.appending(path: "projects/invented/early-two.jsonl")]
+            for path in paths { rig.watcher.emit([path]) }
+            let premature = await XCTWaiter.fulfillment(of: [forbidden], timeout: 0.2)
+            XCTAssertEqual(premature, .completed, "watcher mutated the index before its snapshot landed")
+            await rig.index.observeUpdates {}
+            release.yield(())
+            rig.index.releaseBuild()
+            let delivered = await XCTWaiter.fulfillment(of: [coordinator.expectDeltas(2), coordinator.expectSnapshots(1)], timeout: 3)
+            XCTAssertEqual(delivered, .completed, "buffered batches were lost")
+            let updates = await rig.index.updated
+            XCTAssertEqual(updates.count, 2, "expected both buffered batches exactly once")
+            XCTAssertTrue(updates == paths.map { [$0] }, "buffered batches were reordered")
+            XCTAssertEqual(coordinator.snapshots.count, 1, "the built snapshot was not delivered")
+            rig.watcher.finish()
+        }
+    }
+
     // MARK: - The build is not awaited
 
     /// C3 measured that an index build awaited from a main-actor-bound caller runs at about a third

@@ -199,7 +199,7 @@ struct LaunchSequence: Sendable {
         // persisted snapshot the coordinator hears about the fleet's channels for the first time
         // when this lands, which is what keeps a first-ever launch from finishing with zero
         // registered supervisors.
-        Task.detached(priority: .userInitiated) {
+        let builtSnapshotDelivered = Task.detached(priority: .userInitiated) {
             guard let built = try? await index.build() else { return }
             await coordinator.snapshotAvailable(built, origin: .built)
             try? await index.persist()
@@ -218,6 +218,11 @@ struct LaunchSequence: Sendable {
             // nothing at all, which is why the stall notice below exists as well.
             let appDiagnostics = diagnostics.app
             Task.detached(priority: .userInitiated) {
+                // TranscriptIndex.build is reentrant: it replaces candidates/current across
+                // suspension points. The primary subscription buffers batches until BOTH the
+                // build and the coordinator's snapshot paint finish; only then may deltas mutate
+                // the index or the browser. AsyncStream preserves their arrival order.
+                await builtSnapshotDelivered.value
                 for await batch in subscription {
                     // A report, never a gate: computed after the batch is in hand, written from a
                     // queue of its own, and nothing here waits on it or fails because of it.

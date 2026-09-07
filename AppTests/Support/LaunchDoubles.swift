@@ -89,6 +89,8 @@ actor StubIndex: IndexAccess {
     private(set) var updated: [[URL]] = []
     private(set) var persistCount = 0
     private var delta: IndexDelta
+    private var updateObserver: (@Sendable () -> Void)?
+    func observeUpdates(_ observer: @escaping @Sendable () -> Void) { updateObserver = observer }
 
     init(persisted: IndexSnapshot?, built: IndexSnapshot, blocks: Bool = false,
          loadDelay: Duration = .zero,
@@ -117,6 +119,9 @@ actor StubIndex: IndexAccess {
     }
 
     func update(changed: [URL]) async -> IndexDelta {
+        let observer = updateObserver
+        updateObserver = nil
+        observer?()
         updated.append(changed)
         return delta
     }
@@ -180,8 +185,10 @@ final class RecordingCoordinator: WorkspaceCoordinating {
     init() {}
 
     private(set) var origins: [SnapshotOrigin] = []
+    var beforeSnapshotDelivery: (@MainActor () async -> Void)?
 
     func snapshotAvailable(_ snapshot: IndexSnapshot, origin: SnapshotOrigin) async {
+        await beforeSnapshotDelivery?()
         snapshots.append(snapshot)
         origins.append(origin)
         Self.release(&snapshotWaiters, reached: snapshots.count)
