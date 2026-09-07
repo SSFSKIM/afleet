@@ -244,9 +244,16 @@ final class ChannelTimelineModel {
             failure = "this channel has no transcript in the index"
             return
         }
-
+        // **The index's spelling of the config home, not the workspace's.** `TranscriptIndex`
+        // canonicalises its root and every path it discovers, `TranscriptPath.resolve` is a lexical
+        // prefix check, and `StreamIngestion.open` traps rather than fails when the path it is given
+        // names no stream under the root it was given. Two spellings of one directory — a linked
+        // `TMPDIR`, a linked home, tracker entry 54's disagreement — therefore took the app down on
+        // the first channel opened. Read from the index rather than re-canonicalised here, so there
+        // is one derivation of the canonical root and not a second that can drift from it.
+        let canonicalHome = await workspace.index.currentSnapshot.configHome
         let ingestion = StreamIngestion(session: key.session,
-                                        configHome: workspace.configHome.root,
+                                        configHome: canonicalHome,
                                         mode: .filePrimary,
                                         diagnostics: workspace.diagnostics.timeline)
         self.ingestion = ingestion

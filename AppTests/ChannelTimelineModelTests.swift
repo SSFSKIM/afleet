@@ -48,6 +48,28 @@ final class ChannelTimelineModelTests: XCTestCase {
                        "opening an archived channel invoked the process factory \(spawns.count) time(s)")
     }
 
+    /// A config home reached through a symlink opens.
+    ///
+    /// `TranscriptIndex` canonicalises the root it was given and every path it discovers, so an
+    /// entry's path is spelled through the resolved directory. Ingestion constructed with the
+    /// workspace's own — unresolved — root then meets `TranscriptPath.resolve`, which is a lexical
+    /// prefix check: the two spellings share no prefix, the path names no stream, and
+    /// `StreamIngestion.open` reaches its `preconditionFailure` and takes the process down. Not a
+    /// contrived home: a linked `TMPDIR` or a linked home is the ordinary case (tracker entry 54).
+    ///
+    /// What it asserts is that the channel is *readable*, not merely that nothing trapped, so a
+    /// version that resolved the path and then read nothing fails too.
+    func testAConfigHomeReachedThroughASymlinkOpens() async throws {
+        let rig = try await Rig(inventedChannels: 1, throughSymlink: true)
+        let model = rig.registry.model(for: rig.keys[0])
+
+        await model.open(rig.row(0))
+
+        XCTAssertNil(model.failure, "a symlinked config home reported a failure")
+        XCTAssertGreaterThan(model.items.count, 0,
+                             "a channel under a symlinked config home rendered \(model.items.count) items")
+    }
+
     // MARK: - Every category reaches a row
 
     /// Over the corpus, the categories the view renders and the categories the projection holds are
@@ -585,7 +607,12 @@ private struct Rig {
 
     /// `fixtures` are copied out of the committed corpus; `inventedChannels` are transcripts this
     /// test wrote itself. The two lists concatenate in that order, and `keys[i]` names `paths[i]`.
-    init(fixtures: [String] = [], inventedChannels: Int = 0) async throws {
+    ///
+    /// `throughSymlink` names the config home through a symlink pointing at it, rather than by the
+    /// directory's own resolved path. One directory, two spellings — the disagreement tracker entry
+    /// 54 records between the index and the fleet, and the shape of any config home reached through
+    /// a linked `TMPDIR` or a linked home in the running app.
+    init(fixtures: [String] = [], inventedChannels: Int = 0, throughSymlink: Bool = false) async throws {
         temp = try TempTree()
         home = try ScratchConfigHome(tree: temp)
         let projects = home.root.appending(path: "projects", directoryHint: .isDirectory)
@@ -593,7 +620,14 @@ private struct Rig {
         var keys: [ChannelKey] = []
         var paths: [URL] = []
         var titles: [String] = []
-        let configHome = home.configHome
+        let configHome: ConfigHome
+        if throughSymlink {
+            let link = temp.root.appending(path: "config-home-link")
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: home.root)
+            configHome = ConfigHome(root: URL(fileURLWithPath: link.path), source: .environment)
+        } else {
+            configHome = home.configHome
+        }
 
         for name in fixtures {
             guard let main = try Corpus.mainTranscript(of: name) else {
