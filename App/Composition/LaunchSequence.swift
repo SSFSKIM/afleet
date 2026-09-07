@@ -253,9 +253,9 @@ struct LaunchSequence: Sendable {
     static func overlappingWriteRoot(configHome: URL, storeRoot: URL, diagnosticsRoot: URL) -> WriteRoot? {
         // Components preserve the filesystem-root case: appending "/" to "/" would produce
         // "//", which no descendant matches. Component prefixes also exclude sibling names.
-        let home = (CanonicalPath.string(configHome) as NSString).pathComponents
+        let home = (WriteRootPath.string(configHome) as NSString).pathComponents
         for (root, path) in [(WriteRoot.store, storeRoot), (WriteRoot.diagnostics, diagnosticsRoot)] {
-            let candidate = (CanonicalPath.string(path) as NSString).pathComponents
+            let candidate = (WriteRootPath.string(path) as NSString).pathComponents
             if candidate.starts(with: home) || home.starts(with: candidate) { return root }
         }
         return nil
@@ -267,6 +267,61 @@ struct LaunchSequence: Sendable {
     static func shape(of error: any Error) -> String {
         if let store = error as? StoreError { return String(describing: store) }
         return String(describing: type(of: error))
+    }
+}
+
+/// `CanonicalPath` for the three paths of the write-root check, resolved through a descriptor
+/// rather than through `realpath(3)`.
+///
+/// On macOS a firmlinked location has two spellings — `/Users/…` and
+/// `/System/Volumes/Data/Users/…`, and likewise everything beneath them — that name one directory
+/// with one device and one inode. A firmlink is not a symlink, so `realpath` has nothing to
+/// resolve and hands back whichever spelling it was given; two spellings of one directory then
+/// compare as disjoint, and a guard that rests on that comparison fails open. `F_GETPATH` answers
+/// where the descriptor actually is, which collapses both spellings and still resolves symlinks.
+/// `LocalSettingsStore` opens a descriptor for the same mismatch.
+///
+/// **Confined to this guard, deliberately.** `open(2)` is privacy-gated: opening a directory under
+/// a protected location such as `~/Documents` raises the system's consent dialog and blocks the
+/// caller until somebody answers it. Measured, not reasoned — canonicalising real project
+/// directories this way stalled a whole test process on one such open. The paths here are afleet's
+/// own two write roots and the config home, none of them protected; every other caller of
+/// `CanonicalPath` walks the user's project directories and keeps the `realpath` form, which asks
+/// the kernel nothing that needs consent.
+enum WriteRootPath {
+    static func string(_ url: URL) -> String {
+        var trailing: [String] = []
+        var probe = url.standardizedFileURL.path
+        while true {
+            if let resolved = descriptorPath(probe) {
+                var out = resolved
+                for component in trailing.reversed() {
+                    out = (out as NSString).appendingPathComponent(component)
+                }
+                return out
+            }
+            let parent = (probe as NSString).deletingLastPathComponent
+            if parent == probe || parent.isEmpty { return CanonicalPath.string(url) }
+            trailing.append((probe as NSString).lastPathComponent)
+            probe = parent
+        }
+    }
+
+    /// Where the kernel says this directory is, or nil when it is not a directory that can be
+    /// opened. Nil is not a failure: the caller walks up and puts the component back on the end,
+    /// and a root that cannot be opened at all falls back to `CanonicalPath`, which is the answer
+    /// this check had before.
+    private static func descriptorPath(_ path: String) -> String? {
+        let descriptor = path.withCString { open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC) }
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let answered = buffer.withUnsafeMutableBufferPointer { pointer -> Bool in
+            guard let base = pointer.baseAddress else { return false }
+            return fcntl(descriptor, F_GETPATH, base) != -1
+        }
+        guard answered else { return nil }
+        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 }
 
