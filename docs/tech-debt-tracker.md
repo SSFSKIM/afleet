@@ -784,7 +784,20 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     defects. Closer: the context menu C6 adds reads `offersOwnedActions` for what it offers and
     `readOnlyReason` for the sentence it shows instead, and a test asserts a read-only row offers
     no owned action. Owner: C6, which owns the surface where a channel action first appears.
-75. **The assertion-leak class is unfixed in three package test targets, and it is the one class
+75. **Closed 2026-09-07 (`f36c496`, `9dda131`, `440f525`).** The class is swept out of all three
+    targets and each now carries an `AssertionLeakGuardTests` that scans its own sources for the two
+    mechanical shapes, with an empty allowlist. The counts the sweep actually found, against the
+    candidate counts below: `FleetSessionsTests` 47 sites (11 path, 26 aggregate, 10 invented-value
+    but same-shape), `FleetTimelineTests` 15, `ClaudeWireTests` 5 — all messages, because every
+    equality candidate there turned out to be over an invented constant. The aggregate shape
+    dominated: `ChannelKey` carries the rig's config home, so every equality over a key, a census, a
+    logout outcome or a pane request's environment printed a temporary path without naming one.
+    Filed follow-up: nothing stops the *next* aggregate leak, because the guard is line-based and
+    cannot see through a struct; a `CustomStringConvertible` on `ChannelKey` that prints the session
+    id and a digest of the config home would close the shape rather than the instances, and is a
+    product-side decision C4 owns. Original statement:
+
+    **The assertion-leak class is unfixed in three package test targets, and it is the one class
     the app's own suite was swept for.** C5 Task 10 swept every test target in the tree for
     assertions whose failure message would print a path derived from `FileManager.temporaryDirectory`
     — which carries the account hash of the machine that ran the suite. `AppTests` had ten and they
