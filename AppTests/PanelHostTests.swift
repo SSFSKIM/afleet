@@ -267,6 +267,34 @@ final class PanelHostTests: XCTestCase {
 
     // MARK: - G4c: the popped-out window keeps its channel
 
+    /// A popped-out tab keeps its channel while the main window moves to another.
+    ///
+    /// A scene that resolved from the current selection would pass every other test here and leave
+    /// the parent's channel-retention guarantee checked only by a manual witness.
+    func testAPoppedOutTabKeepsItsChannelWhenTheMainWindowSwitches() async throws {
+        let rig = try await PanelRig(channels: 2)
+        let host = rig.host
+        try host.register(StubPanelTab(.files))
+        let a = rig.keys[0]
+        let b = rig.keys[1]
+        _ = host.context(for: a, cwd: PanelFixtures.cwd)
+        _ = host.context(for: b, cwd: PanelFixtures.cwd)
+        host.focusChannel(a)
+        host.popOut(.files, channel: a)
+
+        // The main window moves on.
+        rig.shell.select(b.session)
+        host.focusChannel(b)
+
+        let popped = try XCTUnwrap(host.poppedOut.first, "the pop-out was not recorded")
+        let poppedContext = try XCTUnwrap(host.context(for: popped.channel),
+                                          "the popped-out entry resolved no context")
+        XCTAssertTrue(poppedContext.key == a, "the popped-out window followed the main window's channel")
+        let main = PanelColumnView.channel(shell: rig.shell, browser: rig.browser)
+        XCTAssertTrue(main?.key == b, "the main window did not move to the second channel")
+        XCTAssertTrue(host.selectedChannel == b, "the host's selected channel did not follow the main window")
+    }
+
     // MARK: - G4b: the context's capabilities
 
     /// The context's store writes into `workbench` and reaches no other namespace.

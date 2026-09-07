@@ -27,6 +27,14 @@ struct AfleetApp: App {
         }
         .commands { shellCommands }
 
+        // One window per popped-out panel tab (spec §7). Keyed by tab and channel rather than by
+        // the context, which holds capabilities that are not `Codable`; the scene resolves the
+        // context from the host by that key, which is what keeps the window on the channel it was
+        // popped from when the main window moves on.
+        WindowGroup(for: PoppedOutPanel.self) { $panel in
+            PoppedOutPanelScene(app: model, panel: panel)
+        }
+
         Settings {
             if let readout = model.settingsReadout {
                 SettingsView(readout: readout)
