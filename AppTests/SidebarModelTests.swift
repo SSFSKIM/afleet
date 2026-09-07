@@ -138,6 +138,41 @@ final class SidebarModelTests: XCTestCase {
         XCTAssertEqual(Set(model.allRows.map(\.id)), [staying, arriving])
     }
 
+    /// An index delta that changes nothing does not re-derive the fleet.
+    ///
+    /// `TranscriptIndex.update` returns an empty delta whenever every candidate reconciled to
+    /// `.skipped` and every subagent-only change left `hasSubagents` where it was — which is the
+    /// ordinary shape of a session writing agent transcripts under a directory the index notes but
+    /// never descends. Those arrive at the watcher's rate for as long as the subagent runs, and
+    /// each one used to rebuild every row and every section on the main actor for a set of rows
+    /// that is byte-identical before and after.
+    ///
+    /// The pair is the discriminating clause: the same model holds its rebuild count across the
+    /// empty delta and raises it across the non-empty one, so "it rebuilt nothing" cannot pass by
+    /// the model having stopped rebuilding at all.
+    func testAnEmptyIndexDeltaDoesNotRebuildTheFleet() async throws {
+        let home = URL(fileURLWithPath: "/invented/config-home", isDirectory: true)
+        let present = SidebarFixtures.session("2")
+        let now = Date()
+        let entries: [SessionID: IndexEntry] = [
+            present: SidebarFixtures.entry(present, configHome: home, cwd: "/invented/project-alpha",
+                                           mtime: now, title: "before"),
+        ]
+        let model = FleetBrowserModel(lifecycle: LifecycleDouble(), configHome: home)
+        model.restore(from: IndexSnapshot(configHome: home, builtAt: now, entries: entries))
+        XCTAssertEqual(model.allRows.count, 1, "the fixture painted no row to hold steady")
+
+        let settled = model.rebuildCount
+        await model.apply(IndexDelta(durationMs: 3)) { entries[$0] }
+        XCTAssertEqual(model.rebuildCount, settled,
+                       "an empty delta re-derived the fleet")
+        XCTAssertEqual(model.allRows.count, 1, "the empty delta changed the rows it carried nothing about")
+
+        await model.apply(IndexDelta(updated: [present])) { entries[$0] }
+        XCTAssertGreaterThan(model.rebuildCount, settled,
+                             "a non-empty delta did not re-derive, so the count proves nothing")
+    }
+
     /// Minor 3: a snapshot that dropped the selected session drops the selection with it. A
     /// selection pointing at a session with no row is a sidebar holding a reference it cannot draw.
     func testASnapshotThatDropsTheSelectedSessionClearsTheSelection() async throws {
