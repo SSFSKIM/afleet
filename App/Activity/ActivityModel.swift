@@ -97,6 +97,8 @@ final class ActivityModel {
 
     private var states: [ChannelKey: ChannelState] = [:]
     private var pumps: [ChannelKey: ChannelEventPump] = [:]
+    /// Retired channels retain the bounded frame tail, not subscriptions or dead requests.
+    private var history: [ChannelKey: [Frame]] = [:]
     /// The last marker the user has seen on each channel, by session id. Persisted under
     /// `FleetKitKeys.unreadCursors`; the store sits beside one config home, so the session alone
     /// identifies the channel in it.
@@ -138,7 +140,7 @@ final class ActivityModel {
             cursors = persisted ?? [:]
         }
         for state in await lifecycle.states() { states[state.key] = state }
-        for key in states.keys where isOwned(states[key]) { await follow(key) }
+        for key in states.keys where isLive(states[key]) { await follow(key) }
         states = states.filter { isWorthKeeping($0.value) }
         rebuild()
         observeFocus()
@@ -160,7 +162,9 @@ final class ActivityModel {
     /// One channel's state. Also the return value of an answered decision, which is why it is not
     /// private.
     func apply(_ state: ChannelState) {
-        if isOwned(state), pumps[state.key] == nil {
+        if !isLive(state) {
+            retire(state.key)
+        } else if pumps[state.key] == nil {
             Task { await follow(state.key) }
         }
         // Activity is O(what is happening), not O(the fleet). Registering a real config home makes
@@ -178,35 +182,44 @@ final class ActivityModel {
         scheduleRebuild()
     }
 
-    /// An owned channel counts whether or not its pump exists yet: `follow` is asynchronous, so a
-    /// state that arrives with the channel newly owned reaches here before the subscription does,
-    /// and dropping it would leave the pump feeding a channel the query never looks at. C4's cap
-    /// bounds how many channels can be owned at once, so this keeps the bound.
+    /// Live channels are kept while subscription is in flight; retired channels only while
+    /// they still supply query inputs. C4 bounds processes, not channels visited or subscriptions
+    /// prepared before an action. Do not impose a second process cap on event listeners here.
     private func isWorthKeeping(_ state: ChannelState) -> Bool {
         !state.pendingDecisions.isEmpty || state.systemItem != nil
-            || pumps[state.key] != nil || isOwned(state)
+            || pumps[state.key] != nil || history[state.key] != nil || isLive(state)
     }
 
-    private func isOwned(_ state: ChannelState?) -> Bool {
+    private func isLive(_ state: ChannelState?) -> Bool {
         guard let state else { return false }
-        if case .owned = state.origin { return true }
-        return false
+        switch state.origin {
+        case .owned(.connecting), .owned(.ready), .owned(.contended): return true
+        default: return false
+        }
     }
 
-    /// Takes this channel's one `events(of:)` subscription, unless the app is already following as
-    /// many channels as C4 lets run at once.
     private func follow(_ key: ChannelKey) async {
-        guard pumps[key] == nil, !starting.contains(key),
-              pumps.count + starting.count < ChannelEventPump.maximumPumps else { return }
+        guard pumps[key] == nil, !starting.contains(key) else { return }
         starting.insert(key)
         defer { starting.remove(key) }
-        guard let stream = await lifecycle.events(of: key) else { return }
+        guard let stream = await lifecycle.events(of: key), isLive(states[key]) else { return }
         guard pumps[key] == nil else { return }
-        let pump = ChannelEventPump(key: key) { [weak self] pump, event in
+        let pump = ChannelEventPump(key: key, recent: history.removeValue(forKey: key) ?? [],
+                                    onFinish: { [weak self] pump in
+            guard let self, self.pumps[key] === pump else { return }
+            self.retire(key)
+            self.scheduleRebuild()
+        }) { [weak self] pump, event in
             self?.pumpDelivered(event, from: pump)
         }
         pumps[key] = pump
         pump.start(stream)
+    }
+
+    private func retire(_ key: ChannelKey) {
+        guard let pump = pumps.removeValue(forKey: key) else { return }
+        if !pump.recent.isEmpty { history[key] = pump.recent }
+        pump.stop()
     }
 
     /// This channel's pump, or nil if the app is not following it. Read by a test that has to know
@@ -239,7 +252,7 @@ final class ActivityModel {
         rebuildCount &+= 1
         let ordered = states.values.sorted { $0.lastActivity > $1.lastActivity }
         var mirrors: [ChannelKey: [any TaskMirrorReading]] = [:]
-        var recent: [ChannelKey: [Frame]] = [:]
+        var recent = history
         for (key, pump) in pumps {
             mirrors[key] = pump.liveWork
             recent[key] = pump.recent

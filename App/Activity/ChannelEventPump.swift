@@ -27,11 +27,6 @@ final class ChannelEventPump {
     /// How many frames the ring holds. Sized for the tail Activity reads, not for a transcript.
     static let recentCapacity = 256
 
-    /// How many pumps may exist at once: C4's fleet-wide cap on owned processes, which is the
-    /// number of channels that can be delivering events at all. Read from C4 rather than restated,
-    /// so raising the cap there does not leave a second six behind here.
-    static let maximumPumps = FleetCapCounter.capacity
-
     let key: ChannelKey
 
     /// The tail of this channel's frames, oldest dropped once the ring is full.
@@ -46,10 +41,15 @@ final class ChannelEventPump {
     /// Called after every event, once the three summaries above are already updated, so a consumer
     /// that re-reads the pump sees the event it is being told about.
     private let onEvent: @MainActor (ChannelEventPump, WireEvent) -> Void
+    private let onFinish: @MainActor (ChannelEventPump) -> Void
     private var task: Task<Void, Never>?
 
-    init(key: ChannelKey, onEvent: @escaping @MainActor (ChannelEventPump, WireEvent) -> Void) {
+    init(key: ChannelKey, recent: [Frame] = [],
+         onFinish: @escaping @MainActor (ChannelEventPump) -> Void = { _ in },
+         onEvent: @escaping @MainActor (ChannelEventPump, WireEvent) -> Void) {
         self.key = key
+        self.recent = recent
+        self.onFinish = onFinish
         self.onEvent = onEvent
     }
 
@@ -63,6 +63,8 @@ final class ChannelEventPump {
                 guard let self else { return }
                 self.ingest(event)
             }
+            guard let self, !Task.isCancelled else { return }
+            self.onFinish(self)
         }
     }
 

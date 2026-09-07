@@ -110,6 +110,56 @@ final class ActivityModelTests: XCTestCase {
         names.reduce(into: [:]) { $0[$1, default: 0] += 1 }
     }
 
+    // F1: keeping six retired subscriptions must not starve the next channel. The
+    // assertion is on its answerable card and the old history, not just pump count.
+    func testRetiredChannelsReleaseCapacityAndKeepHistory() async throws {
+        for resting: ChannelOrigin in [.owned(.dormant), .archived] {
+            let harness = try Harness()
+            let old = (1...6).map { harness.key(String($0)) }
+            for key in old { await arm(harness, key) }
+            await harness.model.start()
+            for key in old {
+                harness.model.pump(for: key)?.ingest(.frame(FixtureRunner.Invented.authStatus(
+                    error: "invented failure", uuid: "invented-history", session: key.session), .first))
+                let state = ActivityFixtures.state(key, origin: resting)
+                await harness.lifecycle.setStates([state])
+                harness.model.apply(state)
+            }
+            let next = harness.key("7")
+            let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                                id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            await arm(harness, next, pending: [ActivityFixtures.pending(ask)])
+            await harness.model.start() // awaits every subscription, no scheduling guess
+            harness.model.pump(for: next)?.ingest(.request(ask))
+            harness.model.rebuild()
+            XCTAssertEqual(harness.model.items.filter { $0.key == next && $0.ask != nil }.count, 1,
+                           "the seventh channel lost its answerable request")
+            XCTAssertEqual(harness.model.items.filter { old.contains($0.key) }.count, 6,
+                           "retiring subscriptions discarded Activity history")
+            XCTAssertTrue(old.allSatisfy { harness.model.pump(for: $0) == nil },
+                          "inactive channels still occupy pump slots")
+            harness.model.stop()
+        }
+    }
+
+    // F1: stream completion also releases a slot, without waiting for a lifecycle update.
+    func testFinishedStreamReleasesItsPump() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        await arm(harness, key)
+        await harness.model.start()
+        XCTAssertTrue(harness.model.pump(for: key) != nil, "no subscription was established")
+        let retired = expectation(description: "finished stream retired")
+        Task {
+            await harness.model.whenChanged { $0.pump(for: key) == nil }
+            retired.fulfill()
+        }
+        await harness.lifecycle.finishEvents(of: key)
+        let result = await XCTWaiter.fulfillment(of: [retired], timeout: 3)
+        XCTAssertEqual(result, .completed, "stream completion did not release its pump")
+        harness.model.stop()
+    }
+
     // MARK: - G2a
 
     /// Two channels at a `can_use_tool`, the `rate-limited-turn` fixture on a third, and an
