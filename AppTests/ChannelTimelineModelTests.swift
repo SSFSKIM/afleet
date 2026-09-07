@@ -284,17 +284,61 @@ final class ChannelTimelineModelTests: XCTestCase {
 
         // The view half. The identity the column's task is keyed by has to separate these two rows,
         // or the second call above never happens in the running app.
-        // Spelled as booleans rather than `XCTAssertNotEqual`, whose default message prints both
-        // values: a `ChannelColumnOpenKey` carries a config-home path and a session id, and §11
-        // keeps both out of a failure message.
-        XCTAssertFalse(ChannelColumnOpenKey(quiet) == ChannelColumnOpenKey(loud),
-                       "one channel's quiet and loud rows share an opening key")
-        XCTAssertTrue(ChannelColumnOpenKey(quiet) == ChannelColumnOpenKey(quiet),
-                      "one row does not equal itself, so the task would re-run on every body pass")
-        // Two channels whose headers are equal — a restored row carries no origin, no presence and
-        // no banner — still have to re-open on a switch.
-        XCTAssertFalse(ChannelColumnOpenKey(rig.row(0)) == ChannelColumnOpenKey(rig.row(1)),
-                       "two channels with equal headers share an opening key")
+        // The other writer of the header. The column no longer opens the channel to refresh it: it
+        // watches `ChannelHeader(row:)` and calls `adopt` on every change, so `adopt` has to move
+        // all four fields on its own and has to leave the ingestion alone.
+        model.adopt(ChannelHeader(row: quiet))
+        XCTAssertEqual(model.header.origin, .owned(.ready), "adopt did not move the header's origin")
+        XCTAssertEqual(model.header.presence, .unknown, "adopt did not move the header's presence")
+        XCTAssertNil(model.header.banner, "adopt did not clear the header's banner")
+        XCTAssertNil(model.header.systemItem, "adopt did not clear the header's system item")
+        XCTAssertEqual(model.items.count, opened,
+                       "adopt left \(model.items.count) items against \(opened)")
+
+        // **What is not asserted, and the substitute.** That the column carries the `onChange` at
+        // all is a one-line binding inside a `body`, and a window cannot open in this runner. The
+        // previous revision asserted on a bespoke identity type the view had to construct, which the
+        // review had that view drop; inventing another such type so a test could see it would be an
+        // artefact built for the test rather than for the app. So the wiring itself rests on review
+        // and on the manual witness, and what is executable — that both writers of the header move
+        // all four fields, and that neither restarts the read — is asserted above.
+    }
+
+    // MARK: - A cancelled open
+
+    /// Cancelling an in-flight open leaves the channel readable.
+    ///
+    /// **The path is ordinary, not exotic.** `.task(id:)` cancels its body when the id changes, a
+    /// channel switch changes it, and cancellation propagates into `StreamIngestion.open`'s settle
+    /// sleep — whose own `catch` cancels the tap, finishes `effects` and marks the actor closed
+    /// before rethrowing. With the read done inline and `hasOpened` already set, the replacement
+    /// task's `open` was a no-op and the channel showed "could not be read" with zero items for the
+    /// life of the app, because the registry retains the model.
+    ///
+    /// What is asserted is that the channel is **readable afterwards** — items present, no failure —
+    /// and not merely that nothing crashed. The gate is the same suspension the ordering test uses,
+    /// so the cancellation lands inside the open rather than near it.
+    func testACancelledOpenLeavesTheChannelReadable() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"])
+        let gate = SubscribeGate(feed: rig.feed)
+        rig.registry.changeFeed = gate.subscribe
+        let model = rig.registry.model(for: rig.keys[0])
+
+        let opening = Task { await model.open(rig.row(0)) }
+        await XCTWaiter().fulfillment(of: [gate.reached], timeout: LaunchFixtures.hangGuard)
+
+        // Exactly what `.task(id:)` does to its body when the selection moves.
+        opening.cancel()
+        gate.release()
+        await opening.value
+
+        // The replacement task the column makes for the same channel.
+        await model.open(rig.row(0))
+
+        XCTAssertNil(model.failure, "a cancelled open left the channel reporting a failure")
+        XCTAssertFalse(model.items.isEmpty,
+                       "a cancelled open left the channel holding \(model.items.count) items")
+        XCTAssertTrue(model.hasOpened, "the channel does not report itself open")
     }
 
     // MARK: - The registry

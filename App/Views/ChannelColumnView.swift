@@ -39,27 +39,6 @@ struct ChannelColumnView: View {
     }
 }
 
-/// What re-runs the channel column's opening task.
-///
-/// **The channel alone is not enough, and that was a defect rather than a refinement.** The header
-/// shows origin, presence, banner and system item — §8's four, every one of them the live half of a
-/// `ChannelRow` — and `ChannelTimelineModel.open` is what assigns them. Keyed on the channel, the
-/// task ran once and never again while the channel stayed selected, so a channel that went busy,
-/// raised a banner or crashed under the cursor kept showing the state it had on arrival. Keying on
-/// the header too re-runs the task on exactly those changes and on nothing else.
-///
-/// It carries the channel as well as the header because two channels can have equal headers — a
-/// restored row carries no origin, no presence and no banner at all — and a switch between them
-/// must still re-open.
-struct ChannelColumnOpenKey: Hashable {
-    let channel: ChannelKey
-    let header: ChannelHeader
-    init(_ row: ChannelRow) {
-        channel = row.key
-        header = ChannelHeader(row: row)
-    }
-}
-
 /// One channel, drawn. Split out so the `task(id:)` that opens the channel is keyed by the channel
 /// and re-runs when the selection moves rather than on every parent body evaluation.
 private struct ChannelTimelineColumn: View {
@@ -81,11 +60,16 @@ private struct ChannelTimelineColumn: View {
                     .listStyle(.inset)
             }
         }
-        // Keyed by the channel *and* the four live header fields. Switching channels opens the new
-        // one; a channel that goes busy, raises a banner or crashes while it stays selected re-runs
-        // the task, and `open` is header-only past its first call, so the extra runs cost a header
-        // assignment and nothing more.
-        .task(id: ChannelColumnOpenKey(row)) { await model.open(row) }
+        // The header and the opening are two concerns, and keying one task on both was a defect.
+        // The header has to follow a channel that goes busy, raises a banner or crashes while it
+        // stays selected, so it moves on every change to §8's four live fields; the ingestion has to
+        // run once per channel, so it is keyed by the channel alone. Folding the header into the
+        // task's id made a live state change cancel an in-flight read — and cancellation reaches
+        // `StreamIngestion.open`'s settle sleep, which half-closes the actor.
+        .onChange(of: ChannelHeader(row: row), initial: true) { _, header in
+            model.adopt(header)
+        }
+        .task(id: row.key) { await model.open(row) }
     }
 }
 

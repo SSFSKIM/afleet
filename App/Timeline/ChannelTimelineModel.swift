@@ -164,6 +164,8 @@ final class ChannelTimelineModel {
     @ObservationIgnored private var ingestion: StreamIngestion?
     @ObservationIgnored private var effectsTask: Task<Void, Never>?
     @ObservationIgnored private var changesTask: Task<Void, Never>?
+    /// The ingestion's own lifetime, owned here and not by whatever called `open`. See `open`.
+    @ObservationIgnored private var openingTask: Task<Void, Never>?
 
     /// `lifecycle` is the events seam. Production passes `workspace.fleet`, which is an `AppFleet`
     /// and therefore a `LifecycleAPI`; a test passes a `LifecycleAPI` double, which is the only way
@@ -184,7 +186,18 @@ final class ChannelTimelineModel {
     deinit {
         effectsTask?.cancel()
         changesTask?.cancel()
+        openingTask?.cancel()
     }
+
+    // MARK: - The header
+
+    /// Takes the row's live half without touching the ingestion.
+    ///
+    /// The header and the opening are separate concerns: origin, presence, banner and system item
+    /// change under a channel that stays selected, and the read must not be restarted — or, worse,
+    /// cancelled mid-flight — every time one of them does. The column calls this on every change to
+    /// those four fields and calls `open` once per channel.
+    func adopt(_ header: ChannelHeader) { self.header = header }
 
     // MARK: - Opening
 
@@ -192,11 +205,41 @@ final class ChannelTimelineModel {
     ///
     /// Idempotent past the header: the header follows the row on every call, because the live half
     /// of a row changes under the model, and the ingestion runs once.
+    ///
+    /// **The ingestion's lifetime is this model's, not the caller's.** The work runs in an
+    /// unstructured `Task` stored here, and `open` awaits that task rather than doing the work
+    /// inline. A view's `.task(id:)` cancels its body when the id changes, cancellation propagates
+    /// into `StreamIngestion.open`'s settle sleep, and that call's own `catch` cancels the tap,
+    /// finishes `effects` and marks the actor closed before it rethrows — so a channel switch
+    /// landing inside the tens of milliseconds an open occupies used to leave a half-closed
+    /// ingestion behind a model that would never re-open it. An unstructured task does not inherit
+    /// the caller's cancellation, so the read completes whatever the view does; only `close()`,
+    /// which the registry owns, ends it.
     func open(_ row: ChannelRow) async {
         header = ChannelHeader(row: row)
+        if let openingTask {
+            // A second caller waits for the first rather than starting a second ingestion. Awaiting
+            // a non-throwing task is not itself cancellable, so this is safe from a cancelled view.
+            await openingTask.value
+            return
+        }
         guard !hasOpened, let workspace, let lifecycle else { return }
         hasOpened = true
+        let task = Task { @MainActor [weak self] () -> Void in
+            await self?.performOpen(workspace: workspace, lifecycle: lifecycle)
+        }
+        openingTask = task
+        await task.value
+        openingTask = nil
+    }
 
+    /// The read itself, run by `open`'s stored task.
+    ///
+    /// A genuine failure here still latches: `hasOpened` stays set, so the channel keeps reporting
+    /// it for the life of the model. That is tracker 66, filed and deliberately not closed here —
+    /// this change is about the ingestion's *lifetime*, and closing a filed entry as a side effect
+    /// of a different fix would ship behaviour no test in this task covers.
+    private func performOpen(workspace: Workspace, lifecycle: any LifecycleAPI) async {
         guard let entry = await workspace.index.entry(key.session) else {
             failure = "this channel has no transcript in the index"
             return
@@ -248,6 +291,7 @@ final class ChannelTimelineModel {
     /// Releases the ingestion and both loops. The registry calls it when a new launch replaces the
     /// workspace this model was built over.
     func close() {
+        openingTask?.cancel(); openingTask = nil
         effectsTask?.cancel(); effectsTask = nil
         changesTask?.cancel(); changesTask = nil
         let ingestion = self.ingestion
