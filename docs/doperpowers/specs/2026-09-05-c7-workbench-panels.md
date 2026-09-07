@@ -752,3 +752,44 @@ retrospect.
   regions of W1; §11's "build output committed" and §9.1's "bundled at build time" are
   reconciled as the Design says; §9.5's verb list is split between panes and X5 actions;
   the parent's Tracking Map row for C7 points here.
+- 2026-09-06: C5 Task 2 wrote contract X7's protocol into `Workbench/Sources/PanelHostAPI`
+  and added **one test target inside its own W1 fence**:
+  `.testTarget(name: "PanelHostAPITests", dependencies: ["PanelHostAPI", core, fleet])`,
+  between `// MARK: - PanelHostAPI` and `// MARK: - end of PanelHostAPI`. C7.1 owns
+  `Workbench/Package.swift` and should know the line exists before its branch opens; nothing
+  in the `products` array, the `dependencies` array or any other leaf's region was touched.
+  The two package dependencies are required rather than decorative: `PanelHostAPI` does not
+  re-export AfleetCore or FleetKit, so under Swift 6's member-import-visibility rules a test
+  that constructs a `ChannelKey`, a `PaneRequest` or a `SeenURL` must import the defining
+  module. The target now holds 8 tests, all passing.
+- 2026-09-06: X7's `LinkTarget` handler takes **`(WorkspaceLink, LinkDestination)`**, exactly
+  as W5 requires. A handler given only the link cannot tell an in-panel open from a
+  popped-out one, and destination-dependent delivery would be lost at integration even though
+  a leaf's own pure tests passed. Routing is one seam, not two: link opening is deliberately
+  not a `PanelHost` member but lives on `LinkRouterCapability`, which the host implements and
+  hands into every `ChannelContext`. C5's `HostLinkRouter` is the app's single registry until
+  C7.2's `LinkRouting` module lands, at which point the host **delegates** to it rather than a
+  second registry appearing. The protocol is named `LinkRouterCapability` and not
+  `LinkRouting` precisely because a panel target importing both would see a module and a
+  protocol competing for one name.
+- 2026-09-06: X7's link-routing seam gains a **withdrawal**, and it changes a signature C7.2
+  inherits. `LinkRouterCapability` now carries `func unregister(tab: PanelTabID) async`, which
+  drops every target registered for that tab, and `PanelHost.unregister(_ id: PanelTabID)` is
+  now **`async`** and awaits it. Both came out of C5 Task 2's review and both matter to C7.2,
+  which ships the `LinkRouting` registry the host delegates to.
+  Why the withdrawal exists: without it a `LinkTarget` outlives the tab that registered it,
+  keeps winning the `specificity` contest, and delivers into a tab that is gone. Why the host
+  member is `async`: a synchronous host could only spawn the withdrawal and return, and on the
+  handover path the method was added for — unregister a placeholder, then register the real tab
+  under the same id — nothing would order the withdrawal before the replacement's registration.
+  Measured rather than argued: the spawn-and-return shape was run five times and failed five
+  times. Reproducible under test rather than strictly deterministic — the ordering is
+  scheduler-dependent and stable only because a test process is idle, so in a real app it would
+  be intermittent, which is worse. The symptom is not that the old tab wins but that the
+  **replacement's target is removed and the link reaches nobody at all**, silently and with no
+  error raised. Withdrawal is keyed by tab id, and after a handover both targets carry the same
+  id.
+  The alternative of dropping `async` from `unregister(tab:)` was rejected precisely because it
+  would force C7.2's registry to be main-actor-isolated state rather than an actor; C7.2 keeps
+  that choice.
+

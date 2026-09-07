@@ -410,6 +410,307 @@ architect's rulings settled them). Line numbers are as at `4f2102d`, before the 
     not changing what it does. Closer: C6 decides where the readback belongs — a second request
     inside a strategy the executor runs, or the surface re-reading settings after a flag change —
     and `ReadbackSource` either drives it or goes. Owner: C6.
+
+## From C5 (`child/c5-app-shell`)
+
+Appended by C5. Entries 49 and 50 are the 2026-09-06 drift ritual's and 51 is the router
+corrective's; C5 numbers from 52 and renumbers nothing above.
+
+52. **Demonstrating a guard failing performs the write the guard exists to refuse.** Parent
+    §17.7 requires that a test written to prove a fix be shown failing against the pre-fix
+    code; for a test whose subject is a refusal — `TempTree`'s config-home guard, the store's
+    `configHomes:` check, the app-write seam of G1e — "pre-fix code" means the guard removed,
+    and the removed-guard run then does the forbidden thing. Observed in C5's Task 1: the
+    demonstration created a directory inside `/tmp/afleet-fixtures/config-home` twice. Both
+    were removed at once and verified gone; no file inside was created, modified or deleted,
+    and the home's thirteen top-level entries and every file under them were untouched (only
+    the root directory's own mtime moved). The committed test was then changed to point at an
+    invented config home under the temporary directory, so repeating the demonstration is
+    safe. Closer: none needed for that test; the entry exists because the tension is general
+    and every later C5 task with a refusal test meets it. The plan's Global Constraints now
+    carry the rule, so this is a record rather than an open item.
+
+
+53. **Two file handles on `diagnostics.log` and two on `fleet.log`, each tracking its own
+    offset.** `Fleet.init` builds a `FileDiagnostics` and a `FileFleetDiagnostics` from the
+    `diagnosticsDirectory` it is handed, and C5's `DiagnosticsComposer` — which the plan's
+    Task 3 deliverable names explicitly — builds a second pair on the same directory. Each
+    sink opens its file with `FileHandle(forWritingTo:)` and seeks to the end **once**, then
+    keeps its own running offset, so it is not `O_APPEND`: if both pairs ever write, the
+    second writer overwrites the first writer's bytes from wherever it last left off rather
+    than appending after them. Today nothing writes through the composer's `wire` or `fleet`
+    sinks — C5 originates no `DiagnosticEvent` and no `FleetDiagnosticEvent` — so the two
+    extra handles are opened and never used and no line has been lost. The moment C6 or C7
+    reports its own wire or fleet event through the composer, `diagnostics.log` starts
+    corrupting. Only `timeline.log` is unambiguously the app's, because FleetKit ships no file
+    sink for `TimelineNotice` at all. Closer: either `Fleet.init` takes the two sinks instead
+    of a directory (one owner per file, which is also what would let the app install a
+    capturing sink), or the composer stops constructing that pair and exposes `Fleet`'s. The
+    first is a small FleetKit change and is the better shape. Owner: C6 (first writer), with
+    the FleetKit signature change belonging to whoever touches `Fleet.init` next.
+    Second consequence, found in Task 3's review: Settings' *Delete diagnostics* renews the
+    composer's own three sinks after unlinking their files, but it cannot reach `Fleet`'s
+    duplicate pair, so those two go on writing into unlinked inodes until the app is
+    relaunched. **Neither closer listed above closes this half**, which the first draft of this
+    sentence claimed: one owner per file still holds a handle to an unlinked inode, and so does
+    a composer that exposes `Fleet`'s sinks. What closes both halves together is the C5 spec's
+    revised recommendation — each sink opening the log `O_APPEND` **per write** and closing,
+    holding no handle across writes, so a sink whose file was unlinked recreates it on the next
+    write. That still leaves two sinks racing each other's rotation rename, which only a single
+    rotation owner settles.
+54. **`TranscriptIndex` and `Fleet` disagree about the config home's spelling.** The index
+    records a symlink-resolved root in its snapshot; `Fleet` keys supervisors by the
+    launch-resolved root. C5's `ChannelRegistrar.listed` threads the home through as an argument
+    so registration joins them correctly today, but the disagreement is still there for the next
+    consumer that joins those two by key — C6 and C7 both will. Found at C5 Task 4. Closer:
+    settle one spelling at the seam, or have both sides canonicalise identically, rather than
+    each caller remembering to bridge it.
+**Historical correction, 2026-09-07 (F1 claim sweep):** entry 55 and its dated amendments
+below preserve the investigation before the sidebar fix. The six-process cap does **not**
+bound how many channels publish states; registered processless supervisors publish too.
+The rebuild defect is closed by row patching and coalescing, as the later closer records.
+
+55. **`FleetBrowserModel.rebuild()` re-derives every section on every `ChannelState`.** Harmless
+    at C4's cap of six live processes, which is the only thing that pushes states today. It is
+    the first thing a view bound straight to `sections` would feel, so C5 Task 5 and C6 should
+    know. Found at C5 Task 4. Closer: patch the affected section rather than rebuilding, if a
+    profile ever shows it.
+    **Amended after Task 4's review, which found this entry recorded half its subject.** The
+    re-derivation was not pure: grouping called `realpath` plus an upward `fileExists` walk per
+    path component and then read a candidate's `.git`, memoised only *within* one call, so the
+    whole set of probes was repeated from scratch on every rebuild — on the main actor, on every
+    `ChannelState`, every delta, every failed action and every dismissed banner. That half is
+    **closed**: `PathMemo` outlives the call, so each distinct directory is probed once per launch,
+    and `ProjectGroupingTests.testThePathMemoIsNotReprobedOnASecondGrouping` holds it there
+    against a counter of real probes rather than of cache entries. What remains open is the
+    original entry as written — the O(rows) rebuild itself, which is arithmetic and allocation
+    with no syscalls in it.
+    **Measured at Task 5, and the "harmless" reading does not survive the number.** Task 5 is the
+    first consumer to bind a view straight to `sections`, so it measured before assuming: 3,000
+    rows across 40 sections, warm `PathMemo`, fifty consecutive `apply(_ state:)` calls, mean
+    **47.9 ms** and worst **50.4 ms** per rebuild, all of it on the main actor. Split by phase over
+    the same corpus: about 41 ms building rows (3,000 `URL(fileURLWithPath:)` among them, one per
+    row per rebuild) and about 18 ms grouping. The cap of six live processes bounds how many
+    *channels* push states, not how often each pushes one, and a channel mid-turn pushes many; at
+    48 ms each that is three dropped frames per state. Note this is the model's own cost and is
+    paid whether or not a view is bound. What binding adds is SwiftUI's own diff, and that is
+    **not** free either: `List` renders rows lazily but `OutlineListCoordinator.diffRows` walks the
+    whole row tree on every update, so the model's cost and the view's cost compound. Closer,
+    unchanged in shape and now with a profile behind it: `apply(_ state:)` changes one row's live
+    half, so patch that row in place and re-derive only when its archived-ness or its section
+    membership changed.
+    **Observed live at Task 5, and it is worse than the synthetic number suggested.**
+    *(The attribution in this paragraph is superseded twice over — read the two paragraphs after it.
+    Kept because the profile split it reports is still the measurement that motivated the fix.)*
+    Running the built app against a real config home — 306 projects, 3,006 transcripts, four foreign live
+    channels — pins one core at 100 percent indefinitely, not as a launch burst. A six-second
+    sample of the main thread: 39 percent inside the `updates` loop, `apply(_ state:)`,
+    `rebuild()`, `ProjectGrouping.sections` and its per-section sort; 60 percent inside
+    `OutlineListCoordinator.diffRows` re-diffing the section array that rebuild just replaced. The
+    driver is the rate, not the size: C4 re-runs `claude agents` every few hundred milliseconds to
+    observe foreign holders and each observation publishes a `ChannelState`, while the transcript
+    index contributed one update in twenty seconds over the same window. So the two halves compound
+    at the holder-poll rate and the model's O(rows) rebuild is the load-bearing one.
+    **Closed at Task 5**, `712ff54`. Idle CPU against the same config home is 0.1 percent, measured
+    over five reads eight seconds apart on an uninstrumented build, against a sustained 100 percent
+    before. Three changes, each demonstrated: a `ChannelState` patches the row it names through a
+    row index instead of re-deriving, falling back to the full derivation only when the state
+    crosses `isArchived`, which is the one thing about a row's position a state can change; a state
+    for a session `listed` does not hold publishes nothing, because `rebuild()` derives from
+    `listed` alone and could not have produced a row for it; and the `updates` loop ingests and
+    defers, flushing on the first main-actor hop that brings no new arrival, bounded by 256
+    deferrals rather than by any duration. Measured coalescing on the real corpus: 87 publishes and
+    7 full rebuilds for 13,250 states.
+    One correction to the diagnosis above, from instrumenting the stream rather than inferring it:
+    the driver is **not** a steady holder poll. It is C4's registration seeding — 13,250 states over
+    2,671 distinct sessions, about five per registered channel, 99.5 percent of them `.archived`,
+    every one a first arrival. `AppTests/SidebarUpdateCostTests.swift` holds all of it, correctness
+    clauses first.
+    **And that correction was itself incomplete**, per Task 5's review, which traced the mechanism
+    to `Fleet.fanOut` (`Fleet.swift:135-137` walks every supervisor for every published `HolderSet`,
+    and `ChannelSupervisor.swift:1718-1720` assigns before testing for change). So the cost is one
+    published state **per registered channel per holder-set change**, recurring for the life of the
+    process, and registration seeding is its first and largest instance rather than the whole of it.
+    The consumer-side fix is unaffected and its value goes up: the coalescing absorbs a recurring
+    cost, not a draining one. The producer half is tracker 60, against C4. Two consequences of the
+    correction are worth keeping visible: "it is a bounded burst that drains and stops" was true of
+    seeding and is false in general, and `identical=0` was true of seeding — where every state is a
+    first arrival — so coalescing repeats is not the dead end it looked outside the burst.
+    Nothing is left open on this entry; the ownership line it used to carry ("whoever next opens
+    `FleetBrowserModel`") is retired with it.
+56. **`FleetFacadeTests.testOpenListsTheChannelAndPublishesEveryTransition` is load-sensitive
+    and fails the whole-suite gate under load.** `FleetKit/Tests/FleetSessionsTests/FleetFacadeTests.swift:473`
+    waits with `harness.waitFor("the merged stream to carry the transitions") { collected.count >= 2 }`
+    — a polling helper on a wall-clock budget — over a merged `AsyncStream` whose delivery is
+    scheduled. Found while C5 was hunting a different flake: on an idle machine the full suite is
+    green, and under deliberate load (a concurrent full test run, a concurrent Release build,
+    twenty spinners, load average 32 rising to 75) this one test failed on both loaded runs.
+    Measured alongside it: an invocation that normally takes thirty seconds took over ten minutes
+    under that load, so a five-second budget is comfortably inside reach.
+    Why it matters beyond C4: `xcodebuild test -scheme afleet` runs FleetKit's suite, so this is
+    a flaky assertion inside C5's G1b gate and inside every later child's. The parent already
+    carries the shape as entry 2, from a C2 test whose starved-machine failure read as a product
+    bug. Owner: C4's file. Closer: fulfil the wait from the delivery — the collector signals when
+    it appends — rather than polling a deadline. C5 converted its own tests this way in `0f3ec6b`
+    and the pattern transfers directly.
+
+57. **The sidebar reads `SidebarGrouping` and never writes it, so pinning and collapse do not
+    persist.** Spec §4 says grouping, pinning and collapse persist through `FleetKitKeys.grouping`
+    and unread cursors through `FleetKitKeys.unreadCursors`. Task 5 wired the read half only:
+    `FleetCoordinator.loadGrouping` loads the persisted `SidebarGrouping` and `ProjectGrouping`
+    orders sections by it, and `SidebarView` draws the pin glyph on a pinned section — but the
+    sidebar offers no pin, unpin or collapse action, so nothing ever writes a new value back.
+    A user can therefore see a pin that a previous version of afleet set and cannot set one.
+    Task 5's brief lists neither action among its deliverables, which is why this is a gap rather
+    than a bug. Closer: a context menu on the section header calling through to a
+    `FleetBrowserModel.setPinned(_:on:)` / `setCollapsed(_:on:)` pair that writes `SidebarGrouping`
+    back through `StateStore` under `.fleetKit`. Owner: C6, or a C5 follow-up if the human gate
+    wants it before C6.
+58. **`LifecycleAPI.attach` hands back a `PaneRequest` that nothing in C5 renders.** The sidebar's
+    *Attach* on a background job calls `FleetBrowserModel.attach(_:)`, which returns X5's
+    `PaneRequest`; `ShellModel.pendingPane` holds the most recent one and no surface runs it,
+    because running a pane is the Terminal panel's job and that is C7's. Nothing is lost — the
+    request is a value and X5 does the ownership work either way — but the button currently
+    reports success and shows nothing, which is a wrong affordance in the same sense §5 uses of a
+    half-drawn card. Closer: either Task 8's pane seam consumes `pendingPane` and hands it to the
+    registered runner, or the button is disabled with a sentence until C7.3 lands. Owner: C5
+    Task 8 for the first option, which is the cheaper of the two and is already building the seam.
+
+59. **`TrustReader.isTrusted` reads `<configHome>/.claude.json`, which on an ordinary installation
+    is a file that has never existed.** Same defect as the one C5 Task 5 fixed on the app side and
+    the same evidence: the engine resolves the global config document as
+    `join(CLAUDE_CONFIG_DIR ?? homedir(), ".claude.json")` (2.1.263 `cli.pretty.js:298330`) while
+    the config home is `CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")`, so the two coincide only
+    when the variable is set. `FleetKit/Sources/FleetSessions/Preconditions/TrustReader.swift:68`
+    appends to the root unconditionally, so with the variable unset every project reads as
+    untrusted and `SpawnPrecondition.untrusted` refuses every spawn. Not observed as a failure yet
+    because C5 spawns nothing; C6 is the first child that will. **Outside C5's fence** — the file
+    is C4's, inside the FleetKit package — which is why this is an entry and not a commit.
+    Closer: `isTrusted` takes the resolved document location, or a `ConfigHome` rather than a URL,
+    the same shape the app now uses. Owner: C4, before C6 spawns.
+60. **One holder change publishes a state to every registered channel, so the cost recurs.**
+    Measured at C5 Task 5 by instrumenting `LifecycleAPI.updates` during a launch over a real
+    config home: **13,250 states across 2,671 distinct sessions**, `identical=0` — not one was a
+    repeat of a state already held — 99.8% carrying the `.archived` origin, and 2,669 of them for
+    sessions the listing policy never lists.
+    **It is not a one-off seeding burst, which is what the first version of this entry said.**
+    C5 Task 5's review found the mechanism and the controller verified it in C4's source:
+    `Fleet.fanOut` (`Fleet.swift:135-137`) walks **every** supervisor for **every** published
+    `HolderSet`, and `ChannelSupervisor.holdersChanged` (`ChannelSupervisor.swift:1718-1720`)
+    assigns `state.observed` before any test of whether anything changed. The observer publishes
+    only sets that differ, but one differing set costs **one published state per registered
+    channel** — and the sidebar registers every listed transcript, so a holder change affecting a
+    single session costs thousands. The cost therefore recurs for the life of the process
+    whenever holders move; seeding is merely the first and largest instance.
+    Not a C5 problem any more: the sidebar patches by row, drops states for unlisted sessions and
+    coalesces a burst, so 13,250 states now cost 87 publishes and 7 rebuilds, and idle CPU is
+    0.1%. Filed because the amplification is real and the next consumer will not have that
+    machinery — C6 subscribes to the same stream. Note also that coalescing *duplicates* would
+    have saved nothing here, since there were none; the cost is in how many distinct intermediate
+    states seeding emits per channel. Owner: C4. Closer, two halves — the recurring one first:
+    publish from a supervisor only when its own holder view actually changed, rather than from
+    every supervisor on every published set; and for seeding, publish the settled state per
+    channel rather than each step toward it, or say why the intermediates are load-bearing.
+
+61. **`afleet.config-change` is answered but not acted on: the `get_settings` refresh §6.4 asks for
+    is owed.** The parent's protocol table says the callback "refreshes `get_settings` and answers
+    likewise". C5 Task 6 ships the answer — an empty continue, so the engine is never left blocked
+    on a registered hook callback that nothing routes — and deliberately not the refresh.
+    Why deferred rather than done: `get_settings` is a per-channel control request whose reader is
+    the channel's settings and permissions view, which is C6's. This child renders no engine
+    settings at all (`SettingsReadout` is the app's own config-home and diagnostics readout, not the
+    engine's), so a refresh here would fetch a value nothing draws and would have to invent a place
+    to keep it. The hang was the defect and the answer closes it; the behaviour is what remains.
+    Closer: when C6 owns a live per-channel settings view, make the `afleet.config-change` route
+    re-read `get_settings` for that channel and publish it, and keep the empty continue after it.
+    Owner: C6. Found by Task 6's review as finding C1; the answer landed in the same task.
+62. **§6's third notification source has no stored preference.** The spec names three toggleable
+    sources — a decision in a channel not in view, a completed turn in a channel not in view, and
+    every notification the engine raises through the `Notification` hook — and the persisted
+    `NotificationPreferences` carries `permissionRequests`, `turnCompleted` and `channelFailed`.
+    None of the three is the hook, so C5 gates decisions, completed turns and failed turns and
+    leaves the engine's own hook notification always on, which is the least surprising default: the
+    engine raised it deliberately. Not a defect, a gap between the document and the stored shape.
+    Closer: add a fourth field with a default, a Settings row beside the other three, and decide
+    whether `channelFailed` keeps its current meaning (a `result` frame with `is_error`) or is
+    renamed to say so. Owner: C6 or whoever next opens the Settings screen.
+63. **`ActivityModel.start()` reads every registered channel's state once per launch.** It seeds
+    itself from `LifecycleAPI.states()`, which on `Fleet` awaits each supervisor in turn — one
+    actor hop per registered channel, and the sidebar registers every listed transcript, so on a
+    real config home that is thousands of hops. It happens once, off the first paint, and the model
+    then keeps only the states that could produce a row, so nothing after the seed is fleet-wide.
+    Filed because it is a fleet-wide read where a per-channel feed would do, and because it grows
+    with the corpus. Not measured at three thousand channels. Closer: either a `states(of:)` taking
+    the keys the caller cares about, or seeding Activity from the same `updates` feed the sidebar
+    already consumes and dropping the initial pull. Owner: C4 for the first, C5's successor for the
+    second.
+64. **Nothing handles a notification being clicked.** C5 posts three kinds of notification and
+    carries the channel's session id on each (`AfleetNotification.session`), but no
+    `UNUserNotificationCenterDelegate` is set, so a click opens the app and lands wherever the
+    window already was. The channel the notification is about is one hop away and the user has to
+    find it themselves, which is most of the value of having been told.
+    **It is unreachable until authorisation can be granted, and that ordering is the useful part
+    of this entry.** Spike S-C5-1 did not promote: on an ad-hoc-signed, non-notarised build the
+    system prompt is presented but nothing unattended can answer it, and the status is `denied`
+    afterwards, so no system notification is drawn and there is nothing to click. Until somebody
+    with a screen grants authorisation, or the app is signed and notarised, a click handler could
+    be written but not exercised — which is why C5 left it rather than shipping a path no test and
+    no human could reach. The in-app fallback banner has the same gap and is reachable today: a
+    banner in the Activity list is not clickable either, and that half could be done now.
+    Closer, in the order they become reachable: give `BannerStack`'s rows a tap that calls
+    `ShellModel.select(_:)` with the notification's session; then, once a system notification can
+    be delivered, set a delegate whose `didReceive` response routes the same way, keyed by the
+    session already carried on the notification. Owner: whoever holds the shell after C5 — C6 in
+    practice, since it owns the surface a routed click lands on. Deferred by C5 Task 6 and filed at
+    the reviewer's instruction, because a deferral nobody recorded is indistinguishable from an
+    omission.
+65. **A `ChannelTimelineModel` created by `attach` and never sent `open` stays blank forever.**
+    Reachable only if a caller attaches a model and then never opens the channel it belongs to,
+    which no C5 path does — the column opens on appearance. Recorded because C6 replaces that
+    view and may attach earlier or on a different trigger. Found at C5 Task 7. Closer: either
+    make `attach` imply the first `open`, or assert in the model that a `nil` projection with
+    `hasOpened` false is unreachable so a future caller trips it.
+66. **`hasOpened` is set before the index lookup, so a missing entry pins `failure` for the
+    model's life.** A channel whose index entry is absent at open time — a transcript deleted
+    between listing and opening — records the failure and never retries, because the guard that
+    prevents re-opening has already fired. No C5 path produces it: the sidebar lists from the
+    same snapshot the model reads. Found at C5 Task 7. Closer: set `hasOpened` after the lookup
+    succeeds, so a transient absence is retried on the next appearance.
+
+67. **The panel column resolves its `ChannelContext` inside `body`, which mutates the host.**
+    `PanelHostModel.context(for:cwd:)` records the channel's working directory and caches the
+    context it built, and `view(for:context:)` touches the eviction order and can create a session
+    — all from inside a SwiftUI view evaluation. It is sound today and deliberately so: every field
+    those paths write is `@ObservationIgnored`, so none of them invalidates a view and none can
+    produce "modifying state during view update". The debt is that the safety rests on that
+    property of five stored properties rather than on the shape of the call, and the first of them
+    to become observed — a host that wanted the tab bar to redraw when a context is rebuilt, say —
+    reintroduces the hazard silently. Found at C5 Task 8. Closer: resolve the context in an
+    `onChange` or a `task(id:)` and hold it in view state, the same move C5 Task 7's fix made for
+    the channel header; or keep the caches behind a type whose API cannot be called from `body`.
+    Owner: whoever next adds observed state to the host — C6 or C7 in practice.
+68. **`PanelHost.run(_:)` picks a pane runner by tab rather than by the request's purpose.**
+    `registerPaneRunner(_:for:)` is keyed by `PanelTabID`, and `run` prefers the runner registered
+    for `.terminal`, falling back to the first registered in canonical order and throwing
+    `noPaneRunner(.terminal)` when there is none. Only C7's Terminal leaf registers a runner, so the
+    fallback arm is unexercised and the choice is unambiguous today. `PaneRequest` already carries a
+    `PanePurpose`, which is what a second runner would want to be routed by — a logs pane in a
+    different leaf, say. Found at C5 Task 8. Closer: when a second runner appears, route on
+    `request.purpose` and let a runner declare the purposes it accepts; the protocol member's `for
+    tab:` parameter stays, because a runner still belongs to a tab. Owner: C7, at its second runner.
+69. **C4's `trustedDirectory(_:)` excludes the config home with a comparison that fails open.**
+    `FleetKit/Tests/FleetSessionsTests/LiveFleetTests.swift` canonicalises both sides of its
+    config-home exclusion with `URL.resolvingSymlinksInPath()`. Foundation rewrites `/private/tmp/…`
+    to `/tmp/…` only when the resulting path **exists**, so a trust entry naming a directory
+    *beneath* the scratch config home that has not been created yet stays `/private/tmp/…` while the
+    config home itself becomes `/tmp/…`; no prefix matches, the entry survives the exclusion, and the
+    live suite would then create a directory inside a config home — the one act X9 forbids
+    absolutely. Found at C5 Task 9 by porting the rule and testing the exclusion for the first time
+    (`AppTests/Support/ScratchLiveGateTests.swift`); C5's port is fixed and uses
+    `CanonicalPath.string`, which resolves as much of a path as exists and puts the rest back.
+    Unexploited in C4 today: the scratch `.claude.json` carries no such entry, and the fixture would
+    have to name one for the hole to open. Closer: take the same fix in C4's copy. Owner: C4's
+    maintainer, or whoever next touches that file.
 70. **Every fixture and live gate ran under a `CLAUDE_CONFIG_DIR` scratch home, which is not the
     shape of an ordinary installation.** With the variable set the engine reads
     `$CLAUDE_CONFIG_DIR/.claude.json`, names its keychain credential item with a path-hash suffix
@@ -424,3 +725,177 @@ architect's rulings settled them). Line numbers are as at `4f2102d`, before the 
     unset), and at least one live gate per spawning child runs in that shape. The cost is that such
     a child authenticates through the unsuffixed keychain item, the author's own; the gate must
     stay zero-turn. Owner: C1's maintainer at the re-pin; C6 for the first spawning gate.
+
+71. **The app never calls `AppFleet.shutdown()`.** `Workspace.swift` declares it on the protocol
+    and every call site is a test's teardown; no path in `App/` invokes it, so quitting afleet
+    leaves its streams unfinished, its timers uncancelled and its diagnostics unflushed.
+    **Corrected 2026-09-07 by the architect's ruling: `shutdown()` terminates nothing** — its own
+    doc comment says so. What ends an owned child on quit is the **pipe**: an owned channel is the
+    engine on afleet's stdio, and the engine treats stream close as wind-down, killing every
+    still-running local shell and abandoning its other background tasks (parent §7 near line 981,
+    and the Decision Log entry near 2805). So an owned conversation cannot outlive afleet, "keep
+    it running" is not something a quit dialog could offer, and the only way to keep one is to
+    release it first with *Open in terminal*. Found at C5 Task 8's review follow-up, by sweeping `App/` for members whose only
+    callers are in `AppTests/` (the same sweep that found `ChannelTimelineRegistry.release(_:)`
+    uncalled, which was fixed rather than filed because it had an owner and a seam already). This
+    one is filed rather than fixed because it is a decision, not an omission: X5's invariant is that
+    afleet never stops a session running in the user's terminal, so what an app-termination hook may
+    end is exactly the set `Fleet` owns, and whether quitting the window should end an owned
+    conversation at all — rather than releasing it the way *Open in terminal* does — is the
+    architect's call. **That call is made**, and goes into parent §7.4 as a binding *Quit* clause
+    at C5's merge: on `applicationShouldTerminate`, if any owned channel has a turn running or
+    running local shells, afleet asks **once**, naming those channels, before ending them — the
+    same warning rule X9 already imposes per channel for `end_session`; on confirmation, or when
+    nothing is busy, it runs `terminate()` on each owned channel that has a process, then
+    `Fleet.shutdown()`, then exits. Foreign and background-job channels are never touched.
+    Closer: implement that clause. Owner: C6, which owns the surface where a running conversation
+    is visible when the user quits.
+72. **A member declared in `App/` whose only callers are in `AppTests/` is not detectable by any
+    check this repo runs.** Two real defects in one review cycle had that exact shape:
+    `PanelHost.selectIndex(_:in:)`, correct and tested with no production caller while the menu
+    called something that indexed a different list, and `ChannelTimelineRegistry.release(_:)`,
+    correct and tested and never called, so every channel ever opened kept its ingestion. Both were
+    found by hand. The sweep is mechanical — declarations in `App/`, call sites counted in `App/`
+    versus `AppTests/` — and would have found both, plus entry 69, in one run.
+    **DONE at C5 Task 10 (`138c58a`), and the closer below is what was built** —
+    `Tools/c5/check-app-wiring.py`, run from `make test-tools`, with its own gate in
+    `Tools/c5/tests/`. Two corrections to the closer as it was written. The allowlist needed
+    **eighteen** entries rather than six: the four probes named below plus `whenSettled`, and
+    twelve current findings, each carrying the tracker number that owns it (71, 73, 74) rather
+    than an exemption. And the check keys on a bare name, so it cannot see a member whose name is
+    also used elsewhere under `App/` — `PanelHostModel.run(_:)` has no production caller and the
+    check will never say so, because `LaunchSequence.run()` shares the name. Per-clause wiring is
+    still read by hand at a merge; this closes the mechanical half only.
+    Closer: add it to
+    `Tools/c5/` beside `check-x7-drift.py` with an explicit allowlist for the members that are
+    legitimately unexercised (`registerPaneRunner`, whose caller is C7's Terminal leaf, and the
+    test-only probes `pump`, `settle`, `whenChanged`, `cursorsPersisted`), and run it from `make
+    test`. Owner: C5 Task 10 if the merge wants it, otherwise the first child that adds a `Tools`
+    check of its own. **The general form is worth more than the check**: a gate clause is only as
+    true as the path the app takes to it, and nothing in the suite says which path that is.
+73. **Six counts and three accessors are declared in `App/` for a diagnostics line, a report or a
+    screen that never reads them.** Found at C5 Task 10 by the sweep tracker 72 asked for, now
+    `Tools/c5/check-app-wiring.py`. `PanelHostModel.liveSessionCount` and `liveChannelCount`,
+    `HostLinkRouter.targetCount`, `ChannelTimelineRegistry.openChannels` and
+    `FleetCoordinator.skippedWithoutCWDCount` each say in their own doc comment that they exist
+    "for a diagnostics line" or "for a report"; no such line is written, so the numbers the app
+    would state about itself are computable and never stated. `FleetBrowserModel.restore(from:)`
+    is superseded by `paint(_:listing:origin:)`, which is what `FleetCoordinator` actually calls,
+    and `AppRoute.setupState` / `upgradeVersions` are unread because `RootView` switches on the
+    enum directly — all three remain the suite's assertion surface, which is why they are here
+    and not deleted. Nothing is wrong with the app: every one of these is a read-only accessor and
+    no behaviour depends on it. Closer, two halves: write the diagnostics line the five counts were
+    declared for, through `DiagnosticsComposer.app`, at the points the composer already records
+    (launch complete, channel released); and delete `restore(from:)` in favour of the call the
+    coordinator makes, moving the two tests that use it onto `paint`. Owner: C6, which is the first
+    child with a reason to read those numbers back. Until then each is allowlisted in the check
+    with this entry's number as its reason.
+74. **`ChannelRow.offersOwnedActions` and `readOnlyReason` have no consumer, because C5's sidebar
+    offers no channel action at all.** `ListingPolicy` decides the mode, `ChannelRegistrar` carries
+    it onto the row, `SidebarModelTests` asserts a teammate transcript is listed read-only — and
+    `ChannelRowView` draws a glyph, a title, a subtitle and a badge, with no context menu and no
+    button. So G1c's read-only clause is true of the model and unobservable in the app, which is
+    correct for this child rather than wrong: with no affordance to gate there is nothing that
+    could spawn against someone else's session, and X5 refuses it a second time regardless. Filed
+    because the first child to add a channel action inherits a row that already knows the answer
+    and a codebase where nothing has ever asked it — the shape that produced tracker 72's two
+    defects. Closer: the context menu C6 adds reads `offersOwnedActions` for what it offers and
+    `readOnlyReason` for the sentence it shows instead, and a test asserts a read-only row offers
+    no owned action. Owner: C6, which owns the surface where a channel action first appears.
+75. **The assertion-leak class is unfixed in three package test targets, and it is the one class
+    the app's own suite was swept for.** C5 Task 10 swept every test target in the tree for
+    assertions whose failure message would print a path derived from `FileManager.temporaryDirectory`
+    — which carries the account hash of the machine that ran the suite. `AppTests` had ten and they
+    are fixed. Outside C5's fence the sweep counted **fifteen** in `FleetSessionsTests`, **twelve**
+    in `FleetTimelineTests` and **seven** in `ClaudeWireTests`, of which the confirmed ones are
+    `PreconditionTests` (nine sites plus two failure messages that interpolate a resolved temporary
+    path outright), `FleetFacadeTests` (one), `TranscriptIndexTests` (the entry-path comparisons)
+    and `LiveCLITests` (one). Every one is an `XCTAssertEqual` or `XCTAssertNotEqual` over two
+    temporary-directory-rooted paths, so a failure prints both. Not fixed here because these files
+    belong to C2, C3 and C4 and a merge-time diff across three other children's suites is the wrong
+    place to land it. Closer: spell each as a boolean with a message that names counts, the way
+    `AppTests` now does; the sweep is mechanical and reproducible from the class statement above.
+    Owner: C4 for `FleetSessionsTests`, C3 for `FleetTimelineTests`, C2 for `ClaudeWireTests`.
+76. **`LaunchFixtures.wait(upTo:for:)` and `waitAsync(upTo:for:)` are declared and called by
+    nothing.** Two polling waiters in `AppTests/Support/LaunchDoubles.swift`, each returning a
+    `Bool` nobody reads because there is no caller. Found by C5 Task 10's sweep for awaits whose
+    result is discarded; they are the inverse case, a result nobody can discard because nobody asks
+    for one. Harmless, and worth removing rather than leaving as a pattern the next executor copies:
+    every wait in this suite is fulfilled by the event it waits for and none of them polls, which is
+    the rule these two would quietly break. Closer: delete both. Owner: the next task that opens
+    `LaunchDoubles.swift`.
+
+77. **Background roster changes outside afleet have no complete app-consumable signal (C5 review F6).**
+    `SidebarView` loads the roster once; afleet's Adopt and Stop refresh it, but external exec
+    jobs and job-state changes can remain invisible until relaunch. The existing
+    `LifecycleAPI.updates` carries channel states, not roster changes: `HolderReader` omits
+    exec jobs from channel holders, and `FleetObserver.perform` publishes only when holders
+    change, ignoring changes in `HolderSnapshot.jobs`. Session jobs with registered supervisors
+    can produce channel-origin transitions, but those cannot cover exec jobs, job-state text,
+    or sessions without supervisors. Refreshing on every channel state would also call
+    `Fleet.jobs()` → `reconcileNow` → `agents --json`, booting the CLI on the state stream's
+    registration burst. C5 therefore adds neither a polling timer nor a partial channel-only
+    refresh and does not claim this finding fixed. Closer: C4 publishes roster changes from
+    the observer's existing watch/reconcile cycle through X5, carrying the current `[JobEntry]`
+    (including exec jobs and state changes), so C5 can update its Background list without an
+    extra CLI reconciliation. Owner: C4 for `FleetObserver`/`LifecycleAPI` and its X5 amendment;
+    C5's fleet browser for the consumer once that signal exists.
+
+**R3 correction, 2026-09-07:** entry 78's two-guard statement excludes the filesystem-root
+case: C5 now handles it by path components; the C4 guard still misses it (entry 80). The
+symlink-containment debt in entry 78 is unchanged.
+
+78. **The X9 app-side claim rests on root containment, which a symlink planted inside a write
+    root would escape.** `AppFileWrites` observes every path app code chooses, and
+    `testEveryFilesystemWriteInTheAppIsBehindTheSeam` keeps that observation complete. It does
+    not observe the bytes `FileStateStore` and the package diagnostics sinks write beneath a
+    root the app handed them; for those the app declares the root, and the claim that nothing
+    lands under a config home follows from `LaunchSequence.overlappingWriteRoot` and
+    `FileStateStore`'s `configHomes:` both refusing a root that canonicalises to or under the
+    resolved config home. Containment therefore assumes a package writes only beneath the root
+    it was given. A symlink inside a write root pointing into a config home defeats both guards,
+    because both canonicalise the root and neither walks its descendants. Not reachable through
+    anything C5 ships — every write root is a directory afleet creates — and left unfixed rather
+    than papered over with a second guard in the seam, which would be a third answer to a
+    question two places already answer. Closer: whichever child first accepts a user-chosen
+    store or diagnostics root resolves each write path, not only the root, or opens its files
+    with `O_NOFOLLOW`. Owner: C6 if it ships the Settings control for either root; otherwise the
+    child that does.
+
+79. **The author's own handle is committed in eighteen fixture `review.reviewer` fields and one
+    probe test input.** C5's X9 leak-risk pass swept every tracked file for the recording
+    machine's account name, its home directory and the author's handles. Four of the six
+    patterns matched nothing anywhere. One matched 23 tracked files, 19 of them outside `docs/`:
+    eighteen `Fixtures/*/fixture.json` `review.reviewer` values and one literal in
+    `Tools/probe/tests/test_fixture_verify.py`. **None of them is C5's** — every one predates
+    this child, introduced 2026-09-04 by C1's fixture-layout and first-fixture commits, and no
+    file carrying one is touched on this branch. They are also not engine bytes: the reviewer
+    field is a human signature the `make sign` gate writes on purpose, so the question is
+    whether §11's "no identifier from the author's home in a committed file" admits a
+    deliberate provenance signature. C5 does not answer that; it records that the sweep is
+    otherwise clean and that every identifier C5's own test inputs use is invented (20 distinct
+    UUIDs, all repeated-nibble or `5c50`-prefixed patterns). Closer: either the parent rules the
+    reviewer field an exception and §11 says so, or `make sign` takes a handle that is not a
+    personal one and the eighteen fixtures are re-signed. Owner: the parent at merge, since the
+    fixtures are C1's and the rule is §11's.
+
+80. **`FileStateStore` permits descendants when a config home is the filesystem root (C5 review R3).**
+    `FleetKit/Sources/FleetSessions/Store/FileStateStore.swift:31` compares canonical strings
+    using equality or `hasPrefix(homePath + "/")`. For a config home of `/`, the prefix is
+    `//`, so an ordinary descendant passes the never-write guard. C5 corrected its own
+    `LaunchSequence.overlappingWriteRoot` before any store or diagnostics construction, but
+    the package constructor remains unsafe for other callers. This is outside C5's fence,
+    like entry 75, and was not edited in the app-shell fix wave. Closer: retain canonicalization
+    and compare path-component prefixes instead of string prefixes; demonstrate the refusal
+    with a non-writing seam so a removed guard cannot create anything beneath a config home.
+    Owner: C4 (`FileStateStore`, X6/X9).
+
+81. **SwiftUI body/action inspection is tied to framework storage (C5 review T2).**
+    `AppTests/Support/ViewTree.swift` exercises the shipped Settings body and its actual
+    button closure without a separate presentation model. The local hosted accessibility
+    instrument exposed no SwiftUI children, so it could not prove control reachability.
+    Reflection is test-only and prints no values. Its action adapter checks isolation,
+    signature and size before bridging SwiftUI's Swift-5 closure metadata to Swift 6;
+    the missing-control and press assertions fail closed if the framework shape changes.
+    This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
+    accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.

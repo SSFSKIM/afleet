@@ -1,0 +1,374 @@
+import Foundation
+import Observation
+import SwiftUI
+import AfleetCore
+import FleetKit
+import PanelHostAPI
+
+/// One popped-out panel window, and the value its `WindowGroup` is keyed by (spec §7).
+///
+/// It carries the tab and the channel and **not** the `ChannelContext`, which holds capabilities
+/// that are not `Codable`. The scene resolves the context from the host by this key, which is also
+/// what keeps a popped-out window on the channel it was popped from when the main window moves on.
+struct PoppedOutPanel: Codable, Hashable, Sendable {
+    let tab: PanelTabID
+    let channel: ChannelKey
+}
+
+/// Contract X7's host: the app's only conformance to `PanelHost` (spec §7).
+///
+/// **What it retains is the session, not the view.** SwiftUI owns `@State`, `@StateObject` and
+/// representable coordinators through the rendered hierarchy and tears them down when a subtree
+/// unmounts, so caching an `AnyView` value would preserve nothing. The host holds one
+/// `PanelTabSession` per (tab, channel), hands it back on every render, and gives each pair a
+/// stable SwiftUI identity so an unrelated re-render does not discard the subtree. A tab puts its
+/// PTY, its panes and its open buffers there.
+///
+/// **What releases a session is one of three things, and origin is not among them.** Sixteen
+/// channels of LRU pressure, the tab being unregistered, and the channel leaving the index. The
+/// `.archived` origin is deliberately *not* a trigger: it is the ordinary origin of a registered
+/// channel with no live process, so evicting on it would destroy nearly every channel's state at
+/// once. Nothing in this type reads a `ChannelOrigin` at all, which is what makes that structural.
+@MainActor
+@Observable
+final class PanelHostModel: PanelHost {
+
+    /// How many channels may hold sessions before the least recently rendered ones are released.
+    ///
+    /// C4's live-process cap of six plus room for the pop-outs and the recently visited. Advisory:
+    /// a measured reason to change it is a Revision Note, not an edit. The alternative — retaining
+    /// a session per channel browsed — accumulates one per channel across a three-thousand-channel
+    /// config home, each potentially holding a PTY.
+    static let channelCapacity = 16
+
+    /// How many URLs a context's feed republishes on each timeline change.
+    static let recentURLLimit = 100
+
+    private(set) var selected: PanelTabID?
+
+    /// The popped-out windows, in the order they were popped. Every channel named here is exempt
+    /// from LRU eviction: a window on screen must not lose the state it is drawing.
+    private(set) var poppedOut: [PoppedOutPanel] = []
+
+    /// The channel the main window is looking at, which is exempt from eviction however long ago
+    /// it was last rendered. The panel column sets it; a headless host has none.
+    private(set) var selectedChannel: ChannelKey?
+
+    /// The tabs the main window can currently show, in canonical order, for the menu that carries
+    /// Cmd+1…7.
+    ///
+    /// **Presentation only, and never a second source of truth for what an index names.** The
+    /// shortcut still resolves through `selectIndex(_:in:)` against the context the panel column
+    /// holds — that is why the context is a parameter of that member rather than state kept here —
+    /// and this exists so the label the menu writes beside Cmd+2 is the tab Cmd+2 actually selects.
+    /// Empty when the window is on Activity or on a channel with no context, where the shortcut has
+    /// nothing to select and the menu correctly offers nothing.
+    private(set) var mainWindowTabs: [PanelTabID] = []
+
+    /// The one link registry in the running app (spec §7, C7's W5). The host hands *this* object
+    /// into every `ChannelContext`, so a tab holds one routing seam rather than two, and when
+    /// C7.2's `LinkRouting` target lands its reusable registry this delegates to it rather than a
+    /// second registry coming into being.
+    @ObservationIgnored let links = HostLinkRouter()
+
+    /// How a popped-out window is actually opened. Set by the panel column, which is the only place
+    /// SwiftUI's `openWindow` action is reachable from; nil in a headless test, where the pop-out
+    /// registry is the whole of the observable behaviour.
+    @ObservationIgnored var presentWindow: (@MainActor (PoppedOutPanel) -> Void)?
+
+    /// One (tab, channel) pair: the session cache's key and the rendered subtree's SwiftUI identity.
+    struct SessionSlot: Hashable {
+        let tab: PanelTabID
+        let channel: ChannelKey
+    }
+
+    @ObservationIgnored private var tabs: [PanelTabID: any PanelTab] = [:]
+    @ObservationIgnored private var runners: [PanelTabID: any PaneRunning] = [:]
+    @ObservationIgnored private var sessions: [SessionSlot: any PanelTabSession] = [:]
+    /// The channels that hold sessions, least recently rendered first. The eviction order.
+    @ObservationIgnored private var recency: [ChannelKey] = []
+    /// The working directory each channel was last rendered with, so a popped-out window can
+    /// rebuild a context for a channel the main window has moved off.
+    @ObservationIgnored private var cwds: [ChannelKey: URL] = [:]
+    /// One context per channel, rebuilt when the channel's working directory changes. Cached so the
+    /// main window and a popped-out window hand a tab the *same* capabilities — in particular the
+    /// same `RecentURLFeed` instance — rather than two feeds over one timeline.
+    @ObservationIgnored private var contexts: [ChannelKey: ChannelContext] = [:]
+
+    @ObservationIgnored private var workspace: Workspace?
+    @ObservationIgnored private var timelines: ChannelTimelineRegistry?
+    @ObservationIgnored private var lifecycle: (any LifecycleAPI)?
+
+    init() {
+        links.host = self
+    }
+
+    // MARK: - The workspace
+
+    /// Binds the host to the workspace a launch reached and to the app's one timeline registry.
+    ///
+    /// Every session and every context built over the previous workspace is released: *Check again*
+    /// runs the whole launch again, and a pane holding the store and fleet of a workspace nothing
+    /// else refers to is a leak with a PTY in it.
+    ///
+    /// `lifecycle` is the seam pane exits leave through. Production passes nil and gets
+    /// `workspace.fleet`; a test passes a double, which is the only way an exit's journey can be
+    /// asserted on.
+    func attach(to workspace: Workspace, timelines: ChannelTimelineRegistry,
+                lifecycle: (any LifecycleAPI)? = nil) {
+        self.workspace = workspace
+        self.timelines = timelines
+        self.lifecycle = lifecycle ?? workspace.fleet
+        sessions = [:]
+        recency = []
+        cwds = [:]
+        contexts = [:]
+        poppedOut = []
+        selectedChannel = nil
+    }
+
+    // MARK: - Registration and order
+
+    func register(_ tab: any PanelTab) throws {
+        guard tabs[tab.id] == nil else { throw PanelHostError.duplicateTab(tab.id) }
+        tabs[tab.id] = tab
+    }
+
+    /// Drops the tab, releases every session it held for every channel, and **awaits** the
+    /// withdrawal of its link targets.
+    ///
+    /// The await is load-bearing rather than incidental. This is the handover path — a later child
+    /// takes an id C5's placeholder holds by unregistering and then registering — and a withdrawal
+    /// that landed after the replacement's registration would delete the *replacement's* target,
+    /// because withdrawal is keyed by a tab id both tabs share.
+    func unregister(_ id: PanelTabID) async {
+        tabs[id] = nil
+        runners[id] = nil
+        for slot in sessions.keys where slot.tab == id { sessions[slot] = nil }
+        forgetChannelsWithNoSessions()
+        poppedOut.removeAll { $0.tab == id }
+        if selected == id { selected = nil }
+        await links.unregister(tab: id)
+    }
+
+    func registerPaneRunner(_ runner: any PaneRunning, for tab: PanelTabID) {
+        runners[tab] = runner
+    }
+
+    /// The registered tabs this channel can show, in `PanelTabID`'s canonical order whatever order
+    /// they were registered in.
+    func available(for context: ChannelContext) -> [PanelTabID] {
+        PanelTabID.allCases.filter { id in
+            guard let tab = tabs[id] else { return false }
+            return tab.isAvailable(in: context)
+        }
+    }
+
+    /// The registered tab's own title, or the id's default when nothing holds the id. The tab bar
+    /// draws this, so a child that takes an id over C5's placeholder is named by its own title
+    /// rather than by the one the placeholder had.
+    func title(for id: PanelTabID) -> String {
+        tabs[id]?.title ?? id.defaultTitle
+    }
+
+    /// The registered tab's own SF Symbol, on the same terms as `title(for:)`.
+    func systemImage(for id: PanelTabID) -> String {
+        tabs[id]?.systemImage ?? id.defaultSystemImage
+    }
+
+    func select(_ id: PanelTabID) {
+        guard tabs[id] != nil, selected != id else { return }
+        selected = id
+    }
+
+    /// The tab Cmd+N names for this channel, or nil when the index is past what the channel can
+    /// show.
+    ///
+    /// `selectIndex(_:in:)` is this plus the host-owned selection. The panel column also returns
+    /// the chosen id to its shortcut caller, so both paths use this one indexing operation.
+    func tab(at index: Int, in context: ChannelContext) -> PanelTabID? {
+        let ids = available(for: context)
+        guard index >= 1, index <= ids.count else { return nil }
+        return ids[index - 1]
+    }
+
+    /// Cmd+1…7, one-based over `available(for:)` so Cmd+1 is the first tab the user can see. An
+    /// index outside the set changes nothing: a key combination is not an assertion.
+    func selectIndex(_ index: Int, in context: ChannelContext) {
+        guard let id = tab(at: index, in: context) else { return }
+        select(id)
+    }
+
+    /// The panel column reports what it is showing, so the menu above the window can name the tabs
+    /// its shortcuts select. Called from a `task(id:)` rather than from `body`, because this one is
+    /// observed and writing it during a view evaluation is the shape that invalidates mid-update.
+    func mainWindowShows(_ ids: [PanelTabID]) {
+        guard ids != mainWindowTabs else { return }
+        mainWindowTabs = ids
+    }
+
+    // MARK: - Pop-out
+
+    func popOut(_ id: PanelTabID, channel: ChannelKey) {
+        let entry = PoppedOutPanel(tab: id, channel: channel)
+        if !poppedOut.contains(entry) { poppedOut.append(entry) }
+        presentWindow?(entry)
+    }
+
+    /// The window closed. Its channel loses its eviction exemption; its session is not released
+    /// here, because the main window may be drawing the same channel.
+    func closePopOut(_ entry: PoppedOutPanel) {
+        poppedOut.removeAll { $0 == entry }
+        evictIfNeeded()
+    }
+
+    // MARK: - Sessions
+
+    func session(for id: PanelTabID, context: ChannelContext) -> any PanelTabSession {
+        remember(context)
+        let slot = SessionSlot(tab: id, channel: context.key)
+        if let existing = sessions[slot] { return existing }
+        guard let tab = tabs[id] else { return UnregisteredTabSession() }
+        let made = tab.makeSession(for: context)
+        sessions[slot] = made
+        evictIfNeeded()
+        return made
+    }
+
+    func view(for id: PanelTabID, context: ChannelContext) -> AnyView {
+        guard let tab = tabs[id] else { return AnyView(EmptyView()) }
+        let session = session(for: id, context: context)
+        // A stable identity per (tab, channel), so an unrelated re-render of the column does not
+        // discard the subtree and take the tab's `@State` with it.
+        return AnyView(tab.makeView(session: session, context: context)
+            .id(SessionSlot(tab: id, channel: context.key)))
+    }
+
+    /// How many sessions are live, for a diagnostic line and for the bound's own test. A count,
+    /// never a key (§11).
+    var liveSessionCount: Int { sessions.count }
+
+    /// How many channels hold at least one session.
+    var liveChannelCount: Int { Set(sessions.keys.map(\.channel)).count }
+
+    /// The channel left the index (`IndexDelta.removed`). Its sessions go at once rather than
+    /// waiting for LRU pressure. Pop-out membership invalidates any window drawing it,
+    /// replacing its retained panel view with the missing-channel placeholder.
+    ///
+    /// `FleetCoordinator` calls this, which is the seam the composition root already drives; a host
+    /// released only from a test would leave production accumulating sessions for channels that no
+    /// longer exist.
+    func releaseChannel(_ key: ChannelKey) {
+        releaseSessions(of: key)
+        poppedOut.removeAll { $0.channel == key }
+        if selectedChannel == key { selectedChannel = nil }
+    }
+
+    /// The main window moved to this channel. Exempts it from eviction; nil when the window is
+    /// showing Activity or no channel at all.
+    func focusChannel(_ key: ChannelKey?) {
+        selectedChannel = key
+    }
+
+    private func remember(_ context: ChannelContext) {
+        cwds[context.key] = context.cwd
+        recency.removeAll { $0 == context.key }
+        recency.append(context.key)
+    }
+
+    /// Releases the least recently rendered channels until the bound is met, skipping the selected
+    /// channel and every popped-out one. If the exempt channels alone exceed the bound, nothing is
+    /// released: a window on screen keeps what it is drawing.
+    private func evictIfNeeded() {
+        var live = Set(sessions.keys.map(\.channel))
+        guard live.count > Self.channelCapacity else { return }
+        var exempt = Set(poppedOut.map(\.channel))
+        if let selectedChannel { exempt.insert(selectedChannel) }
+        for key in recency {
+            guard live.count > Self.channelCapacity else { break }
+            guard !exempt.contains(key), live.contains(key) else { continue }
+            releaseSessions(of: key)
+            live.remove(key)
+        }
+    }
+
+    /// Everything the host holds for one channel: its sessions, its place in the eviction order,
+    /// and the context it was rendering with.
+    ///
+    /// **The context goes too.** It holds the channel's `TimelineRecentURLFeed`, which holds that
+    /// channel's `ChannelTimelineModel`, so a cache that bounded the sessions at sixteen and kept
+    /// every context would still accumulate one timeline model per channel browsed — the
+    /// unbounded growth the bound exists to prevent, one indirection further out. Its callers are
+    /// both channel-level: LRU pressure, which never touches an exempt channel, and a channel
+    /// leaving the index. `unregister` releases one tab's slots itself and does not come here,
+    /// because another tab may still be rendering the same channel.
+    private func releaseSessions(of key: ChannelKey) {
+        for slot in sessions.keys where slot.channel == key { sessions[slot] = nil }
+        recency.removeAll { $0 == key }
+        contexts[key] = nil
+        cwds[key] = nil
+    }
+
+    /// Keeps the eviction order to the channels that still hold something.
+    private func forgetChannelsWithNoSessions() {
+        let live = Set(sessions.keys.map(\.channel))
+        recency.removeAll { !live.contains($0) }
+    }
+
+    // MARK: - The channel context
+
+    /// The context for a channel the host is rendering, recording the working directory so a
+    /// popped-out window can rebuild it later.
+    func context(for key: ChannelKey, cwd: URL) -> ChannelContext? {
+        if let cached = contexts[key], cached.cwd == cwd { return cached }
+        cwds[key] = cwd
+        guard let built = makeContext(key: key, cwd: cwd) else { return nil }
+        contexts[key] = built
+        return built
+    }
+
+    /// The context for a channel by key alone — the popped-out scene's resolution. Nil for a
+    /// channel this host has never rendered, which is what a window outliving its channel gets.
+    func context(for key: ChannelKey) -> ChannelContext? {
+        if let cached = contexts[key] { return cached }
+        guard let cwd = cwds[key] else { return nil }
+        return context(for: key, cwd: cwd)
+    }
+
+    private func makeContext(key: ChannelKey, cwd: URL) -> ChannelContext? {
+        guard let workspace, let timelines, let lifecycle else { return nil }
+        return ChannelContext(key: key,
+                              session: key.session,
+                              cwd: cwd,
+                              environment: workspace.environment,
+                              store: WorkbenchScopedStore(store: workspace.store),
+                              links: links,
+                              recentURLs: TimelineRecentURLFeed(registry: timelines, key: key,
+                                                                limit: Self.recentURLLimit),
+                              reportPaneExit: { exit in await lifecycle.paneExited(exit) })
+    }
+
+    // MARK: - The pane seam
+
+    /// X5's request, delivered to the registered runner **unchanged, `id` included**.
+    ///
+    /// The host neither edits a request nor constructs an exit: C4 accepts an exit only when its
+    /// `request.id` is the one it is waiting on, so a host that minted a fresh id would have every
+    /// exit discarded and nothing would say why.
+    func run(_ request: PaneRequest) async throws {
+        let tab = runners[.terminal] != nil ? PanelTabID.terminal
+            : PanelTabID.allCases.first(where: { runners[$0] != nil })
+        guard let tab, let runner = runners[tab] else { throw PanelHostError.noPaneRunner(.terminal) }
+        // Selecting or creating the Terminal tab is spec §7's wording; a runner registered for a
+        // tab that is not registered runs without a selection moving.
+        select(tab)
+        await runner.run(request)
+    }
+}
+
+/// What `session(for:context:)` answers for a tab that is not registered.
+///
+/// The protocol's return is not optional, because every caller that has a tab has a session; a
+/// caller that asks for one the host never heard of gets an object with nothing in it rather than
+/// a trap, since the panel column can ask during the frame in which a tab is being handed over.
+private final class UnregisteredTabSession: PanelTabSession {}
