@@ -37,6 +37,27 @@ final class PlaceholderTab: PanelTab {
     }
 }
 
+/// The four readouts the placeholder draws, as values.
+///
+/// It exists so what a test asserts is what the view renders: `PlaceholderTabView` reads its four
+/// fields and formats nothing else, so an assertion on this is an assertion on the tab reading
+/// every member of its `ChannelContext`. Gate G4b names the session id, the cwd and the
+/// environment, and a rendered `Text` is not an assertion.
+@MainActor
+struct PlaceholderReadout: Hashable {
+    let session: String
+    let cwd: String
+    let environmentVariables: Int
+    let recentURLs: Int
+
+    init(session: PlaceholderTabSession, context: ChannelContext) {
+        self.session = context.session.description
+        self.cwd = context.cwd.path
+        self.environmentVariables = context.environment.variables.count
+        self.recentURLs = session.recentURLCount
+    }
+}
+
 /// The placeholder's per-channel state: the recent-URL count, kept current from the feed.
 ///
 /// It is where the count lives rather than the view's `@State` for the reason the whole session
@@ -75,6 +96,10 @@ private struct PlaceholderTabView: View {
     let session: PlaceholderTabSession
     let context: ChannelContext
 
+    /// Every value below comes from here, so the four lines the window shows and the four a test
+    /// asserts are the same four.
+    private var values: PlaceholderReadout { PlaceholderReadout(session: session, context: context) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(PanelTabID.thread.defaultTitle).font(.headline)
@@ -82,10 +107,10 @@ private struct PlaceholderTabView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
             Divider()
-            readout("Session", context.session.description)
-            readout("Working directory", context.cwd.path)
-            readout("Environment variables", "\(context.environment.variables.count)")
-            readout("Recent URLs", "\(session.recentURLCount)")
+            readout("Session", values.session)
+            readout("Working directory", values.cwd)
+            readout("Environment variables", "\(values.environmentVariables)")
+            readout("Recent URLs", "\(values.recentURLs)")
             Spacer(minLength: 0)
         }
         .padding(14)
