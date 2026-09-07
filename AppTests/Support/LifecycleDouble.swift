@@ -48,6 +48,11 @@ actor LifecycleDouble: LifecycleAPI {
     private var actionEvents: [WireEvent] = []
     private var performInterlude: (@Sendable () async -> Void)?
     func duringPerform(_ body: @escaping @Sendable () async -> Void) { performInterlude = body }
+    /// Runs inside `states()`, once, before the sample is answered. `Fleet.states()` asks each
+    /// supervisor in turn, so a state really can be published while the sample is being taken;
+    /// this is the seam a test drives that interleaving through.
+    private var statesInterlude: (@Sendable () async -> Void)?
+    func duringStates(_ body: @escaping @Sendable () async -> Void) { statesInterlude = body }
     func emitDuringPerform(_ events: [WireEvent]) { actionEvents = events }
 
     init() {
@@ -92,7 +97,13 @@ actor LifecycleDouble: LifecycleAPI {
     }
 
     func jobs() async -> [JobEntry] { roster }
-    func states() async -> [ChannelState] { Array(table.values) }
+
+    func states() async -> [ChannelState] {
+        let interlude = statesInterlude
+        statesInterlude = nil
+        await interlude?()
+        return Array(table.values)
+    }
     func state(of key: ChannelKey) async -> ChannelState? { table[key] }
 
     // MARK: - Driving the Activity surface

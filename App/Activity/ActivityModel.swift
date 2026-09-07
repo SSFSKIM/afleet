@@ -122,6 +122,12 @@ final class ActivityModel {
     private var cursorWrite: Task<Void, Never>?
     private var focusTask: Task<Void, Never>?
     private var starting: [ChannelKey: Task<Void, Never>] = [:]
+    /// The channels a live `apply(_:)` reached while `start()` was sampling the fleet. Non-nil only
+    /// for the duration of that sample. `LifecycleAPI.states()` asks each supervisor in turn, so a
+    /// state published during the sample is *newer* than the entry the sample carries for it, and
+    /// assigning the sample unconditionally would hide a pending decision or restore an answered
+    /// one.
+    private var liveDuringSample: Set<ChannelKey>?
     /// Adoption may publish a still-background state while waiting for the worker to exit.
     /// Prepared pumps outlive those intermediate states until the enclosing action finishes.
     private var preparedActions: [ChannelKey: Int] = [:]
@@ -154,11 +160,15 @@ final class ActivityModel {
            let persisted = try? await store.read([String: String].self,
                                                  namespace: .fleetKit,
                                                  key: FleetKitKeys.unreadCursors) {
-            cursors = (persisted ?? [:]).compactMapValues {
+            cursors = persisted.compactMapValues {
                 try? JSONDecoder().decode(SeenActivity.self, from: Data($0.utf8))
             }
         }
-        for state in await lifecycle.states() { states[state.key] = state }
+        liveDuringSample = []
+        let sampled = await lifecycle.states()
+        let live = liveDuringSample ?? []
+        liveDuringSample = nil
+        for state in sampled where !live.contains(state.key) { states[state.key] = state }
         for key in states.keys where isLive(states[key]) { await follow(key) }
         states = states.filter { isWorthKeeping($0.value) }
         rebuild()
@@ -189,6 +199,7 @@ final class ActivityModel {
     /// One channel's state. Also the return value of an answered decision, which is why it is not
     /// private.
     func apply(_ state: ChannelState) {
+        liveDuringSample?.insert(state.key)
         if !isLive(state) {
             if preparedActions[state.key] == nil { retire(state.key) }
         } else if pumps[state.key] == nil {

@@ -235,6 +235,48 @@ final class ActivityModelTests: XCTestCase {
         harness.model.stop()
     }
 
+    // A snapshot entry must not overwrite a state that arrived live after sampling began.
+    // `Fleet.states()` asks each supervisor in turn, so a decision published during the sample is
+    // newer than the sample that follows it, and assigning the sample unconditionally hides it.
+    func testALiveDecisionDuringTheInitialSampleSurvivesTheSnapshot() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        // What the sample will carry: this channel, with nothing pending.
+        await harness.lifecycle.setStates([ActivityFixtures.state(key)])
+        await harness.lifecycle.openEvents(of: key)
+        let model = harness.model
+        await harness.lifecycle.duringStates {
+            await model.apply(ActivityFixtures.state(key, pending: [ActivityFixtures.pending(ask)]))
+        }
+
+        await harness.model.start()
+
+        XCTAssertEqual(kindNames(harness.model).filter { $0 == "decision" }.count, 1,
+                       "the initial snapshot overwrote a decision that arrived while it was sampling")
+    }
+
+    // The same rule in the other direction: a decision answered while the sample was being taken
+    // must not be restored by the entry that sample carries.
+    func testADecisionAnsweredDuringTheInitialSampleIsNotRestored() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        await harness.lifecycle.setStates([ActivityFixtures.state(key, pending: [ActivityFixtures.pending(ask)])])
+        await harness.lifecycle.openEvents(of: key)
+        let model = harness.model
+        await harness.lifecycle.duringStates {
+            await model.apply(ActivityFixtures.state(key))
+        }
+
+        await harness.model.start()
+
+        XCTAssertEqual(kindNames(harness.model).filter { $0 == "decision" }.count, 0,
+                       "the initial snapshot restored a decision that had already been answered")
+    }
+
     // F4: focus already on the channel is not a focus-change event when an ask arrives.
     func testNewActivityInTheViewedChannelIsAlreadySeen() async throws {
         let harness = try Harness()
