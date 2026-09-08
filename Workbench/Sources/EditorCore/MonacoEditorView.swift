@@ -71,14 +71,9 @@ public final class MonacoEditorView: NSView {
     private let logger = Logger(subsystem: "com.afleet.app", category: "EditorCore")
     private let resourceRoot: URL
 
-    /// Commands that arrived before `ready`. Opening a file immediately after `load()` is the
-    /// normal case, not an edge one, so they queue rather than erroring.
-    private var pending: [EditorCommand] = []
-    private var isReady = false
-
-    /// Set once the host sends its own `setTheme`. Until then the view follows the system
-    /// appearance; after it, the host owns the theme and appearance changes are left alone.
-    private var hasExplicitTheme = false
+    /// The queue-and-theme half of the send side, held apart from the view so it can be tested
+    /// without a `WKWebView`.
+    private var sendState = BridgeSendState()
 
     // MARK: - Construction
 
@@ -146,7 +141,7 @@ public final class MonacoEditorView: NSView {
 
     /// Load the bootstrap document by the route this view was built for.
     public func load() {
-        isReady = false
+        sendState.loading()
 
         guard route.loadsDocumentFromFileURL else {
             webView.load(URLRequest(url: EditorSchemeHandler.url(forResourcePath: Self.bootstrapDocumentPath)))
@@ -167,16 +162,11 @@ public final class MonacoEditorView: NSView {
     /// Send one command to the editor. Commands sent before `ready` are queued and delivered in
     /// order once the bridge is live.
     public func send(_ command: EditorCommand) {
-        if case .setTheme = command { hasExplicitTheme = true }
-        deliver(command)
+        guard let ready = sendState.send(command) else { return }
+        evaluate(ready)
     }
 
-    private func deliver(_ command: EditorCommand) {
-        guard isReady else {
-            pending.append(command)
-            return
-        }
-
+    private func evaluate(_ command: EditorCommand) {
         guard let script = Self.script(for: command) else {
             report(.error(message: "a command could not be encoded for the bridge"))
             return
@@ -216,13 +206,9 @@ public final class MonacoEditorView: NSView {
         }
 
         if case .ready = event {
-            isReady = true
-            if !hasExplicitTheme {
-                deliver(.setTheme(name: Self.defaultThemeName()))
+            for command in sendState.ready(defaultTheme: Self.defaultThemeName()) {
+                evaluate(command)
             }
-            let queued = pending
-            pending.removeAll()
-            for command in queued { deliver(command) }
         }
 
         report(event)
@@ -261,8 +247,10 @@ public final class MonacoEditorView: NSView {
 
     public override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        guard !hasExplicitTheme else { return }
-        deliver(.setTheme(name: Self.defaultThemeName()))
+        guard let command = sendState.appearanceChanged(defaultTheme: Self.defaultThemeName()),
+              let ready = sendState.deliver(command)
+        else { return }
+        evaluate(ready)
     }
 
     // MARK: - The bootstrap's configuration
