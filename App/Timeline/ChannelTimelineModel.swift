@@ -351,9 +351,11 @@ final class ChannelTimelineModel {
     func transcriptMoved(to path: URL) async {
         guard let ingestion, transcriptPath != path else { return }
         transcriptPath = path
-        await ingestion.relocated(mainPath: path)
-        // The rest of the same move, as a host signal: no frame states a relocation, and the fold
-        // that has to hear about it is the ingestion's.
+        // **One call, not two.** C3's `signal(.relocated:)` performs the path rebind itself — it
+        // calls `relocated(mainPath:)` and says so at its own definition — so raising the signal is
+        // the whole of the move: the paths this actor holds, and the fold hearing about something no
+        // frame states. Calling both, as this did while the corrective was still in flight, ran the
+        // rebind twice (tracker 130, closed here).
         await signal(.relocated(mainPath: path))
     }
 
@@ -372,16 +374,13 @@ final class ChannelTimelineModel {
     /// successful `perform(.answer)`. The name is theirs as much as this leaf's and is a cross-leaf
     /// contract rather than a local choice.
     func signal(_ signal: HostSignal) async {
-        await ingestionSignal?(signal)
+        guard let ingestion else { return }
+        let effect = await ingestion.signal(signal)
+        // The fold answers with what changed. Republishing on an empty effect would push an
+        // identical timeline at every subscriber for a signal that moved nothing.
+        guard !effect.changes.isEmpty else { return }
+        await publish()
     }
-
-    /// Where a host signal reaches the ingestion.
-    ///
-    /// A declared seam rather than a direct call, because the C3 corrective that gives
-    /// `StreamIngestion` a `signal(_:)` of its own is in flight and is not on `main`: this side is
-    /// written now and the architect reconciles it at that landing. `.relocated` continues to reach
-    /// the ingestion through `relocated(mainPath:)` as well, which is unchanged and is not this.
-    @ObservationIgnored var ingestionSignal: (@Sendable (HostSignal) async -> Void)?
 
     /// Releases the ingestion and both loops. The registry calls it when a new launch replaces the
     /// workspace this model was built over.
@@ -398,9 +397,21 @@ final class ChannelTimelineModel {
 
     // MARK: - Publishing
 
+    /// Republishes the channel's read model from the fold that owns it.
+    ///
+    /// **One read, not three.** `StreamIngestion.timeline` returns the durable projection, the
+    /// overlay and the streaming preview together; assembling them from `projection`, `overlay` and
+    /// `preview` would be three awaits on an actor, and a mutation landing between any two of them
+    /// would publish a timeline that never existed. C3 says so at the property's own definition and
+    /// this is the only place the app reads it.
+    ///
+    /// **Superseded 2026-09-08 (C6.1).** What stood here built `ChannelTimeline(durable:)` alone,
+    /// which is why every running channel had an empty overlay and no streaming preview: C3's wire
+    /// fold had no consumer anywhere in the app. The fold now lives in the ingestion — one fold, one
+    /// subscription, in the layer that already owns the tap — and this reads its result.
     private func publish() async {
         guard let ingestion else { return }
-        let next = ChannelTimeline(durable: await ingestion.projection)
+        let next = await ingestion.timeline
         timeline = next
         fanout.yield(next)
     }

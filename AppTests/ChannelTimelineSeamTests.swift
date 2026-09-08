@@ -10,9 +10,15 @@ import FleetKit
 /// **The channel's wire fold is not here.** An earlier revision of this suite drove a `WireReducer`
 /// of the app's own over a second `events(of:)` subscription; the architect moved that fold into
 /// `StreamIngestion`, where one channel has one of them, so what the app owns is the raise site for
-/// host signals and nothing else. The assertions below are therefore about *subscription count*,
-/// *forwarding* and *retry* — the three things observable from this side — and the behaviour a
-/// signal produces is asserted against the ingestion, in C3's own suite, once its corrective lands.
+/// host signals and the republishing of what the fold produced.
+///
+/// **The corrective landed, so nothing here asserts against a double.** An earlier revision of the
+/// two signal tests set a `model.ingestionSignal` closure and counted calls on it; that property is
+/// gone, because `StreamIngestion.signal(_:)` exists and a seam in front of it would be indirection
+/// with a nil hazard (tracker 129). What each test asserts now is the change the app can *see* in
+/// `model.timeline` — a decision leaving `.pending`, a banner the fold raised, an overlay that
+/// filled, a preview that was dropped — which is the behaviour the leaves downstream depend on and
+/// not the fact that a closure ran.
 ///
 /// Every config home here is a scratch tree under `TempTree`, which refuses to build inside any
 /// config home; the fixture transcript is copied into it at run time. No assertion prints a path, a
@@ -57,72 +63,184 @@ final class ChannelTimelineSeamTests: XCTestCase {
 
     // MARK: - The host-signal seam
 
-    /// A host signal raised on the model reaches the ingestion seam, once per call.
+    /// An answered decision leaves `.pending`, which is the whole reason the raise site exists.
     ///
-    /// `HostSignal` is modelled by C3 and was constructed nowhere in the tree: the fold has always
-    /// known how to move a decision out of `.pending` and to give a turn its `.prompted`
-    /// attribution, and nothing ever raised one. `ChannelTimelineModel.signal(_:)` is the raise
-    /// site, and C6.2 and C6.3 call it by that name — after `.send` and an honoured rewind, and
-    /// after a successful `perform(.answer)`.
+    /// `HostSignal` is modelled by C3 and was constructed nowhere in the tree until this leaf's seam
+    /// commit: the fold has always known how to move a decision out of `.pending`, and nothing ever
+    /// raised one. `ChannelTimelineModel.signal(_:)` is where they are raised, and C6.3 calls it by
+    /// that name after a successful `perform(.answer)`.
     ///
-    /// What is asserted is the only half the app can observe: the seam was called, exactly once,
-    /// with the signal it was handed. **What the signal then does to the overlay is the ingestion's
-    /// behaviour and is asserted there**, against C3's corrective, not here against a double.
-    /// Without the count clause this would pass against a forwarder that forwards nowhere.
-    func testSignalReachesTheIngestionSeam() async throws {
+    /// **The request is built and pushed rather than replayed from the fixture's own stream**, and
+    /// that is deliberate. `permission-allow` opens three `mcp_message` requests that the inbound
+    /// policy answers itself before its `can_use_tool` ask ever arrives, so a wait on "a decision
+    /// exists" returns while every decision present is one the host never has to answer. Pushing the
+    /// one request under test makes the condition exact: **a pending decision**, by id.
+    func testAnAnsweredDecisionLeavesPending() async throws {
         let rig = try await SeamRig(fixture: "permission-allow")
         await rig.open()
 
-        let seen = SignalLog()
-        rig.model.ingestionSignal = { await seen.record($0) }
+        let id = RequestID(rawValue: "req_invented_c61_0001")
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool", id: id.rawValue)
+        guard case .request = FixtureRunner.event(for: ask) else {
+            return XCTFail("the inbound policy does not surface a can_use_tool ask, so nothing here would be pending")
+        }
+        await rig.lifecycle.push(.request(ask), to: rig.key)
 
-        let empty = await seen.count
-        XCTAssertEqual(empty, 0, "the seam recorded \(empty) signal(s) before one was raised")
+        let pending = await rig.settle { $0.timeline.overlay.decisions[ask.id]?.state == .pending }
+        XCTAssertTrue(pending, "the pushed ask never became a pending decision the host has to answer")
 
-        await rig.model.signal(.promptSent(uuid: "00000000-0000-4000-8000-0000000000a1", at: Date()))
-        let one = await seen.count
-        XCTAssertEqual(one, 1, "one raised signal reached the seam \(one) time(s)")
+        await rig.model.signal(.decisionAnswered(ask.id, outcome: .allowed))
 
-        await rig.model.signal(.rewound(toUUID: "00000000-0000-4000-8000-0000000000a2"))
-        let two = await seen.count
-        XCTAssertEqual(two, 2, "two raised signals reached the seam \(two) time(s)")
-
-        let kinds = await seen.kinds
-        XCTAssertEqual(kinds, ["promptSent", "rewound"],
-                       "the seam received \(kinds.count) signal(s) in an order or shape it was not handed")
+        let answered = await rig.settle {
+            if case .answered = $0.timeline.overlay.decisions[ask.id]?.state { return true }
+            return false
+        }
+        XCTAssertTrue(answered, "an answered decision is still not out of .pending")
+        XCTAssertEqual(rig.model.timeline.overlay.decisions[ask.id]?.state, .answered(outcome: "allowed"),
+                       "the decision settled on an outcome the signal did not carry")
         await rig.finish()
     }
 
-    /// A relocation reaches both halves of the move: the ingestion's own rebind, and the seam.
+    /// A relocation reaches the fold, and a repeat of the same move does not.
     ///
     /// `relocated` is the one signal C6.1 raises itself, because it owns the path the index reports.
-    /// The two are separate calls on purpose — `StreamIngestion.relocated(mainPath:)` rebinds the
-    /// stream it reads, and the signal is what the fold hears — so a version that dropped either is
-    /// a version that keeps reading the old path or keeps the old slug on the agent tree.
-    func testARelocationRaisesTheSignalToo() async throws {
+    /// C3's `signal(.relocated:)` performs the path rebind itself — it calls `relocated(mainPath:)`
+    /// and says so at its own definition — so the model raises the signal and nothing else; raising
+    /// it *and* calling the rebind ran the rebind twice (tracker 130).
+    ///
+    /// **The witness is a banner, and it has to be.** A resolvable move changes the fold's `slug` and
+    /// its agent tree, both of which are the reducer's own state behind an actor the model holds
+    /// privately; there is no consequence of a *successful* relocation this side can read. An
+    /// unresolvable one raises a `.compatibility` banner, which lands in `timeline.overlay.banners`
+    /// and is visible here — so a path that does not name this session's main transcript is what
+    /// proves the signal arrived at all. C3's own suite asserts the rebind.
+    func testARelocationReachesTheFold() async throws {
         let rig = try await SeamRig(fixture: "background-shell")
         await rig.open()
 
-        let seen = SignalLog()
-        rig.model.ingestionSignal = { await seen.record($0) }
+        let before = rig.model.timeline.overlay.banners.count
+        XCTAssertEqual(before, 0, "the channel raised \(before) banner(s) before the move")
 
-        // A different path under the same scratch home; the model compares before it acts, so a
-        // path equal to the one it holds would raise nothing and prove nothing.
-        let moved = rig.transcriptDestination
+        // Under the scratch home but not this session's main transcript, so the fold refuses it and
+        // says so. A resolvable path would be reduced silently and prove nothing.
+        let elsewhere = rig.transcriptDestination
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appending(path: "invented-moved", directoryHint: .isDirectory)
-            .appending(path: rig.transcriptDestination.lastPathComponent)
-        await rig.model.transcriptMoved(to: moved)
+            .appending(path: "invented-not-this-session", directoryHint: .isDirectory)
+            .appending(path: "00000000-0000-4000-8000-0000000000ff.jsonl")
+        await rig.model.transcriptMoved(to: elsewhere)
 
-        let kinds = await seen.kinds
-        XCTAssertEqual(kinds, ["relocated"], "a relocation raised \(kinds.count) signal(s), not 1")
+        let raised = await rig.settle { $0.timeline.overlay.banners.count == 1 }
+        XCTAssertTrue(raised, "a relocation raised \(rig.model.timeline.overlay.banners.count) banner(s), not 1")
+        XCTAssertEqual(rig.model.timeline.overlay.banners.first?.kind, .compatibility,
+                       "the fold raised a banner of a kind a refused relocation does not produce")
 
         // Idempotent: the coordinator forwards the entry's path on every index update, and only a
         // path that actually moved is worth raising.
-        await rig.model.transcriptMoved(to: moved)
-        let again = await seen.count
-        XCTAssertEqual(again, 1, "a repeated relocation to the same path raised \(again) signal(s)")
+        await rig.model.transcriptMoved(to: elsewhere)
+        let again = rig.model.timeline.overlay.banners.count
+        XCTAssertEqual(again, 1, "a repeated relocation to the same path left \(again) banner(s)")
+        await rig.finish()
+    }
+
+    // MARK: - The pipeline
+
+    /// The overlay reaches the app at all — which, before the seam commit, it never did.
+    ///
+    /// `publish()` built `ChannelTimeline(durable:)` alone, so `overlay` was `.empty` and `preview`
+    /// was nil in every running channel on the machine: C3's fold had no consumer anywhere. This
+    /// pushes `background-shell`'s own recorded events and asserts the live half arrived. Counts
+    /// only, never text (§11).
+    func testTheOverlayReachesTheTimeline() async throws {
+        let rig = try await SeamRig(fixture: "background-shell")
+        await rig.open()
+
+        XCTAssertTrue(rig.model.timeline.overlay.items.isEmpty,
+                      "the overlay held \(rig.model.timeline.overlay.items.count) item(s) before any event was pushed")
+
+        for event in try FixtureRunner.events("background-shell") {
+            await rig.lifecycle.push(event, to: rig.key)
+        }
+
+        // Settle on the shape this asserts, not on a weaker one. `background-shell` carries two
+        // `result` frames, so two turn summaries are what the live half must end with; waiting for
+        // "any overlay item" returns on the first notification and asserts the turns before they
+        // have arrived, which is a flake rather than a finding.
+        let filled = await rig.settle { $0.timeline.overlay.turns.count == 2 }
+        XCTAssertTrue(filled, "the overlay carries \(rig.model.timeline.overlay.turns.count) turn summary/-ies, not the 2 the fixture records")
+        XCTAssertFalse(rig.model.timeline.overlay.items.isEmpty, "the overlay projected no items at all")
+        await rig.finish()
+    }
+
+    /// A cluster's key names the tool call it summarises, so a row can find its members.
+    ///
+    /// **The `tool_use_summary` frame is invented, and it has to be.** No fixture in the corpus
+    /// carries one — `FleetKit/Tests/FleetTimelineTests/Invariant/ProjectionEqualityTests.swift`
+    /// asserts that as an invariant, with a comment telling whoever adds one to *read* it rather
+    /// than construct it — so the labelled arm of every cluster test injects a frame, and only the
+    /// counts-and-elapsed fallback is exercised by any recording (tracker 128). This asserts the one
+    /// thing the renderer depends on: `Overlay.clusters` is keyed by the first call's `ItemID`, and
+    /// that key matches a `toolCall` the durable half holds.
+    func testClusterKeysMatchToolCallIDs() async throws {
+        let rig = try await SeamRig(fixture: "background-shell")
+        await rig.open()
+        for event in try FixtureRunner.events("background-shell") {
+            await rig.lifecycle.push(event, to: rig.key)
+        }
+        let ready = await rig.settle { !$0.timeline.durable.items.isEmpty }
+        XCTAssertTrue(ready, "the fixture produced no durable items to summarise")
+
+        let calls = rig.model.timeline.durable.items.compactMap { item -> String? in
+            if case .toolCall(let call) = item { return call.toolUseID }
+            return nil
+        }
+        let lead = try XCTUnwrap(calls.first, "the fixture carries no tool call for a summary to name")
+
+        // Decoded from a line rather than built with a memberwise initialiser, because
+        // `ToolUseSummaryFields`' is internal to ClaudeWire — and decoding is also how a real one
+        // would arrive, so the invented frame goes through the production decoder like any other.
+        let line = Data(#"{"type":"tool_use_summary","summary":"an invented summary","preceding_tool_use_ids":["\#(lead)"],"uuid":"00000000-0000-4000-8000-0000000000c1","session_id":"\#(rig.key.session.description)"}"#.utf8)
+        guard case .toolUseSummary = FrameDecoder.decode(line: line) else {
+            return XCTFail("the invented summary line did not decode as a tool_use_summary frame")
+        }
+        await rig.lifecycle.push(.frame(FrameDecoder.decode(line: line), .first), to: rig.key)
+
+        let labelled = await rig.settle { !$0.timeline.overlay.clusters.isEmpty }
+        XCTAssertTrue(labelled, "the injected summary produced no cluster")
+
+        // The renderer looks a cluster up by the item id of the call it leads. Compare the `key`
+        // halves: an `ItemID` carries the config-home path and never belongs in a message (§11).
+        let clusterKeys = Set(rig.model.timeline.overlay.clusters.keys.map(\.key))
+        let callKeys = Set(calls)
+        XCTAssertFalse(clusterKeys.isEmpty, "no cluster key to compare")
+        XCTAssertTrue(clusterKeys.isSubset(of: callKeys),
+                      "\(clusterKeys.subtracting(callKeys).count) cluster key(s) name no tool call in the durable half")
+        await rig.finish()
+    }
+
+    /// The streaming preview is dropped when its own message arrives, so no message is drawn twice.
+    ///
+    /// The preview is what the channel shows while an assistant message streams; the `assistant`
+    /// frame carrying the same `message.id` is what settles it. A renderer that kept both would draw
+    /// the message twice — once as a preview and once as the settled item — which is why the drop is
+    /// asserted rather than assumed.
+    func testThePreviewIsDroppedWhenItsAssistantFrameArrives() async throws {
+        let rig = try await SeamRig(fixture: "background-shell")
+        await rig.open()
+
+        let events = try FixtureRunner.events("background-shell")
+        guard let firstAssistant = events.firstIndex(where: { event in
+            if case .frame(.assistant, _) = event { return true }
+            return false
+        }) else { return XCTFail("the fixture carries no assistant frame, so nothing settles a preview") }
+
+        for event in events[..<firstAssistant] { await rig.lifecycle.push(event, to: rig.key) }
+        let streaming = await rig.settle { $0.timeline.preview != nil }
+        XCTAssertTrue(streaming, "the fixture's stream events opened no preview")
+
+        await rig.lifecycle.push(events[firstAssistant], to: rig.key)
+        let settled = await rig.settle { $0.timeline.preview == nil }
+        XCTAssertTrue(settled, "the assistant frame did not drop the preview it settles")
         await rig.finish()
     }
 
@@ -156,27 +274,6 @@ final class ChannelTimelineSeamTests: XCTestCase {
 }
 
 // MARK: - Support
-
-/// Records what `ChannelTimelineModel.ingestionSignal` was handed.
-///
-/// `kinds` names the case and never its payload: a `relocated` carries a path and a `promptSent` a
-/// uuid, and neither belongs in an assertion message (§11).
-private actor SignalLog {
-    private(set) var signals: [HostSignal] = []
-    var count: Int { signals.count }
-    var kinds: [String] {
-        signals.map { signal in
-            switch signal {
-            case .promptSent: "promptSent"
-            case .decisionAnswered: "decisionAnswered"
-            case .rewound: "rewound"
-            case .processReplaced: "processReplaced"
-            case .relocated: "relocated"
-            }
-        }
-    }
-    func record(_ signal: HostSignal) { signals.append(signal) }
-}
 
 /// One channel over a scratch config home, with a committed fixture's transcript on disk.
 ///
@@ -253,6 +350,17 @@ private struct SeamRig {
 
     func open() async { await model.open(row()) }
     func finish() async { await lifecycle.finishEvents(of: key) }
+
+    /// Waits, bounded, for the model to satisfy `predicate`, and **returns whether it did** so the
+    /// caller asserts the outcome. A wait whose result is discarded is not an assertion: it would
+    /// turn a wedge into a pass on whatever clause came after it.
+    func settle(_ predicate: @MainActor (ChannelTimelineModel) -> Bool) async -> Bool {
+        for _ in 0..<400 {
+            if predicate(model) { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return predicate(model)
+    }
 
     func row() -> ChannelRow {
         ChannelRow(key: key,

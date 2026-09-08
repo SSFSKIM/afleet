@@ -920,7 +920,17 @@ is renumbered.
      turn produces consecutive tool calls the engine summarises, at the next fixture re-pin; the
      tests then read it. Owner: C1 for the recording, C6.1 for adopting it.
 
-129. **`ChannelTimelineModel.ingestionSignal` is never set in production, so `signal(_:)` is a
+129. **Closed 2026-09-08**, in the same change that took C3's one-fold corrective (`01eb7a7`).
+     `StreamIngestion.signal(_:)` exists now, so the seam property it describes is deleted rather
+     than wired: `ChannelTimelineModel.signal(_:)` calls the ingestion directly, and there is no
+     longer a property that could be left unassigned. `ChannelTimelineSeamTests`'
+     `testAnAnsweredDecisionLeavesPending` asserts the behaviour the seam existed to enable — a
+     `DecisionItem` leaving `.pending` — instead of counting calls on a double, and it was shown
+     failing against a `signal(_:)` that returns without calling the ingestion. The entry stands
+     below as filed, because what it describes was true of the tree for the hours between the seam
+     commit and the corrective.
+
+     **`ChannelTimelineModel.ingestionSignal` is never set in production, so `signal(_:)` is a
      no-op in the running app.** The forwarder landed with C6.1's seam commit and is exercised by
      `ChannelTimelineSeamTests`, but the only writers of the property are those tests: nothing at
      the composition root assigns it, because the C3 corrective that gives `StreamIngestion` a
@@ -934,7 +944,14 @@ is renumbered.
      root in the same change that lands the C3 corrective, and add a wiring assertion that the
      app — not a test — set it. Owner: the architect, at the corrective's reconciliation.
 
-130. **`.relocated` will reach the ingestion twice once the seam is wired.**
+130. **Closed 2026-09-08**, by the first of the two closers it named. C3's
+     `StreamIngestion.signal(_:)` performs the path rebind itself — `if case .relocated(let mainPath)
+     = signal { await relocated(mainPath: mainPath) }`, at its own definition — so
+     `transcriptMoved(to:)` now raises the signal and nothing else, and one move travels one route.
+     `testARelocationReachesTheFold` holds it, with the idempotence clause the coordinator's
+     path-on-every-update behaviour needs. The entry stands below as filed.
+
+     **`.relocated` will reach the ingestion twice once the seam is wired.**
      `ChannelTimelineModel.transcriptMoved(to:)` calls `ingestion.relocated(mainPath:)` and then
      raises `signal(.relocated(mainPath:))`. Today the second reaches a nil seam and costs nothing.
      When `ingestionSignal` is pointed at `StreamIngestion.signal(_:)` the same move arrives by two
