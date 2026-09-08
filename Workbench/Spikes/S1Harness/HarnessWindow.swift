@@ -240,6 +240,11 @@ final class Harness {
                     outputDeliveryCount += 1
                     let fedAt = DispatchTime.now().uptimeNanoseconds
                     surface.feed(data)
+                    // Stop pulling events while the renderer is more than its cap behind. The read
+                    // loop then stops, the PTY layer's bounded buffer fills and the child blocks on
+                    // the pty, instead of the backlog piling up inside the renderer's own queue
+                    // where nothing bounds it.
+                    await surface.awaitFeedCapacity()
                     let spent = DispatchTime.now().uptimeNanoseconds - fedAt
                     feedNanoseconds += spent
                     longestFeedNanoseconds = max(longestFeedNanoseconds, spent)

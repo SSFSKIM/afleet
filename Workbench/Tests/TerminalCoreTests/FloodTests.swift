@@ -1,4 +1,6 @@
 import Foundation
+import GhosttyTerminal
+import Synchronization
 @testable import TerminalCore
 import XCTest
 
@@ -107,6 +109,103 @@ final class FloodTests: XCTestCase {
             finalSurfaceMeasurements.processExitCount,
             1,
             "the recording surface did not observe exactly one process exit"
+        )
+    }
+
+
+    /// G3's bound has to hold for the whole path, not only for the PTY layer's own buffer. The
+    /// renderer's queue takes whatever it is handed without a limit of its own, and a host that
+    /// resumes reading the moment `feed` returns therefore accumulates outside every bound this
+    /// child measures. With the adapter holding the backlog and the host waiting on it, a renderer
+    /// that is far behind a `yes` child leaves the resident backlog under the cap, and nothing is
+    /// dropped: what the renderer parsed plus what is still outstanding is what the host fed.
+    func testSlowRendererKeepsOutstandingBytesUnderTheCapWithoutDropping() async throws {
+        let directory = try PTYTestChild.temporaryDirectory()
+        defer { PTYTestChild.remove(directory) }
+        let parsedByteCount = Mutex(0)
+        // Roughly 3 MB/s against a `yes` child that produces two orders of magnitude more: the
+        // renderer is behind for the whole ten seconds, which is the condition under test.
+        let surface = await GhosttyTerminalSurface(
+            terminfoDirectory: nil,
+            feedBarrier: { session, byteCount in
+                session.waitForPendingOutput()
+                usleep(20_000)
+                parsedByteCount.withLock { $0 += byteCount }
+            }
+        )
+        let process = try PTYProcess(
+            spawning: PTYSpawnRequest(
+                executable: URL(filePath: "/bin/sh"),
+                arguments: ["-c", "/bin/stty raw -echo; exec /usr/bin/yes"],
+                cwd: directory,
+                environment: [:],
+                size: TerminalSize(rows: 24, columns: 80, pixelWidth: 640, pixelHeight: 480),
+                terminal: TerminalDescription(term: "xterm-256color"),
+                stopPolicy: .report
+            )
+        )
+        defer { PTYTestChild.terminateAndReap(process) }
+
+        let measurements = Mutex(FloodFeedMeasurements())
+        let consumer = Task { @MainActor in
+            for await event in process.events {
+                guard case let .output(bytes) = event else { continue }
+                surface.feed(bytes)
+                await surface.awaitFeedCapacity()
+                let outstanding = surface.outstandingFeedByteCount
+                measurements.withLock {
+                    $0.fedByteCount += bytes.count
+                    $0.largestOutstandingByteCount = max(
+                        $0.largestOutstandingByteCount,
+                        outstanding
+                    )
+                }
+            }
+        }
+        defer { consumer.cancel() }
+
+        try await Task.sleep(for: Self.floodDuration)
+        let sampled = measurements.withLock { $0 }
+        let outstanding = await surface.outstandingFeedByteCount
+        consumer.cancel()
+        await process.teardown()
+
+        print(
+            String(
+                format: "G3c fed=%d largest-outstanding=%d parsed=%d",
+                sampled.fedByteCount,
+                sampled.largestOutstandingByteCount,
+                parsedByteCount.withLock { $0 }
+            )
+        )
+
+        XCTAssertGreaterThanOrEqual(
+            sampled.fedByteCount,
+            Self.byteFlowFloor,
+            "the sample did not carry enough terminal output to be a flood"
+        )
+        // One chunk of headroom: the delivery that crosses the cap is accepted whole, and the
+        // host only waits afterwards.
+        XCTAssertLessThanOrEqual(
+            sampled.largestOutstandingByteCount,
+            GhosttyTerminalSurface.feedBufferByteLimit + PTYProcess.outputDeliveryByteLimit,
+            "renderer-backlog=unbounded"
+        )
+        XCTAssertLessThanOrEqual(
+            outstanding,
+            GhosttyTerminalSurface.feedBufferByteLimit + PTYProcess.outputDeliveryByteLimit,
+            "renderer-backlog=unbounded"
+        )
+        XCTAssertGreaterThan(parsedByteCount.withLock { $0 }, 0, "renderer-parsed=0")
+        XCTAssertLessThanOrEqual(
+            parsedByteCount.withLock { $0 },
+            sampled.fedByteCount,
+            "renderer-parsed=more-than-fed"
+        )
+        XCTAssertGreaterThanOrEqual(
+            parsedByteCount.withLock { $0 } + outstanding,
+            sampled.fedByteCount,
+            "renderer-backlog=dropped-bytes"
         )
     }
 
@@ -235,4 +334,9 @@ final class FloodTests: XCTestCase {
             "the producer did not resume after the consumer began reading"
         )
     }
+}
+
+private struct FloodFeedMeasurements: Sendable {
+    var fedByteCount = 0
+    var largestOutstandingByteCount = 0
 }

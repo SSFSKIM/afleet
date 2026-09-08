@@ -120,12 +120,52 @@ final class AdapterWiringTests: XCTestCase {
 
         surface!.processDidExit(code: 7)
         surface = nil
+        // The exit rides the adapter's feed queue so the child's last bytes are parsed before the
+        // terminal is told the process ended, which makes the call one drain hop away rather than
+        // synchronous. The drain holds the session and the finisher, never the adapter, so the
+        // release below is unaffected.
+        for _ in 0..<200 where calls.value.isEmpty {
+            usleep(10_000)
+        }
 
         XCTAssertTrue(releasedSurface == nil, "adapter-release=absent")
         XCTAssertTrue(calls.value.count == 1, "finish-count=\(calls.value.count)")
         XCTAssertTrue(calls.value.first?.exitCode == 7, "finish-exit-code=changed")
         XCTAssertTrue(calls.value.first?.runtimeMilliseconds == 42, "finish-runtime=changed")
         XCTAssertTrue(session.readViewportText() == nil, "headless-surface=unexpected")
+    }
+
+    /// The adapter holds output the renderer has not parsed, so the exit has to travel the same
+    /// queue: a terminal told its process ended before the process's last bytes were parsed shows
+    /// a screen the child never wrote.
+    func testProcessExitIsDeliveredAfterTheOutputTheAdapterIsStillHolding() {
+        let calls = LockedArray<FinishCall>()
+        let parsedByteCount = Mutex(0)
+        let fedByteCount = Mutex(0)
+        let surface = makeSurface(
+            finishCalls: calls,
+            feedBarrier: { session, byteCount in
+                session.waitForPendingOutput()
+                usleep(2_000)
+                parsedByteCount.withLock { $0 += byteCount }
+            }
+        )
+
+        for _ in 0..<16 {
+            let payload = Data(repeating: UInt8(ascii: "x"), count: 64 * 1024)
+            surface.feed(payload)
+            fedByteCount.withLock { $0 += payload.count }
+        }
+        surface.processDidExit(code: 0)
+        for _ in 0..<500 where calls.value.isEmpty {
+            usleep(10_000)
+        }
+
+        XCTAssertTrue(calls.value.count == 1, "finish-count=\(calls.value.count)")
+        XCTAssertTrue(
+            parsedByteCount.withLock { $0 } == fedByteCount.withLock { $0 },
+            "exit-overtook-output=\(fedByteCount.withLock { $0 } - parsedByteCount.withLock { $0 })"
+        )
     }
 
     /// This headless test asserts feed wiring and return behavior, not rendering; rendered-grid behavior belongs to G2.
@@ -297,7 +337,8 @@ final class AdapterWiringTests: XCTestCase {
     private func makeSurface(
         terminfoDirectory: URL? = nil,
         resizeSource: ResizeCallbackSource = ResizeCallbackSource(),
-        finishCalls: LockedArray<FinishCall>? = nil
+        finishCalls: LockedArray<FinishCall>? = nil,
+        feedBarrier: @escaping GhosttyFeedBarrier = { session, _ in session.waitForPendingOutput() }
     ) -> GhosttyTerminalSurface {
         GhosttyTerminalSurface(
             terminfoDirectory: terminfoDirectory,
@@ -319,7 +360,8 @@ final class AdapterWiringTests: XCTestCase {
                     runtimeMilliseconds: runtimeMilliseconds
                 )
             },
-            runtimeMilliseconds: { 42 }
+            runtimeMilliseconds: { 42 },
+            feedBarrier: feedBarrier
         )
     }
 }
