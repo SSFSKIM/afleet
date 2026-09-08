@@ -71,6 +71,7 @@ actor StubFleet: AppFleet {
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue { unreachable("send") }
     func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID { unreachable("sendPrompt") }
     func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey { unreachable("fork") }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { unreachable("resolvedForkKey") }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey, ui: any StrategyUI) async throws -> StrategyOutcome { unreachable("run") }
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
     func attach(_ job: JobShort) async throws -> PaneRequest { unreachable("attach") }
@@ -319,7 +320,11 @@ enum LaunchFixtures {
     /// directory and fails on the slash.
     static func directoryURL(_ url: URL) -> URL { URL(fileURLWithPath: url.path) }
 
-    static func snapshot(configHome: URL, ids: [SessionID], builtAt: Date = Date()) -> IndexSnapshot {
+    /// `teammates` names the ids whose entry carries a `teamName`, which is the one field `ListingPolicy`'s
+    /// teammate rule reads and therefore the only way to build a row C5 lists read-only. Invented, like every other
+    /// value here.
+    static func snapshot(configHome: URL, ids: [SessionID], builtAt: Date = Date(),
+                         teammates: Set<SessionID> = []) -> IndexSnapshot {
         var entries: [SessionID: IndexEntry] = [:]
         for id in ids {
             entries[id] = IndexEntry(sessionID: id,
@@ -330,7 +335,8 @@ enum LaunchFixtures {
                                      titleSource: .firstPrompt,
                                      preview: "invented preview",
                                      mtime: builtAt,
-                                     size: 1)
+                                     size: 1,
+                                     teamName: teammates.contains(id) ? "an-invented-team" : nil)
         }
         return IndexSnapshot(configHome: configHome, builtAt: builtAt, entries: entries)
     }

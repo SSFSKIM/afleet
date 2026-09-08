@@ -1858,6 +1858,12 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-08, from C6.2's second review round: `ChannelSupervisor.publish()` recomputes `state.presence` before it
+  yields — `deliver`, the pump's `.user` and `.result` arms and the queued-input flush all moved `turnRunning` and
+  published without it, so a running turn was published as idle and §7.4's *Quit* clause ended it with no dialog —
+  and `LifecycleAPI` gains `resolvedForkKey(of: ChannelKey)`, answering the key a fork ends up filed under once its
+  identity resolves, because `fork(at:on:)` answers a provisional id the fleet re-keys away from and nothing in a
+  published `ChannelState` records that the two ids were one channel.
 - 2026-09-08: `LifecycleAPI` gains `fork(at:on:)`, answering the sibling's provisional
   `ChannelKey`, and `ProcessHandle.send` now takes the caller's uuid instead of minting one.
   `ChannelSupervisor.fork(at:)` has always answered the provisional key and `perform(.fork)` has

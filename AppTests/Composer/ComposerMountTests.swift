@@ -30,7 +30,8 @@ final class ComposerMountTests: XCTestCase {
 
     /// A launch that reaches a workspace with exactly one listed channel. Everything is invented and
     /// every path is under the process's temporary directory (X9).
-    private func makeRig(sessions: [SessionID] = [LaunchFixtures.sessionA]) throws -> Rig {
+    private func makeRig(sessions: [SessionID] = [LaunchFixtures.sessionA],
+                         teammates: Set<SessionID> = []) throws -> Rig {
         let temp = try TempTree()
         let configHome = try temp.directory("home")
         for session in sessions {
@@ -38,7 +39,8 @@ final class ComposerMountTests: XCTestCase {
         }
         let fleet = LifecycleDouble()
         let index = StubIndex(persisted: nil,
-                              built: LaunchFixtures.snapshot(configHome: configHome, ids: sessions),
+                              built: LaunchFixtures.snapshot(configHome: configHome, ids: sessions,
+                                                             teammates: teammates),
                               delta: IndexDelta(added: sessions))
         let binary = try temp.file("bin/claude", "#!/bin/sh\nexit 0\n")
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
@@ -294,6 +296,179 @@ final class ComposerMountTests: XCTestCase {
                                    "the registry built no header actions for the second channel")
         XCTAssertTrue(header.row != nil,
                       "the second channel's header adopted no row, so it offers no action at all")
+    }
+
+    // MARK: - The read-only row (scalpel sweep #1)
+
+    /// **A row C5 lists read-only gets no field at all.**
+    ///
+    /// The header's actions are already gated on the same policy, but nothing gated the composer — and every write
+    /// this leaf makes leaves through it: a prompt resumes an archived session in `ChannelSupervisor.send`, and the
+    /// `!` escape permits an archived origin outright. So a teammate's transcript, which afleet may show and may not
+    /// write to, was fully actionable.
+    ///
+    /// Walked through the real mount, over a launch whose one channel is a teammate's, so the assertion is about the
+    /// column's own call site and not about a view built by hand.
+    ///
+    /// Deliberate break: mount `ComposerView` regardless of `readOnly`.
+    func testAReadOnlyRowMountsNoComposerAndSaysWhy() async throws {
+        let rig = try makeRig(teammates: [LaunchFixtures.sessionA])
+        let (app, column) = try await makeColumn(rig)
+        app.composers.lifecycle = ComposerLifecycleDouble()
+        // The premise: this row really is the read-only one. A boolean, never the row (§11).
+        XCTAssertTrue(app.browser?.row(LaunchFixtures.sessionA)?.readOnlyReason != nil,
+                      "the launch painted no read-only row, so this proves nothing about the policy")
+
+        let mount = try XCTUnwrap(ComposerViewTree.view(named: "ChannelComposerMount", in: try channelBody(of: column)),
+                                  "the column mounts no composer at all")
+        let body = ComposerViewTree.body(of: mount)
+
+        XCTAssertNil(ComposerViewTree.view(named: "ComposerView", in: body),
+                     "the read-only row drew a composer, so its field can send")
+        XCTAssertNotNil(ComposerViewTree.view(named: "ReadOnlyComposerNotice", in: body),
+                        "the read-only row drew neither a field nor the sentence that says why")
+        XCTAssertEqual(app.composers.openChannels.count, 0,
+                       "\(app.composers.openChannels.count) composer(s) were built for a read-only channel")
+    }
+
+    /// The floor under the arm above: an ordinary row still gets the field, so the gate is about the policy and not
+    /// about the mount having stopped drawing composers.
+    func testAnOwnedCandidateRowStillMountsItsComposer() async throws {
+        let rig = try makeRig()
+        let (app, column) = try await makeColumn(rig)
+        app.composers.lifecycle = ComposerLifecycleDouble()
+        XCTAssertTrue(app.browser?.row(LaunchFixtures.sessionA)?.readOnlyReason == nil,
+                      "the launch painted a read-only row, so this proves nothing about an owned candidate")
+
+        let mount = try XCTUnwrap(ComposerViewTree.view(named: "ChannelComposerMount", in: try channelBody(of: column)),
+                                  "the column mounts no composer")
+        let body = ComposerViewTree.body(of: mount)
+
+        XCTAssertNotNil(ComposerViewTree.view(named: "ComposerView", in: body),
+                        "an ordinary row lost its field")
+        XCTAssertNil(ComposerViewTree.view(named: "ReadOnlyComposerNotice", in: body),
+                     "an ordinary row was told it is read-only")
+    }
+
+    // MARK: - The workspace generation (scalpel-4 #2, #3)
+
+    /// **A fork handed off after the workspace was replaced is dropped.**
+    ///
+    /// `attach(to:)` releases the previous workspace's models and keeps the registry, which is app-scoped. The
+    /// handoff closure captures the registry weakly and nothing else, so a fork that completed its `LifecycleAPI`
+    /// call across a *Check again* would prefill this registry and move the window's selection onto a channel of a
+    /// fleet nothing else refers to.
+    ///
+    /// Deliberate break: drop the generation guard from `ComposerRegistry.prefill(_:for:from:)`.
+    func testAForkHandedOffAfterAWorkspaceRebindIsDropped() async throws {
+        let rig = try makeRig()
+        let app = AppModel(sequence: rig.sequence)
+        await app.launch()
+        let workspace = try XCTUnwrap(app.route.workspace, "the launch reached no workspace")
+        let key = ChannelKey(configHome: LaunchFixtures.directoryURL(rig.configHome), session: LaunchFixtures.sessionA)
+        app.composers.lifecycle = ComposerLifecycleDouble()
+        let model = try XCTUnwrap(app.composers.model(for: key), "the registry built no composer")
+        let handOff = try XCTUnwrap(model.handOffToFork, "the registry installed no fork handoff")
+        var selected: [SessionID] = []
+        app.composers.selectChannel = { selected.append($0.session) }
+
+        // The launch runs again: same registry, new workspace, every model released.
+        app.bindWorkspace(workspace)
+        app.composers.selectChannel = { selected.append($0.session) }
+        let forked = ChannelKey(configHome: key.configHome, session: LaunchFixtures.sessionB)
+        handOff(forked, "an invented edited message")
+
+        XCTAssertEqual(selected.count, 0,
+                       "\(selected.count) selection(s) were made by a handoff from a workspace that is gone")
+        app.composers.lifecycle = ComposerLifecycleDouble()
+        let after = try XCTUnwrap(app.composers.model(for: forked), "the registry built no composer for the fork")
+        XCTAssertEqual(after.draft.count, 0,
+                       "the stale handoff left \(after.draft.count) character(s) in a new workspace's composer")
+    }
+
+    /// The floor: within one workspace the same handoff prefills and selects, so the arm above is about the rebind
+    /// and not about a handoff that stopped working.
+    func testAForkHandedOffWithinTheSameWorkspacePrefillsAndSelects() async throws {
+        let rig = try makeRig()
+        let app = AppModel(sequence: rig.sequence)
+        await app.launch()
+        let key = ChannelKey(configHome: LaunchFixtures.directoryURL(rig.configHome), session: LaunchFixtures.sessionA)
+        app.composers.lifecycle = ComposerLifecycleDouble()
+        let model = try XCTUnwrap(app.composers.model(for: key), "the registry built no composer")
+        let handOff = try XCTUnwrap(model.handOffToFork, "the registry installed no fork handoff")
+        var selected: [SessionID] = []
+        app.composers.selectChannel = { selected.append($0.session) }
+
+        let forked = ChannelKey(configHome: key.configHome, session: LaunchFixtures.sessionB)
+        handOff(forked, "an invented edited message")
+
+        XCTAssertEqual(selected.count, 1, "the handoff made \(selected.count) selection(s), not 1")
+        let after = try XCTUnwrap(app.composers.model(for: forked), "the registry built no composer for the fork")
+        XCTAssertEqual(after.draft, "an invented edited message", "the fork's composer opened with something else")
+    }
+
+    // MARK: - The release (scalpel-4 #6)
+
+    /// **A channel that leaves the index releases its composer.**
+    ///
+    /// `ComposerRegistry.release(_:)` existed, was tested, and had no production caller — the same defect the panel
+    /// host's and the timeline registry's releases were both found with. A removed channel therefore kept its
+    /// composer, its draft, its attachments and the surface state the header writes into, and where the view
+    /// identity was retained it kept a live `events(of:)` subscription too.
+    ///
+    /// Deliberate break: remove the `composers?.release(key)` line from `FleetCoordinator.release(_:)`.
+    func testAChannelThatLeavesTheIndexReleasesItsComposer() async throws {
+        let temp = try TempTree()
+        let home = LaunchFixtures.directoryURL(try temp.directory("home"))
+        let session = LaunchFixtures.sessionA
+        let key = ChannelKey(configHome: home, session: session)
+        let registry = ComposerRegistry()
+        registry.lifecycle = ComposerLifecycleDouble()
+        XCTAssertNotNil(registry.model(for: key), "the registry built no composer to release")
+        XCTAssertEqual(registry.openChannels.count, 1,
+                       "the registry holds \(registry.openChannels.count) composer(s) before the removal, not 1")
+
+        let coordinator = FleetCoordinator(configHome: home,
+                                           registrar: RegistrarDouble(),
+                                           index: StubIndex(persisted: nil,
+                                                            built: LaunchFixtures.snapshot(configHome: home, ids: [])),
+                                           model: FleetBrowserModel(lifecycle: LifecycleDouble(), configHome: home),
+                                           composers: registry)
+        await coordinator.indexChanged(IndexDelta(removed: [session]))
+
+        XCTAssertEqual(registry.openChannels.count, 0,
+                       "\(registry.openChannels.count) composer(s) survived the channel leaving the index")
+    }
+
+    // MARK: - Shift+Tab over the readback (sweep #5)
+
+    /// **The cycle starts from the mode the channel is in.**
+    ///
+    /// The pickers hold the handshake's `permissionMode` readback, and the shortcut used to keep a second cursor
+    /// that started at `.default` on every channel. A channel launched in `acceptEdits` therefore received
+    /// `acceptEdits` again on its first Shift+Tab: one request, no change, and a key that looked broken.
+    ///
+    /// Deliberate break: cycle from a local `permissionMode` cursor again.
+    func testShiftTabCyclesFromTheModeTheHandshakeReportedAndNotFromDefault() async throws {
+        let double = ComposerLifecycleDouble()
+        let model = makeModel(double)
+        let modes = ComposerModel.cyclablePermissionModes
+        let reported = try XCTUnwrap(modes.dropFirst().first, "the cycle offers one mode, so a start point is moot")
+        await model.pickers.noteHandshake(Self.handshake(reporting: reported))
+        XCTAssertEqual(model.pickers.displayedMode, reported, "the handshake's mode did not reach the picker")
+
+        await model.cyclePermissionMode()
+
+        let sent = await sentModes(double)
+        let expected = modes[(modes.firstIndex(of: reported)! + 1) % modes.count]
+        XCTAssertEqual(sent, [expected.rawValue],
+                       "the first press sent \(sent.count) mode(s) and did not start from the readback")
+    }
+
+    /// A handshake reporting one permission mode. `current_permission_mode` is the field the picker's readback
+    /// reads; every value here is invented and no engine byte reaches this file (§11).
+    private static func handshake(reporting mode: PermissionMode) -> InitializeResponse {
+        InitializeResponse(raw: .object(["current_permission_mode": .string(mode.rawValue)]))
     }
 
     // MARK: - The composer's own lifecycle

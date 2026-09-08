@@ -1264,6 +1264,32 @@ symlink-containment debt in entry 78 is unchanged.
      readback waits for a handshake whose epoch is the new process's before comparing the mode —
      the same watch item 205 needs. Owner: C6.2. Raised by C6.2's fix wave.
 
+211. **`Fleet.forkResolutions` is written for every fork and read by one caller.** The map recording
+     a fork's provisional-to-resolved key is the only place the two ids are ever linked, so it is
+     written whenever `publish` re-keys a channel — but `resolvedForkKey(of:)` is the only reader,
+     and `perform(.fork)` and a routed `/fork` never ask. Each unread fork therefore leaves one key
+     pair behind for the life of the process. Bounded by the number of forks a session opens and
+     measured in tens of bytes, so it is filed rather than fixed. Closer: record only for a
+     provisional key `Fleet.fork(at:on:)` handed out, and drop it when the channel is released.
+     Owner: C4. Raised by C6.2's second review round.
+
+212. **`EditAndRewindTests` prints a `ChannelKey` on two failures.** The pre-existing fork arms
+     compare `rig.selected` to an array of keys, so a failure prints a config home under the
+     process's temporary directory and a session id (§11). It is a failure message and not a report,
+     but the rule is about the byte reaching a file at all. The arm added in the second review round
+     compares a count and a boolean instead; the two older ones were left alone to keep the wave's
+     diff to its findings. Closer: the same count-and-boolean shape. Owner: C6.2.
+
+213. **The read-only gate is in the mount, not in the model.** A row C5 lists read-only is given no
+     composer, which makes every write path unreachable from the UI — but `ComposerModel.send()` and
+     the `!` escape carry no refusal of their own, so a caller that reached a retained composer for
+     such a channel would not be refused the way `surface.isDisabled` refuses one. There is no such
+     caller today: the registry builds a composer only for a drawn channel, and a read-only channel
+     is never drawn with one. Filed because the same reasoning was wrong once already — the header's
+     gate was in the view and this finding is what that cost. Closer: the read-only reason joins
+     `ChannelSurfaceState`, so the model refuses on the same seam the restart already closes.
+     Owner: C6.2.
+
 ## From C7.2 (`child/c7-editor-core`)
 
 97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state

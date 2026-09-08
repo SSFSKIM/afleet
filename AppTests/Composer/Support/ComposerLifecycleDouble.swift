@@ -33,6 +33,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         /// `sendPrompt` and for the same reason: it is a member of this leaf's surface, and the key it
         /// answers is what the prefill and the selection are aimed at.
         case fork(ChannelKey, ForkPoint?)
+        case resolvedForkKey(ChannelKey)
         case route(ChannelKey, String)
         /// X5's two settings members Task 11 added: the late surface's read of what the engine already
         /// reported, and the fleet's own answer to a setting that did not survive a restart. Recorded
@@ -62,6 +63,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
             case .perform: "perform"
             case .sendPrompt: "sendPrompt"
             case .fork: "fork"
+            case .resolvedForkKey: "resolvedForkKey"
             case .route: "route"
             case .engineReports: "engineReports"
             case .resolveSetting: "resolveSetting"
@@ -104,6 +106,8 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     private var isSendHeld = false
     private var heldSenders: [CheckedContinuation<Void, Never>] = []
     private var heldCallers: [CheckedContinuation<Void, Never>] = []
+    private var isReportHeld = false
+    private var heldReportReaders: [CheckedContinuation<Void, Never>] = []
     /// How many callers are suspended inside `perform` right now. A count, not a value (§11).
     private(set) var callersHeldInPerform = 0
 
@@ -115,6 +119,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// The sibling keys `fork` answers, in order. A test that stages none reaches the staging error, which is how a
     /// "no fork happens here" arm stays a failure rather than a silent success.
     private var forkOutcomes: [Result<ChannelKey, LifecycleError>] = []
+    private var forkIdentities: [ChannelKey: ChannelKey] = [:]
     /// Staged answers to `send`, keyed by subtype; a subtype with no answer staged returns `.null`,
     /// which is what an engine member with an empty success body sends (`rename_session`).
     private var sendAnswers: [String: Result<JSONValue, WireError>] = [:]
@@ -150,6 +155,12 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func alwaysSendPrompt(_ outcome: Result<UUID, LifecycleError>) { promptFallback = outcome }
     /// The sibling key the next `fork` answers.
     func stageFork(_ outcome: Result<ChannelKey, LifecycleError>) { forkOutcomes.append(outcome) }
+
+    /// The key a fork minted under `provisional` ends up filed under, as the fleet would answer it once the engine
+    /// announced the fork's own session id. Unstaged means the id never arrived, which is the provisional key.
+    func stageForkIdentity(_ resolved: ChannelKey, resolving provisional: ChannelKey) {
+        forkIdentities[provisional] = resolved
+    }
     func stageRoute(_ routed: Routed) { routeOutcomes.append(routed) }
     func stageRun(_ outcome: Result<StrategyOutcome, LifecycleError>) { runOutcomes.append(outcome) }
     func stageSend(_ subtype: String, _ answer: Result<JSONValue, WireError>) { sendAnswers[subtype] = answer }
@@ -178,6 +189,19 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         for caller in waiting { caller.resume() }
     }
     /// Every `perform` from here on records itself and then suspends, until `releasePerform()`.
+    /// Every `engineReports` from here on records itself, reads what is staged, and then suspends until
+    /// `releaseEngineReports()`. How a test lands a `stop()` and a fresh `start()` inside a seeding that is
+    /// already in flight.
+    func holdEngineReports() { isReportHeld = true }
+    func releaseEngineReports() {
+        isReportHeld = false
+        let waiting = heldReportReaders
+        heldReportReaders = []
+        for reader in waiting { reader.resume() }
+    }
+    /// Stops holding without releasing what is already parked: the next reader runs straight through while the
+    /// earlier one stays suspended.
+    func stopHoldingEngineReports() { isReportHeld = false }
     func holdPerform() { isPerformHeld = true }
     func releasePerform() {
         isPerformHeld = false
@@ -307,13 +331,23 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         return try forkOutcomes.removeFirst().get()
     }
 
+    /// X5's second fork answer: the key the sibling is filed under once its identity resolved.
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey {
+        calls.append(.resolvedForkKey(provisional))
+        return forkIdentities[provisional] ?? provisional
+    }
+
     /// What the fleet retains about a channel it owns a supervisor for, and nil for one it does not —
     /// `Fleet.engineReports(of:)`'s own contract. The values are the ones `stageEngineReport` staged,
     /// so the double cannot tell the surface one story and `route` another.
     func engineReports(of key: ChannelKey) async -> EngineReports? {
         calls.append(.engineReports(key))
         guard opened.contains(key) else { return nil }
-        return EngineReports(handshake: handshake, systemInit: systemInit)
+        // Read before the hold, so a caller parked here answers what was staged when it asked and a test can stage
+        // a newer report for the subscription that overtakes it.
+        let reports = EngineReports(handshake: handshake, systemInit: systemInit)
+        if isReportHeld { await withCheckedContinuation { heldReportReaders.append($0) } }
+        return reports
     }
 
     func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {

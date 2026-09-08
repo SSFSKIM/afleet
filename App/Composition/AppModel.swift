@@ -125,8 +125,8 @@ final class AppModel {
         self.panels = panels
         self.shell = ShellModel(panels: panels)
         self.sequence = sequence
-        self.coordinatorFactory = coordinatorFactory ?? { [timelines] workspace in
-            FleetCoordinator(workspace: workspace, panels: panels, timelines: timelines)
+        self.coordinatorFactory = coordinatorFactory ?? { [timelines, composers] workspace in
+            FleetCoordinator(workspace: workspace, panels: panels, timelines: timelines, composers: composers)
         }
         // C5's one shipped tab, under `.thread`. C6 takes that id by `unregister(.thread)` and then
         // its own `register`; `register` refuses a duplicate, so the pair is the handover.

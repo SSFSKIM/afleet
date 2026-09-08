@@ -270,6 +270,34 @@ final class QuitGuardTests: XCTestCase {
                       + "\(named.symmetricDifference(["a", "b"]).count) channel(s)")
     }
 
+    /// **A channel waiting on a decision is busy.**
+    ///
+    /// The engine has asked afleet something and is holding the conversation open for the answer; quitting ends that
+    /// turn exactly as it ends a running one. A predicate that compared presence to `.busy` alone let the clause end
+    /// a channel with a permission prompt on the screen without asking about it at all.
+    ///
+    /// Deliberate break: compare `state.presence == .busy` again.
+    func testAChannelWaitingOnADecisionIsNamedInTheDialog() async {
+        let double = ComposerLifecycleDouble()
+        let deciding = QuitRig.key("a")
+        let quiet = QuitRig.key("b")
+        await double.setStates([
+            QuitRig.state(deciding, origin: .owned(.ready), presence: .waiting(for: "an-invented-subtype")),
+            QuitRig.state(quiet, origin: .owned(.ready), presence: .idle)
+        ])
+        await double.alwaysPerform(.success(QuitRig.state(quiet, origin: .owned(.dormant))))
+        var seen: [[QuitChannel]] = []
+        let termination = QuitRig.termination(double, titles: { QuitRig.title(of: $0) })
+        let guardModel = QuitGuard(fleet: termination, confirm: { channels in seen.append(channels); return true })
+
+        _ = await guardModel.quit()
+
+        XCTAssertEqual(seen.count, 1, "the clause asked \(seen.count) time(s) with a decision on the screen")
+        let named = Set(seen.first?.map(\.title) ?? [])
+        XCTAssertTrue(named == ["a"],
+                      "the named set and the waiting set differ by \(named.symmetricDifference(["a"]).count) channel(s)")
+    }
+
     /// **Exactly one X5 call per owned channel with a process, and it is never `.reap`.**
     ///
     /// §7.4's *Quit* is the bare terminate: `.quit` is unconditional, gated on no eligibility check
@@ -627,7 +655,8 @@ enum QuitRig {
         switch call {
         case .perform(let key, _), .sendPrompt(let key, _), .fork(let key, _), .route(let key, _), .send(let key, _, _),
              .run(let key, _, _), .openInTerminal(let key), .events(let key), .preconditions(let key),
-             .liveTaskIDs(let key), .engineReports(let key), .resolveSetting(let key, _):
+             .liveTaskIDs(let key), .engineReports(let key), .resolveSetting(let key, _),
+             .resolvedForkKey(let key):
             key
         case .storeWrite:
             nil

@@ -97,10 +97,25 @@ final class ComposerRegistry {
 
     /// Hands `text` to the channel's composer — now if it has one, at its first mount if it does not — and brings
     /// that channel into view. The one path *Fork from here* takes.
-    func prefill(_ text: String, for key: ChannelKey) {
+    /// `from` is the generation the fork was started under. A handoff that completes after a rebind belongs to a
+    /// workspace this registry has let go of: its models were released by `attach(to:)`, its fleet is not the one
+    /// anything else refers to, and taking it would put a draft in this workspace's registry and move the window's
+    /// selection onto a channel of the old one. Dropped, silently — there is no surface left that the fork was
+    /// about.
+    func prefill(_ text: String, for key: ChannelKey, from generation: Int) {
+        guard generation == self.generation else { return }
         if let existing = models[key] { existing.draft = text } else { pendingPrefills[key] = text }
         selectChannel?(key)
     }
+
+    /// Which workspace this registry is bound to, counted up by every `attach(to:)`.
+    ///
+    /// The registry is app-scoped and survives *Check again*, which builds a whole new workspace; the models over
+    /// the previous one are released and their handoffs are not. A fork opened before the rebind completes its
+    /// `LifecycleAPI.fork` afterwards and would then prefill and select a channel of a fleet nothing else refers to
+    /// — into this registry, because the closure captures the registry and not the workspace. The generation is what
+    /// the deferred handoff carries so it can be recognised as an old workspace's and dropped.
+    private(set) var generation = 0
 
     private var models: [ChannelKey: ComposerModel] = [:]
     private var headers: [ChannelKey: ChannelHeaderActionsModel] = [:]
@@ -118,6 +133,7 @@ final class ComposerRegistry {
                 paneRunner: (@MainActor (PaneRequest) async throws -> Void)? = nil,
                 lifecycle: (any LifecycleAPI)? = nil) {
         releaseAll()
+        generation += 1
         self.lifecycle = lifecycle ?? workspace.fleet
         self.fleet = workspace.fleet
         self.diagnostics = workspace.diagnostics.fleet
@@ -163,8 +179,11 @@ final class ComposerRegistry {
         // opening draft, and it is taken exactly once.
         if let waiting = pendingPrefills.removeValue(forKey: key) { model.draft = waiting }
         // How this composer's own *Fork from here* reaches the sibling it opens. The model holds a closure rather
-        // than the registry, so nothing in `App/Composer/` depends on the registry's shape.
-        model.handOffToFork = { [weak self] forked, text in self?.prefill(text, for: forked) }
+        // than the registry, so nothing in `App/Composer/` depends on the registry's shape. The generation is
+        // captured here, when the composer is built, so the handoff carries the workspace it belongs to and a
+        // rebind that happened while the fork was in flight discards it.
+        let generation = generation
+        model.handOffToFork = { [weak self] forked, text in self?.prefill(text, for: forked, from: generation) }
         followTimeline(model)
         models[key] = model
         return model
@@ -247,10 +266,28 @@ struct ChannelComposerMount: View {
     /// The app's one registry, handed down by the column. Not `@Environment`: the column already
     /// holds `AppModel`, and an environment read would make the mount undrawable in a test that
     /// walks the body by reflection, which is how this view is asserted at all.
+    /// Why this row may not be written to, or nil for one that may — C5's listing policy, carried on the row the
+    /// column already resolved (`ChannelRow.readOnlyReason`).
+    let readOnly: ListingPolicy.ReadOnlyReason?
+    /// The app's one registry, handed down by the column. Not `@Environment`: the column already
+    /// holds `AppModel`, and an environment read would make the mount undrawable in a test that
+    /// walks the body by reflection, which is how this view is asserted at all.
     let composers: ComposerRegistry
 
+    /// **A read-only row gets no field, and that gate is here rather than inside the composer.**
+    ///
+    /// C5 lists a teammate's transcript read-only, and the header's actions are already gated on the same policy
+    /// (`ChannelRow.offersOwnedActions`) — but nothing gated the composer, and every write in this leaf leaves
+    /// through it: a prompt resumes an archived session in `ChannelSupervisor.send`, and the `!` escape explicitly
+    /// permits an archived origin. Not mounting the model at all is what makes that unreachable; a disabled field
+    /// would still be a field with a send path behind it, and the surface below says why instead.
+    ///
+    /// The composer is not built either, so a read-only channel the user visits takes no event subscription and
+    /// holds no draft: there is nothing it could ever send.
     var body: some View {
-        if let model = resolved() {
+        if let readOnly {
+            ReadOnlyComposerNotice(reason: readOnly)
+        } else if let model = resolved() {
             ComposerView(model: model)
         }
     }
@@ -269,6 +306,30 @@ struct ChannelComposerMount: View {
         guard let model = composers.model(for: key, cwd: cwd) else { return nil }
         model.start()
         return model
+    }
+}
+
+/// What stands where the field would be on a row C5 listed read-only.
+///
+/// It states the reason rather than leaving the column to end in nothing: the channel is readable, and a user who
+/// finds no composer under a conversation they can see is owed the sentence that says why. Names a kind and never a
+/// path, a holder or a session (§11).
+struct ReadOnlyComposerNotice: View {
+
+    let reason: ListingPolicy.ReadOnlyReason
+
+    var body: some View {
+        Label(Self.sentence(reason), systemImage: "eye")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    static func sentence(_ reason: ListingPolicy.ReadOnlyReason) -> String {
+        switch reason {
+        case .teammate: "This conversation belongs to another user on this machine. afleet can show it and cannot write to it."
+        }
     }
 }
 
