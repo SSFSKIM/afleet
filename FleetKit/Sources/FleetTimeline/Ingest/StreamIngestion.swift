@@ -132,6 +132,10 @@ public actor StreamIngestion {
     /// buffered; every other event is handled at once.
     private var buffer: [(frame: TranscriptMirrorFrame, epoch: ProcessEpoch, at: Date)]?
     private var projectionCache: DurableProjection = .empty
+    /// The channel's live fold, held only for the half no record carries: the overlay a `HostSignal` moves. Its
+    /// durable projection is never read — §7.3 makes the record reducer primary — so it is built with no seed.
+    /// Non-nil from `open`, which is where the stream and the slug it needs are resolved.
+    private var wire: WireReducer?
 
     // MARK: - Queries
 
@@ -153,6 +157,39 @@ public actor StreamIngestion {
     }
     func metadata(of stream: LogicalStream) -> AgentMetadataRecord? { streams[stream]?.metadata }
     var openStreams: Set<LogicalStream> { Set(streams.keys) }
+    /// The live half as this actor's reducer holds it. Not public: the overlay a channel *renders* is the one C6
+    /// folds from its own subscription of the fan-out; this one exists so a host signal has somewhere to land.
+    var overlay: Overlay { wire?.overlay ?? .empty }
+
+    // MARK: - Host signals
+
+    /// What the host did that no frame states: the prompt it wrote, the decision it answered, the rewind and the
+    /// relocation it asked for, the process it replaced. The engine reports none of them, so the live half can only
+    /// learn them from the host — and until this seam existed nothing constructed a `HostSignal` at all, so no
+    /// decision card could leave `.pending` and no turn was ever attributed to the prompt that caused it (filed by
+    /// C6.3 as a `[parent-impact]` against X4 and X5, 2026-09-08).
+    ///
+    /// The signal goes to this actor's reducer at the actor's own clock, and the overlay changes it reports are
+    /// published on `effects` like every other mutation's. The overlay's alone: the durable half is the record
+    /// reducer's (§7.3), so this reducer's own durable projection is discarded here as it is everywhere. A signal
+    /// that changes nothing — an unknown request id, the same answer twice — publishes nothing.
+    @discardableResult
+    public func signal(_ signal: HostSignal) async -> Effect {
+        // The one signal with a second half: the paths this actor holds. `relocated(mainPath:)` is that half, and
+        // this calls it rather than restating it.
+        if case .relocated(let mainPath) = signal { await relocated(mainPath: mainPath) }
+        let before = Set(overlay.items.map(\.id))
+        guard let changes = wire?.apply(signal, at: Date()) else { return Effect() }
+        let live = before.union(overlay.items.map(\.id))
+        let published = changes.filter { change in
+            switch change {
+            case .inserted(let id), .updated(let id), .removed(let id): return live.contains(id)
+            case .previewChanged, .overlayChanged, .sessionStateChanged: return true
+            }
+        }
+        guard !published.isEmpty else { return Effect() }
+        return publish(Effect(), adding: published)
+    }
 
     // MARK: - Open
 
@@ -174,6 +211,8 @@ public actor StreamIngestion {
             preconditionFailure("StreamIngestion.open: the path does not name this session's main transcript")
         }
         mainStream = main
+        // Before the tap starts, so no event reaches the actor ahead of the reducer that folds it.
+        wire = WireReducer(stream: main, slug: slug)
 
         buffer = []
         tap = Task { [weak self] in
@@ -448,6 +487,15 @@ public actor StreamIngestion {
                 stateValue = .both
                 pendingStateChange = .both
             }
+        }
+        // The reducer folds the channel's events so that a host signal lands on a current overlay: a decision has to
+        // be `pending` before it can be answered, and a turn has to exist before a prompt can claim it. What the fold
+        // derives is not published from here — the overlay a channel renders is C6's, from its own subscription — so
+        // the changes are discarded. A mirror frame is the one event this reducer ignores by contract, and folding it
+        // would rebuild the whole line for nothing, so it is not offered.
+        switch event {
+        case .frame(.transcriptMirror, _): break
+        default: _ = wire?.apply(event, at: Date())
         }
         switch event {
         case .frame(.transcriptMirror(let frame), let epoch):
@@ -852,6 +900,9 @@ public actor StreamIngestion {
     /// Rebind the main stream's path and every agent stream's path under the new slug. Offsets, locators and file
     /// identity are unchanged: a locator is a stream plus a range and the stream did not change, and a rename keeps the
     /// inode, so the next `fileChanged` does not take the rewrite arm.
+    ///
+    /// This is the path half of a relocation, and the only implementation of it: `signal(.relocated(mainPath:))` is
+    /// this call plus the agent tree's re-slug, and calls it rather than repeating it.
     public func relocated(mainPath: URL) async {
         guard let main = mainStream,
               let (stream, kind) = TranscriptPath.resolve(mainPath, under: configHome), stream == main,
@@ -935,8 +986,9 @@ public actor StreamIngestion {
         return RecordReducer.merge(projections, main: main)
     }
 
+    /// `adding` is the live half's own changes — a host signal's, which no durable diff can show.
     @discardableResult
-    private func publish(_ effect: Effect) -> Effect {
+    private func publish(_ effect: Effect, adding overlayChanges: [TimelineChange] = []) -> Effect {
         var effect = effect
         if effect.stateChange == nil, let pending = pendingStateChange {
             effect.stateChange = pending
@@ -944,7 +996,7 @@ public actor StreamIngestion {
         pendingStateChange = nil
         let previous = projectionCache
         projectionCache = recompute()
-        effect.changes = Self.changes(from: previous, to: projectionCache)
+        effect.changes = Self.changes(from: previous, to: projectionCache) + overlayChanges
         sink.yield(effect)
         return effect
     }
