@@ -237,15 +237,20 @@ private struct FilesContentColumn: View {
         }
     }
 
+    /// The four previews that draw a *file* rather than a string are given the readout's revision
+    /// as well as the URL. A URL does not change when the agent rewrites the file behind it, so a
+    /// view compared on the URL alone keeps a render of bytes that are gone; the digest of what
+    /// the session last read is what makes the update re-evaluate. The markdown viewer takes the
+    /// text itself and needs none.
     @ViewBuilder
     private func nativeViewer(_ readout: FilesPanelReadout) -> some View {
         if let file = session.selected {
             switch readout.viewer {
             case .markdown: MarkdownViewer(text: file.text)
-            case .image: ImageViewer(url: file.url)
-            case .pdf: PDFViewer(url: file.url)
-            case .media: MediaViewer(url: file.url)
-            case .quickLook: QuickLookViewer(url: file.url)
+            case .image: ImageViewer(url: file.url, revision: readout.revision)
+            case .pdf: PDFViewer(url: file.url, revision: readout.revision)
+            case .media: MediaViewer(url: file.url, revision: readout.revision)
+            case .quickLook: QuickLookViewer(url: file.url, revision: readout.revision)
             case .unsupported: UnsupportedFileViewer(url: file.url)
             case .nothing, .editor, .diff: EmptyState(text: Self.emptyMessage)
             }

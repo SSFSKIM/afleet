@@ -285,6 +285,11 @@ public final class FilesPanelSession: PanelTabSession {
         }
         guard let path = presentedPath,
               let file = openFiles.first(where: { $0.path == path }) else { return }
+        // Sent to this one surface rather than broadcast, so the positions it will report back are
+        // recorded here rather than in `send`: a remounted window echoing the cursor the session
+        // gave it is no more the user moving than any other host-issued move.
+        commandedPositions.insert(Position(line: 1, column: 1))
+        commandedPositions.insert(Position(line: file.line, column: file.column))
         surface.send(.open(path: file.path, language: file.language, text: file.text, line: nil))
         surface.send(.gotoLine(line: file.line, column: file.column))
     }

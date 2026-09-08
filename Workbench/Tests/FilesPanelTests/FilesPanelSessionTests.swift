@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import FilesPanel
@@ -1457,6 +1458,22 @@ final class FilesPanelSessionTests: XCTestCase {
                        "the engine's own file was replaced through a retargeted home")
     }
 
+    /// The other half of the same guard: the components of a path that does not exist yet have no
+    /// inode to compare, so the comparison has to know whether case distinguishes two names — and
+    /// the answer is the volume's, not a constant. Insensitive everywhere lets no save into a
+    /// config home but refuses saves that have nothing to do with one on a case-sensitive volume;
+    /// sensitive everywhere fails open on the volume macOS ships. Asserted as the two decisions,
+    /// which name no path.
+    func testContainmentAsksTheVolumeWhetherCaseDistinguishesTwoNames() throws {
+        let home = tree.root.appending(path: "cased/.claude")
+        let candidate = tree.root.appending(path: "cased/.CLAUDE/settings.json")
+
+        XCTAssertTrue(FilesPanelSession.contains(home, candidate, caseSensitive: false),
+                      "one directory under two spellings was treated as two")
+        XCTAssertFalse(FilesPanelSession.contains(home, candidate, caseSensitive: true),
+                       "two directories were treated as one and an ordinary save was refused")
+    }
+
     // MARK: - 33. Reload clears the dirty state when the refresh lands
 
     /// *Reload* is *discard the buffer and take what is on disk*. A refresh that cannot happen —
@@ -1495,6 +1512,40 @@ final class FilesPanelSessionTests: XCTestCase {
                        [.open(name: "first.swift", language: "swift", text: "one\n", line: nil),
                         .gotoLine(line: 12, column: 4)],
                        "the file came back at the top rather than where the user left it")
+    }
+
+    // MARK: - 35. what a native preview reloads on
+
+    /// A URL is not an identity for a file the agent is rewriting: the path does not move when the
+    /// bytes do, so the preview views compare a *revision* alongside it. That revision has to come
+    /// from the panel — it is the digest of what the session last read — and a content column that
+    /// passes none leaves a PDF or an image drawing a render whose bytes are gone.
+    func testTheReadoutCarriesTheRevisionANativePreviewReloadsOn() async throws {
+        let image = tree.root.appending(path: "pixel.png")
+        try Self.pngBytes(side: 1).write(to: image)
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .milliseconds(50))
+        await harness.session.openFile(at: image, line: nil)
+
+        let opened = FilesPanelReadout(session: harness.session).revision
+        XCTAssertFalse(opened.isEmpty, "the panel passes no revision, so the URL is the whole identity")
+        XCTAssertEqual(opened, harness.session.selected?.lastLoaded?.digest)
+
+        try Self.pngBytes(side: 4).write(to: image)
+
+        try await waitUntil("the rewrite reaches the panel") {
+            FilesPanelReadout(session: harness.session).revision != opened
+        }
+        XCTAssertEqual(FilesPanelReadout(session: harness.session).viewer, .image)
+    }
+
+    /// A square PNG of `side` pixels, encoded by the system rather than typed out: two sides give
+    /// two genuinely different files, which is what the revision is about.
+    private static func pngBytes(side: Int) -> Data {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                   isPlanar: false, colorSpaceName: .deviceRGB,
+                                   bytesPerRow: 4 * side, bitsPerPixel: 32)!
+        return rep.representation(using: .png, properties: [:])!
     }
 
     // MARK: - Harness

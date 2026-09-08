@@ -32,6 +32,14 @@ public struct FilesPanelReadout: Equatable {
     /// Whether the markdown toggle is offered, and which way it is set.
     public let offersMarkdownToggle: Bool
     public let rendersMarkdown: Bool
+    /// What the selected file's bytes were the last time the session read them, as a digest.
+    ///
+    /// The native previews compare it alongside the URL, because a URL alone is not an identity
+    /// for a file the agent is rewriting: the path does not move when the contents do, and a view
+    /// whose stored properties are otherwise unchanged would keep a render of bytes that are gone.
+    /// Empty for a file the panel never read — one above the cap — which means "the URL is the
+    /// whole identity". A digest is not a path and not a buffer (§6.3, §11).
+    public let revision: String
     public let isFilterActive: Bool
     public let openFileCount: Int
     /// What the panel-local area is showing (root spec §10). None of it reaches the channel.
@@ -45,6 +53,7 @@ public struct FilesPanelReadout: Equatable {
         showsConflictBanner = file?.hasConflict ?? false
         offersMarkdownToggle = file?.kind == .markdown
         rendersMarkdown = file?.rendersMarkdown ?? true
+        revision = file?.lastLoaded?.digest ?? ""
         isFilterActive = !session.tree.filter.isEmpty
         openFileCount = session.openFiles.count
         issue = session.issue
