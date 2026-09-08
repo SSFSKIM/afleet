@@ -1929,3 +1929,17 @@ Reserved range 247–261.
      `AfleetSettingsStore.read` distinguish "absent" from "unreadable" so a decode failure is
      reported rather than answered with defaults. Owner: C5's fence — the next child that adds a
      settings field. Filed 2026-09-09 at C7.6's M6.
+
+250. **A popup opened without a target frame loses the original request's method and body, and
+     WebKit's supplied configuration.** `BrowserWebTab`'s `createWebViewWith` answers a
+     `window.open` or a `target="_blank"` by asking the model for a new panel tab and loading
+     `URLRequest(url:)` built from the action's URL alone (Q11), so a `POST` becomes a `GET` with no
+     body, and the `WKWebViewConfiguration` WebKit hands the delegate — which carries the opener
+     relationship — is dropped in favour of the panel's own. Real, and out of scope on purpose: this
+     panel exists for a dev server, a documentation page and a pull request, and a `window.open`
+     carrying a POST body is not among them. Nothing here is a security hole; the loss is fidelity
+     on a shape the panel does not aim at. Closer: return a web view built from the supplied
+     configuration and let WebKit perform the navigation itself, which means the model can hand back
+     a `BrowserWebTab` built around a configuration it did not make — a change to
+     `BrowserWebViewFactory`'s one-way ownership. Owner: C7.6 at closeout if a page needs it,
+     otherwise the next leaf that touches `BrowserWebTab`. Filed 2026-09-09 at the R3/R4 fix wave.
