@@ -1872,7 +1872,9 @@ is renumbered.
      pagination (tracker 114).
 
 194. **`IngestionTests.testTheWholeWireStreamThroughTheTapYieldsMirrorEffectsAndTheLiveHalf` gives
-     up on its effects under load.** In a `make test` run with a 15-minute load average of 89 (two
+     up on its effects under load.** **Closed 2026-09-09 by `1402cd4`** (delivery-fulfilled waits with a
+     120 s hang guard; 0 of 10 → 10 of 10 under a load average near 150; the tailer test's own
+     pre-write race fixed with it). In a `make test` run with a 15-minute load average of 89 (two
      floors and a `swift test` loop in parallel), `IngestionTests` took 209 s instead of ~25 s and
      this test collected 5 of 15 mirror effects (23 of 53 duplicates) before its wait ended at
      23 s; alone it passes 5 of 5. Same class as 131, 146 and 151: a bounded wait read as a
