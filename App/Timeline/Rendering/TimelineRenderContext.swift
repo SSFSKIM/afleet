@@ -69,6 +69,12 @@ struct TimelineRenderContext {
     /// `get_settings`' auto-scroll preference. Task 6 lands the readout that sets it; until then a
     /// channel follows its stream, which is what the engine's own renderer does.
     var autoScrollEnabled: Bool = true
+
+    /// `get_settings`' `syntaxHighlightingDisabled`, inverted so the field reads as what it does.
+    /// Parity §41.17 records it as an accessibility choice for some users, so it is a preference the
+    /// renderer honours rather than a debug switch. Task 5 lands the readout that sets it; until
+    /// then fenced blocks are highlighted, which is what the engine's own renderer does.
+    var syntaxHighlightingEnabled: Bool = true
 }
 
 // MARK: - The environment value

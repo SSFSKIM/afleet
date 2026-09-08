@@ -108,10 +108,34 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// position either held on its anchor or followed to the bottom.
     func apply(_ input: TimelineRenderInput, context: TimelineRenderContext? = nil) {
         self.context = context
+        // The reader's syntax-highlighting preference, honoured on the publish that carries it. A
+        // settled block holds its styled code inside it, so the parsed-block cache goes with the
+        // flip — otherwise a channel already on screen keeps drawing highlighted code after the
+        // preference turned highlighting off.
+        if highlighter.setEnabled(context?.syntaxHighlightingEnabled ?? true) { preferenceChanged() }
         reloadedRows = []
         let anchor = anchorAtViewportTop()
         let appended = applyItems(input) + applyPreview(input.preview)
         settleScroll(anchor: anchor, appended: appended)
+    }
+
+    /// The syntax-highlighting preference flipped: everything already built from it is dropped.
+    ///
+    /// An item's row holds no text of its own — its content is its builder's, and a builder reaches
+    /// the pipeline through the caches this drops — so a reload is the whole of what those rows
+    /// need. A row that *does* carry source is re-settled here. The streaming preview is
+    /// deliberately left alone: rebuilding it would reset the character count the delta path indexes
+    /// the preview's text by and replay text already on screen, and the message it is drawing lands
+    /// as a durable item within the turn.
+    private func preferenceChanged() {
+        markdown.clear()
+        for index in itemRows.indices where !itemRows[index].pendingSource.isEmpty {
+            var rebuilt = RenderedRow(key: itemRows[index].key, source: itemRows[index].pendingSource)
+            rebuilt.settle(markdown: markdown, highlighter: highlighter)
+            itemRows[index] = rebuilt
+        }
+        heights = [:]
+        tableView.reloadData()
     }
 
     /// The item half. Returns how many rows were appended.
