@@ -102,10 +102,46 @@ struct SidebarView: View {
                     JobRowView(job: job,
                                banner: browser.jobBanners[job.short.rawValue],
                                adopt: { Task { await browser.adopt(job) } },
-                               attach: { Task { shell.pendingPane = await browser.attach(job) } },
+                               attach: { Task { await Self.openJobPane(job, verb: .attach,
+                                                                       browser: browser,
+                                                                       panels: shell.panels) } },
+                               logs: { Task { await Self.openJobPane(job, verb: .logs,
+                                                                     browser: browser,
+                                                                     panels: shell.panels) } },
                                stop: { Task { await browser.stop(job) } })
                 }
             }
+        }
+    }
+
+    /// X5's two job panes, *Attach* and *Logs*, as one verb over two requests.
+    ///
+    /// **A static function taking its collaborators**, the shape `PanelColumnView
+    /// .resolvePendingPanelIndex` already has here: the test calls exactly what the row calls, with
+    /// no window and no `List` around it. Logic inside the row's closure would be reachable only by
+    /// rendering the sidebar.
+    ///
+    /// **The channel is named before X5 is asked.** `claude attach` starts a client, and starting
+    /// one for a pane that could never be placed leaves a child running for a screen nobody will
+    /// see; naming first means the row refuses before anything is spawned.
+    ///
+    /// **And the host's refusal is a banner too** (§10). `run(_:for:)` throws when no Terminal leaf
+    /// holds a runner or when the host cannot resolve the named channel — both are things the user
+    /// should read on the row that asked, not errors travelling into a channel.
+    static func openJobPane(_ job: JobEntry, verb: JobPaneVerb,
+                            browser: FleetBrowserModel, panels: PanelHostModel) async {
+        guard let channel = browser.paneChannel(for: job, inView: panels.selectedChannel) else { return }
+        let request: PaneRequest?
+        switch verb {
+        case .attach: request = await browser.attach(job)
+        case .logs: request = await browser.logs(job)
+        }
+        // A refusal from X5 has already been written onto the row by the browser.
+        guard let request else { return }
+        do {
+            try await panels.run(request, for: channel)
+        } catch {
+            browser.noteJobFailure(job, error)
         }
     }
 
@@ -213,13 +249,21 @@ struct ChannelRowView: View {
     }
 }
 
-/// One background job, with the three actions spec §4 names.
+/// Which of X5's two job panes a row asked for. Two cases rather than a boolean, because §9.5 and
+/// §17 C7 name them as two affordances and the sentence a refusal writes is the row's either way.
+enum JobPaneVerb {
+    case attach
+    case logs
+}
+
+/// One background job, with the actions spec §4 and §9.5 name.
 struct JobRowView: View {
 
     let job: JobEntry
     let banner: String?
     let adopt: () -> Void
     let attach: () -> Void
+    let logs: () -> Void
     let stop: () -> Void
 
     var body: some View {
@@ -235,6 +279,7 @@ struct JobRowView: View {
             HStack(spacing: 8) {
                 Button("Adopt", action: adopt).disabled(job.sessionID == nil)
                 Button("Attach", action: attach)
+                Button("Logs", action: logs)
                 Button("Stop", action: stop)
             }
             .buttonStyle(.link)

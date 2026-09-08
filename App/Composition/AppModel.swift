@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import FleetKit
+import Workbench
 
 /// The one state machine over the four routes, and the only thing the window observes.
 ///
@@ -81,6 +82,15 @@ final class AppModel {
     /// feed in its context would watch a timeline nothing updates.
     let panels: PanelHostModel
 
+    /// C7.4's map from a channel to its Terminal panes.
+    ///
+    /// **One instance, and it is the whole point of the property.** The registered tab and the
+    /// registered pane runner are two objects, and each of them asks this for a channel's session:
+    /// a registry per owner would leave the host rendering one session while a `PaneRequest` placed
+    /// its pane in another, so the pane would exist and no window would ever draw it. It is held
+    /// here rather than inside either owner because neither of them can be the one that owns it.
+    let terminalSessions = TerminalSessionRegistry()
+
     /// The per-channel composers (spec §8.5), one `ComposerModel` and one shared
     /// `ChannelSurfaceState` per channel.
     ///
@@ -135,11 +145,18 @@ final class AppModel {
         // could is a future initialiser registering something first — in which case the placeholder
         // would vanish with no signal, and the tab C6 hands itself is the last thing that should
         // disappear quietly.
+        //
+        // C7.4's Terminal leaf takes `.terminal` here and registers its pane runner for the same
+        // id, both over `terminalSessions` — see that property for why the two share one registry.
+        // Registration is what makes `PanelHost.run(_:for:)` reach a runner at all; without it
+        // every X5 pane request answers `noPaneRunner` and no gate can run.
         do {
             try panels.register(PlaceholderTab())
+            try panels.register(TerminalPanelTab(registry: terminalSessions))
+            panels.registerPaneRunner(TerminalPaneRunner(registry: terminalSessions), for: .terminal)
             panels.select(.thread)
         } catch {
-            assertionFailure("the placeholder is the first registration on a freshly built host")
+            assertionFailure("these are the first registrations on a freshly built host")
         }
     }
 

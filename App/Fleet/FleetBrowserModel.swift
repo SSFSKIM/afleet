@@ -496,9 +496,9 @@ final class FleetBrowserModel {
         }
     }
 
-    /// *Attach*: the `PaneRequest` X5 hands back for the job's pane. **C5 renders no pane** — the
-    /// Terminal panel is C7's — so the request is returned to the caller, which holds it, rather
-    /// than being dropped on the floor as though attaching had happened.
+    /// *Attach*: the `PaneRequest` X5 hands back for the job's screen. The request is returned
+    /// rather than run here, because which channel a job's pane belongs to is the caller's to name
+    /// (X7 as amended 2026-09-09) and this model does not know what the window is showing.
     func attach(_ job: JobEntry) async -> PaneRequest? {
         do {
             let request = try await lifecycle.attach(job.short)
@@ -508,6 +508,43 @@ final class FleetBrowserModel {
             jobBanners[job.short.rawValue] = Self.sentence(for: error)
             return nil
         }
+    }
+
+    /// *Logs*: the same shape as *Attach* over X5's other job pane, `claude logs <short>`. Two
+    /// members rather than one with a flag, because the two verbs are two X5 calls and a surface
+    /// that ran one through the other would be invisible in a single call record.
+    func logs(_ job: JobEntry) async -> PaneRequest? {
+        do {
+            let request = try await lifecycle.logs(job.short)
+            jobBanners[job.short.rawValue] = nil
+            return request
+        } catch {
+            jobBanners[job.short.rawValue] = Self.sentence(for: error)
+            return nil
+        }
+    }
+
+    /// Which channel a job's pane belongs to, and the refusal when there is none.
+    ///
+    /// A job that runs a session names that session's channel under this browser's own config home
+    /// — the same key *Adopt* builds one method above, so the two verbs cannot disagree about which
+    /// channel a job is. A job with no session at all, which is what an exec job is, falls back to
+    /// `inView`, the channel the window is showing. When neither exists there is nothing to name,
+    /// and the row says so rather than running a `claude attach` whose pane could never be placed.
+    ///
+    /// **The refusal is a banner and never a thrown error** (§10): a job action that cannot happen
+    /// is the row's news, not the channel's.
+    func paneChannel(for job: JobEntry, inView: ChannelKey?) -> ChannelKey? {
+        if let session = job.sessionID { return ChannelKey(configHome: configHome, session: session) }
+        if let inView { return inView }
+        jobBanners[job.short.rawValue] = "This job runs no session, and no channel is open to show its pane in."
+        return nil
+    }
+
+    /// A job action that failed after X5 had already answered — the pane could not be placed. It
+    /// reads as the same sentence any other refusal on the row does.
+    func noteJobFailure(_ job: JobEntry, _ error: any Error) {
+        jobBanners[job.short.rawValue] = Self.sentence(for: error)
     }
 
     /// *Stop*: `claude stop <short>` through X5's job verb, never a signal of our own. The job leaving the roster
