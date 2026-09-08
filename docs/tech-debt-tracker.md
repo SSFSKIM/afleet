@@ -1267,30 +1267,6 @@ symlink-containment debt in entry 78 is unchanged.
      retains for the channel — after the epoch has been established to have advanced, and an
      unresolved mode holds the gate instead of releasing it (item 214 is what remains of the watch).
 
-214. **An owed readback is settled only by a handshake that arrives afterwards.** C6.2's second fix
-     wave retains the snapshot when a confirmation cannot be completed — the channel did not answer
-     `get_settings`, or the fleet had no permission mode to report for the replacement — and the
-     field stays closed until the next handshake re-runs the comparison. That handshake is the
-     replacement reporting, so it normally arrives; but a replacement that handshook *before* the
-     hold was taken, or one whose handshake is lost, leaves the confirmation owed with nothing to
-     settle it, and the field stays shut until the user changes a setting. It is the same missing
-     watch as item 205 — a surface with no per-channel state to subscribe to — and the closer is the
-     same: the composer's own event loop, or per-channel state on X5, re-running an owed
-     confirmation on any epoch change rather than only on a handshake it happens to see. Owner: the
-     C6 composite, with C4 if the second shape is chosen. Raised by C6.2's second fix wave.
-
-215. **Answering the fleet's banner re-sends a value the engine already applied.** The fleet resolves
-     its unresolved settings strictly in order, so a correction made out of that order cannot advance
-     it; the surface now re-answers each setting the fleet still names with the value the readback
-     reports, which for a setting the user has already corrected is one extra `set_model`,
-     `apply_flag_settings` or `set_permission_mode` carrying a value the process is already running.
-     It is idempotent and bounded by the three settings the pickers own, and it is what makes the
-     banner's promise ("pick a value to continue") true for a user who picks in their own order. What
-     would remove it: `resolveSetting` accepting a correction for any unresolved setting rather than
-     only the head of the list, so one request answers both halves whatever order they arrive in.
-     Owner: C4 (`ChannelSupervisor.resolveSetting`), with C6.2 dropping the re-answer when it lands.
-     Raised by C6.2's second fix wave.
-
 209. **`HostSignal.promptSent` is raised after `sendPrompt` returns, and an engine result can arrive
      first.** `ComposerModel.post` registers the uuid with the fold only once the facade has answered,
      while `ChannelSupervisor.deliver` awaits the process write and the wire fans out independently; a
@@ -1306,28 +1282,6 @@ symlink-containment debt in entry 78 is unchanged.
      `cancel_async_message` answers `cancelled: true`; a result ingested in between takes the cancelled
      uuid off the outstanding list, and the later removal cannot repair the attribution. Same remedy
      and owner as 209. Filed 2026-09-08 (panel round 2, scalpel-1#2).
-
-218. **`ToolRunner` carries both of the escalation defects the `!` escape just had.** C7.3's
-     `Workbench/Sources/SourceControlCore/ToolRunner.swift` is the arrangement C6.2's `ShellChild`
-     was copied from, and it still keys its `SIGKILL` on `settled` and its `signalTree` on `reaped`.
-     Both windows are the same: a budget expiring inside a termination's grace reaps the child and
-     settles, and the escalation then skips the kill; and a settlement-time drain that ends the call
-     can no longer signal a group whose leader has been reaped. A tool a panel runs writes the
-     command, so `git` starting descendants is likelier there than in a chat field, not less.
-     Closer: record the group separately from the pid, key the escalation on whether it has run, and
-     drop `settled` from `beginTermination` — the three edits `ShellEscape.swift` took, with the two
-     arms that arrange the orderings. Owner: C7.3. Found by C6.2's second fix wave (scalpel-3#1, #2)
-     while reading the house pattern.
-
-219. **A `!` whose group is still being escalated does not survive the app quitting.** The escalation
-     is now owed to the group past the caller's answer, which means up to two graces (one second)
-     during which the `SIGKILL` is a block on a dispatch queue and nothing else. If afleet exits in
-     that window — a quit, a crash, a test host tearing down — the block dies with the process and a
-     descendant that ignored the `SIGTERM` stays on the machine. The same is true of
-     `abandonUnreapedChild`'s off-queue reap. Bounded and rare, and unfixable inside the child alone:
-     the closer is that §7.4's quit path drains what the composers still owe their groups before it
-     terminates, in the same pass that ends the channels. Owner: C6.2 (the quit clause). Raised by
-     C6.2's second fix wave.
 
 211. **`Fleet.forkResolutions` is written for every fork and read by one caller.** The map recording
      a fork's provisional-to-resolved key is the only place the two ids are ever linked, so it is
@@ -1354,6 +1308,52 @@ symlink-containment debt in entry 78 is unchanged.
      gate was in the view and this finding is what that cost. Closer: the read-only reason joins
      `ChannelSurfaceState`, so the model refuses on the same seam the restart already closes.
      Owner: C6.2.
+
+214. **An owed readback is settled only by a handshake that arrives afterwards.** C6.2's second fix
+     wave retains the snapshot when a confirmation cannot be completed — the channel did not answer
+     `get_settings`, or the fleet had no permission mode to report for the replacement — and the
+     field stays closed until the next handshake re-runs the comparison. That handshake is the
+     replacement reporting, so it normally arrives; but a replacement that handshook *before* the
+     hold was taken, or one whose handshake is lost, leaves the confirmation owed with nothing to
+     settle it, and the field stays shut until the user changes a setting. It is the same missing
+     watch as item 205 — a surface with no per-channel state to subscribe to — and the closer is the
+     same: the composer's own event loop, or per-channel state on X5, re-running an owed
+     confirmation on any epoch change rather than only on a handshake it happens to see. Owner: the
+     C6 composite, with C4 if the second shape is chosen. Raised by C6.2's second fix wave.
+
+215. **Answering the fleet's banner re-sends a value the engine already applied.** The fleet resolves
+     its unresolved settings strictly in order, so a correction made out of that order cannot advance
+     it; the surface now re-answers each setting the fleet still names with the value the readback
+     reports, which for a setting the user has already corrected is one extra `set_model`,
+     `apply_flag_settings` or `set_permission_mode` carrying a value the process is already running.
+     It is idempotent and bounded by the three settings the pickers own, and it is what makes the
+     banner's promise ("pick a value to continue") true for a user who picks in their own order. What
+     would remove it: `resolveSetting` accepting a correction for any unresolved setting rather than
+     only the head of the list, so one request answers both halves whatever order they arrive in.
+     Owner: C4 (`ChannelSupervisor.resolveSetting`), with C6.2 dropping the re-answer when it lands.
+     Raised by C6.2's second fix wave.
+
+218. **`ToolRunner` carries both of the escalation defects the `!` escape just had.** C7.3's
+     `Workbench/Sources/SourceControlCore/ToolRunner.swift` is the arrangement C6.2's `ShellChild`
+     was copied from, and it still keys its `SIGKILL` on `settled` and its `signalTree` on `reaped`.
+     Both windows are the same: a budget expiring inside a termination's grace reaps the child and
+     settles, and the escalation then skips the kill; and a settlement-time drain that ends the call
+     can no longer signal a group whose leader has been reaped. A tool a panel runs writes the
+     command, so `git` starting descendants is likelier there than in a chat field, not less.
+     Closer: record the group separately from the pid, key the escalation on whether it has run, and
+     drop `settled` from `beginTermination` — the three edits `ShellEscape.swift` took, with the two
+     arms that arrange the orderings. Owner: C7.3. Found by C6.2's second fix wave (scalpel-3#1, #2)
+     while reading the house pattern.
+
+219. **A `!` whose group is still being escalated does not survive the app quitting.** The escalation
+     is now owed to the group past the caller's answer, which means up to two graces (one second)
+     during which the `SIGKILL` is a block on a dispatch queue and nothing else. If afleet exits in
+     that window — a quit, a crash, a test host tearing down — the block dies with the process and a
+     descendant that ignored the `SIGTERM` stays on the machine. The same is true of
+     `abandonUnreapedChild`'s off-queue reap. Bounded and rare, and unfixable inside the child alone:
+     the closer is that §7.4's quit path drains what the composers still owe their groups before it
+     terminates, in the same pass that ends the channels. Owner: C6.2 (the quit clause). Raised by
+     C6.2's second fix wave.
 
 ## From C7.2 (`child/c7-editor-core`)
 
