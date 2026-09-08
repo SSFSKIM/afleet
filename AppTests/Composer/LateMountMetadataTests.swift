@@ -148,6 +148,65 @@ final class LateMountMetadataTests: XCTestCase {
                        "a handshake after a complete refresh made \(after - settled) more request(s)")
     }
 
+    /// **A retained report is not an answer to a request made after it.**
+    ///
+    /// Seeding runs again on every remount, so the picker is handed the handshake the fleet kept —
+    /// which, for a mode the user asked for since, is the report of the process *before* the request.
+    /// A mode switch produces no handshake of its own, so nothing newer exists to compare against;
+    /// reading the retained one as the answer calls a change that succeeded a disagreement and leaves
+    /// the restart snapshot naming a mode the process no longer runs, which then holds the composer
+    /// closed after a restart that in fact restored it.
+    ///
+    /// Deliberate break: seed through `noteHandshake`. The disagreement is raised and the snapshot
+    /// falls back to the retained report's mode.
+    func testSeedingARetainedReportDoesNotAnswerAModeRequestFromTheSameProcess() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        await double.openEvents(of: key)
+        await double.setStates([HeaderRig.replaced(key, epoch: .first)])
+        await double.stageEngineReport(handshake: handshakeEvent(commands: [], mode: .default), systemInitFrom: nil)
+        let model = ComposerModel(key: key, lifecycle: double, surface: ChannelSurfaceState())
+
+        // The user asks for a mode, on the very process the retained report is of.
+        let refusal = await model.pickers.issueMode(.plan)
+        XCTAssertNil(refusal, "the mode request was refused, so this arm never reaches the seeding")
+
+        // A remount, which hands the picker that same retained report again.
+        model.start()
+        try await waitFor("the retained report to be seeded") { model.pickers.displayedMode != nil }
+
+        XCTAssertNil(model.pickers.disagreement,
+                     "a report older than the request was read as the engine disagreeing with it")
+        XCTAssertEqual(model.pickers.currentSnapshot.permissionMode, .plan,
+                       "the restart snapshot named a mode the process is no longer running")
+        model.stop()
+    }
+
+    /// And the arm that keeps that fix honest: a retained report from a **later** epoch is the
+    /// replacement's, and it does settle the request — one that disagrees raises the disagreement.
+    func testSeedingAReportFromALaterEpochDoesAnswerTheModeRequest() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        await double.openEvents(of: key)
+        await double.setStates([HeaderRig.replaced(key, epoch: .first)])
+        await double.stageEngineReport(handshake: handshakeEvent(commands: [], mode: .default), systemInitFrom: nil)
+        let model = ComposerModel(key: key, lifecycle: double, surface: ChannelSurfaceState())
+
+        let refusal = await model.pickers.issueMode(.plan)
+        XCTAssertNil(refusal, "the mode request was refused, so this arm never reaches the seeding")
+
+        // The process is replaced, and the report the fleet now holds is the new one's.
+        await double.setStates([HeaderRig.replaced(key, epoch: ProcessEpoch.first.next())])
+        model.start()
+        try await waitFor("the replacement's report to be seeded") { model.pickers.displayedMode != nil }
+
+        XCTAssertNotNil(model.pickers.disagreement,
+                        "the replacement reported a different mode and nothing said so")
+        XCTAssertEqual(model.pickers.currentSnapshot.permissionMode, .default,
+                       "the snapshot kept the click over the replacement's own report")
+        model.stop()
+    }
+
     /// A bounded wait on a condition the model reaches on its own task.
     private func waitFor(_ what: String, _ condition: @MainActor () async -> Bool) async throws {
         for _ in 0..<400 {

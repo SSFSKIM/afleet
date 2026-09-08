@@ -31,8 +31,12 @@ extension ComposerModel {
         guard isCurrentSubscription(subscription) else { return }
         if let handshake = reports.handshake {
             self.handshake = handshake
-            // The mode picker's readback, on the same terms a live handshake sets it.
-            await pickers.noteHandshake(handshake)
+            // The mode picker's readback — as a **retained** report, not as a live handshake. Every
+            // remount re-runs this seeding, so the picker is handed a report it may well have seen
+            // already, and one older than any mode the user has asked for since. Read as the answer
+            // to that request it would call a change that succeeded a disagreement, and leave the
+            // restart snapshot naming a mode the process no longer runs.
+            await pickers.noteRetainedHandshake(handshake)
             guard isCurrentSubscription(subscription) else { return }
         }
         if let systemInit = reports.systemInit { self.systemInit = systemInit }

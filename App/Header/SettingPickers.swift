@@ -102,6 +102,12 @@ final class SettingPickersModel {
     /// handshake settles the question.
     @ObservationIgnored private var requestedMode: PermissionMode?
 
+    /// The channel's epoch when that request went out, which is what makes a **retained** handshake
+    /// answerable: a report from the same process is older than the request by construction — a mode
+    /// switch produces no handshake of its own — and only a report from a later epoch is the
+    /// replacement's and can settle it.
+    @ObservationIgnored private var requestedModeEpoch: ProcessEpoch?
+
     /// Whether a picker has ever asked the engine for its options, and whether the last attempt came
     /// back complete. Both are needed and neither alone is: a channel with no process refuses the two
     /// requests, so an empty menu is either "nobody asked yet" or "asked and the process was not
@@ -221,9 +227,27 @@ final class SettingPickersModel {
     /// again. A refresh that already came back complete is not repeated — that is the case this
     /// method's silence was written for, and it is still silent for it.
     func noteHandshake(_ initialize: InitializeResponse) async {
+        await note(initialize, settling: true)
+    }
+
+    /// The same handshake, when it comes from the fleet's **retained** copy rather than off the
+    /// stream — a late surface seeding itself (`seedEngineReports`).
+    ///
+    /// A retained report is not news. Remounting re-runs the seeding, so a handshake this model has
+    /// already seen is handed to it again, and reading that as the answer to a mode the user asked
+    /// for since would report a successful change as a disagreement and leave `currentSnapshot`
+    /// carrying the mode the process no longer runs — which closes the composer over a restart that
+    /// restored it correctly. It settles the request only when the fleet's channel has moved to a
+    /// later epoch, which is the one case where the retained report is the replacement's.
+    func noteRetainedHandshake(_ initialize: InitializeResponse) async {
+        await note(initialize, settling: await reportIsNewerThanTheRequest())
+    }
+
+    private func note(_ initialize: InitializeResponse, settling settlesTheRequest: Bool) async {
         handshakeMode = initialize.currentPermissionMode
-        if let requested = requestedMode {
+        if settlesTheRequest, let requested = requestedMode {
             requestedMode = nil
+            requestedModeEpoch = nil
             if let reported = handshakeMode, reported != requested {
                 disagreement = Self.disagreementNote(setting: "permission mode")
             }
@@ -232,6 +256,15 @@ final class SettingPickersModel {
         // A handshake is also the moment an owed confirmation can be settled: it is the replacement
         // reporting, and the readback that could not be taken when the restart returned is taken now.
         if let owed = awaitedRestart { await confirm(owed) }
+    }
+
+    /// Whether the process the fleet is running now is a later one than the process the mode request
+    /// went to. With no request outstanding there is nothing to settle and the answer is yes; with no
+    /// epoch on either side the report cannot be shown to be newer, and the request is kept.
+    private func reportIsNewerThanTheRequest() async -> Bool {
+        guard requestedMode != nil else { return true }
+        guard let asked = requestedModeEpoch, let now = await lifecycle.state(of: key)?.epoch else { return false }
+        return now > asked
     }
 
     /// Both readbacks: the options from `list_models` and the applied values from `get_settings`.
@@ -370,9 +403,18 @@ final class SettingPickersModel {
             return reason
         }
         requestedMode = mode
+        // The process the request went to, so a retained handshake handed to this model later can be
+        // told from the replacement's.
+        requestedModeEpoch = await lifecycle.state(of: key)?.epoch
         await clearRestartGate(for: Self.modeSetting)
         return nil
     }
+
+    /// Whether §7.4's gate is holding a restart: one still replacing a process, or a readback owed by
+    /// one that already did. Read by `BypassGate` (§8.6), which may not let a mode switch reach a
+    /// process that is on its way out — the replacement restores the snapshot the restart captured,
+    /// and a switch that raced it is simply lost.
+    var isRestartPending: Bool { restartsInFlight > 0 || awaitedRestart != nil }
 
     /// §8.6's acceptance, claimed. Answers false when one is already running, which is what makes a
     /// second bypass selection wait rather than take the stored-acceptance path: the acceptance is
@@ -599,6 +641,14 @@ final class SettingPickersModel {
     /// level is a value read off a process, and the reader needs to know which setting to look at.
     @discardableResult
     func confirmReadback(of expected: RestartSnapshot) async -> Bool {
+        // **The operation is closed and the snapshot becomes owed in the same breath.** The
+        // comparison below is several awaits long — `list_models`, `get_settings`, the handshake the
+        // fleet retained — and for every one of them the replacement has reported nothing yet.
+        // Dropping the count without putting the snapshot in its place leaves the machine *open*
+        // while the readbacks are still out, and a picker click landing in that window re-opens the
+        // field over a process nothing has verified. The comparison clears it on whichever arm it
+        // reaches, so the state is *owed* exactly as long as the readbacks are.
+        awaitedRestart = expected
         restartsInFlight = max(0, restartsInFlight - 1)
         return await confirm(expected)
     }
@@ -698,27 +748,40 @@ final class SettingPickersModel {
     /// process, no readback owed, no setting this surface is still waiting for a value for, and no
     /// setting the **fleet** is still holding the channel connecting over.
     private func releaseOrHold() async {
-        guard restartsInFlight == 0 else {
-            surface.isRestarting = true
-            surface.isDisabled = true
-            return
-        }
+        guard nothingHolds else { return closeField() }
         surface.isRestarting = false
-        guard awaitedRestart == nil, restartFailures.isEmpty else {
-            surface.isDisabled = true
-            surface.disabledReason = restartBanner
-            return
-        }
         if let held = await settleFleetBanner() {
             restartBanner = Self.banner(for: [held])
             surface.isDisabled = true
             surface.disabledReason = restartBanner
             return
         }
+        // **Every holder is read again, because settling the fleet's banner is an await.** The
+        // reading above is of the machine as it was before it — and a `beginRestart` that arrived
+        // inside the await has since closed the field over a process that is being replaced right
+        // now. Releasing on the older reading would open the field for that restart's duration, and
+        // the send would reach the process on its way out.
+        guard nothingHolds else { return closeField() }
         corrected = []
         restartBanner = nil
         surface.isDisabled = false
         surface.disabledReason = nil
+    }
+
+    /// Whether the state table's three holders are all clear: no restart replacing a process, no
+    /// readback owed, nothing outstanding on this surface. The fleet's own hold is the fourth and is
+    /// asked for separately, because asking it is an await.
+    private var nothingHolds: Bool {
+        restartsInFlight == 0 && awaitedRestart == nil && restartFailures.isEmpty
+    }
+
+    /// The field, closed over whichever holder is set. *Restarting* keeps the reason `beginRestart`
+    /// gave it — the restart is the thing being waited on, and the banner belongs to the readback —
+    /// and every other holder shows the banner.
+    private func closeField() {
+        surface.isRestarting = restartsInFlight > 0
+        surface.isDisabled = true
+        if restartsInFlight == 0 { surface.disabledReason = restartBanner }
     }
 
     /// The setting the fleet is still holding this channel connecting over, after every correction

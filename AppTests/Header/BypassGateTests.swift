@@ -362,4 +362,112 @@ final class BypassGateTests: XCTestCase {
         let narrowed = recorder.pathsUnderAConfigHome([root])
         XCTAssertGreaterThan(narrowed.count, 0, "a home the writes are known to lie under explained none of them")
     }
+
+    // MARK: - 5. A stored acceptance is not a licence to switch mid-restart
+
+    /// §8.6's fourth arm sends the mode alone — and it may not send it into a process that is being
+    /// replaced. `perform` takes control requests all through a restart, so a switch issued after the
+    /// restart captured its snapshot reaches the outgoing process and is then lost when the
+    /// replacement restores the older mode. Every restart the gate knows about counts, not only a
+    /// bypass acceptance.
+    ///
+    /// Deliberate break: guard on `isAcceptingBypass` alone. The mode switch then goes out over a
+    /// restart nothing else in the gate can see.
+    func testAStoredAcceptanceDoesNotSwitchTheModeWhileAnotherRestartIsRunning() async throws {
+        let recorder = AppWriteRecorder()
+        let double = ComposerLifecycleDouble()
+        let header = try await makeHeader(double, recorder: recorder, accepted: true)
+
+        // Any restart at all — a flag setting's, and not this gate's.
+        header.pickers.beginRestart(reason: "an invented restart")
+        await header.selectBypassMode()
+
+        let subtypes = await double.sentSubtypes
+        XCTAssertFalse(subtypes.contains(SetPermissionMode.subtype),
+                       "the mode switch reached a process that a restart is replacing")
+        XCTAssertFalse(header.isShowingBypassDisclaimer, "a stored acceptance raised the disclaimer again")
+        let underAHome = recorder.pathsUnderAConfigHome()
+        XCTAssertEqual(underAHome.count, 0, "\(underAHome.count) write(s) landed under a config home")
+    }
+
+    /// The same claim across the **store read**, which is an await of its own: the reading the guard
+    /// was made on is stale by the time the acceptance comes back, and a restart begun inside it is
+    /// exactly the race the guard exists for.
+    ///
+    /// Deliberate break: check the restart only before `refreshBypassAcceptance`. The switch then
+    /// goes out for a restart that began one await later.
+    func testARestartBegunInsideTheStoreReadStillStopsTheModeSwitch() async throws {
+        let recorder = AppWriteRecorder()
+        let double = ComposerLifecycleDouble()
+        let tree = try TempTree()
+        trees.append(tree)
+        let store = try FileStateStore(baseDirectory: tree.directory("store"),
+                                       configHomes: TempTree.configHomes(),
+                                       fileOperations: SeamedStoreFileOperations(writes: recorder.seam))
+        try await store.write(true, namespace: .fleetKit, key: FleetKitKeys.bypassAccepted)
+        let hooked = StoreWithAReadHook(inner: RecordingBypassStore(inner: store, double: double))
+        let key = HeaderRig.key()
+        await double.alwaysPerform(.success(HeaderRig.replaced(key)))
+        await double.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
+        await double.stageSend("get_settings", .success(try PickerReadbackTests.recordedBody("get_settings")))
+        let header = HeaderRig.header(double, key: key, store: hooked)
+        await header.pickers.refresh()
+        // The restart lands inside the read the acceptance is fetched by, and only there.
+        hooked.onRead { [pickers = header.pickers] in pickers.beginRestart(reason: "an invented restart") }
+
+        await header.selectBypassMode()
+
+        let subtypes = await double.sentSubtypes
+        XCTAssertFalse(subtypes.contains(SetPermissionMode.subtype),
+                       "the mode switch went out for a restart that began while the acceptance was being read")
+        let underAHome = recorder.pathsUnderAConfigHome()
+        XCTAssertEqual(underAHome.count, 0, "\(underAHome.count) write(s) landed under a config home")
+    }
+}
+
+/// A store that runs one hook **inside** its first read, so a test can land a restart in the window
+/// `selectBypassMode` takes across the acceptance. Everything else is the store it wraps, which is a
+/// real `FileStateStore`: no byte moves anywhere it would not have.
+///
+/// `@unchecked Sendable` is sound because the one mutable field is read and written only inside
+/// `lock`, this instance's own `NSLock`.
+private final class StoreWithAReadHook: StateStore, @unchecked Sendable {
+
+    private let inner: any StateStore
+    private let lock = NSLock()
+    private var hook: (@MainActor @Sendable () -> Void)?
+
+    init(inner: any StateStore) { self.inner = inner }
+
+    /// The hook, run once: a later read goes straight through, so nothing here turns one restart into
+    /// a queue of them.
+    func onRead(_ hook: @escaping @MainActor @Sendable () -> Void) {
+        lock.lock(); self.hook = hook; lock.unlock()
+    }
+
+    private func takeHook() -> (@MainActor @Sendable () -> Void)? {
+        lock.lock(); defer { lock.unlock() }
+        let taken = hook
+        hook = nil
+        return taken
+    }
+
+    func read<T: Codable & Sendable>(_ type: T.Type, namespace: StoreNamespace, key: String) async throws -> T? {
+        if let hook = takeHook() { await MainActor.run { hook() } }
+        return try await inner.read(type, namespace: namespace, key: key)
+    }
+
+    func write<T: Codable & Sendable>(_ value: T, namespace: StoreNamespace, key: String) async throws {
+        try await inner.write(value, namespace: namespace, key: key)
+    }
+
+    func remove(namespace: StoreNamespace, key: String) async throws {
+        try await inner.remove(namespace: namespace, key: key)
+    }
+
+    func keys(in namespace: StoreNamespace) async throws -> [String] { try await inner.keys(in: namespace) }
+
+    func appendUnique(_ element: String, namespace: StoreNamespace, key: String) async throws {
+        try await inner.appendUnique(element, namespace: namespace, key: key)
+    }
 }
