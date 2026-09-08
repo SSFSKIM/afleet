@@ -158,6 +158,38 @@ final class RenderContextMountTests: XCTestCase {
                       "the link the card emitted is not a file link")
     }
 
+    // MARK: - D11's render-time filter
+
+    /// A retracted frame is not drawn, and an unretracted one is — **both arms**.
+    ///
+    /// The negative alone passes against a list that draws nothing, and the positive alone passes
+    /// against a list that filters nothing, so neither says anything by itself. Nothing is removed
+    /// from C3's items: §7.3's differential invariant forbids this leaf reducing, so this is a
+    /// render-time filter and the assertion is over what the table is handed.
+    func testARetainedFrameIsNotDrawn() async throws {
+        let card = try Self.refusalDialogCard()
+        let retracted = try XCTUnwrap(card.refusalFallback?.retractedMessageUUIDs.first,
+                                      "the recorded refusal dialog retracts nothing, so there is nothing to filter")
+
+        let registry = RetractionRegistry()
+        let doomed = TimelineRow(.assistantMessage(Self.assistant(key: retracted)))
+        let kept = TimelineRow(.assistantMessage(Self.assistant(key: "invented-kept-message-1")))
+
+        // Before the dialog settles, both are drawn: a registry that evicted on receipt would take
+        // the message back while the reader was still deciding.
+        let beforehand = TimelineListView.retained([doomed, kept], by: registry)
+        XCTAssertEqual(beforehand.count, 2, "\(beforehand.count) row(s) drawn before the dialog settled, not 2")
+
+        registry.resolved(card, in: Self.channel)
+        let drawn = TimelineListView.retained([doomed, kept], by: registry)
+
+        XCTAssertEqual(drawn.count, 1, "\(drawn.count) row(s) survived the retraction, not 1")
+        XCTAssertFalse(drawn.contains { $0.id.key == doomed.id.key },
+                       "the row the settled dialog took back is still drawn")
+        XCTAssertTrue(drawn.contains { $0.id.key == kept.id.key },
+                      "the row the dialog never named was dropped along with the one it did")
+    }
+
     // MARK: - Support
 
     /// A config home this suite never writes to, for the items it invents. The rig below builds its
@@ -171,6 +203,34 @@ final class RenderContextMountTests: XCTestCase {
         LogicalStream(configHome: channel.configHome, sessionID: channel.session, name: .main)
     }
 
+    /// An invented assistant item under `channel`'s stream, keyed by whatever the caller names.
+    /// `RetractionRegistry.retains(_:)` reads the channel out of the item's own stream, so the two
+    /// have to agree or the filter would answer about a different channel.
+    private static func assistant(key: String) -> AssistantMessageItem {
+        AssistantMessageItem(id: ItemID(stream: stream, key: key),
+                             timestamp: Date(timeIntervalSince1970: 1_800_000_000),
+                             provenance: Provenance(stream: stream, origin: .wire),
+                             messageID: "msg_invented_c61_0001",
+                             model: "invented-model",
+                             blocks: [InventedItems.text("an invented reply")])
+    }
+
+    /// The first `request_user_dialog` the refusal-fallback recording carries, as a card.
+    private static func refusalDialogCard() throws -> DecisionCard {
+        let dialogs = try FixtureRunner.events("dialog-refusal-fallback").compactMap { event -> InboundRequest? in
+            switch event {
+            case .request(let request), .unansweredDialog(let request):
+                return request.subtype == "request_user_dialog" ? request : nil
+            default:
+                return nil
+            }
+        }
+        let withRetraction = dialogs.compactMap { DecisionItem(surfacing: $0, in: channel) }
+            .map(DecisionCard.init)
+            .first { !($0.refusalFallback?.retractedMessageUUIDs.isEmpty ?? true) }
+        return try XCTUnwrap(withRetraction,
+                             "the recording holds \(dialogs.count) dialog(s) and none of them retracts a message")
+    }
 
     private static func press(_ label: String, in body: Any) throws {
         let button = try XCTUnwrap(ViewTree.button(label, in: body), "the card offered no \(label) button")

@@ -42,3 +42,7 @@ values rather than layout:
 Everything a row needs that is not its item arrives through `TimelineRenderContext`, including the
 `TimelineNeighbourhood` gathered once per publish: the tool calls a cluster names, the instant
 before an item, and the agent-run tree.
+
+The list draws through `TimelineListView.retained(_:by:)`, which asks `RetractionRegistry.retains(_:)`
+before the rows reach the table — a render-time filter and not a reduction, because §7.3's
+differential invariant forbids this leaf adding one.

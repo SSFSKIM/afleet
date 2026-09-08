@@ -43,8 +43,19 @@ struct TimelineListView: View {
     var body: some View {
         // No change set: the model republishes the whole timeline and states no diff, so the table
         // computes one by key. When the model does start naming its changes the table prefers them.
-        renderer.view(for: TimelineRenderInput(rows: model.rows, preview: model.timeline.preview))
+        renderer.view(for: TimelineRenderInput(rows: Self.retained(model.rows, by: retraction),
+                                               preview: model.timeline.preview))
             .environment(\.timelineContext, app.map(context(in:)))
+    }
+
+    /// D11's render-time filter: the rows a settled refusal dialog did **not** take back.
+    ///
+    /// **A filter and not a reduction.** §7.3's differential invariant forbids this leaf adding a
+    /// reducer, so nothing is removed from C3's items; the list simply does not draw a frame the
+    /// engine has said stopped being true. Static, so what the table is handed is a function of the
+    /// rows and the registry that a test can call without a render pass.
+    static func retained(_ rows: [TimelineRow], by retraction: RetractionRegistry) -> [TimelineRow] {
+        rows.filter { retraction.retains($0.item) }
     }
 
     /// Contract Y1's per-row capabilities and contract Y7's raise, injected on this subtree and
