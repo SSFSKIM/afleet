@@ -131,7 +131,10 @@ final class FloodTests: XCTestCase {
                 session.waitForPendingOutput()
                 usleep(20_000)
                 parsedByteCount.withLock { $0 += byteCount }
-            }
+            },
+            // The bound under test is the backlog's, not the attach gate's: this surface is
+            // never put in a window, and a stand-in stands for the renderer that would be.
+            isAttached: { _ in true }
         )
         let process = try PTYProcess(
             spawning: PTYSpawnRequest(

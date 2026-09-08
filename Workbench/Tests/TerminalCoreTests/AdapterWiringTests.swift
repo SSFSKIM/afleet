@@ -334,11 +334,111 @@ final class AdapterWiringTests: XCTestCase {
         XCTAssertTrue(surface.renderedViewportText() == nil, "headless-rendered-viewport=present")
     }
 
+    /// Finding: `takeNext` left the remainder of a chunk as a slice of the allocation it came
+    /// from, and `append` extended that slice in place. The prefix already handed over was never
+    /// reclaimed, so a renderer that keeps the backlog partly full — the ordinary state under a
+    /// flood — grew retained storage without bound while `outstandingByteCount` stayed flat.
+    /// The measure here is therefore the storage, not the count: the count is what stayed
+    /// bounded while the defect ran.
+    func testPartialDrainAndRefillDoesNotGrowTheBacklogsRetainedStorage() {
+        let chunkByteLimit = GhosttyTerminalSurface.feedChunkByteLimit
+        let queue = GhosttyFeedQueue(
+            highWaterByteCount: GhosttyTerminalSurface.feedBufferByteLimit,
+            lowWaterByteCount: GhosttyTerminalSurface.feedResumeByteCount,
+            chunkByteLimit: chunkByteLimit
+        )
+        let residentByteCount = 16 * chunkByteLimit
+        _ = queue.append(Data(repeating: UInt8(ascii: "a"), count: residentByteCount))
+
+        for iteration in 0..<200 {
+            guard case let .output(chunk)? = queue.takeNext() else {
+                XCTFail("backlog-drained-early=\(iteration)")
+                return
+            }
+            _ = queue.complete(byteCount: chunk.count)
+            _ = queue.append(Data(repeating: UInt8(ascii: "b"), count: chunk.count))
+        }
+
+        print(
+            "backlog retained-storage=\(queue.retainedStorageByteCount)"
+                + " outstanding=\(queue.outstandingByteCount)"
+        )
+        XCTAssertEqual(
+            queue.outstandingByteCount,
+            residentByteCount,
+            "backlog-outstanding=\(queue.outstandingByteCount)"
+        )
+        XCTAssertLessThanOrEqual(
+            queue.retainedStorageByteCount,
+            2 * residentByteCount + chunkByteLimit,
+            "backlog-retained-storage=\(queue.retainedStorageByteCount)"
+        )
+    }
+
+    /// Finding: the dependency buffers output that arrives before a surface attaches and drops
+    /// the oldest bytes past 1 MiB, and its `waitForPendingOutput` neither awaits an attach nor
+    /// waits for that buffer. Handing bytes over unattached therefore lost the earliest of them
+    /// while the adapter decremented its outstanding count and reported capacity for bytes that
+    /// no longer existed. More than a megabyte is fed here before attachment: nothing may reach
+    /// the renderer until a surface exists, the adapter's own count must say it is still holding
+    /// all of it, and every byte must be handed over once it does.
+    func testMoreThanTheDropWindowFedBeforeAttachmentReachesTheRendererIntact() async {
+        let attached = Mutex(false)
+        let parsedByteCount = Mutex(0)
+        let surface = makeSurface(
+            feedBarrier: { _, byteCount in parsedByteCount.withLock { $0 += byteCount } },
+            isAttached: { _ in attached.withLock { $0 } }
+        )
+        let deliveryByteCount = 64 * 1024
+        let deliveryCount = 24
+        let fedByteCount = deliveryByteCount * deliveryCount
+        XCTAssertGreaterThan(
+            fedByteCount,
+            GhosttyTerminalSurface.feedBufferByteLimit,
+            "unattached-sample=under-the-drop-window"
+        )
+
+        for _ in 0..<deliveryCount {
+            surface.feed(Data(repeating: UInt8(ascii: "c"), count: deliveryByteCount))
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+
+        XCTAssertEqual(
+            parsedByteCount.withLock { $0 },
+            0,
+            "unattached-handed-over=\(parsedByteCount.withLock { $0 })"
+        )
+        XCTAssertEqual(
+            surface.outstandingFeedByteCount,
+            fedByteCount,
+            "unattached-outstanding=\(surface.outstandingFeedByteCount)"
+        )
+
+        attached.withLock { $0 = true }
+        for _ in 0..<600 where surface.outstandingFeedByteCount > 0 {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(
+            parsedByteCount.withLock { $0 },
+            fedByteCount,
+            "attached-handed-over=\(parsedByteCount.withLock { $0 })"
+        )
+        XCTAssertEqual(
+            surface.outstandingFeedByteCount,
+            0,
+            "attached-outstanding=\(surface.outstandingFeedByteCount)"
+        )
+    }
+
     private func makeSurface(
         terminfoDirectory: URL? = nil,
         resizeSource: ResizeCallbackSource = ResizeCallbackSource(),
         finishCalls: LockedArray<FinishCall>? = nil,
-        feedBarrier: @escaping GhosttyFeedBarrier = { session, _ in session.waitForPendingOutput() }
+        feedBarrier: @escaping GhosttyFeedBarrier = { session, _ in session.waitForPendingOutput() },
+        // A renderer this headless test never puts in a window. The adapter holds its backlog
+        // until a surface exists, so a test about anything downstream of that says so here.
+        isAttached: @escaping GhosttySurfaceAttachmentProbe = { _ in true }
     ) -> GhosttyTerminalSurface {
         GhosttyTerminalSurface(
             terminfoDirectory: terminfoDirectory,
@@ -361,7 +461,8 @@ final class AdapterWiringTests: XCTestCase {
                 )
             },
             runtimeMilliseconds: { 42 },
-            feedBarrier: feedBarrier
+            feedBarrier: feedBarrier,
+            isAttached: isAttached
         )
     }
 }

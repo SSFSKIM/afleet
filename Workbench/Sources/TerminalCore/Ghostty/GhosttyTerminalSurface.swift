@@ -62,6 +62,12 @@ typealias GhosttyFeedBarrier = @Sendable (
     _ byteCount: Int
 ) -> Void
 
+/// Whether the session has a surface to parse into. The dependency publishes no attachment
+/// event and keeps `currentSurface` to itself, so the probe is its one public tell: a viewport
+/// read answers `nil` until a view has attached a surface and a string once one has. A test
+/// substitutes a stand-in for a renderer it does not put in a window.
+typealias GhosttySurfaceAttachmentProbe = @Sendable (InMemoryTerminalSession) -> Bool
+
 /// What the adapter is holding for a renderer that has not caught up.
 ///
 /// `InMemoryTerminalSession.receive` hands each payload to a serial queue with no bound of its
@@ -78,16 +84,28 @@ typealias GhosttyFeedBarrier = @Sendable (
 ///
 /// The state is under a `Mutex`: `feed` arrives on the main actor and the drain runs on a private
 /// queue.
-private final class GhosttyFeedQueue: Sendable {
+final class GhosttyFeedQueue: Sendable {
     enum Item: Sendable {
         case output(Data)
         case processExit(Int32)
     }
 
+    /// One backlog entry. Output carries whether a later `append` may still extend it, and only
+    /// an entry whose storage still starts at index zero may. Extending a `Data` that is already
+    /// a slice grows its buffer while the prefix handed over earlier stays allocated inside it,
+    /// so a partial drain followed by a refill, repeated, grows retained storage without bound
+    /// while `outstandingByteCount` stays flat. Sealing an entry the moment it is sliced keeps
+    /// the backlog a ring of whole allocations, each one retired as it is consumed.
+    private enum Entry {
+        case output(Data, isExtendable: Bool)
+        case processExit(Int32)
+    }
+
     private struct State {
-        var pending: [Item] = []
+        var pending: [Entry] = []
         var outstandingByteCount = 0
         var isDraining = false
+        var isAttached = false
         var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     }
 
@@ -106,18 +124,33 @@ private final class GhosttyFeedQueue: Sendable {
         state.withLock { $0.outstandingByteCount }
     }
 
+    /// What the backlog's allocations occupy, including any prefix already handed over. This is
+    /// ``outstandingByteCount`` plus whatever a partially consumed allocation still carries, and
+    /// it is the measure a retained-storage test takes: the count is exactly what stays bounded
+    /// when the storage behind it does not.
+    var retainedStorageByteCount: Int {
+        state.withLock { state in
+            state.pending.reduce(into: 0) { total, entry in
+                guard case let .output(data, _) = entry else { return }
+                total += data.startIndex + data.count
+            }
+        }
+    }
+
     /// Appends `data`, coalescing it with whatever output is already waiting — the renderer parses
-    /// a byte stream, and delivery boundaries carry no meaning it can use. Reports whether this
-    /// caller starts the drain.
+    /// a byte stream, and delivery boundaries carry no meaning it can use. Coalescing stops at an
+    /// entry that has been sliced, and at one already worth a whole chunk, so the ring never
+    /// becomes one growing allocation. Reports whether this caller starts the drain.
     func append(_ data: Data) -> Bool {
         state.withLock { state in
             state.outstandingByteCount += data.count
-            if case .output(var existing) = state.pending.last {
-                state.pending.removeLast()
-                existing.append(data)
-                state.pending.append(.output(existing))
+            if case let .output(existing, isExtendable: true) = state.pending.last,
+               existing.count < chunkByteLimit {
+                var extended = existing
+                extended.append(data)
+                state.pending[state.pending.count - 1] = .output(extended, isExtendable: true)
             } else {
-                state.pending.append(.output(data))
+                state.pending.append(.output(data, isExtendable: data.count < chunkByteLimit))
             }
             return Self.beginDrainIfIdle(&state)
         }
@@ -138,6 +171,30 @@ private final class GhosttyFeedQueue: Sendable {
         return true
     }
 
+    /// Whether the renderer has a surface to parse into. Latched: nothing is handed to the
+    /// session before the first attach, because the dependency buffers unattached output in a
+    /// 1 MiB window it drops the oldest bytes from, and the adapter would be reporting capacity
+    /// for bytes that no longer exist. After the first attach the dependency's own replay covers
+    /// a surface that is swapped or rebuilt.
+    var isAttached: Bool {
+        state.withLock { $0.isAttached }
+    }
+
+    func markAttached() {
+        state.withLock { $0.isAttached = true }
+    }
+
+    /// Ends the drain when there is nothing waiting. The drain calls this before it waits on
+    /// attachment, so a surface that never attaches and has nothing to hand over leaves no poll
+    /// running behind it.
+    func suspendIfIdle() -> Bool {
+        state.withLock { state in
+            guard state.pending.isEmpty else { return false }
+            state.isDraining = false
+            return true
+        }
+    }
+
     /// The next chunk, bounded, or `nil` once the queue is empty — which ends the drain under the
     /// same lock an append takes.
     func takeNext() -> Item? {
@@ -147,12 +204,13 @@ private final class GhosttyFeedQueue: Sendable {
                 return nil
             }
             switch first {
-            case let .output(data):
+            case let .output(data, _):
                 guard data.count > chunkByteLimit else {
                     state.pending.removeFirst()
                     return .output(data)
                 }
-                state.pending[0] = .output(data.dropFirst(chunkByteLimit))
+                // Sealed: what is left is a slice of this allocation, and nothing extends it.
+                state.pending[0] = .output(data.dropFirst(chunkByteLimit), isExtendable: false)
                 return .output(data.prefix(chunkByteLimit))
             case let .processExit(code):
                 state.pending.removeFirst()
@@ -182,6 +240,82 @@ private final class GhosttyFeedQueue: Sendable {
             guard state.outstandingByteCount >= highWaterByteCount else { return false }
             state.waiters[identifier] = continuation
             return true
+        }
+    }
+}
+
+/// Hands the backlog to the renderer one bounded chunk at a time, on a queue of its own.
+///
+/// It holds everything back until the session has a surface. The dependency's
+/// `InMemoryTerminalSurfaceAccess` buffers output that arrives unattached in a 1 MiB window and
+/// drops the oldest bytes past it, and its `waitForPendingOutput` drains only the attached
+/// output queue — it neither awaits an attach nor waits for that buffer to be parsed. Handing
+/// bytes over before there is a surface would therefore let more than a megabyte be dropped
+/// while the adapter decremented its outstanding count and told its host there was capacity.
+/// Held here instead, nothing is dropped and the capacity signal is about bytes that still exist.
+private final class GhosttyFeedDrain: Sendable {
+    /// How often an undelivered backlog re-asks whether a surface has appeared. The dependency
+    /// polls its own main-thread waits at the same interval.
+    private static let attachmentPollSeconds: TimeInterval = 0.01
+
+    private let queue: DispatchQueue
+    private let backlog: GhosttyFeedQueue
+    private let session: InMemoryTerminalSession
+    private let barrier: GhosttyFeedBarrier
+    private let finish: GhosttySessionFinisher
+    private let runtimeMilliseconds: @Sendable () -> UInt64
+    private let isAttached: GhosttySurfaceAttachmentProbe
+
+    init(
+        queue: DispatchQueue,
+        backlog: GhosttyFeedQueue,
+        session: InMemoryTerminalSession,
+        barrier: @escaping GhosttyFeedBarrier,
+        finish: @escaping GhosttySessionFinisher,
+        runtimeMilliseconds: @escaping @Sendable () -> UInt64,
+        isAttached: @escaping GhosttySurfaceAttachmentProbe
+    ) {
+        self.queue = queue
+        self.backlog = backlog
+        self.session = session
+        self.barrier = barrier
+        self.finish = finish
+        self.runtimeMilliseconds = runtimeMilliseconds
+        self.isAttached = isAttached
+    }
+
+    func start() {
+        queue.async { self.run() }
+    }
+
+    private func run() {
+        while true {
+            if !backlog.isAttached {
+                guard !backlog.suspendIfIdle() else { return }
+                guard isAttached(session) else {
+                    queue.asyncAfter(deadline: .now() + Self.attachmentPollSeconds) {
+                        self.run()
+                    }
+                    return
+                }
+                backlog.markAttached()
+            }
+            guard let item = backlog.takeNext() else { return }
+            let parsedByteCount: Int
+            switch item {
+            case let .output(data):
+                session.receive(data)
+                parsedByteCount = data.count
+            case let .processExit(code):
+                finish(session, UInt32(bitPattern: code), runtimeMilliseconds())
+                parsedByteCount = 0
+            }
+            // Off the main thread, so waiting for the parse cannot deadlock against the tick
+            // the dependency's parse may itself be waiting for.
+            barrier(session, parsedByteCount)
+            for waiter in backlog.complete(byteCount: parsedByteCount) {
+                waiter.resume()
+            }
         }
     }
 }
@@ -239,8 +373,7 @@ public final class GhosttyTerminalSurface: TerminalSurface {
     private let finishSession: GhosttySessionFinisher
     private let runtimeMilliseconds: @Sendable () -> UInt64
     private let feedQueue: GhosttyFeedQueue
-    private let feedBarrier: GhosttyFeedBarrier
-    private let feedDrainQueue = DispatchQueue(label: "app.afleet.terminal-core.surface-feed")
+    private let feedDrain: GhosttyFeedDrain
 
     public let terminalDescription: TerminalDescription
 
@@ -281,7 +414,8 @@ public final class GhosttyTerminalSurface: TerminalSurface {
             session.finish(exitCode: exitCode, runtimeMilliseconds: runtimeMilliseconds)
         },
         runtimeMilliseconds: @escaping @Sendable () -> UInt64 = GhosttyTerminalSurface.elapsedRuntimeMeasurement(),
-        feedBarrier: @escaping GhosttyFeedBarrier = { session, _ in session.waitForPendingOutput() }
+        feedBarrier: @escaping GhosttyFeedBarrier = { session, _ in session.waitForPendingOutput() },
+        isAttached: @escaping GhosttySurfaceAttachmentProbe = { $0.readViewportText() != nil }
     ) {
         let handlers = TerminalHandlerBox()
         let session = sessionFactory(
@@ -310,11 +444,20 @@ public final class GhosttyTerminalSurface: TerminalSurface {
         self.clipboardPolicy = clipboardPolicy
         self.finishSession = finishSession
         self.runtimeMilliseconds = runtimeMilliseconds
-        self.feedBarrier = feedBarrier
-        feedQueue = GhosttyFeedQueue(
+        let feedQueue = GhosttyFeedQueue(
             highWaterByteCount: Self.feedBufferByteLimit,
             lowWaterByteCount: Self.feedResumeByteCount,
             chunkByteLimit: Self.feedChunkByteLimit
+        )
+        self.feedQueue = feedQueue
+        feedDrain = GhosttyFeedDrain(
+            queue: DispatchQueue(label: "app.afleet.terminal-core.surface-feed"),
+            backlog: feedQueue,
+            session: session,
+            barrier: feedBarrier,
+            finish: finishSession,
+            runtimeMilliseconds: runtimeMilliseconds,
+            isAttached: isAttached
         )
         terminalDescription = Self.describeTerminal(terminfoDirectory: terminfoDirectory)
     }
@@ -325,10 +468,17 @@ public final class GhosttyTerminalSurface: TerminalSurface {
         feedQueue.outstandingByteCount
     }
 
+    /// What the backlog's allocations occupy, prefixes already handed over included. Diagnostic:
+    /// it exists so a partial drain/refill loop can assert on retained storage rather than on the
+    /// count, which is the pair that comes apart when a consumed prefix is never reclaimed.
+    var retainedFeedStorageByteCount: Int {
+        feedQueue.retainedStorageByteCount
+    }
+
     public func feed(_ output: Data) {
         guard !output.isEmpty else { return }
         guard feedQueue.append(output) else { return }
-        startFeedDrain()
+        feedDrain.start()
     }
 
     /// Returns at once unless the renderer is more than ``feedBufferByteLimit`` behind, and
@@ -349,34 +499,7 @@ public final class GhosttyTerminalSurface: TerminalSurface {
 
     public func processDidExit(code: Int32) {
         guard feedQueue.appendProcessExit(code: code) else { return }
-        startFeedDrain()
-    }
-
-    private func startFeedDrain() {
-        let queue = feedQueue
-        let session = session
-        let barrier = feedBarrier
-        let finish = finishSession
-        let runtime = runtimeMilliseconds
-        feedDrainQueue.async {
-            while let item = queue.takeNext() {
-                let parsedByteCount: Int
-                switch item {
-                case let .output(data):
-                    session.receive(data)
-                    parsedByteCount = data.count
-                case let .processExit(code):
-                    finish(session, UInt32(bitPattern: code), runtime())
-                    parsedByteCount = 0
-                }
-                // Off the main thread, so waiting for the parse cannot deadlock against the tick
-                // the dependency's parse may itself be waiting for.
-                barrier(session, parsedByteCount)
-                for waiter in queue.complete(byteCount: parsedByteCount) {
-                    waiter.resume()
-                }
-            }
-        }
+        feedDrain.start()
     }
 
     /// The rendered viewport, read back through the in-memory backend's own host-side read after
