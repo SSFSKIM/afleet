@@ -248,7 +248,6 @@ final class ChannelTimelineModel {
             return
         }
         guard !hasOpened, let workspace, let lifecycle else { return }
-        hasOpened = true
         let task = Task { @MainActor [weak self] () -> Void in
             await self?.performOpen(workspace: workspace, lifecycle: lifecycle)
         }
@@ -259,15 +258,23 @@ final class ChannelTimelineModel {
 
     /// The read itself, run by `open`'s stored task.
     ///
-    /// A genuine failure here still latches: `hasOpened` stays set, so the channel keeps reporting
-    /// it for the life of the model. That is tracker 66, filed and deliberately not closed here —
-    /// this change is about the ingestion's *lifetime*, and closing a filed entry as a side effect
-    /// of a different fix would ship behaviour no test in this task covers.
+    /// **Tracker 66 closed here, 2026-09-08.** What stood above said a genuine failure latches
+    /// because `hasOpened` is set before the lookup, and that the entry was filed rather than closed.
+    /// It is closed now: `hasOpened` is set *after* the index lookup succeeds, so a channel whose
+    /// entry is momentarily absent — a transcript deleted between listing and opening, or written a
+    /// moment later — is retried on its next appearance instead of reporting a failure for the life
+    /// of the model, which the registry retains across every switch away and back. A second caller
+    /// arriving while the first is in flight is still serialised, by `open`'s `openingTask` await and
+    /// not by this flag.
     private func performOpen(workspace: Workspace, lifecycle: any LifecycleAPI) async {
         guard let entry = await workspace.index.entry(key.session) else {
             failure = "this channel has no transcript in the index"
             return
         }
+        // The other half of tracker 66: a retry that found the entry has to clear the failure the
+        // attempt before it recorded, or the channel keeps reporting a condition that is over.
+        failure = nil
+        hasOpened = true
         // Every `await` below is a point where `close()` can run — the registry releases a channel
         // that left the index, and the model it releases must not go on to build what the release
         // just took down. Cancellation alone is not the test: `close()` cancels the opening task,

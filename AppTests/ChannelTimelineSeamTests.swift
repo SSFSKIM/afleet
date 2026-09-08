@@ -126,6 +126,33 @@ final class ChannelTimelineSeamTests: XCTestCase {
         await rig.finish()
     }
 
+    // MARK: - Tracker 66
+
+    /// A channel whose index entry is momentarily absent is retried rather than latched.
+    ///
+    /// The entry is absent because the transcript was not there when the channel was first opened —
+    /// deleted between listing and opening, or written a moment later. `hasOpened` used to be set
+    /// before the lookup, so the guard that prevents a second ingestion had already fired and the
+    /// channel reported "could not be read" for the life of the model, which the registry retains
+    /// across every switch away and back.
+    func testAMissingIndexEntryIsRetried() async throws {
+        let rig = try await SeamRig(fixture: "background-shell", placeTranscript: false)
+
+        await rig.open()
+        XCTAssertNotNil(rig.model.failure, "opening a channel with no index entry reported no failure")
+        XCTAssertTrue(rig.model.items.isEmpty, "a channel with no index entry read \(rig.model.items.count) items")
+        XCTAssertFalse(rig.model.hasOpened, "a failed lookup still marked the channel opened")
+
+        // The transcript appears, the index sees it, and the column's next appearance opens again.
+        try rig.placeTranscript()
+        _ = try await rig.workspace.index.build()
+        await rig.open()
+
+        XCTAssertNil(rig.model.failure, "the retried open still reports a failure")
+        XCTAssertFalse(rig.model.items.isEmpty, "the retried open read \(rig.model.items.count) items")
+        XCTAssertTrue(rig.model.hasOpened, "the successful open did not mark the channel opened")
+        await rig.finish()
+    }
 }
 
 // MARK: - Support
