@@ -188,7 +188,24 @@ final class AppModel {
         settingsReadout = reached.workspace.map(SettingsReadout.init(workspace:))
         // Before Activity, so a channel opened by the first paint already has a registry bound to
         // the workspace this launch reached rather than to the one it replaced.
-        if let workspace = reached.workspace { bindWorkspace(workspace) }
+        if let workspace = reached.workspace {
+            bindWorkspace(workspace)
+            // Contract Y3: `.thread` passes from C5's placeholder to C6.3's Thread tab. Here rather
+            // than on `init`'s registration line for two reasons with one answer: `unregister` is
+            // `async` — it awaits the link-target withdrawal, so a withdrawal cannot land after the
+            // replacement's registration and delete the *new* tab's target — and an initialiser
+            // cannot await; and this is the first moment a lifecycle exists, without which the tab
+            // can neither answer a card nor post a reply. `unregister` drops the selection when it
+            // held it, so the selection is re-taken.
+            let wasShowingThread = panels.selected == .thread
+            await panels.unregister(.thread)
+            do {
+                try panels.register(ThreadTab(lifecycle: workspace.fleet))
+            } catch {
+                assertionFailure("the handover unregistered .thread before registering over it")
+            }
+            if wasShowingThread { panels.select(.thread) }
+        }
         await startActivity(over: reached)
         // **Last.** Publishing the route is what puts the actionable surfaces on screen — the
         // sidebar's Background section and its *Adopt*, every row's action menu — and supervisor
