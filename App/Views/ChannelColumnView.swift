@@ -54,7 +54,7 @@ private struct ChannelTimelineColumn: View {
     var body: some View {
         VStack(spacing: 0) {
             ChannelHeaderView(header: model.header)
-            ChannelHeaderActionsSlot(key: row.key, composers: composers)
+            ChannelHeaderActionsSlot(key: row.key, row: row, composers: composers)
             Divider()
             if let failure = model.failure {
                 PlaceholderColumn(title: "This channel could not be read", detail: failure)

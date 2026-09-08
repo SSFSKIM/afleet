@@ -44,6 +44,12 @@ final class ComposerRegistry {
     /// layering: the registry depends on the *question*, not on X7's concrete host.
     var contextProvider: (@MainActor (ChannelKey, URL) -> ChannelContext?)?
 
+    /// How a `PaneRequest` reaches the panel host's registered runner — X7's seam, for the header's
+    /// *Open in terminal*. A closure for the reason `contextProvider` is one: holding the host would
+    /// put the app's whole object graph on the reflection walk that asserts the mounts, which is
+    /// what crashed the bundle at Task 3's boundary (tracker 147).
+    var paneRunner: (@MainActor (PaneRequest) async throws -> Void)?
+
     /// How the composer reaches the channel's `ChannelTimelineModel` — C6.1's, read only.
     ///
     /// The queue chip reads `Overlay.queue.queued` out of the timeline that model publishes, which
@@ -80,12 +86,14 @@ final class ComposerRegistry {
     /// static with no rebind, which had exactly that defect; its worker flagged it.
     func attach(to workspace: Workspace, context: (@MainActor (ChannelKey, URL) -> ChannelContext?)? = nil,
                 timeline: (@MainActor (ChannelKey) -> ChannelTimelineModel?)? = nil,
+                paneRunner: (@MainActor (PaneRequest) async throws -> Void)? = nil,
                 lifecycle: (any LifecycleAPI)? = nil) {
         releaseAll()
         self.lifecycle = lifecycle ?? workspace.fleet
         self.diagnostics = workspace.diagnostics.fleet
         self.store = workspace.store
         self.contextProvider = context
+        self.paneRunner = paneRunner
         self.timelineProvider = timeline
     }
 
@@ -220,25 +228,29 @@ struct ChannelComposerMount: View {
 struct ChannelHeaderActionsSlot: View {
 
     let key: ChannelKey
+    /// The row the column already resolved. Handed down rather than read back out of
+    /// `@Environment(AppModel.self)`, for the reason the composer's own mount is: an environment
+    /// read leaves the production path undrawable in the reflection test that is the only way these
+    /// views are asserted, so the one thing tracker 74's gate turns on — whether this row offers
+    /// owned actions — would be exercised on the model and never through the mount.
+    let row: ChannelRow?
     /// The app's one registry, handed down by the column, exactly as the composer's mount takes it.
     let composers: ComposerRegistry
-
-    @Environment(AppModel.self) private var app: AppModel?
 
     var body: some View {
         if let header = composers.header(for: key) {
             ChannelHeaderMenus(model: header)
                 .onAppear { adopt(header) }
-                .onChange(of: app?.browser?.row(key.session)?.mode) { _, _ in adopt(header) }
+                .onChange(of: row?.mode) { _, _ in adopt(header) }
         }
     }
 
-    /// The row and the pane runner, taken from the app. Re-taken whenever the row's listing mode
-    /// moves, so a channel that turns read-only while it is on screen loses the menu with it.
+    /// The row and the pane runner. Re-taken whenever the row's listing mode moves, so a channel
+    /// that turns read-only while it is on screen loses the menu with it.
     private func adopt(_ header: ChannelHeaderActionsModel) {
-        header.adopt(row: app?.browser?.row(key.session))
-        if let panels = app?.panels {
-            header.paneRunner = { request in try await panels.run(request) }
+        header.adopt(row: row)
+        if let runner = composers.paneRunner {
+            header.paneRunner = runner
         }
     }
 }

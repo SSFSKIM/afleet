@@ -156,6 +156,7 @@ final class AppModel {
         composers.attach(to: workspace,
                          context: { [panels] key, cwd in panels.context(for: key, cwd: cwd) },
                          timeline: { [timelines] key in timelines.model(for: key) },
+                         paneRunner: { [panels] request in try await panels.run(request) },
                          lifecycle: lifecycle)
     }
 

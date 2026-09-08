@@ -777,7 +777,16 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     coordinator makes, moving the two tests that use it onto `paint`. Owner: C6, which is the first
     child with a reason to read those numbers back. Until then each is allowlisted in the check
     with this entry's number as its reason.
-74. **`ChannelRow.offersOwnedActions` and `readOnlyReason` have no consumer, because C5's sidebar
+74. **Closed 2026-09-08 by C6.2 Task 8.** The channel header's action menu is the first consumer of
+    both properties: every owned action is gated on `offersOwnedActions`, and a read-only row draws
+    `readOnlyReason` **in place of** the menu rather than a disabled list.
+    `HeaderActionTests.testAReadOnlyRowOffersNoOwnedActionAtAll` asserts it, and the mutation that
+    opens the gate unconditionally fails twenty assertions across the read-only and no-row tests.
+    The row is threaded into the mount from the column rather than read back out of the
+    environment, so the gate is exercised through the production path and not only on the model.
+    Original entry follows.
+
+    **`ChannelRow.offersOwnedActions` and `readOnlyReason` have no consumer, because C5's sidebar
     offers no channel action at all.** `ListingPolicy` decides the mode, `ChannelRegistrar` carries
     it onto the row, `SidebarModelTests` asserts a teammate transcript is listed read-only — and
     `ChannelRowView` draws a glyph, a title, a subtitle and a badge, with no context menu and no
@@ -1208,3 +1217,22 @@ is renumbered.
      either of which is an engine change and not afleet's; failing that, nothing to fix — this entry
      exists so the lag is read as the readback rule holding rather than as a bug. Owner: nobody
      today; C1's probe suite if a readback ever appears. Raised by C6.2 Task 7.
+
+156. **§8.6's fourth arm has nothing to stand on: the bypass acceptance is written and read by
+     nobody.** C6.2 writes `FleetKitKeys.bypassAccepted` into the `fleetKit` namespace as §7.8
+     requires, and `grep` finds no other reader in the tree — only the key's declaration and this
+     leaf's code. So §8.6's "later owned spawns include the flag from the start, so the mode
+     switches without a restart" is not implemented anywhere: nothing consults the acceptance when
+     a launch configuration is built, and neither `ChannelState` nor `get_settings` reports whether
+     the running process carries `--allow-dangerously-skip-permissions`. A surface therefore cannot
+     tell arm 4 (already launched with the flag) from arm 3 (needs the restart) except by trying.
+     C6.2 implemented arm 4 as the spec's own fallback says — with the acceptance stored, send
+     `set_permission_mode` and restart nothing, and render whichever of the validator's three
+     refusal strings comes back (2.1.263 `cli.pretty.js:750921-750931`) — so the behaviour is
+     correct and self-correcting, but it asks the engine a question the host should already know
+     the answer to, and on a process without the flag the user sees a refusal rather than a
+     restart.
+     Closer, and it is a C4 decision rather than a fix: either the launch path consults
+     `bypassAccepted` when composing a spawn, or X5 publishes the launch flags the current process
+     carries so a surface can branch without asking. Owner: C4, with the C6 composite ruling which.
+     Raised by C6.2 Task 8.
