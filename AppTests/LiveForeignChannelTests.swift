@@ -330,6 +330,10 @@ final class RecordingAppFleet: AppFleet {
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         try await inner.send(request, on: key)
     }
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
+        try await inner.fork(at: point, on: key)
+    }
+
     func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
         log.note("send")
         return try await inner.sendPrompt(input, on: key)

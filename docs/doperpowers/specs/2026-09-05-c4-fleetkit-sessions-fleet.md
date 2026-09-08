@@ -1858,6 +1858,17 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-08: `LifecycleAPI` gains `fork(at:on:)`, answering the sibling's provisional
+  `ChannelKey`, and `ProcessHandle.send` now takes the caller's uuid instead of minting one.
+  `ChannelSupervisor.fork(at:)` has always answered the provisional key and `perform(.fork)` has
+  always discarded it, so a host that forked could not name, select or prefill the channel it had
+  just opened — C6.2's *Fork from here* wrote the edited message into the source instead. Same
+  preconditions and refusals as `perform(.fork(at:))`, which stays for the whole-conversation
+  *Fork*. The uuid change closes `sendPrompt`'s contract in the one state where the answer and the
+  write are separated in time: a send admitted while the channel is connecting is queued with the
+  uuid its caller was answered and written under that uuid when the handshake lands, where the
+  handle previously minted a second one that nothing above X5 ever saw.
+
 - 2026-09-08 corrective on `main` from C6.2's `[parent-impact]`: X5 gains `quit` and
   `liveTaskIDs(of:)`. Parent §7.4's *Quit* clause — terminate every owned channel that has a
   process, then `Fleet.shutdown()`, then exit — was added at C5's merge, after C4's FleetKit

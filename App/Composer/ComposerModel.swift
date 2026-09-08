@@ -152,6 +152,14 @@ final class ComposerModel {
     /// image that could not be converted. Nil whenever it has nothing to say.
     var attachmentNote: String?
 
+    /// How the text of an edited message reaches the composer of the channel a *Fork from here* just opened, and
+    /// how that channel is brought into view (`EditAndRewind`). Installed by `ComposerRegistry`, which owns both —
+    /// the sibling may have no composer yet, and this model has no way to reach one that does exist.
+    ///
+    /// Nil leaves the fork opened and unprefilled rather than writing the prefill into **this** channel, which is
+    /// the conversation the user is editing away from.
+    @ObservationIgnored var handOffToFork: (@MainActor (ChannelKey, String) -> Void)?
+
     /// X5, and the only way anything in this file reaches the engine. Internal rather than private
     /// because the shortcuts are an extension in `ComposerShortcuts.swift`; Swift has no narrower
     /// scope than the module for that, and every caller is inside `App/Composer/`.
@@ -223,9 +231,9 @@ final class ComposerModel {
         // Only the words that were sent. A keystroke that landed during the await is the user's
         // next message, not part of the one the engine now has.
         if draft.hasPrefix(text) { draft = String(draft.dropFirst(text.count)) }
-        // The images that went with the message. Anything attached during the await is the next
-        // message's, on exactly the terms the draft is.
-        dropAttachments(images.count)
+        // The images that went with the message, by identity: anything attached during the await is the next
+        // message's, and anything removed during it is already gone.
+        dropAttachments(images)
         ghostText = nil
     }
 

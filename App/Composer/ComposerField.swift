@@ -122,6 +122,11 @@ struct ComposerField: NSViewRepresentable {
         var onPasteboard: ((NSPasteboard) -> Int)?
 
         override func keyDown(with event: NSEvent) {
+            // **An input method is composing, so this keystroke is the candidate's and not the composer's.** Return
+            // confirms a candidate and Tab moves through them; a field that read the key code first would submit an
+            // unfinished word on every phrase, which for a user typing Korean, Japanese or Chinese is every message.
+            // AppKit's own path decides it: the key goes to the input context and nothing here is declared over it.
+            if hasMarkedText() { super.keyDown(with: event); return }
             let tab = ComposerKeyAction.forTab(keyCode: event.keyCode, modifiers: event.modifierFlags,
                                                hasGhostText: true)
             if tab == .acceptGhost, onAcceptGhost?() == true { return }

@@ -29,6 +29,10 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         /// The prompt the composer sent. `sendPrompt` **is** this leaf's surface — the send path — so it
         /// is recorded like every other member and not trapped as C5's doubles trap it.
         case sendPrompt(ChannelKey, UserInput)
+        /// The fork the composer's *Fork from here* opened, and the point it forked at. Recorded like
+        /// `sendPrompt` and for the same reason: it is a member of this leaf's surface, and the key it
+        /// answers is what the prefill and the selection are aimed at.
+        case fork(ChannelKey, ForkPoint?)
         case route(ChannelKey, String)
         /// The subtype and the payload exactly as they go to the wire.
         case send(ChannelKey, subtype: String, payload: JSONValue)
@@ -51,6 +55,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
             switch self {
             case .perform: "perform"
             case .sendPrompt: "sendPrompt"
+            case .fork: "fork"
             case .route: "route"
             case .send: "send"
             case .run: "run"
@@ -88,6 +93,8 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// never overlaps, because an unheld double answers before the second call is ever made. Both
     /// members, because the send path is `sendPrompt` and the reentrancy guard is the send's.
     private var isPerformHeld = false
+    private var isSendHeld = false
+    private var heldSenders: [CheckedContinuation<Void, Never>] = []
     private var heldCallers: [CheckedContinuation<Void, Never>] = []
     /// How many callers are suspended inside `perform` right now. A count, not a value (§11).
     private(set) var callersHeldInPerform = 0
@@ -97,6 +104,9 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// The uuids `sendPrompt` answers, in order, and the fallback for a suite that stages no particular one.
     private var promptOutcomes: [Result<UUID, LifecycleError>] = []
     private var promptFallback: Result<UUID, LifecycleError>?
+    /// The sibling keys `fork` answers, in order. A test that stages none reaches the staging error, which is how a
+    /// "no fork happens here" arm stays a failure rather than a silent success.
+    private var forkOutcomes: [Result<ChannelKey, LifecycleError>] = []
     /// Staged answers to `send`, keyed by subtype; a subtype with no answer staged returns `.null`,
     /// which is what an engine member with an empty success body sends (`rename_session`).
     private var sendAnswers: [String: Result<JSONValue, WireError>] = [:]
@@ -127,6 +137,8 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func alwaysPerform(_ outcome: Result<ChannelState, LifecycleError>) { performFallback = outcome }
     func stageSendPrompt(_ outcome: Result<UUID, LifecycleError>) { promptOutcomes.append(outcome) }
     func alwaysSendPrompt(_ outcome: Result<UUID, LifecycleError>) { promptFallback = outcome }
+    /// The sibling key the next `fork` answers.
+    func stageFork(_ outcome: Result<ChannelKey, LifecycleError>) { forkOutcomes.append(outcome) }
     func stageRoute(_ routed: Routed) { routeOutcomes.append(routed) }
     func stageRun(_ outcome: Result<StrategyOutcome, LifecycleError>) { runOutcomes.append(outcome) }
     func stageSend(_ subtype: String, _ answer: Result<JSONValue, WireError>) { sendAnswers[subtype] = answer }
@@ -137,6 +149,15 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func stageEngineReport(handshake: WireEvent?, systemInitFrom: WireEvent?) {
         if case .handshakeCompleted(let shake, _)? = handshake { self.handshake = shake.initialize }
         if case .frame(.system(.initialize(let fields)), _)? = systemInitFrom { self.systemInit = fields.fields }
+    }
+    /// Every control request from here on records itself and then suspends, until `releaseSend()`. How a test
+    /// types into the field while one request the composer is awaiting is still in flight.
+    func holdSend() { isSendHeld = true }
+    func releaseSend() {
+        isSendHeld = false
+        let waiting = heldSenders
+        heldSenders = []
+        for caller in waiting { caller.resume() }
     }
     /// Every `perform` from here on records itself and then suspends, until `releasePerform()`.
     func holdPerform() { isPerformHeld = true }
@@ -204,6 +225,14 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         return nil
     }
 
+    /// Every fork point the composer forked at, in order.
+    var forkPoints: [ForkPoint?] {
+        calls.compactMap { if case .fork(_, let point) = $0 { point } else { nil } }
+    }
+
+    /// How many forks the log holds — a count, never a key (§11).
+    var forkCount: Int { calls.reduce(0) { if case .fork = $1 { $0 + 1 } else { $0 } } }
+
     /// Every strategy run, in order.
     var strategies: [RouteStrategy] {
         calls.compactMap { if case .run(_, let strategy, _) = $0 { strategy } else { nil } }
@@ -252,6 +281,14 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         return try outcome.get()
     }
 
+    /// `perform(.fork)`'s path, answering the sibling's key. What the composer prefills and the window selects.
+    @discardableResult
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
+        calls.append(.fork(key, point))
+        guard !forkOutcomes.isEmpty else { throw StagingError.nothingStaged(member: "fork") }
+        return try forkOutcomes.removeFirst().get()
+    }
+
     func route(_ text: String, on key: ChannelKey) async -> Routed {
         calls.append(.route(key, text))
         // With nothing staged the double routes through C4's own `CommandRouter`, which is what
@@ -264,6 +301,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     @discardableResult
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         calls.append(.send(key, subtype: request.subtype, payload: request.payload))
+        if isSendHeld { await withCheckedContinuation { heldSenders.append($0) } }
         guard let staged = sendAnswers[request.subtype] else { return .null }
         return try staged.get()
     }

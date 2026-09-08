@@ -18,6 +18,14 @@ enum ImageIntake {
     static let maxImages = 8
     static let maxBytesEach = 8 * 1024 * 1024
 
+    /// The most a dropped **file** is read from disk before it is decoded.
+    ///
+    /// A pasted image is already in memory; a dropped one is a path, and the bytes behind it are unbounded. The cap
+    /// above is on what travels, which is not what a decoder is handed — a TIFF several times the size of its PNG is
+    /// ordinary — so the source needs a bound of its own, and it is deliberately generous: too tight a bound would
+    /// refuse pictures the message could have carried.
+    static let maxSourceBytes = 64 * 1024 * 1024
+
     /// The two media types that travel as they arrived. Everything else this machine can decode is
     /// converted to PNG — the engine's image blocks carry `media_type`, and PNG is the lossless
     /// format every decoder here can write.
@@ -95,19 +103,47 @@ extension ComposerModel {
     func attach(from pasteboard: NSPasteboard) -> Int {
         var items: [Data] = []
         for item in pasteboard.pasteboardItems ?? [] {
+            var took = false
             for type in item.types {
                 guard let data = item.data(forType: type), ImageIntake.normalized(data) != nil else { continue }
                 items.append(data)
+                took = true
                 break
             }
+            // A Finder drop offers a **path** and no bytes at all, which is the ordinary way a picture arrives from
+            // outside the app — the field registers `.fileURL` for exactly it. The file's own bytes then go through
+            // the same sniff, conversion and cap as a pasted image; nothing here trusts the extension.
+            guard !took, let data = Self.imageBytes(ofFileOn: item) else { continue }
+            items.append(data)
         }
         return attach(items)
     }
 
-    /// Drops the first `count` attachments — the ones that went with a message that was sent.
-    func dropAttachments(_ count: Int) {
-        guard count > 0 else { return }
-        attachments.removeFirst(min(count, attachments.count))
+    /// The bytes of the file a pasteboard item names, when that file is an image this machine can read.
+    ///
+    /// Nil for an item that names no file, for a file too large to be a decoder's input, and for one whose bytes are
+    /// not an image — the last of which the caller counts into its note like any other undecodable item.
+    private static func imageBytes(ofFileOn item: NSPasteboardItem) -> Data? {
+        guard let string = item.string(forType: .fileURL), let url = URL(string: string), url.isFileURL else {
+            return nil
+        }
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size > 0, size <= ImageIntake.maxSourceBytes else { return nil }
+        return try? Data(contentsOf: url, options: .mappedIfSafe)
+    }
+
+    /// Drops the images that went with a message that was sent — **by identity, one occurrence each**.
+    ///
+    /// Not by count. The tray stays live across the send's await: a chip can be removed and another image attached
+    /// while the prompt is in flight, and dropping "the first N" then deletes whatever is in front of the tray — a
+    /// picture the user has attached and not sent — while the one that travelled stays behind. The same image
+    /// attached twice is two entries and one send drops one of them.
+    func dropAttachments(_ sent: [ImageAttachment]) {
+        guard !sent.isEmpty else { return }
+        for image in sent {
+            guard let index = attachments.firstIndex(of: image) else { continue }
+            attachments.remove(at: index)
+        }
         if attachments.isEmpty { attachmentNote = nil }
     }
 

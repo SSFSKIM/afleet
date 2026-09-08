@@ -79,6 +79,29 @@ final class ComposerRegistry {
     /// afleet writes goes under.
     var store: (any StateStore)?
 
+    /// How a channel is brought into view — C5's `ShellModel.select`, handed down by `AppModel`.
+    ///
+    /// A closure for the reason every other seam here is one: the registry depends on the *question*, and holding
+    /// the shell would put the app's object graph on the reflection walk that asserts the mounts (tracker 147). Nil
+    /// leaves the fork where the user can find it in the sidebar rather than selecting nothing.
+    var selectChannel: (@MainActor (ChannelKey) -> Void)?
+
+    /// What a channel's composer is to open with, for a channel whose composer does not exist yet.
+    ///
+    /// *Fork from here* opens a **sibling**, and the text of the edited message belongs in that sibling's field —
+    /// but a channel nobody has drawn has no composer to put it in, and building one here would build it against a
+    /// timeline the column has not opened. So the text waits under the sibling's key and the composer takes it when
+    /// it is first built. One channel holds one pending prefill: a second fork onto the same key replaces it, which
+    /// is what a user who forked twice means.
+    private var pendingPrefills: [ChannelKey: String] = [:]
+
+    /// Hands `text` to the channel's composer — now if it has one, at its first mount if it does not — and brings
+    /// that channel into view. The one path *Fork from here* takes.
+    func prefill(_ text: String, for key: ChannelKey) {
+        if let existing = models[key] { existing.draft = text } else { pendingPrefills[key] = text }
+        selectChannel?(key)
+    }
+
     private var models: [ChannelKey: ComposerModel] = [:]
     private var headers: [ChannelKey: ChannelHeaderActionsModel] = [:]
     private var surfaces: [ChannelKey: ChannelSurfaceState] = [:]
@@ -131,6 +154,12 @@ final class ComposerRegistry {
         surfaces[key] = surface
         let model = ComposerModel(key: key, lifecycle: lifecycle, surface: surface, diagnostics: diagnostics)
         if let cwd { model.context = contextProvider?(key, cwd) }
+        // A fork opened before this channel was ever drawn left the edited message here; it is this composer's
+        // opening draft, and it is taken exactly once.
+        if let waiting = pendingPrefills.removeValue(forKey: key) { model.draft = waiting }
+        // How this composer's own *Fork from here* reaches the sibling it opens. The model holds a closure rather
+        // than the registry, so nothing in `App/Composer/` depends on the registry's shape.
+        model.handOffToFork = { [weak self] forked, text in self?.prefill(text, for: forked) }
         followTimeline(model)
         models[key] = model
         return model
@@ -189,6 +218,7 @@ final class ComposerRegistry {
     private func releaseAll() {
         for model in models.values { model.stop() }
         models = [:]
+        pendingPrefills = [:]
         headers = [:]
         surfaces = [:]
     }

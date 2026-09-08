@@ -429,6 +429,19 @@ public actor Fleet: LifecycleAPI {
         return try await supervisor.send(input)
     }
 
+    /// `perform(.fork(at:), on:)`'s path, answering the sibling's provisional key instead of the source's state.
+    ///
+    /// The supervisor mints that key — a fork is a *new channel*, filed under a provisional id until the engine
+    /// announces its own — and `perform` throws it away, so a host that forked had no way to name the channel it had
+    /// just opened. Without it the fork's own composer cannot be prefilled and the window cannot select it; with it
+    /// neither has to guess, and reaching below the facade for the fleet's supervisor table is contract Y5's refusal.
+    @discardableResult
+    public func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
+        let supervisor = supervisor(for: key)
+        try spawnBarrier.check()
+        return try await supervisor.fork(at: point)
+    }
+
     public func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
         try spawnBarrier.check()
         return try await supervisor(for: key).openInTerminal()
