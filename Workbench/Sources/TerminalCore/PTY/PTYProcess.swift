@@ -421,49 +421,181 @@ private final class PTYEventDelivery: @unchecked Sendable {
     }
 }
 
+/// What the ordered ingress is holding, and what it has had to refuse. Counts only: a pane's
+/// diagnostics never carry the bytes themselves.
+public struct PTYIngressDiagnostics: Sendable, Equatable {
+    /// Input accepted from a producer that the child has not taken yet.
+    public let queuedInputByteCount: Int
+    /// Grids accepted that the master has not been told about yet.
+    public let pendingResizeCount: Int
+    /// Whole payloads ``PTYProcess/sendInput(_:)`` refused because the backlog was at its cap.
+    public let refusedInputCount: Int
+    /// The bytes those refusals carried.
+    public let refusedInputByteCount: Int
+}
+
 /// A serialised handoff from a synchronous producer into the actor.
 ///
 /// A renderer reports keystrokes and grid changes through synchronous callbacks that run off the
 /// main actor and cannot await. One unstructured `Task` per callback would let N callbacks race
 /// to enter the actor, so the child could receive them in an order the producer never chose —
 /// the write gate only promises the order callers *entered* the actor. This queue fixes the order
-/// at the moment the callback runs, and at most one drain is ever in flight.
+/// at the moment the callback runs, and at most one drain per lane is ever in flight.
+///
+/// **Two lanes, not one.** Input is a byte stream into the child's terminal input queue and is
+/// strictly ordered; a resize is an `ioctl` on the master that the kernel applies at once and that
+/// nothing about a pty orders against pending input. Sharing one drain made a write that had
+/// suspended on a full input queue — a paste into a child that is not reading — hold every later
+/// resize for as long as the child declined to read. Each lane keeps its own order, which is what
+/// "the last grid the producer reported is the last one the child is told about" needs; only the
+/// ordering *between* the lanes is given up, and that ordering never had a meaning.
 ///
 /// The state lives in a `Mutex` because callbacks arrive on whatever thread the renderer uses
-/// while the drain runs on the actor; that lock is the single point serialising the two.
+/// while the drains run on the actor; that lock is the single point serialising them.
 private final class PTYIngressQueue: Sendable {
-    enum Item: Sendable {
-        case input(Data)
-        case resize(TerminalSize)
+    /// What an enqueue asks of its caller.
+    enum Admission: Sendable, Equatable {
+        /// Accepted, and this caller starts the lane's drain: exactly the enqueue that finds no
+        /// drain in flight is told to, so two drains never run on one lane.
+        case startDrain
+        /// Accepted into a lane that is already draining.
+        case queued
+        /// Refused whole: the backlog is at its cap. Nothing is truncated and nothing is dropped
+        /// from the middle of the stream — the newest payload simply does not enter.
+        case refused
+        /// The pty is gone; the backlog has been discarded and nothing more is accepted.
+        case discarded
     }
 
     private struct State {
-        var pending: [Item] = []
-        var isDraining = false
+        var input: [Data] = []
+        var inputByteCount = 0
+        var inputIsDraining = false
+        var inputDrain: Task<Void, Never>?
+        var resizes: [TerminalSize] = []
+        var resizeIsDraining = false
+        var resizeDrain: Task<Void, Never>?
+        var refusedInputCount = 0
+        var refusedInputByteCount = 0
+        var isDiscarded = false
     }
+
+    /// The backlog a producer may hold ahead of a child that is not reading. One MiB is the same
+    /// house number the output path is bounded by, and for the same reason: it absorbs the pastes a
+    /// person makes without letting a child that never reads turn a keyboard into memory growth.
+    let inputBacklogByteLimit: Int
 
     private let state = Mutex(State())
 
-    /// Appends `item`, reporting whether this caller has to start the drain. Exactly the enqueue
-    /// that finds no drain in flight is told to start one, so two drains never run at once.
-    func enqueue(_ item: Item) -> Bool {
+    init(inputBacklogByteLimit: Int) {
+        self.inputBacklogByteLimit = inputBacklogByteLimit
+    }
+
+    /// Appends `data` unless the backlog is full. A payload larger than the whole cap is still
+    /// admitted into an empty backlog: refusing it would make a large paste undeliverable rather
+    /// than bounded, and one payload in flight is exactly the bound the write itself already has.
+    func enqueueInput(_ data: Data) -> Admission {
         state.withLock { state in
-            state.pending.append(item)
-            guard !state.isDraining else { return false }
-            state.isDraining = true
-            return true
+            guard !state.isDiscarded else { return .discarded }
+            guard state.input.isEmpty || state.inputByteCount + data.count <= inputBacklogByteLimit
+            else {
+                state.refusedInputCount += 1
+                state.refusedInputByteCount += data.count
+                return .refused
+            }
+            state.input.append(data)
+            state.inputByteCount += data.count
+            guard !state.inputIsDraining else { return .queued }
+            state.inputIsDraining = true
+            return .startDrain
         }
     }
 
-    /// The next item, or `nil` once the queue is empty — which also ends the drain, under the same
-    /// lock that an enqueue takes, so the enqueue that follows an empty queue starts a fresh one.
-    func takeNext() -> Item? {
+    func enqueueResize(_ size: TerminalSize) -> Admission {
         state.withLock { state in
-            guard !state.pending.isEmpty else {
-                state.isDraining = false
+            guard !state.isDiscarded else { return .discarded }
+            state.resizes.append(size)
+            guard !state.resizeIsDraining else { return .queued }
+            state.resizeIsDraining = true
+            return .startDrain
+        }
+    }
+
+    /// The next payload, or `nil` once the lane is empty — which also ends the drain, under the
+    /// same lock an enqueue takes, so the enqueue that follows an empty lane starts a fresh one.
+    func takeNextInput() -> Data? {
+        state.withLock { state in
+            guard !state.input.isEmpty else {
+                state.inputIsDraining = false
                 return nil
             }
-            return state.pending.removeFirst()
+            let data = state.input.removeFirst()
+            state.inputByteCount -= data.count
+            return data
+        }
+    }
+
+    func takeNextResize() -> TerminalSize? {
+        state.withLock { state in
+            guard !state.resizes.isEmpty else {
+                state.resizeIsDraining = false
+                return nil
+            }
+            return state.resizes.removeFirst()
+        }
+    }
+
+    /// Remembers the drain a caller was told to start, so termination can cancel it. A finished
+    /// drain's handle is simply replaced by the next one.
+    func setInputDrain(_ task: Task<Void, Never>) {
+        state.withLock { $0.inputDrain = task }
+    }
+
+    func setResizeDrain(_ task: Task<Void, Never>) {
+        state.withLock { $0.resizeDrain = task }
+    }
+
+    /// Discards both backlogs and cancels their drains: once the master is closed, every queued
+    /// payload is bytes for a child that can no longer receive them, and a drain suspended on a
+    /// write would otherwise outlive the pty it was writing to.
+    func discard() {
+        let drains = state.withLock { state -> [Task<Void, Never>] in
+            state.isDiscarded = true
+            state.input.removeAll()
+            state.inputByteCount = 0
+            state.resizes.removeAll()
+            let drains = [state.inputDrain, state.resizeDrain].compactMap { $0 }
+            state.inputDrain = nil
+            state.resizeDrain = nil
+            return drains
+        }
+        drains.forEach { $0.cancel() }
+    }
+
+    /// Clears whatever a cancelled drain left behind and lets the lane end.
+    func discardPendingInput() {
+        state.withLock { state in
+            state.input.removeAll()
+            state.inputByteCount = 0
+            state.inputIsDraining = false
+        }
+    }
+
+    func discardPendingResizes() {
+        state.withLock { state in
+            state.resizes.removeAll()
+            state.resizeIsDraining = false
+        }
+    }
+
+    var diagnostics: PTYIngressDiagnostics {
+        state.withLock { state in
+            PTYIngressDiagnostics(
+                queuedInputByteCount: state.inputByteCount,
+                pendingResizeCount: state.resizes.count,
+                refusedInputCount: state.refusedInputCount,
+                refusedInputByteCount: state.refusedInputByteCount
+            )
         }
     }
 }
@@ -477,6 +609,11 @@ public actor PTYProcess {
     /// capped deliveries during ordinary scheduler jitter without turning a stalled renderer into
     /// process-wide memory growth; once full, the pty's kernel queue blocks the child naturally.
     static let outputBufferByteLimit = 1 * 1024 * 1024
+
+    /// One MiB bounds the input a synchronous producer may hold ahead of a child that is not
+    /// reading. `sendInput` cannot block its caller and cannot report an error, so the only
+    /// bound available is a refusal — whole payloads, counted on ``ingressDiagnostics``.
+    public static let ingressInputBacklogByteLimit = 1 * 1024 * 1024
 
     private static let eventSlotLimit = 1
     private static let privateOutputByteLimit = outputBufferByteLimit - outputDeliveryByteLimit
@@ -503,7 +640,9 @@ public actor PTYProcess {
     private let eventDelivery: PTYEventDelivery
     private let stopPolicy: PTYStopPolicy
     private let processGroup: PTYChildProcessGroup
-    private let ingress = PTYIngressQueue()
+    private let ingress = PTYIngressQueue(
+        inputBacklogByteLimit: PTYProcess.ingressInputBacklogByteLimit
+    )
     private var masterIsOpen = true
     private var termination: PTYTermination?
     private var childIsTerminal = false
@@ -801,29 +940,53 @@ public actor PTYProcess {
     ///
     /// nonisolated because the ordering is established before the actor is reached: `PTYIngressQueue`
     /// serialises every producer under its own `Mutex`.
+    /// Bounded: a child that never reads its input fills the pty's queue, the write suspends, and
+    /// the backlog behind it grows. Past ``ingressInputBacklogByteLimit`` the *newest* payload is
+    /// refused whole and counted on ``ingressDiagnostics`` — nothing already accepted is dropped,
+    /// and no payload is delivered in part.
     public nonisolated func sendInput(_ data: Data) {
-        enqueueIngress(.input(data))
+        guard !data.isEmpty else { return }
+        guard ingress.enqueueInput(data) == .startDrain else { return }
+        ingress.setInputDrain(Task { await self.drainInput() })
     }
 
-    /// The resize counterpart of ``sendInput(_:)``, ordered against it and against itself, so the
-    /// last grid the producer reported is the last one the child is told about.
+    /// The resize counterpart of ``sendInput(_:)``, ordered against itself, so the last grid the
+    /// producer reported is the last one the child is told about.
+    ///
+    /// Its own lane: a resize is an `ioctl` on the master, and a write that has suspended because
+    /// the child is not reading its input must not hold it. Ordering against input is given up
+    /// deliberately — the kernel gives it no meaning — and ordering among grids is kept.
     public nonisolated func sendResize(to size: TerminalSize) {
-        enqueueIngress(.resize(size))
+        guard ingress.enqueueResize(size) == .startDrain else { return }
+        ingress.setResizeDrain(Task { await self.drainResizes() })
     }
 
-    private nonisolated func enqueueIngress(_ item: PTYIngressQueue.Item) {
-        guard ingress.enqueue(item) else { return }
-        Task { await self.drainIngress() }
+    /// What the ingress is holding and what it has refused. Counts only.
+    public nonisolated var ingressDiagnostics: PTYIngressDiagnostics {
+        ingress.diagnostics
     }
 
-    private func drainIngress() async {
-        while let item = ingress.takeNext() {
-            switch item {
-            case let .input(data):
-                try? await write(data)
-            case let .resize(size):
-                try? resize(to: size)
+    private func drainInput() async {
+        while true {
+            // Cancellation is teardown: the master is closed, so the backlog is bytes for a child
+            // that cannot receive them.
+            if Task.isCancelled {
+                ingress.discardPendingInput()
+                return
             }
+            guard let data = ingress.takeNextInput() else { return }
+            try? await write(data)
+        }
+    }
+
+    private func drainResizes() async {
+        while true {
+            if Task.isCancelled {
+                ingress.discardPendingResizes()
+                return
+            }
+            guard let size = ingress.takeNextResize() else { return }
+            try? resize(to: size)
         }
     }
 
@@ -1050,6 +1213,9 @@ public actor PTYProcess {
     func readEnded() {
         guard masterIsOpen else { return }
         masterIsOpen = false
+        // The pty is gone: whatever a producer still had queued can never reach the child, and a
+        // drain suspended on a write must not outlive the descriptor it was writing to.
+        ingress.discard()
         for identifier in Array(writabilityWaits.keys) {
             finishWritabilityWait(identifier, with: .failure(PTYError.closed))
         }
