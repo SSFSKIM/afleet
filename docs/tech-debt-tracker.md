@@ -1011,3 +1011,27 @@ leaf's reservation; 125 onward are unused.
      fails and no test notices. Trivial and stable in practice; filed because the number is a copy
      of another program's documentation with nothing linking it back. Owner: whoever next revises
      the configuration pins.
+
+125. **C2's `ProcessRunner` carries the same unbounded pipe drain C7.3's `ToolRunner` had.**
+     `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift` reads while data keeps arriving and
+     returns only on `EAGAIN`, on the same serial queue that runs its timeout, its `SIGKILL`
+     escalation and its settlement — the shape C7.3's R6 review found and bounded in its own copy
+     (`PipeDrain.bytesPerPass`, one mebibyte per readable event). C7.3 could not fix it: contract
+     X1 forbids Workbench from importing `ClaudeWire`, the two runners are deliberately separate
+     copies (entry 112), and the file belongs to C2. The exposure there is larger, not smaller: that
+     runner drives the engine's own long-lived processes rather than short `git` reads. What would
+     close it: the same bound applied in C2's copy, or the extraction entry 112 anticipates, which
+     would leave one copy to bound. Owner: C2, or whichever child needs the third copy.
+
+126. **The bound on one drain pass has no end-to-end tripwire.** `PipeDrain.bytesPerPass` exists so
+     that a producer cannot own the runner's queue; deleting it leaves every black-box test in the
+     suite green. Measured over five producer shapes — one `dd` at 64 KiB, 1 MiB and 4 MiB blocks,
+     and four and eight of them at once — this machine's drain consumes about 3 GB/s and no
+     user-space producer keeps a 64 KiB pipe fed at that rate, so the loop reaches `EAGAIN` between
+     events and the timeout fires within 13 ms of its deadline either way. The bound is therefore
+     pinned at the seam (`PipeDrain.pass` against a descriptor that never says `EAGAIN`) and the
+     flooding-child test is a floor rather than a discriminator. The same testability limit as
+     entry 117, one layer up, and it is what let the defect live: a review found it by reading.
+     What would close it: a seam that lets a test hold the queue busy across a producer's writes,
+     or a fake descriptor whose readability the test controls. Owner: whoever next revises the
+     process layer, or the extraction entry 112 anticipates.

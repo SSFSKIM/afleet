@@ -300,6 +300,23 @@ final class ToolRunnerTests: XCTestCase {
         return fd
     }
 
+    /// The integration half of the bound, and the property a bounded drain could plausibly break:
+    /// a child whose output is many times one pass still arrives **whole**. The re-arm is what
+    /// carries it — the readable event fires again while the descriptor still holds data — and if
+    /// it did not, this is where a `git` listing would come back truncated.
+    func testAChildsOutputArrivesWholeWhenItIsManyPassesLong() async throws {
+        let blockSize = 65_536, blocks = 128            // 8 MiB, eight passes' worth
+        let output = try await ToolRunner().run(executable: URL(filePath: "/bin/dd"),
+                                                arguments: ["if=/dev/zero", "bs=\(blockSize)",
+                                                            "count=\(blocks)"],
+                                                cwd: tree.root, environment: [:],
+                                                timeout: .seconds(30))
+        XCTAssertEqual(output.exitCode, 0, "the producer did not exit zero")
+        XCTAssertFalse(output.timedOut, "a producer well inside its budget was reported as timed out")
+        XCTAssertEqual(output.stdout.count, blockSize * blocks,
+                       "the drain delivered a different number of bytes than the child wrote")
+    }
+
     // MARK: - G2.6 a non-zero exit is data, not an exception
 
     func testANonZeroExitIsReturnedRatherThanThrown() async throws {
