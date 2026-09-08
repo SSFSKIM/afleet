@@ -1886,3 +1886,43 @@ is renumbered.
      this is one prompted turn under the scratch home at C1's next re-pin, reading the transcript
      after exit. Owner: C1 (probe), C2 (`terminate()`) if it bites. Filed 2026-09-08 at the Quit
      ruling.
+
+## From C7.5 (Files panel, `child/c7-files-panel`)
+
+232. **Every leaf builds its own git and temporary-tree fixtures.** `FilesPanelTests/Support`
+     rebuilds a scratch-tree guard, a repository builder and a recording runner that
+     `SourceControlCoreTests/Support` already has, because test sources cannot be imported across
+     targets and neither belongs in a shipping module. Two copies of a guard is two places for it
+     to be wrong. Closer: a `WorkbenchTestSupport` library target the test targets depend on, or
+     the guard promoted into a module that ships. Owner: whichever of C7.4, C7.6 or C7.7 writes
+     the third copy.
+
+233. **Both sides of a diff are decoded as UTF-8 with replacement.** `DiffPairResolver` hands
+     Monaco strings, so a byte sequence that is not UTF-8 becomes U+FFFD and a save from that
+     buffer would not round-trip. Deliberate — refusing to show a diff of a file with one bad byte
+     is worse for the user — and the diff editor is read-only, so nothing writes it back today.
+     This is the contents half of entry 189, which is about path bytes. Closer: carry the raw
+     bytes beside the string and refuse the *editor* (not the diff) for a file that does not
+     round-trip. Owner: C7.7 when it renders diffs of arbitrary history.
+
+234. **`ToolRunning` cannot write to a `git` child's stdin.** `ToolJob` opens every child's
+     descriptor 0 on `/dev/null` and `run` has no stdin parameter, so any verb whose batch form is
+     `--stdin` is unavailable: C7.5's gitignore batch had to be respelled
+     `check-ignore --verbose --non-matching` and read by position (child spec Design §3). The
+     failure shape is the dangerous one — `--stdin` reads EOF and reports *nothing*, exit 0. Closer:
+     an optional `stdin: Data` on `ToolRunning.run` written and closed before the read loop.
+     Owner: C7.3's module, whichever leaf needs the second such verb.
+
+235. **The watcher re-reads the whole file to answer "did it change?".** `FileSnapshot.read` is a
+     `Data(contentsOf:)` plus a SHA-256 on every observation, and under the poll fallback that is
+     every interval for every open file. The digest is what makes the save echo correct, so it is
+     not removable; the *whole* read is. Closer: compare size and mtime first and digest only when
+     they differ, or digest a bounded prefix plus the size. Owner: C7.5's own follow-up, or the
+     first leaf that opens a large file and notices.
+
+236. **The Files tree does not follow the working tree.** §9.1's watcher sentence is about open
+     files, so a file the agent creates or deletes appears only on expansion, on *Refresh*, or
+     after a save. A user watching an agent scaffold a directory sees nothing move. Ruled out of
+     scope at this leaf's gate (Parent revision 3) rather than forgotten. Closer: one FSEvents
+     stream over the channel's cwd, coalesced, with the `node_modules` class of directory
+     excluded. Owner: a v1.1 Files follow-up.
