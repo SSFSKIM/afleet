@@ -297,6 +297,126 @@ final class DialogCardTests: XCTestCase {
         XCTAssertEqual(count, 0, "a retired dialog put \(count) actions on the wire")
     }
 
+    // MARK: - The overage dialog
+
+    /// `consent` is offered only where the engine says billing is already on (anchor 3): a bare wire
+    /// reply enables nothing. Both arms, and the answer asserted as a body — the enabled arm sends
+    /// `consent`, the disabled arm offers the credits action in its place.
+    func testConsentIsOfferedOnlyWhenOveragesAreEnabled() async throws {
+        let (lifecycle, answering) = await hosted()
+        let enabled = try card("dialog-fable-overage", at: 0)
+        XCTAssertTrue(enabled.overagesEnabled, "the fixture's first overage dialog is not the enabled arm")
+        let enabledBody = try dialogView(enabled, answering).body
+        XCTAssertTrue(offers("Use usage credits", in: enabledBody), "the enabled arm offers no consent action")
+        XCTAssertFalse(offers("Set up usage credits…", in: enabledBody),
+                       "the enabled arm offers the credits action as well as consent")
+        try press("Use usage credits", in: enabledBody)
+        await answering.whenIdle()
+        let consent = try await sentBody(lifecycle, "Use usage credits")
+        XCTAssertEqual(consent, try json(#"{"behavior":"completed","result":"consent"}"#),
+                       "the consent answer is not the engine's spelling")
+
+        let (_, second) = await hosted()
+        let disabled = try card("dialog-fable-overage", at: 1)
+        XCTAssertFalse(disabled.overagesEnabled, "the fixture's second overage dialog is not the disabled arm")
+        let disabledBody = try dialogView(disabled, second).body
+        XCTAssertFalse(offers("Use usage credits", in: disabledBody),
+                       "consent is offered on a dialog the engine says has no billing")
+        XCTAssertTrue(offers("Set up usage credits…", in: disabledBody),
+                      "the disabled arm offers no way to set credits up")
+        XCTAssertTrue(offers("Switch to the default model", in: disabledBody),
+                      "the disabled arm offers no way to resolve the dialog")
+        XCTAssertTrue(offers("Not now", in: disabledBody), "the disabled arm offers no way to decline")
+    }
+
+    /// Spec D7: the payload carries **no URL**, so *Set up usage credits…* opens nothing, sends
+    /// nothing and leaves the card pending. The card resolves only on *Switch to the default model*
+    /// or *Not now*, and both of those are asserted as bodies.
+    func testSetUpUsageCreditsLeavesTheCardPendingAndEmitsNoLink() async throws {
+        let (lifecycle, answering) = await hosted()
+        let disabled = try card("dialog-fable-overage", at: 1)
+        let body = try dialogView(disabled, answering).body
+        try press("Set up usage credits…", in: body)
+        await answering.whenIdle()
+        let count = await lifecycle.actions.count
+        XCTAssertEqual(count, 0, "the credits action put \(count) actions on the wire")
+        XCTAssertTrue(disabled.state == .pending, "the credits action settled the card")
+
+        let texts = CardTree.texts(in: body)
+        XCTAssertTrue(texts.contains(DialogCardView.creditsNote),
+                      "the card does not say credits are set up outside the session")
+        XCTAssertFalse(texts.contains(where: { $0.contains("http") }),
+                       "the card drew an address the payload never carried")
+
+        for (label, expected) in [("Switch to the default model", #"{"behavior":"completed","result":"switch_default"}"#),
+                                  ("Not now", #"{"behavior":"completed","result":"cancelled"}"#)] {
+            let (resolver, answers) = await hosted()
+            let fresh = try card("dialog-fable-overage", at: 1)
+            try press(label, in: try dialogView(fresh, answers).body)
+            await answers.whenIdle()
+            let sent = try await sentBody(resolver, label)
+            XCTAssertEqual(sent, try json(expected),
+                           "the body sent for \(label) is not the engine's spelling")
+        }
+    }
+
+    /// `model_consent_fallback` renders as the card's outcome **when it arrives**, and its absence
+    /// is equally correct: the engine emits nothing when provisioning succeeded (anchor 5), so a
+    /// card that waited for the frame would hang on the successful path. Both directions.
+    func testTheConsentFallbackIsTheOutcomeAndItsAbsenceStillSettlesTheCard() async throws {
+        let settled = try card("dialog-fable-overage", at: 1, state: .answered(outcome: "switch_default"))
+
+        // No frame: the card still settles, and it reads its own outcome.
+        let alone = try XCTUnwrap(settled.reading(inStaleOverlay: false, consentFallback: nil),
+                                  "an answered overage card is still waiting with no fallback frame")
+        XCTAssertEqual(alone.text, "switch_default", "the settled card does not read its own outcome")
+
+        // The frame the recording carries: its content is the outcome, verbatim.
+        let frame = try XCTUnwrap(Self.consentFallbacks(try FixtureRunner.frames("dialog-fable-overage")).first,
+                                  "the fixture records no model_consent_fallback frame")
+        let withFrame = try XCTUnwrap(settled.reading(inStaleOverlay: false, consentFallback: frame),
+                                      "the card with a fallback frame is still waiting")
+        XCTAssertEqual(withFrame.text, frame.fields.content,
+                       "the fallback frame's content is not the card's outcome")
+
+        let (_, answering) = await hosted()
+        let drawn = CardTree.texts(in: DecisionCardView(card: settled, presentation: .full, in: Self.channel,
+                                                        answering: answering, consentFallback: frame).body)
+        XCTAssertTrue(drawn.contains(frame.fields.content), "the hosted card does not draw the frame's content")
+    }
+
+    /// The overage payload's `balanceCents` and `currency` are declared and **currently unfed**
+    /// (anchor 3, `cli.pretty.js:770104`). A payload with neither key, and one carrying explicit
+    /// nulls, both draw no balance — not a zero, which a user would read as an empty account. Where
+    /// the engine does feed one, the card draws what arrived.
+    func testTheOverageCardShowsNoBalanceWhereTheEngineFedNone() async throws {
+        let (_, answering) = await hosted()
+
+        // The disabled arm the fixture records carries explicit nulls.
+        let nulled = try card("dialog-fable-overage", at: 1)
+        XCTAssertNil(nulled.overageConsent?.balanceCents, "an explicit null decoded as a balance")
+        XCTAssertFalse(CardTree.texts(in: try dialogView(nulled, answering).body)
+                           .contains(where: { $0.hasPrefix("Balance:") }),
+                       "a null balance still drew a balance line")
+
+        // The shape the engine actually sends today: the two flags and nothing else. An override,
+        // because no recording carries it.
+        let unfed = try card("dialog-fable-overage", at: 0,
+                             payload: ["overagesEnabled": true, "modelName": "invented-model"])
+        XCTAssertNil(DialogCardView.balanceText(try XCTUnwrap(unfed.overageConsent,
+                                                              "the overage payload no longer decodes")),
+                     "a payload with no balance key drew a balance")
+
+        // And the positive case, so a card that drew nothing at all could not pass.
+        let fed = try card("dialog-fable-overage", at: 0)
+        let balance = try XCTUnwrap(fed.overageConsent?.balanceCents, "the recorded enabled arm carries no balance")
+        let line = try XCTUnwrap(DialogCardView.balanceText(try XCTUnwrap(fed.overageConsent,
+                                                                          "the overage payload no longer decodes")),
+                                 "a fed balance drew no line")
+        XCTAssertTrue(line.hasPrefix("Balance:"), "a fed balance is not drawn as a balance")
+        XCTAssertEqual(balance, 0, "the recorded enabled arm's balance is not the one this clause was written against")
+    }
+
     /// Every `model_consent_fallback` a fixture's frames carry.
     private static func consentFallbacks(_ frames: [Frame]) -> [ModelConsentFallback] {
         frames.compactMap { frame in
