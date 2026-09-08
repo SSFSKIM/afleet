@@ -36,6 +36,10 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         case openInTerminal(ChannelKey)
         case events(ChannelKey)
         case preconditions(ChannelKey)
+        /// §7.4's busy question, asked of the fleet rather than of a surface. Recorded like every
+        /// other member, so "the clause asked about exactly the owned channels" is a claim over the
+        /// one ordered log and not over a counter of its own.
+        case liveTaskIDs(ChannelKey)
         /// A write into afleet's own store, recorded **in the same ordered log** as the lifecycle
         /// calls. G5's ordering assertion spans all three of §8.6's steps — the store write, the
         /// restart and the mode switch — and two logs could not order the first against the other two.
@@ -53,6 +57,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
             case .openInTerminal: "openInTerminal"
             case .events: "events"
             case .preconditions: "preconditions"
+            case .liveTaskIDs: "liveTaskIDs"
             case .storeWrite: "store.write"
             }
         }
@@ -104,6 +109,9 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     private var runOutcomes: [Result<StrategyOutcome, LifecycleError>] = []
     private var paneRequest: Result<PaneRequest, LifecycleError>?
     private var preconditionVerdict: SpawnPrecondition = .ready
+    /// What `liveTaskIDs(of:)` answers per channel; a key with nothing staged answers `[]`, which is
+    /// the fleet's own answer for a channel it owns no supervisor for.
+    private var liveTasks: [ChannelKey: [String]] = [:]
     private var table: [ChannelKey: ChannelState] = [:]
     private var opened: Set<ChannelKey> = []
     private nonisolated let sink = EventSink()
@@ -140,6 +148,8 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         for caller in waiting { caller.resume() }
     }
     func stagePrecondition(_ verdict: SpawnPrecondition) { preconditionVerdict = verdict }
+    /// Invented task ids for one channel. Ids, never a real one (§11).
+    func stageLiveTasks(_ ids: [String], for key: ChannelKey) { liveTasks[key] = ids }
     /// Records one store write in the ordered log. Called by `RecordingBypassStore`, which wraps the
     /// real store rather than replacing it, so the bytes still go through `FileStateStore`.
     func noteStoreWrite(namespace: StoreNamespace, key: String) { calls.append(.storeWrite(namespace, key: key)) }
@@ -172,6 +182,11 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         calls.compactMap { if case .sendPrompt(_, let input) = $0 { input } else { nil } }
     }
 
+    /// How many `perform`s the log holds. A count and not the log's own length, because the log also
+    /// carries the queries a pass makes on its way — `liveTaskIDs` among them — and an ordering
+    /// assertion about terminations must not move when a query is added beside them.
+    var performCount: Int { actions.count }
+
     /// Every action performed, in order.
     var actions: [LifecycleAction] {
         calls.compactMap { if case .perform(_, let action) = $0 { action } else { nil } }
@@ -202,6 +217,11 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition {
         calls.append(.preconditions(key))
         return preconditionVerdict
+    }
+
+    func liveTaskIDs(of key: ChannelKey) async -> [String] {
+        calls.append(.liveTaskIDs(key))
+        return liveTasks[key] ?? []
     }
 
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {

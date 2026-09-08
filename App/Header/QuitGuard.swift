@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import OSLog
 import AfleetCore
 import FleetKit
 
@@ -12,7 +13,7 @@ import FleetKit
 /// to keep a conversation is to release it first with *Open in terminal*. What quitting does
 /// instead is end them deliberately, in the order the clause states: ask **once** if any owned
 /// channel is busy, naming those channels; then, on confirmation or immediately when nothing is
-/// busy, `terminate()` each owned channel **that has a process**, then `Fleet.shutdown()`, then
+/// busy, `perform(.quit)` on each owned channel **that has a process**, then `Fleet.shutdown()`, then
 /// exit. `shutdown()` itself terminates nothing — streams, timers and diagnostics only — which is
 /// why the termination pass comes first and separately.
 ///
@@ -27,9 +28,9 @@ struct QuitChannel: Sendable, Hashable {
     /// Ready, connecting or contended. A dormant owned channel has none and there is nothing in it
     /// to terminate, so the clause skips it — and it does not block the pass either.
     let hasProcess: Bool
-    /// A turn running or running local shells. Not a second notion of busy: it is the presence the
-    /// sidebar and the composer already read, plus the live background tasks the *Send to
-    /// background* confirm already names.
+    /// A turn running or running local shells. Not a second notion of busy, and not a surface's
+    /// local count either: it is `ChannelState.presence` plus `LifecycleAPI.liveTaskIDs(of:)`, both
+    /// read from the fleet, so a channel the user never opened is judged exactly like one on screen.
     let isBusy: Bool
 }
 
@@ -118,9 +119,6 @@ struct FleetQuitTermination: QuitFleet {
     let lifecycle: any LifecycleAPI
     /// `Fleet.shutdown()`. A closure because `shutdown()` is `AppFleet`'s and not `LifecycleAPI`'s.
     let shutdown: @Sendable () async -> Void
-    /// The channel's running background tasks, as the *Send to background* confirm already counts
-    /// them. Reads a composer that already exists and constructs nothing.
-    let liveTaskCount: @MainActor @Sendable (ChannelKey) -> Int
     /// The channel's title, from the row the fleet browser already built. Nil for a channel with no
     /// row, which the dialog names by the placeholder below rather than by a session id (§11).
     let title: @MainActor @Sendable (ChannelKey) -> String?
@@ -133,7 +131,10 @@ struct FleetQuitTermination: QuitFleet {
             // X5's invariant, spelled once: foreign live, background job and archived all fall out
             // here, and nothing below can reach one.
             guard case .owned(let owned) = state.origin else { continue }
-            let tasks = await MainActor.run { liveTaskCount(state.key) }
+            // §7.4's "busy", second half: the fleet's own running-or-armed task ids, not a count a
+            // surface kept locally. A channel with no composer has no local count and would have
+            // been judged by presence alone; X5 answers for it too.
+            let tasks = await lifecycle.liveTaskIDs(of: state.key)
             let name = await MainActor.run { title(state.key) } ?? Self.unnamed
             channels.append(QuitChannel(key: state.key,
                                         title: name,
@@ -141,33 +142,37 @@ struct FleetQuitTermination: QuitFleet {
                                         // contended channel is one whose process afleet still holds;
                                         // dormant is the resting state of every processless one.
                                         hasProcess: owned != .dormant,
-                                        isBusy: state.presence == .busy || tasks > 0))
+                                        isBusy: state.presence == .busy || !tasks.isEmpty))
         }
         return channels
     }
 
-    /// `terminate()` on one owned channel: X5's `.reap`.
+    /// `terminate()` on one owned channel: X5's `.quit`, once, and nothing else.
     ///
-    /// **`perform(.reap)` is gated on dormant eligibility** — `Fleet` refuses the reap the *user*
-    /// asked for on a channel with a turn in flight or a background shell still working — and the
-    /// channels the quit dialog just asked about are exactly the ineligible ones. There is no
-    /// unconditional terminate on X5 (`ChannelSupervisor.reap()` is not reachable through the
-    /// facade), so a refused reap is followed by `.stopEverything`, which interrupts the turn and
-    /// stops each running task, and then by the reap again. That is what the user confirmed when
-    /// they were told quitting ends these channels; it is not a second policy. Filed for the
-    /// architect as the one place §7.4 asks for a capability X5 does not publish.
+    /// `.quit` is §7.4's own verb, landed on `main` for this clause: per channel, unconditional,
+    /// `maySpawn: false`, and gated on no eligibility check — so it ends a channel with a turn in
+    /// flight, with a background shell still working, or mid-spawn, which is exactly the set the
+    /// dialog just asked about. It therefore throws neither `notEligible` nor `busy`, and there is
+    /// nothing here to escalate.
+    ///
+    /// **Why no escalation, recorded so it is not reintroduced.** An earlier form reaped, and on a
+    /// refusal ran `.stopEverything` and reaped again. Its failure path — a reap still refused after
+    /// the stop — exited with no SIGTERM, no SIGKILL and **no wedge record**, which regresses §6.7:
+    /// every terminating action here is one `terminateOrWedge` and the wedged row has to know what
+    /// was attempted. It optimised the happy path and left the failure path recording nothing.
+    ///
+    /// Any other error is a count in the log and the pass continues: at exit the pipe closes and the
+    /// engine winds the channel down anyway, which is the fact the whole clause rests on.
     func terminateForQuit(_ key: ChannelKey) async {
         do {
-            _ = try await lifecycle.perform(.reap, on: key)
-        } catch LifecycleError.notEligible {
-            _ = try? await lifecycle.perform(.stopEverything, on: key)
-            _ = try? await lifecycle.perform(.reap, on: key)
+            _ = try await lifecycle.perform(.quit, on: key)
         } catch {
-            // Every other refusal is final and the exit is not held for it: at exit the pipe closes
-            // and the engine winds the channel down anyway, which is the fact the whole clause rests
-            // on.
+            Self.log.error("quit: \(1, privacy: .public) channel(s) refused the terminate; the exit closes the pipe regardless")
         }
     }
+
+    /// Counts only, never a key or a title (§11).
+    private static let log = Logger(subsystem: "com.afleet.app", category: "quit")
 
     func shutdownForQuit() async { await shutdown() }
 }
@@ -195,16 +200,14 @@ final class AfleetQuitDelegate: NSObject, NSApplicationDelegate {
 
 extension QuitGuard {
 
-    /// The app's own guard: the fleet the launch reached, the live tasks the composers already know
-    /// about, and the titles the fleet browser already built.
+    /// The app's own guard: the fleet the launch reached — which answers both halves of "busy" —
+    /// and the titles the fleet browser already built.
     static func forApp(_ model: AppModel) -> QuitGuard? {
         guard let fleet = model.composers.fleet else { return nil }
-        let composers = model.composers
         let browser = model.browser
         return QuitGuard(fleet: FleetQuitTermination(
             lifecycle: fleet,
             shutdown: { await fleet.shutdown() },
-            liveTaskCount: { key in composers.liveTaskCount(for: key) },
             title: { key in browser?.row(key.session)?.title }))
     }
 }

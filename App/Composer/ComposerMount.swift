@@ -183,19 +183,6 @@ final class ComposerRegistry {
         surfaces.removeValue(forKey: key)
     }
 
-    /// The running background tasks of a channel whose composer already exists, counted exactly as
-    /// the *Send to background* confirm counts them (`ChannelHeaderActionsModel.liveTaskIDs`).
-    ///
-    /// **It builds nothing.** §7.4's *Quit* clause reads this for every owned channel at once, and a
-    /// lookup that constructed a composer — and with it a timeline ingestion — for each of them
-    /// would start work at the moment the app is being asked to stop. A channel with no composer has
-    /// no timeline to read and answers zero, which is what the clause then falls back on: its
-    /// presence, which is the turn.
-    func liveTaskCount(for key: ChannelKey) -> Int {
-        guard let timeline = models[key]?.timelines?.timeline else { return 0 }
-        return ChannelHeaderActionsModel.liveTaskIDs(in: timeline.items).count
-    }
-
     /// The channels a composer has been built for; the count is what a report states.
     var openChannels: [ChannelKey] { Array(models.keys) }
 

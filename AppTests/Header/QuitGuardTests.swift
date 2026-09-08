@@ -145,9 +145,14 @@ final class QuitGuardTests: XCTestCase {
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "the sequence ran")
 
-        let keys = QuitRig.reapedKeys(await double.calls)
-        XCTAssertEqual(keys.count, 1, "\(keys.count) channel(s) were reaped; 1 was owned with a process")
-        XCTAssertTrue(keys.contains(owned), "the owned channel is the one that was reaped")
+        let keys = QuitRig.terminatedKeys(await double.calls)
+        XCTAssertEqual(keys.count, 1, "\(keys.count) channel(s) were terminated; 1 was owned with a process")
+        XCTAssertTrue(keys.contains(owned), "the owned channel is the one that was terminated")
+        let verbs = await double.actions
+        XCTAssertEqual(verbs.filter(QuitRig.isQuit).count, 1,
+                       "\(verbs.filter(QuitRig.isQuit).count) of \(verbs.count) terminating action(s) were `.quit`")
+        XCTAssertEqual(verbs.filter(QuitRig.isReap).count, 0,
+                       "\(verbs.filter(QuitRig.isReap).count) terminating action(s) reached for the eligibility-gated reap")
         for untouchable in [foreign, job, archived] {
             let count = await double.calls.filter { QuitRig.key(of: $0) == untouchable }.count
             XCTAssertEqual(count, 0, "\(count) X5 call(s) reached a channel afleet does not own")
@@ -170,10 +175,11 @@ final class QuitGuardTests: XCTestCase {
             QuitRig.state(foreign, origin: .foreignLive(.usersTerminal), presence: .busy)
         ])
         await double.alwaysPerform(.success(QuitRig.state(quiet, origin: .owned(.dormant))))
+        // The fleet's own answer, not a surface's count: `b` has no composer in this test and never
+        // will, and X5 still reports its running shells.
+        await double.stageLiveTasks(["invented-task-1", "invented-task-2"], for: shelling)
         var seen: [[QuitChannel]] = []
-        let termination = QuitRig.termination(double,
-                                              liveTasks: { $0 == shelling ? 2 : 0 },
-                                              titles: { QuitRig.title(of: $0) })
+        let termination = QuitRig.termination(double, titles: { QuitRig.title(of: $0) })
         let guardModel = QuitGuard(fleet: termination, confirm: { channels in seen.append(channels); return true })
 
         _ = await guardModel.quit()
@@ -186,15 +192,26 @@ final class QuitGuardTests: XCTestCase {
                       + "\(named.symmetricDifference(["a", "b"]).count) channel(s)")
     }
 
-    /// A reap the eligibility gate refuses — which is every channel the dialog just asked about — is
-    /// escalated through `.stopEverything` and reaped again, rather than leaving the channel the
-    /// user agreed to end still running. The one place §7.4 asks for a capability X5 does not
-    /// publish; see `FleetQuitTermination.terminateForQuit`.
-    func testARefusedReapIsEscalatedThroughStopEverything() async {
+    /// **Exactly one X5 call per owned channel with a process, and it is never `.reap`.**
+    ///
+    /// §7.4's *Quit* is the bare terminate: `.quit` is unconditional, gated on no eligibility check
+    /// and refuses neither `notEligible` nor `busy`, so a channel with a turn in flight and a
+    /// background shell still working — precisely what the dialog just asked about — is ended by one
+    /// call. The arm this replaces escalated a refused `.reap` through `.stopEverything`; its own
+    /// failure path exited with no signal and **no wedge record**, which §6.7 does not allow.
+    ///
+    /// The `.reap` half is the discriminator: a composer back on the eligibility-gated verb fails
+    /// here even though the channel is still, in the end, terminated.
+    func testEachOwnedProcessIsTerminatedByExactlyOneUnconditionalQuit() async {
         let double = ComposerLifecycleDouble()
         let busy = QuitRig.key("a")
-        await double.setStates([QuitRig.state(busy, origin: .owned(.ready), presence: .busy)])
-        await double.stagePerform(.failure(.notEligible(.turnRunning)))
+        let quiet = QuitRig.key("b")
+        let dormant = QuitRig.key("c")
+        await double.setStates([
+            QuitRig.state(busy, origin: .owned(.ready), presence: .busy),
+            QuitRig.state(quiet, origin: .owned(.connecting)),
+            QuitRig.state(dormant, origin: .owned(.dormant))
+        ])
         await double.alwaysPerform(.success(QuitRig.state(busy, origin: .owned(.dormant))))
         let guardModel = QuitGuard(fleet: QuitRig.termination(double), confirm: { _ in true })
 
@@ -202,14 +219,54 @@ final class QuitGuardTests: XCTestCase {
         XCTAssertTrue(mayExit, "the confirmed quit completes")
 
         let actions = await double.actions
-        XCTAssertEqual(actions.count, 3, "a refused reap is 3 actions; the log has \(actions.count)")
-        XCTAssertTrue(QuitRig.isReap(actions.first), "the first attempt is the reap")
-        XCTAssertTrue(QuitRig.isStopEverything(actions.dropFirst().first),
-                      "the refusal is escalated with the action that ends the turn and the tasks")
-        XCTAssertTrue(QuitRig.isReap(actions.last), "the channel is reaped after the escalation")
+        XCTAssertEqual(actions.count, 2,
+                       "\(actions.count) terminating action(s) were performed; 2 owned channels had a process")
+        XCTAssertEqual(actions.filter(QuitRig.isQuit).count, 2,
+                       "\(actions.filter(QuitRig.isQuit).count) of \(actions.count) action(s) were the unconditional quit")
+        XCTAssertEqual(actions.filter(QuitRig.isReap).count, 0,
+                       "\(actions.filter(QuitRig.isReap).count) action(s) reached for the eligibility-gated reap")
+        let keys = Set(QuitRig.terminatedKeys(await double.calls))
+        XCTAssertEqual(keys.count, 2, "\(keys.count) distinct channel(s) were terminated; 2 had a process")
+        XCTAssertEqual(keys.intersection([dormant]).count, 0,
+                       "\(keys.intersection([dormant]).count) processless channel(s) were terminated")
     }
 
-    /// The X5 call log is read for order as well as for membership: every reap lands before the
+    /// **The arm `liveTaskIDs(of:)` exists to close.** A channel with **no composer** — one the user
+    /// never opened, so there is no timeline model and no local count to read — whose fleet reports a
+    /// running task is named in the dialog all the same, because busy is asked of X5 and not of a
+    /// surface. Its presence is idle, so a clause that judged by presence alone would let the app
+    /// end a working channel without asking.
+    ///
+    /// Nothing in this test builds a `ComposerModel` or a `ComposerRegistry`; that absence is the
+    /// premise.
+    func testAChannelWithNoComposerIsNamedWhenTheFleetReportsALiveTask() async {
+        let double = ComposerLifecycleDouble()
+        let unopened = QuitRig.key("a")
+        let quiet = QuitRig.key("b")
+        await double.setStates([
+            QuitRig.state(unopened, origin: .owned(.ready), presence: .idle),
+            QuitRig.state(quiet, origin: .owned(.ready), presence: .idle)
+        ])
+        await double.stageLiveTasks(["invented-task-1"], for: unopened)
+        await double.alwaysPerform(.success(QuitRig.state(quiet, origin: .owned(.dormant))))
+        var seen: [[QuitChannel]] = []
+        let termination = QuitRig.termination(double, titles: { QuitRig.title(of: $0) })
+        let guardModel = QuitGuard(fleet: termination, confirm: { channels in seen.append(channels); return true })
+
+        _ = await guardModel.quit()
+
+        XCTAssertEqual(seen.count, 1, "the clause asked \(seen.count) time(s) with one live task in the fleet")
+        let named = Set(seen.first?.map(\.title) ?? [])
+        XCTAssertEqual(named.count, 1,
+                       "the dialog named \(named.count) channel(s); 1 was busy, and only by its live task")
+        XCTAssertTrue(named == ["a"],
+                      "the named set and the busy set differ by \(named.symmetricDifference(["a"]).count) channel(s)")
+        // The question was asked of the fleet, of every owned channel, and of nothing else.
+        let asked = await double.calls.filter { if case .liveTaskIDs = $0 { return true } else { return false } }.count
+        XCTAssertEqual(asked, 2, "the fleet was asked about \(asked) channel(s); 2 were owned")
+    }
+
+    /// The X5 call log is read for order as well as for membership: every terminate lands before the
     /// shutdown closure runs.
     func testEveryTerminateLandsBeforeTheShutdown() async {
         let double = ComposerLifecycleDouble()
@@ -222,19 +279,18 @@ final class QuitGuardTests: XCTestCase {
         await double.alwaysPerform(.success(QuitRig.state(first, origin: .owned(.dormant))))
         let counter = QuitShutdownCounter()
         let termination = FleetQuitTermination(lifecycle: double,
-                                               shutdown: { await counter.note(await double.calls.count) },
-                                               liveTaskCount: { _ in 0 },
+                                               shutdown: { await counter.note(await double.performCount) },
                                                title: { QuitRig.title(of: $0) })
         let guardModel = QuitGuard(fleet: termination, confirm: { _ in true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "the sequence ran")
 
-        let reaped = QuitRig.reapedKeys(await double.calls).count
-        XCTAssertEqual(reaped, 2, "\(reaped) of 2 owned processes were reaped")
+        let terminated = QuitRig.terminatedKeys(await double.calls).count
+        XCTAssertEqual(terminated, 2, "\(terminated) of 2 owned processes were terminated")
         let atShutdown = await counter.callsAtShutdown
         XCTAssertEqual(atShutdown, 2,
-                       "\(atShutdown ?? -1) X5 call(s) had been made when the shutdown ran; 2 were owed first")
+                       "\(atShutdown ?? -1) terminate(s) had landed when the shutdown ran; 2 were owed first")
     }
 
     // MARK: - The hook
@@ -381,27 +437,28 @@ enum QuitRig {
     }
 
     static func termination(_ double: ComposerLifecycleDouble,
-                            liveTasks: @escaping @MainActor @Sendable (ChannelKey) -> Int = { _ in 0 },
                             titles: @escaping @MainActor @Sendable (ChannelKey) -> String? = { _ in nil })
     -> FleetQuitTermination {
-        FleetQuitTermination(lifecycle: double, shutdown: {}, liveTaskCount: liveTasks, title: titles)
+        FleetQuitTermination(lifecycle: double, shutdown: {}, title: titles)
     }
 
-    /// The channels a recorded log reaped, in order.
-    static func reapedKeys(_ calls: [ComposerLifecycleDouble.Call]) -> [ChannelKey] {
+    /// The channels a recorded log terminated, in order — every `perform`, whatever action it
+    /// carried, so a pass that reached for the wrong verb still shows up here and is caught by
+    /// `isQuit` below rather than silently vanishing from the count.
+    static func terminatedKeys(_ calls: [ComposerLifecycleDouble.Call]) -> [ChannelKey] {
         calls.compactMap { call in
-            guard case .perform(let key, let action) = call, isReap(action) else { return nil }
+            guard case .perform(let key, _) = call else { return nil }
             return key
         }
     }
 
-    static func isReap(_ action: LifecycleAction?) -> Bool {
-        if case .reap = action { return true }
+    static func isQuit(_ action: LifecycleAction?) -> Bool {
+        if case .quit = action { return true }
         return false
     }
 
-    static func isStopEverything(_ action: LifecycleAction?) -> Bool {
-        if case .stopEverything = action { return true }
+    static func isReap(_ action: LifecycleAction?) -> Bool {
+        if case .reap = action { return true }
         return false
     }
 
@@ -410,7 +467,8 @@ enum QuitRig {
     static func key(of call: ComposerLifecycleDouble.Call) -> ChannelKey? {
         switch call {
         case .perform(let key, _), .sendPrompt(let key, _), .route(let key, _), .send(let key, _, _),
-             .run(let key, _, _), .openInTerminal(let key), .events(let key), .preconditions(let key):
+             .run(let key, _, _), .openInTerminal(let key), .events(let key), .preconditions(let key),
+             .liveTaskIDs(let key):
             key
         case .storeWrite:
             nil
