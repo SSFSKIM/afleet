@@ -1310,3 +1310,13 @@ is renumbered.
      bottom. Found by C7.3's merge panel. Closer: reserve a lane for the out-of-window `HEAD` and
      release it at the window's end, or draw the truncated edge to the row's edge. Owner: C7.7 with
      pagination (tracker 114).
+
+194. **`IngestionTests.testTheWholeWireStreamThroughTheTapYieldsMirrorEffectsAndTheLiveHalf` gives
+     up on its effects under load.** In a `make test` run with a 15-minute load average of 89 (two
+     floors and a `swift test` loop in parallel), `IngestionTests` took 209 s instead of ~25 s and
+     this test collected 5 of 15 mirror effects (23 of 53 duplicates) before its wait ended at
+     23 s; alone it passes 5 of 5. Same class as 131, 146 and 151: a bounded wait read as a
+     product failure. Closer: the collection wait becomes delivery-fulfilled (await the count, with
+     a guard of a minute or more that only turns a hang into a failure) rather than a fixed window;
+     and the floor's operator rule is one xcodebuild floor at a time. Owner: C3. Filed 2026-09-08
+     at C7.2's merge.
