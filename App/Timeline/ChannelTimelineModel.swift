@@ -34,22 +34,37 @@ struct ChannelHeader: Hashable, Sendable {
     }
 }
 
-// MARK: - One line of the placeholder timeline
+// MARK: - One row of a channel's list
 
-/// One rendered line: the item's category, its timestamp and a one-line summary. Nothing else —
-/// §8's "no composer, no markdown, no cards", and C6 replaces the whole view.
+/// One row of a channel's list: **the item itself**, plus the three fields C5's placeholder row
+/// draws, each derived from it.
+///
+/// **Superseded 2026-09-08 (C6.1; contract Y1 amended by the architect's ruling).** What stood here
+/// said a row was "the item's category, its timestamp and a one-line summary. Nothing else", because
+/// that is all C5's placeholder needed. It is not what a row is. Y1 hands a leaf's builder one of
+/// these and nothing else, and no builder can draw an assistant message's blocks, a tool call's
+/// typed input, a cluster's members or an agent chip's status from a flattened 140-character string.
+/// So the row carries `item`, and `category`, `timestamp` and `summary` stay exactly what they were
+/// and stay derived from it: `PlaceholderRowView`, the closed switch below and every existing
+/// assertion are untouched, and C6.3's builders — written against this type in a parallel worktree —
+/// keep compiling. The amendment is one stored field, and the builder's arity is deliberately
+/// unchanged.
 ///
 /// **The switch below is closed and total on purpose.** The category test compares the set of
 /// categories this builder produced against the set the projection holds, in both directions, and
 /// that comparison only means something while every item yields exactly one row. A `default:` here
 /// that returned nil for a kind nobody thought about would drop that kind's items silently.
 struct TimelineRow: Identifiable, Hashable, Sendable {
+    /// What the row is of. `TimelineItem` is `Hashable` and `Sendable`, so this type's own
+    /// conformances are unaffected by carrying it.
+    let item: TimelineItem
     let id: ItemID
     let category: TimelineCategory
     let timestamp: Date?
     let summary: String
 
     init(_ item: TimelineItem) {
+        self.item = item
         id = item.id
         category = item.category
         timestamp = item.timestamp
