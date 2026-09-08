@@ -144,7 +144,11 @@ struct VerbatimSection: Hashable, Sendable {
 /// What the card should draw for a change: a diff, or the input as the engine sent it.
 enum DiffPreparation: Hashable, Sendable {
     case diff(before: String, after: String, path: String)
-    case verbatim(path: String, sections: [VerbatimSection])
+    /// The tool's own input, with the sentence saying why there is no diff. The note travels with
+    /// the preparation because the *source* is what knows which of the two reasons applies, and a
+    /// card that picked one for itself would tell the user a file could not be read when it was
+    /// read perfectly well and the change it describes is simply too large to draw.
+    case verbatim(path: String, note: String, sections: [VerbatimSection])
 }
 
 /// Turns a `Write` or an `Edit` into the two sides of a diff (spec D9).
@@ -152,6 +156,21 @@ enum DiffSource {
 
     /// Lines of the file kept either side of an `Edit`, so the change is read in its place.
     static let contextLines = 3
+
+    /// The most either side of a diff may be, in UTF-8 bytes: the reader's own ceiling, because both
+    /// sides end up in one card and the card is what the ceiling protects.
+    static let expansionCeilingBytes = FileTextReader.defaultLimitBytes
+
+    /// What a card says instead of a diff. The engine's request is still shown in full; what is
+    /// missing is the other side of it, and saying so is what keeps a fabricated diff off the
+    /// screen.
+    static let unreadableNotice = "This file could not be read, so the tool's input is shown instead of a diff."
+
+    /// The same, for a change the app *can* describe and cannot draw: a `replace_all` whose result
+    /// would pass the ceiling. Distinct from the sentence above because nothing is wrong with the
+    /// file and telling the user otherwise would send them looking for a fault that is not there.
+    static let oversizedChangeNotice =
+        "This change is too large to draw, so the tool's input is shown instead of a diff."
 
     /// True for the tool inputs `prepare` can answer. A card asks this synchronously so that a tool
     /// which is not a change to a file draws nothing at all rather than an empty container waiting
@@ -195,20 +214,26 @@ enum DiffSource {
             case .unreadable:
                 // A file that exists and cannot be read is **not** a new file. Diffing it
                 // against empty would draw an overwrite of an existing file as a fresh one.
-                return .verbatim(path: write.filePath,
+                return .verbatim(path: write.filePath, note: unreadableNotice,
                                  sections: [VerbatimSection(label: "New contents", text: write.content)])
             }
         case .edit(let edit):
             switch await reader.read(atPath: edit.filePath) {
             case .contents(let current):
-                let sides = inPlace(old: edit.oldString, new: edit.newString, within: current,
-                                    everywhere: edit.replaceAll == true)
+                guard let sides = inPlace(old: edit.oldString, new: edit.newString, within: current,
+                                          everywhere: edit.replaceAll == true) else {
+                    // The result would pass the ceiling. The card shows what the tool asked for and
+                    // says why it is not drawn — the same shape an oversized file already takes.
+                    return .verbatim(path: edit.filePath, note: oversizedChangeNotice,
+                                     sections: [VerbatimSection(label: "Replacing", text: edit.oldString),
+                                                VerbatimSection(label: "With", text: edit.newString)])
+                }
                 return .diff(before: sides.before, after: sides.after, path: edit.filePath)
             case .absent:
                 // The two strings are the whole change; there is no file to take context from.
                 return .diff(before: edit.oldString, after: edit.newString, path: edit.filePath)
             case .unreadable:
-                return .verbatim(path: edit.filePath,
+                return .verbatim(path: edit.filePath, note: unreadableNotice,
                                  sections: [VerbatimSection(label: "Replacing", text: edit.oldString),
                                             VerbatimSection(label: "With", text: edit.newString)])
             }
@@ -229,10 +254,18 @@ enum DiffSource {
     /// would tell the user the change is smaller than it is. So that arm diffs the whole file
     /// against the whole result — which is exactly what the `Write` arm above already does, for
     /// the same reason: the card shows the change the tool would make, not a sample of it.
+    /// **`nil` is the answer for a change that would not fit** (scalpel-5#2). A `replace_all` grows
+    /// the file by the difference between the two strings *once per occurrence*, so a dense file and
+    /// a long replacement multiply — a mebibyte of one repeated character replaced by a kibibyte
+    /// each is about a gibibyte, built here, on the way to one card. The reader's ceiling bounded
+    /// what was read and said nothing about what was produced. The size is therefore computed from
+    /// the occurrence count and the growth *before* anything is allocated, which is why the string
+    /// that would prove the problem by existing never does.
     static func inPlace(old: String, new: String, within file: String,
-                        everywhere: Bool = false) -> (before: String, after: String) {
+                        everywhere: Bool = false) -> (before: String, after: String)? {
         guard !old.isEmpty, file.contains(old) else { return (old, new) }
         if everywhere {
+            guard fitsExpansion(old: old, new: new, within: file) else { return nil }
             return (file, file.replacingOccurrences(of: old, with: new))
         }
         guard let range = file.range(of: old) else { return (old, new) }
@@ -241,6 +274,27 @@ enum DiffSource {
         let leading = head.suffix(min(head.count, contextLines + 1)).joined(separator: "\n")
         let trailing = tail.prefix(min(tail.count, contextLines + 1)).joined(separator: "\n")
         return (leading + old + trailing, leading + new + trailing)
+    }
+
+    /// Whether replacing every occurrence of `old` with `new` stays inside the ceiling.
+    ///
+    /// Only growth is counted, and only when there is any: a replacement no longer than what it
+    /// replaces cannot produce more than the file, which the reader has already bounded. The scan
+    /// walks non-overlapping matches the way `replacingOccurrences` does, so the count is the one
+    /// the allocation would have used, and it allocates nothing itself.
+    static func fitsExpansion(old: String, new: String, within file: String,
+                              ceilingBytes: Int = expansionCeilingBytes) -> Bool {
+        let growth = new.utf8.count - old.utf8.count
+        guard growth > 0 else { return true }
+        var occurrences = 0
+        var from = file.startIndex
+        while let found = file.range(of: old, range: from..<file.endIndex) {
+            occurrences += 1
+            from = found.upperBound
+        }
+        let (added, overflowed) = occurrences.multipliedReportingOverflow(by: growth)
+        guard !overflowed, added <= ceilingBytes else { return false }
+        return file.utf8.count + added <= ceilingBytes
     }
 }
 
@@ -273,11 +327,6 @@ struct DiffView: View {
         _prepared = State(initialValue: prepared)
     }
 
-    /// What a card says instead of a diff. The engine's request is still shown in full; what is
-    /// missing is the other side of it, and saying so is what keeps a fabricated diff off the
-    /// screen.
-    static let unreadableNotice = "This file could not be read, so the tool's input is shown instead of a diff."
-
     var body: some View {
         if DiffSource.changesAFile(input) {
             drawn.task(id: DiffSource.identity(of: input)) { prepared = await prepare() }
@@ -296,9 +345,9 @@ struct DiffView: View {
         switch prepared {
         case .diff(let before, let after, let path):
             renderer.view(before: before, after: after, path: path)
-        case .verbatim(_, let sections):
+        case .verbatim(_, let note, let sections):
             VStack(alignment: .leading, spacing: 4) {
-                Text(Self.unreadableNotice).font(.caption).foregroundStyle(.secondary)
+                Text(note).font(.caption).foregroundStyle(.secondary)
                 ForEach(sections, id: \.self) { section in
                     Text(section.label).font(.caption).foregroundStyle(.secondary)
                     Text(section.text)

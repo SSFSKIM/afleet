@@ -207,7 +207,7 @@ final class DiffRenderingTests: XCTestCase {
         let renderer = RendererProbe()
         let input = try toolInput("Write", ["file_path": target.path, "content": "alpha\nbeta"])
 
-        guard case .verbatim(_, let sections) = try await prepared(input, reader) else {
+        guard case .verbatim(_, _, let sections) = try await prepared(input, reader) else {
             XCTFail("an unreadable file produced a diff instead of the tool's input")
             return
         }
@@ -219,7 +219,7 @@ final class DiffRenderingTests: XCTestCase {
         let preparation = await card.prepare()
         let prepared = try XCTUnwrap(preparation, "the card prepared nothing for a file-changing input")
         let body = DiffView(input: input, reader: reader, renderer: renderer, prepared: prepared).body
-        XCTAssertTrue(texts(in: body).contains(DiffView.unreadableNotice),
+        XCTAssertTrue(texts(in: body).contains(DiffSource.unreadableNotice),
                       "the card drew \(texts(in: body).count) lines and none of them said why there is no diff")
         XCTAssertEqual(renderer.calls, 0,
                        "\(renderer.calls) diffs were produced for a file the app cannot read")
@@ -288,6 +288,42 @@ final class DiffRenderingTests: XCTestCase {
         }
         XCTAssertEqual(bytes.count, ceiling, "\(bytes.count) bytes came back for a ceiling of \(ceiling)")
         XCTAssertTrue(truncated, "a file larger than the ceiling was not reported as truncated")
+    }
+
+    /// scalpel-5#2: **a `replace_all` whose expanded result passes the ceiling is never built.**
+    ///
+    /// The `everywhere` arm diffs the whole file against the whole result, and the result is not
+    /// bounded by the input: every occurrence grows by the difference between the two strings, so a
+    /// dense file and a long replacement multiply. The reader's ceiling bounds what is read and said
+    /// nothing about what is produced. The invented file below is half a mebibyte of one repeated
+    /// character and the replacement is forty bytes, which is twenty mebibytes out — past the
+    /// sixteen the card is allowed. The size is computed from the occurrence count and the growth,
+    /// so the string that would prove this by existing is exactly the one that is never allocated.
+    func testAReplaceAllWhoseResultPassesTheCeilingIsNotExpanded() async throws {
+        let tree = try TempTree()
+        let dense = String(repeating: "a", count: 512 * 1024)
+        let target = try tree.file("invented-module/dense.txt", dense)
+        let replacement = String(repeating: "b", count: 40)
+        let expanded = dense.utf8.count * replacement.utf8.count
+        XCTAssertGreaterThan(expanded, DiffSource.expansionCeilingBytes,
+                             "the invented replacement does not pass the ceiling, so this clause proves nothing")
+
+        let reader = RecordingReader()
+        let input = try toolInput("Edit", ["file_path": target.path, "old_string": "a",
+                                           "new_string": replacement, "replace_all": true])
+        guard case .verbatim(_, let note, let sections) = try await prepared(input, reader) else {
+            return XCTFail("a replace_all past the ceiling was expanded and handed to the renderer")
+        }
+        XCTAssertEqual(sections.count, 2, "\(sections.count) of 2 verbatim sections were offered")
+        XCTAssertFalse(note.isEmpty, "the card fell back to the input and said nothing about why")
+
+        // The bound is on the expansion and not on `replace_all`: the same edit with a replacement
+        // that fits still draws a diff.
+        let short = try toolInput("Edit", ["file_path": target.path, "old_string": "a",
+                                           "new_string": "b", "replace_all": true])
+        guard case .diff = try await prepared(short, reader) else {
+            return XCTFail("a replace_all whose result fits the ceiling was refused a diff")
+        }
     }
 
     /// The same read refuses what it is not: a symbolic link at the final component (`O_NOFOLLOW`,
