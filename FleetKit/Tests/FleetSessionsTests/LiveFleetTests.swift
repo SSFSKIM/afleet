@@ -211,7 +211,7 @@ final class LiveFleetTests: XCTestCase {
             // marker proves the engine's own promotion rather than the gate's behaviour.
             let keyA = ChannelKey(configHome: LiveGate.scratchHome, session: SessionID())
             await rig.fleet.register(keyA, cwd: directory, recent: true)
-            guard case .consentNeeded(let servers) = await rig.fleet.preconditions(for: keyA) else {
+            guard case .consentNeeded(_, let servers) = await rig.fleet.preconditions(for: keyA) else {
                 throw LiveGateFailure("the project's marker server was not read as consent-needed")
             }
             XCTAssertEqual(servers.map(\.name), ["marker"])

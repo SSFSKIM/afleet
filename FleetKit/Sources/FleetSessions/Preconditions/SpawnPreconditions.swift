@@ -50,7 +50,10 @@ public struct SpawnPreconditions: Sendable {
                                         configHome: key.configHome, settingSources: launch.settingSources,
                                         acceptances: acceptances ?? [])
         let pending = verdicts.filter { $0.value == .pending }.keys.sorted { $0.name < $1.name }
-        guard pending.isEmpty else { return (.consentNeeded(pending), launch) }
+        // The evaluated directory, not the canonical root: it is the one the decline's own resolver
+        // takes, and it is what a caller must answer against for the write to land where this read
+        // looked.
+        guard pending.isEmpty else { return (.consentNeeded(project: cwd, servers: pending), launch) }
         return (.ready, launch)
     }
 

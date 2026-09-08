@@ -1916,7 +1916,418 @@ is renumbered.
      Found at C6.1 Task 7. Closer: the composer records the target it was given — one stored
      `promptUUID` beside `editNote` — and the row reads it instead of remembering, which also makes
      the placement survive a re-mount. Owner: C6.2, whose file the target would live in.
+## From C6.3 (`child/c6-decisions`)
 
+Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–168 are
+used and 169–171 are left unspent. Nothing above is renumbered — the gap between 141 and 157 is
+Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–166 and
+169–170 are used and 167–168 and 171 are left unspent. Nothing above is renumbered — the gap between 141 and 157 is
+C6.1's and C6.2's reservations and is expected.
+
+157. **Five deferred mounts wait on one carrier: C6.1's `TimelineRenderContext`.** Read rather than
+     assumed at this child's tip: no `EnvironmentValues`, `EnvironmentKey` or `@Entry` declaration
+     exists anywhere under `App/`, and `TimelineRenderContext` appears in the tree only as four
+     doc-comments naming its absence. C6.1's skeleton 2 (`9d6d320`) landed `TimelineRow.item` and
+     `ChannelTimelineModel.signal(_:)`; the per-row capability value lands in a later C6.1 task.
+     Everything this child could not mount is downstream of that one value, and filing them
+     separately would restate one closer five times:
+     - a permission card's paths render as **text, not links**, because the link capability travels
+       in that value and reaching `ChannelContext.links` another way would be the duplicate registry
+       C5's `HostLinkRouter` exists to prevent;
+     - the sent-file row's *Open in Files* (§14 item 29) is unbuilt for the same reason;
+     - the decision row's actions are absent, so the row renders and does not answer;
+     - `RetractionRegistry.retains(_:)` has **no production caller** and still carries its
+       `check-app-wiring.py` allowlist entry naming Task 8, and `TaskCardView` is not mounted on
+       C6.1's `taskRun` row — both allowlist entries were to be removed at that mount;
+     - **`DecisionAnswering.raise` was assigned nowhere**, so D2's loop was complete but not closed:
+       a successful `perform(.answer)` raised `HostSignal.decisionAnswered` where a test handed it
+       the fold, and raised nothing in the running app, because none of the three hosts that
+       construct an answering object (Activity, the Thread tab, the timeline row) owns a
+       `ChannelTimelineModel` — only the channel column does. So a card's state did not leave
+       `.pending` on screen. The spec never said who makes that assignment; that omission was the
+       architect's, not a worker's. **Activity's clause is closed** (2026-09-09, architect's ruling,
+       second review round): no render context is needed for it, because the app-scoped
+       `ChannelTimelineRegistry` reaches every channel's fold, and `ActivityModel` now takes a
+       `timeline` provider over that one registry which the composition root assigns. The Thread
+       tab's and the timeline row's assignments remain on this entry.
+     - **nothing assigns `DecisionAnswering.raise`**, so D2's loop is complete but not closed: a
+       successful `perform(.answer)` raises `HostSignal.decisionAnswered` where a test hands it the
+       fold, and raises nothing in the running app, because none of the three hosts that construct
+       an answering object (Activity, the Thread tab, the timeline row) owns a
+       `ChannelTimelineModel` — only the channel column does. So a card's state does not yet leave
+       `.pending` on screen. The spec never said who makes that assignment; that omission is the
+       architect's, not a worker's. **Closed for the Thread tab, 2026-09-09**, by the architect's
+       ruling: the tab is handed `ChannelFold`, two closures over the app-scoped
+       `ChannelTimelineRegistry`, at its `performLaunch` construction, and assigns `raise` on the
+       answering object it builds — a panel tab has no row and needs no per-row carrier. **Closed for
+       Activity the same day** by wave A (`ad4e854`): `ActivityModel` takes a `timeline` provider over
+       the same registry. The timeline row's assignment is the one clause still open, and it is
+       contract Y7's (C6.1's `TimelineRenderContext`).
+     The mechanism in every case ships and is tested against a double; what is missing is the
+     construction site. Found at Tasks 2, 6 and 8a, re-verified by reading at this child's tip.
+     Closer: C6.1's merge lands `TimelineRenderContext` and constructs the answering object with the
+     channel's model; this child's rows then read the capability where every other row reads it. If
+     C6.1's merge does not make the `raise` assignment, this stays open on that clause alone.
+     Owner: C6.1, at its merge.
+
+158. **`annotations.preview` is produced by the question card's shape but never populated.** The
+     card writes only `notes`. Two readings of one field name, unresolved and not resolvable from
+     what is recorded: `Fixtures/ask-user-question` records an answer with **no `annotations` key at
+     all** even though its chosen option carries a preview, so deriving one from the option would
+     contradict the recording; and the engine's own TUI populates it only from a preview whose
+     `kind` is `"full"` (2.1.263 `cli.pretty.js:518286`), a shape the tool-input schema's
+     plain-string `preview` does not describe. The card therefore emits `annotations` only when it
+     produced one and omits it otherwise, which is what G1b asserts — correct against both readings
+     and informative under neither. Same class as the overage card's declared-but-unfed
+     `balanceCents` and `currency`. Found at Task 4. Closer: a recording that actually carries
+     `annotations`, or a bundle reading that reconciles the two preview shapes. Owner: C1 for the
+     recording, C6.3's successor for adopting it.
+
+159. **`ThreadModel.open(_:)` has no production caller, and `check-app-wiring.py` cannot see it.**
+     Nothing inside the Thread tab opens a thread; every affordance that would is in another leaf —
+     a timeline tool row (C6.1), a decision row (this child's deferred Task 8 mount, entry 157) and
+     *Ask on the side* on a message (C6.2). The checker keys on the bare name `open`, which is used
+     elsewhere under `App/`, so the member is invisible to it: the tool's letter is satisfied and
+     its substance is not, which is the shape tracker 72 exists to catch. Recorded here rather than
+     left to a name collision. Found at Task 6. Closer: C6.1's and C6.2's affordances land, and the
+     decision row's actions arrive with entry 157's carrier. Owner: C6.1 and C6.2, at their merges.
+
+160. **A pre-existing unused-binding warning outside this child's fence.** A clean
+     `build-for-testing` surfaces `App/Timeline/ChannelTimelineModel.swift:352: warning: immutable
+     value 'ingestion' was never used` — `transcriptMoved(to:)` binds the ingestion in its `guard`
+     and then raises `signal(.relocated:)` alone, which is correct behaviour (tracker 130's closer)
+     with a leftover binding. Committed code this child did not touch, and invisible to an
+     incremental `make build`/`make test`, which is why it survived: this child's own runs report
+     zero warnings. Verified still present at this tip by reading the source. Found at Task 6.
+     Closer: drop the binding to a plain `guard ingestion != nil` or use it. Owner: whoever owns
+     `App/Timeline/` — C6.1.
+
+161. **Two load-dependent flakes in `FleetTimelineTests` redden the shared floor.** **Closed 2026-09-09
+     by the `main` corrective `1402cd4`** (both waits delivery-fulfilled with a 120 s hang guard; the
+     tailer test's own pre-write race fixed with it; 0 of 10 → 10 of 10 under a load average near 150).
+     `IngestionTests.testTheWholeWireStreamThroughTheTapYieldsMirrorEffectsAndTheLiveHalf` failed
+     once in a full-suite run (7 effects against 15, 30 entries against 53) and passes in
+     isolation — 27 executed / 0 failures on a focused re-run. `TaskOutputTailerTests
+     .testASecondChunksCallSurvivesTheFirstStreamsTermination` has the same shape. Both are outside
+     this child's fence. This matters past tidiness: **two intermittents make a red full-suite run
+     ambiguous**, so every downstream child and every merge reconciliation has to distinguish noise
+     from regression by hand, which is exactly the reading a floor exists to make mechanical. Found
+     at Tasks 7 and 9. Closer: make each assertion wait on delivery rather than on elapsed work, the
+     way tracker 2's and tracker 131's instances were converted. Owner: C3.
+
+162. **afleet has no new-channel path, and a Settings toggle with no consumer.** `Fleet.register`
+     composes every launch as `.resume(key.session, fork: false)`; nothing under `App/` constructs
+     `.new(SessionID())`. `AfleetStore.isolatedSettingsForNewChannels`
+     (`App/Composition/AfleetStore.swift:49`) is written by a control in `SettingsView` and read by
+     nobody. Two consequences, both concrete: root acceptance item 3 (*New channel*) has no
+     implementation at all, and item 4's *Isolated settings for this channel* developer setting does
+     not reach a spawn — which is why this child's live gate has to impose isolation at the
+     process-factory seam rather than through the setting the parent names. Not this child's to fix;
+     channel creation belongs to the shell or to the composer/header leaf. Found at Task 9. Closer:
+     a `.new` composition at `Fleet.register`'s caller, with the developer setting read there.
+     Owner: the architect, to assign.
+
+163. **`claude auth status` is not a sufficient live-gate precondition, and `ScratchLiveGate` treats
+     it as one.** The scratch home reports `loggedIn: true` with an `oauth_token` on `firstParty`,
+     and a prompted turn still returns an API error before any tool call: the account's
+     organisation has subscription access to Claude Code disabled at the policy level. The engine
+     writes it as an `assistant` record carrying `isApiErrorMessage`, `apiErrorStatus`, `error` and
+     `requestId`, with `stop_reason: stop_sequence`, at **zero cost**. So a signed-in home can be an
+     unusable home and the gate's entry check cannot see the difference; the failure instead
+     surfaces four minutes later as the surface's own assertion about a missing card, and the
+     diagnosis took a transcript read because nothing in the run reported it. Found at Task 9, and
+     it has already cost a second leaf (C6.2's G6). Closer: `ScratchLiveGate` additionally skips —
+     loudly, naming the condition — when the first `result` of a probe run carries an error subtype
+     or the first assistant record carries `isApiErrorMessage`. Owner: C5, which owns the file.
+
+164. **`RowRegistry.shared` is process-wide and traps on a duplicate, while the suite builds many
+     `AppModel`s.** An unguarded pair of `register(kind:)` calls in `AppModel.init` crashes the
+     second construction, so this child's claim sits behind a MainActor-isolated
+     `hasClaimedRowKinds` flag: the trap stays live for the case Y1 wrote it for (two leaves owning
+     one kind) and is defeated for the case it never anticipated (one process, many models).
+     **C6.1 registers eleven kinds the same way and meets this the moment its leaf merges**, so the
+     guard belongs in Y1's skeleton rather than being rediscovered per leaf. Found at Task 8a.
+     Closer: the skeleton either states the one-claim-per-process rule and offers the guard, or
+     `RowRegistry` becomes idempotent for an identical re-registration. Owner: the architect, with
+     C6.1 at its merge.
+
+165. **The elicitation form implements a stated JSON-Schema subset, and anything outside it renders
+     raw** (spec D8): object properties of string (with `enum`), number, integer, boolean and
+     string-array; every other shape, a nested object included, renders as a raw JSON field and
+     still answers. The boundary is deliberate, not an oversight, and is filed so that the first
+     real MCP server whose schema exceeds it produces a widening rather than a bug report. No
+     fixture carries an elicitation at all, so the whole card is built on invented requests. Found
+     at Task 4. Closer: widen the subset when a real server's schema needs it. Owner: C6.3's
+     successor.
+
+166. **`ViewTree` reflection needs an explicit descent to reach a hosted card.** `ViewTree` reflects
+     stored properties, so a host's body holds the card *value* and not its buttons, and a blind
+     recursion into `body` reaches `Text`, whose `Body` is `Never`. Task 2 added a `CardTree` helper
+     that descends deliberately for the card's own type. Test-instrument debt, and it extends entry
+     81's finding that SwiftUI body inspection is tied to framework storage rather than to the view
+     tree a user sees. Found at Task 2. Closer: fold the deliberate descent into `ViewTree` itself
+     so each host does not add its own. Owner: C5, which owns the instrument.
+
+167. **The sent-file row has no production supplier for its channel's working directory.** The row
+     resolves its preview path the way `SendUserFileTool` did — tilde first, absolute as given,
+     anything else against the channel's cwd — and `SentFileRowView.cwd` is the seam that carries it.
+     Nothing in the running app sets it, because a row learns its channel's context from C6.1's
+     `TimelineRenderContext` and that value is not on `main` (entry 157). Capturing the app's panel
+     host in `RowRegistry.shared`'s builder instead was rejected: the registry is process-wide and the
+     suite builds many `AppModel`s (entry 164), so the first one's host would answer for every later
+     one. The consequence is bounded and stated in the row: with no cwd, a **relative** path is not
+     read at all and the row says the file could not be previewed, rather than reading whatever sits
+     at that path relative to the app's own directory. Absolute and `~` paths, which is what the
+     recorded corpus carries, preview as normal. Found in the second review round. Closer: the same
+     carrier as 157 hands the row its channel's cwd. Owner: C6.1, at its merge.
+
+168. **No production host marks a decision card active, so no card binds Return.** `isActive` gates
+     the approve shortcut (Decision Log, 2026-09-09) and every host passes the default, which is
+     `false`: Activity deliberately, because a compact card in a fleet-wide list must not own the
+     keyboard default action, and the timeline and Thread hosts because neither yet knows which of
+     the cards it draws the user is acting on. Answering by mouse is unaffected; a one-key approve is
+     absent until a host tracks focus or selection. Filed rather than answered here because the
+     knowledge is the host's, not the card's. Found in the second review round. Closer: the timeline
+     list marks the focused row's card active (C6.1), and the Thread tab marks the open thread's
+     (C6.3's Thread half). Owner: C6.1 and the Thread host.
+
+     **Half closed 2026-09-09 (second fix wave, architect's ruling).** The Thread tab is the first
+     production host to set it: a tab draws exactly one card and the user opened it, so it owns
+     Return with no list for the shortcut to reach the wrong member of. `ThreadView` passes
+     `isActive: true`, asserted through the existing shortcut clause. Activity's compact list and
+     the timeline's rows still pass the default, and the entry stays open for the timeline row —
+     which is where a focused-row notion has to come from.
+
+169. **Four of the five thread anchors are still snapshots.** `ThreadAnchor.decision` now resolves
+     through the `DecisionItem` the channel's fold holds, so a card settled by any surface reads as
+     settled in the open thread. The other four carry values taken at the moment the thread was
+     opened: a tool call opened while running shows *running* for as long as the thread stays open,
+     a task's status is the registry mirror's at that instant, and a sent file's delivery never
+     turns from pending to delivered. The mechanism to fix each is the one the decision anchor now
+     uses — the fold is reachable from the tab — but each kind is keyed differently (`ItemID` for a
+     tool call and a sent file, the task id for a task) and none of the four misleads a user into
+     an action the engine then rejects, which is what made the decision case worth closing now.
+     Found while closing the decision anchor, 2026-09-09. Closer: the anchor holds the key rather
+     than the value for every kind, and reads the fold for all five. Owner: C6.3's successor.
+
+170. **Closed 2026-09-09** (second fix wave, architect's ruling): §6.12 gains a third answer, *Not
+     now*. It dismisses the sheet, writes nothing anywhere and leaves the channel in
+     `consentNeeded` — unspawned, still asking — and the column draws a banner that brings the
+     sheet back, so an outstanding decision does not lose its affordance with its modal. Closing
+     the sheet by its own gesture *is* *Not now*: the binding is real now, and declining stays the
+     only path that writes `settings.local.json` (§6.12's one exception), reachable only by
+     pressing *Decline*. `testNotNowRecordsNothingAndLeavesTheChannelWaiting` holds it on the X9
+     seam — no acceptance, no decline, no lifecycle action — with the precondition re-asserted
+     afterwards. The entry stands below as filed.
+
+     **The consent sheet cannot be dismissed by the user.** `ChannelDecorations` presents §6.12's
+     sheet from the verdict — `.constant(model.consentRequest)` — so the sheet's own dismissal
+     gesture writes into a binding that drops it and the sheet returns. That is deliberate as far
+     as it goes: consent is taken before the child exists, the sheet closes because the fleet
+     stopped asking rather than because the view decided it had, and a sheet a user could wave away
+     would leave the channel in a state with no affordance to get back to. But it reads as a stuck
+     window rather than as a modal decision, and the design says nothing about a third answer.
+     Found while binding the sheet to its evaluation, 2026-09-09. Closer: §6.12 says what dismissal
+     means — *not now*, leaving the channel unspawned with a banner, is the likely answer — and the
+     sheet gets a real binding. Owner: the architect, then C6.3's successor.
+
+171. **A question answered with only a note carries an empty `answers` entry.** The question card
+     now builds a response for a question the user annotated and did not otherwise answer, because
+     that is the only way its annotation reaches the reply at all; `DecisionCard.echo(_:answering:)`
+     then writes `answers[<the question>] = ""` beside the annotation, so the engine reads an empty
+     answer where the user gave none. Nothing is lost and nothing is invented — the alternative
+     spelling, an `answers` map that skips a response with no selections, lives in the mapping and
+     not in the card. Found by the review wave on C6.3. Closer: `echo` omits an entry whose
+     selections are empty. Owner: whoever next owns `DecisionAnswerMapping`.
+
+296. **A form-mode elicitation whose schema is not an object draws no form and no Accept.**
+     `ElicitationForm.init?` now builds a form for an object with no properties (its answer is
+     `{}`), but a `requested_schema` of some other type — a bare `{"type": "string"}`, or a schema
+     given as a `$ref` — still produces no form, so the card offers only *Decline* and *Cancel*.
+     That is the same shape §6.4 forbids, one level up from the properties this wave fixed; it is
+     left standing because no server has been seen to send one and the raw-JSON fallback for a
+     whole schema is a design question, not a repair. Found by the review wave on C6.3. Closer:
+     a whole-schema raw field for a form-mode request the subset cannot open. Owner: C6.3's
+     successor, with entry 165.
+
+297. **An integer control truncates a fractional entry rather than refusing it.** Typing `2.7`
+     into a property of `type: "integer"` sends `2`, silently, and this wave's numeric guard did
+     not change that — it only stopped the out-of-range and non-finite cases from trapping. Small,
+     and the field would have to say why it refused. Found by the review wave on C6.3. Closer:
+     refuse a value with a fractional part in an integer control, the way an out-of-range one is
+     refused. Owner: C6.3's successor.
+
+300. **The timeline's own card host does not share the app's reservation set yet.** The second fix
+     wave gave `DecisionAnswering` an app-scoped `DecisionReservations` — one in-flight set and one
+     settle announcement for every surface — and wired the two hosts that exist on this branch,
+     Activity and the Thread tab, from `AppModel.decisions`. The third host is C6.1's timeline card,
+     which builds its answering object inside `TimelineRenderContext` and is not on `main`. Until it
+     is handed the same set, a card answered from the timeline while Activity's answer is in flight
+     reopens exactly the window this wave closed: two answers on the wire and the second refused as
+     `decisionGone`, and Activity's pump keeps a payload the timeline settled. Found while closing
+     scalpel-1#2 and #4. Closer: C6.1's render context carries the app's `DecisionReservations` and
+     passes it to the answering object it builds. Owner: C6.1, at its merge.
+
+301. **A host registered on `DecisionReservations` cannot withdraw.** `observe(_:_:)` is keyed by the
+     host's `ObjectIdentifier`, which is what stops one model re-registering twice, but there is no
+     removal: `startActivity` builds a **new** `ActivityModel` on every launch that reaches a
+     workspace, so the previous model's entry stays in the map for the app's life. Nothing leaks the
+     model — the closure holds it weakly and a dead entry does nothing — and the bound is the number
+     of relaunches in one process, which is small. Filed rather than fixed because the withdrawal
+     wants an owner (a token, or `stop()`), and choosing one is a design question about who holds the
+     registration. Found in the same change. Closer: `observe` returns a registration the host
+     releases, or `ActivityModel.stop()` withdraws. Owner: C6.3's successor.
+
+302. **The trust re-read fires when the pane is handed over, not when the user finishes with it.**
+     `reviewTrustInTerminal` re-reads the verdict once `PanelHost.run(_:)` returns, and that is the
+     handover rather than the grant: the user trusts the project in Claude Code's own dialog some
+     seconds later. The second half of sweep#5 is what actually catches it — the mount re-evaluates
+     when afleet comes back to the front — so the case left standing is a Terminal pane that never
+     takes the front away from afleet, where the banner can stay up until the selection moves. Small,
+     and no wrong write follows from it: the channel is history-only, which is the safe direction.
+     Found in the second fix wave. Closer: the pane's `PaneExit` is already reported to C4; route it
+     to a re-read as well. Owner: C6.3's successor, with C7.4.
+
+303. **A card's diff is prepared once per view instance, not once per decision.** `DiffView` reads
+     the other side of a change through `.task(id:)`, so a card drawn in both presentations — the
+     compact card in Activity and the full card in the timeline — makes the read twice, and a view
+     SwiftUI rebuilds for an unrelated reason makes it again. The line-level difference is cached by
+     its two sides and does not repeat, so what is left is one bounded read per instance rather than
+     one per render pass, which is the cost the fix was about. Found by the second review wave on
+     C6.3 (scalpel-5#1). Closer: a preparation cache keyed by the request id, invalidated when the
+     card leaves `.pending`. Owner: C6.3's successor, with C7.2's `MonacoEditorView` seam.
+
+304. **A raw elicitation field cannot answer a schema with a string that begins like JSON.** The
+     discriminator between "a string" and "a syntax error" is the opening character: text beginning
+     `{`, `[` or `"` must parse, everything else is carried as a string. A server whose schema
+     genuinely wants the *string* `{not json` therefore cannot be answered through the raw field.
+     Nothing recorded asks for one, and the alternative — a control that says which of the two it is
+     — is a design question rather than a repair. Found by the second review wave on C6.3
+     (scalpel-4#3). Closer: a per-field switch between "as JSON" and "as text". Owner: C6.3's
+     successor, with entries 165 and 296.
+
+305. **A file over 16 MiB shows the tool's input instead of a diff.** `FileTextReader` reports a
+     file past `defaultLimitBytes` as unreadable, because a diff of a truncated file draws the
+     missing half as a deletion nobody proposed, and the card then falls back to the verbatim input
+     with the line that says why. That is true but unhelpful for a legitimately large file — a
+     generated bundle, a lockfile — where a diff of the changed region would be exactly what the
+     user needs. Found by the second review wave on C6.3 (scalpel-5#2). Closer: an `Edit` reads a
+     window around its `old_string` rather than the whole file, which needs a seek the bounded read
+     already has the descriptor for. Owner: C6.3's successor, with tracker 292.
+
+306. **The diff's line difference is computed on the main actor on a cache miss.**
+     `DiffRendering.view` (`App/Decisions/DiffRendering.swift`) looks the two sides up in `DiffLineCache` and, when the digest is not
+     there, computes the line-level difference inside the render pass. The read and the repeat
+     computation were moved off the main actor, but the *first* one for any pair was not, and the
+     algorithm is quadratic in the number of lines over a ceiling of sixteen mebibytes — a large
+     `Write` or a `replace_all` therefore hitches the window once per card. It is one hitch and not
+     a hang, which is why this is a note. Closer: the difference is computed in the preparing task
+     beside the read, so the cache is warm before the card draws; or the renderer bounds itself by
+     line count and draws a summary past it. Owner: C6.3. Filed 2026-09-09 at C6.3's third review
+     round (hard stop).
+
+307. **A completed answer clears whatever draft is in the thread, not its own.** `ThreadModel.send`
+     (`App/Threads/ThreadModel.swift`) hands `perform` an `onSuccess` that clears the draft unconditionally. The answer is a round
+     trip, and the thread can be re-opened on another anchor while it is in flight, so a reply the
+     user has begun typing to a *newer* card is erased by an older card's success. The window is
+     narrow and nothing wrong is sent — what is lost is typing. Closer: the clear names the draft
+     belonging to the answer that completed, and does nothing when the thread has moved on. Owner:
+     C6.3. Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+308. **A refused thread reply is discarded rather than kept.** `ThreadModel.post` (`App/Threads/ThreadModel.swift`) clears the draft
+     before it calls `perform(.send)`, so a send the composer or the wire refuses takes the user's
+     text with it. The decision path already holds the opposite rule — the draft is cleared by the
+     answer succeeding, because the model holds the only copy of what was typed — and the reply path
+     did not get it. Closer: clear on success, as the answers do. Owner: C6.3. Filed 2026-09-09 at
+     C6.3's third review round (hard stop).
+
+309. **A settled answer announces a `ChannelState` captured before the round trip.**
+     `DecisionAnswering.deliver` (`App/Decisions/DecisionAnswering.swift`) reads the state, awaits the raise, and then announces the value it
+     captured; the settlement observer applies it. A state that arrived while the answer was in
+     flight is therefore overwritten by an older one, and the card list on screen is the one from
+     before the answer. Closer: announce the state before awaiting, or let the observer apply by
+     request id alone and take the state from the stream that owns it. Owner: C6.3. Filed 2026-09-09
+     at C6.3's third review round (hard stop).
+
+310. **A failed answer releases the reservation without settling the card.** `answerFailed` and
+     `decisionGone` (`App/Decisions/DecisionAnswering.swift`) drop the in-flight reservation and announce nothing, so a Thread card whose
+     request the engine has already closed goes back to pending and enabled — an affordance over a
+     request that can never be answered, and a second press that earns the same error. The two
+     failures are not the same shape as a refusal the user can retry: a consumed request is
+     terminal. Closer: treat a consumed-request failure as a settlement for the card. Owner: C6.3.
+     Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+311. **A settlement signalled while the timeline is opening its ingestion is dropped.**
+     `ChannelTimelineModel` (`App/Timeline/ChannelTimelineModel.swift`) holds no wire until its ingestion is open, and a signal that arrives in
+     that window meets a nil and is discarded — the card stays pending on screen although the answer
+     succeeded, until something else invalidates it. The window is short and opens once per channel,
+     which is why this is a note rather than a fix. Closer: the signal is buffered until the
+     ingestion opens, or the model retains it and replays it on open. Owner: C3/C5 with C6.3. Filed
+     2026-09-09 at C6.3's third review round (hard stop).
+
+312. **A request answered before Activity ingests it stays retained.** `ChannelEventPump.forget`
+     (`App/Activity/ChannelEventPump.swift`) marks a request the pump has already ingested; a Thread answer that lands first finds nothing
+     to mark, and the later ingest retains the payload with no settlement against it. Bounded — one
+     request's payload, released when the channel's pump goes — but it is the one bookkeeping rule
+     the reservation set exists to keep. Closer: a settlement marker that survives the later ingest,
+     so the order of the two events stops mattering. Owner: C6.3. Filed 2026-09-09 at C6.3's third
+     review round (hard stop).
+
+313. **A plan approval's `setMode` does not reach the supervisor's runtime permission mode.**
+     `RuntimeStateUpdater` (`FleetKit/Sources/FleetSessions/Lifecycle/RuntimeState.swift`) ignores `system/status`, so the mode the engine adopts when a plan
+     approval sends `setMode` is never recorded in `ChannelState.permissionMode`. The session
+     behaves as the user asked; a relaunch reads the stale mode and undoes it, silently. Closer: C4
+     reads the accepted mode from the answer it sent, or from the `system/status` frame that follows
+     it. Owner: C4. Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+314. **The trust action throws on a channel with no process.** *Review trust in terminal* (`App/Consent/PrecommitModel.swift`) goes
+     through the lifecycle's terminal handoff, which mints a `PaneRequest` from a running channel
+     and throws `notOwned` when there is none — so on a history-only channel opened from its files,
+     which is exactly the case §6.11's banner is drawn for, the action refuses before it reaches the
+     pane. Closer: with no process to hand over, the action opens a pane on the project's directory
+     directly; no handoff is involved, because there is nothing to hand off. Owner: C6.3 with C7.4.
+     Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+315. **The thread's generic reply to a question card answers only the first question.** A thread
+     reply (`App/Threads/ThreadModel.swift`, against `App/Decisions/QuestionCardView.swift`) builds one response from the text in the composer and files it against the first
+     question, so the selections and notes the user entered on the card's own controls for the other
+     questions are dropped. The card's own Answer button is correct; the thread's reply is the
+     second path to the same request and does not read what the first one holds. Closer: the thread
+     reply reads the question card's draft rather than composing its own. Owner: C6.3. Filed
+     2026-09-09 at C6.3's third review round (hard stop).
+
+316. **A list field eats its delimiter while it is being typed.** The elicitation form's list control
+     (`App/Decisions/ElicitationForm.swift`) rebuilds its text from the parsed selections on every set, so the delimiter the user has just
+     typed — the character that is about to start the next item — is parsed away before the next one
+     arrives, and a list cannot be typed straight through. Closer: the control retains the text
+     being edited and parses it for the value, rather than deriving the text from the value. Owner:
+     C6.3. Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+317. **A root schema with `allOf` and no direct properties becomes a form that accepts `{}`.** The
+     elicitation form (`App/Decisions/ElicitationForm.swift`) reads the root object's `properties`; a schema that composes its properties
+     through `allOf` has none there, so the form is empty and its Accept sends an empty object as
+     though the user had answered. Composition is outside the stated subset (tracker 165), and the
+     rule for everything outside it is the raw editor — the root did not get it. Closer: composition
+     at the root falls back to the raw editor, as an unsupported field already does. Owner: C6.3.
+     Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+318. **Question and elicitation drafts are lost on a channel switch.** Both live in view `@State`
+     (`App/Decisions/QuestionCardView.swift`, `App/Decisions/ElicitationCardView.swift`),
+     which SwiftUI discards when the subtree goes away, so a half-filled form or a typed note is
+     gone the moment the user looks at another channel and comes back. The card is still pending and
+     still answerable; what is lost is typing. The same class as 307 and 308, and the same cure.
+     Closer: the drafts move to the retained model, which is where the reply draft already lives.
+     Owner: C6.3. Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+319. **An older read can overwrite a newer preview.** `SentFileRowView` and `DiffView`
+     (`App/Decisions/SentFileRowView.swift`, `App/Decisions/DiffRendering.swift`) assign the
+     result of an awaited read without checking that the source it was started for is still the one
+     on screen, so two reads in flight settle in completion order rather than in request order and
+     the slower, older one wins. Both are keyed by `.task(id:)`, which cancels the previous task —
+     which is why this is a note and not a fix — but cancellation is cooperative and the read does
+     not check it. Closer: a generation captured before the await and compared after it, the fence
+     `PrecommitModel.evaluate` already takes. Owner: C6.3. Filed 2026-09-09 at C6.3's third review
+     round (hard stop).
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
@@ -2137,3 +2548,20 @@ is renumbered.
     latched after the first attach, so it costs one poll cycle of first-paint latency and nothing
     afterwards. Closer: an attachment callback upstream, or `currentSurface` made public, either
     of which turns the poll into a wait. Owner: C7.1 if the dependency is bumped, else C7.4.
+292. **A `replace_all` edit draws the whole file as a diff.** The card shows the change the tool
+     would make, and for `replace_all` the occurrences can be anywhere, so `DiffSource.prepare`
+     hands the renderer the file and the file with every occurrence replaced (Decision Log,
+     2026-09-09). `AttributedDiffRenderer` draws every line it is given, including unchanged ones, so
+     a `replace_all` over a large file draws a large view — the same shape the `Write` arm has had
+     since Task 3 and the reason this is a note rather than a regression. Nothing is wrong on screen;
+     it is a cost, and it is the renderer's to answer, not the source's. Closer: the renderer emits
+     hunks — runs of change with a few lines of context and an elision between them — which also
+     improves every long `Write`. Owner: whoever replaces the drawing, C7.2's Monaco conformer being
+     the likely one. Filed 2026-09-09 at C6.3's second review round.
+
+320. **`LateMountMetadataTests.testALateComposerSeedsTheReportsTheStreamWillNotRepeat` fails under a
+     full floor and passes alone.** Seen once at C6.3's final stitch floor ("the composer read back no
+     system/init", 0.136 s) and 3 of 3 green alone at 5/5 each; the suite's files were untouched by the
+     branch. Same class as 131/146/151/194: a seeding path whose order a busy host can change. Closer:
+     the seeding test waits for delivery of the retained report rather than reading once. Owner: C6.2.
+     Filed 2026-09-09 at C6.3's merge.

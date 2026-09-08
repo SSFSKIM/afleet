@@ -6,8 +6,15 @@ import ClaudeWire
 public enum SpawnPrecondition: Hashable, Sendable {
     case ready
     case untrusted(root: URL)
-    /// Name, transport summary and hash of every project server the user has not decided about.
-    case consentNeeded([ProjectMCPServer])
+    /// Name, transport summary and hash of every project server the user has not decided about, and
+    /// the project directory this evaluation read them for.
+    ///
+    /// **The directory travels with the verdict.** The answer to a `consentNeeded` is a write into
+    /// that project (§6.12's one write), and the fleet evaluates the launch's own `cwd` — which a
+    /// relocation parts from whatever directory a surface holds beside it. A caller that paired
+    /// these servers with a directory it supplied itself could accept or decline one project's
+    /// servers against another's.
+    case consentNeeded(project: URL, servers: [ProjectMCPServer])
     case managedSettingsPending
     case contended(HolderSet)
     case wedged(EscalationTrace)

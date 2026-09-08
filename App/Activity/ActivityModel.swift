@@ -9,20 +9,34 @@ import FleetKit
 /// stands, and a stable identity to draw it under.
 struct ActivityItem: Identifiable, Sendable {
 
-    /// The permission ask a row may answer inline. Non-nil for exactly one shape: a `can_use_tool`
-    /// request, still open, that does not carry `requires_user_interaction` (spec §5, §8.4).
-    struct PermissionAsk: Hashable, Sendable {
-        var id: RequestID
-        var toolName: String
-    }
-
     let row: ActivityRow
-    let ask: PermissionAsk?
+    /// The card this row answers where it stands, or nil for a row that opens its channel instead.
+    /// Non-nil for exactly one shape: a plain permission ask, still open, that does not carry
+    /// `requires_user_interaction` (spec §5, §8.4, D4).
+    let card: DecisionCard?
     /// Position in the query's output. Rows repeat — two failed results of the same tool are two
     /// rows with identical contents — so the position is what separates them.
     let position: Int
 
-    var id: String { "\(position)" }
+    /// Position **and** the row's own identity.
+    ///
+    /// The position alone separates two rows with identical contents, which is what it was added
+    /// for; it does not separate two *different* rows that happen to occupy one position across a
+    /// rebuild. A List keys its row views on this, and the compact permission card it hosts holds
+    /// view state — the destination an *Always allow* would be filed at. Under the position alone,
+    /// a request answered and replaced by the next one inherits that state, and the retained
+    /// destination is applied to a different request's rules.
+    var id: String { "\(position)|\(identity)" }
+
+    /// What this row is *about*, as far as anything here can name it: the request a decision waits
+    /// on, the transcript item a frame-derived row links to, or the row's own short text.
+    private var identity: String {
+        switch row.kind {
+        case .decision(let request): request.rawValue
+        case .agentRunning(let task), .agentFailed(let task): task
+        default: row.itemUUID ?? row.text
+        }
+    }
     var key: ChannelKey { row.key }
 
     /// What kind of thing this is, in one word the view puts in front of the text. Exhaustive over
@@ -81,10 +95,26 @@ final class ActivityModel {
     /// The in-app half of spike S-C5-1's fallback: notifications the system would not deliver,
     /// newest first, until the user dismisses them.
     private(set) var banners: [AfleetNotification] = []
-    /// The last refusal an inline answer met, if any. Cleared by the next successful answer.
-    private(set) var answerFailure: String?
 
     // MARK: - Seams
+
+    /// The one path a card's answer leaves by, shared with the timeline's host (contract Y2).
+    /// Activity performs no answer of its own and constructs no `InboundAnswer`.
+    let answering: DecisionAnswering
+
+    /// Where a channel's fold is, for the host signal a successful answer raises (spec D2,
+    /// contract X4).
+    ///
+    /// The engine sends no frame back for an answer, so the only thing that can move a decision out
+    /// of `.pending` is the host saying it answered. Activity answers for channels whose
+    /// `ChannelTimelineModel` it does not own, so it is handed the app's one
+    /// `ChannelTimelineRegistry` as a provider — the shape the composer registry already receives
+    /// its own seams in — rather than reaching for a registry of its own, which is the second
+    /// capability path the C6 cut exists to prevent.
+    ///
+    /// Nil for a model built without one: it then raises nowhere, which is right for a surface with
+    /// no fold to tell.
+    var timeline: (@MainActor (ChannelKey) -> ChannelTimelineModel)?
 
     private let lifecycle: any LifecycleAPI
     private let configHome: URL
@@ -145,8 +175,10 @@ final class ActivityModel {
          shell: ShellModel,
          router: NotificationRouter,
          store: (any StateStore)? = nil,
+         reservations: DecisionReservations = DecisionReservations(),
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.lifecycle = lifecycle
+        self.answering = DecisionAnswering(lifecycle: lifecycle, reservations: reservations)
         self.configHome = configHome
         self.shell = shell
         self.router = router
@@ -158,6 +190,27 @@ final class ActivityModel {
         // seam the inline permission path uses; without it every completed payload the router
         // answered would sit in `requests` until the process exits.
         router.onAnswered = { [weak self] id, key in self?.pumps[key]?.forget(id) }
+        // The same seam for a card's answer: the engine sends no frame back for one, so the pump
+        // learns the request is closed only by being told, and the state `perform` returned is the
+        // fleet's newest.
+        // D2's raise: the fold this answer belongs to hears that the host answered it, so the
+        // card leaves `.pending` on screen and not only in a test that hands the fold in.
+        answering.raise = { [weak self] key, signal in
+            guard let model = self?.timeline?(key) else { return }
+            await model.signal(signal)
+        }
+        // **Registered on the shared set, not on this model's own answering object.** Activity is
+        // the host that holds the live `InboundRequest` — its pump is what a card is built from —
+        // and the request is answerable from surfaces this model knows nothing about: the Thread
+        // tab, the timeline's card. An answer sent from any of them closes the request, so the
+        // payload has to be released whoever sent it, or it sits in `requests` until the process
+        // exits.
+        reservations.observe(self) { [weak self] id, key, state in
+            guard let self else { return }
+            self.pumps[key]?.forget(id)
+            self.apply(state)
+            self.rebuild()
+        }
     }
 
     // MARK: - Starting
@@ -356,61 +409,36 @@ final class ActivityModel {
         }
         let rows = ActivityQuery.rows(states: ordered, mirrors: mirrors, recent: recent)
         items = rows.enumerated().map { position, row in
-            ActivityItem(row: row, ask: ask(for: row), position: position)
+            ActivityItem(row: row, card: card(for: row), position: position)
         }
         markViewedChannelSeen()
         releaseWaiters()
     }
 
-    /// The inline-answer affordance, or nil.
+    /// The card this row answers where it stands, or nil.
     ///
-    /// Nil for every kind but a decision, and for a decision it is nil unless the request the pump
-    /// holds is a `can_use_tool` without `requires_user_interaction`. §8.4 makes that flag the
-    /// engine saying the tool's own card is the surface, so an *Allow once* button here would be
-    /// answering a question the user has not been shown. Every other kind — question, plan,
-    /// elicitation, dialog — gets its row and a *Go to channel*, because those cards are C6's and
-    /// half a card is a wrong affordance rather than a partial one.
-    private func ask(for row: ActivityRow) -> ActivityItem.PermissionAsk? {
+    /// Activity holds no `ChannelTimeline` for a channel the user has not opened, so it cannot read
+    /// C3's overlay; it holds the live `InboundRequest` in its pump and builds the item the reducer
+    /// would have built for it (spec D14). The card itself, its actions and its answers are
+    /// `DecisionCardView`'s and `DecisionCard.answer(_:)`'s — Activity constructs none of them.
+    ///
+    /// Nil for every kind but a decision, and for a decision it is nil unless **both** hold: the
+    /// card's kind is `.permission`, and the request does not carry `requires_user_interaction`
+    /// (spec D17). Neither implies the other. The flag is the engine saying the tool's own card is
+    /// the surface, so an *Allow once* button here would answer a question the user has not been
+    /// shown; the kind is the human ruling about what Activity may answer at all, so a question or
+    /// a plan that arrives *without* the flag is still refused inline. Every other kind — question,
+    /// plan, elicitation, dialog — gets its row and a *Go to channel*, because half a card is a
+    /// wrong affordance rather than a partial one (C5's human-gate ruling 4, spec D4).
+    private func card(for row: ActivityRow) -> DecisionCard? {
         guard case .decision(let id) = row.kind,
               let request = pumps[row.key]?.requests[id],
               case .canUseTool(let tool) = request.payload,
-              tool.requiresUserInteraction != true else { return nil }
-        return ActivityItem.PermissionAsk(id: id, toolName: tool.toolName)
-    }
-
-    // MARK: - Answering
-
-    /// *Allow once*: `allow`, classified `user_temporary` (§8.4's binding mapping).
-    ///
-    /// *Always allow* is deliberately absent. It needs the request's `permission_suggestions` and a
-    /// choice of destination, and that card is C6's.
-    func allowOnce(_ ask: ActivityItem.PermissionAsk, on key: ChannelKey) async {
-        await answer(.permission(.allow(updatedInput: nil, updatedPermissions: nil,
-                                        classification: .userTemporary)),
-                     to: ask.id, on: key)
-    }
-
-    /// *Deny*: `deny`, classified `user_reject`, without interrupting the turn.
-    func deny(_ ask: ActivityItem.PermissionAsk, on key: ChannelKey) async {
-        await answer(.permission(.deny(message: "Denied from Activity.", interrupt: false,
-                                       classification: .userReject)),
-                     to: ask.id, on: key)
-    }
-
-    /// The one path an answer leaves by. `LifecycleAPI` has no `answer` member; the action is
-    /// `LifecycleAction.answer(RequestID, InboundAnswer)`.
-    private func answer(_ answer: InboundAnswer, to id: RequestID, on key: ChannelKey) async {
-        do {
-            let state = try await lifecycle.perform(.answer(id, answer), on: key)
-            answerFailure = nil
-            pumps[key]?.forget(id)
-            apply(state)
-            rebuild()
-        } catch let error as LifecycleError {
-            answerFailure = RowBanner(error).text
-        } catch {
-            answerFailure = "The answer failed: \(type(of: error))."
-        }
+              tool.requiresUserInteraction != true,
+              let item = DecisionItem(surfacing: request, in: row.key) else { return nil }
+        let card = DecisionCard(item)
+        guard case .permission = card.kind else { return nil }
+        return card
     }
 
     // MARK: - Badges and the unread cursor

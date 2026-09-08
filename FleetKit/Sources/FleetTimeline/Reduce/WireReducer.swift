@@ -40,6 +40,20 @@ public struct WireReducer: Sendable {
     private var slug: String
     /// `hostToolInvoked` arrivals with no `SentFileItem` open yet, held for the next row the builder opens.
     private var pendingDeliveries: Int
+    /// Settlements that arrived before the request they settle, oldest first (scalpel-1#3).
+    ///
+    /// The host answers a decision through one subscription of the event stream and the fold consumes another, so
+    /// "the request is folded before its answer" is not something either side can promise. Dropping an answer for
+    /// an id the overlay does not hold left the request opening `.pending` afterwards — a card asking a question the
+    /// user had already answered, which is the state §6.4 exists to forbid. Each entry is spent by the request it
+    /// names, dropped whole on process exit (the ids belong to the process that issued them) and bounded by count,
+    /// so a channel whose requests never arrive cannot grow this without limit.
+    private var retainedAnswers: [(id: RequestID, outcome: DecisionOutcome)]
+
+    /// How many unmatched settlements are held. A settlement is a press the user made, so the list is short in every
+    /// ordinary run; the bound is what stops a pathological one — a process dying mid-turn, repeatedly — from
+    /// retaining answers for the life of the fold.
+    public static let retainedAnswerLimit = 64
 
     public init(stream: LogicalStream, slug: String, seed: DurableProjection = .empty) {
         self.stream = stream
@@ -59,6 +73,7 @@ public struct WireReducer: Sendable {
         self.session = seed.session
         self.epoch = .first
         self.pendingDeliveries = 0
+        self.retainedAnswers = []
         rebuild()
     }
 
@@ -85,7 +100,11 @@ public struct WireReducer: Sendable {
             outstandingPrompts.removeAll { $0 == uuid }
 
         case .decisionAnswered(let id, let outcome):
-            setDecision(id) { $0.state = .answered(outcome: outcome.label) }
+            if overlay.decisions[id] == nil {
+                retain(outcome, for: id)
+            } else {
+                setDecision(id) { $0.state = .answered(outcome: outcome.label) }
+            }
 
         case .rewound(let toUUID):
             rewind(to: toUUID)
@@ -95,6 +114,7 @@ public struct WireReducer: Sendable {
             overlay = .empty
             preview = nil
             outstandingPrompts = []
+            retainedAnswers = []
 
         case .relocated(let mainPath):
             if let (resolved, kind) = TranscriptPath.resolve(mainPath, under: stream.configHome),
@@ -390,16 +410,39 @@ public struct WireReducer: Sendable {
             return
         }
         let id = ItemID(stream: stream, key: request.id.rawValue)
+        // A settlement that outran its request settles it now. Only a `.pending` open takes one: an `.inert` or
+        // `.policyAnswered` request was never the host's to answer, so a retained answer for such an id names an
+        // outcome nobody chose. The retention is spent either way — the request it named has arrived.
+        let retained = spendRetainedAnswer(for: request.id)
         overlay.decisions[request.id] = DecisionItem(
             id: id, timestamp: now, provenance: provenance(), requestID: request.id, kind: kind,
             title: Self.title(of: request.payload), toolUseID: Self.toolUseID(of: request.payload),
             agentID: Self.agentID(of: request.payload), state: state, payload: request.raw)
+        if state == .pending, let retained {
+            setDecision(request.id) { $0.state = .answered(outcome: retained.label) }
+        }
     }
 
     private mutating func setDecision(_ id: RequestID, _ body: (inout DecisionItem) -> Void) {
         guard var decision = overlay.decisions[id] else { return }
         body(&decision)
         overlay.decisions[id] = decision
+    }
+
+    /// Holds a settlement for a request this fold has not seen. A second answer for the same id replaces the first
+    /// rather than queueing beside it — the newest press is the one the host sent — and the oldest is dropped once
+    /// the list is full.
+    private mutating func retain(_ outcome: DecisionOutcome, for id: RequestID) {
+        retainedAnswers.removeAll { $0.id == id }
+        retainedAnswers.append((id: id, outcome: outcome))
+        if retainedAnswers.count > Self.retainedAnswerLimit {
+            retainedAnswers.removeFirst(retainedAnswers.count - Self.retainedAnswerLimit)
+        }
+    }
+
+    private mutating func spendRetainedAnswer(for id: RequestID) -> DecisionOutcome? {
+        guard let index = retainedAnswers.firstIndex(where: { $0.id == id }) else { return nil }
+        return retainedAnswers.remove(at: index).outcome
     }
 
     private static func kind(of payload: InboundRequest.Payload) -> DecisionItem.Kind? {

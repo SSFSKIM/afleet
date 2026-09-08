@@ -1589,6 +1589,7 @@ one; entry 23 is worth more to C1 than a guessed fix would have been to C6.
   effect counts it then asserts, the tailer's watchdog becomes a hang guard that fails with a count
   of its own, and the restart test writes its file only once the replacement stream is the sole
   reader, since the read offset is the tailer's and not one stream's.
+- 2026-09-09: **an unmatched `decisionAnswered` is retained until its request arrives.** The host answers a decision through one subscription of the event stream and the fold consumes another, so a settlement can reach `apply(_ signal:)` before the `control_request` it settles has been folded; `setDecision` returned at once for an unknown id and the request then opened `.pending`. `WireReducer` now holds the outcome (`retainedAnswers`, capped at `retainedAnswerLimit`, oldest dropped) and applies it when the request opens `.pending` — spent by that request, and dropped whole on `processReplaced`. Filed by C6.3's second fix wave (scalpel-1#3); `FleetTimelineTests/RetainedAnswerTests` is the discriminating suite.
 
 - 2026-09-08: **the agent-run tree's route to the app.** `WireReducer.agents` has always been
   folded from the task frames and the parent-tool-use observations, but nothing exposed it past
