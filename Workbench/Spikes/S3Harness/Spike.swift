@@ -100,6 +100,9 @@ final class Spike: NSObject, WKNavigationDelegate {
         // can be installed from outside without a user script.
         MainActor.assumeIsolated {
             view.webView.evaluateJavaScript(ProbeScripts.bootErrorCapture, completionHandler: nil)
+            // Before `bridge.js` runs, so every worker Monaco creates is counted. Monaco's
+            // fallback to the main thread is silent, and this is what makes it visible.
+            view.webView.evaluateJavaScript(ProbeScripts.workerInstrumentation, completionHandler: nil)
             Trace.log("navigation committed")
         }
     }
@@ -135,7 +138,7 @@ final class Spike: NSObject, WKNavigationDelegate {
             report["postMortem"] = (try? await call(ProbeScripts.postMortem))
                 ?? ["error": "the post-mortem probe could not run in the page"]
             report["verdict"] = verdict(document: false, chunk: false, workers: [:])
-            return 2
+            return Verdict.rule(report).status
         }
 
         report["documentLoaded"] = true
@@ -351,7 +354,13 @@ final class Spike: NSObject, WKNavigationDelegate {
 
         let functional = (try? await call(ProbeScripts.languageWorkerProbe, ["timeoutMs": 12000])) as? [String: Any] ?? [:]
 
-        return WorkerEvidence.summarise(direct: direct, functional: functional, diffComputed: diffComputed)
+        // Read last: the counts are of the workers Monaco created for the diff and for the
+        // functional probes above, so nothing before this point has the whole population.
+        let instrumented = (try? await call(ProbeScripts.monacoWorkerProbe)) as? [String: Any]
+            ?? ["error": "the worker instrumentation probe threw"]
+
+        return WorkerEvidence.summarise(direct: direct, functional: functional,
+                                        instrumented: instrumented, diffComputed: diffComputed)
     }
 
     // MARK: - Facts and plumbing
@@ -387,15 +396,19 @@ final class Spike: NSObject, WKNavigationDelegate {
         let answered = workers["allServicesAnswered"] as? Bool ?? false
         let computedDiff = workers["editorWorkerComputedDiff"] as? Bool ?? false
         let proven = workers["proven"] as? Bool ?? false
-        return [
+        var outcome: [String: Any] = [
             "documentLoaded": document,
             "dynamicImportChunkLoaded": chunk,
             "allFiveWorkersStarted": started,
             "allLanguageServicesAnswered": answered,
             "editorWorkerComputedDiff": computedDiff,
+            "monacoWorkersExchangedMessages": workers["messagesByMonacoWorker"] ?? [:],
+            "monacoFellBackToTheMainThread": workers["mainThreadFallback"] as? Bool ?? false,
             "workersProven": proven,
             "routeCarriesEveryLoadPath": document && chunk && proven,
         ]
+        if let why = workers["unprovenBecause"] as? String { outcome["workersUnprovenBecause"] = why }
+        return outcome
     }
 
     var finalReport: [String: Any] { report }

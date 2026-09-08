@@ -59,7 +59,14 @@ for index in $(seq 1 "$runs"); do
     status=0
     report="$("$binary" --route "$route" --frames 30 2>/dev/null)" || status=$?
     case "$status" in
-        0|5) ;;   # 0: measured, within budget.  5: measured, over budget. Both are observations.
+        # Every status here carries a cold-load reading, and the reading is what this loop is
+        # for. 0 within budget and 5 over it are the two the clause is about; 4, 6 and 7 are
+        # findings about frames, render evidence and editor errors, none of which the interval
+        # from process start to `ready` depends on — so they are observations too, and are
+        # noted rather than discarded. Only 2 (the route dropped a load path) and a status the
+        # harness never prints are not measurements. The report is the real arbiter below.
+        0|5) ;;
+        4|6|7) echo "run $index: exited $status — the cold load was measured; see the report" >&2 ;;
         *)  echo "run $index: S3Harness exited $status — not a measurement" >&2
             failed=$((failed + 1))
             continue ;;

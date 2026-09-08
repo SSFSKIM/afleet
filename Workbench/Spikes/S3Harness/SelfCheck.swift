@@ -15,6 +15,9 @@ enum SelfCheck {
     private struct Scenario {
         let name: String
         let expected: Int32
+        /// A fragment the reason must contain. A status alone is not enough: three scenarios
+        /// once returned the right status naming the wrong missing piece.
+        let because: String
         let report: [String: Any]
     }
 
@@ -24,9 +27,10 @@ enum SelfCheck {
 
         for scenario in scenarios() {
             let ruling = Verdict.ruleRecomputingWorkers(scenario.report)
-            let ok = ruling.status == scenario.expected
+            let ok = ruling.status == scenario.expected && ruling.reason.contains(scenario.because)
             if !ok {
-                failures.append("\(scenario.name): expected exit \(scenario.expected), got \(ruling.status)")
+                failures.append("\(scenario.name): expected exit \(scenario.expected)"
+                                + " naming \"\(scenario.because)\", got \(ruling.status) — \(ruling.reason)")
             }
             lines.append(String(format: "  %@ exit %d (expected %d)  %@ — %@",
                                 ok ? "ok  " : "FAIL",
@@ -57,7 +61,10 @@ enum SelfCheck {
             "chunk": ["loaded": true, "elapsedMs": 18.0],
             "fiveMegabyteFile": ["bytes": 5_243_442, "lines": 209_919, "syncMs": 88.0,
                                  "toRenderMs": 104.0, "toSecondFrameMs": 125.0, "complete": true],
-            "scroll": ["frames": 180, "p50Ms": 17.0, "p95Ms": 28.0, "worstMs": 52.0],
+            // Annotated: an all-numeric literal infers `[String: Double]`, `frames` becomes
+            // 180.0, and `as? Int` then reads nil — a stub that lies in the shape the verdict
+            // is most likely to be wrong about. The self-check found this on its first run.
+            "scroll": ["frames": 180, "p50Ms": 17.0, "p95Ms": 28.0, "worstMs": 52.0] as [String: Any],
             "reopen": ["contentsReplaced": true, "requestedLineRevealed": true,
                        "errorsDuringReopen": [String](), "reopenSucceeded": true],
             "diff": ["computed": true, "changeCount": 508, "renderedInsertLines": 23,
@@ -94,14 +101,14 @@ enum SelfCheck {
 
     private static func scenarios() -> [Scenario] {
         [
-            Scenario(name: "a complete run, within budget", expected: 0, report: healthy()),
+            Scenario(name: "a complete run, within budget", expected: 0, because: "within budget", report: healthy()),
 
             // The load paths: the route search's own signal, unchanged.
-            Scenario(name: "the document never reported ready", expected: 2,
+            Scenario(name: "the document never reported ready", expected: 2, because: "never reported ready",
                      report: mutating("documentLoaded") { _ in }.merging(["documentLoaded": false]) { _, new in new }),
-            Scenario(name: "the dynamic-import chunk did not load", expected: 2,
+            Scenario(name: "the dynamic-import chunk did not load", expected: 2, because: "dynamic-import chunk did not load",
                      report: mutating("chunk") { $0["loaded"] = false }),
-            Scenario(name: "a language service did not answer", expected: 2,
+            Scenario(name: "a language service did not answer", expected: 2, because: "json language service did not answer",
                      report: mutating("workers") {
                          var functional = $0["functional"] as? [String: Any] ?? [:]
                          functional["json"] = ["answered": false]
@@ -109,12 +116,12 @@ enum SelfCheck {
                      }),
             // C2: Monaco's own workers exchanged nothing, so the functional answers came from
             // the main-thread fallback and the direct probe's population proves nothing.
-            Scenario(name: "Monaco's own workers exchanged no messages", expected: 2,
+            Scenario(name: "Monaco's own workers exchanged no messages", expected: 2, because: "ran on the main thread",
                      report: mutating("workers") {
                          $0["monacoWorkers"] = ["workerCount": 0, "byService": [String: Any](),
                                                 "fallbackWarnings": ["Could not create web worker(s)."]]
                      }),
-            Scenario(name: "the editor worker exchanged no messages", expected: 2,
+            Scenario(name: "the editor worker exchanged no messages", expected: 2, because: "editor worker exchanged",
                      report: mutating("workers") {
                          var counts = monacoWorkerCounts(received: 6)
                          counts["editor"] = ["workers": 1, "sent": 3, "received": 0, "errors": [String]()]
@@ -123,29 +130,29 @@ enum SelfCheck {
                      }),
 
             // C1: a run that produced no render evidence is not a pass.
-            Scenario(name: "the window was given no animation frames", expected: 4,
+            Scenario(name: "the window was given no animation frames", expected: 4, because: "no animation frames",
                      report: mutating("frameLiveness") { $0["frames"] = 0; $0["framesAvailable"] = false }),
-            Scenario(name: "the 5 MB file's recorder never completed", expected: 6,
+            Scenario(name: "the 5 MB file's recorder never completed", expected: 6, because: "render recorder never completed",
                      report: mutating("fiveMegabyteFile") {
                          $0["complete"] = false
                          $0["timedOutWaitingForFrame"] = true
                      }),
-            Scenario(name: "the scroll histogram recorded no frames", expected: 6,
+            Scenario(name: "the scroll histogram recorded no frames", expected: 6, because: "scroll histogram recorded no frames",
                      report: mutating("scroll") { $0["frames"] = 0 }),
-            Scenario(name: "the diff pane was never displayed", expected: 6,
+            Scenario(name: "the diff pane was never displayed", expected: 6, because: "diff pane was never displayed",
                      report: mutating("diff") { $0["diffPaneDisplayed"] = false }),
-            Scenario(name: "the diff rendered nothing into the DOM", expected: 6,
+            Scenario(name: "the diff rendered nothing into the DOM", expected: 6, because: "rendered nothing into the DOM",
                      report: mutating("diff") {
                          $0["renderedDiffDecorations"] = 0
                          $0["renderedInsertLines"] = 0
                          $0["renderedDeleteLines"] = 0
                      }),
-            Scenario(name: "reopening the open file did not succeed", expected: 6,
+            Scenario(name: "reopening the open file did not succeed", expected: 6, because: "already on screen did not succeed",
                      report: mutating("reopen") { $0["reopenSucceeded"] = false }),
-            Scenario(name: "the editor reported an error", expected: 7,
+            Scenario(name: "the editor reported an error", expected: 7, because: "the editor reported 1 error",
                      report: healthy().merging(["editorErrors": ["open failed: model exists"]]) { _, new in new }),
 
-            Scenario(name: "every load path, cold load over budget", expected: 5,
+            Scenario(name: "every load path, cold load over budget", expected: 5, because: "over budget",
                      report: mutating("coldLoad") { $0["withinBudget"] = false
                                                     $0["processStartToReadyMs"] = 1_864.0 }),
         ]

@@ -271,7 +271,10 @@ enum ProbeScripts {
           resolve(outcome);
         }
         try {
-          worker = new Worker(url, { type: "module", name: file });
+          // `__s3untracked` keeps this population out of the worker instrumentation. These
+          // are the harness's own workers, constructed and terminated here; counting their
+          // traffic as Monaco's is the confusion the instrumentation exists to end.
+          worker = new Worker(url, { type: "module", name: file, __s3untracked: true });
         } catch (failure) {
           finish({ started: false, error: "constructor threw: " + String(failure) });
           return;
@@ -380,6 +383,77 @@ enum ProbeScripts {
 
     out.errors = window.__s3.errors.slice(-6);
     return out;
+    """
+
+    /// Installed at `didCommit`, before `bridge.js` can create a worker.
+    ///
+    /// Monaco's `MonacoEnvironment.getWorker` returns `new Worker(...)` from the bootstrap's own
+    /// scope, so wrapping the page's `Worker` constructor catches every worker Monaco creates,
+    /// whatever route built the URL, without editing `bridge.js` — the spike measures the
+    /// shipped bootstrap, so it instruments from outside.
+    ///
+    /// The count that matters is *received*, added through `addEventListener` rather than
+    /// `onmessage` so it is invisible to, and cannot be displaced by, whatever the consumer
+    /// assigns. Without it the harness cannot tell a working worker from Monaco's silent
+    /// main-thread fallback, which answers exactly the same and logs only a console warning.
+    static let workerInstrumentation = """
+    window.__s3workers = { records: [] };
+    (function () {
+      var Native = window.Worker;
+      if (!Native || Native.__s3wrapped) { return; }
+      class TrackedWorker extends Native {
+        constructor(url, options) {
+          super(url, options);
+          if (options && options.__s3untracked) { return; }
+          var record = { label: (options && options.name) || "", url: String(url),
+                         sent: 0, received: 0, errors: [] };
+          window.__s3workers.records.push(record);
+          this.__s3record = record;
+          this.addEventListener("message", function () { record.received += 1; });
+          this.addEventListener("error", function (event) {
+            record.errors.push(String((event && event.message) || "error"));
+          });
+        }
+        postMessage(message, transfer) {
+          if (this.__s3record) { this.__s3record.sent += 1; }
+          return transfer === undefined ? super.postMessage(message) : super.postMessage(message, transfer);
+        }
+      }
+      TrackedWorker.__s3wrapped = true;
+      window.Worker = TrackedWorker;
+    })();
+    """
+
+    /// What the workers Monaco itself created actually carried, per service.
+    ///
+    /// `bridge.js` names each worker with the language label Monaco asked for, so the label is
+    /// the attribution: a bucket per language service, and everything else — the editor worker
+    /// is asked for under `editorWorkerService` — under `editor`. Read after the functional
+    /// probes and after the diff, because those are what make Monaco create and use them.
+    static let monacoWorkerProbe = """
+    var records = (window.__s3workers && window.__s3workers.records) || [];
+    var alias = { typescript: "typescript", javascript: "typescript", json: "json",
+                  css: "css", scss: "css", less: "css",
+                  html: "html", handlebars: "html", razor: "html" };
+    var byService = {};
+    records.forEach(function (record) {
+      var service = alias[record.label] || "editor";
+      var bucket = byService[service];
+      if (!bucket) { bucket = byService[service] = { workers: 0, sent: 0, received: 0, labels: [], errors: [] }; }
+      bucket.workers += 1;
+      bucket.sent += record.sent;
+      bucket.received += record.received;
+      if (bucket.labels.indexOf(record.label) < 0) { bucket.labels.push(record.label); }
+      bucket.errors = bucket.errors.concat(record.errors);
+    });
+    // Monaco says so itself when it gives up on workers, and says it only to the console:
+    // "Could not create web worker(s). Falling back to loading web worker code in main thread".
+    // The boot capture already wraps console.error, so the sentence survives.
+    var boot = window.__s3boot || [];
+    var fallbackWarnings = boot.map(function (entry) { return String(entry.message || ""); })
+      .filter(function (message) { return message.toLowerCase().indexOf("web worker") >= 0; });
+    return { byService: byService, workerCount: records.length, fallbackWarnings: fallbackWarnings,
+             labels: records.map(function (record) { return record.label; }) };
     """
 
     /// Installed at `didCommit`, before the document's own scripts run.

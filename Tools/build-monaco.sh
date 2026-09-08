@@ -45,6 +45,10 @@ MISSING
     exit 1
 fi
 
+# Recorded into VERSION, not enforced. The lockfile pins Monaco's dependency graph; it does not
+# pin the executable that reads it, and this script produces minified, content-hashed output with
+# whichever bun is installed — so the committed inputs alone do not determine the committed bytes.
+# Tracker entry 106 holds the closer.
 bun_version="$(bun --version)"
 
 # --- install --------------------------------------------------------------------------------
