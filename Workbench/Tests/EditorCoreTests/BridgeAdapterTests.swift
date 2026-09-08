@@ -24,9 +24,21 @@ final class BridgeAdapterTests: XCTestCase {
     window.webkit = { messageHandlers: { afleet: { postMessage: function (m) { posted.push(m); } } } };
     window.document = { baseURI: "afleet-editor:///bootstrap/index.html" };
     window.URL = function (relative, base) { this.href = String(base).replace(/bootstrap\\/index.html$/, "") + "monaco/"; };
-    window.URL.createObjectURL = function () { return "blob:stub"; };
-    window.Blob = function () {};
-    window.Worker = function () {};
+    // The object-URL registry, kept rather than stubbed: a leak is a URL that was handed out
+    // and never given back, which is only visible if the two calls are recorded together.
+    var objectURLs = { created: [], revoked: [], counter: 0 };
+    window.URL.createObjectURL = function () {
+      var url = "blob:afleet-editor://bundle/" + (++objectURLs.counter);
+      objectURLs.created.push(url);
+      return url;
+    };
+    window.URL.revokeObjectURL = function (url) { objectURLs.revoked.push(url); };
+    window.Blob = function (parts) { this.parts = parts; };
+    var workersBuilt = [];
+    window.Worker = function (url, options) { workersBuilt.push({ url: url, options: options }); };
+    function liveObjectURLs() {
+      return objectURLs.created.filter(function (url) { return objectURLs.revoked.indexOf(url) < 0; });
+    }
     """
 
     /// Monaco, reduced to what the adapter touches, with its model registry behaving the way
@@ -125,7 +137,11 @@ final class BridgeAdapterTests: XCTestCase {
     """
 
     /// A context with the page globals, the shipped bridge and the stand-in loaded, booted.
-    private func bootedContext(file: StaticString = #filePath, line: UInt = #line) throws -> JSContext {
+    private func bootedContext(
+        route: WorkerLoadingRoute = .schemeForEverything,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> JSContext {
         let context = try XCTUnwrap(JSContext(), file: file, line: line)
         var failures: [String] = []
         context.exceptionHandler = { _, exception in
@@ -136,6 +152,9 @@ final class BridgeAdapterTests: XCTestCase {
         let bridge = try String(contentsOf: bridgeURL, encoding: .utf8)
 
         context.evaluateScript(Self.pageGlobals)
+        // The same injection `MonacoEditorView.configurationScript(for:)` performs at document
+        // start, so the route under test is the one the host would have asked for.
+        context.evaluateScript("window.afleetEditorConfig = { workerRoute: \"\(route.javaScriptName)\" };")
         context.evaluateScript(bridge, withSourceURL: bridgeURL)
         context.evaluateScript(Self.monacoStandIn)
         context.evaluateScript("bootBridge();")
@@ -313,4 +332,116 @@ final class BridgeAdapterTests: XCTestCase {
                        "the model for the closed file was not disposed")
         XCTAssertEqual(context.evaluateScript("editor.getModel().getValue();").toString(), "two\n")
     }
+
+    // MARK: - Leaving the diff behind
+
+    /// The diff editor is persistent and holds a pair of models that are not the open buffer.
+    /// Coming back to the editor only hid its container, so both diff buffers stayed alive —
+    /// two whole file contents per diff, held until another `showDiff` or a navigation. C7.7
+    /// puts a diff on screen in the same view C7.5 opens files in, so this is the ordinary
+    /// sequence between two panels.
+    func testReturningToTheEditorDisposesTheDiffModels() throws {
+        let context = try bootedContext()
+
+        send(["type": "open", "path": "src/main.swift", "language": "swift", "text": "one\n"], in: context)
+        send(["type": "showDiff", "path": "src/main.swift", "language": "swift",
+              "original": "one\n", "modified": "two\n"], in: context)
+        context.evaluateScript("var shown = diffEditor.model;")
+        XCTAssertEqual(context.evaluateScript("shown.original.disposed;").toBool(), false)
+        XCTAssertEqual(context.evaluateScript("registrySize();").toInt32(), 3,
+                       "the diff did not put its two models in the registry")
+
+        send(["type": "open", "path": "src/main.swift", "language": "swift", "text": "three\n"], in: context)
+
+        XCTAssertEqual(context.evaluateScript("shown.original.disposed;").toBool(), true,
+                       "the diff's original model outlived the diff")
+        XCTAssertEqual(context.evaluateScript("shown.modified.disposed;").toBool(), true,
+                       "the diff's modified model outlived the diff")
+        XCTAssertEqual(context.evaluateScript("diffEditor.model;").isNull, true,
+                       "the diff editor still holds the models it was shown with")
+        XCTAssertEqual(context.evaluateScript("registrySize();").toInt32(), 1,
+                       "only the open buffer should be left")
+    }
+
+    /// `setText` and `gotoLine` reach the editor through the same door, so they release the diff
+    /// too — otherwise the leak survives by whichever command the panel happens to send.
+    func testSetTextAndGotoLineAlsoReleaseTheDiff() throws {
+        for command in [["type": "setText", "text": "three\n"] as [String: Any],
+                        ["type": "gotoLine", "line": 1] as [String: Any]] {
+            let context = try bootedContext()
+            send(["type": "open", "path": "src/main.swift", "language": "swift", "text": "one\n"], in: context)
+            send(["type": "showDiff", "path": "src/main.swift", "language": "swift",
+                  "original": "one\n", "modified": "two\n"], in: context)
+            context.evaluateScript("var shown = diffEditor.model;")
+
+            send(command, in: context)
+
+            XCTAssertEqual(context.evaluateScript("shown.original.disposed;").toBool(), true,
+                           "\(command["type"] as? String ?? "?") left the diff's models alive")
+            XCTAssertEqual(context.evaluateScript("registrySize();").toInt32(), 1,
+                           "\(command["type"] as? String ?? "?") left diff models in the registry")
+        }
+    }
+
+    /// A second diff still replaces the first, and the release above must not double-dispose or
+    /// take the models the diff editor is about to be shown with.
+    func testASecondDiffReplacesTheFirstAndKeepsItsOwnModels() throws {
+        let context = try bootedContext()
+
+        send(["type": "showDiff", "path": "a.swift", "language": "swift",
+              "original": "one\n", "modified": "two\n"], in: context)
+        context.evaluateScript("var first = diffEditor.model;")
+        send(["type": "showDiff", "path": "b.swift", "language": "swift",
+              "original": "three\n", "modified": "four\n"], in: context)
+
+        XCTAssertEqual(context.evaluateScript("first.original.disposed;").toBool(), true)
+        XCTAssertEqual(context.evaluateScript("diffEditor.model.original.disposed;").toBool(), false,
+                       "the diff on screen was disposed under it")
+        XCTAssertEqual(context.evaluateScript("diffEditor.model.original.getValue();").toString(), "three\n")
+        XCTAssertEqual(context.evaluateScript("registrySize();").toInt32(), 2)
+    }
+
+    // MARK: - The Blob route's object URLs
+
+    /// Route 2 builds each worker from an object URL. The bundled `json`, `css` and `html`
+    /// worker managers stop an idle worker after two minutes and construct a new one, so the
+    /// route creates object URLs for as long as the page lives; every one that is not revoked
+    /// pins its Blob until navigation.
+    ///
+    /// Revoking immediately after the constructor returns is safe by HTML's own rule: `new
+    /// Worker(url)` creates its request synchronously and the request keeps the blob URL entry
+    /// it resolved, so a later revoke cannot strand the fetch.
+    func testTheBlobRouteRevokesEveryObjectURLItCreates() throws {
+        let context = try bootedContext(route: .blobWorkers)
+
+        context.evaluateScript("""
+        ["json", "css", "html", "typescript", "editorWorkerService"].forEach(function (label, index) {
+          window.MonacoEnvironment.getWorker(index, label);
+        });
+        """)
+
+        XCTAssertEqual(context.evaluateScript("objectURLs.created.length;").toInt32(), 5,
+                       "the blob route did not build an object URL per worker")
+        XCTAssertEqual(context.evaluateScript("workersBuilt.length;").toInt32(), 5)
+        XCTAssertEqual(context.evaluateScript("workersBuilt[0].url;").toString(),
+                       context.evaluateScript("objectURLs.created[0];").toString(),
+                       "the worker was not built from the object URL")
+        XCTAssertEqual(context.evaluateScript("workersBuilt[0].options.type;").toString(), "module",
+                       "the shim must stay a module worker")
+        XCTAssertEqual(context.evaluateScript("liveObjectURLs().length;").toInt32(), 0,
+                       "object URLs were handed out and never revoked: \(context.evaluateScript("JSON.stringify(liveObjectURLs());").toString() ?? "")")
+    }
+
+    /// The scheme route builds no object URL at all, so the revoke above is not passing by
+    /// revoking something the default route never creates.
+    func testTheSchemeRouteBuildsNoObjectURL() throws {
+        let context = try bootedContext()
+
+        context.evaluateScript("window.MonacoEnvironment.getWorker(0, \"json\");")
+
+        XCTAssertEqual(context.evaluateScript("objectURLs.created.length;").toInt32(), 0)
+        XCTAssertEqual(context.evaluateScript("workersBuilt[0].url;").toString(),
+                       "afleet-editor:///monaco/json.worker.js")
+    }
 }
+

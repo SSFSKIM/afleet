@@ -28,15 +28,19 @@ public enum EditorCommand: Sendable, Hashable {
     case save
 }
 
+/// The six `type` strings of W4's host-to-editor half, named once so the JSON encoder and the
+/// bridged-object encoder below cannot drift apart.
+fileprivate enum EditorCommandType: String {
+    case open, setText, gotoLine, setTheme, showDiff, save
+}
+
 extension EditorCommand: Codable {
 
     private enum CodingKeys: String, CodingKey {
         case type, path, language, text, line, column, name, original, modified
     }
 
-    private enum MessageType: String {
-        case open, setText, gotoLine, setTheme, showDiff, save
-    }
+    fileprivate typealias MessageType = EditorCommandType
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -100,6 +104,45 @@ extension EditorCommand: Codable {
     }
 }
 
+// MARK: - Host to editor, as WebKit marshals it
+
+extension EditorCommand {
+
+    /// The same six messages as the object `callAsyncJavaScript` marshals into the page.
+    ///
+    /// The wire is unchanged — `bridge.js` reads the same flat tagged shape off the same field
+    /// names — but the buffer never becomes JavaScript source on the way there. Handed to
+    /// `evaluateJavaScript` a command carrying a file had to be encoded, escaped into a string
+    /// literal and concatenated into a script WebKit then parsed as source; handed to
+    /// `callAsyncJavaScript` as an argument it is marshalled as data. A test asserts this object
+    /// is field-for-field what the encoder above produces, so the two cannot drift.
+    var bridgedObject: [String: Any] {
+        switch self {
+        case let .open(path, language, text, line):
+            var object: [String: Any] = [
+                "type": MessageType.open.rawValue, "path": path, "language": language, "text": text,
+            ]
+            if let line { object["line"] = line }
+            return object
+        case let .setText(text):
+            return ["type": MessageType.setText.rawValue, "text": text]
+        case let .gotoLine(line, column):
+            var object: [String: Any] = ["type": MessageType.gotoLine.rawValue, "line": line]
+            if let column { object["column"] = column }
+            return object
+        case let .setTheme(name):
+            return ["type": MessageType.setTheme.rawValue, "name": name]
+        case let .showDiff(path, original, modified, language):
+            return [
+                "type": MessageType.showDiff.rawValue, "path": path,
+                "original": original, "modified": modified, "language": language,
+            ]
+        case .save:
+            return ["type": MessageType.save.rawValue]
+        }
+    }
+}
+
 // MARK: - Editor to host
 
 public enum EditorEvent: Sendable, Hashable {
@@ -115,15 +158,19 @@ public enum EditorEvent: Sendable, Hashable {
     case error(message: String)
 }
 
+/// The five `type` strings of W4's editor-to-host half, named once so the JSON decoder and the
+/// bridged-object decoder below cannot drift apart.
+fileprivate enum EditorEventType: String {
+    case ready, dirty, saveRequested, cursor, error
+}
+
 extension EditorEvent: Codable {
 
     private enum CodingKeys: String, CodingKey {
         case type, path, isDirty, text, line, column, message
     }
 
-    private enum MessageType: String {
-        case ready, dirty, saveRequested, cursor, error
-    }
+    fileprivate typealias MessageType = EditorEventType
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -170,6 +217,47 @@ extension EditorEvent: Codable {
         case let .error(message):
             try container.encode(MessageType.error.rawValue, forKey: .type)
             try container.encode(message, forKey: .message)
+        }
+    }
+}
+
+// MARK: - Editor to host, as WebKit bridges it
+
+extension EditorEvent {
+
+    /// The same five messages, read straight out of the object a `WKScriptMessageHandler`
+    /// receives — an `NSDictionary` of `NSString`s and `NSNumber`s, already parsed by WebKit.
+    ///
+    /// It lives beside the `Codable` conformance because the shapes must not be stated twice:
+    /// the fields, their names and their optionality are the ones above, and the two routes are
+    /// tested against each other message by message. What it buys is `saveRequested`, which
+    /// carries a whole file: the JSON route serialises that buffer back out and parses it again,
+    /// on the main actor, for nothing (spec Revision Note of 2026-09-08).
+    init?(bridgedObject object: [String: Any]) {
+        guard let raw = object["type"] as? String, let type = EditorEventType(rawValue: raw) else {
+            return nil
+        }
+        switch type {
+        case .ready:
+            self = .ready
+        case .dirty:
+            guard let path = object["path"] as? String,
+                  let isDirty = object["isDirty"] as? Bool
+            else { return nil }
+            self = .dirty(path: path, isDirty: isDirty)
+        case .saveRequested:
+            guard let path = object["path"] as? String,
+                  let text = object["text"] as? String
+            else { return nil }
+            self = .saveRequested(path: path, text: text)
+        case .cursor:
+            guard let line = object["line"] as? Int,
+                  let column = object["column"] as? Int
+            else { return nil }
+            self = .cursor(line: line, column: column)
+        case .error:
+            guard let message = object["message"] as? String else { return nil }
+            self = .error(message: message)
         }
     }
 }

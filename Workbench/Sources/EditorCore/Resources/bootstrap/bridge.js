@@ -107,14 +107,23 @@
 
   function createWorker(label) {
     var url = workerURL(label);
+    var objectURL = null;
     if (workerRoute === "blob") {
       // A blob module worker has a `blob:` base URL, so its relative chunk imports do not
       // resolve back onto the scheme; the shim's own import is written absolute here, and
       // whether the chunks it pulls in behave is exactly what S3 measures.
       var source = "import " + JSON.stringify(url) + ";";
-      url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+      objectURL = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+      url = objectURL;
     }
-    return new Worker(url, { type: "module", name: label });
+    var worker = new Worker(url, { type: "module", name: label });
+    // The object URL has done its whole job by the time the constructor returns: `new Worker`
+    // creates its request synchronously and that request keeps the blob URL entry it resolved,
+    // so revoking now cannot strand the fetch. Not revoking leaks — the bundled json, css and
+    // html worker managers stop an idle worker after two minutes and build a new one, so a
+    // long-lived page strands one Blob per idle cycle until it navigates.
+    if (objectURL) URL.revokeObjectURL(objectURL);
+    return worker;
   }
 
   global.MonacoEnvironment = {
@@ -168,7 +177,20 @@
   function makeAdapter(state) {
     var monaco = state.monaco;
 
+    // The diff editor is persistent — it is created once and reused — but the pair of models it
+    // is shown with is not: they are two whole file contents that belong to one `showDiff`.
+    // Hiding the container leaves them attached and alive, so a panel that shows a diff and goes
+    // back to the file holds both buffers until the next diff or a navigation.
+    function releaseDiffModels() {
+      if (!state.diffModels) return;
+      if (state.diffEditor) state.diffEditor.setModel(null);
+      state.diffModels.original.dispose();
+      state.diffModels.modified.dispose();
+      state.diffModels = null;
+    }
+
     function showEditor() {
+      releaseDiffModels();
       state.mode = "editor";
       state.diffContainer.style.display = "none";
       state.editorContainer.style.display = "block";
@@ -303,6 +325,8 @@
           modified: monaco.editor.createModel(modified, language || undefined),
         };
         state.diffEditor.setModel(state.diffModels);
+        // The replacement is built and attached before the models it replaces are disposed, so
+        // the diff editor is never left holding a disposed pair.
         if (previous) {
           previous.original.dispose();
           previous.modified.dispose();

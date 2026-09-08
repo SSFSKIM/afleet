@@ -39,6 +39,18 @@ public enum WorkerLoadingRoute: String, Sendable, CaseIterable {
     var loadsDocumentFromFileURL: Bool { self == .fileURLForEverything }
 }
 
+/// Where an `error` the host is about to log came from.
+public enum BridgeErrorOrigin: String, Sendable, CaseIterable {
+    /// The bridge itself posted `error` — `boot`, `receive`, or an adapter refusal.
+    case bridge
+    /// The page could not be reached.
+    case transport
+    /// A message arrived on the `afleet` handler that the codec could not decode.
+    case undecodable
+    /// A resource the view needs is missing from `Bundle.module`.
+    case resource
+}
+
 /// An `NSView` owning a `WKWebView` that hosts Monaco, speaking contract W4's vocabulary and no
 /// other (spec Design §5, §6).
 ///
@@ -149,7 +161,7 @@ public final class MonacoEditorView: NSView {
         }
 
         guard let documentURL = EditorResources.bootstrapDocumentURL else {
-            report(.error(message: "the bootstrap document is missing from Bundle.module"))
+            report(.error(message: "the bootstrap document is missing from Bundle.module"), origin: .resource)
             return
         }
         webView.loadFileURL(documentURL, allowingReadAccessTo: resourceRoot)
@@ -167,32 +179,40 @@ public final class MonacoEditorView: NSView {
     }
 
     private func evaluate(_ command: EditorCommand) {
-        guard let script = Self.script(for: command) else {
-            report(.error(message: "a command could not be encoded for the bridge"))
-            return
-        }
-
-        webView.evaluateJavaScript(script) { [weak self] _, error in
-            guard let self, let error else { return }
-            // The message names the failure, never the command's payload: a path or a buffer in
-            // a log is what §11 forbids.
-            MainActor.assumeIsolated {
-                self.report(.error(message: "the bridge could not be reached: \((error as NSError).code)"))
+        // `callAsyncJavaScript` is async, and `send` is not: commands would otherwise reach the
+        // page in whatever order the executor happened to start their tasks in, and W4's
+        // vocabulary is ordered — `setTheme` then `open` then `gotoLine` is one sequence, not
+        // three independent requests. Each send waits on the one before it, which is the
+        // ordering `evaluateJavaScript` gave for free.
+        let previous = sendChain
+        sendChain = Task { [weak self] in
+            _ = await previous.value
+            guard let self else { return }
+            do {
+                _ = try await self.webView.callAsyncJavaScript(
+                    Self.receiveBody, arguments: ["message": command.bridgedObject],
+                    in: nil, contentWorld: .page)
+            } catch {
+                // The message names the failure, never the command's payload: a path or a
+                // buffer in a log is what §11 forbids.
+                self.report(.error(message: "the bridge could not be reached: \((error as NSError).code)"),
+                            origin: .transport)
             }
         }
     }
 
-    /// `window.afleetBridge.receive(JSON.parse("…"))` rather than a JavaScript object literal:
-    /// the payload carries file contents, and `JSON.parse` of a string literal is both the
-    /// faster parse and the one with no expression-level escaping hazards.
-    static func script(for command: EditorCommand) -> String? {
-        guard let payload = try? JSONEncoder().encode(command),
-              let json = String(data: payload, encoding: .utf8),
-              let literal = try? JSONSerialization.data(withJSONObject: json, options: [.fragmentsAllowed]),
-              let literalText = String(data: literal, encoding: .utf8)
-        else { return nil }
-        return "window.afleetBridge.receive(JSON.parse(\(literalText)));"
-    }
+    /// The tail of the ordered send chain above.
+    private var sendChain: Task<Void, Never> = Task {}
+
+    /// The function body a command is delivered through. `callAsyncJavaScript` names its
+    /// arguments, so `message` here is `EditorCommand.bridgedObject` and not a global.
+    ///
+    /// `evaluateJavaScript` took a *script*, so a command carrying a file's contents had to be
+    /// encoded, decoded, escaped into a JavaScript string literal, decoded again and
+    /// concatenated into a source line WebKit then parsed as source — five representations of
+    /// the buffer on the main actor, for S3's 5 MB fixture 23 ms of them. An argument is
+    /// marshalled as data, so none of that happens and `JSON.parse` is not needed either.
+    static let receiveBody = "window.afleetBridge.receive(message);"
 
     // MARK: - Editor to host
 
@@ -201,7 +221,8 @@ public final class MonacoEditorView: NSView {
             // Undecodable is reported, never fatal. Only the `type` field is named — it is this
             // module's own vocabulary — and never the rest of the body.
             let named = (body as? [String: Any])?["type"] as? String
-            report(.error(message: "an undecodable message arrived from the bridge: \(named ?? "no type")"))
+            report(.error(message: "an undecodable message arrived from the bridge: \(named ?? "no type")"),
+                   origin: .undecodable)
             return
         }
 
@@ -214,25 +235,44 @@ public final class MonacoEditorView: NSView {
         report(event)
     }
 
-    static func decodeEvent(from body: Any) -> EditorEvent? {
-        let data: Data?
+    /// WebKit hands the message handler the JavaScript object already bridged to an
+    /// `NSDictionary`, so `saveRequested` arrives with the whole buffer in it. Serialising that
+    /// back to JSON only to decode it again is work with no product, and it is work on the main
+    /// actor: the codec's own dictionary decoder is used instead (`BridgeCodec.swift`).
+    ///
+    /// The `String` case stays for a body that arrives as text, and is the one the codec's
+    /// literal-JSON tests exercise.
+    nonisolated static func decodeEvent(from body: Any) -> EditorEvent? {
         switch body {
-        case let text as String:
-            data = text.data(using: .utf8)
         case let object as [String: Any]:
-            data = try? JSONSerialization.data(withJSONObject: object)
+            return EditorEvent(bridgedObject: object)
+        case let text as String:
+            return try? JSONDecoder().decode(EditorEvent.self, from: Data(text.utf8))
         default:
-            data = nil
+            return nil
         }
-        guard let data else { return nil }
-        return try? JSONDecoder().decode(EditorEvent.self, from: data)
     }
 
-    private func report(_ event: EditorEvent) {
+    private func report(_ event: EditorEvent, origin: BridgeErrorOrigin = .bridge) {
         if case let .error(message) = event {
-            logger.error("editor: \(message, privacy: .public)")
+            // The classification is public; the message is not. Root spec §6.3 makes
+            // metadata-only a binding contract and the diagnostics log is unredacted by
+            // construction — §11's redactor works structurally, by key name, so a free-form
+            // string passes through it untouched. An `error` message is free-form and
+            // payload-derived: Monaco interpolates model URIs, and so file paths, into its own
+            // exception text, and `bridge.js` forwards that text as it stands.
+            logger.error("""
+                \(Self.diagnosticLine(origin: origin, message: message), privacy: .public) \
+                message=\(message, privacy: .private)
+                """)
         }
         onEvent?(event)
+    }
+
+    /// The public half of the diagnostic an `error` event produces: which path in the bridge
+    /// failed and how long the message was, and nothing that came out of the message itself.
+    nonisolated static func diagnosticLine(origin: BridgeErrorOrigin, message: String) -> String {
+        "editor error origin=\(origin.rawValue) messageLength=\(message.count)"
     }
 
     // MARK: - Theme
