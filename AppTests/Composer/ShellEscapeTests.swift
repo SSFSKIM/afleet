@@ -138,9 +138,9 @@ final class ShellEscapeTests: XCTestCase {
         return String(text[open.upperBound..<close.lowerBound])
     }
 
-    // MARK: - The equality that proves nothing was sanitised twice
+    // MARK: - The equality, and the one thing it does not prove
 
-    /// The whole of G2's first clause: one `perform(.send)`, and its text **equals** the envelope's
+    /// The whole of G2's first clause: one `sendPrompt`, and its text **equals** the envelope's
     /// own output over the command, the stdout bytes and the stderr bytes the script really wrote.
     func testPostedTextEqualsTheEnvelopeOverTheSameThreeInputs() async throws {
         let tree = try TempTree()

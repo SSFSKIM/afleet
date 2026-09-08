@@ -755,6 +755,22 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     already reads. A channel the user never opened has no timeline, so at quit it is judged by its
     presence alone — the guard constructs no composer and no ingestion at the moment the app is being
     asked to stop. `ChannelState` carrying a live-task count would close that gap and is C4's too.
+    **Ruled 2026-09-08, and the escalation withdrawn.** The architect read §7.4's *Quit* as the
+    literal bare `terminate()` and accepted the missing verb as a parent gap: the clause was added at
+    C5's merge a day after C4 merged, so X5 never received it. The escalation's argument was wrong on
+    the point that mattered — the engine's `end_session` already records `task_updated
+    {status: "killed"}` and `task_notification {status: "stopped"}` for its shells and writes the
+    trailing `last-prompt` during shutdown, so the bare form is a *recorded* teardown rather than a
+    pipe yank, while the escalation's failure path (a reap still refused after `.stopEverything`)
+    exits with no SIGTERM/SIGKILL and no wedge record, regressing §6.7. The replacement lands on
+    `main` as `LifecycleAction.quit` (per channel, unconditional, `maySpawn: false`, no eligibility
+    gate, no `inFlight` guard, with `LifecycleTable.TerminatingAction.quit` so a ghost a quit leaves
+    is recorded as one) plus `LifecycleAPI.liveTaskIDs(of:)`, which also closes the presence-only
+    narrowing above: busy becomes `presence == .busy || !liveTaskIDs(of:).isEmpty`, the fleet's fact
+    rather than a surface's local count. **Still open at C6.2 Task 10:** neither member exists in this
+    leaf's tree, so `QuitGuard` still ships the withdrawn escalation and `QuitGuardTests` still
+    asserts it. Closer: the adoption task swaps both and re-points the two assertions. Owner: C6.2's
+    adoption task.
 72. **A member declared in `App/` whose only callers are in `AppTests/` is not detectable by any
     check this repo runs.** Two real defects in one review cycle had that exact shape:
     `PanelHost.selectIndex(_:in:)`, correct and tested with no production caller while the menu
@@ -978,6 +994,162 @@ symlink-containment debt in entry 78 is unchanged.
      failure. The `XCTAssertLessThan` is already an arrangement guard rather than a subject
      assertion, which is why it reads as a defect in the code under test when it fires.
      Owner: C4 (`FleetKit/Tests/FleetSessionsTests/LifecycleRowTests.swift`). Found by C6.2.
+
+147. **A test that crashes the bundle is retried by `xcodebuild` and reports "Executed 0", not a
+     failure.** Found at C6.2's Task 3 boundary. `ComposerMountTests` walks the channel column's
+     view body with `Mirror` to assert the two mount points; when the composer's registry gained a
+     route to `PanelHostModel`, that walk left the view layer and ran into the app's object graph —
+     view struct → model → `ChannelContext` → link router, store, pane-exit closure — which is
+     cyclic. It recursed until the stack ended. The bundle died, `xcodebuild` restarted it, and the
+     final summary read `Test Suite 'ComposerMountTests' passed … Executed 0 tests, with 0 failures`.
+     A suite that executes nothing is indistinguishable, in the summary a reviewer reads, from a
+     suite that has nothing to run — and the run's overall exit code was still 0. The seven tests
+     were only noticed missing because a per-suite count was compared against the previous run.
+     Fixed locally for this walk (`ComposerViewTree` no longer descends into a reference type that
+     is not itself a view; C5's `ViewTree` has the same unbounded shape but has never reached such
+     a graph). The general hazard is not fixed: nothing in this repo's `make test` notices that a
+     bundle restarted or that a suite's executed count fell to zero.
+     Closer: have the test target's runner fail when a suite reports zero executed tests while
+     declaring test methods, or diff per-suite counts against a committed baseline in `make test`.
+     Owner: C5's test tooling (`Tools/c5/`), which already owns the wiring check.
+
+148. **`check-app-wiring.py` cannot see a member whose only caller is inside a package.**
+     `ComposerModel.confirm(preview:)` witnesses `FleetKit.StrategyUI`; `StrategyExecutor.run` calls
+     it through the `ui:` argument the composer hands itself in as, so no source under `App/` calls
+     it and none should. The checker reported it as declared in `App/` and called only from
+     `AppTests/`, which is the same category its `FRAMEWORK` set already covers for SwiftUI — for a
+     protocol the check does not know about. C6.2 added one allowlist line with its reason
+     (`2b2a236`, isolated so it can be reverted alone) rather than changing the rule or dropping the
+     conformance. Note the asymmetry that made this visible at all: the sibling requirement
+     `open(url:)` escapes the check entirely, because the check keys on a bare name and `open` is
+     used elsewhere under `App/` — the known blind spot in entry 72. So the mechanism reports one of
+     two identical cases and is silent about the other.
+     Closer: teach the check about protocol witnesses — a member whose name and signature match a
+     requirement of a protocol the type conforms to is called by whoever calls the protocol. Owner:
+     C5's test tooling.
+
+149. **`ProcessRunner` cannot set a child's working directory.**
+     `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift`'s `run` takes an executable,
+     arguments, an environment and a timeout, and no directory. C6.2's `!` escape is defined by the
+     directory it runs in (§6.6: "in the channel's directory with the resolved environment"), so it
+     could not reuse the runner and spawns locally in `HostShellRunner`, copying `ProcessJob`'s
+     settlement rather than its code — exit-driven completion rather than EOF on the pipes, so a `!`
+     that backgrounds a daemon does not hang; non-blocking drains; a budget then SIGTERM/SIGKILL.
+     The rejected alternative was prefixing `cd <dir> &&` to the user's command, which puts a line
+     in front of what they typed and changes what the transcript shows them running.
+     Closer: a `directory:` parameter on `ProcessRunner`, after which `HostShellRunner` collapses
+     into `FoundationProcessRunner`. Owner: C2. Found by C6.2 Task 4.
+
+150. **`ShellEnvelope.neutralize` is idempotent, so double sanitisation is byte-invisible.** An
+     escaped `<` has no `<` left, an escaped turn marker no longer matches, a defused prefix no
+     longer starts its line. A host that neutralised a command or a stream before handing it to
+     `wrap` therefore produces byte-identical output, and C6.2's G2 equality assertion — written
+     believing it proved the composer sanitised nothing itself — passes. Demonstrated at Task 4 by
+     three mutations, one carrying a marker through the command; all passed. The same assertion does
+     catch a rule of the host's own: an appended element, a dropped byte, a merged or trimmed
+     stream, each demonstrated failing. This is not a defect in the envelope — idempotence is a
+     property worth having — but it means "called, never copied" (§6.6) is enforced by structure and
+     review, not by any test, and C6.2's gate has been corrected in place to say so.
+     Closer: if the property is ever worth testing, give `neutralize` a way to report whether it
+     changed anything, and assert the host's call is the first. Owner: C2 if it is worth it; filed
+     mainly so no later reader re-derives the false confidence. Found by C6.2 Task 4.
+
+151. **`ChannelTimelineModelTests.testOpenSettlesOnAFinishedEventStream` has a wall-clock budget that
+     fails under load. Recurred; worth fixing now rather than watching.** Observed twice during
+     C6.2: 621 ms at Task 5 and **1022 ms at Task 6's boundary**, both against a 500 ms budget, both
+     while other builds were competing for the machine; alone on a quiet machine it settles in
+     **51 ms**, so the budget is 10x the real cost and the failures are entirely load. Original note:
+     observed once during C6.2's Task 5: 621 ms against a 500 ms budget while
+     mutation builds were competing for the machine; it passed on the clean run and on the retry.
+     Same family as entry 146 and as C2's entry 2 — a test whose failure reads as a product defect
+     when what it measured was a busy host, and this repo now runs several `xcodebuild` invocations
+     at once during a fix wave, so the condition is ordinary rather than exotic.
+     Closer: raise the budget substantially, or make the assertion insensitive to load by settling on
+     an observed event rather than on elapsed time. Owner: C6.1
+     (`AppTests/ChannelTimelineModelTests.swift`). Found by C6.2 Task 5.
+
+152. **`HostSignal.rewound` moves only the live half, and that is the design — recorded so nobody
+     re-derives the alarm.** `StreamIngestion.signal` folds through `wire?.apply` and reports
+     `liveChanges` only (`StreamIngestion.swift:192-201`); the durable projection is a separate
+     cache and is untouched. C6.2's Task 6 read that as "an honoured rewind leaves the discarded
+     turn on screen" and wrote an assertion that failed. It is not a defect. The durable half is
+     built by walking back from the transcript's own leaf (`last-prompt.leafUuid`, else the last
+     conversation record) through `parentUuid` — `Reader/WindowedTranscript.swift:111-128` — and the
+     honoured rewind appends exactly one `last-prompt` naming the pre-rewind assistant, which
+     arrives mirrored (`Fixtures/rewind-turn/README.md`). So the abandoned records fall out of the
+     durable half as soon as that record lands, and `HostSignal.rewound` covers the live half in the
+     interval. Two halves, two mechanisms, no gap.
+     The observable a host-side test can actually assert is therefore the live one: an open
+     streaming preview is cleared by an honoured rewind and left alone by a refused one. C6.2's G4
+     asserts both arms. Filed for C6.3, which raises `decisionAnswered` through the same seam and
+     would otherwise spend the same hour. No closer; this entry is the answer.
+
+153. **C6.1 must call `ComposerModel.edit(_:)`, and no contract says so.** The composite gives C6.2
+     the *Edit* request, the body reading and the *Fork from here* fallback, and gives C6.1 every
+     row kind — so the affordance that starts an edit is a row action on a past user message, in
+     `App/Timeline/`, while everything it triggers is in `App/Composer/`. Neither leaf's section
+     names the call, and the cut's cross-child contracts (Y1–Y5) do not cover it: Y4 is the mirror
+     case in the other direction (C6.1 calls C6.4's `AgentNavigation.show`) and was named
+     explicitly, which is what makes the omission here visible rather than invisible.
+     Left as it stands, C6.1 ships a row with no *Edit*, or an *Edit* wired to nothing, and item 13
+     is dead at recomposition with every gate green on both sides. `check-wiring` reported
+     `ComposerModel.edit(_:)` as declared in `App/` and called only from `AppTests/` — correctly —
+     and C6.2 allowlisted it in the category the file already uses for Y4's seam ("filled by C6.n")
+     rather than inventing an affordance inside another leaf's directory.
+     Closer: name it in the composite as a cross-child contract in Y4's shape, and give C6.1 the one
+     call. Owner: the C6 composite (the architect). Raised by C6.2 Task 6.
+
+154. **`HostSignal.promptSent` reaches the fold and produces no `TimelineChange`, so no surface can
+     show a queued message before the engine echoes it.** `WireReducer.apply(_ signal:)` appends the
+     uuid to `outstandingPrompts`; that array is not in `Snapshot`, so `difference(to:)` reports
+     nothing, `StreamIngestion.signal` returns an empty `Effect` and `ChannelTimelineModel.signal`
+     does not republish. Measured at C6.2's Task 6b against the real reducer, with the negative
+     asserted (`testPromptSentPutsNoRowInTheChip`, floored by the `command_lifecycle` arm so it
+     cannot pass vacuously).
+     This is not a defect in the X5 corrective (`d802792`), which delivered exactly what it
+     promised: the uuid is now available and `TurnAttribution.prompted(uuid:)` works, where before
+     this every turn afleet reduced was `.unprompted`. It is a gap between what the host-signal
+     corrective's design implies — a pre-echo preview — and what the fold currently models. C6.2's
+     queue chip therefore renders from `Overlay.queue` alone, which is what §8.5 describes and what
+     G3 asserts, so nothing is blocked.
+     Closer: if a pre-echo queued row is wanted, C3 models an outstanding prompt the snapshot diffs
+     and the chip reads it like any other reduced state. Owner: C3 / the C6 composite, as a design
+     decision rather than a fix. Raised by C6.2 Task 6b.
+
+155. **The permission-mode picker cannot re-read its own value.** Model and effort are confirmed by
+     a fresh `get_settings` after every click (`applied.model`, `applied.effort`), which is what
+     makes §7.4's "the displayed value is a readback, never the last click" true of them.
+     `set_permission_mode` answers an empty body, and no control request anywhere in the corpus
+     reports the mode a running process is in — the only readback is the handshake's
+     `current_permission_mode`, which arrives at connect and at a quiescent restart. So between a
+     click and the next handshake the picker either shows a value nothing confirmed or shows the
+     stale one. C6.2 chose the second: the click is remembered and never displayed, and the next
+     handshake either confirms it or raises the disagreement, so the rule holds at the cost of the
+     picker lagging its own click until the process restarts.
+     Closer: a `get_permission_mode` request, or `set_permission_mode` answering the resulting mode,
+     either of which is an engine change and not afleet's; failing that, nothing to fix — this entry
+     exists so the lag is read as the readback rule holding rather than as a bug. Owner: nobody
+     today; C1's probe suite if a readback ever appears. Raised by C6.2 Task 7.
+
+156. **§8.6's fourth arm has nothing to stand on: the bypass acceptance is written and read by
+     nobody.** C6.2 writes `FleetKitKeys.bypassAccepted` into the `fleetKit` namespace as §7.8
+     requires, and `grep` finds no other reader in the tree — only the key's declaration and this
+     leaf's code. So §8.6's "later owned spawns include the flag from the start, so the mode
+     switches without a restart" is not implemented anywhere: nothing consults the acceptance when
+     a launch configuration is built, and neither `ChannelState` nor `get_settings` reports whether
+     the running process carries `--allow-dangerously-skip-permissions`. A surface therefore cannot
+     tell arm 4 (already launched with the flag) from arm 3 (needs the restart) except by trying.
+     C6.2 implemented arm 4 as the spec's own fallback says — with the acceptance stored, send
+     `set_permission_mode` and restart nothing, and render whichever of the validator's three
+     refusal strings comes back (2.1.263 `cli.pretty.js:750921-750931`) — so the behaviour is
+     correct and self-correcting, but it asks the engine a question the host should already know
+     the answer to, and on a process without the flag the user sees a refusal rather than a
+     restart.
+     Closer, and it is a C4 decision rather than a fix: either the launch path consults
+     `bypassAccepted` when composing a spawn, or X5 publishes the launch flags the current process
+     carries so a surface can branch without asking. Owner: C4, with the C6 composite ruling which.
+     Raised by C6.2 Task 8.
+
 ## From C6.1 (`child/c6-timeline-renderer`)
 
 Entries **127 through 141** are C6.1's, as the C6 composite's leaf table allots them. Nothing above
@@ -1088,109 +1260,6 @@ is renumbered.
      wire) through the two existing, tested entry points; then C6.4 reads one tree for every
      channel kind. Owner: C3, before C6.4's Agents tab is judged on foreign channels.
 
-147. **A test that crashes the bundle is retried by `xcodebuild` and reports "Executed 0", not a
-     failure.** Found at C6.2's Task 3 boundary. `ComposerMountTests` walks the channel column's
-     view body with `Mirror` to assert the two mount points; when the composer's registry gained a
-     route to `PanelHostModel`, that walk left the view layer and ran into the app's object graph —
-     view struct → model → `ChannelContext` → link router, store, pane-exit closure — which is
-     cyclic. It recursed until the stack ended. The bundle died, `xcodebuild` restarted it, and the
-     final summary read `Test Suite 'ComposerMountTests' passed … Executed 0 tests, with 0 failures`.
-     A suite that executes nothing is indistinguishable, in the summary a reviewer reads, from a
-     suite that has nothing to run — and the run's overall exit code was still 0. The seven tests
-     were only noticed missing because a per-suite count was compared against the previous run.
-     Fixed locally for this walk (`ComposerViewTree` no longer descends into a reference type that
-     is not itself a view; C5's `ViewTree` has the same unbounded shape but has never reached such
-     a graph). The general hazard is not fixed: nothing in this repo's `make test` notices that a
-     bundle restarted or that a suite's executed count fell to zero.
-     Closer: have the test target's runner fail when a suite reports zero executed tests while
-     declaring test methods, or diff per-suite counts against a committed baseline in `make test`.
-     Owner: C5's test tooling (`Tools/c5/`), which already owns the wiring check.
-
-148. **`check-app-wiring.py` cannot see a member whose only caller is inside a package.**
-     `ComposerModel.confirm(preview:)` witnesses `FleetKit.StrategyUI`; `StrategyExecutor.run` calls
-     it through the `ui:` argument the composer hands itself in as, so no source under `App/` calls
-     it and none should. The checker reported it as declared in `App/` and called only from
-     `AppTests/`, which is the same category its `FRAMEWORK` set already covers for SwiftUI — for a
-     protocol the check does not know about. C6.2 added one allowlist line with its reason
-     (`2b2a236`, isolated so it can be reverted alone) rather than changing the rule or dropping the
-     conformance. Note the asymmetry that made this visible at all: the sibling requirement
-     `open(url:)` escapes the check entirely, because the check keys on a bare name and `open` is
-     used elsewhere under `App/` — the known blind spot in entry 72. So the mechanism reports one of
-     two identical cases and is silent about the other.
-     Closer: teach the check about protocol witnesses — a member whose name and signature match a
-     requirement of a protocol the type conforms to is called by whoever calls the protocol. Owner:
-     C5's test tooling.
-
-149. **`ProcessRunner` cannot set a child's working directory.**
-     `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift`'s `run` takes an executable,
-     arguments, an environment and a timeout, and no directory. C6.2's `!` escape is defined by the
-     directory it runs in (§6.6: "in the channel's directory with the resolved environment"), so it
-     could not reuse the runner and spawns locally in `HostShellRunner`, copying `ProcessJob`'s
-     settlement rather than its code — exit-driven completion rather than EOF on the pipes, so a `!`
-     that backgrounds a daemon does not hang; non-blocking drains; a budget then SIGTERM/SIGKILL.
-     The rejected alternative was prefixing `cd <dir> &&` to the user's command, which puts a line
-     in front of what they typed and changes what the transcript shows them running.
-     Closer: a `directory:` parameter on `ProcessRunner`, after which `HostShellRunner` collapses
-     into `FoundationProcessRunner`. Owner: C2. Found by C6.2 Task 4.
-
-150. **`ShellEnvelope.neutralize` is idempotent, so double sanitisation is byte-invisible.** An
-     escaped `<` has no `<` left, an escaped turn marker no longer matches, a defused prefix no
-     longer starts its line. A host that neutralised a command or a stream before handing it to
-     `wrap` therefore produces byte-identical output, and C6.2's G2 equality assertion — written
-     believing it proved the composer sanitised nothing itself — passes. Demonstrated at Task 4 by
-     three mutations, one carrying a marker through the command; all passed. The same assertion does
-     catch a rule of the host's own: an appended element, a dropped byte, a merged or trimmed
-     stream, each demonstrated failing. This is not a defect in the envelope — idempotence is a
-     property worth having — but it means "called, never copied" (§6.6) is enforced by structure and
-     review, not by any test, and C6.2's gate has been corrected in place to say so.
-     Closer: if the property is ever worth testing, give `neutralize` a way to report whether it
-     changed anything, and assert the host's call is the first. Owner: C2 if it is worth it; filed
-     mainly so no later reader re-derives the false confidence. Found by C6.2 Task 4.
-
-151. **`ChannelTimelineModelTests.testOpenSettlesOnAFinishedEventStream` has a wall-clock budget that
-     fails under load. Recurred; worth fixing now rather than watching.** Observed twice during
-     C6.2: 621 ms at Task 5 and **1022 ms at Task 6's boundary**, both against a 500 ms budget, both
-     while other builds were competing for the machine; alone on a quiet machine it settles in
-     **51 ms**, so the budget is 10x the real cost and the failures are entirely load. Original note:
-     observed once during C6.2's Task 5: 621 ms against a 500 ms budget while
-     mutation builds were competing for the machine; it passed on the clean run and on the retry.
-     Same family as entry 146 and as C2's entry 2 — a test whose failure reads as a product defect
-     when what it measured was a busy host, and this repo now runs several `xcodebuild` invocations
-     at once during a fix wave, so the condition is ordinary rather than exotic.
-     Closer: raise the budget substantially, or make the assertion insensitive to load by settling on
-     an observed event rather than on elapsed time. Owner: C6.1
-     (`AppTests/ChannelTimelineModelTests.swift`). Found by C6.2 Task 5.
-
-152. **`HostSignal.rewound` moves only the live half, and that is the design — recorded so nobody
-     re-derives the alarm.** `StreamIngestion.signal` folds through `wire?.apply` and reports
-     `liveChanges` only (`StreamIngestion.swift:192-201`); the durable projection is a separate
-     cache and is untouched. C6.2's Task 6 read that as "an honoured rewind leaves the discarded
-     turn on screen" and wrote an assertion that failed. It is not a defect. The durable half is
-     built by walking back from the transcript's own leaf (`last-prompt.leafUuid`, else the last
-     conversation record) through `parentUuid` — `Reader/WindowedTranscript.swift:111-128` — and the
-     honoured rewind appends exactly one `last-prompt` naming the pre-rewind assistant, which
-     arrives mirrored (`Fixtures/rewind-turn/README.md`). So the abandoned records fall out of the
-     durable half as soon as that record lands, and `HostSignal.rewound` covers the live half in the
-     interval. Two halves, two mechanisms, no gap.
-     The observable a host-side test can actually assert is therefore the live one: an open
-     streaming preview is cleared by an honoured rewind and left alone by a refused one. C6.2's G4
-     asserts both arms. Filed for C6.3, which raises `decisionAnswered` through the same seam and
-     would otherwise spend the same hour. No closer; this entry is the answer.
-
-153. **C6.1 must call `ComposerModel.edit(_:)`, and no contract says so.** The composite gives C6.2
-     the *Edit* request, the body reading and the *Fork from here* fallback, and gives C6.1 every
-     row kind — so the affordance that starts an edit is a row action on a past user message, in
-     `App/Timeline/`, while everything it triggers is in `App/Composer/`. Neither leaf's section
-     names the call, and the cut's cross-child contracts (Y1–Y5) do not cover it: Y4 is the mirror
-     case in the other direction (C6.1 calls C6.4's `AgentNavigation.show`) and was named
-     explicitly, which is what makes the omission here visible rather than invisible.
-     Left as it stands, C6.1 ships a row with no *Edit*, or an *Edit* wired to nothing, and item 13
-     is dead at recomposition with every gate green on both sides. `check-wiring` reported
-     `ComposerModel.edit(_:)` as declared in `App/` and called only from `AppTests/` — correctly —
-     and C6.2 allowlisted it in the category the file already uses for Y4's seam ("filled by C6.n")
-     rather than inventing an affordance inside another leaf's directory.
-     Closer: name it in the composite as a cross-child contract in Y4's shape, and give C6.1 the one
-     call. Owner: the C6 composite (the architect). Raised by C6.2 Task 6.
 188. **`make test` rewrites `Workbench/Package.resolved` with the app's own dependency pins.**
      Since C6.1's seam range added HighlightKit to `project.yml` (`exactVersion: 0.2.0`), the
      app scheme's xcodebuild resolution writes HighlightKit's pin and a new `originHash` into
@@ -1204,53 +1273,3 @@ is renumbered.
      `xcshareddata/swiftpm/Package.resolved`; until then the floor's Makefile target restores the
      file after the run. Owner: C5 (`project.yml`), noted 2026-09-08.
 
-154. **`HostSignal.promptSent` reaches the fold and produces no `TimelineChange`, so no surface can
-     show a queued message before the engine echoes it.** `WireReducer.apply(_ signal:)` appends the
-     uuid to `outstandingPrompts`; that array is not in `Snapshot`, so `difference(to:)` reports
-     nothing, `StreamIngestion.signal` returns an empty `Effect` and `ChannelTimelineModel.signal`
-     does not republish. Measured at C6.2's Task 6b against the real reducer, with the negative
-     asserted (`testPromptSentPutsNoRowInTheChip`, floored by the `command_lifecycle` arm so it
-     cannot pass vacuously).
-     This is not a defect in the X5 corrective (`d802792`), which delivered exactly what it
-     promised: the uuid is now available and `TurnAttribution.prompted(uuid:)` works, where before
-     this every turn afleet reduced was `.unprompted`. It is a gap between what the host-signal
-     corrective's design implies — a pre-echo preview — and what the fold currently models. C6.2's
-     queue chip therefore renders from `Overlay.queue` alone, which is what §8.5 describes and what
-     G3 asserts, so nothing is blocked.
-     Closer: if a pre-echo queued row is wanted, C3 models an outstanding prompt the snapshot diffs
-     and the chip reads it like any other reduced state. Owner: C3 / the C6 composite, as a design
-     decision rather than a fix. Raised by C6.2 Task 6b.
-
-155. **The permission-mode picker cannot re-read its own value.** Model and effort are confirmed by
-     a fresh `get_settings` after every click (`applied.model`, `applied.effort`), which is what
-     makes §7.4's "the displayed value is a readback, never the last click" true of them.
-     `set_permission_mode` answers an empty body, and no control request anywhere in the corpus
-     reports the mode a running process is in — the only readback is the handshake's
-     `current_permission_mode`, which arrives at connect and at a quiescent restart. So between a
-     click and the next handshake the picker either shows a value nothing confirmed or shows the
-     stale one. C6.2 chose the second: the click is remembered and never displayed, and the next
-     handshake either confirms it or raises the disagreement, so the rule holds at the cost of the
-     picker lagging its own click until the process restarts.
-     Closer: a `get_permission_mode` request, or `set_permission_mode` answering the resulting mode,
-     either of which is an engine change and not afleet's; failing that, nothing to fix — this entry
-     exists so the lag is read as the readback rule holding rather than as a bug. Owner: nobody
-     today; C1's probe suite if a readback ever appears. Raised by C6.2 Task 7.
-
-156. **§8.6's fourth arm has nothing to stand on: the bypass acceptance is written and read by
-     nobody.** C6.2 writes `FleetKitKeys.bypassAccepted` into the `fleetKit` namespace as §7.8
-     requires, and `grep` finds no other reader in the tree — only the key's declaration and this
-     leaf's code. So §8.6's "later owned spawns include the flag from the start, so the mode
-     switches without a restart" is not implemented anywhere: nothing consults the acceptance when
-     a launch configuration is built, and neither `ChannelState` nor `get_settings` reports whether
-     the running process carries `--allow-dangerously-skip-permissions`. A surface therefore cannot
-     tell arm 4 (already launched with the flag) from arm 3 (needs the restart) except by trying.
-     C6.2 implemented arm 4 as the spec's own fallback says — with the acceptance stored, send
-     `set_permission_mode` and restart nothing, and render whichever of the validator's three
-     refusal strings comes back (2.1.263 `cli.pretty.js:750921-750931`) — so the behaviour is
-     correct and self-correcting, but it asks the engine a question the host should already know
-     the answer to, and on a process without the flag the user sees a refusal rather than a
-     restart.
-     Closer, and it is a C4 decision rather than a fix: either the launch path consults
-     `bypassAccepted` when composing a spawn, or X5 publishes the launch flags the current process
-     carries so a surface can branch without asking. Owner: C4, with the C6 composite ruling which.
-     Raised by C6.2 Task 8.

@@ -128,8 +128,8 @@ extension ComposerModel {
         case .text(let text):
             // A pass-through is a prompt like any other: the user typed a line and a turn runs for
             // it. So it goes through `post(_:)` — `sendPrompt`, and the `HostSignal.promptSent` raise
-            // that attributes the turn it causes. Issued as `perform(.send)` with no raise, as it was
-            // until Task 7, the turn reduced as `.unprompted`.
+            // that attributes the turn it causes. While it was issued as `perform(.send)` with no
+            // raise — as it was until Task 7 — the turn reduced as `.unprompted`.
             return await post(UserInput(text: text))
         case .native(let surface):
             // Nothing reaches the lifecycle: a picker, a list or the switcher is afleet's own screen.

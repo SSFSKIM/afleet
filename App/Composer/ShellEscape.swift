@@ -185,8 +185,8 @@ extension ComposerModel {
         return command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : command
     }
 
-    /// Runs the line host-side and posts exactly one `perform(.send(UserInput))` — the only write
-    /// this path makes, and the only one it is allowed (contract Y5).
+    /// Runs the line host-side and posts exactly one `sendPrompt(UserInput)` — the only write this
+    /// path makes, and the only one it is allowed (contract Y5).
     ///
     /// A non-zero exit and a command that does not exist both still post: the shell's complaint is
     /// what the model needs to see, and it is already inside `<bash-stderr>` because that is where
@@ -212,8 +212,8 @@ extension ComposerModel {
         let text = ShellEnvelope.wrap(command: command, stdout: output.stdout, stderr: output.stderr)
         // Through `post(_:)`, the one place a `UserInput` becomes a prompt: the engine answers a
         // `<bash-stdout>`-bearing user frame with a turn (the live gate's item 12 is exactly that), so
-        // this send attributes like every other. Issued as `perform(.send)` with no raise, as it was
-        // until Task 7, that turn reduced as `.unprompted`.
+        // this send attributes like every other. While it was issued as `perform(.send)` with no
+        // raise — as it was until Task 7 — that turn reduced as `.unprompted`.
         let posted = await post(UserInput(text: text))
         if posted, output.timedOut {
             let seconds = HostShellRunner.budget.components.seconds
