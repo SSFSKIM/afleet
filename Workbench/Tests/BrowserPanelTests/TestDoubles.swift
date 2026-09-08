@@ -38,7 +38,33 @@ actor InMemoryScopedStore: ScopedStore {
     private var waiters: [(target: Int, continuation: CheckedContinuation<Void, Never>)] = []
     private var expectations: [(target: Int, expectation: XCTestExpectation)] = []
 
+    /// Reads suspended at a gate the test opens. A restore that races a routed link is only a race
+    /// a test can drive if the read can be held open for as long as the test needs it.
+    private var readGate: [CheckedContinuation<Void, Never>] = []
+    private var readsHeld = false
+    private var readArrivals = 0
+    private var readArrivalExpectations: [XCTestExpectation] = []
+
     func setFailsWrites(_ value: Bool) { failsWrites = value }
+
+    /// Every subsequent `read` suspends until `releaseReads` is called.
+    func holdReads() { readsHeld = true }
+
+    /// Fulfils `expectation` once a read has reached the gate.
+    func expectReadArrival(_ expectation: XCTestExpectation) {
+        if readArrivals > 0 {
+            expectation.fulfill()
+            return
+        }
+        readArrivalExpectations.append(expectation)
+    }
+
+    func releaseReads() {
+        readsHeld = false
+        let waiting = readGate
+        readGate.removeAll()
+        for continuation in waiting { continuation.resume() }
+    }
 
     /// Seeds the raw JSON a document at `key` would have on disk, without going through `write`.
     func seed(json: String, key: String) {
@@ -77,6 +103,13 @@ actor InMemoryScopedStore: ScopedStore {
     // MARK: ScopedStore
 
     func read<T: Codable & Sendable>(_ type: T.Type, key: String) async throws -> T? {
+        readArrivals += 1
+        let due = readArrivalExpectations
+        readArrivalExpectations.removeAll()
+        for waiter in due { waiter.fulfill() }
+        if readsHeld {
+            await withCheckedContinuation { readGate.append($0) }
+        }
         guard let data = storage[key] else { return nil }
         return try JSONDecoder().decode(type, from: data)
     }
@@ -323,4 +356,93 @@ actor NoRoutingCapability: LinkRouterCapability {
     func register(_ target: LinkTarget) async {}
     func unregister(tab: PanelTabID) async {}
     func open(_ link: WorkspaceLink, from destination: LinkDestination) async {}
+}
+
+// MARK: - A store whose writes and reads the test holds open
+
+/// A completion count readable **without** an actor hop.
+///
+/// A test that asks "had the write finished when this call returned?" cannot ask an actor: the hop
+/// is itself a suspension, and the answer would be taken after whatever the test was trying to
+/// catch. A lock-guarded counter is read in the same breath as the return.
+final class CompletionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func record() { lock.lock(); count += 1; lock.unlock() }
+}
+
+/// A `ScopedStore` whose writes suspend at a gate the test opens, so which of two writes lands
+/// last is a thing the test decides rather than a thing the scheduler does.
+///
+/// The gate opens **newest first**. A gate that resumed in arrival order could not tell a
+/// serialised writer from an unserialised one, because arrival order already produces the answer
+/// the serialised writer gives.
+actor GatedScopedStore: ScopedStore {
+
+    private var gate: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+    private var storage: [String: Data] = [:]
+
+    /// How many writes were inside `write` at once — 1 for a store written to in series, and the
+    /// measure of the interleaving this double exists to catch.
+    private(set) var maxInFlight = 0
+    private var inFlight = 0
+
+    private var arrivals = 0
+    private var arrivalExpectations: [(target: Int, expectation: XCTestExpectation)] = []
+
+    private let completions: CompletionCounter
+
+    init(completions: CompletionCounter) {
+        self.completions = completions
+    }
+
+    /// Fulfils `expectation` once at least `count` writes have reached the gate.
+    func expectWriteArrivals(_ count: Int, _ expectation: XCTestExpectation) {
+        if arrivals >= count {
+            expectation.fulfill()
+            return
+        }
+        arrivalExpectations.append((count, expectation))
+    }
+
+    /// Lets every write waiting at the gate through, newest first, and leaves the gate open.
+    func openGate() {
+        isOpen = true
+        let waiting = gate.reversed()
+        gate.removeAll()
+        for continuation in waiting { continuation.resume() }
+    }
+
+    func document<T: Codable & Sendable>(_ type: T.Type, key: String) throws -> T? {
+        guard let data = storage[key] else { return nil }
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    // MARK: ScopedStore
+
+    func read<T: Codable & Sendable>(_ type: T.Type, key: String) async throws -> T? {
+        guard let data = storage[key] else { return nil }
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    func write<T: Codable & Sendable>(_ value: T, key: String) async throws {
+        inFlight += 1
+        maxInFlight = max(maxInFlight, inFlight)
+        arrivals += 1
+        let due = arrivalExpectations.filter { $0.target <= arrivals }
+        arrivalExpectations.removeAll { $0.target <= arrivals }
+        for waiter in due { waiter.expectation.fulfill() }
+        if !isOpen {
+            await withCheckedContinuation { gate.append($0) }
+        }
+        inFlight -= 1
+        storage[key] = try JSONEncoder().encode(value)
+        completions.record()
+    }
+
+    func remove(key: String) async throws { storage[key] = nil }
+
+    func keys() async throws -> [String] { Array(storage.keys) }
 }

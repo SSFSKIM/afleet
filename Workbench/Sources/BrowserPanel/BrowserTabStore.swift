@@ -58,6 +58,11 @@ public actor BrowserTabStore {
     private var pendingEdit: BrowserTabSet?
     private var windowIsOpen = false
 
+    /// Persistence runs in order behind this chain; see `persist`.
+    private var writeChain: Task<Void, Never> = Task {}
+
+    private var errorObserver: ErrorObserver?
+
     /// The task an open window is running in. Held so a test can tell the difference between "the
     /// superseded window wrote nothing" and "the superseded window has not run yet" — from a write
     /// count alone the two look identical.
@@ -81,15 +86,21 @@ public actor BrowserTabStore {
     /// cannot be told about it is not a channel this failure belongs in (§10).
     @discardableResult
     public func load() async -> BrowserTabSet {
+        current = .empty
         do {
-            guard let document = try await store.read(BrowserTabSetDocument.self, key: Self.storeKey) else {
-                current = .empty
+            // **The version is read before the shape.** A later build is free to rename or drop
+            // every field this one knows, so decoding the version-1 document first turns a newer
+            // document into an *unreadable* one — and an unreadable document is one this build then
+            // writes over, which is exactly the protection the version exists to give.
+            guard let probe = try await store.read(SchemaProbe.self, key: Self.storeKey) else {
                 return current
             }
-            guard document.schemaVersion <= BrowserTabSetDocument.currentSchemaVersion else {
+            guard probe.schemaVersion <= BrowserTabSetDocument.currentSchemaVersion else {
                 writesRefused = true
-                lastError = .documentFromANewerBuild(found: document.schemaVersion)
-                current = .empty
+                lastError = .documentFromANewerBuild(found: probe.schemaVersion)
+                return current
+            }
+            guard let document = try await store.read(BrowserTabSetDocument.self, key: Self.storeKey) else {
                 return current
             }
             current = BrowserTabSet(document: document)
@@ -99,6 +110,14 @@ public actor BrowserTabStore {
             current = .empty
             return current
         }
+    }
+
+    /// The one field every version of this document has, on its own.
+    ///
+    /// Decoded before the version-specific shape so that "which build wrote this" is answered by
+    /// the payload and never inferred from whether this build could read the rest of it.
+    private struct SchemaProbe: Codable, Sendable {
+        var schemaVersion: Int
     }
 
     // MARK: Writing
@@ -129,11 +148,27 @@ public actor BrowserTabStore {
     /// Writes whatever a window is holding, now. The panel calls this when it is going away, so a
     /// title typed into the last half-second is not the one thing a relaunch forgets.
     public func flushPendingEdits() async {
-        guard let pending = pendingEdit else { return }
-        pendingEdit = nil
-        windowIsOpen = false
-        generation += 1
-        await persist(pending)
+        if let pending = pendingEdit {
+            pendingEdit = nil
+            windowIsOpen = false
+            generation += 1
+            await persist(pending)
+        }
+        // And whatever a window already handed to the store, pending or not. A drain that returned
+        // in front of a write in flight would let the app exit mid-write, which is the one thing a
+        // drain exists to prevent.
+        await writeChain.value
+    }
+
+    /// Told the error row after every write, so the panel's own copy follows the write rather than
+    /// the call that scheduled it.
+    public typealias ErrorObserver = @Sendable (BrowserTabStoreError?) async -> Void
+
+    /// Installs `observer` and tells it what the row says now. One observer: the model that owns
+    /// this store is the only thing that renders it.
+    public func observeErrors(_ observer: @escaping ErrorObserver) async {
+        errorObserver = observer
+        await observer(lastError)
     }
 
     /// Returns once the window in flight, if any, has run to its decision. Nothing in the panel
@@ -154,13 +189,35 @@ public actor BrowserTabStore {
         await persist(pending)
     }
 
+    /// Every write, in submission order.
+    ///
+    /// **The two write paths are not otherwise ordered.** `closeWindow` has already taken the
+    /// pending edit by the time it suspends on the store, so the generation check can no longer
+    /// invalidate a write that is on its way; a structural change entering during that suspension
+    /// submits a newer snapshot behind it; and `ScopedStore` promises nothing about which of two
+    /// writes completes first. The chain is what makes the last snapshot submitted the last one
+    /// written, and it is also what `flushPendingEdits` waits on.
     private func persist(_ set: BrowserTabSet) async {
         guard !writesRefused else { return }
+        let task = Task { [previous = writeChain] in
+            await previous.value
+            await self.write(set)
+        }
+        writeChain = task
+        await task.value
+    }
+
+    /// One write, and the error row that follows it.
+    private func write(_ set: BrowserTabSet) async {
         do {
             try await store.write(set.documentToPersist(), key: Self.storeKey)
             lastError = nil
         } catch {
             lastError = .writeFailed
         }
+        // The panel is told by the write that happened and not by the call that scheduled one: a
+        // coalesced commit returns half a second before its write, so a caller sampling `lastError`
+        // at the commit samples the write before it.
+        await errorObserver?(lastError)
     }
 }

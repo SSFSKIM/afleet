@@ -130,6 +130,102 @@ final class BrowserTabStoreTests: XCTestCase {
         XCTAssertEqual(live.tabs.count, 1, "the panel still works in memory; only the document is left alone")
     }
 
+    /// **A newer document that does not carry a version-1 field is still a newer document.**
+    ///
+    /// The version has to be read before the shape is: a later build is free to rename or drop
+    /// every field this one knows, so decoding `BrowserTabSetDocument` first turns a newer document
+    /// into an *unreadable* one — and an unreadable document is one this build then writes over,
+    /// which is precisely the protection Q6's version exists to give.
+    func testANewerDocumentMissingAVersionOneFieldStillRefusesEveryWrite() async throws {
+        let (store, backing, _) = makeStore()
+        // Version 2 as a later build might have written it: `selectedIndex` is gone and a field
+        // this build has never heard of stands in its place.
+        await backing.seed(json: #"{"schemaVersion":2,"tabs":[],"selection":{"tabID":null}}"#,
+                           key: BrowserTabStore.storeKey)
+
+        let restored = await store.load()
+        await store.commitStructuralChange(Self.set(["one"], selection: 0))
+
+        let attempts = await backing.attemptedWrites
+        let error = await store.lastError
+        XCTAssertTrue(restored.tabs.isEmpty, "a schema this build does not know opens empty")
+        XCTAssertEqual(error, .documentFromANewerBuild(found: 2),
+                       "the version was read out of the payload, not inferred from a decode failure")
+        XCTAssertEqual(attempts, 0, "this build wrote over a newer build\'s document")
+    }
+
+    // MARK: Q6 — the two write paths, in order
+
+    /// A structural change that arrives while a coalesced write is in flight is the one that
+    /// survives.
+    ///
+    /// `closeWindow` has already taken the pending edit by the time it suspends on the store, so
+    /// the generation check cannot invalidate a write that is already on its way — and `ScopedStore`
+    /// promises no completion order. Without a chain, the older snapshot lands last and the tab the
+    /// user just opened is gone from the document.
+    func testAStructuralCommitDuringACoalescedWriteIsTheOneThatSurvives() async throws {
+        let completions = CompletionCounter()
+        let backing = GatedScopedStore(completions: completions)
+        let sleeper = ManualSleeper()
+        let store = BrowserTabStore(store: backing, sleep: sleeper.sleep)
+
+        await store.commitEdit(Self.set(["coalesced"], selection: 0))
+        await sleeper.waitForSleep()
+        let arrived = expectation(description: "the coalesced write reached the store")
+        await backing.expectWriteArrivals(1, arrived)
+        await sleeper.advance()
+        await fulfillment(of: [arrived], timeout: Self.deadline)
+
+        // The structural change enters while that write is suspended, carrying the newer set.
+        let newer = Self.set(["structural"], selection: 0)
+        let structural = Task { await store.commitStructuralChange(newer) }
+        for _ in 0..<Self.yields { await Task.yield() }
+
+        await backing.openGate()
+        await structural.value
+        await store.flushPendingEdits()
+
+        let document = try await backing.document(BrowserTabSetDocument.self, key: BrowserTabStore.storeKey)
+        let concurrent = await backing.maxInFlight
+        XCTAssertEqual(document?.tabs.map(\.title), ["structural"],
+                       "the older coalesced snapshot landed on top of the newer structural one")
+        XCTAssertEqual(concurrent, 1, "\(concurrent) writes were inside the store at once")
+    }
+
+    /// A flush with nothing pending still waits for the write a window already handed to the store.
+    ///
+    /// This is what the quit path drains through, so a flush that returns in front of an
+    /// outstanding write lets the app exit mid-write — the one thing a drain exists to prevent.
+    func testAFlushWaitsForAWriteAlreadyInFlight() async throws {
+        let completions = CompletionCounter()
+        let backing = GatedScopedStore(completions: completions)
+        let sleeper = ManualSleeper()
+        let store = BrowserTabStore(store: backing, sleep: sleeper.sleep)
+
+        await store.commitEdit(Self.set(["pending"], selection: 0))
+        await sleeper.waitForSleep()
+        let arrived = expectation(description: "the coalesced write reached the store")
+        await backing.expectWriteArrivals(1, arrived)
+        await sleeper.advance()
+        await fulfillment(of: [arrived], timeout: Self.deadline)
+        // The window has taken the pending edit, so the flush has nothing of its own to write —
+        // and a write in flight it must not return in front of.
+
+        // The count is read in the same breath as the return: an actor hop to ask would be taken
+        // after whatever this is trying to catch.
+        let observed = Task { await store.flushPendingEdits(); return completions.value }
+        for _ in 0..<Self.yields { await Task.yield() }
+        await backing.openGate()
+
+        let atReturn = await observed.value
+        XCTAssertEqual(atReturn, 1, "the flush returned with a write still in flight")
+    }
+
+    /// A bounded number of cooperative yields: enough for a call that does not wait to run to its
+    /// return, and never enough for one that is waiting on a gate the test has not opened.
+    private static let yields = 50
+    private static let deadline: TimeInterval = 5
+
     // MARK: Q6 — the fifty-tab cap
 
     func testSixtyTabsPersistAsTheNewestFiftyInOrder() async throws {
