@@ -899,8 +899,12 @@ leaf's reservation; 125 onward are unused.
      outside the window `truncated`, but nothing fetches the next page. Correct for a viewport,
      incomplete for a scroll. Owner: C7.7 when the panel's scroll needs it.
 
-115. **`%D`'s shortened decorations cannot distinguish a remote-tracking branch from a local
-     branch whose name contains a slash.** Measured on `git` 2.55.0: `feature/x` is reported as
+115. **Closed 2026-09-08 (`3c0ec27`).** The architect amended contract W7 to `--decorate=full`,
+     so `%D` arrives as full ref paths and `GitLog.refs(from:)` strips `refs/heads/`,
+     `refs/remotes/` and `refs/tags/` instead of guessing at the first slash; the pin stays
+     explicit because `log.decorate=short` is now the adverse setting. **`%D`'s shortened
+     decorations cannot distinguish a remote-tracking branch from a local branch whose name
+     contains a slash.** Measured on `git` 2.55.0: `feature/x` is reported as
      `.remoteBranch(remote: "feature")` named `x`, and a local branch literally named
      `origin/feature` is indistinguishable from the remote-tracking one. The arrow form
      (`HEAD -> feature/x`) is exempt because it names a local branch by construction. No parser
@@ -980,7 +984,7 @@ leaf's reservation; 125 onward are unused.
      edge or a wrong commit — and `AdverseConfigurationTests` documents it as unpinned rather than
      ruled out. What would close it: read decorations from `git for-each-ref` and join them to the
      window by object name, instead of from `%D`. Owner: whoever next revises `GitLog`, and a
-     natural companion to the `--decorate=full` swap the ledger's Parent-revisions item 3 proposes.
+     natural companion to the `--decorate=full` swap entry 115 records as taken.
 
 123. **Nothing enforces that a setting `AdverseConfigurationTests.ruledOut` names can be exhibited
      by the fixture that measures it.** The suite carries two dictionaries: `hostile`, the settings
