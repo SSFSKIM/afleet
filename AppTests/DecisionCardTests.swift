@@ -268,6 +268,31 @@ final class DecisionCardTests: XCTestCase {
         }
     }
 
+    /// scalpel-2#2: a directory-carrying suggestion names **every directory**, not how many.
+    ///
+    /// `DecisionAnswerMapping` sends the suggestions as they arrived, so *Always allow* grants the
+    /// engine access to each of these directories for the rest of the session and beyond. No other
+    /// control on the card exposes the list — the picker chooses where the rule is filed, not what
+    /// it covers — so a reading that said "3 directories" was the only description of the grant, and
+    /// it described none of it.
+    func testADirectorySuggestionNamesEveryDirectoryItWouldAdd() async throws {
+        let (_, answering) = await answering()
+        let directories = ["/invented/workspace/alpha", "/invented/workspace/beta",
+                           "/invented/workspace/gamma"]
+        let suggestion: [String: Any] = ["type": "addDirectories", "directories": directories,
+                                         "destination": "localSettings"]
+        let card = try card("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaab04",
+                            overrides: ["permission_suggestions": [suggestion]])
+        for presentation in [DecisionCardView.Presentation.full, .compact] {
+            let texts = CardTree.texts(in: try permissionView(card, presentation, answering).body)
+            let reading = try XCTUnwrap(texts.first { $0.contains("Always allow adds") },
+                                        "the card offered Always allow without describing the grant")
+            let unnamed = directories.filter { !reading.contains($0) }
+            XCTAssertEqual(unnamed.count, 0,
+                           "\(unnamed.count) of \(directories.count) directories were left out of the reading")
+        }
+    }
+
     // MARK: - Why the engine is asking
 
     /// An empty `decision_reason` is rebuilt from `decision_reason_type` and `matched_ask_rule`

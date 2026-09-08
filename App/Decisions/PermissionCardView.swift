@@ -225,10 +225,15 @@ struct PermissionCardView: View {
         return rules.count == 1 ? "\(word) for \(named)" : "\(behavior.rawValue) rules for \(named)"
     }
 
+    /// Every directory, named (scalpel-2#2).
+    ///
+    /// The count was the whole description of what *Always allow* would grant, and the list reaches
+    /// the engine in full: `DecisionAnswerMapping` sends the suggestion as it arrived, and no other
+    /// control on the card exposes it — the picker chooses where the rule is filed, not what it
+    /// covers. A user cannot consent to directories they were never shown.
     private static func reading(of directories: [String]) -> String {
-        directories.count == 1
-            ? "the directory \(directories[0])"
-            : "\(directories.count) directories"
+        let named = directories.joined(separator: ", ")
+        return directories.count == 1 ? "the directory \(named)" : "the directories \(named)"
     }
 
     private static func name(of mode: PermissionMode) -> String {
