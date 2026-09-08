@@ -920,3 +920,29 @@ is renumbered.
      only one any recording exercises. Found at C6.1's grill. Closer: C1 records a scenario whose
      turn produces consecutive tool calls the engine summarises, at the next fixture re-pin; the
      tests then read it. Owner: C1 for the recording, C6.1 for adopting it.
+
+129. **`ChannelTimelineModel.ingestionSignal` is never set in production, so `signal(_:)` is a
+     no-op in the running app.** The forwarder landed with C6.1's seam commit and is exercised by
+     `ChannelTimelineSeamTests`, but the only writers of the property are those tests: nothing at
+     the composition root assigns it, because the C3 corrective that gives `StreamIngestion` a
+     `signal(_:)` of its own was not on `main` when the seam was written. `check-app-wiring` does
+     not flag it — the check keys on a bare name and `signal(_:)` *reads* the property in
+     production — so the tool's substance is unmet while its letter is satisfied, which is
+     precisely the shape tracker 72 exists to catch. The consequence is worse than a missing seam:
+     C6.2 and C6.3 call `signal(_:)` by a name the architect gave them, and until the property is
+     assigned their calls succeed and do nothing, so a decision stays `.pending` with no error
+     anywhere. Found at C6.1's review of its own seam commit. Closer: assign it at the composition
+     root in the same change that lands the C3 corrective, and add a wiring assertion that the
+     app — not a test — set it. Owner: the architect, at the corrective's reconciliation.
+
+130. **`.relocated` will reach the ingestion twice once the seam is wired.**
+     `ChannelTimelineModel.transcriptMoved(to:)` calls `ingestion.relocated(mainPath:)` and then
+     raises `signal(.relocated(mainPath:))`. Today the second reaches a nil seam and costs nothing.
+     When `ingestionSignal` is pointed at `StreamIngestion.signal(_:)` the same move arrives by two
+     routes, and whether that is idempotent is a property of the corrective, not of this side —
+     C6.1's test can only pin the idempotence of its own double. Both calls are deliberate: the
+     first is the path rebind the ingestion already needed, the second is the fold hearing about a
+     move no frame states. Found at C6.1's review. Closer: at the corrective's landing, either make
+     `StreamIngestion.signal(.relocated:)` subsume the rebind so the app raises only the signal, or
+     assert the double delivery is idempotent against the real ingestion. Owner: the architect,
+     with C3.
