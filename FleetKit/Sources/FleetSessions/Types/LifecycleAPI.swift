@@ -41,4 +41,9 @@ public protocol LifecycleAPI: Sendable {
     func events(of key: ChannelKey) async -> AsyncStream<WireEvent>?
     /// Every transition, coalesced per channel.
     var updates: AsyncStream<ChannelState> { get }
+    /// The roster, republished in full whenever it changes. `updates` cannot carry this: it is keyed by channel and
+    /// an exec job has no channel, so a surface listening to it alone never learns that a job appeared outside
+    /// afleet or that one changed state. Published from the observer's own watch and poll cycle, so a consumer that
+    /// listens rather than polls costs no extra `agents --json` run.
+    var jobUpdates: AsyncStream<[JobEntry]> { get }
 }
