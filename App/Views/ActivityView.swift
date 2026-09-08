@@ -6,7 +6,7 @@ import FleetKit
 /// the whole fleet, with an inline answer for a plain permission ask.
 ///
 /// It decides nothing. Which rows exist is `ActivityQuery`'s, which of them may be answered where
-/// they stand is `ActivityModel`'s, and this file draws the answer and routes the two buttons.
+/// they stand is `ActivityModel`'s, and the card that answers them is `DecisionCardView`'s.
 struct ActivityView: View {
 
     @Bindable var app: AppModel
@@ -44,9 +44,9 @@ struct ActivityView: View {
                 }
                 .listStyle(.inset)
             }
-            if let failure = activity.answerFailure {
+            if let failure = activity.answering.banner {
                 Divider()
-                Text(failure)
+                Text(failure.text)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(10)
@@ -87,8 +87,13 @@ private struct BannerStack: View {
     }
 }
 
-/// One row. Two shapes: a plain permission ask, which is answered here, and everything else, which
-/// opens its channel — §5's rule that Activity *lists* every decision kind and *answers* one.
+/// One row. Two shapes: a plain permission ask, which is answered here through the shared card
+/// component in its compact presentation, and everything else, which opens its channel — §5's rule
+/// that Activity *lists* every decision kind and *answers* one (spec D4).
+///
+/// Nothing here builds a card or an answer. The buttons, the actions they emit and the bodies those
+/// actions map to are `DecisionCardView`'s, `DecisionAction`'s and `DecisionCard.answer(_:)`'s
+/// (contract Y2).
 struct ActivityRowView: View {
 
     let item: ActivityItem
@@ -103,17 +108,18 @@ struct ActivityRowView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 92, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
-                if let ask = item.ask {
-                    Text(ask.toolName).font(.body.weight(.semibold))
+                if let card = item.card {
+                    DecisionCardView(card: card,
+                                     presentation: .compact,
+                                     in: item.key,
+                                     answering: activity.answering)
+                } else {
+                    Text(item.row.text.isEmpty ? item.kindLabel : item.row.text)
                 }
-                Text(item.row.text.isEmpty ? item.kindLabel : item.row.text)
                 Text(title).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
-            if let ask = item.ask {
-                Button("Allow once") { Task { await activity.allowOnce(ask, on: item.key) } }
-                Button("Deny") { Task { await activity.deny(ask, on: item.key) } }
-            } else {
+            if item.card == nil {
                 Button("Go to channel") { shell.select(item.key.session) }
             }
         }

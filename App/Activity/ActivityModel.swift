@@ -9,15 +9,11 @@ import FleetKit
 /// stands, and a stable identity to draw it under.
 struct ActivityItem: Identifiable, Sendable {
 
-    /// The permission ask a row may answer inline. Non-nil for exactly one shape: a `can_use_tool`
-    /// request, still open, that does not carry `requires_user_interaction` (spec §5, §8.4).
-    struct PermissionAsk: Hashable, Sendable {
-        var id: RequestID
-        var toolName: String
-    }
-
     let row: ActivityRow
-    let ask: PermissionAsk?
+    /// The card this row answers where it stands, or nil for a row that opens its channel instead.
+    /// Non-nil for exactly one shape: a plain permission ask, still open, that does not carry
+    /// `requires_user_interaction` (spec §5, §8.4, D4).
+    let card: DecisionCard?
     /// Position in the query's output. Rows repeat — two failed results of the same tool are two
     /// rows with identical contents — so the position is what separates them.
     let position: Int
@@ -81,10 +77,12 @@ final class ActivityModel {
     /// The in-app half of spike S-C5-1's fallback: notifications the system would not deliver,
     /// newest first, until the user dismisses them.
     private(set) var banners: [AfleetNotification] = []
-    /// The last refusal an inline answer met, if any. Cleared by the next successful answer.
-    private(set) var answerFailure: String?
 
     // MARK: - Seams
+
+    /// The one path a card's answer leaves by, shared with the timeline's host (contract Y2).
+    /// Activity performs no answer of its own and constructs no `InboundAnswer`.
+    let answering: DecisionAnswering
 
     private let lifecycle: any LifecycleAPI
     private let configHome: URL
@@ -147,6 +145,7 @@ final class ActivityModel {
          store: (any StateStore)? = nil,
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.lifecycle = lifecycle
+        self.answering = DecisionAnswering(lifecycle: lifecycle)
         self.configHome = configHome
         self.shell = shell
         self.router = router
@@ -158,6 +157,15 @@ final class ActivityModel {
         // seam the inline permission path uses; without it every completed payload the router
         // answered would sit in `requests` until the process exits.
         router.onAnswered = { [weak self] id, key in self?.pumps[key]?.forget(id) }
+        // The same seam for a card's answer: the engine sends no frame back for one, so the pump
+        // learns the request is closed only by being told, and the state `perform` returned is the
+        // fleet's newest.
+        answering.settled = { [weak self] id, key, state in
+            guard let self else { return }
+            self.pumps[key]?.forget(id)
+            self.apply(state)
+            self.rebuild()
+        }
     }
 
     // MARK: - Starting
@@ -356,61 +364,33 @@ final class ActivityModel {
         }
         let rows = ActivityQuery.rows(states: ordered, mirrors: mirrors, recent: recent)
         items = rows.enumerated().map { position, row in
-            ActivityItem(row: row, ask: ask(for: row), position: position)
+            ActivityItem(row: row, card: card(for: row), position: position)
         }
         markViewedChannelSeen()
         releaseWaiters()
     }
 
-    /// The inline-answer affordance, or nil.
+    /// The card this row answers where it stands, or nil.
     ///
-    /// Nil for every kind but a decision, and for a decision it is nil unless the request the pump
-    /// holds is a `can_use_tool` without `requires_user_interaction`. §8.4 makes that flag the
-    /// engine saying the tool's own card is the surface, so an *Allow once* button here would be
-    /// answering a question the user has not been shown. Every other kind — question, plan,
-    /// elicitation, dialog — gets its row and a *Go to channel*, because those cards are C6's and
-    /// half a card is a wrong affordance rather than a partial one.
-    private func ask(for row: ActivityRow) -> ActivityItem.PermissionAsk? {
+    /// Activity holds no `ChannelTimeline` for a channel the user has not opened, so it cannot read
+    /// C3's overlay; it holds the live `InboundRequest` in its pump and builds the item the reducer
+    /// would have built for it (spec D14). The card itself, its actions and its answers are
+    /// `DecisionCardView`'s and `DecisionCard.answer(_:)`'s — Activity constructs none of them.
+    ///
+    /// Nil for every kind but a decision, and for a decision it is nil unless the request is a
+    /// `can_use_tool` without `requires_user_interaction` — C5's rule, unchanged by the adoption.
+    /// That flag is the engine saying
+    /// the tool's own card is the surface, so an *Allow once* button here would answer a question
+    /// the user has not been shown. Every other kind — question, plan, elicitation, dialog — gets
+    /// its row and a *Go to channel*, because half a card is a wrong affordance rather than a
+    /// partial one (C5's human-gate ruling 4, spec D4).
+    private func card(for row: ActivityRow) -> DecisionCard? {
         guard case .decision(let id) = row.kind,
               let request = pumps[row.key]?.requests[id],
               case .canUseTool(let tool) = request.payload,
-              tool.requiresUserInteraction != true else { return nil }
-        return ActivityItem.PermissionAsk(id: id, toolName: tool.toolName)
-    }
-
-    // MARK: - Answering
-
-    /// *Allow once*: `allow`, classified `user_temporary` (§8.4's binding mapping).
-    ///
-    /// *Always allow* is deliberately absent. It needs the request's `permission_suggestions` and a
-    /// choice of destination, and that card is C6's.
-    func allowOnce(_ ask: ActivityItem.PermissionAsk, on key: ChannelKey) async {
-        await answer(.permission(.allow(updatedInput: nil, updatedPermissions: nil,
-                                        classification: .userTemporary)),
-                     to: ask.id, on: key)
-    }
-
-    /// *Deny*: `deny`, classified `user_reject`, without interrupting the turn.
-    func deny(_ ask: ActivityItem.PermissionAsk, on key: ChannelKey) async {
-        await answer(.permission(.deny(message: "Denied from Activity.", interrupt: false,
-                                       classification: .userReject)),
-                     to: ask.id, on: key)
-    }
-
-    /// The one path an answer leaves by. `LifecycleAPI` has no `answer` member; the action is
-    /// `LifecycleAction.answer(RequestID, InboundAnswer)`.
-    private func answer(_ answer: InboundAnswer, to id: RequestID, on key: ChannelKey) async {
-        do {
-            let state = try await lifecycle.perform(.answer(id, answer), on: key)
-            answerFailure = nil
-            pumps[key]?.forget(id)
-            apply(state)
-            rebuild()
-        } catch let error as LifecycleError {
-            answerFailure = RowBanner(error).text
-        } catch {
-            answerFailure = "The answer failed: \(type(of: error))."
-        }
+              tool.requiresUserInteraction != true,
+              let item = DecisionItem(surfacing: request, in: row.key) else { return nil }
+        return DecisionCard(item)
     }
 
     // MARK: - Badges and the unread cursor

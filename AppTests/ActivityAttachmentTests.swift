@@ -100,7 +100,7 @@ final class ActivityAttachmentTests: XCTestCase {
         let activity = try XCTUnwrap(model.activity, "the launch reached a workspace and built no Activity")
         let performed = await rig.fleet.performCount
         XCTAssertEqual(performed, 1, "the adopt never reached the fleet")
-        XCTAssertEqual(activity.items.filter { $0.key == key }.compactMap(\.ask).count, 1,
+        XCTAssertEqual(activity.items.filter { $0.key == key }.compactMap(\.card).count, 1,
                        "the request emitted during the adopt reached no subscription")
         activity.stop()
     }
