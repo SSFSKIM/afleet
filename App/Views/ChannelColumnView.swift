@@ -49,6 +49,7 @@ private struct ChannelTimelineColumn: View {
     var body: some View {
         VStack(spacing: 0) {
             ChannelHeaderView(header: model.header)
+            ChannelHeaderActionsSlot(key: row.key)
             Divider()
             if let failure = model.failure {
                 PlaceholderColumn(title: "This channel could not be read", detail: failure)
@@ -62,6 +63,7 @@ private struct ChannelTimelineColumn: View {
                 List(model.rows) { TimelineRowSlot(row: $0) }
                     .listStyle(.inset)
             }
+            ChannelComposerMount(key: row.key)
         }
         // The header and the opening are two concerns, and keying one task on both was a defect.
         // The header has to follow a channel that goes busy, raises a banner or crashes while it

@@ -4,7 +4,7 @@ import SwiftUI
 /// it draws the inline refusal, the field, and the reason the field is closed, and it decides
 /// nothing.
 ///
-/// Not mounted yet — Task 2 puts it in `ChannelColumnView`.
+/// Mounted by `ChannelComposerMount`, below the channel's list.
 struct ComposerView: View {
 
     @Bindable var model: ComposerModel
@@ -28,6 +28,9 @@ struct ComposerView: View {
                 .frame(minHeight: 34, maxHeight: 160)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
                 .opacity(model.surface.isDisabled ? 0.5 : 1)
+            // Esc, Shift+Tab and Cmd+Shift+Esc. Beside the field rather than inside it because a
+            // `.keyboardShortcut` is a command-table binding and `keyDown` is not.
+            ComposerShortcutBar(model: model)
         }
         .padding(8)
         .onAppear { model.start() }

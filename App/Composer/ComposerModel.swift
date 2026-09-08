@@ -28,7 +28,17 @@ final class ComposerModel {
 
     /// The inline surface above the field: a refusal, in this leaf's own words for a
     /// `LifecycleError` and verbatim from `RouterTable` for a locally refused command (Task 3).
-    private(set) var refusal: String?
+    var refusal: String?
+
+    /// Where Shift+Tab's cycle currently stands (`ComposerShortcuts`).
+    ///
+    /// A cursor, not a readback, and nothing displays it: §7.4 says a displayed setting comes from
+    /// the engine, and Task 7's picker replaces this with the handshake's own `permissionMode`.
+    var permissionMode: PermissionMode = .default
+
+    /// Cmd+Shift+Esc raised its confirm and the view is presenting it. `.stopEverything` is issued
+    /// only from the accepted arm, so nothing has reached the lifecycle while this is true.
+    var isConfirmingStopEverything = false
 
     /// True from the moment a send is accepted until its `perform` returns.
     ///
@@ -39,7 +49,10 @@ final class ComposerModel {
     /// is the same defect with a delay in front of it.
     private(set) var isSending = false
 
-    @ObservationIgnored private let lifecycle: any LifecycleAPI
+    /// X5, and the only way anything in this file reaches the engine. Internal rather than private
+    /// because the shortcuts are an extension in `ComposerShortcuts.swift`; Swift has no narrower
+    /// scope than the module for that, and every caller is inside `App/Composer/`.
+    @ObservationIgnored let lifecycle: any LifecycleAPI
     @ObservationIgnored private var events: Task<Void, Never>?
 
     /// Where this channel's frames arrive. Task 1 subscribes and hands each one here; the ghost
