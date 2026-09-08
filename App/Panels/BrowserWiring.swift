@@ -39,16 +39,20 @@ enum BrowserWiring {
     /// through its own link router — and a target that outlived the host would be answering for a
     /// window that no longer exists either way.
     ///
-    /// **The pull-request resolver reads the host's currently selected channel** (Q3) rather than a
-    /// channel cached when the panel was drawn: a `.pullRequest` can arrive before the Browser tab
-    /// has ever been rendered, and a cached context would then be stale in exactly the case that
-    /// matters. The environment `gh` runs under comes with that context — X11's capture, made by
+    /// **The pull-request resolver reads the channel the click came from** (Q3) — `HostLinkRouter`'s
+    /// capture, taken when the action was created and carried with it — rather than a channel cached
+    /// when the panel was drawn or the host's selection read when resolution begins. A cached
+    /// context is stale in exactly the case that matters, a link arriving before the Browser tab has
+    /// ever been rendered; and the live selection is wrong in the other one, because routing
+    /// suspends twice before this closure runs and the window can move to another channel in
+    /// between — resolving channel A's pull-request number against channel B's repository. The environment `gh` runs under comes with that context — X11's capture, made by
     /// `PanelHostModel.makeContext` out of the workspace's `ResolvedEnvironment` — so the resolver
     /// runs the user's own `gh` through the user's own `PATH` and this file names neither.
     @MainActor
-    static func makeLinkTargets(model: BrowserModel, panels: PanelHostModel) -> [LinkTarget] {
-        let resolver = PullRequestURLResolver(runner: ToolRunner()) { [weak panels] in
-            guard let panels, let key = panels.selectedChannel else { return nil }
+    static func makeLinkTargets(model: BrowserModel, panels: PanelHostModel,
+                                runner: any ToolRunning = ToolRunner()) -> [LinkTarget] {
+        let resolver = PullRequestURLResolver(runner: runner) { [weak panels] in
+            guard let panels, let key = LinkOrigin.channel else { return nil }
             return panels.context(for: key)
         }
         return BrowserLinkTargets.make(model: model,

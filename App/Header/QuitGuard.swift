@@ -73,6 +73,8 @@ final class QuitGuard {
     /// because the clause's decision — ask once, and only about the busy owned channels — is worth
     /// asserting without one.
     private let confirm: @MainActor ([QuitChannel]) async -> Bool
+    /// Panel state that is still on its way to disk. Nil for a guard with no panels behind it.
+    private let drainPanels: (@MainActor () async -> Void)?
 
     /// How many times this guard has put the dialog on screen. A count, and the floor "asks once"
     /// needs (§11).
@@ -83,9 +85,11 @@ final class QuitGuard {
 
     init(fleet: any QuitFleet,
          hostCommands: (any QuitHostCommands)? = nil,
+         drainPanels: (@MainActor () async -> Void)? = nil,
          confirm: @escaping @MainActor ([QuitChannel]) async -> Bool = QuitGuard.alert) {
         self.fleet = fleet
         self.hostCommands = hostCommands
+        self.drainPanels = drainPanels
         self.confirm = confirm
     }
 
@@ -143,6 +147,13 @@ final class QuitGuard {
         // trying to reach a channel that has just been quit, and a declined quit has already returned
         // above with every command still running.
         await hostCommands?.cancelHostCommands()
+        // **Panel state that is still on its way to disk goes with it.** A Workbench panel commits
+        // through a trailing window — the Browser's tab set does, by Q6 — so an edit made in the
+        // last half-second is held in memory by design, and `shutdown()` does not know about it.
+        // Nothing else in this clause reaches it: the terminations end conversations, not panels.
+        // After the terminations, so a panel following a channel that just ended writes what it
+        // finally saw; before the shutdown, because that is the last thing that happens.
+        await drainPanels?()
         await fleet.shutdownForQuit()
         return true
     }
@@ -310,11 +321,16 @@ extension QuitGuard {
     static func forApp(_ model: AppModel) -> QuitGuard? {
         guard let fleet = model.composers.fleet else { return nil }
         let browser = model.browser
+        let browserTab = model.browserTab
         return QuitGuard(fleet: FleetQuitTermination(
             lifecycle: fleet,
             shutdown: { await fleet.shutdown() },
             title: { key in browser?.row(key.session)?.title }),
                          // The app's one composer registry, which is where every running `!` is held.
-                         hostCommands: model.composers)
+                         hostCommands: model.composers,
+                         // C7.6's G3 — "tabs persist across relaunch" — is the reason this seam
+                         // exists: the Browser coalesces URL and title commits over half a second,
+                         // so a fast quit otherwise drops whatever that window was holding.
+                         drainPanels: { await browserTab.model.flush() })
     }
 }

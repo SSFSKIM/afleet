@@ -99,6 +99,44 @@ final class BrowserWiringTests: XCTestCase {
                      "this launch is meant to reach no workspace, so a registration under one proves less")
     }
 
+    /// **The channel a `.pullRequest` is resolved against is the one the click came from** (A5).
+    ///
+    /// Routing suspends on the way to the registry and again on the way back, and the main actor is
+    /// free throughout — so a window that moves to another channel while a link is in flight would,
+    /// with a provider that read the *current* selection when resolution begins, have channel A's
+    /// pull-request number resolved against channel B's repository. The working directory `git` was
+    /// asked to run in is the only thing that can tell the two apart, and it is a count-free,
+    /// invented path (§11).
+    func testAPullRequestResolvesAgainstTheChannelTheClickCameFrom() async throws {
+        let rig = try WorkspaceRig()
+        let app = AppModel()
+        app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
+        let clicked = BrowserWiringFixtures.key(1)
+        let movedTo = BrowserWiringFixtures.key(2)
+        XCTAssertNotNil(app.panels.context(for: clicked, cwd: BrowserWiringFixtures.clickedCwd),
+                        "the host could not build a context for the channel the click comes from")
+        XCTAssertNotNil(app.panels.context(for: movedTo, cwd: BrowserWiringFixtures.movedToCwd),
+                        "the host could not build a context for the channel the window moves to")
+        app.panels.focusChannel(clicked)
+
+        let runner = RecordingToolRunner()
+        for target in BrowserWiring.makeLinkTargets(model: app.browserTab.model,
+                                                    panels: app.panels,
+                                                    runner: runner) {
+            await app.panels.links.register(target)
+        }
+
+        let delivery = Task { await app.panels.links.open(.pullRequest(7), from: .currentPanel) }
+        // One yield is enough for the delivery to reach the registry and suspend there, and never
+        // enough for the handler — which needs this actor — to have run.
+        await Task.yield()
+        app.panels.focusChannel(movedTo)
+        await delivery.value
+
+        XCTAssertEqual(runner.directories, [BrowserWiringFixtures.clickedCwd],
+                       "the lookup ran in a directory the click did not come from")
+    }
+
     // MARK: - Persistence (G3's app half, W6)
 
     /// The tab set the panel holds reaches the workspace's own store, under W6's key in the
@@ -178,6 +216,8 @@ private enum BrowserWiringFixtures {
 
     static let configHome = URL(fileURLWithPath: "/invented/config-home")
     static let cwd = URL(fileURLWithPath: "/invented/project")
+    static let clickedCwd = URL(fileURLWithPath: "/invented/project-clicked")
+    static let movedToCwd = URL(fileURLWithPath: "/invented/project-moved-to")
     static let url = URL(string: "http://127.0.0.1:1/invented-page")!
 
     static func key(_ index: Int = 0) -> ChannelKey {
@@ -281,4 +321,29 @@ private struct NullLinkRouter: LinkRouterCapability {
 private struct NullRecentURLFeed: RecentURLFeed {
     func current(limit: Int) async -> [SeenURL] { [] }
     var updates: AsyncStream<[SeenURL]> { AsyncStream { $0.finish() } }
+}
+
+/// A `ToolRunning` that runs nothing and records the directory it was asked to run in.
+///
+/// It answers the one command the route reaches — `git rev-parse --show-toplevel` — with a failure,
+/// because what is under test is *which repository was asked about* and a resolver that got that far
+/// has already read its channel. The row that failure produces is the panel's own (§10).
+private final class RecordingToolRunner: ToolRunning, @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var stored: [URL] = []
+
+    var directories: [URL] { lock.lock(); defer { lock.unlock() }; return stored }
+
+    func run(_ tool: Tool, arguments: [String], cwd: URL, environment: [String: String],
+             timeout: Duration) async throws -> ToolOutput {
+        record(cwd)
+        return ToolOutput(stdout: Data(), stderr: Data("fatal: not a git repository\n".utf8),
+                          exitCode: 128, timedOut: false)
+    }
+
+    private func record(_ cwd: URL) {
+        lock.lock(); defer { lock.unlock() }
+        stored.append(cwd)
+    }
 }

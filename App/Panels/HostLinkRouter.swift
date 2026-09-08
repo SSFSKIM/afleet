@@ -76,7 +76,9 @@ final class HostLinkRouter: LinkRouterCapability {
     /// can move to another channel or leave every channel while one link is in flight. A pop-out
     /// that read the host's current channel when it finally ran would open the target in a channel
     /// the action did not come from, or report "no channel" for a link that had one. The channel an
-    /// action originated in is a property of the action, so it is captured with the action.
+    /// action originated in is a property of the action, so it is captured with the action. The
+    /// same capture is published as `LinkOrigin.channel` for the whole routed call, because a
+    /// target's handler needs it for the same reason and runs where this type cannot reach.
     ///
     /// **`.currentPanel` is routed with no `prepare` at all.** There is nothing to pop out for it,
     /// and a `prepare` that is a no-op is not free: it is what makes the router suspend between
@@ -100,11 +102,18 @@ final class HostLinkRouter: LinkRouterCapability {
     /// A pop-out re-added after any of those draws the missing-channel placeholder, so it is
     /// reported rather than presented.
     func open(_ link: WorkspaceLink, from destination: LinkDestination) async {
+        let origin = self.host?.selectedChannel
+        await LinkOrigin.$channel.withValue(origin) {
+            await self.route(link, from: destination, origin: origin)
+        }
+    }
+
+    private func route(_ link: WorkspaceLink, from destination: LinkDestination,
+                       origin: ChannelKey?) async {
         guard destination == .newWindow else {
             await router.open(link, from: destination)
             return
         }
-        let origin = self.host?.selectedChannel
         await router.open(link, from: destination) { target, _ in
             if let host = self.host, let channel = origin {
                 guard host.canResolveChannel(channel), host.isRegistered(target.tab) else {
@@ -125,4 +134,17 @@ final class HostLinkRouter: LinkRouterCapability {
             }
         }
     }
+}
+
+/// The channel a routed action came from, for a target that has to resolve against a repository, a
+/// working directory or an environment.
+///
+/// It is the same capture `HostLinkRouter.open` takes for the pop-out, carried to a place that type
+/// cannot reach: a target's handler runs inside the registry, two suspensions away, and a handler
+/// that read the host's *current* channel there would resolve one channel's pull-request number
+/// against another channel's repository. A task-local is what makes the capture travel with the
+/// call rather than being read again at the far end, and it needs no change to X7's `LinkTarget`.
+/// `nil` outside a routed action, which is a row and never a guess (C7.6 Q3).
+enum LinkOrigin {
+    @TaskLocal static var channel: ChannelKey?
 }
