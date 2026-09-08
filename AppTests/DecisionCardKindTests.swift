@@ -428,4 +428,239 @@ final class DecisionCardKindTests: XCTestCase {
         return ElicitationCardView(card: card, request: request, presentation: .full,
                                    channel: Self.channel, answering: answering, draft: draft)
     }
+
+    // MARK: - G1e, the task card
+
+    /// Waits for a pressed button's control request to reach the double, then for the model to
+    /// finish with it. A count, not a duration: the property is that the request arrived.
+    private func settle(_ control: ControlDouble, _ model: TaskCardModel, expecting count: Int) async {
+        var spins = 0
+        while await control.sent.count < count, spins < 100_000 {
+            await Task.yield()
+            spins += 1
+        }
+        await model.whenIdle()
+    }
+
+    /// *Move to background* exists only for a running Bash call or agent run the registry mirror
+    /// knows. A `Read` produces no task frame at all, so the mirror does not know it and the action
+    /// is not offered — the clause a card that offered the action on every task would get wrong with
+    /// no other symptom.
+    func testOnlyARunningRegisteredBashCallOffersMoveToBackground() async throws {
+        let control = ControlDouble()
+
+        let running = model(taskID: "bbbbbbbb1", control: control,
+                            registry: Self.mirror([Self.taskStarted(taskID: "bbbbbbbb1", type: "local_bash",
+                                                                    backgrounded: false)]))
+        XCTAssertTrue(running.offersMoveToBackground, "a running foreground Bash call offered no background action")
+        XCTAssertTrue(running.offersStop, "a running task offered no stop")
+
+        // A Read call: no task frame, so no entry. Same item, empty mirror.
+        let read = model(taskID: "bbbbbbbb1", control: control, registry: RegistryMirror())
+        XCTAssertFalse(read.offersMoveToBackground,
+                       "a call the registry mirror does not know offered the background action")
+        XCTAssertFalse(offers("Move to background", in: TaskCardView(model: read).body),
+                       "a call the mirror does not know drew the background button")
+
+        // An entry of a kind the engine cannot move, which is every plain tool call.
+        let plain = model(taskID: "bbbbbbbb2", control: control,
+                          registry: Self.mirror([Self.taskStarted(taskID: "bbbbbbbb2", type: "an_invented_type",
+                                                                  backgrounded: false)]))
+        XCTAssertFalse(plain.offersMoveToBackground, "a non-backgroundable task kind offered the background action")
+
+        // A run already in the background has nowhere to move to.
+        let already = model(taskID: "bbbbbbbb3", control: control,
+                            registry: Self.mirror([Self.taskStarted(taskID: "bbbbbbbb3", type: "local_bash",
+                                                                    backgrounded: true)]))
+        XCTAssertFalse(already.offersMoveToBackground, "a backgrounded run offered to be backgrounded again")
+
+        let sent = await control.sent
+        XCTAssertEqual(sent.count, 0, "reading a card sent \(sent.count) control requests")
+    }
+
+    /// Item 61's **first** arm: `{backgrounded: false}` is a *success* body. The card refreshes, the
+    /// action disappears, and **no banner is raised**.
+    func testABackgroundedFalseBodyRefreshesTheCardWithNoBanner() async throws {
+        let control = ControlDouble()
+        await control.stage(.success(.object(["backgrounded": .bool(false)])))
+        let model = model(taskID: "bbbbbbbb4", control: control,
+                          registry: Self.mirror([Self.taskStarted(taskID: "bbbbbbbb4", type: "local_bash",
+                                                                  backgrounded: false)]))
+        let completed: TaskRunItem = {
+            var item = model.item
+            item.status = .completed
+            return item
+        }()
+        model.refresh = { completed }
+
+        try press("Move to background", in: TaskCardView(model: model).body)
+        await settle(control, model, expecting: 1)
+
+        let sent = await control.sent
+        XCTAssertEqual(sent.count, 1, "one press sent \(sent.count) control requests")
+        XCTAssertEqual(sent.first?.subtype, "background_tasks", "the press sent a different control request")
+        XCTAssertTrue(sent.first?.payload == .object(["tool_use_id": .string("toolu_invented_bbbbbbbb4")]),
+                      "background_tasks did not name the task's tool_use_id")
+        XCTAssertNil(model.banner, "a {backgrounded: false} success body raised a banner")
+        XCTAssertEqual(model.item.status, .completed, "the card did not refresh from the host")
+        XCTAssertFalse(model.offersMoveToBackground, "the action stayed after the engine refused the move")
+    }
+
+    /// Item 61's **second** arm, and it arrives somewhere else entirely: the disabled sentence is a
+    /// **control error**, not a success body (anchor 12). It raises the banner and hides the action.
+    /// A test driving both arms off one path could not fail here.
+    func testTheDisabledSentenceArrivesAsAControlErrorAndRaisesTheBanner() async throws {
+        let control = ControlDouble()
+        let sentence = "Background tasks are disabled in this session."
+        await control.stage(.failure(WireError.controlError(sentence)))
+        let model = model(taskID: "bbbbbbbb5", control: control,
+                          registry: Self.mirror([Self.taskStarted(taskID: "bbbbbbbb5", type: "local_bash",
+                                                                  backgrounded: false)]))
+        let refreshes = RefreshCount()
+        model.refresh = { refreshes.value += 1; return nil }
+
+        try press("Move to background", in: TaskCardView(model: model).body)
+        await settle(control, model, expecting: 1)
+
+        XCTAssertEqual(model.banner?.text, sentence, "the engine's refusal did not become the card's banner")
+        XCTAssertFalse(model.offersMoveToBackground, "the action stayed after the engine refused it")
+        XCTAssertEqual(refreshes.value, 0, "a control error was read as a success body and refreshed the card")
+        XCTAssertTrue(CardTree.texts(in: TaskCardView(model: model).body).contains(sentence),
+                      "the banner is held but not drawn")
+    }
+
+    /// Per-task *Stop* sends `stop_task {task_id}`, whose success body is `{}` (anchor 11). Driven
+    /// over `background-shell`'s own recorded task frames, whose card is a `TaskRunItem` and not a
+    /// `DecisionItem` (spec D15).
+    func testPerTaskStopSendsStopTaskAndTakesAnEmptyBody() async throws {
+        let control = ControlDouble()
+        await control.stage(.success(.object([:])))
+        let frames = try FixtureRunner.frames("background-shell")
+        var registry = RegistryMirror()
+        var taskID: String?
+        for frame in frames {
+            guard case .system(let system) = frame else { continue }
+            let touched = registry.apply(system, at: Date(), epoch: .first)
+            taskID = taskID ?? touched.first
+        }
+        let recorded = try XCTUnwrap(taskID, "the recording carries no task frames")
+        let entry = try XCTUnwrap(registry.entries[recorded], "the mirror folded no entry for the recorded task")
+        XCTAssertEqual(entry.status, .completed, "the recorded run did not finish")
+
+        let model = model(taskID: recorded, control: control, registry: registry, status: entry.status)
+        XCTAssertFalse(model.offersStop, "a finished run still offered stop")
+        XCTAssertNotNil(model.elapsedText(), "a folded entry rendered no elapsed time")
+
+        await model.stop()
+        let sent = await control.sent
+        XCTAssertEqual(sent.count, 1, "one stop sent \(sent.count) control requests")
+        XCTAssertEqual(sent.first?.subtype, "stop_task", "stop sent a different control request")
+        XCTAssertTrue(sent.first?.payload == .object(["task_id": .string(recorded)]),
+                      "stop_task did not name the task it stops")
+        XCTAssertNil(model.banner, "an empty success body raised a banner")
+    }
+
+    // MARK: - The task card's fixtures
+
+    /// A `task_started` with invented identifiers: the corpus records one run and it is already in
+    /// the background, so the foreground arm is this shape with that one flag flipped.
+    private static func taskStarted(taskID: String, type: String, backgrounded: Bool) -> SystemFrame {
+        let object: [String: Any] = ["type": "system", "subtype": "task_started",
+                                     "task_id": taskID, "tool_use_id": "toolu_invented_\(taskID)",
+                                     "description": "An invented task", "is_backgrounded": backgrounded,
+                                     "task_type": type,
+                                     "uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbe1",
+                                     "session_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbe2"]
+        let data = try! JSONSerialization.data(withJSONObject: object)
+        guard case .system(let system) = FrameDecoder.decode(line: data) else {
+            preconditionFailure("an invented task_started did not decode as a system frame")
+        }
+        return system
+    }
+
+    private static func mirror(_ frames: [SystemFrame]) -> RegistryMirror {
+        var mirror = RegistryMirror()
+        for frame in frames { mirror.apply(frame, at: Date(), epoch: .first) }
+        return mirror
+    }
+
+    private func model(taskID: String, control: ControlDouble, registry: RegistryMirror,
+                       status: TaskStatus = .running) -> TaskCardModel {
+        let stream = LogicalStream(configHome: Self.channel.configHome, sessionID: Self.channel.session, name: .main)
+        let item = TaskRunItem(id: ItemID(stream: stream, key: taskID),
+                               timestamp: Date(),
+                               provenance: Provenance(stream: stream, epoch: .first, origin: .synthesised),
+                               taskID: taskID, kind: .localBash, description: "An invented task",
+                               status: status, toolUseID: "toolu_invented_\(taskID)")
+        return TaskCardModel(item: item, registry: registry, lifecycle: control, channel: Self.channel)
+    }
+}
+
+/// How many times the host was asked to re-read the item. A reference, because a `@MainActor`
+/// closure cannot capture a mutable local.
+@MainActor
+final class RefreshCount {
+    var value = 0
+}
+
+/// A `LifecycleAPI` that answers **control requests** and records them.
+///
+/// `LifecycleDouble` traps on `send(_:on:)` on purpose — every surface before this one answered
+/// through `perform`. The task card is the first thing in this child whose actions are control
+/// requests, and the two arms of item 61 are a *success body* and a *control error*, so the double
+/// has to be able to produce each on its own path. Every other member traps, for the same reason
+/// `LifecycleDouble`'s do.
+actor ControlDouble: LifecycleAPI {
+
+    nonisolated let updates: AsyncStream<ChannelState>
+    nonisolated let jobUpdates: AsyncStream<[JobEntry]>
+    private nonisolated let updatesContinuation: AsyncStream<ChannelState>.Continuation
+    private nonisolated let jobsContinuation: AsyncStream<[JobEntry]>.Continuation
+
+    private(set) var sent: [AnyControlRequest] = []
+    private var replies: [Result<JSONValue, WireError>] = []
+
+    init() {
+        (updates, updatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (jobUpdates, jobsContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+    }
+
+    /// What the next `send` answers. A queue, so a test stages an error and a success in order.
+    func stage(_ reply: Result<JSONValue, WireError>) { replies.append(reply) }
+
+    func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
+        sent.append(request)
+        guard !replies.isEmpty else { return .object([:]) }
+        return try replies.removeFirst().get()
+    }
+
+    func state(of key: ChannelKey) async -> ChannelState? { nil }
+    func states() async -> [ChannelState] { [] }
+    func preconditions(for key: ChannelKey) async -> SpawnPrecondition { unreachable("preconditions") }
+    func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState { unreachable("perform") }
+    func route(_ text: String, on key: ChannelKey) async -> Routed { unreachable("route") }
+    func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
+             ui: any StrategyUI) async throws -> StrategyOutcome { unreachable("run") }
+    func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
+    func attach(_ job: JobShort) async throws -> PaneRequest { unreachable("attach") }
+    func logs(_ job: JobShort) async throws -> PaneRequest { unreachable("logs") }
+    func paneExited(_ exit: PaneExit) async { unreachable("paneExited") }
+    func jobs() async -> [JobEntry] { [] }
+    func performJob(_ verb: JobVerb, _ short: JobShort) async throws { unreachable("performJob") }
+    func isDormantEligible(_ key: ChannelKey) async -> Bool { unreachable("isDormantEligible") }
+    func declineProjectServers(_ names: [String], project: URL) async throws { unreachable("declineProjectServers") }
+    func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async { unreachable("acceptProjectServers") }
+    func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? { nil }
+
+    private nonisolated func unreachable(_ member: String) -> Never {
+        fatalError("ControlDouble.\(member) is not part of the task card's surface")
+    }
+}
+
+/// The one piece of state `TaskCardModel` holds about a call in flight, as a probe: a test that has
+/// pressed a button waits for the round trip rather than for a duration.
+extension TaskCardModel {
+    func whenIdle() async {
+        while inFlight { await Task.yield() }
+    }
 }
