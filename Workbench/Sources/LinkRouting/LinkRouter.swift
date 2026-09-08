@@ -29,7 +29,19 @@ public actor LinkRouter {
     /// the kind and never the link, so no path, no commit hash and no PR number reaches a log (§11).
     private let diagnostic: @Sendable (String) -> Void
 
-    private var targets: [LinkTarget] = []
+    /// A registered target plus the identity the router gives it. `LinkTarget` is not `Equatable`
+    /// and carries closures, so "the target I resolved" is only expressible as a token the router
+    /// mints: monotonic, never reused, and dropped with the registration.
+    private struct Registration {
+        let token: Int
+        let target: LinkTarget
+    }
+
+    private var registrations: [Registration] = []
+
+    /// Next token to hand out. Monotonic, so a withdrawn token can never be resurrected by a
+    /// later registration — which is what makes the post-suspension re-check below sound.
+    private var nextToken = 0
 
     private static let log = Logger(subsystem: "com.afleet.app", category: "panel-links")
 
@@ -50,17 +62,18 @@ public actor LinkRouter {
     }
 
     /// How many targets are registered, for a diagnostic line. A count, never a tab set (§11).
-    public var targetCount: Int { targets.count }
+    public var targetCount: Int { registrations.count }
 
     // MARK: - The registry
 
     public func register(_ target: LinkTarget) {
-        targets.append(target)
+        registrations.append(Registration(token: nextToken, target: target))
+        nextToken += 1
     }
 
     /// Drops every target this tab registered, so a target never outlives the tab that registered it.
     public func unregister(tab: PanelTabID) {
-        targets.removeAll { $0.tab == tab }
+        registrations.removeAll { $0.target.tab == tab }
     }
 
     /// Resolves the most specific registered target, runs `prepare` for it, and only then delivers
@@ -69,25 +82,45 @@ public actor LinkRouter {
     /// `prepare` is where the host pops a tab out for `.newWindow`; it runs *after* resolution and
     /// *before* delivery, which is the ordering that rule is about. With no `prepare` this is the
     /// pure registry W5 describes.
+    ///
+    /// `prepare` is a main-actor `await`, so the router *suspends* between resolving and
+    /// delivering, and an `unregister(tab:)` can land in that window — the host's own teardown
+    /// path does exactly this. X7 says a target "cannot deliver into one that is gone", so the
+    /// resolved registration is re-checked by token after the suspension; a withdrawn one is not
+    /// delivered to, and the link re-resolves to the next target or, with none left, to W5's
+    /// fallback. Re-resolving means `prepare` runs again for whoever actually receives the link:
+    /// a pop-out prepared for a tab that then withdrew is not one prepared for its successor.
+    ///
+    /// The loop terminates because candidates are drawn from the registrations that existed when
+    /// this call began (`ceiling`), and each further iteration means one of that fixed set was
+    /// withdrawn. A target registered *during* this call is not a candidate for it: the link was
+    /// already resolved against the registry as it stood.
     public func open(_ link: WorkspaceLink, from destination: LinkDestination,
                      prepare: (@MainActor @Sendable (LinkTarget, LinkDestination) async -> Void)? = nil) async {
-        guard let target = mostSpecific(for: link) else {
-            fallback(link)
+        let ceiling = nextToken
+        while true {
+            guard let chosen = mostSpecific(for: link, registeredBefore: ceiling) else {
+                fallback(link)
+                return
+            }
+            await prepare?(chosen.target, destination)
+            guard registrations.contains(where: { $0.token == chosen.token }) else { continue }
+            await chosen.target.open(link, destination)
             return
         }
-        await prepare?(target, destination)
-        await target.open(link, destination)
     }
 
     // MARK: - Picking
 
     /// Highest `specificity` wins; ties break by `PanelTabID`'s canonical order, so the choice is
     /// total and does not depend on registration order.
-    private func mostSpecific(for link: WorkspaceLink) -> LinkTarget? {
-        let handling = targets.filter { $0.handles(link) }
+    private func mostSpecific(for link: WorkspaceLink, registeredBefore ceiling: Int) -> Registration? {
+        let handling = registrations.filter { $0.token < ceiling && $0.target.handles(link) }
         return handling.min { left, right in
-            if left.specificity != right.specificity { return left.specificity > right.specificity }
-            return Self.order(left.tab) < Self.order(right.tab)
+            if left.target.specificity != right.target.specificity {
+                return left.target.specificity > right.target.specificity
+            }
+            return Self.order(left.target.tab) < Self.order(right.target.tab)
         }
     }
 

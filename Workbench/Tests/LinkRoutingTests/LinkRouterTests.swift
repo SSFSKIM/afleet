@@ -192,6 +192,87 @@ final class LinkRouterTests: XCTestCase {
         XCTAssertEqual(recorder.events, [], "prepare ran with no target resolved")
         XCTAssertEqual(sink.messages.count, 1, "the fallback produced \(sink.messages.count) diagnostics")
     }
+
+    // MARK: - 8. Withdrawal *during* the `prepare` suspension
+
+    /// X7's guarantee is that a target "cannot deliver into one that is gone". `prepare` is an
+    /// `await` on the main actor, so the router suspends between resolving a target and delivering
+    /// to it, and `unregister(tab:)` can land in that window — which is exactly what the host does
+    /// when it tears a tab down while a link for it is in flight. The withdrawal here is driven
+    /// from inside `prepare` and awaited, so the interleaving is deterministic rather than timed:
+    /// when `prepare` returns, the withdrawal has already been applied on the router's executor.
+    ///
+    /// The resolved tab must receive nothing, and the link must fall through to the next target —
+    /// including its own `prepare`, since a pop-out prepared for the withdrawn tab is not one
+    /// prepared for the tab that ends up delivering.
+    @MainActor
+    func testWithdrawalDuringPrepareStopsDeliveryAndFallsThrough() async {
+        let recorder = Recorder()
+        let sink = Sink()
+        let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
+        await router.register(Fixtures.target(.files, specificity: 10, into: recorder))
+        await router.register(Fixtures.target(.terminal, specificity: 1, into: recorder))
+
+        await router.open(Fixtures.file, from: .newWindow) { target, _ in
+            recorder.note("prepare:\(target.tab.rawValue)")
+            if target.tab == .files { await router.unregister(tab: .files) }
+        }
+
+        XCTAssertEqual(recorder.tabs, [.terminal],
+                       "delivery went to \(recorder.tabs) after the resolved tab withdrew during prepare")
+        XCTAssertEqual(recorder.events, ["prepare:files", "prepare:terminal", "open:terminal:newWindow"],
+                       "the recorded order was \(recorder.events)")
+        XCTAssertEqual(sink.messages, [], "a link that fell through to a target also produced a diagnostic")
+    }
+
+    /// The companion the fix has to keep passing: a withdrawal that lands during `prepare` but
+    /// names a *different* tab is none of the resolved target's business. A router that simply
+    /// refused to deliver after any withdrawal would pass the test above and fail this one.
+    @MainActor
+    func testWithdrawalOfAnotherTabDuringPrepareStillDelivers() async {
+        let recorder = Recorder()
+        let sink = Sink()
+        let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
+        await router.register(Fixtures.target(.files, specificity: 10, into: recorder))
+        await router.register(Fixtures.target(.terminal, specificity: 1, into: recorder))
+
+        await router.open(Fixtures.file, from: .newWindow) { target, _ in
+            recorder.note("prepare:\(target.tab.rawValue)")
+            await router.unregister(tab: .terminal)
+        }
+
+        XCTAssertEqual(recorder.events, ["prepare:files", "open:files:newWindow"],
+                       "the recorded order was \(recorder.events)")
+        let remaining = await router.targetCount
+        XCTAssertEqual(remaining, 1, "the registry holds \(remaining) targets after the other tab withdrew")
+    }
+
+    /// Two targets for one tab, withdrawn together during `prepare`, leave nothing to fall through
+    /// to: the link takes W5's fallback rather than vanishing. The re-check is about the *resolved
+    /// target's* identity, so a router that only asked "does some target for this tab remain"
+    /// would deliver into the second one here.
+    @MainActor
+    func testWithdrawalDuringPrepareWithNoOtherTargetTakesTheFallback() async {
+        let recorder = Recorder()
+        let sink = Sink()
+        let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
+        await router.register(Fixtures.target(.files, specificity: 10, into: recorder))
+        await router.register(Fixtures.target(.files, specificity: 8, into: recorder))
+
+        await router.open(Fixtures.unclaimedFile, from: .newWindow) { target, _ in
+            recorder.note("prepare:\(target.tab.rawValue)")
+            await router.unregister(tab: .files)
+        }
+
+        XCTAssertEqual(recorder.tabs, [], "a withdrawn tab received \(recorder.tabs.count) links")
+        XCTAssertEqual(recorder.events, ["prepare:files"], "the recorded order was \(recorder.events)")
+        XCTAssertEqual(sink.messages.count, 1,
+                       "the withdrawn link produced \(sink.messages.count) diagnostics, not the one fallback")
+        for token in Fixtures.payloadTokens {
+            XCTAssertFalse(sink.messages.first?.contains(token) ?? false,
+                           "the fallback message carries a payload token")
+        }
+    }
 }
 
 // MARK: - Rigs
