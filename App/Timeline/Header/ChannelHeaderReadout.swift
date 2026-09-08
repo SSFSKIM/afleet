@@ -28,16 +28,29 @@ struct ChannelHeaderReadout: Hashable, Sendable {
 
     /// The engine's own report of the mode it is running.
     ///
-    /// **From the handshake, and this is not the source §10 names.** The child spec says model, mode
-    /// and effort all come from `get_settings`; the engine does not report the mode there. Its
-    /// `get_settings` answer is `{applied: {model, effort, advisor, ultracode}, effective, sources}`
-    /// (2.1.257 `cli.pretty.js:178217`, and both recordings that carry the subtype — `control-shapes`
-    /// and `zero-cost`), where `effective` is the merged *settings files*, so a mode read out of it
-    /// would be what a file asks for and not what the process is running. `InitializeResponse`'s
-    /// `current_permission_mode` is the readback the engine offers, which is what
-    /// `Readback.verify` compares a restart against and what C6.2's picker displays. Reported to the
-    /// leaf owner; see the task report.
+    /// **Corrected 2026-09-09 (C6.1 Task 8): the handshake is the initial value, not the source.**
+    /// `system/status` carries `permissionMode` — `StatusFields` models it and the engine populates
+    /// it: across the corpus's 40 status frames exactly one carries a value, and it is in the one
+    /// recording where a mode actually changes. So the readout **follows status frames** and falls
+    /// back to the handshake for the value it opens with. A readback retained for the life of a
+    /// process is stale in a way that looks authoritative: "the header shows what the engine said at
+    /// startup" fails in the same shape as "the header shows what the user last clicked", which is
+    /// what G4 exists to catch.
+    ///
+    /// What still holds, and is why this is not `get_settings`: that answer is
+    /// `{applied: {model, effort, advisor, ultracode}, effective, sources}` (2.1.257
+    /// `cli.pretty.js:178217`, and both recordings that carry the subtype — `control-shapes` and
+    /// `zero-cost`), where `effective` is the merged *settings files*, so a mode read out of it would
+    /// be what a file asks for and not what the process is running.
     var mode: PermissionMode?
+
+    /// Whether the mode on screen came from a `system/status` frame.
+    ///
+    /// The precedence this records **is** the correction. The handshake is retained per process and
+    /// never reissued, so without it the next settings readback — one per turn end — would fold the
+    /// launch mode back over a live one, and the header would show the true value for a few seconds
+    /// and the stale one for ever after.
+    private(set) var modeIsLive = false
 
     /// `get_settings.applied.effort`, falling back to the `effortLevel` the answer's `effective` map
     /// carries. Nil is a value and not an absence: the engine reports `null` for the default.
@@ -58,8 +71,19 @@ struct ChannelHeaderReadout: Hashable, Sendable {
         model = settings.model
         effort = settings.effort
         // The mode comes from a second report, and a channel whose retained handshake is not
-        // available yet must not blank a mode an earlier one gave.
-        if let mode = settings.mode { self.mode = mode }
+        // available yet must not blank a mode an earlier one gave. Nor may the handshake — which is
+        // minted once per process — overwrite a mode a `system/status` frame has since reported.
+        guard !modeIsLive, let mode = settings.mode else { return }
+        self.mode = mode
+    }
+
+    /// The live readback: the mode a `system/status` frame reported.
+    ///
+    /// It outranks the handshake from the moment it arrives, and it is the only writer that sets
+    /// `modeIsLive` — so the header follows the process rather than remembering its launch.
+    mutating func apply(liveMode mode: PermissionMode) {
+        self.mode = mode
+        modeIsLive = true
     }
 }
 

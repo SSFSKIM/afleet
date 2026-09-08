@@ -62,4 +62,20 @@ struct ReadbackPoller {
         if case .frame(.result, _) = event { return true }
         return false
     }
+
+    /// The permission mode a `system/status` frame reported, or nil for a frame that reports none
+    /// (child spec §10, corrected 2026-09-09).
+    ///
+    /// **`permissionMode` is optional on the frame and is almost always absent**: across the fixture
+    /// corpus's 40 status frames exactly one carries a value, in the one recording where a mode
+    /// actually changes. So nil means "this frame says nothing about the mode" and never "no mode" —
+    /// a reader that folded nil in would blank the header on every heartbeat.
+    ///
+    /// A spelling this build does not model reads as nil for the same reason: going on showing the
+    /// last mode that could be named is better than showing one that cannot.
+    static func liveMode(_ event: WireEvent) -> PermissionMode? {
+        guard case .frame(.system(.status(let status)), _) = event,
+              let spelling = status.fields.permissionMode else { return nil }
+        return PermissionMode(rawValue: spelling)
+    }
 }

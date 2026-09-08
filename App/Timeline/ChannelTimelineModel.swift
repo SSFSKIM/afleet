@@ -288,6 +288,14 @@ final class ChannelTimelineModel {
     /// known to have ended. **Not a timer**: nothing pushes the context meter (parity §41.15.4), and
     /// an interval would ask a question of an idle channel over and over.
     ///
+    /// **The permission mode is the exception, and it is pushed** (child spec §10, corrected
+    /// 2026-09-09). It is in no control answer: `get_settings` reports the model and the effort, the
+    /// handshake reports the mode the process launched with and is minted once, and a mode changed
+    /// mid-session — by a `/mode`, by an *exit plan mode* approval, by any host's
+    /// `set_permission_mode` — arrives on a `system/status` frame and nowhere else. So this loop
+    /// reads those frames as they pass and the readout follows them, rather than showing the launch
+    /// mode until a restart.
+    ///
     /// The subscription is this model's own fan-out, which `events(of:)` documents as legal and is
     /// how the ingestion and the Activity pump already share one channel. It ends when the channel
     /// archives — the stream is finished then — and the task clears itself so a channel that comes
@@ -300,6 +308,7 @@ final class ChannelTimelineModel {
             guard let stream = await lifecycle.events(of: key) else { self?.readbackTask = nil; return }
             for await event in stream {
                 guard let self, !self.isTerminated else { return }
+                if let mode = ReadbackPoller.liveMode(event) { self.readout.apply(liveMode: mode) }
                 guard ReadbackPoller.isTurnEnd(event) else { continue }
                 await self.refreshReadbacks()
             }

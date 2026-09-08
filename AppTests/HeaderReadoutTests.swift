@@ -59,6 +59,60 @@ final class HeaderReadoutTests: XCTestCase {
                        "\(sent.filter { $0 == "get_settings" }.count) settings readback(s) were taken, not 2")
     }
 
+    // MARK: - G4: the mode follows the process, not its launch
+
+    /// The permission mode readback **follows `system/status`** and falls back to the handshake for
+    /// the value the header opens with (child spec §10, corrected 2026-09-09).
+    ///
+    /// The three moves are the whole correction. The handshake gives the launch mode, which is what
+    /// the header shows while nothing has changed. The recorded status frame — replayed from
+    /// `exit-plan-mode`, the one fixture where a mode actually changes — names a different one, and
+    /// the readout moves to it. Then a turn ends and the settings readback is taken again over the
+    /// **same retained handshake**, and the readout does *not* fall back: a handshake is minted once
+    /// per process, so a header that let it win would show the true mode for a few seconds and the
+    /// launch mode for ever after.
+    ///
+    /// Discriminating: against the handshake-only readback this leaf shipped at Task 5, the second
+    /// assertion fails — the frame passes and the readout never moves. A stale readback is not a
+    /// smaller version of a correct one; it looks authoritative, which is the shape G4 exists to
+    /// catch.
+    func testTheModeFollowsAStatusFrameAndNotTheRetainedHandshake() async throws {
+        let rig = try await Rig()
+        let double = rig.double
+        let key = rig.key
+        await double.stageSend("get_settings", .success(try Self.answer("control-shapes", to: "get_settings")))
+        await double.stageEngineReport(handshake: try Self.handshake("exit-plan-mode"), systemInitFrom: nil)
+
+        rig.model.startReadbacks()
+        // Waited on the *subscription*: the frame below is pushed to whoever is listening at the
+        // time, so a test that enqueued it first would assert on a frame nothing received.
+        let attached = await LaunchFixtures.waitAsync { await double.memberSequence.contains("events") }
+        XCTAssertTrue(attached, "the header never subscribed, so no frame could reach it")
+        let opened = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .plan }
+        XCTAssertTrue(opened, "the handshake's mode never reached the readout, so nothing that follows is a change")
+
+        let statuses = try Self.modeStatuses("exit-plan-mode")
+        XCTAssertEqual(statuses.count, 1,
+                       "the recording carries \(statuses.count) status frame(s) reporting a mode, not the 1 this replays")
+        for status in statuses { double.enqueue(status, to: key) }
+
+        let moved = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .acceptEdits }
+        XCTAssertTrue(moved, "the readout did not follow the mode the recorded status frame reported")
+
+        // The turn ends, the settings readback is taken again, and the retained handshake is still
+        // the launch one. The live value stands.
+        let results = try Self.results("plain-two-turn")
+        XCTAssertGreaterThan(results.count, 0, "the fixture carried no result frame, so no readback is re-taken")
+        for result in results { double.enqueue(result, to: key) }
+        let polled = await LaunchFixtures.waitAsync { await Self.polls(double, of: "get_settings") >= 1 + results.count }
+        let taken = await Self.polls(double, of: "get_settings")
+        XCTAssertTrue(polled, "\(taken) settings readback(s) were taken, so the turns did not land")
+        XCTAssertTrue(rig.model.readout.mode == .acceptEdits,
+                      "the retained handshake folded the launch mode back over the live one")
+
+        rig.model.close()
+    }
+
     // MARK: - The meter, polled because nothing pushes it
 
     /// One `get_context_usage` per `result` frame, plus the one the header takes when it opens, and
@@ -259,6 +313,18 @@ final class HeaderReadoutTests: XCTestCase {
     static func handshake(_ fixture: String) throws -> WireEvent {
         let raw = try answer(fixture, to: "initialize")
         return .handshakeCompleted(Handshake(initialize: InitializeResponse(raw: raw), pending: []), .first)
+    }
+
+    /// The fixture's `system/status` frames that **report a permission mode**, as events.
+    ///
+    /// Almost none do: across the corpus's 40 status frames exactly one carries a value, in the one
+    /// recording where a mode actually changes. Hence the filter, rather than taking whichever
+    /// status frame comes first.
+    static func modeStatuses(_ fixture: String) throws -> [WireEvent] {
+        try FixtureRunner.frames(fixture).compactMap { frame in
+            guard case .system(.status(let status)) = frame, status.fields.permissionMode != nil else { return nil }
+            return .frame(frame, .first)
+        }
     }
 
     /// The fixture's `result` frames, as the events a channel's consumers see.
