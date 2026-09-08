@@ -299,6 +299,42 @@ final class BrowserWebTabTests: XCTestCase {
         XCTAssertEqual(BrowserWebTab.answer(to: .refuse(.executableOrInlineContent("javascript"))), .cancel)
     }
 
+    // MARK: What a navigation error is classified as (fix wave B, B6)
+
+    /// The cancellation half, which is the half a panel gets wrong: this panel issues cancellations
+    /// on purpose — every policy refusal is a `.cancel` handed back to WebKit, and the stop control
+    /// is one the user asked for — and a panel that read them as failures would announce a broken
+    /// page every time it did what it was told.
+    func testACancellationIsNotAFailure() {
+        XCTAssertNil(BrowserWebTab.failure(from: Self.urlError(NSURLErrorCancelled)))
+        // WebKit's own name for "the policy said no".
+        XCTAssertNil(BrowserWebTab.failure(from: NSError(domain: "WebKitErrorDomain", code: 102)))
+        XCTAssertNil(BrowserWebTab.failure(from: NSError(domain: "WebKitErrorDomain", code: 101)))
+    }
+
+    func testTheOrdinaryFailuresAreToldApart() {
+        XCTAssertEqual(BrowserWebTab.failure(from: Self.urlError(NSURLErrorCannotConnectToHost)),
+                       .cannotConnect)
+        XCTAssertEqual(BrowserWebTab.failure(from: Self.urlError(NSURLErrorNetworkConnectionLost)),
+                       .cannotConnect)
+        XCTAssertEqual(BrowserWebTab.failure(from: Self.urlError(NSURLErrorCannotFindHost)),
+                       .hostNotFound)
+        XCTAssertEqual(BrowserWebTab.failure(from: Self.urlError(NSURLErrorTimedOut)), .timedOut)
+        XCTAssertEqual(BrowserWebTab.failure(from: Self.urlError(NSURLErrorSecureConnectionFailed)),
+                       .insecureConnection)
+    }
+
+    /// Anything else is a failure and is said so plainly, rather than guessed at.
+    func testAnUnrecognisedErrorIsStillAFailure() {
+        XCTAssertEqual(BrowserWebTab.failure(from: Self.urlError(NSURLErrorUnknown)), .other)
+        XCTAssertEqual(BrowserWebTab.failure(from: NSError(domain: "InventedDomain", code: 7)),
+                       .other)
+    }
+
+    private static func urlError(_ code: Int) -> NSError {
+        NSError(domain: NSURLErrorDomain, code: code)
+    }
+
     // MARK: The delegate's own refusal path
 
     /// Q10's rule, through WebKit rather than through `navigate(to:)`: a page cannot make afleet
