@@ -105,7 +105,6 @@ public final class MonacoEditorView: NSView {
         )
 
         let controller = WKUserContentController()
-        controller.addUserScript(Self.configurationScript(for: route))
         configuration.userContentController = controller
 
         self.webView = WKWebView(frame: .zero, configuration: configuration)
@@ -115,6 +114,7 @@ public final class MonacoEditorView: NSView {
         let relay = BridgeMessageRelay()
         relay.owner = self
         controller.add(relay, name: Self.messageHandlerName)
+        installConfigurationScript()
 
         #if DEBUG
         webView.isInspectable = true
@@ -152,8 +152,19 @@ public final class MonacoEditorView: NSView {
     // MARK: - Loading
 
     /// Load the bootstrap document by the route this view was built for.
+    ///
+    /// Every load opens a new navigation generation. The generation is what the page stamps its
+    /// events with, so the document being replaced can go on talking without being mistaken for
+    /// the one arriving: `sendState` stops hearing it, the send chain built for it is cancelled
+    /// rather than left to deliver into it, and the commands still queued are held for the page
+    /// that is coming.
     public func load() {
         sendState.loading()
+        sendChain.cancel()
+        // A fresh chain: the cancelled one may still be suspended inside a `callAsyncJavaScript`
+        // on a document that is going away, and the new page's first command must not wait on it.
+        sendChain = Task {}
+        installConfigurationScript()
 
         guard route.loadsDocumentFromFileURL else {
             webView.load(URLRequest(url: EditorSchemeHandler.url(forResourcePath: Self.bootstrapDocumentPath)))
@@ -185,9 +196,15 @@ public final class MonacoEditorView: NSView {
         // three independent requests. Each send waits on the one before it, which is the
         // ordering `evaluateJavaScript` gave for free.
         let previous = sendChain
+        let generation = sendState.generation
         sendChain = Task { [weak self] in
             _ = await previous.value
-            guard let self else { return }
+            guard let self, !Task.isCancelled else { return }
+            // A command is for the page it was queued against. By the time the chain reaches
+            // this one the view may have navigated, and W4's vocabulary is about a buffer: an
+            // `open` or a `save` delivered into the wrong document is not a late command but a
+            // command about the wrong file.
+            guard self.sendState.generation == generation else { return }
             do {
                 _ = try await self.webView.callAsyncJavaScript(
                     Self.receiveBody, arguments: ["message": command.bridgedObject],
@@ -217,22 +234,20 @@ public final class MonacoEditorView: NSView {
     // MARK: - Editor to host
 
     fileprivate func receive(_ body: Any) {
-        guard let event = Self.decodeEvent(from: body) else {
+        switch sendState.receive(body, defaultTheme: Self.defaultThemeName()) {
+        case .stale:
+            // The page that posted this is one the view has navigated away from. Nothing it has
+            // to say is about the document on screen, so the host is not told at all.
+            return
+        case let .undecodable(named):
             // Undecodable is reported, never fatal. Only the `type` field is named — it is this
             // module's own vocabulary — and never the rest of the body.
-            let named = (body as? [String: Any])?["type"] as? String
             report(.error(message: "an undecodable message arrived from the bridge: \(named ?? "no type")"),
                    origin: .undecodable)
-            return
+        case let .deliver(event, drained):
+            for command in drained { evaluate(command) }
+            report(event)
         }
-
-        if case .ready = event {
-            for command in sendState.ready(defaultTheme: Self.defaultThemeName()) {
-                evaluate(command)
-            }
-        }
-
-        report(event)
     }
 
     /// WebKit hands the message handler the JavaScript object already bridged to an
@@ -299,9 +314,28 @@ public final class MonacoEditorView: NSView {
     /// it is being asked to take. The Monaco base URL is *not* passed: the bootstrap derives it
     /// from `document.baseURI`, which is correct under every route by construction and cannot
     /// disagree with the URL the document was actually loaded from.
-    private static func configurationScript(for route: WorkerLoadingRoute) -> WKUserScript {
+    ///
+    /// The generation is carried the same way, and by a user script rather than by a query item
+    /// on the document URL: it is injected at document start under every route — `loadFileURL`
+    /// takes a file URL, which has nowhere to put a query — it survives a reload WebKit performs
+    /// on its own (a web-content crash re-runs the injection with the generation still current),
+    /// and it cannot arrive late the way a value pushed in with `callAsyncJavaScript` can, which
+    /// would race the page's own `ready`.
+    private func installConfigurationScript() {
+        let controller = webView.configuration.userContentController
+        // The controller holds this module's scripts and no host's: the whole set is replaced
+        // so the outgoing generation's script cannot be injected into the page arriving.
+        controller.removeAllUserScripts()
+        controller.addUserScript(Self.configurationScript(for: route, generation: sendState.generation))
+    }
+
+    /// The field of `window.afleetEditorConfig` the bootstrap stamps its events from.
+    nonisolated static let generationConfigKey = "navigationGeneration"
+
+    private static func configurationScript(for route: WorkerLoadingRoute, generation: Int) -> WKUserScript {
         WKUserScript(
-            source: "window.afleetEditorConfig = { workerRoute: \"\(route.javaScriptName)\" };",
+            source: "window.afleetEditorConfig = { workerRoute: \"\(route.javaScriptName)\","
+                + " \(Self.generationConfigKey): \(generation) };",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         )

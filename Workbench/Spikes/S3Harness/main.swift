@@ -13,7 +13,8 @@ import Foundation
 //
 // `--hold` leaves the window up after the report for the human half of "no visible jank";
 // `--frames` and `--bytes` shrink the scroll sample and the synthetic file when the run is a
-// diagnostic rather than a measurement. `--self-check` and `--evaluate-report` open no window
+// diagnostic rather than a measurement — and the verdict refuses both reductions rather than
+// reporting a smaller workload as the gate's own. `--self-check` and `--evaluate-report` open no window
 // and measure nothing: they drive the verdict from stubbed reports, which is how an executable
 // whose tests are its own runs gets a test that can fail.
 //

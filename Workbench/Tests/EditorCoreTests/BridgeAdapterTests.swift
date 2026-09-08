@@ -47,8 +47,29 @@ final class BridgeAdapterTests: XCTestCase {
     var registry = {};
     var modelCounter = 0;
 
-    function Uri(text) { this.text = text; }
-    Uri.prototype.toString = function () { return this.text; };
+    // Monaco's own URI, in the two properties this file depends on. `Uri.parse` percent-decodes
+    // the authority and the path into fields (the bundle's own `parse` applies its percent
+    // decoder to both), and `toString` re-encodes them; the model registry is keyed by
+    // `toString`, and a path read back out of a model URI comes from the decoded fields. A
+    // stand-in that stored the text verbatim could not tell two paths apart that the real one
+    // maps onto one model, which is the defect these tests exist for.
+    var uriPattern = /^(([^:/?#]+?):)?(\\/\\/([^/?#]*))?([^?#]*)(\\?([^#]*))?(#(.*))?/;
+    function percentDecode(text) {
+      return text.replace(/(%[0-9A-Fa-f]{2})+/g, function (escaped) { return decodeURIComponent(escaped); });
+    }
+    function Uri(scheme, authority, path) {
+      this.scheme = scheme;
+      this.authority = authority;
+      this.path = path;
+    }
+    Uri.prototype.toString = function () {
+      return this.scheme + "://" + this.authority
+        + this.path.split("/").map(encodeURIComponent).join("/");
+    };
+    function parseUri(text) {
+      var parts = uriPattern.exec(text);
+      return new Uri(parts[2] || "", percentDecode(parts[4] || ""), percentDecode(parts[5] || ""));
+    }
 
     function Model(text, language, uri) {
       this.value = text;
@@ -95,13 +116,13 @@ final class BridgeAdapterTests: XCTestCase {
     };
 
     var monaco = {
-      Uri: { parse: function (text) { return new Uri(text); } },
+      Uri: { parse: parseUri },
       editor: {
         create: function () { return editor; },
         createModel: function (text, language, uri) {
           // A model created without a URI — which is how the diff editor's two models arrive —
           // gets a generated one, as the real ModelService does.
-          var target = uri || new Uri("inmemory://model/" + (modelCounter + 1));
+          var target = uri || parseUri("inmemory://model/" + (modelCounter + 1));
           var key = target.toString();
           // The real refusal, and the reason this file exists: Monaco throws rather than
           // handing back the model already at that URI.
@@ -154,7 +175,10 @@ final class BridgeAdapterTests: XCTestCase {
         context.evaluateScript(Self.pageGlobals)
         // The same injection `MonacoEditorView.configurationScript(for:)` performs at document
         // start, so the route under test is the one the host would have asked for.
-        context.evaluateScript("window.afleetEditorConfig = { workerRoute: \"\(route.javaScriptName)\" };")
+        context.evaluateScript("""
+            window.afleetEditorConfig = { workerRoute: "\(route.javaScriptName)", \
+            \(MonacoEditorView.generationConfigKey): \(Self.generation) };
+            """)
         context.evaluateScript(bridge, withSourceURL: bridgeURL)
         context.evaluateScript(Self.monacoStandIn)
         context.evaluateScript("bootBridge();")
@@ -164,6 +188,10 @@ final class BridgeAdapterTests: XCTestCase {
                        "the bridge did not report ready", file: file, line: line)
         return context
     }
+
+    /// The navigation the stand-in page was loaded for. Any value will do; what matters is that
+    /// the events come back carrying it.
+    private static let generation = 7
 
     private func posted(in context: JSContext) -> [[String: Any]] {
         (context.objectForKeyedSubscript("posted").toArray() as? [[String: Any]]) ?? []
@@ -443,5 +471,73 @@ final class BridgeAdapterTests: XCTestCase {
         XCTAssertEqual(context.evaluateScript("workersBuilt[0].url;").toString(),
                        "afleet-editor:///monaco/json.worker.js")
     }
-}
 
+    // MARK: - The model URI a path is keyed by
+
+    /// `/tmp/a.ts` and `tmp/a.ts` are two files, and the second is only a file at all relative
+    /// to a working directory. A URI that dropped the leading slash mapped both onto one Monaco
+    /// model — and a model is what markers, decorations, language state and the diagnostics of
+    /// a language worker are keyed to, so the two files would have shared all of them.
+    func testAnAbsolutePathAndARelativePathAreDifferentModels() throws {
+        let context = try bootedContext()
+
+        send(["type": "open", "path": "/tmp/a.ts", "language": "typescript", "text": "one\n"], in: context)
+        let absoluteID = context.evaluateScript("editor.getModel().id;").toString()
+        let absoluteURI = context.evaluateScript("editor.getModel().uri.toString();").toString()
+
+        send(["type": "open", "path": "tmp/a.ts", "language": "typescript", "text": "two\n"], in: context)
+
+        XCTAssertNotEqual(context.evaluateScript("editor.getModel().id;").toString(), absoluteID,
+                          "the relative path was opened into the absolute path's model")
+        XCTAssertNotEqual(context.evaluateScript("editor.getModel().uri.toString();").toString(), absoluteURI,
+                          "the two paths share one model URI")
+    }
+
+    /// `#` and `?` are ordinary characters in a file name and delimiters in a URI. Left
+    /// unescaped they end the path, so every file whose name differs only after one of them
+    /// becomes the same model — and the path Monaco hands back is a truncation of the real one.
+    func testAPathWithURIDelimitersKeepsItsIdentityAndRoundTrips() throws {
+        let context = try bootedContext()
+        let first = "notes/rc#2?draft.md"
+        let second = "notes/rc#3?draft.md"
+
+        send(["type": "open", "path": first, "language": "markdown", "text": "one\n"], in: context)
+        let firstID = context.evaluateScript("editor.getModel().id;").toString()
+        XCTAssertEqual(context.evaluateScript("editor.getModel().uri.path;").toString(), "/" + first,
+                       "the model URI does not carry the path it was opened for")
+
+        send(["type": "open", "path": second, "language": "markdown", "text": "two\n"], in: context)
+        XCTAssertNotEqual(context.evaluateScript("editor.getModel().id;").toString(), firstID,
+                          "two files differing after a URI delimiter share one model")
+
+        // The round trip the host depends on: the path it is offered a buffer for is read back
+        // out of the model URI, so an encoding that cannot be undone would offer it another file.
+        send(["type": "save"], in: context)
+        let saves = posted(in: context).filter { $0["type"] as? String == "saveRequested" }
+        XCTAssertEqual(saves.last?["path"] as? String, second,
+                       "the path did not survive the round trip through the model URI")
+        XCTAssertEqual(saves.last?["text"] as? String, "two\n")
+    }
+
+    // MARK: - The navigation an event belongs to
+
+    /// A page keeps running until WebKit tears it down, so the host has to be able to tell an
+    /// event from the document it is showing from one the outgoing document posted on its way
+    /// out. Every event carries the generation the host injected for this navigation.
+    func testEveryEventCarriesTheNavigationItWasPostedFrom() throws {
+        let context = try bootedContext()
+
+        send(["type": "open", "path": "src/main.swift", "language": "swift", "text": "one\n"], in: context)
+        context.evaluateScript("editor.getModel().setValue('edited\\n');")
+        send(["type": "save"], in: context)
+        send(["type": "nonsense"], in: context)
+
+        let events = posted(in: context)
+        XCTAssertEqual(Set(events.map { $0["type"] as? String ?? "?" }),
+                       ["ready", "dirty", "saveRequested", "error"])
+        for event in events {
+            XCTAssertEqual(event["generation"] as? Int, Self.generation,
+                           "\(event["type"] as? String ?? "?") was posted unstamped")
+        }
+    }
+}

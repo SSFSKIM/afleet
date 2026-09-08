@@ -28,7 +28,8 @@ final class Spike: NSObject, WKNavigationDelegate {
 
     struct Options {
         var holdOpen = false
-        var sourceBytes = 5 * 1024 * 1024
+        /// The gate's own figure, shared with the verdict that refuses anything below it.
+        var sourceBytes = Verdict.requiredSourceBytes
         var diffLines = 2000
         var scrollFrames = 180
         var readyTimeout: TimeInterval = 30
