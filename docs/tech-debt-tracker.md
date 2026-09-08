@@ -2007,3 +2007,21 @@ is renumbered.
      is a racing local writer on the user's own machine — the class C7.3 ruled out of scope twice as
      entry 191. Found by C7.5's second merge round. Closer: descriptor-relative creation (`openat`
      from a descriptor on the validated parent). Owner: whichever leaf makes 191 worth closing.
+
+245. **The suppressed clean report is keyed on a path, not on a surface.** When the session replaces
+     a buffer it records the path whose `dirty:false` it caused, so the bridge's own clean report
+     does not drop an unsaved marker the user still owns. The record is retired only by a real
+     `dirty:true`. That is exact for `bridge.js` as written — `reportDirty` fires on transitions, so
+     a clean report can only follow a dirty one — but it is an assumption about another module's
+     behaviour rather than something this session enforces, and with several surfaces attached there
+     is no per-surface accounting. Found by C7.5's fix wave for the second merge round. Closer:
+     either the bridge tagging a host-caused transition, which is a W4 shape change, or per-surface
+     expectations here. Owner: C7.5's follow-up, or C7.2's contract if the bridge answers it.
+
+246. **`FilesPanelTests` builds fixtures that duplicate no other target, and is now the leaf's
+     largest suite.** 149 of the package's 383 tests live in one target with a private git fixture
+     builder, a scratch-tree guard and a recording runner (entry 232's duplication), plus real PDFs,
+     PNGs and MP4 containers generated per test. Nothing is wrong with it; it is slow enough
+     (~15 s of the package's ~33 s) that the next leaf to add to it should know where the time goes
+     before adding more. Closer: share the fixtures per entry 232 and build the media corpus once
+     per suite rather than once per test. Owner: C7.7, which will add to this target.
