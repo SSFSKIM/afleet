@@ -21,9 +21,18 @@ public actor FleetObserver {
     private var refreshing: Task<Void, Never>?
     private var published = false
     private let continuation: AsyncStream<HolderSet>.Continuation
+    private let jobsContinuation: AsyncStream<HolderSnapshot>.Continuation
 
     /// Every `HolderSet` that differed from the one before it, the first read included.
     public nonisolated let updates: AsyncStream<HolderSet>
+
+    /// Every read whose `jobs` differed from the one before it, the first read included, in full.
+    ///
+    /// A stream of its own rather than a second reading of `updates`, because the two really do move apart: an exec
+    /// job is never a holder at all, a job going from `working` to `blocked` rewrites only its own record, and an
+    /// interactive session appearing moves the holders while the roster stands still. The whole snapshot travels so
+    /// the roster is derived once, by the fleet, exactly as `jobs()` derives it.
+    public nonisolated let jobUpdates: AsyncStream<HolderSnapshot>
 
     public init(configHome: ConfigHome, reader: any HolderReader, clock: any Clock<Duration>,
                 ownPIDs: @escaping @Sendable () async -> Set<Int32>,
@@ -32,6 +41,7 @@ public actor FleetObserver {
         self.pollInterval = pollInterval; self.reconcileInterval = reconcileInterval
         self.last = HolderSnapshot(holders: HolderSet(holders: [], observedAt: .distantPast), jobs: [:], skipped: 0)
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (jobUpdates, jobsContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
     // MARK: - Reading
@@ -83,6 +93,7 @@ public actor FleetObserver {
         for source in sources { source.cancel() }   // the cancel handler closes the descriptor
         sources = []
         continuation.finish()
+        jobsContinuation.finish()
     }
 
     // MARK: - Internals
@@ -103,9 +114,14 @@ public actor FleetObserver {
                                          label: label)
         // `observedAt` stamps every read, so compare the holders themselves: an unchanged fleet publishes nothing.
         let changed = !published || snapshot.holders.holders != last.holders.holders
+        // The same rule over the roster, and separately: the two views move apart, and a read that changed only the
+        // other one has nothing to say here. `JobRecord` carries no observation stamp — every field of it is what
+        // the CLI wrote — so this is a plain comparison by value.
+        let jobsChanged = !published || snapshot.jobs != last.jobs
         last = snapshot
         published = true
         if changed { continuation.yield(snapshot.holders) }
+        if jobsChanged { jobsContinuation.yield(snapshot) }
     }
 
     /// A vnode source per watched directory. A directory event says only "something under here moved", so the
