@@ -1099,6 +1099,26 @@ symlink-containment debt in entry 78 is unchanged.
      Closer: name it in the composite as a cross-child contract in Y4's shape, and give C6.1 the one
      call. Owner: the C6 composite (the architect). Raised by C6.2 Task 6.
 
+     **Two more faces of the same omission, found by Task 10's gate audit.** The call is the incoming
+     half; the missing render sites are the outgoing half, and neither is reachable from this leaf's
+     fence either.
+     (a) **`ComposerModel.editNote` is written in eight places and read by no view.** It is the note
+     G4 requires on every refused-rewind arm — "the conversation was not rewound and a fork was
+     opened instead", the no-fork-point reason, the two distinguishable refusal wordings. Every arm
+     is asserted on the model and none of them is visible anywhere, so G4's "shows a visible note"
+     clause is discharged at model level only. It has no natural home in `App/Composer/`: the note is
+     about a past message the user chose to edit, so it belongs beside that row.
+     (b) **`ComposerModel.interceptedReplacements` is written and read by nobody.** §7.7 and G1 ask
+     that the drift replacement be shown *in place of* the offending assistant frame. The map is keyed
+     by frame uuid precisely so a renderer can substitute; `RefusalSurface` instead draws
+     `lastInterception.replacement` as an **additional** label beside the field, which annotates the
+     refusal rather than replacing it. The substitution site is a timeline row — `App/Timeline/`,
+     C6.1's — so this leaf can file it and not fix it. The interception, the replacement text and the
+     per-shape counts are all asserted and correct; only the substitution is missing.
+     Closer for both: the same composite contract that gives C6.1 the `edit(_:)` call gives it the two
+     render sites — the note beside the edited row, and `interceptedReplacements[uuid]` consulted when
+     an assistant row draws. Owner: the C6 composite, with C6.1.
+
 154. **`HostSignal.promptSent` reaches the fold and produces no `TimelineChange`, so no surface can
      show a queued message before the engine echoes it.** `WireReducer.apply(_ signal:)` appends the
      uuid to `outstandingPrompts`; that array is not in `Snapshot`, so `difference(to:)` reports
