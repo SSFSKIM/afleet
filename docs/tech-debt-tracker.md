@@ -1193,3 +1193,18 @@ is renumbered.
      Closer: if a pre-echo queued row is wanted, C3 models an outstanding prompt the snapshot diffs
      and the chip reads it like any other reduced state. Owner: C3 / the C6 composite, as a design
      decision rather than a fix. Raised by C6.2 Task 6b.
+
+155. **The permission-mode picker cannot re-read its own value.** Model and effort are confirmed by
+     a fresh `get_settings` after every click (`applied.model`, `applied.effort`), which is what
+     makes §7.4's "the displayed value is a readback, never the last click" true of them.
+     `set_permission_mode` answers an empty body, and no control request anywhere in the corpus
+     reports the mode a running process is in — the only readback is the handshake's
+     `current_permission_mode`, which arrives at connect and at a quiescent restart. So between a
+     click and the next handshake the picker either shows a value nothing confirmed or shows the
+     stale one. C6.2 chose the second: the click is remembered and never displayed, and the next
+     handshake either confirms it or raises the disagreement, so the rule holds at the cost of the
+     picker lagging its own click until the process restarts.
+     Closer: a `get_permission_mode` request, or `set_permission_mode` answering the resulting mode,
+     either of which is an engine change and not afleet's; failing that, nothing to fix — this entry
+     exists so the lag is read as the readback rule holding rather than as a bug. Owner: nobody
+     today; C1's probe suite if a readback ever appears. Raised by C6.2 Task 7.
