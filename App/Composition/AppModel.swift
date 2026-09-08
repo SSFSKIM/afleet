@@ -155,6 +155,7 @@ final class AppModel {
         panels.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
         composers.attach(to: workspace,
                          context: { [panels] key, cwd in panels.context(for: key, cwd: cwd) },
+                         timeline: { [timelines] key in timelines.model(for: key) },
                          lifecycle: lifecycle)
     }
 

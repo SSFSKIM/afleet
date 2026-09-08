@@ -1119,3 +1119,13 @@ is renumbered.
      Closer: if the property is ever worth testing, give `neutralize` a way to report whether it
      changed anything, and assert the host's call is the first. Owner: C2 if it is worth it; filed
      mainly so no later reader re-derives the false confidence. Found by C6.2 Task 4.
+
+151. **`ChannelTimelineModelTests.testOpenSettlesOnAFinishedEventStream` has a wall-clock budget that
+     fails under load.** Observed once during C6.2's Task 5: 621 ms against a 500 ms budget while
+     mutation builds were competing for the machine; it passed on the clean run and on the retry.
+     Same family as entry 146 and as C2's entry 2 — a test whose failure reads as a product defect
+     when what it measured was a busy host, and this repo now runs several `xcodebuild` invocations
+     at once during a fix wave, so the condition is ordinary rather than exotic.
+     Closer: raise the budget substantially, or make the assertion insensitive to load by settling on
+     an observed event rather than on elapsed time. Owner: C6.1
+     (`AppTests/ChannelTimelineModelTests.swift`). Found by C6.2 Task 5.
