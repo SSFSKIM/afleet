@@ -2437,7 +2437,11 @@ SwiftPM package or target that builds and tests without the children above it, p
   `StreamIngestion.signal(_:) async -> Effect`; after `perform(.answer)` succeeds the host
   raises `.decisionAnswered` there, so the card leaves the overlay on the host's own evidence
   rather than waiting for the engine's next frame. Nothing had raised the signal before this
-  corrective (C3 Revision Note 2026-09-08).
+  corrective (C3 Revision Note 2026-09-08). Amended 2026-09-08 from C6.2's `[parent-impact]`
+  (corrective `d802792`): `sendPrompt(_ input: UserInput, on: ChannelKey) async throws -> UUID` —
+  `perform(.send)`'s path verbatim, returning the uuid the supervisor mints and the engine echoes
+  instead of the state, so the composer raises `HostSignal.promptSent(uuid:at:)` before the echo
+  arrives; `perform(.send)` stays for callers that want the state.
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
   types; FleetKit never models upper-layer state — and state its own listing and unread
