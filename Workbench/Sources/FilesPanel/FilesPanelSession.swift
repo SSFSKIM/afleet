@@ -135,8 +135,13 @@ public final class FilesPanelSession: PanelTabSession {
     private let watchMode: FileWatch.Mode
     private let watchCoalescingDelay: Duration
     private let watchPollInterval: Duration
-    /// The config homes no save may land in, resolved once (CLAUDE.md rule 1, root spec X9).
-    private let protectedHomes: [URL]
+    /// Where the config homes come from. The *set* is derived at every check rather than kept,
+    /// because a home is a path and a path is not a directory: a home reached through a symbolic
+    /// link that is retargeted after this session was built would otherwise leave the guard
+    /// protecting a directory that is no longer the home, and the one that is writable
+    /// (CLAUDE.md rule 1, root spec X9).
+    private let channelConfigHome: URL
+    private let channelVariables: [String: String]
 
     /// Every attached editor, held **weakly** and one per window (Design §1).
     ///
@@ -172,17 +177,42 @@ public final class FilesPanelSession: PanelTabSession {
     /// Bumped by every presentation, so a diff resolved over several `git` calls cannot land on
     /// top of a newer one — or of the file the user opened while it was resolving.
     private var presentation = 0
-    /// What the `save` in flight is for. The vocabulary's only way to obtain the buffer is
-    /// `save` → `saveRequested`, so a presentation that is about to replace the buffer asks for
-    /// it with `.stash`: the text is recorded on the open file and **nothing is written**.
-    private enum SaveIntent { case write, stash }
-    private var saveIntent: SaveIntent = .write
-    /// The presentation waiting for a stash to come back, resumed by `saveRequested`, by the
-    /// editor's `error`, or by the bound below — never twice, and never not at all.
+    /// What the `save` in flight is for, and **whether there is one**. The vocabulary's only way
+    /// to obtain the buffer is `save` → `saveRequested`, so a presentation that is about to
+    /// replace the buffer asks for it with `.stash`: the text is recorded on the open file and
+    /// **nothing is written**.
+    ///
+    /// `.idle` is the state with no request outstanding, and it is what every finished request
+    /// falls back to. A reply is only ever acted on when it answers the request this names — a
+    /// `saveRequested` is one message for two questions and carries no identity of its own, so
+    /// the identity has to be held here. Without `.idle` an expired stash left the session set to
+    /// *write*, and the editor's late answer to a request nobody was waiting for any more saved a
+    /// file the user never asked to save.
+    private enum SaveIntent: Equatable { case idle, write, stash(id: Int, path: String) }
+    private var saveIntent: SaveIntent = .idle
+    /// The presentation waiting for a stash to come back, and the request it is waiting for.
+    /// Resumed by `saveRequested`, by the editor's `error`, or by the bound below — never twice,
+    /// and never not at all. The id is what stops an expiry that fired for a retired request from
+    /// resolving whichever waiter happens to exist by then.
     private var stashWaiter: CheckedContinuation<Void, Never>?
+    private var stashWaiterID: Int?
+    private var stashRequests = 0
     private let stashTimeout: Duration
     /// Whether a restore is between its first suspension and its last.
     private var isRestoring = false
+    /// One position in the buffer, which is all a `cursor` event says.
+    private struct Position: Hashable { let line: Int; let column: Int }
+    /// Where **this session** last told the editor to put the cursor.
+    ///
+    /// The bridge posts a `cursor` for a host-issued move exactly as it does for the user's own,
+    /// so a `gotoLine` broadcast to every window comes back from all of them. Taking those as
+    /// evidence of where the user is made a background window the save target and handed `write`
+    /// its stale buffer. A cursor the session asked for is therefore not ownership; anything else
+    /// is, and it clears this.
+    private var commandedPositions: Set<Position> = []
+    /// The path whose buffer the session itself last replaced. `open` and `setText` leave the
+    /// editor clean and the bridge says so — its own echo, not the user saving.
+    private var replacedBufferPath: String?
 
     public init(context: ChannelContext,
                 runner: any ToolRunning = ToolRunner(),
@@ -204,8 +234,8 @@ public final class FilesPanelSession: PanelTabSession {
         self.watchMode = watchMode
         self.watchCoalescingDelay = watchCoalescingDelay
         self.watchPollInterval = watchPollInterval
-        self.protectedHomes = Self.protectedConfigHomes(channel: context.key.configHome,
-                                                        variables: context.environment.variables)
+        self.channelConfigHome = context.key.configHome
+        self.channelVariables = context.environment.variables
         if let surface { attach(surface) }
     }
 
@@ -323,18 +353,30 @@ public final class FilesPanelSession: PanelTabSession {
     ///
     /// Re-opening the path that is already open is the normal case — the bridge reuses the model
     /// at that URI — so this updates the record it already has rather than building a second one.
+    ///
+    /// **What the record already knows survives the reopen.** A link, a tree row and a second Read
+    /// row all arrive here, and A-B-A navigation is ordinary: replacing the text discarded the
+    /// user's unsaved edits, and replacing `lastLoaded` under a dirty buffer adopted another
+    /// writer's bytes as its baseline, which is what §8's conflict rule and the save preflight are
+    /// both keyed on. So a dirty record is left exactly as it stands — the file is re-read only to
+    /// learn that it can be read — and a clean one adopts the new bytes and retires **both**
+    /// baselines with them: a `lastWritten` kept past its own `lastLoaded` goes on answering for
+    /// bytes that are not there and swallows the next real change as this panel's save echo.
     public func openFile(at url: URL, line: Int?) async {
         guard let loaded = read(url) else {
             issue = .unreadableFile
             return
         }
         if let index = openFiles.firstIndex(where: { $0.url == url }) {
-            openFiles[index].kind = loaded.kind
-            openFiles[index].language = loaded.language
-            openFiles[index].text = loaded.text
-            openFiles[index].lastLoaded = loaded.snapshot
             openFiles[index].isMissing = false
             if let line { openFiles[index].line = max(1, line) }
+            if !openFiles[index].isDirty {
+                openFiles[index].kind = loaded.kind
+                openFiles[index].language = loaded.language
+                openFiles[index].text = loaded.text
+                openFiles[index].lastLoaded = loaded.snapshot
+                openFiles[index].lastWritten = nil
+            }
         } else {
             openFiles.append(OpenFile(url: url, kind: loaded.kind, language: loaded.language,
                                       line: max(1, line ?? 1), column: 1, isDirty: false,
@@ -412,10 +454,22 @@ public final class FilesPanelSession: PanelTabSession {
     /// **`isShowingDiff` is cleared before the native-viewer return**, not after it: the readout
     /// prioritises that flag, so a file with a native viewer opened out of a diff would otherwise
     /// draw the diff it just left (Design §4).
+    ///
+    /// **The stash is a round trip, so this presentation can lose while it waits.** The generation
+    /// is claimed before the suspension and re-checked after it, exactly as `showDiff` does across
+    /// its `git` calls: the user opening something else while a dirty buffer comes back must not
+    /// then be drawn over by the presentation that was waiting.
+    ///
+    /// **The cursor is restored when the caller has no line of its own.** `open` reveals a line
+    /// only when it was given one, and a selection or a toggle has none, so the position this
+    /// session is holding for the file — the one G4 persists — is sent after it. A file whose
+    /// cursor is the top is already there and is not told so.
     private func present(_ url: URL, revealing line: Int?) async {
-        await stashPresentedBuffer()
         presentation += 1
-        guard let file = openFiles.first(where: { $0.url == url }) else { return }
+        let generation = presentation
+        await stashPresentedBuffer()
+        guard generation == presentation,
+              let file = openFiles.first(where: { $0.url == url }) else { return }
         isShowingDiff = false
         presentedDiff = nil
         guard file.usesEditor else {
@@ -425,6 +479,9 @@ public final class FilesPanelSession: PanelTabSession {
         }
         presentedPath = file.path
         send(.open(path: file.path, language: file.language, text: file.text, line: line))
+        if line == nil, file.line > 1 || file.column > 1 {
+            send(.gotoLine(line: file.line, column: file.column))
+        }
     }
 
     /// Takes Monaco out of its diff pane when the panel has moved to a surface that sends no
@@ -500,29 +557,66 @@ public final class FilesPanelSession: PanelTabSession {
         return homes.map(resolvingSymlinks)
     }
 
+    /// The set of homes as it stands **now** — a home is a path, and the directory a path names
+    /// can be replaced under it.
+    private var protectedHomes: [URL] {
+        Self.protectedConfigHomes(channel: channelConfigHome, variables: channelVariables)
+    }
+
     /// Whether `url` is one of `homes` or lies inside one.
     static func isInside(_ homes: [URL], _ url: URL) -> Bool {
         let candidate = resolvingSymlinks(url)
-        return homes.contains { contains($0, candidate) }
+        let caseSensitive = isCaseSensitiveVolume(candidate)
+        return homes.contains { contains($0, candidate, caseSensitive: caseSensitive) }
     }
 
     /// Identity first — macOS mounts the data volume twice, so one directory has two spellings
-    /// that share no components — and case-insensitive components second, for the part of the path
-    /// that does not exist yet and so has no inode to compare.
-    private static func contains(_ home: URL, _ candidate: URL) -> Bool {
+    /// that share no components — and components second, for the part of the path that does not
+    /// exist yet and so has no inode to compare.
+    ///
+    /// The component comparison asks the **volume** whether case distinguishes two names, because
+    /// neither answer is right everywhere: a macOS volume is case-insensitive by default, where
+    /// `.CLAUDE` and `.claude` are one directory and a case-sensitive comparison would let a save
+    /// into a config home through; on a case-sensitive volume they are two directories and an
+    /// insensitive comparison refuses a save that has nothing to do with a config home. C7.3's
+    /// own guard reasons this out in `SourceControlCoreTests/Support/TempTree.swift`, and errs
+    /// towards refusal for the same reason the default below does.
+    static func contains(_ home: URL, _ candidate: URL, caseSensitive: Bool) -> Bool {
         if sharesIdentity(home, candidate) { return true }
         let inside = candidate.pathComponents, outside = home.pathComponents
         guard inside.count >= outside.count else { return false }
-        for (mine, theirs) in zip(inside, outside) where !sameComponent(mine, theirs) { return false }
+        for (mine, theirs) in zip(inside, outside)
+        where !sameComponent(mine, theirs, caseSensitive: caseSensitive) { return false }
         return true
     }
 
+    /// Whether names are distinguished by case on the volume `url` is on, asked of its nearest
+    /// existing ancestor — the destination itself is often the file a save is about to create.
+    /// A volume that will not answer is treated as case-insensitive, which errs towards refusing
+    /// a write rather than letting one into a config home.
+    private static func isCaseSensitiveVolume(_ url: URL) -> Bool {
+        var probe = url.standardized
+        while true {
+            if let values = try? probe.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]),
+               let sensitive = values.volumeSupportsCaseSensitiveNames {
+                return sensitive
+            }
+            let parent = probe.deletingLastPathComponent().standardized
+            guard parent.pathComponents.count < probe.pathComponents.count else { return false }
+            probe = parent
+        }
+    }
+
+    /// `standardized` and never `standardizedFileURL`: the file-URL form consults the file system
+    /// and strips a `/private` prefix from a path that exists while leaving it on one that does
+    /// not, which is the two-spellings failure this walk exists to end (C7.3's `TempTree`
+    /// measured it).
     private static func sharesIdentity(_ home: URL, _ candidate: URL) -> Bool {
         guard let target = identity(home) else { return false }
-        var probe = candidate.standardizedFileURL
+        var probe = candidate.standardized
         while true {
             if let found = identity(probe), found == target { return true }
-            let parent = probe.deletingLastPathComponent().standardizedFileURL
+            let parent = probe.deletingLastPathComponent().standardized
             guard parent.pathComponents.count < probe.pathComponents.count else { return false }
             probe = parent
         }
@@ -534,9 +628,10 @@ public final class FilesPanelSession: PanelTabSession {
         return (status.st_dev, status.st_ino)
     }
 
-    private static func sameComponent(_ one: String, _ other: String) -> Bool {
+    private static func sameComponent(_ one: String, _ other: String, caseSensitive: Bool) -> Bool {
         one.precomposedStringWithCanonicalMapping
-            .compare(other.precomposedStringWithCanonicalMapping, options: [.caseInsensitive])
+            .compare(other.precomposedStringWithCanonicalMapping,
+                     options: caseSensitive ? [] : [.caseInsensitive])
             == .orderedSame
     }
 
@@ -573,9 +668,32 @@ public final class FilesPanelSession: PanelTabSession {
 
     /// *Save*. W4's vocabulary is closed, so the editor cannot report a key press: the button and
     /// the menu item both land here, and the `saveRequested` that comes back is written.
+    ///
+    /// **It saves the file the user has selected, or it saves nothing.** The editor answers `save`
+    /// out of *its* model, and a native viewer draws over Monaco without replacing that model —
+    /// so asking the editor while a rendered Markdown file, an image or a PDF is on screen gets
+    /// back the code file that was there before. Three cases, and each is the same rule:
+    ///
+    /// - the selected file **is** the buffer on screen: ask the editor, as it always did;
+    /// - a diff is on screen: ask anyway, because the bridge's refusal is what draws the notice
+    ///   that tells the user to close it, and its answer is an `error` and never a buffer;
+    /// - a native viewer is on screen: the editor is not showing this file at all, and the
+    ///   session already holds its text — every presentation stashes the buffer before replacing
+    ///   it (§7) — so the write comes from the record rather than from a round trip.
     public func save() {
-        saveIntent = .write
-        sendToFocused(.save)
+        guard let file = selected else { return }
+        if isShowingDiff {
+            saveIntent = .idle
+            sendToFocused(.save)
+            return
+        }
+        if presentedPath == file.path {
+            saveIntent = .write
+            sendToFocused(.save)
+            return
+        }
+        guard file.isDirty else { return }
+        write(path: file.path, text: file.text)
     }
 
     /// Asks the editor for the buffer and records it on the open file **without writing it**.
@@ -593,16 +711,19 @@ public final class FilesPanelSession: PanelTabSession {
               let path = presentedPath,
               let index = openFiles.firstIndex(where: { $0.path == path }),
               openFiles[index].isDirty else { return }
+        stashRequests += 1
+        let request = stashRequests
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             // The waiter is in place **before** the request goes out: an editor that answers
             // synchronously — which is what a recorder does, and what a same-actor bridge could —
             // would otherwise find nothing to resume and leave this suspended for ever.
             stashWaiter = continuation
+            stashWaiterID = request
             Task { [weak self, stashTimeout] in
                 try? await Task.sleep(for: stashTimeout)
-                self?.finishStash()
+                self?.finishStash(request)
             }
-            saveIntent = .stash
+            saveIntent = .stash(id: request, path: path)
             sendToFocused(.save)
         }
     }
@@ -618,12 +739,26 @@ public final class FilesPanelSession: PanelTabSession {
             .map { !buffer.hasSameContents(as: $0) } ?? false
     }
 
-    /// Resumes whatever is waiting for a stash, once.
-    private func finishStash() {
-        guard let waiter = stashWaiter else { return }
+    /// Resumes the presentation waiting for stash `request`, once.
+    ///
+    /// The expiry cannot be cancelled once armed, so it arrives for a request that may long since
+    /// have been answered — and the waiter it would find then belongs to a *later* presentation,
+    /// which is still owed its own answer or its own expiry. The id is what keeps the two apart.
+    /// The intent falls back to `.idle` whichever way this request ended, so no reply that arrives
+    /// after it is over can be read as an authorisation to write.
+    private func finishStash(_ request: Int) {
+        guard stashWaiterID == request, let waiter = stashWaiter else { return }
         stashWaiter = nil
-        saveIntent = .write
+        stashWaiterID = nil
+        saveIntent = .idle
         waiter.resume()
+    }
+
+    /// The same, for an answer that names no request: the editor's `error` is the reply to
+    /// whatever is outstanding, and there is at most one.
+    private func finishOutstandingStash() {
+        guard let request = stashWaiterID else { return }
+        finishStash(request)
     }
 
     /// Writes the buffer the editor answered with.
@@ -633,8 +768,14 @@ public final class FilesPanelSession: PanelTabSession {
     /// as a file that has not changed. A file whose bytes are neither what was loaded nor what was
     /// last written belongs to another writer, and the write is refused into the banner unless the
     /// user has already chosen *Keep mine*.
+    ///
+    /// **Only the selected file is ever written.** The path comes from the editor, which answers
+    /// out of its own model, and that model outlives the presentation: a native viewer draws over
+    /// Monaco without replacing it. A save is the user saving the file they are looking at, so a
+    /// path that is not the one on screen is not a file this panel may write.
     private func write(path: String, text: String) {
-        guard let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
+        guard path == selectedPath,
+              let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
         let file = openFiles[index]
         let data = Data(text.utf8)
         // The destination is the file the buffer was read from, which for a link is the link's
@@ -830,9 +971,10 @@ public final class FilesPanelSession: PanelTabSession {
     /// heard from the editor, **in that order**, on the ordered send chain. The bridge reuses the
     /// model at that URI, so markers, decorations and view state survive; the cursor does not,
     /// which is why it is restored explicitly.
-    private func refresh(_ url: URL) {
+    @discardableResult
+    private func refresh(_ url: URL) -> Bool {
         guard let index = openFiles.firstIndex(where: { $0.url == url }),
-              let loaded = read(url) else { return }
+              let loaded = read(url) else { return false }
         openFiles[index].kind = loaded.kind
         openFiles[index].language = loaded.language
         openFiles[index].text = loaded.text
@@ -842,18 +984,26 @@ public final class FilesPanelSession: PanelTabSession {
         openFiles[index].isDirty = false
         openFiles[index].hasConflict = false
         let file = openFiles[index]
-        guard file.usesEditor, presentedPath == file.path, !isShowingDiff else { return }
+        guard file.usesEditor, presentedPath == file.path, !isShowingDiff else { return true }
         send(.open(path: file.path, language: file.language, text: file.text, line: nil))
         send(.gotoLine(line: file.line, column: file.column))
+        return true
     }
 
     /// *Reload*: discard the buffer, refresh, clear the banner.
+    ///
+    /// **The buffer is discarded when the new one arrives, not when the user asks for it.** The
+    /// refresh is the only thing that replaces the text, and it cannot happen for a file that is
+    /// not there to be read — the ordinary state of a file the agent is replacing by rename.
+    /// Clearing the dirty state in advance told the user they had nothing unsaved while their
+    /// edits were still the only copy.
     public func reload(_ url: URL) async {
-        guard let index = openFiles.firstIndex(where: { $0.url == url }) else { return }
+        guard openFiles.contains(where: { $0.url == url }) else { return }
         presentation += 1
-        openFiles[index].isDirty = false
+        guard refresh(url), let index = openFiles.firstIndex(where: { $0.url == url }) else {
+            return
+        }
         openFiles[index].keepsMine = false
-        refresh(url)
         await persist()
     }
 
@@ -874,10 +1024,14 @@ public final class FilesPanelSession: PanelTabSession {
     /// after the last, so neither an older pair nor an older failure can replace a newer surface.
     public func showDiff(_ reference: DiffRef) async {
         // The buffer goes first: the diff pane replaces the editor's surface, and what the user
-        // typed is only recoverable while the editor is still showing it (§7).
-        await stashPresentedBuffer()
+        // typed is only recoverable while the editor is still showing it (§7). The generation is
+        // claimed before that round trip, not after it: the stash is a suspension like the `git`
+        // calls below, and a diff superseded while it waits is as stale as one superseded while
+        // it resolves.
         presentation += 1
         let generation = presentation
+        await stashPresentedBuffer()
+        guard generation == presentation else { return }
         do {
             let resolution = try await resolver.resolve(reference)
             guard generation == presentation else { return }
@@ -942,15 +1096,28 @@ public final class FilesPanelSession: PanelTabSession {
         case .ready:
             break
         case .dirty(let path, let isDirty):
+            // A clean report the session **caused** is not the user having saved. `open` and
+            // `setText` replace the model and leave the buffer clean, and the bridge says so for
+            // the path it replaced — including the same path, which is what re-opening a stashed
+            // buffer at the file it came from does. Accepting it dropped the unsaved marker from
+            // a buffer whose edits are all still there. Only a real transition back to dirty
+            // retires the expectation, and a clean report can only follow one.
+            if !isDirty, path == replacedBufferPath { return }
+            if isDirty { replacedBufferPath = nil }
             if let surface { focused = surface }
-            // Only the presented buffer may report its dirtiness. The bridge also reports the
-            // buffer it *replaced* clean — that is the model replacement's own echo, and taking it
-            // would drop the unsaved marker from a file whose text the session has just stashed.
+            // Only the presented buffer may report its dirtiness.
             guard path == presentedPath,
                   let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
             openFiles[index].isDirty = isDirty
         case .cursor(let line, let column):
-            if let surface { focused = surface }
+            // A move this session asked for is not the user moving: `gotoLine` goes to every
+            // window and comes back from every window, and taking that as evidence made a
+            // background window the save target.
+            let commanded = commandedPositions.contains(Position(line: line, column: column))
+            if !commanded {
+                commandedPositions.removeAll()
+                if let surface { focused = surface }
+            }
             guard let path = presentedPath,
                   let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
             openFiles[index].line = line
@@ -958,11 +1125,20 @@ public final class FilesPanelSession: PanelTabSession {
             Task { await self.persist() }
         case .saveRequested(let path, let text):
             switch saveIntent {
+            case .idle:
+                // Nothing is waiting for a buffer. A reply to a request that has already ended —
+                // an expired stash, a save already written — authorises nothing.
+                break
             case .write:
+                saveIntent = .idle
                 write(path: path, text: text)
-            case .stash:
+            case .stash(let request, let expected):
+                // The reply has to be the one this request asked for. A `saveRequested` naming
+                // another file answers no live request, and recording it would put one file's
+                // bytes on another's record.
+                guard path == expected else { return }
                 stash(path: path, text: text)
-                finishStash()
+                finishStash(request)
             }
         case .error:
             // The bridge refuses `save` while a diff is on screen, and `error` is the whole
@@ -971,7 +1147,7 @@ public final class FilesPanelSession: PanelTabSession {
             issue = isShowingDiff ? .saveRefusedWhileDiffShown : .editorReported
             // A refusal is also the answer to a stash: the presentation waiting on one is owed a
             // resumption whichever way the editor replied.
-            finishStash()
+            finishOutstandingStash()
         }
     }
 
@@ -981,12 +1157,21 @@ public final class FilesPanelSession: PanelTabSession {
         // Which pane the bridge is showing follows from the command, exactly as it does inside the
         // bridge: `open`, `setText` and `gotoLine` all show the editor first, `showDiff` shows the
         // diff. Deriving it here is what stops the two from drifting.
+        // What the session is about to make the editor report back: the buffer it replaces goes
+        // clean, and the cursor lands where the command put it. Both come back as events that
+        // look exactly like the user's own, and neither is (see `handle`).
         switch command {
-        case .open(let path, _, _, _):
+        case .open(let path, _, _, let line):
             bridgeShowsDiff = false
             bufferPath = path
-        case .setText, .gotoLine:
+            replacedBufferPath = path
+            commandedPositions = [Position(line: line ?? 1, column: 1)]
+        case .setText:
             bridgeShowsDiff = false
+            replacedBufferPath = presentedPath
+        case .gotoLine(let line, let column):
+            bridgeShowsDiff = false
+            commandedPositions.insert(Position(line: line, column: column ?? 1))
         case .showDiff:
             bridgeShowsDiff = true
         case .setTheme, .save:

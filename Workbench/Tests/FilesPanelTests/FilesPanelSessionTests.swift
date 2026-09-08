@@ -1212,6 +1212,291 @@ final class FilesPanelSessionTests: XCTestCase {
                        "the writer's restore was swallowed as the save's own echo")
     }
 
+    // MARK: - 26. the stash round trip is a request with an identity
+
+    /// The vocabulary's only way to obtain the buffer is `save` → `saveRequested`, and the reply
+    /// carries no request identity of its own — so the session has to hold one. A stash that was
+    /// never answered expires, and the expiry must leave the session unable to *write*: otherwise
+    /// the next reply the editor sends, for a request nobody is waiting for any more, saves a file
+    /// the user never asked to save.
+    func testAReplyToATimedOutStashDoesNotWriteAnything() async throws {
+        let first = try tree.file("first.swift", "one\n")
+        let second = try tree.file("second.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        await harness.session.openFile(at: first, line: nil)
+        harness.surface.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
+
+        // The stash for `first` goes out with this presentation and is never answered.
+        await harness.session.openFile(at: second, line: nil)
+        await harness.session.select(first)
+
+        harness.surface.deliver(.saveRequested(path: first.path(percentEncoded: false),
+                                               text: "never asked for\n"))
+
+        XCTAssertEqual(try String(contentsOf: first, encoding: .utf8), "one\n",
+                       "an expired stash left the session authorised to write")
+    }
+
+    /// The matching half: a reply that names a file other than the one the stash asked about
+    /// belongs to no live request, and recording it would put another file's bytes on that file.
+    func testAStashReplyForAnotherFileIsDroppedRatherThanRecorded() async throws {
+        let first = try tree.file("first.swift", "one\n")
+        let second = try tree.file("second.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        await harness.session.openFile(at: first, line: nil)
+        harness.surface.type("edited one\n")
+        harness.surface.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
+        harness.surface.reset()
+
+        let opening = Task { await harness.session.openFile(at: second, line: nil) }
+        // One turn puts the presentation inside its stash wait, which is where the reply arrives.
+        await Task.yield()
+        harness.surface.deliver(.saveRequested(path: second.path(percentEncoded: false),
+                                               text: "not this file's bytes\n"))
+        await opening.value
+
+        XCTAssertEqual(harness.surface.shapes.last,
+                       .open(name: "second.swift", language: "swift", text: "two\n", line: nil),
+                       "a reply naming another file was recorded as that file's buffer")
+    }
+
+    // MARK: - 27. a presentation superseded while it waits for a stash
+
+    /// The stash is a round trip, and the panel does not stand still while it runs: the user may
+    /// open something else. The presentation that was waiting has to notice it lost, exactly as a
+    /// diff resolved over several `git` calls does (§23).
+    func testAPresentationSupersededWhileItWaitsForAStashIsAbandoned() async throws {
+        let dirty = try tree.file("dirty.swift", "one\n")
+        let waited = try tree.file("waited.swift", "two\n")
+        let overtaking = try tree.file("overtaking.swift", "three\n")
+        let harness = try makeHarness(stashTimeout: .seconds(5))
+        await harness.session.openFile(at: dirty, line: nil)
+        harness.surface.type("edited one\n")
+        harness.surface.deliver(.dirty(path: dirty.path(percentEncoded: false), isDirty: true))
+
+        let waiting = Task { await harness.session.openFile(at: waited, line: nil) }
+        await Task.yield()
+        await harness.session.openFile(at: overtaking, line: nil)
+        // The stashed buffer comes back now, which resumes the presentation that was overtaken.
+        harness.surface.deliver(.saveRequested(path: dirty.path(percentEncoded: false),
+                                               text: "edited one\n"))
+        await waiting.value
+
+        XCTAssertEqual(harness.session.selected?.name, "overtaking.swift")
+        XCTAssertEqual(harness.surface.shapes.last,
+                       .open(name: "overtaking.swift", language: "swift", text: "three\n",
+                             line: nil),
+                       "a superseded presentation opened over the file the user had chosen")
+    }
+
+    // MARK: - 28. ownership of the buffer follows the user
+
+    /// `save` goes to the window the user is in, and the editor's `cursor` is the evidence of
+    /// which one that is — but the bridge posts a `cursor` for a position *this session* asked for
+    /// too. A background window echoing the panel's own `gotoLine` is not the user moving into it,
+    /// and treating it as one hands `save` a buffer from a window nobody is typing in.
+    func testACursorTheSessionItselfAskedForDoesNotMoveTheSaveTarget() async throws {
+        let file = try tree.file("owned.swift", "one\n")
+        let harness = try makeHarness()
+        let poppedOut = RecordingSurface()
+        harness.session.attach(poppedOut)
+        harness.surface.answersSave = true
+        poppedOut.answersSave = true
+
+        await harness.session.openFile(at: file, line: nil)
+        // The user is in the main window.
+        harness.surface.deliver(.cursor(line: 9, column: 4))
+        // A presentation the session issued, which restores that cursor in *both* windows.
+        await harness.session.select(file)
+        poppedOut.deliver(.cursor(line: 9, column: 4))
+
+        harness.surface.type("from the window the user is in\n")
+        poppedOut.type("from the background window\n")
+        harness.session.save()
+
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8),
+                       "from the window the user is in\n",
+                       "the session's own cursor move took the buffer away from the user")
+    }
+
+    // MARK: - 29. saving is about the file the user selected
+
+    /// A native viewer draws over Monaco without replacing its model, so the editor still answers
+    /// `save` out of the file it was last given. *Save* over a rendered Markdown file would then
+    /// write the code file the user was looking at before.
+    func testSavingAFileOnANativeViewerNeverWritesTheFileStillInTheEditorsModel() async throws {
+        let code = try tree.file("code.swift", "code\n")
+        let notes = try tree.file("notes.md", "# heading\n")
+        let harness = try makeHarness()
+        await harness.session.openFile(at: code, line: nil)
+        await harness.session.openFile(at: notes, line: nil)
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: code.path(percentEncoded: false),
+                                               text: "wrong file\n"))
+
+        XCTAssertEqual(try String(contentsOf: code, encoding: .utf8), "code\n",
+                       "the save wrote a file the panel was not showing")
+    }
+
+    /// The other half of the same rule: the file the user *has* selected is saved out of the
+    /// buffer the session already holds for it, so the rendered side of the toggle is not a file
+    /// that cannot be saved.
+    func testSavingARenderedMarkdownFileWritesThatFile() async throws {
+        let notes = try tree.file("notes.md", "# heading\n")
+        let harness = try makeHarness()
+        harness.surface.answersSave = true
+        await harness.session.openFile(at: notes, line: nil)
+        await harness.session.setRendersMarkdown(false, for: notes)
+        harness.surface.type("# edited\n")
+        harness.surface.deliver(.dirty(path: notes.path(percentEncoded: false), isDirty: true))
+        await harness.session.setRendersMarkdown(true, for: notes)
+
+        harness.session.save()
+
+        XCTAssertEqual(try String(contentsOf: notes, encoding: .utf8), "# edited\n",
+                       "the rendered side of the toggle could not save its own file")
+        XCTAssertEqual(harness.session.selected?.isDirty, false)
+    }
+
+    // MARK: - 30. reopening a file the session already holds
+
+    /// A path is opened again by every route the panel has — a link, the tree, a second Read row —
+    /// and the record it already has is what carries the user's unsaved edits.
+    func testReopeningADirtyFileKeepsTheEditsTheSessionStashed() async throws {
+        let first = try tree.file("first.swift", "one\n")
+        let second = try tree.file("second.swift", "two\n")
+        let harness = try makeHarness()
+        harness.surface.answersSave = true
+        await harness.session.openFile(at: first, line: nil)
+        harness.surface.type("edited one\n")
+        harness.surface.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
+        await harness.session.openFile(at: second, line: nil)
+        harness.surface.reset()
+
+        await harness.session.openFile(at: first, line: nil)
+
+        XCTAssertEqual(harness.surface.shapes.last,
+                       .open(name: "first.swift", language: "swift", text: "edited one\n",
+                             line: nil),
+                       "reopening the file replaced what the user had typed with the bytes on disk")
+        XCTAssertEqual(harness.session.selected?.isDirty, true, "the unsaved marker was dropped")
+    }
+
+    /// And the baselines: `lastWritten` is what makes a save's own echo invisible to §8's policy
+    /// and acceptable to the save preflight, so a reopen that adopts new bytes as `lastLoaded`
+    /// must retire the other baseline with it.
+    func testReopeningACleanFileRetiresBothBaselinesTogether() async throws {
+        let file = try tree.file("rebaselined.swift", "loaded\n")
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .seconds(30))
+        await harness.session.openFile(at: file, line: nil)
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false),
+                                               text: "saved\n"))
+
+        try "another writer\n".write(to: file, atomically: true, encoding: .utf8)
+        await harness.session.openFile(at: file, line: nil)
+
+        let reopened = try XCTUnwrap(harness.session.selected)
+        XCTAssertEqual(reopened.lastLoaded?.digest,
+                       FileSnapshot.predicted(contents: Data("another writer\n".utf8)).digest)
+        XCTAssertNil(reopened.lastWritten,
+                     "an obsolete save echo survived a reopen and will swallow a real change")
+    }
+
+    // MARK: - 31. a clean report the session caused
+
+    /// `open` replaces the model, and the bridge reports the buffer it replaced clean — its own
+    /// echo. The session asked for that open, so the report is not the user having saved, and
+    /// taking it drops the unsaved marker from a buffer whose edits are still there.
+    func testTheCleanReportAnOpenCausesDoesNotDropTheUnsavedMarker() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        let harness = try makeHarness(cwd: repository.root, environment: repository.environment)
+        harness.surface.answersSave = true
+        let file = repository.root.appending(path: "notes.swift")
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.type("half-finished\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+        await harness.session.open(.diff(DiffRef(repository: repository.root, path: "notes.swift",
+                                                 base: .workingTreeAgainstHEAD)),
+                                   from: .currentPanel)
+
+        await harness.session.dismissDiff()
+        // The model replacement's own echo, in the bridge's own words.
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: false))
+
+        XCTAssertEqual(harness.session.selected?.isDirty, true,
+                       "the unsaved marker went with an open the session had asked for")
+    }
+
+    // MARK: - 32. the protected homes are resolved when the check runs
+
+    /// A config home reached through a symbolic link is a home whose target can move. Resolving
+    /// the set once at construction leaves the guard protecting a directory that is no longer the
+    /// home while the one that is stays writable (CLAUDE.md rule 1, root spec X9).
+    func testAConfigHomeSymlinkRetargetedAfterTheSessionWasBuiltIsStillProtected() async throws {
+        try tree.directory("home-one")
+        let second = try tree.directory("home-two")
+        try tree.symlink("home-link", to: tree.root.appending(path: "home-one")
+                            .path(percentEncoded: false))
+        let context = try makeContext(store: try makeStore(),
+                                      configHome: tree.root.appending(path: "home-link"))
+        let harness = try makeHarness(context: context)
+        let settings = try tree.file("home-two/settings.json", "original\n")
+
+        try tree.symlink("home-link", to: second.path(percentEncoded: false))
+        await harness.session.openFile(at: settings, line: nil)
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: settings.path(percentEncoded: false),
+                                               text: "replaced\n"))
+
+        XCTAssertEqual(harness.session.issue, .saveRefusedIntoConfigHome)
+        XCTAssertEqual(try String(contentsOf: settings, encoding: .utf8), "original\n",
+                       "the engine's own file was replaced through a retargeted home")
+    }
+
+    // MARK: - 33. Reload clears the dirty state when the refresh lands
+
+    /// *Reload* is *discard the buffer and take what is on disk*. A refresh that cannot happen —
+    /// the file is gone, which is the ordinary state of a file mid-rename — leaves the buffer
+    /// where it was, and a marker cleared in advance says the user has nothing unsaved when they
+    /// still do.
+    func testReloadLeavesTheBufferDirtyWhenThereIsNothingToRefreshFrom() async throws {
+        let file = try tree.file("reloaded.swift", "one\n")
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .seconds(30))
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+        try FileManager.default.removeItem(at: file)
+
+        await harness.session.reload(file)
+
+        XCTAssertEqual(harness.session.selected?.isDirty, true,
+                       "the unsaved marker was cleared before the refresh could happen")
+    }
+
+    // MARK: - 34. a presentation restores the cursor G4 persisted
+
+    /// G4 promises the cursor comes back. `open` reveals a line only when the caller had one —
+    /// a selection has none — so the position the session is holding has to be sent after it.
+    func testAPresentationWithNoLineOfItsOwnRestoresTheStoredCursor() async throws {
+        let first = try tree.file("first.swift", "one\n")
+        let second = try tree.file("second.swift", "two\n")
+        let harness = try makeHarness()
+        await harness.session.openFile(at: first, line: nil)
+        harness.surface.deliver(.cursor(line: 12, column: 4))
+        await harness.session.openFile(at: second, line: nil)
+        harness.surface.reset()
+
+        await harness.session.select(first)
+
+        XCTAssertEqual(harness.surface.shapes,
+                       [.open(name: "first.swift", language: "swift", text: "one\n", line: nil),
+                        .gotoLine(line: 12, column: 4)],
+                       "the file came back at the top rather than where the user left it")
+    }
+
     // MARK: - Harness
 
     /// A session and the recorder it drives, held together so a test cannot let the session go by
@@ -1227,7 +1512,8 @@ final class FilesPanelSessionTests: XCTestCase {
                              links: any LinkRouterCapability = UnusedLinks(),
                              watchMode: FileWatch.Mode = .vnode,
                              pollInterval: Duration = .milliseconds(50),
-                             coalescingInterval: Duration = .milliseconds(10)) throws -> Harness {
+                             coalescingInterval: Duration = .milliseconds(10),
+                             stashTimeout: Duration = .seconds(2)) throws -> Harness {
         let surface = RecordingSurface()
         let resolved = try context ?? makeContext(store: try makeStore(), cwd: cwd,
                                                   environment: environment, links: links)
@@ -1235,15 +1521,17 @@ final class FilesPanelSessionTests: XCTestCase {
                                         coalescingInterval: coalescingInterval,
                                         watchMode: watchMode,
                                         watchCoalescingDelay: .milliseconds(20),
-                                        watchPollInterval: pollInterval)
+                                        watchPollInterval: pollInterval,
+                                        stashTimeout: stashTimeout)
         return Harness(session: session, surface: surface)
     }
 
     private func makeContext(store: any ScopedStore, cwd: URL? = nil,
                              environment: [String: String] = [:],
-                             links: any LinkRouterCapability = UnusedLinks()) throws -> ChannelContext {
+                             links: any LinkRouterCapability = UnusedLinks(),
+                             configHome: URL? = nil) throws -> ChannelContext {
         let session = SessionID()
-        let home = tree.root.appending(path: "config-home-\(session.description)")
+        let home = configHome ?? tree.root.appending(path: "config-home-\(session.description)")
         return ChannelContext(
             key: ChannelKey(configHome: home, session: session),
             session: session,
