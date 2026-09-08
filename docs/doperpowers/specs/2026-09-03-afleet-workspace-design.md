@@ -1307,12 +1307,19 @@ router; `@` completes files via `file_suggestions`; `!` runs the command host-si
 posts the hardened, wrapped user frame of §6.6; image paste and file drop attach. Pickers for permission mode, model and effort on the right. Sending
 while a turn runs queues; `command_lifecycle` drives a "queued" chip with cancel via
 `cancel_async_message`. Editing a past user message calls `rewind_conversation` and
-prefills the returned `prefillText`. The engine honours the rewind only for a message the
-running process itself sent; any older target, which after a reopen is every earlier message,
-is refused with `rewound: false` and `error: "stale target"` inside a `success` envelope
-(fixture `rewind-turn`, 2026-09-05), so the host reads the body, not the envelope, and on
-refusal falls back to *Fork from here* (item 13); no file is reverted ahead of that answer (§7.7
-`/rewind`, 2026-09-06). When *Prompt suggestions* is on, the `prompt_suggestion`
+prefills the returned `prefillText`. The request always carries `last_seen_user_message_uuid`, the newest user message the host
+has rendered: with it the engine honours a rewind to a message from before the running
+process (measured 2026-09-08 on 2.1.263, probe `spike_rewind_last_seen`, zero turns), and the
+honoured answer is a different shape — `rewound: true`, `targetMessageUuid`, `prefillText`,
+`precedingAssistantUuid`, no `error` key. Without the field every older target is refused
+with `rewound: false` and `error: "stale target"` inside a `success` envelope (fixture
+`rewind-turn`, recorded 2026-09-05 without the field); with it, a host that has not caught
+up is refused with `"unseen later turn"` — the same later-turn scan under two names
+(2.1.263 `cli.pretty.js:452145-452153`, the scan starting at the later of the target and the
+last-seen index). The host reads the body, not the envelope; on either refusal it falls back
+to *Fork from here* (item 13), now the rare path; the turn-running, prompt-pending, queued-
+command and poll-event refusals are untouched by the field; no file is reverted ahead of the
+answer (§7.7 `/rewind`, 2026-09-06). When *Prompt suggestions* is on, the `prompt_suggestion`
 frame after each turn renders as ghost text in the composer that Tab accepts; it is off by
 default.
 
@@ -2380,7 +2387,15 @@ SwiftPM package or target that builds and tests without the children above it, p
   output file, last frame time) are FleetKit types. Owner: C3. Binds C4, C6, and every
   leaf C6's cut produces. Amended 2026-09-05 from C7's cut: a recent-URL query over the
   channel's reduced items (URL, first-seen item, time; de-duplicated, most recent first),
-  with the contributing item kinds a named constant, feeds X7's channel context.
+  with the contributing item kinds a named constant, feeds X7's channel context. Amended
+  2026-09-08 from C6's cut (corrective `01eb7a7` on `main`): a channel's wire is folded once,
+  in C3's `StreamIngestion` — it holds the channel's `WireReducer`, folds its own subscription,
+  and publishes both halves on `effects` (`Effect.changes` carries durable and overlay item
+  changes plus `.previewChanged`, `.overlayChanged`, `.sessionStateChanged`; the record
+  bookkeeping fields stay the durable half's and read zero on a purely live effect); it exposes
+  `overlay`, `preview` and `timeline` (the three in one read, the only one that cannot straddle
+  a mutation). C6 subscribes to `effects` and reads `timeline`; it never folds the wire itself
+  and never holds a second reducer.
 - **X5 Lifecycle API.** Channel origin and sub-state as observable state; the actions
   open, send, reap, adopt, sendToBackground, openInTerminal, fork, quiescentRestart,
   stopEverything, backgroundAll, logout; the preconditions as a typed result (ready,
@@ -2397,7 +2412,11 @@ SwiftPM package or target that builds and tests without the children above it, p
   value, so the lifecycle accepts an exit only when its `request.id` is the one it is
   waiting on, and a late exit from an older pane is discarded. The panel never spawns `claude` for a session on its own
   initiative. `stop`, `respawn` and `rm` are actions here with no PTY; `attach` and `logs`
-  are panes. Amended 2026-09-06 at C4's merge: `LifecycleAction.answer(RequestID, InboundAnswer)`;
+  are panes. Amended 2026-09-06 at C4's merge: `LifecycleAction.answer(RequestID, InboundAnswer)`; Amended 2026-09-08 from C5's tracker entry 77 (corrective on `main`): `var jobUpdates:
+  AsyncStream<[JobEntry]> { get }` — the whole current roster, republished from the observer's
+  existing watch and poll cycle whenever its read of `jobs/` changes by value and never otherwise,
+  so an exec job or a job-state change that `updates` cannot express reaches a surface without a
+  second `agents --json`; a surface subscribes before it takes its initial `jobs()` snapshot;
   `LifecycleAPI.events(of:)` (per-subscriber fan-out; a stream is returned for any registered
   channel so a consumer may subscribe before `open`, and it finishes on archive);
   `LifecycleAPI.jobs()` and `performJob(_:_:)` (the job verbs sit off `perform(on:)` because an
@@ -2408,7 +2427,13 @@ SwiftPM package or target that builds and tests without the children above it, p
   naming the blocker (a turn, a decision, queued input, a wedge, a background task by id).
   Amended 2026-09-06: the router is reachable through this API on a `ChannelKey` — `route(_:on:)`,
   `send(_:on:)` and `run(_:arguments:on:ui:)` — so C6's composer routes a line and executes what it
-  named without holding anything under the facade.
+  named without holding anything under the facade. Amended 2026-09-08 from C6's cut (corrective
+  `01eb7a7` on `main`): host-side facts that change the overlay without a wire frame —
+  `HostSignal.decisionAnswered`, the queue and rewind moves — reach the fold through
+  `StreamIngestion.signal(_:) async -> Effect`; after `perform(.answer)` succeeds the host
+  raises `.decisionAnswered` there, so the card leaves the overlay on the host's own evidence
+  rather than waiting for the engine's next frame. Nothing had raised the signal before this
+  corrective (C3 Revision Note 2026-09-08).
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
   types; FleetKit never models upper-layer state — and state its own listing and unread
@@ -2563,7 +2588,7 @@ notarized distribution, and any write under `<configHome>` (X9).
 | C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` (v1 `916ce02`, parent-pin `ee94449`; v2.7 at merge `a758308`); plan `plans/2026-09-05-c3-fleetkit-timeline.md` (v5 `f9f0f2c`, 13 tasks); retrospective in the child spec's Outcomes & Retrospective | **merged** 2026-09-06 at `f4a8723` from `child/c3-timeline` `a758308` (57 commits of its own; only `FleetKit/Sources/FleetTimeline`, its tests and `docs/` touched, `FleetKit/Package.swift` byte-identical); G1–G4 green at the tip: `FleetTimelineTests` 165 tests, 4 skipped without `AFLEET_LOCAL_INDEX`, 0 failures, run twice in separate scratch paths; G1 check one over 20 mirrored streams and 518 entries, check two over 132 compared items across all twenty fixtures with no exclusion (two pinned differences on `compact-boundary`, named by shape); G2 measured opt-in on the author's config home: 365/366 ms cold build over 3,032 transcripts (limit 500), 1 ms incremental (limit 50), 667/679 ms largest history (limit 1,000); G3/G4 by the twelve named tests; X1 import graph green; X9 scratch-home fingerprint unchanged across the suite; one Codex whole-branch review (3 P1, 7 P2) and one adversarial review (6) closed by one fix wave (two dismissals logged as tracker 22 and 23); the twenty-fixture corpus surfaced three findings at merge, fixed red-first before any repin (boundary chain, `isSynthetic` union, recorded rewind); independent leak-risk review at merge (4 findings: three fixed, one logged as tracker 24); deferred debt entries 11–25 in `docs/tech-debt-tracker.md`; spend: no model turns (C3 spawns no process) |
 | C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md`; plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4, 12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-06 at `f1e35d9` from `child/c4-sessions-fleet` `26aa962` (owns `FleetKit/Package.swift`; `FleetSessions` and its tests, `docs/`, plus a C2 corrective to `ClaudeWire`'s process runner carried by the branch); suite at the tip: FleetKit 415 tests, 10 skipped without the live flags, ClaudeWire 243; G1 coverage gate 58/58 lifecycle scenarios; G2 over C3's real registry mirror, five boundary cases; G3, G4; G5 eight live scenarios green together twice on the installed 2.1.263 (runs 4 and 5: 136.6 s and 132.3 s, five turns each, $0.17 and $0.19; cumulative child live spend $1.58); two whole-branch Codex reviews (48 confirmed → 10) closed by one fix wave and two follow-up rounds under five architect rulings; four live-gate product defects found at Task 10 and three more at the merge gate; independent leak-risk review at merge: no findings; deferred debt 26–48 in `docs/tech-debt-tracker.md` |
 | C5 App shell, panel host, packaging | `2026-09-06-c5-app-shell.md`; plan `plans/2026-09-06-c5-app-shell.md` (v6, 10 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-07 at `78303c7` from `child/c5-app-shell` `4c4ede4` (212 commits; owns `App/`, `AppTests/`, `project.yml`, `Workbench/Sources/PanelHostAPI`, plus `main` correctives taken at its boundaries); G1–G4 green at the tip: test scheme 835 executed, 20 designed skips, 0 failures, zero compiler warnings at `5f3779f`, re-run green at `4c4ede4`; `make check-imports` and `make check-wiring` clean; first paint 2,505 ms median with no persisted snapshot and 2,121 ms with one, warm page cache, over 4,261 transcripts against the 5,000 ms budget; the cold case is unmeasured; three `[parent-impact]` filings reconciled (§11 per-domain logs, the per-write sink corrective `c31bebd`, the `.claude.json` sibling rule `6b3fc23`/`1c19d52`) and X7 amended as filed |
-| C6 Conversation surface and Agents panel | composite spec `2026-09-07-c6-conversation-surface.md` (four leaves, its own tracking map) | cut landed 2026-09-07 after C5's merge (`78303c7`); C6.1 Timeline renderer, C6.2 Composer and header, C6.3 Decision cards and threads dispatchable on the human's approval of the cut; C6.4 Agents panel blocked-by C6.1 and C6.3 |
+| C6 Conversation surface and Agents panel | composite spec `2026-09-07-c6-conversation-surface.md` (four leaves, its own tracking map) | cut landed 2026-09-07 after C5's merge (`78303c7`), approved by the human 2026-09-08; Y1 skeleton on `main` at `5e24f1a`; C6.1 Timeline renderer, C6.2 Composer and header, C6.3 Decision cards and threads **dispatched** 2026-09-08; C6.4 Agents panel blocked-by C6.1 and C6.3 |
 | C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core **dispatchable** — the cut approved by the human 2026-09-07, dispatch follows C6's; C7.4–C7.7 unblocked by C5's merge (`78303c7`) except where noted (C7.4 also by C4's X5, C7.6 by C4's store) |
 
 Each child's spec path is filled in when it is dispatched; a composite's row points at
@@ -4567,3 +4592,18 @@ Pending — written at finish.
   document; conditional edges to C7.2 (Monaco diffs) and C7.4 (item 47's terminal pane) carry
   fallbacks so no C6 leaf waits on a C7 leaf. Live-cost ceiling ten dollars across the unit,
   every replayable item a fixture. Leaves dispatch on the human's approval of the cut.
+- 2026-09-08 corrective on `main` (tracker 77, filed by C5's review): X5 gains `jobUpdates`, the
+  roster stream above; the sidebar's Background list subscribes and no longer re-reads the roster
+  after Adopt or Stop. The first paint still takes one `jobs()` snapshot, because a launch has to
+  start somewhere and the stream owes nothing until something moves.
+- 2026-09-08 engine fact (C6.2's tracker 145, settled by a zero-turn probe committed as
+  `Tools/probe/scenarios/spike_rewind_last_seen.py`, `77a0d62`): `rewind_conversation` honours a
+  target from before the running process when `last_seen_user_message_uuid` names the newest
+  user message; `"stale target"` is what a host gets for omitting the field. §8.5 corrected; item
+  13's fork fallback is the rare path; the `rewind-turn` fixture stays valid as the without-field
+  recording and is re-recorded with the field at C1's next re-pin.
+- 2026-09-08 one wire fold per channel (corrective `01eb7a7`, ruled while C6.1's seam commit and
+  C3's host-signal corrective were both about to fold the wire). X4 and X5 amended as above: C3's
+  `StreamIngestion` owns the channel's single `WireReducer`, publishes the live half on `effects`
+  and exposes `timeline`; `HostSignal` reaches it through `signal(_:)`. C6.1 consumes the fold;
+  its own reducer and second subscription were withdrawn before they landed.

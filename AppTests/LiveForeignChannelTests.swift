@@ -320,6 +320,7 @@ final class RecordingAppFleet: AppFleet {
     func adoptTrace() {}
 
     nonisolated var updates: AsyncStream<ChannelState> { inner.updates }
+    nonisolated var jobUpdates: AsyncStream<[JobEntry]> { inner.jobUpdates }
 
     func state(of key: ChannelKey) async -> ChannelState? { await inner.state(of: key) }
     func states() async -> [ChannelState] { await inner.states() }

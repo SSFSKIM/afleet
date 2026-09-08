@@ -132,10 +132,29 @@ public actor StreamIngestion {
     /// buffered; every other event is handled at once.
     private var buffer: [(frame: TranscriptMirrorFrame, epoch: ProcessEpoch, at: Date)]?
     private var projectionCache: DurableProjection = .empty
+    /// The channel's one wire fold: the overlay and the streaming preview, the half of the timeline no record
+    /// carries, moved by the tap and by the host's own signals. There is no second one anywhere — the app reads
+    /// `overlay` and `preview` off this actor rather than folding the wire again. Its own durable projection is
+    /// never read (§7.3 makes the record reducer primary), so it is built with no seed. Non-nil from `open`, which
+    /// is where the stream and the slug it needs are resolved.
+    private var wire: WireReducer?
+    /// Live-half changes the tap moved while `open` was still buffering. They ride the first effect after the
+    /// alignment: publishing during the buffer window would diff a projection the read has not finished building and
+    /// report the whole file as inserted, which is exactly the render `open`'s return value already gave the app.
+    private var bufferedLiveChanges: [TimelineChange] = []
 
     // MARK: - Queries
 
     public var projection: DurableProjection { projectionCache }
+    /// The live half: everything about the channel that no record carries, folded from the tap and from the host's
+    /// own signals. Read with `projection` and `preview` — or as one value through `timeline`, which is the read
+    /// model X4 names and the only one of the three that cannot straddle a mutation.
+    public var overlay: Overlay { wire?.overlay ?? .empty }
+    public var preview: StreamingPreview? { wire?.preview }
+    /// One consistent read of both halves, for the app that renders them together.
+    public var timeline: ChannelTimeline {
+        ChannelTimeline(durable: projectionCache, overlay: overlay, preview: preview)
+    }
     public var state: State { stateValue }
     public var offsets: [LogicalStream: Int] { streams.mapValues(\.offset) }
     public var paths: [LogicalStream: URL] { streams.mapValues(\.path) }
@@ -153,6 +172,53 @@ public actor StreamIngestion {
     }
     func metadata(of stream: LogicalStream) -> AgentMetadataRecord? { streams[stream]?.metadata }
     var openStreams: Set<LogicalStream> { Set(streams.keys) }
+
+    // MARK: - Host signals
+
+    /// What the host did that no frame states: the prompt it wrote, the decision it answered, the rewind and the
+    /// relocation it asked for, the process it replaced. The engine reports none of them, so the live half can only
+    /// learn them from the host — and until this seam existed nothing constructed a `HostSignal` at all, so no
+    /// decision card could leave `.pending` and no turn was ever attributed to the prompt that caused it (filed by
+    /// C6.3 as a `[parent-impact]` against X4 and X5, 2026-09-08).
+    ///
+    /// The signal goes to the channel's reducer at the actor's own clock, and the live changes it reports are
+    /// published on `effects` like every other mutation's. The live half's alone: the durable half is the record
+    /// reducer's (§7.3), so the wire reducer's own durable projection is discarded here as it is everywhere. A
+    /// signal that changes nothing — an unknown request id, the same answer twice — publishes nothing.
+    @discardableResult
+    public func signal(_ signal: HostSignal) async -> Effect {
+        // The one signal with a second half: the paths this actor holds. `relocated(mainPath:)` is that half, and
+        // this calls it rather than restating it.
+        if case .relocated(let mainPath) = signal { await relocated(mainPath: mainPath) }
+        let before = Set(overlay.items.map(\.id))
+        guard let changes = wire?.apply(signal, at: Date()) else { return Effect() }
+        let published = liveChanges(changes, before: before)
+        guard !published.isEmpty else { return Effect() }
+        return publish(Effect(), adding: published)
+    }
+
+    /// Fold one tap event into the channel's live half and report what moved. A `transcript_mirror` frame is the one
+    /// event the wire reducer ignores by contract — it is the record half's, and this actor applies it itself — so
+    /// folding it would rebuild the whole line for nothing.
+    private func foldLive(_ event: WireEvent) -> [TimelineChange] {
+        if case .frame(.transcriptMirror, _) = event { return [] }
+        let before = Set(overlay.items.map(\.id))
+        guard let changes = wire?.apply(event, at: Date()) else { return [] }
+        return liveChanges(changes, before: before)
+    }
+
+    /// The live half's own changes out of what the wire reducer reported: the items the overlay holds on either side
+    /// of the apply, and the three markers that name no item. Everything else the reducer reported belongs to its
+    /// durable projection, which this actor discards.
+    private func liveChanges(_ changes: [TimelineChange], before: Set<ItemID>) -> [TimelineChange] {
+        let live = before.union(overlay.items.map(\.id))
+        return changes.filter { change in
+            switch change {
+            case .inserted(let id), .updated(let id), .removed(let id): return live.contains(id)
+            case .previewChanged, .overlayChanged, .sessionStateChanged: return true
+            }
+        }
+    }
 
     // MARK: - Open
 
@@ -174,6 +240,8 @@ public actor StreamIngestion {
             preconditionFailure("StreamIngestion.open: the path does not name this session's main transcript")
         }
         mainStream = main
+        // Before the tap starts, so no event reaches the actor ahead of the reducer that folds it.
+        wire = WireReducer(stream: main, slug: slug)
 
         buffer = []
         tap = Task { [weak self] in
@@ -209,6 +277,10 @@ public actor StreamIngestion {
             alignBuffer(buffered)
             buffer = nil
             projectionCache = recompute()
+            if !bufferedLiveChanges.isEmpty {
+                publish(Effect(), adding: bufferedLiveChanges)
+                bufferedLiveChanges = []
+            }
             for (index, item) in buffered.enumerated() {
                 publish(applyMirror(item.frame, epoch: item.epoch, at: item.at, claimed: claimedEntries[index] ?? []))
             }
@@ -449,16 +521,22 @@ public actor StreamIngestion {
                 pendingStateChange = .both
             }
         }
+        // The channel's one wire fold. Every event moves the live half here, and what it moved is published on the
+        // same stream as the record half's changes — riding the effect this actor already publishes for the events it
+        // handles itself, and on an effect of its own for the events it does not. Nothing is published when nothing
+        // moved, which is the rule the record half already follows.
+        let live = foldLive(event)
         switch event {
         case .frame(.transcriptMirror(let frame), let epoch):
             if buffer != nil { buffer?.append((frame, epoch, Date())) }
             else { publish(apply(mirror: frame, epoch: epoch, at: Date())) }
         case .frame(.system(.mirrorError(let error)), let epoch):
-            publish(mirrorError(error, epoch: epoch))
+            publish(mirrorError(error, epoch: epoch), adding: live)
         case .exited(_, let epoch):
-            publish(await processExited(epoch))
+            publish(await processExited(epoch), adding: live)
         default:
-            break
+            if buffer != nil { bufferedLiveChanges += live }
+            else if !live.isEmpty { publish(Effect(), adding: live) }
         }
     }
 
@@ -852,6 +930,9 @@ public actor StreamIngestion {
     /// Rebind the main stream's path and every agent stream's path under the new slug. Offsets, locators and file
     /// identity are unchanged: a locator is a stream plus a range and the stream did not change, and a rename keeps the
     /// inode, so the next `fileChanged` does not take the rewrite arm.
+    ///
+    /// This is the path half of a relocation, and the only implementation of it: `signal(.relocated(mainPath:))` is
+    /// this call plus the agent tree's re-slug, and calls it rather than repeating it.
     public func relocated(mainPath: URL) async {
         guard let main = mainStream,
               let (stream, kind) = TranscriptPath.resolve(mainPath, under: configHome), stream == main,
@@ -935,8 +1016,9 @@ public actor StreamIngestion {
         return RecordReducer.merge(projections, main: main)
     }
 
+    /// `adding` is the live half's own changes — a host signal's, which no durable diff can show.
     @discardableResult
-    private func publish(_ effect: Effect) -> Effect {
+    private func publish(_ effect: Effect, adding overlayChanges: [TimelineChange] = []) -> Effect {
         var effect = effect
         if effect.stateChange == nil, let pending = pendingStateChange {
             effect.stateChange = pending
@@ -944,7 +1026,7 @@ public actor StreamIngestion {
         pendingStateChange = nil
         let previous = projectionCache
         projectionCache = recompute()
-        effect.changes = Self.changes(from: previous, to: projectionCache)
+        effect.changes = Self.changes(from: previous, to: projectionCache) + overlayChanges
         sink.yield(effect)
         return effect
     }
