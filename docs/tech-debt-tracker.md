@@ -1800,8 +1800,8 @@ is renumbered.
 
 ## From C6.3 (`child/c6-decisions`)
 
-Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–166 are
-used and 167–171 are left unspent. Nothing above is renumbered — the gap between 141 and 157 is
+Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–168 are
+used and 169–171 are left unspent. Nothing above is renumbered — the gap between 141 and 157 is
 C6.1's and C6.2's reservations and is expected.
 
 157. **Five deferred mounts wait on one carrier: C6.1's `TimelineRenderContext`.** Read rather than
@@ -1819,13 +1819,17 @@ C6.1's and C6.2's reservations and is expected.
      - `RetractionRegistry.retains(_:)` has **no production caller** and still carries its
        `check-app-wiring.py` allowlist entry naming Task 8, and `TaskCardView` is not mounted on
        C6.1's `taskRun` row — both allowlist entries were to be removed at that mount;
-     - **nothing assigns `DecisionAnswering.raise`**, so D2's loop is complete but not closed: a
-       successful `perform(.answer)` raises `HostSignal.decisionAnswered` where a test hands it the
-       fold, and raises nothing in the running app, because none of the three hosts that construct
-       an answering object (Activity, the Thread tab, the timeline row) owns a
-       `ChannelTimelineModel` — only the channel column does. So a card's state does not yet leave
-       `.pending` on screen. The spec never said who makes that assignment; that omission is the
-       architect's, not a worker's.
+     - **`DecisionAnswering.raise` was assigned nowhere**, so D2's loop was complete but not closed:
+       a successful `perform(.answer)` raised `HostSignal.decisionAnswered` where a test handed it
+       the fold, and raised nothing in the running app, because none of the three hosts that
+       construct an answering object (Activity, the Thread tab, the timeline row) owns a
+       `ChannelTimelineModel` — only the channel column does. So a card's state did not leave
+       `.pending` on screen. The spec never said who makes that assignment; that omission was the
+       architect's, not a worker's. **Activity's clause is closed** (2026-09-09, architect's ruling,
+       second review round): no render context is needed for it, because the app-scoped
+       `ChannelTimelineRegistry` reaches every channel's fold, and `ActivityModel` now takes a
+       `timeline` provider over that one registry which the composition root assigns. The Thread
+       tab's and the timeline row's assignments remain on this entry.
      The mechanism in every case ships and is tested against a double; what is missing is the
      construction site. Found at Tasks 2, 6 and 8a, re-verified by reading at this child's tip.
      Closer: C6.1's merge lands `TimelineRenderContext` and constructs the answering object with the
@@ -1929,6 +1933,29 @@ C6.1's and C6.2's reservations and is expected.
      tree a user sees. Found at Task 2. Closer: fold the deliberate descent into `ViewTree` itself
      so each host does not add its own. Owner: C5, which owns the instrument.
 
+167. **The sent-file row has no production supplier for its channel's working directory.** The row
+     resolves its preview path the way `SendUserFileTool` did — tilde first, absolute as given,
+     anything else against the channel's cwd — and `SentFileRowView.cwd` is the seam that carries it.
+     Nothing in the running app sets it, because a row learns its channel's context from C6.1's
+     `TimelineRenderContext` and that value is not on `main` (entry 157). Capturing the app's panel
+     host in `RowRegistry.shared`'s builder instead was rejected: the registry is process-wide and the
+     suite builds many `AppModel`s (entry 164), so the first one's host would answer for every later
+     one. The consequence is bounded and stated in the row: with no cwd, a **relative** path is not
+     read at all and the row says the file could not be previewed, rather than reading whatever sits
+     at that path relative to the app's own directory. Absolute and `~` paths, which is what the
+     recorded corpus carries, preview as normal. Found in the second review round. Closer: the same
+     carrier as 157 hands the row its channel's cwd. Owner: C6.1, at its merge.
+
+168. **No production host marks a decision card active, so no card binds Return.** `isActive` gates
+     the approve shortcut (Decision Log, 2026-09-09) and every host passes the default, which is
+     `false`: Activity deliberately, because a compact card in a fleet-wide list must not own the
+     keyboard default action, and the timeline and Thread hosts because neither yet knows which of
+     the cards it draws the user is acting on. Answering by mouse is unaffected; a one-key approve is
+     absent until a host tracks focus or selection. Filed rather than answered here because the
+     knowledge is the host's, not the card's. Found in the second review round. Closer: the timeline
+     list marks the focused row's card active (C6.1), and the Thread tab marks the open thread's
+     (C6.3's Thread half). Owner: C6.1 and the Thread host.
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
@@ -2017,3 +2044,14 @@ C6.1's and C6.2's reservations and is expected.
      this is one prompted turn under the scratch home at C1's next re-pin, reading the transcript
      after exit. Owner: C1 (probe), C2 (`terminate()`) if it bites. Filed 2026-09-08 at the Quit
      ruling.
+
+292. **A `replace_all` edit draws the whole file as a diff.** The card shows the change the tool
+     would make, and for `replace_all` the occurrences can be anywhere, so `DiffSource.prepare`
+     hands the renderer the file and the file with every occurrence replaced (Decision Log,
+     2026-09-09). `AttributedDiffRenderer` draws every line it is given, including unchanged ones, so
+     a `replace_all` over a large file draws a large view — the same shape the `Write` arm has had
+     since Task 3 and the reason this is a note rather than a regression. Nothing is wrong on screen;
+     it is a cost, and it is the renderer's to answer, not the source's. Closer: the renderer emits
+     hunks — runs of change with a few lines of context and an elision between them — which also
+     improves every long `Write`. Owner: whoever replaces the drawing, C7.2's Monaco conformer being
+     the likely one. Filed 2026-09-09 at C6.3's second review round.
