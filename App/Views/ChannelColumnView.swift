@@ -70,8 +70,8 @@ private struct ChannelTimelineColumn: View {
                                   detail: "This channel's history is read from its transcript on disk.")
             } else {
                 // Every row is resolved through contract Y1's registry — the slot draws whichever
-                // builder owns the item's kind, and until a C6 leaf claims that kind the registry's
-                // default draws C5's placeholder row.
+                // builder owns the item's kind. C6.1 has claimed eleven of the thirteen; `decision`
+                // and `sentFile` are C6.3's and draw C5's placeholder row until that leaf lands.
                 TimelineListView(model: model)
                     .id(row.key)
             }
