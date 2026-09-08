@@ -25,22 +25,33 @@ struct DecisionCardView: View {
     /// the overlay and not of the item.
     let isStale: Bool
     let answering: DecisionAnswering
+    /// Where a resolved refusal dialog's retracted uuids go (spec D11). A host with no list to
+    /// filter passes none.
+    let retraction: RetractionRegistry?
+    /// The `system/model_consent_fallback` frame that followed an overage answer, where one did.
+    /// **Its absence is equally correct** — the engine emits nothing when provisioning succeeded
+    /// (anchor 5) — so it changes what a settled card *reads* and never whether it settles.
+    let consentFallback: ModelConsentFallback?
 
     init(card: DecisionCard,
          presentation: Presentation,
          in channel: ChannelKey,
          isStale: Bool = false,
-         answering: DecisionAnswering) {
+         answering: DecisionAnswering,
+         retraction: RetractionRegistry? = nil,
+         consentFallback: ModelConsentFallback? = nil) {
         self.card = card
         self.presentation = presentation
         self.channel = channel
         self.isStale = isStale
         self.answering = answering
+        self.retraction = retraction
+        self.consentFallback = consentFallback
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: presentation == .full ? 8 : 4) {
-            if let reading = card.reading(inStaleOverlay: isStale) {
+            if let reading = card.reading(inStaleOverlay: isStale, consentFallback: consentFallback) {
                 Text(reading.text)
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -50,9 +61,8 @@ struct DecisionCardView: View {
         }
     }
 
-    /// A card the engine is still waiting on. Four of the five payloads draw their own card; the
-    /// dialog card is Task 5, and until then its kind renders its summary and offers nothing, which
-    /// is what an unmodelled payload does for good (§6.3).
+    /// A card the engine is still waiting on. Every modelled payload draws its own card; an
+    /// unmodelled one renders its summary and offers nothing, for good (§6.3).
     @ViewBuilder
     private var live: some View {
         switch card.payload {
@@ -71,6 +81,9 @@ struct DecisionCardView: View {
         case .elicitation(let request):
             ElicitationCardView(card: card, request: request, presentation: presentation,
                                 channel: channel, answering: answering)
+        case .dialog(let request):
+            DialogCardView(card: card, request: request, presentation: presentation,
+                           channel: channel, answering: answering, retraction: retraction)
         default:
             Text(card.summaryLine)
                 .font(presentation == .full ? .body : .callout)
@@ -91,18 +104,28 @@ extension DecisionCard {
     /// `.inert` has **two** producers — `.exited` rewriting every pending decision, and an
     /// undeclared dialog kind left to the binary — and `overlay.stale` is what separates them. A
     /// card reading `.inert` alone would tell the user a live session had ended.
-    func reading(inStaleOverlay stale: Bool) -> DecisionReading? {
+    ///
+    /// `consentFallback` is the `system/model_consent_fallback` frame that followed an overage
+    /// answer. Where one arrived it **is** the card's outcome, in the engine's own words; where none
+    /// did, the card reads its own settled state instead. The engine emits nothing when
+    /// provisioning succeeded (anchor 5), so a card that waited for the frame would hang on the
+    /// successful path — which is why this only ever replaces the text of an already-settled card.
+    func reading(inStaleOverlay stale: Bool,
+                 consentFallback: ModelConsentFallback? = nil) -> DecisionReading? {
+        if let consentFallback, dialogKind == .overageConsent, state != .pending {
+            return DecisionReading(text: consentFallback.fields.content)
+        }
         switch state {
         case .pending:
-            nil
+            return nil
         case .answered(let outcome):
-            DecisionReading(text: outcome)
+            return DecisionReading(text: outcome)
         case .cancelled:
-            DecisionReading(text: "Answered elsewhere.")
+            return DecisionReading(text: "Answered elsewhere.")
         case .policyAnswered(let error):
-            DecisionReading(text: error)
+            return DecisionReading(text: error)
         case .inert:
-            stale
+            return stale
                 ? DecisionReading(text: "This session ended.")
                 : DecisionReading(text: "Left to the binary: afleet does not handle this kind.")
         }

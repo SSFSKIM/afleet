@@ -85,9 +85,55 @@ struct DecisionCard: Sendable {
 
     /// `overagesEnabled` on an overage dialog. Absent is false: the engine omits the flag it means
     /// to be false, so nil never means "unknown".
-    var overagesEnabled: Bool {
-        guard case .dialog(let d) = payload, dialogKind == .overageConsent else { return false }
-        return d.fields.payload["overagesEnabled"]?.boolValue ?? false
+    var overagesEnabled: Bool { overageConsent?.overagesEnabled ?? false }
+
+    /// `refusal_fallback_prompt`'s payload (anchor 2, `cli.pretty.js:702406`).
+    ///
+    /// Every field but the two model names is optional, and `apiRefusalCategory` is **nullable**:
+    /// the engine writes an explicit `null` as readily as it omits the key, so a card that read the
+    /// key's *presence* would draw a category that names nothing. Reading the value is what makes
+    /// the two shapes one.
+    struct RefusalFallback: Sendable, Hashable {
+        var originalModel: String?
+        var fallbackModel: String?
+        var apiRefusalCategory: String?
+        var guidanceText: String?
+        /// The already-streamed messages this dialog takes back once it is resolved (spec D11).
+        var retractedMessageUUIDs: [String]
+    }
+
+    var refusalFallback: RefusalFallback? {
+        guard case .dialog(let d) = payload, dialogKind == .refusalFallback else { return nil }
+        let object = d.fields.payload
+        return RefusalFallback(
+            originalModel: object["originalModel"]?.stringValue,
+            fallbackModel: object["fallbackModel"]?.stringValue,
+            apiRefusalCategory: object["apiRefusalCategory"]?.stringValue,
+            guidanceText: object["guidanceText"]?.stringValue,
+            retractedMessageUUIDs: object["retractedMessageUuids"]?.arrayValue?.compactMap(\.stringValue) ?? [])
+    }
+
+    /// `fable_overage_consent_prompt`'s payload (anchor 3, `cli.pretty.js:725659`).
+    ///
+    /// `balanceCents` and `currency` are declared by the schema and **currently unfed**: the sole
+    /// runtime construction sends `{overagesEnabled, modelName}` (`cli.pretty.js:770104`), and the
+    /// one fixture carrying them carries an explicit `null` on its disabled arm. Both are read as
+    /// values, so an absent balance and a null balance are the same nothing — and neither becomes a
+    /// zero a user would read as a real account balance.
+    struct OverageConsent: Sendable, Hashable {
+        var overagesEnabled: Bool
+        var modelName: String?
+        var balanceCents: Int64?
+        var currency: String?
+    }
+
+    var overageConsent: OverageConsent? {
+        guard case .dialog(let d) = payload, dialogKind == .overageConsent else { return nil }
+        let object = d.fields.payload
+        return OverageConsent(overagesEnabled: object["overagesEnabled"]?.boolValue ?? false,
+                              modelName: object["modelName"]?.stringValue,
+                              balanceCents: object["balanceCents"]?.intValue,
+                              currency: object["currency"]?.stringValue)
     }
 
     /// Whether *Always allow* exists at all, and over which destinations it may be filed.
