@@ -23,7 +23,14 @@ targets:
   Afleet:
     type: application
     platform: macOS
-    sources: [App]
+    # Excluding the ownership READMEs is the one thing the directory declaration cannot do on
+    # its own: XcodeGen treats a non-source file under `App/` as a bundle resource, and the seven
+    # leaf-ownership `README.md` files of contract Y1 would all copy to `Resources/README.md`,
+    # which is a hard "multiple commands produce" build failure. Adding a Swift file under `App/`
+    # still needs no edit here.
+    sources:
+      - path: App
+        excludes: ["**/README.md"]
     info:
       path: App/Info.plist
       properties:

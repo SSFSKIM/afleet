@@ -51,6 +51,16 @@ TESTS = ROOT / "AppTests"
 ALLOWLIST: dict[str, str] = {
     # Seams whose caller is a later child.
     "registerPaneRunner": "X7's seam for C7's Terminal leaf, which is the caller and has not landed",
+    # Contract Y1 and Y4's skeleton: the two members a C6 leaf fills, landed ahead of the leaves
+    # so four worktrees build one target (`docs/doperpowers/specs/2026-09-07-c6-conversation-surface.md`).
+    "register": "filled by C6.1 and C6.3 — RowRegistry.register(kind:builder:) is the row slot each "
+                "leaf claims its kinds through, and no production code registers until one does. The "
+                "check keys on a bare name and `register` is declared elsewhere under App/ too, so it "
+                "would not be flagged today; the entry records the intent, not an exemption in force",
+    "show": "filled by C6.4 — AgentNavigating.show(run:in:) is contract Y4's seam, called by C6.1's "
+            "agent chip once that leaf lands",
+    "agentNavigation": "filled by C6.4 — the composition root installs Y4's no-op so C6.1's chip has "
+                       "something to call; the call site arrives with C6.1",
     # Probes that exist for the suite and say so where they are declared.
     "pump": "a test-only probe on ActivityModel, named as one where it is declared",
     "settle": "a test-only probe on NotificationRouter, named as one where it is declared",

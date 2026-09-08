@@ -56,7 +56,10 @@ private struct ChannelTimelineColumn: View {
                 PlaceholderColumn(title: model.hasOpened ? "Nothing in this transcript yet" : "Opening…",
                                   detail: "This channel's history is read from its transcript on disk.")
             } else {
-                List(model.rows) { TimelineRowView(row: $0) }
+                // Every row is resolved through contract Y1's registry — the slot draws whichever
+                // builder owns the item's kind, and until a C6 leaf claims that kind the registry's
+                // default draws C5's placeholder row.
+                List(model.rows) { TimelineRowSlot(row: $0) }
                     .listStyle(.inset)
             }
         }
@@ -139,34 +142,4 @@ private struct ChannelHeaderView: View {
         case .forkIdentityTimedOut: "A fork never announced its session id and was ended."
         }
     }
-}
-
-/// One line: category, timestamp, one-line summary.
-private struct TimelineRowView: View {
-
-    let row: TimelineRow
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(row.category.rawValue)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 120, alignment: .leading)
-            Text(row.timestamp.map { Self.stamp.string(from: $0) } ?? "—")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 72, alignment: .leading)
-            Text(row.summary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 2)
-    }
-
-    private static let stamp: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter
-    }()
 }

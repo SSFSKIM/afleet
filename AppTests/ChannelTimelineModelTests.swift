@@ -107,8 +107,9 @@ final class ChannelTimelineModelTests: XCTestCase {
         // What `rendered` reaches, exactly: `ChannelTimelineModel.rows`, the row builder the column
         // draws — not the column. `TimelineRow.init` copies `item.category`, so the two sets are
         // equal by construction unless the builder drops a kind, which is the regression this
-        // discriminates. A filter added inside `ChannelTimelineColumn` or `TimelineRowView` would
-        // not be seen here; today the view is an unfiltered `List(model.rows)`.
+        // discriminates. A filter added inside `ChannelTimelineColumn` or a row builder registered
+        // with `RowRegistry` would not be seen here; today the view is an unfiltered
+        // `List(model.rows)` whose every row resolves through that registry.
     }
 
     // MARK: - C3's tap contract
