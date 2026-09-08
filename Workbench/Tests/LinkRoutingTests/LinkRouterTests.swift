@@ -328,6 +328,9 @@ final class LinkRouterTests: XCTestCase {
     /// replacement and hand the link either to an unrelated registration or to the fallback, and
     /// no assertion about the withdrawn target could see it. The two `.files` registrations carry
     /// different labels, so the recorded event names which one received the link.
+    ///
+    /// The successor is prepared for again before it is delivered to, because the teardown that
+    /// made it the live target may have taken the first preparation's window with it (test 12).
     @MainActor
     func testAReplacementRegisteredDuringPrepareReceivesTheLink() async {
         let recorder = Recorder()
@@ -345,19 +348,21 @@ final class LinkRouterTests: XCTestCase {
                                                   label: "successor"))
         }
 
-        XCTAssertEqual(recorder.events, ["prepare:files", "open:successor:newWindow"],
+        XCTAssertEqual(recorder.events,
+                       ["prepare:files", "prepare:files", "open:successor:newWindow"],
                        "the recorded order was \(recorder.events)")
         XCTAssertEqual(sink.messages, [], "a link that reached a target also produced a diagnostic")
     }
 
-    /// The bound on re-resolution, and what makes it a bound rather than a hope.
+    /// The bound on re-resolution and on preparation, and what makes both bounds rather than hopes.
     ///
     /// This `prepare` hands the tab over on **every** attempt, so a router that re-resolved against
-    /// the live registry and prepared each time would never leave `open`. It leaves after one
-    /// preparation and one outcome: the replacement for the tab already prepared for delivers into
-    /// the window that preparation opened, and nothing is prepared twice.
+    /// the live registry and prepared each time would never leave `open`, and one that prepared
+    /// once per stale preparation would present a window per attempt. It leaves after two
+    /// preparations and one outcome: the second preparation is the last the bound allows, and the
+    /// replacement resolved after it delivers into the window that preparation opened.
     @MainActor
-    func testAHandoverRepeatedOnEveryAttemptStillFinishesWithOnePreparation() async {
+    func testAHandoverRepeatedOnEveryAttemptStillFinishesWithBoundedPreparations() async {
         let recorder = Recorder()
         let sink = Sink()
         let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
@@ -370,9 +375,152 @@ final class LinkRouterTests: XCTestCase {
         }
 
         XCTAssertEqual(recorder.tabs, [.files], "a target delivered \(recorder.tabs.count) times, not once")
-        XCTAssertEqual(recorder.events, ["prepare:files", "open:files:newWindow"],
+        XCTAssertEqual(recorder.events, ["prepare:files", "prepare:files", "open:files:newWindow"],
                        "the recorded order was \(recorder.events)")
         XCTAssertEqual(sink.messages, [], "a link that reached a target also produced a diagnostic")
+    }
+
+    // MARK: - 11. The tab's withdrawal epoch
+
+    /// Two withdrawals of one tab **join one drain**. The second returns when the first's does,
+    /// and not before.
+    ///
+    /// A withdrawal that remembered only the tokens *it* took away finds nothing to wait for when
+    /// it arrives second — the first has already emptied the registry for that tab — and returns
+    /// while the delivery the first is still waiting on is running. The host awaits this and
+    /// releases the tab's sessions the moment it returns, so the second withdrawal would hand a
+    /// running handler a torn-down tab, which is the barrier test 9 exists for, evaded by
+    /// overlapping. The gate holds one delivery open and the assertion is an ordering.
+    @MainActor
+    func testOverlappingWithdrawalsOfOneTabJoinTheSameDrain() async {
+        let recorder = Recorder()
+        let gate = Gate()
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        await router.register(LinkTarget(tab: .files, specificity: 1,
+                                         handles: { _ in true },
+                                         open: { _, _ in
+                                             recorder.note("handler-start")
+                                             await gate.arrive()
+                                             recorder.note("handler-end")
+                                         }))
+
+        let routing = Task { await router.open(Fixtures.file, from: .currentPanel) }
+        await gate.waitForArrival()
+        let first = Task { _ = await router.unregister(tab: .files); recorder.note("first") }
+        let second = Task { _ = await router.unregister(tab: .files); recorder.note("second") }
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(recorder.events, ["handler-start"],
+                       "a withdrawal returned while a delivery for its tab was in flight: \(recorder.events)")
+
+        gate.open()
+        _ = await first.value
+        _ = await second.value
+        await routing.value
+        XCTAssertEqual(Array(recorder.events.prefix(2)), ["handler-start", "handler-end"],
+                       "the recorded order was \(recorder.events)")
+        XCTAssertEqual(Set(recorder.events.suffix(2)), ["first", "second"],
+                       "the recorded order was \(recorder.events)")
+    }
+
+    /// A registration made **during** a drain belongs to the new epoch: it survives the withdrawal
+    /// that is draining, receives the next link, and makes that withdrawal `superseded`.
+    ///
+    /// `superseded` is the whole verdict a host acts on. The host releases the tab's sessions and
+    /// its pane runner after this returns, and by then they belong to the registration that landed
+    /// during the drain — X7's handover — so a withdrawal that reported `complete` here would have
+    /// the host delete the successor's state.
+    @MainActor
+    func testARegistrationDuringTheDrainSurvivesAndSupersedesTheWithdrawal() async {
+        let recorder = Recorder()
+        let gate = Gate()
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        await router.register(LinkTarget(tab: .files, specificity: 10,
+                                         handles: { _ in true },
+                                         open: { _, _ in await gate.arrive() }))
+
+        let routing = Task { await router.open(Fixtures.file, from: .currentPanel) }
+        await gate.waitForArrival()
+        let withdrawal = Task { await router.unregister(tab: .files) }
+        for _ in 0..<50 { await Task.yield() }
+        await router.register(Fixtures.target(.files, specificity: 10, into: recorder,
+                                              label: "successor"))
+        gate.open()
+        let outcome = await withdrawal.value
+        await routing.value
+
+        XCTAssertEqual(outcome, .superseded,
+                       "the withdrawal reported \(outcome) though a registration landed during its drain")
+        let remaining = await router.targetCount
+        XCTAssertEqual(remaining, 1,
+                       "the registry holds \(remaining) targets after a registration during the drain")
+        await router.open(Fixtures.file, from: .currentPanel)
+        XCTAssertEqual(recorder.events, ["open:successor:currentPanel"],
+                       "the recorded order was \(recorder.events)")
+    }
+
+    /// A withdrawal nothing overtook is `complete`, which is what lets the host release at all. The
+    /// companion to the two above: a router that answered `superseded` always would pass them both
+    /// and stop every teardown in the app from releasing anything.
+    @MainActor
+    func testAWithdrawalNothingOvertookIsComplete() async {
+        let recorder = Recorder()
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        await router.register(Fixtures.target(.files, specificity: 10, into: recorder))
+
+        let outcome = await router.unregister(tab: .files)
+
+        XCTAssertEqual(outcome, .complete, "an uncontested withdrawal reported \(outcome)")
+    }
+
+    // MARK: - 12. A preparation whose tab was torn down under it
+
+    /// A preparation stops counting once its tab is torn down under it, and the replacement
+    /// registered in the new epoch is **prepared for again** before it is delivered to.
+    ///
+    /// The teardown that made the replacement the live target is also what removes the pop-out the
+    /// first preparation opened, so a router that took the "already prepared" path here would
+    /// deliver `.newWindow` into a window that is no longer on screen. The host's pop-out is
+    /// idempotent per (tab, channel), so the second preparation brings the window back rather than
+    /// opening a second one. The handover runs once, so the count below is the router's and not
+    /// the `prepare` closure's.
+    @MainActor
+    func testAReplacementInANewEpochIsPreparedForAgain() async {
+        let recorder = Recorder()
+        let sink = Sink()
+        let handover = Once()
+        let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
+        await router.register(Fixtures.target(.files, specificity: 10, into: recorder,
+                                              label: "placeholder"))
+
+        await router.open(Fixtures.file, from: .newWindow) { target, _ in
+            recorder.note("prepare:\(target.tab.rawValue)")
+            guard target.tab == .files, handover.firstTime() else { return }
+            await router.unregister(tab: .files)
+            await router.register(Fixtures.target(.files, specificity: 10, into: recorder,
+                                                  label: "successor"))
+        }
+
+        XCTAssertEqual(recorder.events,
+                       ["prepare:files", "prepare:files", "open:successor:newWindow"],
+                       "the recorded order was \(recorder.events)")
+        XCTAssertEqual(sink.messages, [], "a link that reached a target also produced a diagnostic")
+    }
+
+    /// The companion: a preparation nothing tore down is prepared for **once**. A router that
+    /// re-prepared on every attempt would pass the test above and present a second window for the
+    /// ordinary `.newWindow` open.
+    @MainActor
+    func testALivePreparationIsNotRepeated() async {
+        let recorder = Recorder()
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        await router.register(Fixtures.target(.files, specificity: 10, into: recorder))
+
+        await router.open(Fixtures.file, from: .newWindow) { target, _ in
+            recorder.note("prepare:\(target.tab.rawValue)")
+        }
+
+        XCTAssertEqual(recorder.events, ["prepare:files", "open:files:newWindow"],
+                       "the recorded order was \(recorder.events)")
     }
 }
 
@@ -413,6 +561,17 @@ final class Gate {
     }
 }
 
+
+/// A one-shot latch, so a `prepare` that is called more than once acts only the first time and the
+/// count under test is the router's rather than the closure's.
+@MainActor
+final class Once {
+    private var used = false
+    func firstTime() -> Bool {
+        defer { used = true }
+        return !used
+    }
+}
 
 /// What the handlers and the `prepare` hook write to. One object, so ordering is assertable.
 @MainActor

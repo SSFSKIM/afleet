@@ -595,6 +595,10 @@ final class PanelHostTests: XCTestCase {
         let host = PanelHostModel()
         try host.register(StubPanelTab(.files))
         let channel = PanelFixtures.key(0)
+        // The channel the main window has rendered. A pop-out is refused for one the host cannot
+        // resolve, because the window it would present draws the missing-channel placeholder;
+        // `context(for:cwd:)` records the working directory even on a host with no workspace.
+        _ = host.context(for: channel, cwd: PanelFixtures.cwd)
         host.focusChannel(channel)
         let recorder = LinkRecorder()
         host.presentWindow = { _ in recorder.note("window") }
@@ -664,6 +668,7 @@ final class PanelHostTests: XCTestCase {
         try host.register(StubPanelTab(.files))
         let origin = PanelFixtures.key(0)
         let elsewhere = PanelFixtures.key(1)
+        _ = host.context(for: origin, cwd: PanelFixtures.cwd)
         host.focusChannel(origin)
         let recorder = LinkRecorder()
         host.presentWindow = { _ in recorder.note("window") }
@@ -689,11 +694,20 @@ final class PanelHostTests: XCTestCase {
     /// The handler here reports the tab's own title, which the host answers from the registration
     /// and falls back to the id's default for once the tab is gone, so a release that landed under
     /// the handler is visible rather than inferred.
+    ///
+    /// **And it releases nothing that a successor owns by the time the drain is over.** The
+    /// registration that lands here while the withdrawal is draining is X7's handover: the
+    /// registry keeps it, because it belongs to the epoch the withdrawal opened rather than to the
+    /// one it withdrew, and the host must keep the tab and the sessions the successor now routes
+    /// into. A teardown that released them on the way out would leave a live target delivering
+    /// into a tab the host no longer holds.
     func testUnregisterWithdrawsTheLinkTargetBeforeReleasingTheTabsState() async throws {
         let host = PanelHostModel()
         let title = "Invented Files Title"
-        try host.register(StubPanelTab(.files, title: title))
+        let counter = SessionCounter()
+        try host.register(StubPanelTab(.files, title: title, counter: counter))
         host.focusChannel(PanelFixtures.key(0))
+        _ = host.session(for: .files, context: PanelFixtures.context())
         let recorder = LinkRecorder()
         let gate = HandlerGate()
         await host.links.register(LinkTarget(tab: .files, specificity: 5,
@@ -711,12 +725,114 @@ final class PanelHostTests: XCTestCase {
             recorder.note("unregistered")
         }
         for _ in 0..<50 { await Task.yield() }
+        // The handover, driven while the withdrawal is still draining.
+        await host.links.register(PanelFixtures.fileTarget(.files, specificity: 5, into: recorder,
+                                                           note: "successor"))
         gate.open()
         await withdrawal.value
         await routing.value
 
         XCTAssertEqual(recorder.notes, ["start:\(title)", "end:\(title)", "unregistered"],
                        "the recorded order was \(recorder.notes)")
+        XCTAssertEqual(host.title(for: .files), title,
+                       "the teardown released a tab a successor had already registered for")
+        XCTAssertEqual(counter.released, 0,
+                       "the teardown released \(counter.released) sessions the successor owns")
+        XCTAssertEqual(host.liveSessionCount, 1,
+                       "the host holds \(host.liveSessionCount) sessions after a superseded teardown, not 1")
+
+        // And the successor is the live target: the link reaches it, in the tab the host still holds.
+        await host.links.open(PanelFixtures.fileLink, from: .currentPanel)
+        XCTAssertEqual(recorder.notes.last, "successor",
+                       "the recorded order was \(recorder.notes)")
+    }
+
+    /// A `.currentPanel` link is routed with **no preparation at all**, so a withdrawal has no
+    /// suspension to land in.
+    ///
+    /// There is nothing to pop out for `.currentPanel`, but a `prepare` that returns immediately is
+    /// not the same as no `prepare`: it is what makes the router suspend between resolving a target
+    /// and delivering to it. A withdrawal arriving in that suspension — the host's own teardown
+    /// path — then invalidates the resolution, and because a preparation was already counted for
+    /// the withdrawn tab the router refuses the unrelated target that survived and falls back,
+    /// though nothing irreversible ever happened. With no hook the resolution and the delivery are
+    /// one step on the router's executor: the withdrawal queued behind this open waits for the
+    /// delivery it finds in flight instead of pre-empting it.
+    func testACurrentPanelLinkIsNotHeldOpenByAPreparation() async throws {
+        let recorder = LinkRecorder()
+        let messages = URLBox()
+
+        // The interleaving is driven twenty times, because a router that *does* hop through a
+        // no-op preparation only loses the target when the withdrawal wins that hop: one round is
+        // a coin toss and twenty is a witness. With no preparation every round is the same round —
+        // resolving and committing the delivery are one step on the router's executor, so the
+        // withdrawal that follows waits for the delivery it finds in flight.
+        for round in 0..<20 {
+            let resolved = URLBox()
+            let router = HostLinkRouter(diagnostic: { message in messages.set(messages.value + [message]) })
+            await router.register(LinkTarget(tab: .files, specificity: 10,
+                                             handles: { link in
+                                                 guard case .file = link else { return false }
+                                                 resolved.set(["resolved"])
+                                                 return true
+                                             },
+                                             open: { _, _ in recorder.note("files") }))
+            await router.register(PanelFixtures.fileTarget(.terminal, specificity: 1, into: recorder,
+                                                           note: "terminal"))
+
+            // The withdrawal is driven once the registry has *resolved*, which the target reports
+            // from its own `handles`: an ordering rather than a timing.
+            let routing = Task { await router.open(PanelFixtures.fileLink, from: .currentPanel) }
+            for _ in 0..<1000 where resolved.value.isEmpty { await Task.yield() }
+            await router.unregister(tab: .files)
+            await routing.value
+
+            XCTAssertEqual(recorder.notes.count, round + 1,
+                           "round \(round) delivered \(recorder.notes.count - round) links, not 1")
+        }
+
+        XCTAssertEqual(Set(recorder.notes), ["files"],
+                       "a resolved target lost its link to another target or to the fallback")
+        XCTAssertEqual(messages.value.count, 0,
+                       "the twenty rounds produced \(messages.value.count) diagnostics")
+    }
+
+    /// A pop-out is refused for a channel the host can no longer resolve.
+    ///
+    /// The channel is captured at entry, because it is a property of the action — but the window is
+    /// presented in the present, and `releaseChannel(_:)` and `attach(to:…)` erase the very context
+    /// a popped-out scene resolves through. A preparation that re-added the entry blindly would put
+    /// a window on screen showing the missing-channel placeholder, which is what a link in flight
+    /// across an index delta produces.
+    func testAPopOutIsRefusedForAChannelTheHostCanNoLongerResolve() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let host = rig.host
+        try host.register(StubPanelTab(.files))
+        let key = rig.keys[0]
+        _ = host.context(for: key, cwd: PanelFixtures.cwd)
+        host.focusChannel(key)
+        let recorder = LinkRecorder()
+        let messages = URLBox()
+        let router = HostLinkRouter(diagnostic: { message in messages.set(messages.value + [message]) })
+        router.host = host
+        host.presentWindow = { _ in recorder.note("window") }
+        await router.register(PanelFixtures.fileTarget(.files, specificity: 5, into: recorder,
+                                                       note: "delivered"))
+
+        // The channel leaves the index while the link is in flight: its context and its pop-outs
+        // are erased, and the main window is pointed back at it before the preparation runs. The
+        // sequence is straight-line rather than raced, because what the pop-out has to check is a
+        // state and not an ordering — the timing above is only how the state is reached.
+        host.releaseChannel(key)
+        host.focusChannel(key)
+
+        await router.open(PanelFixtures.fileLink, from: .newWindow)
+
+        XCTAssertEqual(host.poppedOut.count, 0,
+                       "the host recorded \(host.poppedOut.count) pop-outs for a channel it had released")
+        XCTAssertEqual(recorder.notes, ["delivered"], "the recorded order was \(recorder.notes)")
+        XCTAssertEqual(messages.value.count, 1,
+                       "the refused pop-out produced \(messages.value.count) diagnostics, not 1")
     }
 
     // MARK: - G4d: the pane seam
