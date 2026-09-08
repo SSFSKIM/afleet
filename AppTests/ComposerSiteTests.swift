@@ -97,6 +97,58 @@ final class ComposerSiteTests: XCTestCase {
         XCTAssertGreaterThan(elsewhere.count, 0, "the other message's row drew \(elsewhere.count) string(s)")
     }
 
+    // MARK: - Site 3, the substitution
+
+    /// An assistant row whose frame uuid is a key in `interceptedReplacements` renders the
+    /// replacement **in place of** the frame's own text.
+    ///
+    /// **The negative clause is the test.** Annotation — the replacement drawn *beside* the original
+    /// — passes the positive clause on its own, and annotation is the defect: root spec §7.7 has
+    /// afleet replace the engine's drift refusal, and leaving the original on screen leaves the
+    /// sentence telling the user to go to the terminal, which §7.7 forbids in as many words.
+    func testAnInterceptedFrameIsReplacedNotAnnotated() {
+        let composer = RecordingComposerSite()
+        let original = "an invented refusal sentence sending the reader somewhere else"
+        let replacement = "an invented replacement afleet wrote instead"
+        let item = Self.assistant(recordUUIDs: ["f-invented-0001", "f-invented-0002"], text: original)
+        composer.interceptedReplacements = ["f-invented-0002": replacement]
+        let context = InventedItems.context(composer: composer)
+
+        let content = AssistantMessageBody(item: item, context: context).content
+        let strings = ViewTree.values(of: String.self, in: content)
+        XCTAssertTrue(strings.contains(replacement), "the intercepted row drew no replacement")
+        XCTAssertFalse(strings.contains(original),
+                       "the intercepted row still carries the frame's own text, which is annotation")
+
+        // The one body, and its source: a row drawing two markdown bodies is annotation whatever the
+        // strings say.
+        let sources = ViewTree.values(of: MarkdownBody.self, in: content).map(\.source)
+        XCTAssertEqual(sources.count, 1, "the intercepted row drew \(sources.count) markdown body/bodies, not 1")
+        XCTAssertEqual(sources.first, replacement, "the intercepted row's one body is not the replacement")
+
+        // The floor, and the arm that proves the walk sees the frame's own text when nothing was
+        // intercepted: without it the negative clause above would pass against a row that drew
+        // nothing at all.
+        composer.interceptedReplacements = [:]
+        let plain = ViewTree.values(of: String.self, in: AssistantMessageBody(item: item, context: context).content)
+        XCTAssertTrue(plain.contains(original), "an un-intercepted row drew \(plain.count) string(s) and not its own text")
+        XCTAssertFalse(plain.contains(replacement), "an un-intercepted row drew a replacement it was never given")
+    }
+
+    /// The key the replacement is looked up under is the **frame's** uuid, which for a merged
+    /// assistant item is any of its records — `ComposerModel` keys by `AssistantFrame.fields.uuid`
+    /// while `ItemBuilder` keys the item by the first record and keeps the rest in `recordUUIDs`. A
+    /// lookup on the item's key alone misses every interception on a second record.
+    func testTheReplacementIsFoundByAnyOfTheFramesRecords() {
+        let item = Self.assistant(recordUUIDs: ["f-invented-0003", "f-invented-0004"], text: "an invented refusal")
+        XCTAssertEqual(ComposerSites.frameUUIDs(of: item).count, 2,
+                       "a two-record item offered \(ComposerSites.frameUUIDs(of: item).count) candidate uuid(s)")
+
+        let bare = Self.assistant(recordUUIDs: [], text: "an invented refusal")
+        XCTAssertEqual(ComposerSites.frameUUIDs(of: bare), [bare.id.key],
+                       "an item with no record list offered \(ComposerSites.frameUUIDs(of: bare).count) candidate uuid(s)")
+    }
+
     // MARK: - Invented items
 
     static func message(promptUUID: String, text: String, key: String = "u-invented-key") -> UserMessageItem {
@@ -106,6 +158,16 @@ final class ComposerSiteTests: XCTestCase {
                         blocks: [InventedItems.text(text)],
                         text: text,
                         promptUUID: promptUUID)
+    }
+
+    static func assistant(recordUUIDs: [String], text: String) -> AssistantMessageItem {
+        AssistantMessageItem(id: InventedItems.id("a-invented-key"),
+                             timestamp: InventedItems.epoch,
+                             provenance: InventedItems.provenance,
+                             messageID: "msg_invented0000",
+                             model: "invented-model",
+                             blocks: [InventedItems.text(text)],
+                             recordUUIDs: recordUUIDs)
     }
 
     /// Runs the main actor until `condition` holds, or gives up. The answer is returned rather than

@@ -142,20 +142,38 @@ struct AssistantMessageRow: View {
     @Environment(\.timelineContext) private var context
 
     var body: some View {
-        RowFrame(author: "Claude", badge: item.model, timestamp: item.timestamp) {
-            if let context, let summary = ThinkingDisclosure.summary(of: item, in: context) {
-                ThinkingDisclosure(id: item.id, summary: summary)
-            }
-            let text = MessageText.text(of: item.blocks, fallback: "")
-            if !text.isEmpty {
-                MarkdownBody(key: item.id.key, source: text)
-                    .opacity(item.supersededBy == nil ? 1 : 0.5)
-            }
-            if item.supersededBy != nil {
-                Text("Superseded")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+        AssistantMessageBody(item: item, context: context)
+    }
+}
+
+/// The assistant row's content, with the context handed in — `UserMessageBody`'s reason, and one
+/// more: contract Y6's third site is a **substitution**, and the assertion that matters is that the
+/// frame's own text appears nowhere in the row, which is a walk of this value.
+struct AssistantMessageBody: View {
+
+    let item: AssistantMessageItem
+    let context: TimelineRenderContext?
+
+    var body: some View {
+        RowFrame(author: "Claude", badge: item.model, timestamp: item.timestamp) { content }
+    }
+
+    @ViewBuilder @MainActor var content: some View {
+        if let context, let summary = ThinkingDisclosure.summary(of: item, in: context) {
+            ThinkingDisclosure(id: item.id, summary: summary)
+        }
+        // **Y6 site 3.** One string, and by construction there is no shape of this row that draws
+        // both: §7.7 has afleet *replace* the engine's drift refusal, and a replacement drawn beside
+        // the original leaves the refusal on screen telling the user to go to the terminal.
+        let text = ComposerSites.text(of: item, in: context)
+        if !text.isEmpty {
+            MarkdownBody(key: item.id.key, source: text)
+                .opacity(item.supersededBy == nil ? 1 : 0.5)
+        }
+        if item.supersededBy != nil {
+            Text("Superseded")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 }

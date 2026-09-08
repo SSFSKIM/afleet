@@ -74,4 +74,31 @@ enum ComposerSites {
         guard let context, context.editing.editedKey == item.id.key else { return nil }
         return context.composer?.editNote
     }
+
+    /// The text an assistant row draws: **the replacement in place of the frame's own text** when
+    /// this channel's interceptor caught it, and the frame's own text otherwise.
+    ///
+    /// **A substitution and not an annotation, and that is the whole point.** Root spec §7.7 has
+    /// afleet intercept the engine's `/<name> isn't available in this environment.` refusal and
+    /// *replace* it; drawing the replacement beside the original leaves the refusal on screen
+    /// telling the user to go to the terminal, which §7.7 forbids in as many words. So this returns
+    /// one string and there is no shape of this function that can return both.
+    static func text(of item: AssistantMessageItem, in context: TimelineRenderContext?) -> String {
+        let own = MessageText.text(of: item.blocks, fallback: "")
+        guard let replacements = context?.composer?.interceptedReplacements, !replacements.isEmpty else { return own }
+        for uuid in frameUUIDs(of: item) where replacements[uuid] != nil {
+            return replacements[uuid] ?? own
+        }
+        return own
+    }
+
+    /// The uuids the interceptor could have keyed a replacement under.
+    ///
+    /// `ComposerModel` keys by `AssistantFrame.fields.uuid` — one **record** — while `ItemBuilder`
+    /// merges an assistant message's records into one item keyed by the first of them and keeps them
+    /// all in `recordUUIDs`. So every record of the item is a candidate, and the item's own key is
+    /// the answer only for an item that carries no record list at all.
+    static func frameUUIDs(of item: AssistantMessageItem) -> [String] {
+        item.recordUUIDs.isEmpty ? [item.id.key] : item.recordUUIDs
+    }
 }
