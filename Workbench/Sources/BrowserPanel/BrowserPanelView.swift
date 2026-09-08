@@ -145,7 +145,10 @@ struct BrowserURLBar: View {
 
     @Bindable var model: BrowserModel
     @Bindable var session: BrowserTabSession
-    @State private var typed = ""
+    /// The field's own state, and never a mirror of the page: see `BrowserAddressField` for the two
+    /// rules it holds and why neither of them can live in an `onChange`.
+    @State private var field = BrowserAddressField()
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -164,10 +167,16 @@ struct BrowserURLBar: View {
                 .disabled(model.selected?.web == nil)
                 .help(model.chrome?.isLoading == true ? "Stop" : "Reload")
 
-                TextField("Address", text: $typed)
+                TextField("Address", text: Binding(get: { field.text },
+                                                   set: { field.edited(to: $0) }))
                     .textFieldStyle(.roundedBorder)
                     .font(.caption)
-                    .onSubmit { model.submitURLBar(typed) }
+                    .focused($isFocused)
+                    .onSubmit {
+                        let typed = field.text
+                        field.submitted()
+                        model.submitURLBar(typed)
+                    }
 
                 Button { session.openQuickOpen() } label: { Image(systemName: "clock.arrow.circlepath") }
                     .help("Recent URLs from this session")
@@ -229,13 +238,14 @@ struct BrowserURLBar: View {
                 .padding(.bottom, 4)
             }
         }
-        // The field follows the page except while the user is editing it, which is what
-        // `onChange` of the *model's* URL gives and a two-way binding would not.
-        .onChange(of: model.chrome?.url) { _, new in
-            if let new { typed = new.absoluteString }
-        }
-        .onChange(of: model.selectedID) { _, _ in
-            typed = model.selected?.url?.absoluteString ?? ""
+        // The field follows the page except while the user is composing an address, and it is
+        // seeded when it appears: this state is rebuilt on every channel switch, and a page that is
+        // already settled fires neither `onChange` (B5).
+        .onAppear { field.appeared(showing: model.chrome?.url ?? model.selected?.url) }
+        .onChange(of: model.chrome?.url) { _, new in field.pageChanged(to: new) }
+        .onChange(of: model.selectedID) { _, _ in field.tabChanged(to: model.selected?.url) }
+        .onChange(of: isFocused) { _, focused in
+            if !focused { field.focusEnded() }
         }
     }
 }
