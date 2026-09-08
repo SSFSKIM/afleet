@@ -44,6 +44,18 @@ final class ComposerRegistry {
     /// layering: the registry depends on the *question*, not on X7's concrete host.
     var contextProvider: (@MainActor (ChannelKey, URL) -> ChannelContext?)?
 
+    /// How the composer reaches the channel's `ChannelTimelineModel` — C6.1's, read only.
+    ///
+    /// The queue chip reads `Overlay.queue.queued` out of the timeline that model publishes, which
+    /// is the channel's one fold (contract X4). A closure rather than the `ChannelTimelineRegistry`
+    /// itself, for the same reason `contextProvider` is one: `ComposerMountTests` walks this view's
+    /// body with `Mirror`, and a stored registry would put every open channel's ingestion on that
+    /// walk. `Mirror` does not descend into a closure's captures.
+    ///
+    /// Nil leaves the chip empty rather than wrong — a composer with no timeline has nothing to
+    /// read, and there is no second place to read a queue from.
+    var timelineProvider: (@MainActor (ChannelKey) -> ChannelTimelineModel?)?
+
     /// Where each composer's `RefusalInterceptor` records a replaced drift refusal: FleetKit's own
     /// `fleet.log`, which is where C5's diagnostics already carry the drift count. Null until a launch
     /// reaches a workspace, so a composer built before one still counts and writes nowhere.
@@ -60,11 +72,13 @@ final class ComposerRegistry {
     /// fleet would send into a workspace nothing else refers to. Task 2 shipped this registry as a
     /// static with no rebind, which had exactly that defect; its worker flagged it.
     func attach(to workspace: Workspace, context: (@MainActor (ChannelKey, URL) -> ChannelContext?)? = nil,
+                timeline: (@MainActor (ChannelKey) -> ChannelTimelineModel?)? = nil,
                 lifecycle: (any LifecycleAPI)? = nil) {
         releaseAll()
         self.lifecycle = lifecycle ?? workspace.fleet
         self.diagnostics = workspace.diagnostics.fleet
         self.contextProvider = context
+        self.timelineProvider = timeline
     }
 
     /// This channel's composer, built on first ask and retained afterwards.
@@ -86,6 +100,7 @@ final class ComposerRegistry {
             // A row that gained a cwd after its composer was built — an archived channel since
             // registered — gets its context now rather than never.
             if existing.context == nil, let cwd { existing.context = contextProvider?(key, cwd) }
+            followTimeline(existing)
             return existing
         }
         guard let lifecycle else { return nil }
@@ -93,8 +108,20 @@ final class ComposerRegistry {
         surfaces[key] = surface
         let model = ComposerModel(key: key, lifecycle: lifecycle, surface: surface, diagnostics: diagnostics)
         if let cwd { model.context = contextProvider?(key, cwd) }
+        followTimeline(model)
         models[key] = model
         return model
+    }
+
+    /// Points the composer's queue chip at the channel's timeline, if there is one to point at.
+    ///
+    /// Called on every `model(for:)` and not only on the first: `ChannelTimelineRegistry` builds a
+    /// channel's model on first ask too, so a composer built before the column ever drew the channel
+    /// would otherwise follow nothing for as long as it lived. `QueueChipModel.follow` is idempotent
+    /// for the same model.
+    private func followTimeline(_ model: ComposerModel) {
+        guard let timelines = timelineProvider?(model.key) else { return }
+        model.queue.follow(timelines)
     }
 
     /// This channel's shared surface state, whether or not a composer has been built. The header

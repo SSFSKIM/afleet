@@ -98,6 +98,10 @@ final class ComposerModel {
     /// is the same defect with a delay in front of it.
     private(set) var isSending = false
 
+    /// The queue chip for this channel (`QueueChip`). Built here so it shares the composer's
+    /// lifetime and its `LifecycleAPI`; it reads the channel's timeline and nothing of this model's.
+    let queue: QueueChipModel
+
     /// X5, and the only way anything in this file reaches the engine. Internal rather than private
     /// because the shortcuts are an extension in `ComposerShortcuts.swift`; Swift has no narrower
     /// scope than the module for that, and every caller is inside `App/Composer/`.
@@ -119,6 +123,7 @@ final class ComposerModel {
         self.lifecycle = lifecycle
         self.surface = surface
         self.interceptor = RefusalInterceptor(diagnostics: diagnostics)
+        self.queue = QueueChipModel(key: key, lifecycle: lifecycle)
     }
 
     // MARK: - Sending
@@ -157,6 +162,14 @@ final class ComposerModel {
             return
         }
         do {
+            // **No `HostSignal.promptSent` is raised here, and it is not an omission.** The signal
+            // needs the uuid the engine will echo; `ChannelSupervisor.send` mints it and
+            // `LifecycleAPI.perform` returns a `ChannelState` and discards it, so nothing above X5
+            // has it, and reaching below X5 for it is what contract Y5 forbids. Filed as the
+            // `[parent-impact]` "X5 drops the uuid `HostSignal.promptSent` needs" on this leaf's
+            // spec; when `perform(.send)` returns the minted uuid, the raise goes here, after the
+            // call succeeds and never before. Until then the queue chip renders from
+            // `Overlay.queue` alone, which is what §8.5 describes and G3 asserts.
             _ = try await lifecycle.perform(.send(UserInput(text: text)), on: key)
             // Only the words that were sent. A keystroke that landed during the await is the user's
             // next message, not part of the one the engine now has.
@@ -221,6 +234,7 @@ final class ComposerModel {
     }
 
     func stop() {
+        queue.stop()
         events?.cancel()
         events = nil
         mentionTask?.cancel()

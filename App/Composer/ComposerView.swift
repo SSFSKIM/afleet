@@ -18,6 +18,7 @@ struct ComposerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             RefusalSurface(refusal: model.refusal, interception: model.lastInterception)
+            QueueChipView(model: model.queue)
             CommandCompletionView(model: model)
             FileMentionView(model: model)
             RewindConfirmationView(model: model)

@@ -335,7 +335,10 @@ final class ShellEscapeTests: XCTestCase {
         var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
         for fd in 0..<ceiling {
             guard fcntl(fd, F_GETPATH, &buffer) != -1 else { continue }
-            let path = String(cString: buffer)
+            // Truncated at the terminator and decoded, rather than `String(cString:)`, which is
+            // deprecated: `F_GETPATH` fills the buffer's head and leaves the rest of the PATH_MAX
+            // allocation zeroed.
+            let path = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
             if path == root || path.hasPrefix(root + "/") { total += 1 }
         }
         return total
