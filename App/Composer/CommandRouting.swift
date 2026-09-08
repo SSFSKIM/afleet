@@ -16,16 +16,24 @@ import FleetKit
 /// A lifecycle action afleet does not issue until the user has answered for it (spec §8.5's dispatch
 /// table: *behind a confirm for `stopEverything`, `backgroundAll` and `logout`*).
 ///
-/// A value over `LifecycleAction` rather than a flag per action, so the three share one gate: each
-/// closes shells or signs sessions out on this whole machine, and none of them may be reached by a
-/// mistyped chord or an autocompleted line.
+/// A value over `LifecycleAction` rather than a flag per action, so they share one gate: each closes
+/// shells or signs sessions out on this whole machine, and none of them may be reached by a mistyped
+/// chord or an autocompleted line.
+///
+/// Task 8 added `sendToBackground`, which is the **header's** and not the router's. The gate is
+/// shared — one pending confirmation per channel, answered in one place — while `init?(_:)` still
+/// maps only the three the router's table puts behind a confirm, because a typed `/background` is a
+/// `.lifecycle` row the composer issues directly and G1 asserts exactly that member sequence. The
+/// menu item is the one that has to show the cost first, because it is the one that names the live
+/// background tasks whose shells the handoff closes.
 enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
     case stopEverything
     case backgroundAll
     case logout
+    case sendToBackground
 
-    /// Nil for every action that needs no confirm — a plain fork and a send to background are the
-    /// channel's own business and are issued directly.
+    /// Nil for every action the **router** issues directly — a plain fork and a typed `/background`
+    /// are the channel's own business. The header raises `.sendToBackground` itself.
     init?(_ action: LifecycleAction) {
         switch action {
         case .stopEverything: self = .stopEverything
@@ -40,6 +48,7 @@ enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
         case .stopEverything: .stopEverything
         case .backgroundAll: .backgroundAll
         case .logout: .logout
+        case .sendToBackground: .sendToBackground
         }
     }
 
@@ -48,6 +57,7 @@ enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
         case .stopEverything: "Stop everything in this channel?"
         case .backgroundAll: "Send every live channel to the background?"
         case .logout: "Sign out of every channel on this machine?"
+        case .sendToBackground: "Send this channel to the background?"
         }
     }
 
@@ -56,6 +66,7 @@ enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
         case .stopEverything: "The running turn and every background task in this channel stop. Their shells close."
         case .backgroundAll: "Every channel afleet owns hands off to a background job and its window goes quiet."
         case .logout: "Every owned channel and every afleet-launched job on this machine signs out."
+        case .sendToBackground: "This channel's process is replaced by a background job; its local shells close."
         }
     }
 
@@ -64,6 +75,7 @@ enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
         case .stopEverything: "Stop Everything"
         case .backgroundAll: "Send to Background"
         case .logout: "Sign Out"
+        case .sendToBackground: "Send to Background"
         }
     }
 }
@@ -145,6 +157,7 @@ extension ComposerModel {
     func confirmPending() async -> Bool {
         guard let pending = pendingConfirmation else { return false }
         pendingConfirmation = nil
+        confirmationDetail = nil
         let issued = await issue { _ = try await self.lifecycle.perform(pending.action, on: self.key) }
         if issued, let line = confirmedLine, draft.hasPrefix(line) { draft = String(draft.dropFirst(line.count)) }
         confirmedLine = nil
@@ -154,6 +167,7 @@ extension ComposerModel {
     /// Answered no. Nothing has reached the lifecycle and the typed line stays where it was.
     func cancelPending() {
         pendingConfirmation = nil
+        confirmationDetail = nil
         confirmedLine = nil
     }
 

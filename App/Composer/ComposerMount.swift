@@ -61,7 +61,14 @@ final class ComposerRegistry {
     /// reaches a workspace, so a composer built before one still counts and writes nowhere.
     var diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics()
 
+    /// afleet's own store, for the one value this leaf writes: the bypass acceptance, in the
+    /// `fleetKit` namespace (§7.8). Taken from the workspace at `attach(to:)` — the header needs a
+    /// store and has no other way to a legal one, and the launch already chose the root every byte
+    /// afleet writes goes under.
+    var store: (any StateStore)?
+
     private var models: [ChannelKey: ComposerModel] = [:]
+    private var headers: [ChannelKey: ChannelHeaderActionsModel] = [:]
     private var surfaces: [ChannelKey: ChannelSurfaceState] = [:]
 
     init() {}
@@ -77,6 +84,7 @@ final class ComposerRegistry {
         releaseAll()
         self.lifecycle = lifecycle ?? workspace.fleet
         self.diagnostics = workspace.diagnostics.fleet
+        self.store = workspace.store
         self.contextProvider = context
         self.timelineProvider = timeline
     }
@@ -128,6 +136,20 @@ final class ComposerRegistry {
         model.queue.follow(timelines)
     }
 
+    /// This channel's header actions, built on first ask and retained beside its composer.
+    ///
+    /// One per channel, over the same composer: the header's restart path closes the field through
+    /// the `ChannelSurfaceState` that composer shares, and a second header would be writing into a
+    /// state whose field is not the one on screen. Nil for the same reason `model(for:)` is — before
+    /// a launch reaches a workspace there is no X5 to act through.
+    func header(for key: ChannelKey, cwd: URL? = nil) -> ChannelHeaderActionsModel? {
+        if let existing = headers[key] { return existing }
+        guard let composer = model(for: key, cwd: cwd) else { return nil }
+        let header = ChannelHeaderActionsModel(composer: composer, store: store)
+        headers[key] = header
+        return header
+    }
+
     /// This channel's shared surface state, whether or not a composer has been built. The header
     /// needs it before the field is first drawn.
     func surface(for key: ChannelKey) -> ChannelSurfaceState {
@@ -142,6 +164,7 @@ final class ComposerRegistry {
     /// state whose field is gone.
     func release(_ key: ChannelKey) {
         models.removeValue(forKey: key)?.stop()
+        headers.removeValue(forKey: key)
         surfaces.removeValue(forKey: key)
     }
 
@@ -151,6 +174,7 @@ final class ComposerRegistry {
     private func releaseAll() {
         for model in models.values { model.stop() }
         models = [:]
+        headers = [:]
         surfaces = [:]
     }
 }
@@ -184,19 +208,37 @@ struct ChannelComposerMount: View {
 
 /// The channel header's action menu — C6.2's other call site, mounted above the list.
 ///
-/// It draws the three setting pickers, whose displayed values are engine readbacks (`SettingPickers`,
-/// gate G7). C6.2 Task 8 fills the rest of it: the MCP popover, reload skills and plugins, rename,
-/// fork, send to background and open in terminal, and moves the whole menu into `App/Header/`.
+/// It draws Task 7's three setting pickers, whose displayed values are engine readbacks
+/// (`SettingPickers`, gate G7), and Task 8's menus (`HeaderMenus`).
+///
+/// **Two things reach it through the environment, both optional.** The `ChannelRow` this header is
+/// drawing — `offersOwnedActions` is the gate on every action here (tracker 74) — and the panel host
+/// *Open in terminal* hands its `PaneRequest` to. Optional because the reflection-based mount test
+/// installs no environment, and a non-optional read would trap there: an unresolved environment
+/// leaves the header with no row, which offers nothing, which is the safe answer rather than the
+/// convenient one.
 struct ChannelHeaderActionsSlot: View {
 
     let key: ChannelKey
-    /// Task 8's actions write the surface state this registry holds for the channel; the slot takes
-    /// it now so filling it changes this view and not the column.
+    /// The app's one registry, handed down by the column, exactly as the composer's mount takes it.
     let composers: ComposerRegistry
 
+    @Environment(AppModel.self) private var app: AppModel?
+
     var body: some View {
-        if let model = composers.model(for: key) {
-            SettingPickersView(model: model.pickers)
+        if let header = composers.header(for: key) {
+            ChannelHeaderMenus(model: header)
+                .onAppear { adopt(header) }
+                .onChange(of: app?.browser?.row(key.session)?.mode) { _, _ in adopt(header) }
+        }
+    }
+
+    /// The row and the pane runner, taken from the app. Re-taken whenever the row's listing mode
+    /// moves, so a channel that turns read-only while it is on screen loses the menu with it.
+    private func adopt(_ header: ChannelHeaderActionsModel) {
+        header.adopt(row: app?.browser?.row(key.session))
+        if let panels = app?.panels {
+            header.paneRunner = { request in try await panels.run(request) }
         }
     }
 }

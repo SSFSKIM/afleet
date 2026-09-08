@@ -1,0 +1,84 @@
+import Foundation
+import AfleetCore
+import ClaudeWire
+import FleetKit
+
+/// A launch setting this header can change, named exactly as `LaunchSettingMatrix` names it
+/// (§7.7's *Launch settings: mutable at runtime versus restart-required*).
+///
+/// **The matrix is the data that decides**, and the whole point of naming a setting by its matrix
+/// key is that the header does not carry a list of its own: `takesARestart` is a lookup, so a
+/// setting C4 moves between the two classes moves here with it and no line in this leaf changes.
+enum HeaderLaunchSetting: String, CaseIterable, Hashable, Sendable {
+    case promptSuggestions
+    case allowBypass
+
+    /// The matrix's key for this setting. The raw value, spelled once.
+    var matrixKey: String { rawValue }
+
+    /// Whether §7.7's matrix puts this setting in the restart-required class. Read, never asserted:
+    /// a setting in neither set is a setting C4 does not know about, and the header refuses it
+    /// rather than guessing which path it takes.
+    var takesARestart: Bool { LaunchSettingMatrix.restartRequired.contains(matrixKey) }
+    var isRuntimeMutable: Bool { LaunchSettingMatrix.runtimeMutable.contains(matrixKey) }
+
+    /// What the field says while the process is being replaced for this setting. A setting's name,
+    /// never a value (§11).
+    var restartReason: String {
+        switch self {
+        case .promptSuggestions: "This channel is restarting to change prompt suggestions."
+        case .allowBypass: "This channel is restarting to allow the bypass permission mode."
+        }
+    }
+}
+
+/// §7.4's quiescent-restart path, for every restart-required setting the header changes.
+///
+/// **One path, not one per setting.** A `RestartRequest`, then §7.4's readback wait with the
+/// composer disabled behind the connecting glyph, then either release or a banner naming the setting
+/// that did not survive. The gate itself is Task 7's, on `SettingPickersModel` over the
+/// `ChannelSurfaceState` the header shares with the field; this file decides *when* it runs and
+/// carries nothing of its own about how it works.
+extension ChannelHeaderActionsModel {
+
+    /// Applies one restart-required setting. Answers whether the change took **and** survived.
+    ///
+    /// A setting the matrix does not call restart-required never reaches `quiescentRestart` from
+    /// here: it has a runtime mechanism (§7.7's table) and the pickers or the router own it. That
+    /// refusal is spelled rather than assumed, because a restart issued for a setting that did not
+    /// need one replaces a process — and kills its shells — for nothing.
+    @discardableResult
+    func apply(_ setting: HeaderLaunchSetting, _ request: RestartRequest) async -> Bool {
+        guard gate() else { return false }
+        guard setting.takesARestart else {
+            say("That setting changes without a restart; the header does not replace the process for it.")
+            return false
+        }
+        let expected = pickers.currentSnapshot
+        pickers.beginRestart(reason: setting.restartReason)
+        guard await perform(.quiescentRestart(request)) else {
+            // Nothing was replaced, so the field re-opens rather than staying shut behind a process
+            // that is still the one it was.
+            pickers.cancelRestart()
+            return false
+        }
+        countRestart()
+        // §7.4: the composer stays disabled until **every** readback matches; a mismatch banners,
+        // names the setting that did not survive, and keeps it disabled until the user picks a value.
+        let survived = await pickers.confirmReadback(of: expected)
+        if !survived { say(pickers.restartBanner) }
+        return survived
+    }
+
+    /// The per-channel *Prompt suggestions* toggle (§7.7's matrix: `--prompt-suggestions` is a launch
+    /// flag, so it is a restart and not a control request).
+    ///
+    /// The composer's own flag moves only once the restart has been confirmed: a channel whose
+    /// process was never replaced receives no `prompt_suggestion` frame, so a toggle that moved first
+    /// would leave ghost text switched on against a process that can never produce any.
+    func setPromptSuggestions(_ enabled: Bool) async {
+        guard await apply(.promptSuggestions, RestartRequest(promptSuggestions: enabled)) else { return }
+        composer.promptSuggestionsEnabled = enabled
+        say("Prompt suggestions \(enabled ? "on" : "off") for this channel.")
+    }
+}

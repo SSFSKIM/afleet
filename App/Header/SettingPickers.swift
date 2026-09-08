@@ -93,6 +93,10 @@ final class SettingPickersModel {
     /// tell "read nothing" from "read and found nothing".
     private(set) var readbacksTaken = 0
 
+    /// Where a click on `bypassPermissions` goes when something has claimed it — the header's §8.6
+    /// gate. Nil leaves the click going straight to the engine.
+    @ObservationIgnored var bypassRoute: (@MainActor () async -> Void)?
+
     /// The mode the user last asked for, held only until the next handshake can be compared against
     /// it. **Not a displayed value** — nothing reads it to draw with — and cleared as soon as a
     /// handshake settles the question.
@@ -243,9 +247,45 @@ final class SettingPickersModel {
     /// the click is remembered, the displayed value does **not** move, and the next handshake either
     /// confirms it or raises the disagreement. A picker that adopted the click here would report a
     /// mode the engine's validator may have refused outright (§8.6's three refusal arms).
-    func selectMode(_ mode: PermissionMode) async {
-        guard await issue(AnyControlRequest(SetPermissionMode(mode: mode))) else { return }
+    /// It answers the engine's **own** refusal string when the mode was refused, and nil when the
+    /// request went out. §8.6's validator has three refusal arms — a restricted session, the settings
+    /// disable and the missing launch flag — and afleet renders whichever string comes back rather
+    /// than guessing which of them fired, so a caller needs the sentence and not a boolean.
+    ///
+    /// `bypassPermissions` is the one row that does not go straight out: §8.6 puts a disclaimer, a
+    /// store write and a quiescent restart in front of it, and that gate is the header's
+    /// (`BypassGate`). The picker routes the click there when a route is installed and issues the
+    /// request itself when none is — a channel drawn with no header still has a mode picker, and the
+    /// engine's own validator is what refuses a mode the process cannot take.
+    @discardableResult
+    func selectMode(_ mode: PermissionMode) async -> String? {
+        if mode == .bypassPermissions, let bypassRoute {
+            await bypassRoute()
+            return nil
+        }
+        return await issueMode(mode)
+    }
+
+    /// The request itself, with no gate in front of it. §8.6's third step calls this directly, after
+    /// the acceptance is written and the restart has been confirmed.
+    @discardableResult
+    func issueMode(_ mode: PermissionMode) async -> String? {
+        do {
+            _ = try await lifecycle.send(AnyControlRequest(SetPermissionMode(mode: mode)), on: key)
+        } catch {
+            let reason = Self.reason(of: error)
+            disagreement = reason
+            return reason
+        }
         requestedMode = mode
+        return nil
+    }
+
+    /// The engine's sentence, when the error carries one. `WireError.controlError` holds the wire's
+    /// own `error` string; anything else is afleet's transport failing, which the engine did not say.
+    static func reason(of error: any Error) -> String {
+        if case WireError.controlError(let sentence) = error, !sentence.isEmpty { return sentence }
+        return "The channel did not answer; what is shown is the last value it reported."
     }
 
     // MARK: - §7.4's readback gate

@@ -36,6 +36,11 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         case openInTerminal(ChannelKey)
         case events(ChannelKey)
         case preconditions(ChannelKey)
+        /// A write into afleet's own store, recorded **in the same ordered log** as the lifecycle
+        /// calls. G5's ordering assertion spans all three of §8.6's steps — the store write, the
+        /// restart and the mode switch — and two logs could not order the first against the other two.
+        /// The namespace and the key, never the value.
+        case storeWrite(StoreNamespace, key: String)
 
         /// The member's name, for a failure message that names a member and no value (§11).
         var member: String {
@@ -48,6 +53,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
             case .openInTerminal: "openInTerminal"
             case .events: "events"
             case .preconditions: "preconditions"
+            case .storeWrite: "store.write"
             }
         }
     }
@@ -134,6 +140,9 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         for caller in waiting { caller.resume() }
     }
     func stagePrecondition(_ verdict: SpawnPrecondition) { preconditionVerdict = verdict }
+    /// Records one store write in the ordered log. Called by `RecordingBypassStore`, which wraps the
+    /// real store rather than replacing it, so the bytes still go through `FileStateStore`.
+    func noteStoreWrite(namespace: StoreNamespace, key: String) { calls.append(.storeWrite(namespace, key: key)) }
     func setStates(_ states: [ChannelState]) { for state in states { table[state.key] = state } }
     func openEvents(of key: ChannelKey) { opened.insert(key) }
     nonisolated func enqueue(_ event: WireEvent, to key: ChannelKey) { sink.push(event, to: key) }
@@ -147,6 +156,16 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// The members called, in order. The spelling every ordering assertion uses, because it carries
     /// no value and so cannot print one on failure (§11).
     var memberSequence: [String] { calls.map(\.member) }
+
+    /// The members called, in order, with a control request's **subtype** attached to it: `send`
+    /// alone cannot tell `reload_skills` from `rename_session`, and the header's table is a claim
+    /// about which subtype each action reaches. Still a member name and a subtype, and never a value.
+    var labelledSequence: [String] {
+        calls.map { call in
+            if case .send(_, let subtype, _) = call { return "send:\(subtype)" }
+            return call.member
+        }
+    }
 
     /// Every prompt sent through `sendPrompt`, in order. The send path's counterpart to `actions`.
     var prompts: [UserInput] {

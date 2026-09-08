@@ -40,6 +40,11 @@ final class ComposerModel {
     /// Nil whenever nothing is waiting; see `ComposerConfirmation`.
     var pendingConfirmation: ComposerConfirmation?
 
+    /// What the pending confirmation adds to its own sentence — the header's *Send to background*
+    /// names the live background tasks whose shells the handoff closes. Nil for every confirm that
+    /// has nothing to add, and cleared with the confirmation it belongs to.
+    var confirmationDetail: String?
+
     /// The `/rewind` dry run in front of the user, and the answer `StrategyUI.confirm` is suspended
     /// on. Both live here because the sheet is drawn by the composer's own view.
     var rewindPreview: RewindPreview?

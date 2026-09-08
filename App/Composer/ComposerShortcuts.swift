@@ -83,7 +83,9 @@ struct ComposerShortcutBar: View {
             }
             Button("Cancel", role: .cancel) { model.cancelPending() }
         } message: {
-            Text(model.pendingConfirmation?.message ?? "")
+            // The header's *Send to background* names the live background tasks whose shells the
+            // handoff closes; every other confirm has nothing to add to its own sentence.
+            Text(model.confirmationDetail ?? model.pendingConfirmation?.message ?? "")
         }
     }
 }
