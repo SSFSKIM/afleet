@@ -1802,6 +1802,8 @@ is renumbered.
 
 Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–168 are
 used and 169–171 are left unspent. Nothing above is renumbered — the gap between 141 and 157 is
+Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–166 and
+169–170 are used and 167–168 and 171 are left unspent. Nothing above is renumbered — the gap between 141 and 157 is
 C6.1's and C6.2's reservations and is expected.
 
 157. **Five deferred mounts wait on one carrier: C6.1's `TimelineRenderContext`.** Read rather than
@@ -1830,6 +1832,17 @@ C6.1's and C6.2's reservations and is expected.
        `ChannelTimelineRegistry` reaches every channel's fold, and `ActivityModel` now takes a
        `timeline` provider over that one registry which the composition root assigns. The Thread
        tab's and the timeline row's assignments remain on this entry.
+     - **nothing assigns `DecisionAnswering.raise`**, so D2's loop is complete but not closed: a
+       successful `perform(.answer)` raises `HostSignal.decisionAnswered` where a test hands it the
+       fold, and raises nothing in the running app, because none of the three hosts that construct
+       an answering object (Activity, the Thread tab, the timeline row) owns a
+       `ChannelTimelineModel` — only the channel column does. So a card's state does not yet leave
+       `.pending` on screen. The spec never said who makes that assignment; that omission is the
+       architect's, not a worker's. **Closed for the Thread tab, 2026-09-09**, by the architect's
+       ruling: the tab is handed `ChannelFold`, two closures over the app-scoped
+       `ChannelTimelineRegistry`, at its `performLaunch` construction, and assigns `raise` on the
+       answering object it builds — a panel tab has no row and needs no per-row carrier. Activity's
+       and the timeline row's assignments are unchanged and still wait here.
      The mechanism in every case ships and is tested against a double; what is missing is the
      construction site. Found at Tasks 2, 6 and 8a, re-verified by reading at this child's tip.
      Closer: C6.1's merge lands `TimelineRenderContext` and constructs the answering object with the
@@ -1955,6 +1968,28 @@ C6.1's and C6.2's reservations and is expected.
      knowledge is the host's, not the card's. Found in the second review round. Closer: the timeline
      list marks the focused row's card active (C6.1), and the Thread tab marks the open thread's
      (C6.3's Thread half). Owner: C6.1 and the Thread host.
+169. **Four of the five thread anchors are still snapshots.** `ThreadAnchor.decision` now resolves
+     through the `DecisionItem` the channel's fold holds, so a card settled by any surface reads as
+     settled in the open thread. The other four carry values taken at the moment the thread was
+     opened: a tool call opened while running shows *running* for as long as the thread stays open,
+     a task's status is the registry mirror's at that instant, and a sent file's delivery never
+     turns from pending to delivered. The mechanism to fix each is the one the decision anchor now
+     uses — the fold is reachable from the tab — but each kind is keyed differently (`ItemID` for a
+     tool call and a sent file, the task id for a task) and none of the four misleads a user into
+     an action the engine then rejects, which is what made the decision case worth closing now.
+     Found while closing the decision anchor, 2026-09-09. Closer: the anchor holds the key rather
+     than the value for every kind, and reads the fold for all five. Owner: C6.3's successor.
+
+170. **The consent sheet cannot be dismissed by the user.** `ChannelDecorations` presents §6.12's
+     sheet from the verdict — `.constant(model.consentRequest)` — so the sheet's own dismissal
+     gesture writes into a binding that drops it and the sheet returns. That is deliberate as far
+     as it goes: consent is taken before the child exists, the sheet closes because the fleet
+     stopped asking rather than because the view decided it had, and a sheet a user could wave away
+     would leave the channel in a state with no affordance to get back to. But it reads as a stuck
+     window rather than as a modal decision, and the design says nothing about a third answer.
+     Found while binding the sheet to its evaluation, 2026-09-09. Closer: §6.12 says what dismissal
+     means — *not now*, leaving the channel unspawned with a banner, is the likely answer — and the
+     sheet gets a real binding. Owner: the architect, then C6.3's successor.
 
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 

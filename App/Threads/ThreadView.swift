@@ -13,12 +13,26 @@ struct ThreadView: View {
 
     let model: ThreadModel
 
+    /// **The content scrolls; the header and the reply do not.**
+    ///
+    /// A thread's content is unbounded — a tool call's whole input and whole output, a plan, a
+    /// question card, a side question's accumulated exchanges — and the panel column it is drawn in
+    /// adds no scroll container of its own, so a `VStack` alone puts the overflow somewhere the user
+    /// cannot reach. That is worse than an awkward layout for this tab in particular: the reply
+    /// field is the last thing in the stack, so the one control §7.5 gives the thread is the first
+    /// thing to go off the bottom. Keeping the header and the reply outside the scroll view is what
+    /// makes them reachable whatever the anchor holds.
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let anchor = model.anchor {
                 header(anchor)
                 Divider()
-                content(anchor)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        content(anchor)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if model.offersReply { replyField(anchor) }
                 if let banner = model.banner {
                     Text(banner.text).font(.caption).foregroundStyle(.secondary)
@@ -28,8 +42,8 @@ struct ThreadView: View {
                 }
             } else {
                 Text("No thread open.").font(.callout).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -57,9 +71,13 @@ struct ThreadView: View {
         case .task(let task):
             // Stop only: the task card's own action, hosted rather than reimplemented (D15).
             TaskCardView(model: task)
-        case .decision(let card):
-            DecisionCardView(card: card, presentation: .full, in: model.channel,
-                             answering: model.answering)
+        case .decision:
+            // The fold's card, not the anchor's snapshot: what §8.4 draws is `DecisionItem.state`,
+            // and a card answered anywhere would otherwise go on offering its buttons here.
+            if let card = model.openDecision {
+                DecisionCardView(card: card, presentation: .full, in: model.channel,
+                                 answering: model.answering)
+            }
         case .sideQuestion(let thread):
             sideQuestion(thread)
         case .sentFile(let sent):
@@ -124,7 +142,26 @@ struct ThreadView: View {
             TextField(ThreadView.placeholder(for: anchor.kind), text: draftBinding)
                 .textFieldStyle(.roundedBorder)
             Button(ThreadView.action(for: anchor.kind)) { model.send() }
-                .disabled(model.isPosting)
+                .disabled(ThreadView.isBlocked(anchor, model: model))
+        }
+    }
+
+    /// Whether this kind's one action is already on the wire. Each kind leaves by its own seam and
+    /// each keeps its own in-flight flag, so the disable has to ask the anchor: `isPosting` covers
+    /// the two posting kinds alone, and a side question that read it would offer *Ask* again while
+    /// the first ask was still out — losing the second question, which `ThreadModel.send()` can
+    /// only refuse.
+    static func isBlocked(_ anchor: ThreadAnchor, model: ThreadModel) -> Bool {
+        switch anchor {
+        case .sideQuestion(let thread):
+            return thread.isAsking
+        case .decision:
+            // Nothing to send while this request's answer is on the wire, and nothing to send at
+            // all once it is settled: D12's card is no longer answerable, and a reply is an answer.
+            guard let card = model.openDecision, case .pending = card.state else { return true }
+            return model.answering.isAnswering(card.requestID)
+        default:
+            return model.isPosting
         }
     }
 

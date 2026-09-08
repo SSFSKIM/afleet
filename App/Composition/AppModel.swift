@@ -235,7 +235,14 @@ final class AppModel {
             let wasShowingThread = panels.selected == .thread
             await panels.unregister(.thread)
             do {
-                try panels.register(ThreadTab(lifecycle: workspace.fleet))
+                // The tab is handed the app's one timeline registry, through two closures and not
+                // as a reference: a decision answered from the Thread tab has to raise
+                // `HostSignal.decisionAnswered` on the channel's fold — the engine sends no frame
+                // back for an answer, so nothing else moves the item out of `.pending` — and the
+                // open thread has to read the item's state from that same fold. This is the one
+                // construction site where the app-scoped registry and a lifecycle both exist.
+                try panels.register(ThreadTab(lifecycle: workspace.fleet,
+                                              fold: ChannelFold(timelines: timelines)))
             } catch {
                 assertionFailure("the handover unregistered .thread before registering over it")
             }

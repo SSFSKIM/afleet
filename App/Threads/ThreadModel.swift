@@ -114,10 +114,40 @@ final class ThreadModel: PanelTabSession {
     /// A posted reply is on the wire. The Send button disables on it, so two presses post once.
     private(set) var isPosting = false
 
-    init(channel: ChannelKey, lifecycle: any LifecycleAPI) {
+    /// How this tab reaches the channel's fold: where an answer's host signal goes, and where the
+    /// open decision thread reads its state from.
+    @ObservationIgnored private let fold: ChannelFold
+
+    init(channel: ChannelKey, lifecycle: any LifecycleAPI, fold: ChannelFold = ChannelFold()) {
         self.channel = channel
         self.lifecycle = lifecycle
+        self.fold = fold
         self.answering = DecisionAnswering(lifecycle: lifecycle)
+        // D2's loop, closed for this host: a successful `perform(.answer)` raises
+        // `HostSignal.decisionAnswered` on the channel's fold, which is the only thing that moves
+        // the item out of `.pending` — the engine sends no frame back for an answer. Assigned here
+        // rather than left to the view, because the tab is what was handed the fold.
+        self.answering.raise = { [fold] key, signal in await fold.raise(key, signal) }
+    }
+
+    // MARK: - The decision a thread is anchored on
+
+    /// The open decision thread's card, **as the fold has it now**.
+    ///
+    /// `ThreadAnchor.decision` carries the card the user clicked, which is a value and therefore a
+    /// snapshot: it was `.pending` when the thread opened and stays `.pending` for ever, so a card
+    /// answered from this tab — or from the timeline row, or from Activity — would go on offering
+    /// its buttons, and the next press would be a second `perform(.answer)` the supervisor rejects.
+    /// The card is rebuilt from the `DecisionItem` C3's reducer holds, so this tab renders the same
+    /// state every other surface renders and keeps no second copy of it.
+    ///
+    /// The snapshot is the fallback, not the source: a channel with no fold — an archived one, or a
+    /// host built without a workspace — has no item to read, and the card the thread was opened on
+    /// is then the best that exists.
+    var openDecision: DecisionCard? {
+        guard case .decision(let card) = anchor else { return nil }
+        guard let item = fold.decision(channel, card.requestID) else { return card }
+        return DecisionCard(item)
     }
 
     // MARK: - One thread at a time
@@ -156,11 +186,20 @@ final class ThreadModel: PanelTabSession {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let anchor else { return }
         switch anchor {
-        case .decision(let card):
+        case .decision:
+            // The card the fold has, not the one the thread opened on: a reply is an answer, and an
+            // answer to a request that is already settled is one the engine would reject.
+            guard let card = openDecision else { return }
+            // D12: a request that is no longer waiting is not answerable, by button or by reply.
+            guard case .pending = card.state else { return }
             guard let action = card.replyAction(text: text) else {
                 banner = RowBanner(text: "This decision cannot be answered with a reply.")
                 return
             }
+            // `DecisionAnswering.inFlight` is the one in-flight set this tab has; a second guard
+            // here would be a second copy of it. A press while an answer is on the wire keeps the
+            // draft, because `send` would drop the text and there is nowhere else it survives.
+            guard !answering.isAnswering(card.requestID) else { return }
             banner = nil
             draft = ""
             answering.send(action, on: card, in: channel)
@@ -169,8 +208,13 @@ final class ThreadModel: PanelTabSession {
         case .sentFile(let sent):
             post(ThreadReply.prefixed(tool: ThreadReply.sentFileTool, toolUseID: sent.toolUseID, text: text))
         case .sideQuestion(let thread):
+            // The slot is claimed **before** the draft is cleared, and synchronously: an ask that
+            // was refused because one is already on the wire must leave the second question in the
+            // field. `ask`'s own guard runs inside a `Task`, far too late for the text to survive.
+            guard let asked = thread.claim(text) else { return }
+            banner = nil
             draft = ""
-            Task { await thread.ask(text, through: lifecycle, on: channel) }
+            Task { await thread.deliver(asked, through: lifecycle, on: channel) }
         case .task:
             // §7.5: stop only. The card's own *Stop* is the action; there is no reply to post.
             break

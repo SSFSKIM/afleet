@@ -63,11 +63,24 @@ final class SideQuestionThread {
         }
     }
 
-    /// One ask, on the side. Y5: `send(AnyControlRequest(SideQuestion(...)))` and nothing else.
-    func ask(_ question: String, through lifecycle: any LifecycleAPI, on channel: ChannelKey) async {
+    /// Takes the in-flight slot for a question, or refuses because one ask is already on the wire or
+    /// because there is nothing to ask. The claimed question comes back trimmed.
+    ///
+    /// **Synchronous, and separate from the ask itself**, for the reason
+    /// `DecisionAnswering.send(_:on:in:)` claims its request id before it returns: the caller holds
+    /// the only copy of what the user typed, and a refusal it learns about from inside a `Task` is a
+    /// refusal it learns about after it has already cleared the field. A claim it can read on the
+    /// spot is what lets the second question survive the first one being in flight.
+    func claim(_ question: String) -> String? {
         let asked = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !asked.isEmpty, !isAsking else { return }
+        guard !asked.isEmpty, !isAsking else { return nil }
         isAsking = true
+        return asked
+    }
+
+    /// One ask, on the side, once `claim(_:)` has taken the slot. Y5:
+    /// `send(AnyControlRequest(SideQuestion(...)))` and nothing else. The claim is given back here.
+    func deliver(_ asked: String, through lifecycle: any LifecycleAPI, on channel: ChannelKey) async {
         defer { isAsking = false }
         let request = AnyControlRequest(SideQuestion(question: asked, history: history))
         do {

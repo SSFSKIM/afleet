@@ -43,6 +43,22 @@ final class ConsentAndTrustTests: XCTestCase {
     /// its last component is the string the trust banner must not contain.
     private static let project = URL(fileURLWithPath: "/invented/consent-project-e7")
 
+    /// The second channel and project a selection moves to, so an evaluation can be superseded by
+    /// one for somewhere else. Invented, and different from the first in both halves.
+    private static var otherChannel: ChannelKey {
+        ActivityFixtures.key("f", configHome: FileManager.default.temporaryDirectory
+            .appending(path: "afleet-c6-3-consent-unwritten"))
+    }
+
+    private static let otherProject = URL(fileURLWithPath: "/invented/consent-project-f8")
+
+    /// The second project's own pending server, named after nobody and shared with neither list.
+    private static let otherServers = [
+        ProjectMCPServer(name: "invented-ledger",
+                         transport: .http(url: "https://invented.example/ledger"),
+                         entryHash: String(repeating: "c", count: 64))
+    ]
+
     /// Two pending servers: one stdio, one http. Both invented.
     private static let servers = [
         ProjectMCPServer(name: "invented-notes",
@@ -69,6 +85,13 @@ final class ConsentAndTrustTests: XCTestCase {
         XCTAssertTrue(ViewTree.press(button), "the \(label) button carried no action")
     }
 
+    /// The sheet the mount builds, over one `ConsentRequest`: servers and evaluation together, and
+    /// both answers carrying that one value — which is exactly what `ChannelDecorations` does.
+    private func sheet(for request: PrecommitModel.ConsentRequest, on model: PrecommitModel) -> ConsentSheet {
+        ConsentSheet(servers: request.servers, isAnswering: model.isAnswering,
+                     accept: { model.accept(request) }, decline: { model.decline(request) })
+    }
+
     private func texts(in body: Any) -> [String] {
         ViewTree.values(of: Text.self, in: body).flatMap { ViewTree.values(of: String.self, in: $0) }
     }
@@ -80,7 +103,7 @@ final class ConsentAndTrustTests: XCTestCase {
     /// both transports.
     func testTheSheetListsEveryServerWithItsNameAndTransportSummary() async throws {
         let (_, model) = await evaluated([.consentNeeded(Self.servers)])
-        let servers = try XCTUnwrap(model.consentServers, "the consentNeeded verdict raised no sheet")
+        let servers = try XCTUnwrap(model.consentRequest?.servers, "the consentNeeded verdict raised no sheet")
         XCTAssertEqual(servers.count, 2, "the sheet lists a different number of servers than the verdict named")
 
         let sheet = ConsentSheet(servers: servers, isAnswering: false, accept: {}, decline: {})
@@ -100,12 +123,10 @@ final class ConsentAndTrustTests: XCTestCase {
     /// lifecycle action. Asserted as the emitted call and its arguments.
     func testAcceptCallsAcceptProjectServersAndNothingElse() async throws {
         let (lifecycle, model) = await evaluated([.consentNeeded(Self.servers), .ready])
-        let servers = try XCTUnwrap(model.consentServers, "the consentNeeded verdict raised no sheet")
+        let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
+        let servers = request.servers
 
-        let sheet = ConsentSheet(servers: servers, isAnswering: model.isAnswering,
-                                 accept: { model.accept(servers) },
-                                 decline: { model.decline(servers.map(\.name)) })
-        try press("Accept", in: sheet.body)
+        try press("Accept", in: sheet(for: request, on: model).body)
         await model.whenIdle()
 
         let accepted = await lifecycle.accepted
@@ -119,7 +140,7 @@ final class ConsentAndTrustTests: XCTestCase {
         let actions = await lifecycle.actions
         XCTAssertEqual(declined.count, 0, "accept also declined \(declined.count) server set(s)")
         XCTAssertEqual(actions.count, 0, "accept also performed \(actions.count) lifecycle action(s)")
-        XCTAssertNil(model.consentServers, "the re-read verdict still asks for consent")
+        XCTAssertTrue(model.consentRequest == nil, "the re-read verdict still asks for consent")
     }
 
     /// *Decline* is `declineProjectServers` with **exactly the declined names** and the project
@@ -127,12 +148,9 @@ final class ConsentAndTrustTests: XCTestCase {
     /// wrong directory fails here and nowhere else.
     func testDeclineCallsDeclineProjectServersWithExactlyTheDeclinedNames() async throws {
         let (lifecycle, model) = await evaluated([.consentNeeded(Self.servers), .ready])
-        let servers = try XCTUnwrap(model.consentServers, "the consentNeeded verdict raised no sheet")
+        let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
 
-        let sheet = ConsentSheet(servers: servers, isAnswering: model.isAnswering,
-                                 accept: { model.accept(servers) },
-                                 decline: { model.decline(servers.map(\.name)) })
-        try press("Decline", in: sheet.body)
+        try press("Decline", in: sheet(for: request, on: model).body)
         await model.whenIdle()
 
         let declined = await lifecycle.declined
@@ -157,17 +175,86 @@ final class ConsentAndTrustTests: XCTestCase {
         let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
         await model.evaluate(channel: Self.channel, project: Self.project)
 
-        let servers = try XCTUnwrap(model.consentServers, "the consentNeeded verdict raised no sheet")
-        let sheet = ConsentSheet(servers: servers, isAnswering: model.isAnswering,
-                                 accept: { model.accept(servers) },
-                                 decline: { model.decline(servers.map(\.name)) })
+        let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
         XCTAssertEqual(counter.count, 0, "a process was built while the consent sheet was up")
-        try press("Accept", in: sheet.body)
+        try press("Accept", in: sheet(for: request, on: model).body)
         await model.whenIdle()
 
         XCTAssertEqual(counter.count, 0, "accepting the sheet spawned \(counter.count) process(es) itself")
         let opens = await lifecycle.actions.filter { if case .open = $0.action { true } else { false } }
         XCTAssertEqual(opens.count, 0, "the consent path performed \(opens.count) open action(s) of its own")
+    }
+
+    // MARK: - Two evaluations, one surface
+
+    /// A verdict read for an evaluation the user has already navigated past **never reaches the
+    /// surface**.
+    ///
+    /// `preconditions(for:)` is a call to the fleet and nothing orders two of them: the column
+    /// re-evaluates whenever the selection moves, so A's read can complete after B's. A model that
+    /// published whatever came back last would put A's `consentNeeded` on screen beside B's
+    /// project — and the sheet's two answers act on exactly that pair, so the acceptance would be
+    /// recorded for a project the user never saw.
+    ///
+    /// The out-of-order completion is constructed rather than hoped for: A's read is held inside the
+    /// double until B's has settled.
+    func testASupersededEvaluationsVerdictNeverReachesTheSurface() async throws {
+        let lifecycle = ConsentDouble()
+        // A reads `consentNeeded`; B reads `ready`. A is held, so it returns second.
+        await lifecycle.stage([.consentNeeded(Self.servers), .ready])
+        await lifecycle.gateNextPreconditions()
+        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+
+        let first = Task { await model.evaluate(channel: Self.channel, project: Self.project) }
+        while await lifecycle.gated == 0 { await Task.yield() }
+
+        await model.evaluate(channel: Self.otherChannel, project: Self.otherProject)
+        XCTAssertTrue(model.consentRequest == nil, "the second channel's ready verdict raised a sheet of its own")
+
+        await lifecycle.releaseGate()
+        await first.value
+
+        XCTAssertTrue(model.consentRequest == nil,
+                      "a superseded evaluation's consent sheet reached the surface after a later one settled")
+        let evaluation = try XCTUnwrap(model.evaluation, "no evaluation is on screen at all")
+        XCTAssertTrue(evaluation.project == Self.otherProject,
+                      "the surface holds a project the last evaluation did not read")
+        XCTAssertTrue(evaluation.channel == Self.otherChannel,
+                      "the surface holds a channel the last evaluation did not read")
+    }
+
+    /// The sheet's two answers act on **the project and the servers the sheet was shown with**, and
+    /// a sheet whose evaluation has been superseded answers nothing.
+    ///
+    /// This needs no out-of-order completion at all: starting B's evaluation changes what the model
+    /// holds while A's sheet is still on screen and still pressable. Both directions, because an
+    /// accept that recorded nothing at all would pass the first clause alone.
+    func testASupersededSheetRecordsNothingAndTheCurrentOneRecordsItsOwnProject() async throws {
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.consentNeeded(Self.servers), .consentNeeded(Self.otherServers)])
+        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+
+        await model.evaluate(channel: Self.channel, project: Self.project)
+        let stale = try XCTUnwrap(model.consentRequest, "the first channel raised no sheet")
+
+        await model.evaluate(channel: Self.otherChannel, project: Self.otherProject)
+        let current = try XCTUnwrap(model.consentRequest, "the second channel raised no sheet")
+        XCTAssertNotEqual(stale.id, current.id, "the second evaluation reused the first one's sheet")
+
+        try press("Accept", in: sheet(for: stale, on: model).body)
+        await model.whenIdle()
+        let afterStale = await lifecycle.accepted
+        XCTAssertEqual(afterStale.count, 0,
+                       "a sheet the selection has moved past recorded \(afterStale.count) acceptance(s)")
+
+        try press("Accept", in: sheet(for: current, on: model).body)
+        await model.whenIdle()
+        let accepted = await lifecycle.accepted
+        XCTAssertEqual(accepted.count, 1, "the current sheet emitted \(accepted.count) acceptProjectServers call(s)")
+        XCTAssertTrue(accepted.first?.project == Self.otherProject,
+                      "the acceptance was recorded against a project the sheet did not show")
+        XCTAssertEqual(accepted.first?.servers.map(\.name), Self.otherServers.map(\.name),
+                       "the acceptance named servers the sheet did not list")
     }
 
     // MARK: - G4b: a refused decline
@@ -179,7 +266,7 @@ final class ConsentAndTrustTests: XCTestCase {
         let (lifecycle, model) = await evaluated([.consentNeeded(Self.servers)])
         await lifecycle.refuseDecline(reason: "symlink")
 
-        model.decline(Self.servers.map(\.name))
+        model.decline(try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet"))
         await model.whenIdle()
 
         let banner = try XCTUnwrap(model.banner, "a refused decline raised no banner")
@@ -191,7 +278,7 @@ final class ConsentAndTrustTests: XCTestCase {
                       "the refusal banner does not say that nothing spawned")
         XCTAssertTrue(banner.text.contains("symlink"),
                       "the refusal banner does not name the store's own reason")
-        XCTAssertNotNil(model.consentServers, "a refused decline let the consent sheet close")
+        XCTAssertTrue(model.consentRequest != nil, "a refused decline let the consent sheet close")
     }
 
     // MARK: - G4c: the trust banner
@@ -297,14 +384,37 @@ actor ConsentDouble: LifecycleAPI {
         (jobUpdates, jobContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
+    /// Holds the next `preconditions` read inside the double until `releaseGate()`, so a test can
+    /// construct the completion order two concurrent evaluations do not otherwise have. The verdict
+    /// is drawn from the queue *before* the hold, so which read gets which verdict is settled by
+    /// call order and not by completion order.
+    private var gateNext = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    /// How many reads the gate has caught. A test waits on this rather than on a duration.
+    private(set) var gated = 0
+
+    func gateNextPreconditions() { gateNext = true }
+    func releaseGate() {
+        for continuation in held { continuation.resume() }
+        held = []
+    }
+
     func stage(_ verdicts: [SpawnPrecondition]) { self.verdicts = verdicts }
     func refuseDecline(reason: String) { declineRefusal = .declineRefused(reason: reason) }
     func setSpawn(_ factory: @escaping ProcessFactory) { spawn = factory }
 
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition {
-        guard let next = verdicts.first else { return .ready }
-        if verdicts.count > 1 { verdicts.removeFirst() }
-        return next
+        var verdict = SpawnPrecondition.ready
+        if let next = verdicts.first {
+            verdict = next
+            if verdicts.count > 1 { verdicts.removeFirst() }
+        }
+        if gateNext {
+            gateNext = false
+            gated += 1
+            await withCheckedContinuation { held.append($0) }
+        }
+        return verdict
     }
 
     func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async {

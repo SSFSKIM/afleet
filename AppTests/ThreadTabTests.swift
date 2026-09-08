@@ -228,6 +228,82 @@ final class ThreadTabTests: XCTestCase {
         XCTAssertTrue(model.offersReply, "the tool-detail thread offered no reply")
     }
 
+    // MARK: - G2: the thread and the channel's fold
+
+    /// The ruling that closes tracker 157's `raise` clause for this host: **a card answered from
+    /// the Thread tab leaves nothing pending.**
+    ///
+    /// The engine sends no frame back for an answer, so the only thing that can move a
+    /// `DecisionItem` out of `.pending` is the host saying it answered —
+    /// `HostSignal.decisionAnswered` through `ChannelTimelineModel.signal(_:)`. Nothing assigned
+    /// `DecisionAnswering.raise`, so the loop was complete and not closed: the answer went to the
+    /// engine and the card stayed pending on screen for ever. The tab is handed the app's one
+    /// registry at its construction, and this drives the whole path — a real fold over a recorded
+    /// channel, the tab's own session, and a press on the card's own button.
+    ///
+    /// **The ask is pushed rather than replayed.** `permission-allow` opens `mcp_message` requests
+    /// the inbound policy answers itself, so a wait on "a decision exists" would return while every
+    /// decision present is one the host never has to answer. Pushing the one request under test
+    /// makes both the wait and the count exact.
+    func testAnsweringADecisionFromTheThreadTabLeavesNothingPending() async throws {
+        let rig = try await ThreadFoldRig(fixture: "permission-allow")
+        await rig.open()
+        let ask = try rig.pushPendingAsk()
+        let raised = await rig.settle { $0.timeline.overlay.decisions[ask.id]?.state == .pending }
+        XCTAssertTrue(raised, "the pushed ask never became a pending decision the host has to answer")
+
+        let model = try rig.thread()
+        model.open(.decision(DecisionCard(try rig.pending(ask))))
+        try press("Allow once", in: try XCTUnwrap(CardTree.permissionBody(in: ThreadView(model: model).body),
+                                                  "the decision thread drew no permission card"))
+        await model.answering.whenIdle()
+
+        let answered = await rig.settle { ThreadFoldRig.pendingCount(in: $0) == 0 }
+        XCTAssertTrue(answered,
+                      "answering from the Thread tab left \(ThreadFoldRig.pendingCount(in: rig.model)) pending decision(s)")
+        let actions = await rig.lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "one press produced \(actions.count) lifecycle action(s)")
+        XCTAssertTrue(answer(in: actions) != nil, "the press sent no answer")
+    }
+
+    /// And the anchor is a *view* of the fold, not a snapshot of it: a decision settled by any
+    /// surface reads as settled in the open thread, and a reply to it is refused.
+    ///
+    /// `ThreadAnchor.decision` carries a `DecisionCard`, which is a value: it was pending when the
+    /// thread opened and would stay pending however the request ended. The timeline row and Activity
+    /// answer requests for channels whose thread is open beside them, and nothing tells the thread —
+    /// so the card would go on offering a reply, and the reply would be a second `perform(.answer)`
+    /// the supervisor rejects.
+    ///
+    /// The settlement is raised on the fold directly, which is what another surface's answer does,
+    /// and the snapshot is re-asserted afterwards so the clause cannot pass by the anchor having
+    /// been mutated.
+    func testTheDecisionThreadReadsTheFoldRatherThanTheCardItOpenedOn() async throws {
+        let rig = try await ThreadFoldRig(fixture: "permission-allow")
+        await rig.open()
+        let ask = try rig.pushPendingAsk()
+        let raised = await rig.settle { $0.timeline.overlay.decisions[ask.id]?.state == .pending }
+        XCTAssertTrue(raised, "the pushed ask never became a pending decision the host has to answer")
+
+        let model = try rig.thread()
+        let opened = DecisionCard(try rig.pending(ask))
+        model.open(.decision(opened))
+        XCTAssertEqual(model.openDecision?.state, .pending, "the thread opened on a card that is not pending")
+
+        // Another surface answers it — the timeline row, or Activity, both of which raise here.
+        await rig.model.signal(.decisionAnswered(ask.id, outcome: .allowed))
+
+        XCTAssertEqual(opened.state, .pending, "the anchor's own snapshot moved, so this clause proves nothing")
+        XCTAssertEqual(model.openDecision?.state, .answered(outcome: "allowed"),
+                       "the open thread still reads the card it was opened on")
+
+        model.draft = "An invented second thought."
+        try press("Send", in: ThreadView(model: model).body)
+        await model.answering.whenIdle()
+        let actions = await rig.lifecycle.actions
+        XCTAssertEqual(actions.count, 0, "a settled decision took \(actions.count) further answer(s)")
+    }
+
     // MARK: - G2: replying to a card is answering it
 
     /// Item 37: a reply to a pending permission card sends `.deny` with the typed text as the
@@ -375,6 +451,51 @@ final class ThreadTabTests: XCTestCase {
         XCTAssertEqual(thread.exchanges.count, 2, "the thread holds \(thread.exchanges.count) exchanges")
     }
 
+    /// A second question typed while the first ask is still on the wire **is not lost**.
+    ///
+    /// Only one ask goes at a time — `side_question` is a control request with a reply, and the
+    /// thread accumulates its history in ask order — so the second press has to be refused. What it
+    /// must not do is clear the field on the way to refusing it: the model holds the only copy of
+    /// what the user typed, and *Ask* is the one control this thread has.
+    ///
+    /// The overlap is constructed rather than hoped for: the first ask is held inside the double
+    /// until the second press has happened.
+    func testASecondSideQuestionTypedWhileOneIsPendingKeepsItsDraft() async throws {
+        let (lifecycle, model) = await hosted()
+        await lifecycle.stageReply(.success(.object(["response": .string("An invented side answer."),
+                                                     "synthetic": .bool(false)])))
+        await lifecycle.gateNextSend()
+        let thread = SideQuestionThread(anchorText: "An invented message.")
+        model.open(.sideQuestion(thread))
+
+        model.draft = "An invented first question?"
+        try press("Ask", in: ThreadView(model: model).body)
+        while await lifecycle.gated == 0 { await Task.yield() }
+        XCTAssertEqual(model.draft, "", "the accepted ask left its own text in the field")
+        XCTAssertTrue(ThreadView.isBlocked(try XCTUnwrap(model.anchor, "the thread closed itself"), model: model),
+                      "Ask stayed enabled while an ask was on the wire")
+
+        model.draft = "An invented second question?"
+        try press("Ask", in: ThreadView(model: model).body)
+        XCTAssertEqual(model.draft, "An invented second question?",
+                       "the refused ask cleared the field and the second question was lost")
+
+        await lifecycle.releaseGate()
+        await thread.settled(1)
+        var requests = await lifecycle.sent
+        XCTAssertEqual(requests.count, 1, "two presses sent \(requests.count) control request(s)")
+
+        // And the draft that survived is still askable, which is the whole point of keeping it.
+        await lifecycle.stageReply(.success(.object(["response": .string("An invented second answer."),
+                                                     "synthetic": .bool(false)])))
+        try press("Ask", in: ThreadView(model: model).body)
+        await thread.settled(2)
+        requests = await lifecycle.sent
+        XCTAssertEqual(requests.count, 2, "the preserved draft sent \(requests.count) control request(s) in total")
+        XCTAssertTrue(requests.last?.payload["question"] == .string("An invented second question?"),
+                      "the second ask carried a question the user did not type")
+    }
+
     /// Item 10's negative, and the clause the item exists for: **the main transcript gains no
     /// records**. Counted as durable items before and after, in both directions.
     ///
@@ -417,6 +538,30 @@ final class ThreadTabTests: XCTestCase {
 
         XCTAssertEqual(reducer.durable.items.count, before + 1,
                        "a posted reply moved the count by \(reducer.durable.items.count - before), not by one")
+    }
+
+    // MARK: - G2: the thread is reachable
+
+    /// A thread's content scrolls, and the reply control stays outside the scroll container.
+    ///
+    /// §7.5's tool-detail thread draws a call's whole input and whole output, and the panel column
+    /// this tab is drawn in adds no scroll container of its own: an oversized output in a plain
+    /// stack pushes everything below it out of the tab, and what is below it is the one control the
+    /// thread has. Both halves are asserted — the content inside, the reply outside — because a
+    /// scroll view wrapped around *everything* would answer the first and re-create the second.
+    func testTheThreadsContentScrollsAndTheReplyControlStaysReachable() async throws {
+        let (_, model) = await hosted()
+        let (call, _) = try postingAnchors()
+        model.open(.toolDetail(call))
+
+        let body = ThreadView(model: model).body
+        let scrolled = try XCTUnwrap(ViewTree.scrollViewContent(in: body),
+                                     "the thread draws its content in no scroll container")
+        XCTAssertTrue(CardTree.texts(in: scrolled).contains("Input"),
+                      "the tool detail's own content is outside the scroll container")
+        XCTAssertTrue(ViewTree.button("Send", in: scrolled) == nil,
+                      "the reply control scrolls away with the content it replies to")
+        XCTAssertTrue(ViewTree.button("Send", in: body) != nil, "the thread offers no reply control at all")
     }
 }
 
@@ -479,6 +624,19 @@ actor ThreadDouble: LifecycleAPI {
         (jobUpdates, jobContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
+    /// Holds the next `send` inside the double until `releaseGate()`, so a test can press *Ask* a
+    /// second time while the first ask is genuinely still on the wire.
+    private var gateNext = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    /// How many sends the gate has caught. A test waits on this rather than on a duration.
+    private(set) var gated = 0
+
+    func gateNextSend() { gateNext = true }
+    func releaseGate() {
+        for continuation in held { continuation.resume() }
+        held = []
+    }
+
     func always(_ outcome: Result<ChannelState, LifecycleError>) { self.outcome = outcome }
     /// What the next `send` answers. A queue, so two asks are answered differently.
     func stageReply(_ reply: Result<JSONValue, WireError>) { replies.append(reply) }
@@ -491,6 +649,11 @@ actor ThreadDouble: LifecycleAPI {
 
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         sent.append(request)
+        if gateNext {
+            gateNext = false
+            gated += 1
+            await withCheckedContinuation { held.append($0) }
+        }
         guard !replies.isEmpty else { return .object([:]) }
         return try replies.removeFirst().get()
     }
@@ -540,5 +703,152 @@ extension SideQuestionThread {
     func settled(_ count: Int) async {
         while exchanges.count < count { await Task.yield() }
         while isAsking { await Task.yield() }
+    }
+}
+
+/// A channel with a real fold: a scratch config home, one committed recording placed in it, the app's
+/// one `ChannelTimelineRegistry` over it, and the Thread tab built the way `performLaunch` builds it.
+///
+/// The two clauses that need one are about the seam between this tab and the channel's fold, and a
+/// double in place of the fold would assert that a closure ran rather than that a decision left
+/// `.pending`. `TempTree` refuses to build inside any config home, the recording is copied in at run
+/// time, and nothing is written under a config home the app did not create (X9, §11).
+@MainActor
+private struct ThreadFoldRig {
+
+    let temp: TempTree
+    let home: ScratchConfigHome
+    let workspace: Workspace
+    let lifecycle: LifecycleDouble
+    let registry: ChannelTimelineRegistry
+    let key: ChannelKey
+
+    var model: ChannelTimelineModel { registry.model(for: key) }
+
+    /// The tab's access to this rig's fold, through the same initialiser the composition root uses.
+    var fold: ChannelFold { ChannelFold(timelines: registry) }
+
+    init(fixture: String) async throws {
+        temp = try TempTree()
+        home = try ScratchConfigHome(tree: temp)
+        let projects = home.root.appending(path: "projects", directoryHint: .isDirectory)
+
+        let transcripts = Self.fixtures.appending(path: fixture).appending(path: "transcript")
+        let slugs = try FileManager.default.contentsOfDirectory(at: transcripts, includingPropertiesForKeys: nil)
+        var found: (session: SessionID, slug: URL)?
+        for slug in slugs {
+            let files = (try? FileManager.default.contentsOfDirectory(at: slug, includingPropertiesForKeys: nil)) ?? []
+            for file in files where file.pathExtension == "jsonl" {
+                guard let session = TranscriptPath.mainTranscript(fileName: file.lastPathComponent) else { continue }
+                found = (session, slug)
+            }
+        }
+        guard let found else { throw ThreadRigError.noTranscript(fixture) }
+        key = ChannelKey(configHome: home.configHome.root, session: found.session)
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: found.slug,
+                                         to: projects.appending(path: found.slug.lastPathComponent,
+                                                                directoryHint: .isDirectory))
+
+        let index = TranscriptIndex(configHome: home.configHome, storage: InMemoryIndexStorage())
+        _ = try await index.build()
+        let store = try FileStateStore(baseDirectory: temp.root.appending(path: "store", directoryHint: .isDirectory),
+                                       configHomes: [home.root])
+        let watcher = StubWatcher()
+        let feed = TranscriptChangeFeed(source: watcher.changes)
+        await feed.start()
+
+        lifecycle = LifecycleDouble()
+        workspace = Workspace(configHome: home.configHome,
+                              environment: LaunchFixtures.environment(home: temp.root, configHome: home.root),
+                              binary: try temp.file("bin/claude", "#!/bin/sh\nexit 0\n"),
+                              installed: SemanticVersion(major: 2, minor: 1, patch: 263),
+                              store: store,
+                              index: index,
+                              fleet: StubFleet(),
+                              watcher: watcher,
+                              changes: feed,
+                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)),
+                              rawCapture: nil)
+        registry = ChannelTimelineRegistry()
+        registry.attach(to: workspace, lifecycle: lifecycle)
+        // An owned channel, so the model's `events(of:)` really answers and a pushed request lands.
+        await lifecycle.openEvents(of: key)
+        // Every answer this rig drives is accepted, so what is asserted is what the tab did with it.
+        await lifecycle.always(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+    }
+
+    func open() async {
+        await model.open(ChannelRow(key: key,
+                                    title: "a recorded channel",
+                                    titleSource: .firstPrompt,
+                                    preview: "invented preview",
+                                    cwd: URL(fileURLWithPath: "/invented/project"),
+                                    gitBranch: nil,
+                                    agentName: nil,
+                                    mtime: Date(),
+                                    isRecent: true,
+                                    mode: .ownedCandidate,
+                                    decidingRule: "invented",
+                                    isProvisional: false,
+                                    state: SidebarFixtures.state(key, origin: .owned(.ready))))
+    }
+
+    /// The tab as `performLaunch` builds it, and the session it makes for this channel.
+    func thread() throws -> ThreadModel {
+        let tab = ThreadTab(lifecycle: lifecycle, fold: fold)
+        let session = tab.makeSession(for: ThreadFixtures.context(key))
+        guard let model = session as? ThreadModel else { throw ThreadRigError.noSession }
+        return model
+    }
+
+    /// Pushes the one `can_use_tool` ask under test, re-keyed to an invented request id.
+    func pushPendingAsk() throws -> InboundRequest {
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "req_invented_c63_thread_0001")
+        guard case .request = FixtureRunner.event(for: ask) else { throw ThreadRigError.notSurfaced }
+        lifecycle.enqueue(.request(ask), to: key)
+        return ask
+    }
+
+    /// The fold's item for a pushed ask.
+    func pending(_ ask: InboundRequest) throws -> DecisionItem {
+        guard let item = model.timeline.overlay.decisions[ask.id] else { throw ThreadRigError.noDecision }
+        return item
+    }
+
+    static func pendingCount(in model: ChannelTimelineModel) -> Int {
+        model.timeline.overlay.decisions.values.filter { $0.state == .pending }.count
+    }
+
+    /// Waits, bounded, for the model to satisfy `predicate`, and returns whether it did, so the
+    /// caller asserts the outcome rather than discarding the wait.
+    func settle(_ predicate: @MainActor (ChannelTimelineModel) -> Bool) async -> Bool {
+        for _ in 0..<400 {
+            if predicate(model) { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return predicate(model)
+    }
+
+    static var fixtures: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appending(path: "Fixtures")
+    }
+}
+
+private enum ThreadRigError: Error, CustomStringConvertible {
+    case noTranscript(String)
+    case noSession
+    case notSurfaced
+    case noDecision
+
+    var description: String {
+        switch self {
+        case .noTranscript(let fixture): "fixture \(fixture) carries no main transcript"
+        case .noSession: "the Thread tab made a session that is not a thread model"
+        case .notSurfaced: "the inbound policy does not surface a can_use_tool ask, so nothing would be pending"
+        case .noDecision: "the fold holds no decision for the pushed ask"
+        }
     }
 }
