@@ -36,14 +36,25 @@ final class PTYMasterDescriptor: Sendable {
 }
 
 public actor PTYProcess {
+    // Task 6 replaces this single policy with bounded, coalesced delivery. Keeping the current
+    // behavior named here avoids threading an implicit AsyncStream default through the actor.
+    private static let eventBufferingPolicy: AsyncStream<PTYEvent>.Continuation.BufferingPolicy =
+        .unbounded
+
     public nonisolated let events: AsyncStream<PTYEvent>
     public nonisolated let processIdentifier: pid_t
 
     private let master: PTYMasterDescriptor
     private let writeQueue: DispatchQueue
+    private let waitQueue: DispatchQueue
     private let eventContinuation: AsyncStream<PTYEvent>.Continuation
     private let readSource: DispatchSourceRead
+    private let stopPolicy: PTYStopPolicy
     private var masterIsOpen = true
+    private var masterReachedEnd = false
+    private var termination: PTYTermination?
+    private var childStatusUnavailable = false
+    private var streamWasFinished = false
 
     /// The gate that makes `write` a queue rather than a race. A caller that has to wait for the
     /// master to drain suspends, which lets a second `write` enter the actor; without the gate
@@ -71,7 +82,9 @@ public actor PTYProcess {
 
     public init(spawning request: PTYSpawnRequest) throws {
         let spawned = try DarwinPTY.spawn(request)
-        let eventChannel = AsyncStream<PTYEvent>.makeStream()
+        let eventChannel = AsyncStream<PTYEvent>.makeStream(
+            bufferingPolicy: Self.eventBufferingPolicy
+        )
         let queue = DispatchQueue(label: "app.afleet.terminal-core.pty-read")
         let descriptor = PTYMasterDescriptor(value: spawned.masterDescriptor)
         let source = DispatchSource.makeReadSource(
@@ -87,6 +100,8 @@ public actor PTYProcess {
         // Writability waits get their own queue: a write source stays armed until the actor can
         // take it down, and on the read queue that window would delay the child's output.
         writeQueue = DispatchQueue(label: "app.afleet.terminal-core.pty-write")
+        waitQueue = DispatchQueue(label: "app.afleet.terminal-core.pty-wait")
+        stopPolicy = request.stopPolicy
 
         let readDescriptor = spawned.masterDescriptor
         let continuation = eventChannel.continuation
@@ -109,9 +124,52 @@ public actor PTYProcess {
         }
         source.setCancelHandler { descriptor.release() }
         source.resume()
+
+        let processIdentifier = spawned.processIdentifier
+        // The statuses `waitpid` returns are ordered — a stop, then whatever ended the child —
+        // and the actor has to see them in that order: under `.detach` the stop handler is what
+        // sends the signals that produce the end. Handing each status to its own unstructured
+        // `Task` would put that order up to the scheduler, so the waiter instead delivers one
+        // status at a time and blocks until the actor has finished with it. Only this dedicated
+        // queue's thread blocks; no cooperative executor is involved, and no further `waitpid`
+        // runs until the previous status has been handled.
+        waitQueue.async { [weak self] in
+            while true {
+                var status: Int32 = 0
+                let result = Darwin.waitpid(processIdentifier, &status, WUNTRACED)
+                // Read out of the weak capture once: the delivery closure needs a value it can
+                // carry across the hop, and it is held only for the length of that hop.
+                let owner = self
+                if result == processIdentifier {
+                    let waitStatus = ChildWaitStatus(status)
+                    Self.deliver { await owner?.received(waitStatus) }
+                    if waitStatus.isTerminal { return }
+                } else if result == -1, errno == EINTR {
+                    continue
+                } else {
+                    Self.deliver { await owner?.waiterFinishedWithoutStatus() }
+                    return
+                }
+            }
+        }
+    }
+
+    /// Runs one actor hop from the waiter queue and waits for it to complete, which is what
+    /// keeps successive statuses in the order `waitpid` produced them. Safe to block on: the
+    /// caller is the dedicated waiter queue, never a cooperative executor, and the body reaches
+    /// the actor through a reference that is already `nil` once the owner has gone away.
+    private static func deliver(_ body: @escaping @Sendable () async -> Void) {
+        let delivered = DispatchSemaphore(value: 0)
+        Task {
+            await body()
+            delivered.signal()
+        }
+        delivered.wait()
     }
 
     deinit {
+        // Releasing the last master is the terminal hangup: macOS continues a stopped foreground
+        // group, sends it SIGHUP, and the dedicated waiter remains alive long enough to reap it.
         readSource.cancel()
     }
 
@@ -153,6 +211,19 @@ public actor PTYProcess {
             } else {
                 throw PTYError.systemCall(operation: .write, code: failure)
             }
+        }
+    }
+
+    public func resize(to size: TerminalSize) throws {
+        guard masterIsOpen else { throw PTYError.closed }
+        var windowSize = winsize(
+            ws_row: UInt16(truncatingIfNeeded: size.rows),
+            ws_col: UInt16(truncatingIfNeeded: size.columns),
+            ws_xpixel: UInt16(truncatingIfNeeded: size.pixelWidth),
+            ws_ypixel: UInt16(truncatingIfNeeded: size.pixelHeight)
+        )
+        guard ioctl(master.value, TIOCSWINSZ, &windowSize) != -1 else {
+            throw PTYError.systemCall(operation: .resize, code: errno)
         }
     }
 
@@ -246,13 +317,77 @@ public actor PTYProcess {
         wait.continuation.resume(with: result)
     }
 
-    private func readEnded() {
+    private func received(_ status: ChildWaitStatus) {
+        switch status {
+        case let .stopped(signal):
+            eventContinuation.yield(.stopped(signal: signal))
+            if stopPolicy == .detach {
+                _ = Darwin.kill(-processIdentifier, SIGCONT)
+                _ = Darwin.kill(-processIdentifier, SIGHUP)
+            }
+        case let .ended(childTermination):
+            termination = childTermination
+            finishIfChildAndMasterEnded()
+        }
+    }
+
+    /// The waiter gave up without ever seeing a terminal status, which is what happens when
+    /// something outside this actor reaps the child first. No status was observed, so no
+    /// termination is invented; the stream is only allowed to finish. Not `private`: the arrival
+    /// order that has to be remembered — this before the master's end of file — is a race in
+    /// production and is driven directly from the tests.
+    func waiterFinishedWithoutStatus() {
+        childStatusUnavailable = true
+        finishIfChildAndMasterEnded()
+    }
+
+    /// Not `private` for the same reason as `waiterFinishedWithoutStatus`.
+    func readEnded() {
         guard masterIsOpen else { return }
         masterIsOpen = false
+        masterReachedEnd = true
         for identifier in Array(writabilityWaits.keys) {
             finishWritabilityWait(identifier, with: .failure(PTYError.closed))
         }
-        eventContinuation.finish()
         readSource.cancel()
+        finishIfChildAndMasterEnded()
+    }
+
+    /// The stream ends once the master has reached end of file and the child's fate is settled.
+    /// "Settled" has two shapes: a status the waiter observed, which becomes the `ended` event,
+    /// and a status nobody will ever observe because something outside reaped the child first.
+    /// The second shape carries no termination, so none is invented — the stream just finishes.
+    /// Either half can arrive first, so this is called from both and reconciles what it finds.
+    private func finishIfChildAndMasterEnded() {
+        guard masterReachedEnd, !streamWasFinished else { return }
+        if let termination {
+            streamWasFinished = true
+            eventContinuation.yield(.ended(termination))
+            eventContinuation.finish()
+        } else if childStatusUnavailable {
+            streamWasFinished = true
+            eventContinuation.finish()
+        }
+    }
+}
+
+private enum ChildWaitStatus: Sendable {
+    case stopped(signal: Int32)
+    case ended(PTYTermination)
+
+    init(_ status: Int32) {
+        let waitKind = status & 0x7f
+        if waitKind == 0x7f {
+            self = .stopped(signal: (status >> 8) & 0xff)
+        } else if waitKind == 0 {
+            self = .ended(.exited(code: (status >> 8) & 0xff))
+        } else {
+            self = .ended(.signalled(signal: waitKind))
+        }
+    }
+
+    var isTerminal: Bool {
+        if case .ended = self { return true }
+        return false
     }
 }

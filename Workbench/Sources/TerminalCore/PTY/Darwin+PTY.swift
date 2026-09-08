@@ -11,10 +11,12 @@ public enum PTYOperation: Hashable, Sendable {
     case closeInheritedDescriptor
     case initializeSpawnAttributes
     case setSignalDefaults
+    case setSignalMask
     case setSpawnFlags
     case allocateArguments
     case spawn
     case readForegroundProcessGroup
+    case resize
     case write
 }
 
@@ -140,13 +142,25 @@ enum DarwinPTY {
         result = posix_spawnattr_setsigdefault(&attributes, &defaultedSignals)
         try requireSuccess(result, operation: .setSignalDefaults)
 
+        // Dispatch worker threads block signals, and posix_spawn otherwise inherits that mask.
+        // Start the child with no blocked signals so its default dispositions can take effect.
+        var blockedSignals = sigset_t()
+        sigemptyset(&blockedSignals)
+        result = posix_spawnattr_setsigmask(&attributes, &blockedSignals)
+        try requireSuccess(result, operation: .setSignalMask)
+
         // CLOEXEC_DEFAULT closes every descriptor the file actions do not name, so the child
         // receives its terminal and nothing else. The explicit closes below stay: they are what
         // names the inherited master and slave, and under CLOEXEC_DEFAULT they are also what
         // keeps the intent readable when the flag is read alone.
         result = posix_spawnattr_setflags(
             &attributes,
-            Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_CLOEXEC_DEFAULT)
+            Int16(
+                POSIX_SPAWN_SETSID
+                    | POSIX_SPAWN_SETSIGDEF
+                    | POSIX_SPAWN_SETSIGMASK
+                    | POSIX_SPAWN_CLOEXEC_DEFAULT
+            )
         )
         try requireSuccess(result, operation: .setSpawnFlags)
 
