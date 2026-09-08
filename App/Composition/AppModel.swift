@@ -10,7 +10,7 @@ import Workbench
 /// call as the first launch, and what lets the whole sequence be tested without a window.
 @MainActor
 @Observable
-final class AppModel {
+final class AppModel: FilesTabHost {
     private(set) var route: AppRoute = .launching
 
     /// The sequence, with its seams. Production values by default; a test replaces the ones it
@@ -140,14 +140,46 @@ final class AppModel {
         // C7.5's Files tab under `.files`, which nothing holds, so it is a plain registration and
         // not a handover (C7.5 Design §10). Asserted for the same reason: a shipped tab that
         // vanished from the tab bar with no signal is the thing this must not do quietly.
+        //
+        // Its two link targets are registered **with the tab**, not with its first session: the
+        // host builds a session lazily, for rendering, so a `.file` or `.diff` link raised before
+        // anyone has looked at Files would otherwise resolve to nothing (C7.5 Design §9).
+        // Spawned, because registration is a hop onto the link registry's actor and this is not.
+        let files = FilesTab(host: self)
         do {
             try panels.register(PlaceholderTab())
             panels.select(.thread)
-            try panels.register(FilesTab())
+            try panels.register(files)
         } catch {
             assertionFailure("the shipped tabs are the first registrations on a freshly built host")
         }
+        Task { await files.registerLinkTargets(through: panels.links) }
     }
+
+    // MARK: - The Files panel's link deliveries (C7.5 spec Design §9)
+
+    /// What a delivered `.file` or `.diff` opens in: the Files session for the channel the main
+    /// window is showing, built if this is its first visit.
+    ///
+    /// **It creates where `filesSaveTarget` refuses to**, and the difference is what asked. A menu
+    /// item computing its own enabled state must not bring a panel into being; a link the user
+    /// clicked is an instruction to open something now, and the channel it belongs to may never
+    /// have shown Files.
+    ///
+    /// **The channel is the host's, not the render path's.** `PanelColumnView` draws only the
+    /// selected tab, so moving channels with Thread up renders no Files view, and a pop-out draws
+    /// one for a channel of its own; resolving through the last render would send the delivery to
+    /// whichever channel was drawn last. This is the Y-side of tracker 240's mitigation, and it is
+    /// still only a mitigation — a link on behalf of a channel that is not on screen cannot say so
+    /// until X7 carries the originating channel.
+    func filesSession() -> FilesPanelSession? {
+        guard let key = panels.selectedChannel,
+              let context = panels.context(for: key) else { return nil }
+        return panels.session(for: .files, context: context) as? FilesPanelSession
+    }
+
+    /// Brings Files forward, so a routed file does not open in a panel nobody can see.
+    func selectFilesTab() { panels.select(.files) }
 
     // MARK: - The Files panel's save (C7.5 spec Design §7)
 

@@ -73,7 +73,7 @@ public actor FileWatch {
         lastObserved = baseline ?? FileSnapshot.read(url)
         switch mode {
         case .poll: startPolling()
-        case .vnode: if !arm() { startPolling() }
+        case .vnode: if !arm() || watchesASymbolicLink { startPolling() }
         }
         // The gap between the session's read and the arming belongs to nobody: a write that
         // completed inside it fired no source event, and under the vnode source there is no poll
@@ -95,6 +95,23 @@ public actor FileWatch {
     public var isPolling: Bool { pollTask != nil }
 
     // MARK: - The source
+
+    /// Whether the path is itself a symbolic link — `lstat(2)`'s answer, so the link and not what
+    /// it points at.
+    ///
+    /// A vnode source is armed on an inode and `open(2)` follows the link, so the source watches
+    /// the **target**: retargeting the link, or removing it, touches that inode not at all and
+    /// reaches the source never. The path is what the panel opened and what a save writes to, so
+    /// the poll stays armed beside the source for as long as the path is a link. It is asked again
+    /// at each decision rather than cached, because a path becomes and stops being a link while it
+    /// is being watched.
+    ///
+    /// Two sources — the target's plus an `O_SYMLINK` one on the link — was the alternative. It
+    /// observes the link's own inode but not its *replacement*, which is a directory operation and
+    /// the case that matters here, so it would need the poll anyway.
+    private var watchesASymbolicLink: Bool {
+        (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
+    }
 
     private func arm() -> Bool {
         guard !armed.isArmed else { return true }
@@ -137,7 +154,7 @@ public actor FileWatch {
         // The re-arm. Unconditional: an event mask says which inode ended, not which path is now
         // interesting, and re-opening is correct for an in-place write too.
         disarm()
-        if arm() { stopPolling() } else { startPolling() }
+        if arm(), !watchesASymbolicLink { stopPolling() } else { startPolling() }
         evaluate()
     }
 
@@ -166,8 +183,9 @@ public actor FileWatch {
 
     private func tick() {
         guard !stopped else { return }
-        // A path that has come back can be armed again, and the poll steps aside when it is.
-        if mode == .vnode, !armed.isArmed, arm() { stopPolling() }
+        // A path that has come back can be armed again, and the poll steps aside when it is — but
+        // never for a symbolic link, whose own replacement no source can see.
+        if mode == .vnode, !armed.isArmed, arm(), !watchesASymbolicLink { stopPolling() }
         evaluate()
     }
 

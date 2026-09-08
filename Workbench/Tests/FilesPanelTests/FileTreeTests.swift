@@ -136,6 +136,76 @@ final class FileTreeTests: XCTestCase {
         XCTAssertEqual(names(restored), names(unfiltered), "clearing restores order and count")
     }
 
+    /// A directory whose own name does not match is still the way to a loaded node that does.
+    /// The column flattens what `children(of:)` answers, so a directory dropped here takes every
+    /// loaded descendant off the screen with it and the filter appears to match nothing.
+    func testTheFilterKeepsADirectoryWhoseLoadedDescendantMatches() async throws {
+        try tree.file("src/main.swift")
+        try tree.file("src/nested/deep.swift")
+        try tree.file("docs/guide.md")
+        let model = FileTree(root: tree.root, environment: plainEnvironment, runner: ToolRunner())
+        // Expanded the way the column expands: every directory is asked for by the URL its own
+        // node carries, which is the key the listing is held under.
+        let atRoot = await model.children(of: tree.root)
+        let source = try XCTUnwrap(atRoot.first { $0.name == "src" })
+        let inSourceUnfiltered = await model.children(of: source.url)
+        let nested = try XCTUnwrap(inSourceUnfiltered.first { $0.name == "nested" })
+        _ = await model.children(of: nested.url)
+
+        model.filter = "main"
+
+        var top = names(await model.children(of: tree.root))
+        var inSource = names(await model.children(of: source.url))
+        XCTAssertEqual(top, ["src"],
+                       "the way to a loaded match was filtered away with the directories")
+        XCTAssertEqual(inSource, ["main.swift"],
+                       "the match itself is still listed under its directory")
+
+        model.filter = "deep"
+        top = names(await model.children(of: tree.root))
+        inSource = names(await model.children(of: source.url))
+        XCTAssertEqual(top, ["src"], "a match two levels down keeps its ancestors")
+        XCTAssertEqual(inSource, ["nested"],
+                       "the intermediate directory is kept for the match below it")
+
+        model.filter = "nothing-here"
+        top = names(await model.children(of: tree.root))
+        XCTAssertEqual(top, [], "a filter nothing matches still empties the listing")
+    }
+
+    // MARK: - 4b. turning the ignore toggle on
+
+    /// The column keys its enumeration on `hidesIgnoredFiles`, so the moment that property moves
+    /// it rebuilds its rows from whatever the cache holds *then*. A toggle published before the
+    /// classification it pays for therefore rebuilds over unclassified entries, and nothing later
+    /// moves the key again: the ignored rows stay on screen until something else refreshes.
+    /// So the toggle is published only once the answer is in the listing.
+    func testTurningTheIgnoreToggleOnPublishesItOnlyOnceTheClassificationIsInTheListing() async throws {
+        let repository = try await GitRepository(tree)
+        try repository.write(".gitignore", "*.log\n")
+        try repository.write("noisy.log", "noise\n")
+        try repository.write("kept.txt", "kept\n")
+        let model = FileTree(root: repository.root, environment: repository.environment,
+                             runner: ToolRunner(), hidesIgnoredFiles: false)
+        _ = await model.children(of: repository.root)
+        XCTAssertTrue(model.entries(of: repository.root).allSatisfy { !$0.isIgnored },
+                      "the premise did not hold: the listing was already classified")
+
+        let toggling = Task { await model.setHidesIgnoredFiles(true) }
+        let deadline = ContinuousClock().now + .seconds(20)
+        while !model.hidesIgnoredFiles, ContinuousClock().now < deadline { await Task.yield() }
+        // Read synchronously, at the first moment a view observing the toggle would rebuild.
+        let ignoredWhenTheTogglePublished =
+            Set(model.entries(of: repository.root).filter(\.isIgnored).map(\.name))
+        await toggling.value
+
+        XCTAssertTrue(model.hidesIgnoredFiles, "the toggle never published")
+        XCTAssertEqual(ignoredWhenTheTogglePublished, ["noisy.log"],
+                       "the toggle published before the classification it pays for")
+        let visible = names(await model.children(of: repository.root))
+        XCTAssertEqual(visible, ["kept.txt"])
+    }
+
     // MARK: - 5. the gitignore batch
 
     func testTheGitignoreBatchNamesWhichEntriesAreIgnored() async throws {

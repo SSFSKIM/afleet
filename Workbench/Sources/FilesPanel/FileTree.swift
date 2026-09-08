@@ -104,7 +104,7 @@ public final class FileTree {
     public func children(of directory: URL) async -> [Node] {
         if loaded[directory] == nil {
             guard isEnumerable(directory) else { return [] }
-            loaded[directory] = await enumerate(directory)
+            loaded[directory] = await enumerate(directory, classifying: hidesIgnoredFiles)
         }
         return visible(loaded[directory] ?? [])
     }
@@ -117,13 +117,23 @@ public final class FileTree {
 
     /// Discards `directory`'s listing and enumerates it again, if it was loaded at all.
     public func refresh(_ directory: URL) async {
-        guard loaded[directory] != nil, isEnumerable(directory) else { return }
-        loaded[directory] = await enumerate(directory)
+        await reload(directory, classifying: hidesIgnoredFiles)
     }
 
     /// Re-enumerates every loaded directory. The panel's *Refresh*.
     public func refreshAll() async {
-        for directory in loaded.keys { await refresh(directory) }
+        await reloadAll(classifying: hidesIgnoredFiles)
+    }
+
+    /// The refresh underneath both, with the classification asked for explicitly rather than read
+    /// off the toggle — which is what lets the toggle be published only once its answer is in.
+    private func reload(_ directory: URL, classifying: Bool) async {
+        guard loaded[directory] != nil, isEnumerable(directory) else { return }
+        loaded[directory] = await enumerate(directory, classifying: classifying)
+    }
+
+    private func reloadAll(classifying: Bool) async {
+        for directory in loaded.keys { await reload(directory, classifying: classifying) }
     }
 
     /// Sets the gitignore toggle, re-enumerating what is loaded when it is turned on.
@@ -131,10 +141,17 @@ public final class FileTree {
     /// Asynchronous, and not a plain property, because the classification is a `git` invocation per
     /// loaded directory: a listing loaded while the toggle was off carries no answer, and a toggle
     /// that flipped a boolean would hide nothing until the user happened to refresh.
+    ///
+    /// **The classification runs before the toggle is published**, which is what makes one
+    /// announcement enough. The view keys its enumeration on this property, so it rebuilds its rows
+    /// the moment the property moves and reads the cache as it stands then; a toggle published
+    /// first would have it rebuild over unclassified entries, and the classification landing
+    /// afterwards moves nothing the view is watching — so the ignored rows would stay on screen
+    /// until an unrelated refresh. Turning the toggle *off* pays for nothing and publishes at once.
     public func setHidesIgnoredFiles(_ hidden: Bool) async {
         guard hidden != hidesIgnoredFiles else { return }
+        if hidden { await reloadAll(classifying: true) }
         hidesIgnoredFiles = hidden
-        if hidden { await refreshAll() }
     }
 
     // MARK: - enumeration
@@ -151,7 +168,7 @@ public final class FileTree {
     /// Directories first and then by localized name, because that is the order a person reads a
     /// tree in; `localizedStandardCompare` rather than a raw `<`, so that case and embedded numbers
     /// order the way the Finder orders them.
-    private func enumerate(_ directory: URL) async -> [Node] {
+    private func enumerate(_ directory: URL, classifying: Bool) async -> [Node] {
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey]
         let contents = (try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: keys, options: [])) ?? []
@@ -166,8 +183,8 @@ public final class FileTree {
                 .localizedStandardCompare(other.url.lastPathComponent) == .orderedAscending
         }
         let names = entries.map(\.url.lastPathComponent)
-        let ignored = hidesIgnoredFiles ? await classify(names, in: directory) : nil
-        if hidesIgnoredFiles { gitignore = ignored == nil ? .unavailable : .available }
+        let ignored = classifying ? await classify(names, in: directory) : nil
+        if classifying { gitignore = ignored == nil ? .unavailable : .available }
         return entries.enumerated().map { index, entry in
             Node(url: entry.url, name: names[index], isDirectory: entry.isDirectory,
                  isSymbolicLink: entry.isLink, isIgnored: ignored?[index] ?? false)
@@ -175,13 +192,33 @@ public final class FileTree {
     }
 
     /// The hidden-files toggle and the filter, in that order. Neither loads anything.
+    ///
+    /// **A directory is kept when a loaded descendant matches**, even though its own name does
+    /// not. The column flattens this listing depth-first, so a directory dropped here takes every
+    /// node under it off the screen: filtering for `main` would remove `src` and with it the
+    /// `main.swift` already loaded inside it, and the filter would appear to match nothing.
     private func visible(_ nodes: [Node]) -> [Node] {
         nodes.filter { node in
             if !showsHiddenFiles, node.name.hasPrefix(".") { return false }
             if hidesIgnoredFiles, node.isIgnored { return false }
-            if !filter.isEmpty,
-               node.name.range(of: filter, options: .caseInsensitive) == nil { return false }
-            return true
+            guard !filter.isEmpty else { return true }
+            if node.name.range(of: filter, options: .caseInsensitive) != nil { return true }
+            return node.isDirectory && holdsAMatch(under: node.url)
+        }
+    }
+
+    /// Whether any node under `directory` that is itself visible matches the filter.
+    ///
+    /// **Loaded directories only**, which keeps this what §9 says the filter is: setting a filter
+    /// enumerates nothing, so a directory nobody has expanded has no known descendants and answers
+    /// no. It cannot cycle either — a symbolic link is never enumerated, so `loaded` is a tree.
+    private func holdsAMatch(under directory: URL) -> Bool {
+        guard let children = loaded[directory] else { return false }
+        return children.contains { node in
+            if !showsHiddenFiles, node.name.hasPrefix(".") { return false }
+            if hidesIgnoredFiles, node.isIgnored { return false }
+            if node.name.range(of: filter, options: .caseInsensitive) != nil { return true }
+            return node.isDirectory && holdsAMatch(under: node.url)
         }
     }
 

@@ -156,6 +156,77 @@ final class FilesTabTests: XCTestCase {
                        "the link opened in a channel the user was not looking at")
     }
 
+    /// And with a host, the resolution is the host's: the delivery reaches the session the host
+    /// names for the channel it is showing, whatever the render path drew last. A pop-out draws a
+    /// channel of its own and a channel switch under another tab draws no Files view at all, so
+    /// "the session rendered last" is not the channel a `.currentPanel` link belongs to.
+    func testAHostedLinkOpensInTheChannelTheHostIsShowingRatherThanTheOneDrawnLast() async throws {
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let capability = RouterCapability(router: router)
+        let host = StubFilesTabHost()
+        let tab = FilesTab(host: host)
+        let drawnContext = try makeContext(store: try makeStore(),
+                                           cwd: try tree.directory("drawn"), links: capability)
+        let drawn = try XCTUnwrap(tab.makeSession(for: drawnContext) as? FilesPanelSession)
+        let showing = try XCTUnwrap(tab.makeSession(for: try makeContext(
+            store: try makeStore(), cwd: try tree.directory("showing"), links: capability))
+            as? FilesPanelSession)
+        // The last thing rendered is one channel; the host is on the other.
+        _ = tab.makeView(session: drawn, context: drawnContext)
+        host.showing = showing
+        let file = try tree.file("showing/routed.swift", "let routed = true\n")
+        try await waitUntilCount(2, in: router)
+
+        await router.open(.file(file, line: 3), from: .currentPanel)
+
+        XCTAssertEqual(showing.openFiles.count, 1, "the link did not reach the host's channel")
+        XCTAssertEqual(drawn.openFiles.count, 0, "the link followed the last render")
+    }
+
+    /// A `.currentPanel` delivery brings Files forward; a `.newWindow` one does not, because the
+    /// host has already popped a window out for it and the main panel's selection is not its
+    /// business.
+    func testACurrentPanelDeliverySelectsFilesAndANewWindowOneDoesNot() async throws {
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let capability = RouterCapability(router: router)
+        let host = StubFilesTabHost()
+        let tab = FilesTab(host: host)
+        let context = try makeContext(store: try makeStore(), links: capability)
+        host.showing = try XCTUnwrap(tab.makeSession(for: context) as? FilesPanelSession)
+        let file = try tree.file("workspace/routed.swift", "let routed = true\n")
+        try await waitUntilCount(2, in: router)
+
+        await router.open(.file(file, line: nil), from: .currentPanel)
+        XCTAssertEqual(host.selections, 1, "the panel was left behind whichever tab was up")
+
+        await router.open(.file(file, line: nil), from: .newWindow)
+        XCTAssertEqual(host.selections, 1,
+                       "a link that asked for its own window moved the main panel's selection")
+    }
+
+    /// The registration the app does: the targets exist before any session does, because the host
+    /// builds one lazily for rendering and a link may arrive before the first visit.
+    func testTheTabRegistersItsTargetsWithNoSessionBuiltAtAll() async throws {
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let host = StubFilesTabHost()
+        let tab = FilesTab(host: host)
+
+        await tab.registerLinkTargets(through: RouterCapability(router: router))
+
+        let count = await router.targetCount
+        XCTAssertEqual(count, 2, "the pair is not registered until something renders")
+
+        // And a delivery arriving now still reaches the host's channel, which is what the
+        // registration is for.
+        let context = try makeContext(store: try makeStore())
+        host.showing = try XCTUnwrap(tab.makeSession(for: context) as? FilesPanelSession)
+        let file = try tree.file("workspace/routed.swift", "let routed = true\n")
+        await router.open(.file(file, line: nil), from: .currentPanel)
+        XCTAssertEqual(host.showing?.openFiles.count, 1)
+        let after = await router.targetCount
+        XCTAssertEqual(after, 2, "building a session registered a second pair")
+    }
+
     /// The weak half survives the move: a released session leaves the tab's targets claiming
     /// nothing, and the router takes W5's fallback rather than delivering into nothing.
     func testATargetWhoseSessionWasReleasedIsInertAndTheOpenFallsBack() async throws {
@@ -477,6 +548,17 @@ final class FilesTabTests: XCTestCase {
         }
         XCTFail("timed out waiting for: \(what)")
     }
+}
+
+/// The app, as far as a delivered link can see it: the channel the window is showing, and the
+/// selection. A count and a session, never a channel key (§11).
+@MainActor
+final class StubFilesTabHost: FilesTabHost {
+    var showing: FilesPanelSession?
+    private(set) var selections = 0
+
+    func filesSession() -> FilesPanelSession? { showing }
+    func selectFilesTab() { selections += 1 }
 }
 
 /// Counts registrations and nothing else: the count is the whole assertion (§11).

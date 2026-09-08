@@ -378,6 +378,59 @@ final class FileWatchTests: XCTestCase {
                        "the delivery did not carry what was on disk when the watch was armed")
     }
 
+    // MARK: - 8. A symbolic link is a path the source cannot see
+
+    /// `open(2)` follows the link, so the vnode source is armed on the **target's** inode. Nothing
+    /// done to the link itself — retargeting it, removing it — touches that inode, and under the
+    /// vnode source a successful arming leaves no poll to notice it either. What the panel opened
+    /// is the path, so a symlinked path keeps the poll beside the source.
+    func testRetargetingASymbolicLinkIsObservedUnderTheVnodeSource() async throws {
+        let first = root.appendingPathComponent("first.txt")
+        let second = root.appendingPathComponent("second.txt")
+        try write("one", to: first)
+        try write("twelve chars", to: second)
+        let link = root.appendingPathComponent("current.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
+        let loaded = try XCTUnwrap(FileSnapshot.read(link))
+        XCTAssertEqual(loaded.size, 3, "the premise did not hold: the link read the wrong target")
+
+        let log = EventLog()
+        let watch = watcher(on: link, mode: .vnode, log: log)
+        await watch.start(baseline: loaded)
+        defer { Task { await watch.stop() } }
+
+        let polling = await watch.isPolling
+        XCTAssertTrue(polling, "a symlinked path was left to the source's target inode alone")
+
+        // The link is retargeted; the inode the source was armed on is not touched at all.
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: second)
+
+        await wait(on: log, until: { $0.contains { $0.snapshot?.size == 12 } },
+                   "retargeting the link was never observed", within: .seconds(10))
+    }
+
+    /// And the other half: the link removed and not replaced is a deletion of the path, however
+    /// well the target it pointed at is doing.
+    func testRemovingASymbolicLinkIsReportedAsADeletionUnderTheVnodeSource() async throws {
+        let target = root.appendingPathComponent("target.txt")
+        try write("one", to: target)
+        let link = root.appendingPathComponent("current.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let loaded = try XCTUnwrap(FileSnapshot.read(link))
+
+        let log = EventLog()
+        let watch = watcher(on: link, mode: .vnode, log: log)
+        await watch.start(baseline: loaded)
+        defer { Task { await watch.stop() } }
+
+        try FileManager.default.removeItem(at: link)
+
+        await wait(on: log, until: { $0.contains(.deleted) },
+                   "the link's removal was never observed", within: .seconds(10))
+        XCTAssertNotNil(FileSnapshot.read(target), "the target itself was removed, not the link")
+    }
+
     // MARK: - Rig
 
     /// The path's modification time as the pair `utimensat(2)` takes back.
