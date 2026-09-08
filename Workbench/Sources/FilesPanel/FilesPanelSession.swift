@@ -188,6 +188,25 @@ public final class FilesPanelSession: PanelTabSession {
         await store.flush()
     }
 
+    /// The eviction path, which is the one nobody calls anything on.
+    ///
+    /// X7's `PanelTabSession` has no teardown member and `PanelHostModel` releases a session by
+    /// setting its slot to nil — under LRU pressure, on `unregister`, and when a channel leaves
+    /// the index. So the flush cannot depend on a call: whatever the store is still coalescing is
+    /// written when the session goes. The store is an actor and holds the pending document itself,
+    /// so this needs nothing from the isolated state a `deinit` may not touch — only the store,
+    /// which is a `let` of a `Sendable` type and so is nonisolated, retained by the task that
+    /// flushes it.
+    ///
+    /// It covers the last *recorded* state, not a change never recorded: every mutation records
+    /// one, so the two differ only for an edit in flight at the moment of release. `teardown()`
+    /// stays the explicit path — it records the state first and stops the watchers, which a
+    /// `deinit` cannot await.
+    deinit {
+        let store = self.store
+        Task.detached { await store.flush() }
+    }
+
     // MARK: - The link targets (Design §9)
 
     /// The specificity both targets carry. Above W5's fallback and equal to each other; nothing

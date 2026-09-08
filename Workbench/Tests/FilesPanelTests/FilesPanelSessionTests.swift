@@ -404,6 +404,40 @@ final class FilesPanelSessionTests: XCTestCase {
         XCTAssertEqual(other.session.openFiles.count, 0, "a channel restores only its own document")
     }
 
+    /// `teardown()` flushes the store, and nothing calls it: X7's host releases a session by
+    /// setting its slot to nil under LRU pressure, on `unregister`, and when a channel leaves the
+    /// index. The cursor G4 promises to persist was therefore lost exactly when a channel was
+    /// evicted — the ordinary case for the sixteenth channel. The coalescing interval here is long
+    /// enough that no drain can land the document: only the release can.
+    func testTheDocumentTheStoreIsStillCoalescingLandsWhenTheSessionIsReleased() async throws {
+        let file = try tree.file("evicted.swift", "kept\n")
+        let store = try makeStore()
+        let context = try makeContext(store: store)
+
+        let key = try await openThenRelease(file, context: context)
+
+        var landed: FilesPanelState?
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, landed == nil {
+            landed = try await store.read(FilesPanelState.self, key: key)
+            if landed == nil { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        let document = try XCTUnwrap(landed, "no document was written after the session was released")
+        XCTAssertEqual(document.openFiles.count, 1)
+        XCTAssertEqual(document.openFiles.first?.line, 9, "the cursor the panel last heard")
+        XCTAssertEqual(document.selectedPath, file.path(percentEncoded: false))
+    }
+
+    /// Opens a file, moves the cursor and lets the session go without a `teardown()` — the host
+    /// evicting a channel. Separate so nothing in the test's own frame keeps it alive; the store's
+    /// key is all that comes back.
+    private func openThenRelease(_ file: URL, context: ChannelContext) async throws -> String {
+        let harness = try makeHarness(context: context, coalescingInterval: .seconds(30))
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.deliver(.cursor(line: 9, column: 5))
+        return harness.session.storeKey
+    }
+
     func testADocumentFromAFutureSchemaIsRefusedIntoTheEmptyState() async throws {
         let store = try makeStore()
         let context = try makeContext(store: store)
@@ -491,12 +525,13 @@ final class FilesPanelSessionTests: XCTestCase {
                              environment: [String: String] = [:],
                              links: any LinkRouterCapability = UnusedLinks(),
                              watchMode: FileWatch.Mode = .vnode,
-                             pollInterval: Duration = .milliseconds(50)) throws -> Harness {
+                             pollInterval: Duration = .milliseconds(50),
+                             coalescingInterval: Duration = .milliseconds(10)) throws -> Harness {
         let surface = RecordingSurface()
         let resolved = try context ?? makeContext(store: try makeStore(), cwd: cwd,
                                                   environment: environment, links: links)
         let session = FilesPanelSession(context: resolved, surface: surface,
-                                        coalescingInterval: .milliseconds(10),
+                                        coalescingInterval: coalescingInterval,
                                         watchMode: watchMode,
                                         watchCoalescingDelay: .milliseconds(20),
                                         watchPollInterval: pollInterval)
