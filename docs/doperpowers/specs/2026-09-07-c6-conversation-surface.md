@@ -473,10 +473,10 @@ recomposition, it is a corrective child of this composite).
 
 | Leaf | Artifact | Status |
 |---|---|---|
-| Y1 skeleton | landed by the orchestrator on `main` before dispatch | pending approval |
-| C6.1 Timeline renderer | spec and plan `2026-09-<dd>-c6.1-timeline-renderer.md` on `child/c6-timeline-renderer` | not-dispatched, dispatchable on approval |
-| C6.2 Composer and header | spec and plan `…-c6.2-composer.md` on `child/c6-composer` | not-dispatched, dispatchable on approval |
-| C6.3 Decision cards and threads | spec and plan `…-c6.3-decisions.md` on `child/c6-decisions` | not-dispatched, dispatchable on approval; in-timeline row after C6.1 |
+| Y1 skeleton | landed by the orchestrator on `main` at `5e24f1a` (row registry keyed by `TimelineCategory`, seven leaf directories, Y4's `AgentNavigating` seam) | landed 2026-09-08 |
+| C6.1 Timeline renderer | spec and plan `2026-09-08-c6.1-timeline-renderer.md` on `child/c6-timeline-renderer` (worktree `../afleet-c6/timeline-renderer`) | dispatched 2026-09-08 from `5e24f1a` |
+| C6.2 Composer and header | spec and plan `2026-09-08-c6.2-composer.md` on `child/c6-composer` (worktree `../afleet-c6/composer`) | dispatched 2026-09-08 from `5e24f1a` |
+| C6.3 Decision cards and threads | spec and plan `2026-09-08-c6.3-decisions.md` on `child/c6-decisions` (worktree `../afleet-c6/decisions`) | dispatched 2026-09-08 from `5e24f1a`; in-timeline row after C6.1 |
 | C6.4 Agents panel | spec and plan `…-c6.4-agents.md` on `child/c6-agents` | blocked-by C6.1, C6.3 |
 
 ## Decision Log
@@ -529,3 +529,7 @@ Parent-Level Acceptance as written, then the retrospective.
   C5 merge (`78303c7`). Flow-back to the parent at approval: the §17.9 C6 row points here; the
   sub-cut sketch in §17 C6 is superseded by this cut (advisory content, recorded as a dated
   Revision Note on the parent by the orchestrator).
+- 2026-09-08: cut approved by the human; the Y1 skeleton landed on `main` at `5e24f1a` — one
+  deviation from the Design: XcodeGen treats a `README.md` under `App/**` as a bundle resource, so
+  `project.yml` excludes `**/README.md` rather than the directories going without an owner file.
+  C6.1, C6.2 and C6.3 dispatched from `5e24f1a` in their worktrees.
