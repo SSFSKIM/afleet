@@ -87,22 +87,42 @@ cache_dir="${HOME}/.swiftpm/cache/repositories"
 missing_from_cache=0
 while read -r identity; do
     [[ -z "$identity" ]] && continue
-    if compgen -G "$cache_dir/${identity}-*" >/dev/null 2>&1; then
+    # Package.resolved lower-cases the identity; the cache directory keeps the repository's
+    # own spelling, so the match has to be case-insensitive.
+    if [[ -n "$(find "$cache_dir" -maxdepth 1 -iname "${identity}-*" 2>/dev/null)" ]]; then
         say "   $identity: present in the SwiftPM repository cache"
     else
         say "   $identity: NOT in the SwiftPM repository cache — resolution will need the network"
         missing_from_cache=1
     fi
 done < <(sed -n 's/.*"identity" : "\(.*\)".*/\1/p' "$clone/Workbench/Package.resolved")
+# libghostty-spm ships GhosttyKit as a binary target, so a *second* cache is load-bearing:
+# SwiftPM's artifact cache, which holds the downloaded xcframework zip.
+artifact_cache="${HOME}/.swiftpm/cache/artifacts"
+artifact_count=$(ls -1 "$artifact_cache" 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$artifact_count" -gt 0 ]]; then
+    say "   binary artifacts: $artifact_count in the SwiftPM artifact cache"
+else
+    say "   binary artifacts: the SwiftPM artifact cache is empty — the xcframework will need"
+    say "                     the network"
+    missing_from_cache=1
+fi
+
 if [[ $missing_from_cache -eq 1 ]]; then
     say "   (the run below is expected to fail; that failure is the finding, not a bug)"
 fi
 
 # --- 4. Build and test with the network denied ----------------------------------------------
 say
-say "== sandbox-exec -p '$SANDBOX_PROFILE' swift test --package-path Workbench"
+say "== sandbox-exec -p '$SANDBOX_PROFILE' swift test --disable-sandbox --package-path Workbench"
+# `--disable-sandbox` is required and does not weaken the claim. SwiftPM sandboxes its own
+# manifest compilation with sandbox_apply(), which macOS refuses inside an existing sandbox
+# ("sandbox_apply: Operation not permitted"), so the manifest fails to compile. Turning
+# SwiftPM's inner sandbox off leaves the outer one — which denies the network to *every*
+# process in the tree, manifests included — in force, and that is the stronger of the two for
+# what G3 asserts.
 set +e
-( cd "$clone" && sandbox-exec -p "$SANDBOX_PROFILE" swift test --package-path Workbench ) \
+( cd "$clone" && sandbox-exec -p "$SANDBOX_PROFILE" swift test --disable-sandbox --package-path Workbench ) \
     2>&1 | tee "$work_dir/test.log"
 test_status=${PIPESTATUS[0]}
 set -e
