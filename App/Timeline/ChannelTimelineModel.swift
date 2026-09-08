@@ -349,7 +349,11 @@ final class ChannelTimelineModel {
     /// holds, so without this the channel would keep reading a file that is no longer there and a
     /// channel with no live tap would go quietly stale.
     func transcriptMoved(to path: URL) async {
-        guard let ingestion, transcriptPath != path else { return }
+        // `ingestion != nil` rather than a binding: since the rebind moved into
+        // `signal(.relocated:)` nothing here needs the actor itself, and a bound-but-unused value
+        // is a compiler warning, which the floor does not allow. The condition still matters — a
+        // model with no ingestion has nothing to relocate and must not raise the signal.
+        guard ingestion != nil, transcriptPath != path else { return }
         transcriptPath = path
         // **One call, not two.** C3's `signal(.relocated:)` performs the path rebind itself — it
         // calls `relocated(mainPath:)` and says so at its own definition — so raising the signal is
