@@ -143,6 +143,65 @@ final class ChannelTimelineSeamTests: XCTestCase {
         await rig.finish()
     }
 
+    /// A card answered **from Activity** moves the channel's decision out of `.pending`.
+    ///
+    /// This is the clause tracker 157 left open: the raise existed, both hosts performed answers
+    /// through it, and nothing ever assigned it — so a card answered from Activity stayed pending
+    /// on screen for ever, because the engine sends no frame back for an answer. Activity does not
+    /// need the per-row render context to close it: it holds no `ChannelTimelineModel`, but the
+    /// app's one registry does, and a provider over that registry is what the composition root
+    /// hands it.
+    ///
+    /// The whole path is exercised — the row's own button, Activity's answering object, the
+    /// lifecycle double, the raise, the fold — because every shorter version of this test passed
+    /// while the app did not.
+    func testAnAnswerFromActivityLeavesNoPendingDecision() async throws {
+        let rig = try await SeamRig(fixture: "permission-allow")
+        await rig.open()
+
+        let shell = ShellModel()
+        shell.isApplicationActive = true
+        let router = NotificationRouter(poster: RecordingPoster(),
+                                        lifecycle: rig.lifecycle,
+                                        isInView: { _ in false },
+                                        preferences: { NotificationPreferences() })
+        let activity = ActivityModel(lifecycle: rig.lifecycle,
+                                     configHome: rig.home.configHome.root,
+                                     shell: shell,
+                                     router: router,
+                                     store: nil)
+        activity.timeline = { [registry = rig.registry] key in registry.model(for: key) }
+
+        let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                            id: "req_invented_c63_activity_0001")
+        await rig.lifecycle.setStates([ActivityFixtures.state(rig.key, pending: [ActivityFixtures.pending(ask)])])
+        await rig.lifecycle.always(.success(ActivityFixtures.state(rig.key)))
+        await activity.start()
+        await rig.lifecycle.push(.request(ask), to: rig.key)
+
+        let pending = await rig.settle { $0.timeline.overlay.decisions[ask.id]?.state == .pending }
+        XCTAssertTrue(pending, "the pushed ask never became a pending decision the host has to answer")
+        await activity.whenSettled { model in model.items.contains { $0.card != nil } }
+        let item = try XCTUnwrap(activity.items.first { $0.card != nil },
+                                 "Activity offered no inline answer for a plain permission ask")
+
+        let body = ActivityRowView(item: item, title: "an invented channel",
+                                   activity: activity, shell: shell).body
+        let card = try XCTUnwrap(CardTree.permissionBody(in: body), "the row drew no permission card")
+        let button = try XCTUnwrap(ViewTree.button("Allow once", in: card), "the row drew no Allow once")
+        XCTAssertTrue(ViewTree.press(button), "the Allow once button carried no action")
+        await activity.answering.whenIdle()
+
+        let settled = await rig.settle { model in
+            model.timeline.overlay.decisions.values.allSatisfy { $0.state != .pending }
+        }
+        let stillPending = rig.model.timeline.overlay.decisions.values.filter { $0.state == .pending }
+        XCTAssertTrue(settled, "\(stillPending.count) decision(s) are still pending after answering from Activity")
+
+        activity.stop()
+        await rig.finish()
+    }
+
     // MARK: - The pipeline
 
     /// The overlay reaches the app at all — which, before the seam commit, it never did.

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 import FleetKit
 
 /// The one state machine over the four routes, and the only thing the window observes.
@@ -72,6 +73,16 @@ final class AppModel {
     /// releases every model built over the previous one.
     let timelines = ChannelTimelineRegistry()
 
+    /// The one set of in-flight decision reservations, and the one place a settled answer is
+    /// announced (contract Y2).
+    ///
+    /// **One instance, app-scoped**, for a reason the registry above shares: a request the engine is
+    /// waiting on is answerable exactly once, and the surfaces that can answer it — Activity's row,
+    /// the Thread tab, the timeline's card — each hold their own `DecisionAnswering`. A set per host
+    /// disables only the host that clicked, so two of them reach the wire and the second is refused;
+    /// and the host holding the request's payload never hears about an answer another surface sent.
+    let decisions = DecisionReservations()
+
     /// Contract X7's host (spec §7), the app's only conformance to `PanelHost`.
     ///
     /// **One instance, app-scoped**, for the same reason the registry above is: the panel column
@@ -141,7 +152,25 @@ final class AppModel {
         } catch {
             assertionFailure("the placeholder is the first registration on a freshly built host")
         }
+        // Contract Y1: this child's two kinds, claimed on the app's one registry. Here rather than
+        // in `performLaunch` because registration is synchronous and needs nothing a launch
+        // produces — unlike the `.thread` handover above, whose `unregister` is `async` and whose
+        // tab cannot answer a card without a lifecycle.
+        //
+        // **Once per process.** `RowRegistry.register(kind:)` traps on a second claim, which is the
+        // contract working: two leaves owning one kind is a breach of the C6 cut. A second
+        // `AppModel` is not that — every test that launches builds one — so the claim is guarded by
+        // this flag and the trap is left to say the one thing it exists to say.
+        if !AppModel.hasClaimedRowKinds {
+            AppModel.hasClaimedRowKinds = true
+            RowRegistry.shared.register(kind: .decision) { AnyView(DecisionRowView(row: $0)) }
+            RowRegistry.shared.register(kind: .sentFile) { AnyView(SentFileRowView(row: $0)) }
+        }
     }
+
+    /// Whether this process has already claimed Y1's two kinds. `@MainActor` on the type isolates
+    /// it, so the check and the claim cannot interleave.
+    private static var hasClaimedRowKinds = false
 
     /// Binds the two app-scoped, workspace-dependent owners to the workspace a launch reached.
     ///
@@ -204,7 +233,32 @@ final class AppModel {
         settingsReadout = reached.workspace.map(SettingsReadout.init(workspace:))
         // Before Activity, so a channel opened by the first paint already has a registry bound to
         // the workspace this launch reached rather than to the one it replaced.
-        if let workspace = reached.workspace { bindWorkspace(workspace) }
+        if let workspace = reached.workspace {
+            bindWorkspace(workspace)
+            // Contract Y3: `.thread` passes from C5's placeholder to C6.3's Thread tab. Here rather
+            // than on `init`'s registration line for two reasons with one answer: `unregister` is
+            // `async` — it awaits the link-target withdrawal, so a withdrawal cannot land after the
+            // replacement's registration and delete the *new* tab's target — and an initialiser
+            // cannot await; and this is the first moment a lifecycle exists, without which the tab
+            // can neither answer a card nor post a reply. `unregister` drops the selection when it
+            // held it, so the selection is re-taken.
+            let wasShowingThread = panels.selected == .thread
+            await panels.unregister(.thread)
+            do {
+                // The tab is handed the app's one timeline registry, through two closures and not
+                // as a reference: a decision answered from the Thread tab has to raise
+                // `HostSignal.decisionAnswered` on the channel's fold — the engine sends no frame
+                // back for an answer, so nothing else moves the item out of `.pending` — and the
+                // open thread has to read the item's state from that same fold. This is the one
+                // construction site where the app-scoped registry and a lifecycle both exist.
+                try panels.register(ThreadTab(lifecycle: workspace.fleet,
+                                              fold: ChannelFold(timelines: timelines),
+                                              reservations: decisions))
+            } catch {
+                assertionFailure("the handover unregistered .thread before registering over it")
+            }
+            if wasShowingThread { panels.select(.thread) }
+        }
         await startActivity(over: reached)
         // **Last.** Publishing the route is what puts the actionable surfaces on screen — the
         // sidebar's Background section and its *Adopt*, every row's action menu — and supervisor
@@ -244,8 +298,14 @@ final class AppModel {
                                   configHome: workspace.configHome.root,
                                   shell: shell,
                                   router: router,
-                                  store: workspace.store)
+                                  store: workspace.store,
+                                  reservations: decisions)
         sink.model = model
+        // Contract X4 and spec D2: a card answered from Activity raises `decisionAnswered` on the
+        // channel's own fold. Activity holds no timeline model — it answers for channels the user
+        // has never opened — so it is given the app's one registry as a provider, the shape the
+        // composer registry receives its seams in.
+        model.timeline = { [timelines] key in timelines.model(for: key) }
         activity = model
         model.attach(to: browser)
         // Activity first, authorisation after and not awaited here — see `ActivityLaunch`.

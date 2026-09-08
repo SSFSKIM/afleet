@@ -205,7 +205,7 @@ struct RowBanner: Hashable, Sendable {
         switch precondition {
         case .ready: "ready"
         case .untrusted: "untrusted"
-        case .consentNeeded(let servers): "consent needed for \(servers.count) project servers"
+        case .consentNeeded(_, let servers): "consent needed for \(servers.count) project servers"
         case .managedSettingsPending: "managed settings pending"
         case .contended: "contended"
         case .wedged: "wedged"

@@ -134,7 +134,7 @@ final class ActivityModelTests: XCTestCase {
             await harness.model.start() // awaits every subscription, no scheduling guess
             harness.model.pump(for: next)?.ingest(.request(ask))
             harness.model.rebuild()
-            XCTAssertEqual(harness.model.items.filter { $0.key == next && $0.ask != nil }.count, 1,
+            XCTAssertEqual(harness.model.items.filter { $0.key == next && $0.card != nil }.count, 1,
                            "the seventh channel lost its answerable request")
             XCTAssertEqual(harness.model.items.filter { old.contains($0.key) }.count, 6,
                            "retiring subscriptions discarded Activity history")
@@ -177,14 +177,14 @@ final class ActivityModelTests: XCTestCase {
         await harness.lifecycle.emitDuringPerform([.request(ask)])
         let card = expectation(description: "adopted request answerable")
         Task {
-            await harness.model.whenSettled { $0.items.contains { $0.key == key && $0.ask != nil } }
+            await harness.model.whenSettled { $0.items.contains { $0.key == key && $0.card != nil } }
             card.fulfill()
         }
         await browser.adopt(JobEntry(short: JobShort(rawValue: "invented-job"), state: "running", kind: "session",
                                      sessionID: key.session, cwd: nil, name: nil))
         let result = await XCTWaiter.fulfillment(of: [card], timeout: 3)
         XCTAssertEqual(result, .completed, "the first adopted request was lost")
-        XCTAssertEqual(harness.model.items.compactMap(\.ask).count, 1, "no answerable card")
+        XCTAssertEqual(harness.model.items.compactMap(\.card).count, 1, "no answerable card")
         harness.model.stop()
     }
 
@@ -206,14 +206,14 @@ final class ActivityModelTests: XCTestCase {
         await harness.lifecycle.emitDuringPerform([.request(ask)])
         let card = expectation(description: "request after interim background state answerable")
         Task {
-            await harness.model.whenSettled { $0.items.contains { $0.key == key && $0.ask != nil } }
+            await harness.model.whenSettled { $0.items.contains { $0.key == key && $0.card != nil } }
             card.fulfill()
         }
         await browser.adopt(JobEntry(short: JobShort(rawValue: "invented-job"), state: "running", kind: "session",
                                      sessionID: key.session, cwd: nil, name: nil))
         let result = await XCTWaiter.fulfillment(of: [card], timeout: 3)
         XCTAssertEqual(result, .completed, "interim background state discarded the prepared subscription")
-        XCTAssertEqual(harness.model.items.compactMap(\.ask).count, 1, "the first request lost its payload")
+        XCTAssertEqual(harness.model.items.compactMap(\.card).count, 1, "the first request lost its payload")
         harness.model.stop()
     }
 
@@ -438,8 +438,9 @@ final class ActivityModelTests: XCTestCase {
             let remaining = ActivityFixtures.state(key, pending: [ActivityFixtures.pending(b)])
             if answer {
                 await harness.lifecycle.stage(.success(remaining))
-                let ask = try XCTUnwrap(harness.model.items.first { $0.ask?.id == a.id }?.ask)
-                await harness.model.allowOnce(ask, on: key)
+                let ask = try XCTUnwrap(harness.model.items.first { $0.card?.requestID == a.id }?.card)
+                harness.model.answering.send(.allowOnce, on: ask, in: key)
+                await harness.model.answering.whenIdle()
                 let actions = await harness.lifecycle.actions
                 XCTAssertEqual(actions.count, 1, "the answer path was not exercised")
             } else {
@@ -447,7 +448,7 @@ final class ActivityModelTests: XCTestCase {
                 harness.model.apply(remaining)
                 harness.model.rebuild()
             }
-            XCTAssertEqual(harness.model.items.compactMap(\.ask).count, 1, "the wrong number of permission rows survived")
+            XCTAssertEqual(harness.model.items.compactMap(\.card).count, 1, "the wrong number of permission rows survived")
             XCTAssertEqual(harness.model.badge(for: key.session), .none, "a departure made the seen survivor unread")
             harness.model.stop()
 
@@ -611,20 +612,27 @@ final class ActivityModelTests: XCTestCase {
         let key = harness.key("1")
         for (index, name) in ["InventedRead", "InventedWrite"].enumerated() {
             let id = RequestID(rawValue: "invented-request-\(index)")
+            // The row draws the shared card component now, so the tool's name and the two answers
+            // are read out of the card's own body rather than the row's (spec D4).
+            let request = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                                    id: id.rawValue, overrides: ["display_name": name])
+            let card = DecisionCard(try XCTUnwrap(DecisionItem(surfacing: request, in: key),
+                                                  "no item was opened for a recorded ask"))
             let item = ActivityItem(row: ActivityRow(key: key, kind: .decision(id), text: "can_use_tool"),
-                                    ask: .init(id: id, toolName: name), position: index)
+                                    card: card, position: index)
             let body = ActivityRowView(item: item, title: "Invented channel",
                                        activity: harness.model, shell: harness.shell).body
-            let text = ViewTree.values(of: Text.self, in: body).flatMap { ViewTree.values(of: String.self, in: $0) }
+            let cardBody = try XCTUnwrap(CardTree.permissionBody(in: body), "the row drew no card")
+            let text = CardTree.texts(in: body) + CardTree.texts(in: cardBody)
             XCTAssertFalse(text.isEmpty, "the row body contained no text")
             XCTAssertTrue(text.contains(name), "the permission row did not render its requested tool")
             XCTAssertFalse(text.contains(name == "InventedRead" ? "InventedWrite" : "InventedRead"),
                            "the row rendered the other request's tool")
-            XCTAssertTrue(ViewTree.button("Allow once", in: body) != nil, "the permission row lost Allow once")
-            XCTAssertTrue(ViewTree.button("Deny", in: body) != nil, "the permission row lost Deny")
+            XCTAssertTrue(ViewTree.button("Allow once", in: cardBody) != nil, "the permission row lost Allow once")
+            XCTAssertTrue(ViewTree.button("Deny", in: cardBody) != nil, "the permission row lost Deny")
         }
         let notice = ActivityItem(row: ActivityRow(key: key, kind: .authProblem, text: "Invented auth problem"),
-                                  ask: nil, position: 2)
+                                  card: nil, position: 2)
         let body = ActivityRowView(item: notice, title: "Invented channel",
                                    activity: harness.model, shell: harness.shell).body
         let text = ViewTree.values(of: Text.self, in: body).flatMap { ViewTree.values(of: String.self, in: $0) }
@@ -647,11 +655,12 @@ final class ActivityModelTests: XCTestCase {
         await harness.lifecycle.push(.request(ask), to: one)
         await harness.model.whenSettled { $0.pump(for: one)?.requests.count == 1 }
 
-        let answerable = harness.model.items.compactMap(\.ask)
+        let answerable = harness.model.items.compactMap(\.card)
         XCTAssertEqual(answerable.count, 1, "the permission row offered no inline answer")
         await harness.lifecycle.stage(.success(ActivityFixtures.state(one, pending: [])))
 
-        await harness.model.allowOnce(try XCTUnwrap(answerable.first), on: one)
+        harness.model.answering.send(.allowOnce, on: try XCTUnwrap(answerable.first), in: one)
+        await harness.model.answering.whenIdle()
 
         let actions = await harness.lifecycle.actions
         XCTAssertEqual(actions.count, 1, "expected exactly one lifecycle action")
@@ -700,40 +709,76 @@ final class ActivityModelTests: XCTestCase {
         assertSameMultiset(kindNames(harness.model), Array(repeating: "decision", count: asks.count))
         for (key, _) in asks.dropLast() {
             let item = try XCTUnwrap(harness.model.items.first { $0.key == key })
-            XCTAssertNil(item.ask, "a non-permission decision offered an inline answer")
+            XCTAssertNil(item.card, "a non-permission decision offered an inline answer")
         }
         let inline = try XCTUnwrap(harness.model.items.first { $0.key == permission })
-        XCTAssertNotNil(inline.ask, "the plain permission ask offered no inline answer")
+        XCTAssertNotNil(inline.card, "the plain permission ask offered no inline answer")
     }
 
     /// An ask carrying `requires_user_interaction` gets a *Go to channel* row, because §8.4 makes
     /// that flag the engine saying the tool's own card is the surface. The floor is the same
-    /// recorded ask with the flag cleared, which *is* answerable — without it a model that never
+    /// recorded ask with the flag absent, which *is* answerable — without it a model that never
     /// offered an inline answer at all would pass.
+    ///
+    /// The subject is a **permission** ask with the flag set by override, not a question with it
+    /// cleared (spec D17). Since eligibility is the kind *and* the flag, a question would be
+    /// excluded by its kind and this test would pass with the flag ignored entirely. On a
+    /// permission ask the flag is the only thing that can exclude it, so this test fails alone when
+    /// the flag stops being read. The kind clause has its own test below.
     func testAnAskRequiringUserInteractionIsNotAnsweredInline() async throws {
         let harness = try Harness()
         let interactive = harness.key("1"), plain = harness.key("2")
-        let flagged = try FixtureRunner.request("ask-user-question", subtype: "can_use_tool",
-                                                id: "11111111-1111-4111-8111-111111111111")
-        let cleared = try FixtureRunner.request("ask-user-question", subtype: "can_use_tool",
-                                                id: "22222222-2222-4222-8222-222222222222",
-                                                overrides: ["requires_user_interaction": false])
+        let flagged = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                                id: "11111111-1111-4111-8111-111111111111",
+                                                overrides: ["requires_user_interaction": true])
+        let plainAsk = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                                 id: "22222222-2222-4222-8222-222222222222")
         guard case .canUseTool(let tool) = flagged.payload else { return XCTFail("not a can_use_tool") }
-        XCTAssertEqual(tool.requiresUserInteraction, true, "the fixture no longer carries the flag")
+        XCTAssertEqual(tool.requiresUserInteraction, true, "the override never reached the request")
+        guard case .canUseTool(let plainTool) = plainAsk.payload else { return XCTFail("not a can_use_tool") }
+        XCTAssertNotEqual(plainTool.requiresUserInteraction, true,
+                          "the recorded permission ask now carries the flag, so the floor proves nothing")
 
         await arm(harness, interactive, pending: [ActivityFixtures.pending(flagged)])
-        await arm(harness, plain, pending: [ActivityFixtures.pending(cleared)])
+        await arm(harness, plain, pending: [ActivityFixtures.pending(plainAsk)])
         await harness.model.start()
         await harness.lifecycle.push(.request(flagged), to: interactive)
-        await harness.lifecycle.push(.request(cleared), to: plain)
+        await harness.lifecycle.push(.request(plainAsk), to: plain)
         await harness.model.whenSettled { model in
             model.pump(for: interactive)?.requests.count == 1 && model.pump(for: plain)?.requests.count == 1
         }
 
         let interactiveItem = try XCTUnwrap(harness.model.items.first { $0.key == interactive })
-        XCTAssertNil(interactiveItem.ask, "an ask requiring user interaction was answered inline")
+        XCTAssertNil(interactiveItem.card, "an ask requiring user interaction was answered inline")
         let plainItem = try XCTUnwrap(harness.model.items.first { $0.key == plain })
-        XCTAssertNotNil(plainItem.ask, "the same ask without the flag was not answerable")
+        XCTAssertNotNil(plainItem.card, "the same ask without the flag was not answerable")
+    }
+
+    /// A question that does **not** carry `requires_user_interaction` still gets a row and no
+    /// inline answer, because eligibility is the kind as well as the flag (spec D17).
+    ///
+    /// This is the clause the kind guard alone can fail: the flag is cleared here, so a model that
+    /// keyed only on the flag would offer the question card's actions inside Activity — C5's
+    /// human-gate ruling 4 widened by accident. The row is asserted present as well, so a model
+    /// that dropped the request entirely does not pass by having nothing to answer.
+    func testAQuestionWithoutTheInteractionFlagIsStillNotAnsweredInline() async throws {
+        let harness = try Harness()
+        let channel = harness.key("1")
+        let question = try FixtureRunner.request("ask-user-question", subtype: "can_use_tool",
+                                                 id: "33333333-3333-4333-8333-333333333333",
+                                                 overrides: ["requires_user_interaction": false])
+        guard case .canUseTool(let tool) = question.payload else { return XCTFail("not a can_use_tool") }
+        XCTAssertNotEqual(tool.requiresUserInteraction, true,
+                          "the flag is still set, so the flag rather than the kind could refuse it")
+
+        await arm(harness, channel, pending: [ActivityFixtures.pending(question)])
+        await harness.model.start()
+        await harness.lifecycle.push(.request(question), to: channel)
+        await harness.model.whenSettled { model in model.pump(for: channel)?.requests.count == 1 }
+
+        let item = try XCTUnwrap(harness.model.items.first { $0.key == channel },
+                                 "the question earned no row at all")
+        XCTAssertNil(item.card, "a question without the interaction flag was answered inline")
     }
 
     // MARK: - The launch order

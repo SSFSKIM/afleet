@@ -1210,7 +1210,7 @@ public actor ChannelSupervisor {
         switch verdict {
         case .ready: "ready"
         case .untrusted: "untrusted"
-        case .consentNeeded(let servers): "consentNeeded(\(servers.count))"
+        case .consentNeeded(_, let servers): "consentNeeded(\(servers.count))"
         case .managedSettingsPending: "managedSettingsPending"
         case .contended(let holders): "contended(\(holders.holders.count))"
         case .wedged: "wedged"
