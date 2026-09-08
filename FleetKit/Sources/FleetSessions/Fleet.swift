@@ -40,6 +40,10 @@ public actor Fleet: LifecycleAPI {
     /// The key each supervisor is filed under, so a fork that re-keys itself can be found and re-filed.
     private var filedAs: [ObjectIdentifier: ChannelKey] = [:]
     private var seeds: [ChannelKey: Seed] = [:]
+    /// Where each fork's provisional key went, for `resolvedForkKey(of:)`. Written once per re-key and taken by the
+    /// first reader; an entry nobody reads is one key pair per fork this process opened, which is the price of the
+    /// only record that the two ids were ever the same channel.
+    private var forkResolutions: [ChannelKey: ChannelKey] = [:]
     /// The line each channel was built from; the precondition gate reads its setting sources and its cwd.
     private var launches: [ChannelKey: LaunchConfiguration] = [:]
     private var tasks: [Task<Void, Never>] = []
@@ -293,6 +297,10 @@ public actor Fleet: LifecycleAPI {
             filedAs[id] = state.key
             if let seed = seeds.removeValue(forKey: filed) { seeds[state.key] = seed }
             if let launch = launches.removeValue(forKey: filed) { launches[state.key] = launch }
+            // The one place the provisional-to-resolved link exists at all. `resolvedForkKey(of:)` reads it for the
+            // caller that arrives *after* this line has run — the supervisor is no longer filed under the
+            // provisional key by then, and nothing in a published state names the id the channel used to carry.
+            forkResolutions[filed] = state.key
         }
         updatesContinuation.yield(state)
     }
@@ -429,6 +437,30 @@ public actor Fleet: LifecycleAPI {
         return try await supervisor.send(input)
     }
 
+    /// `perform(.fork(at:), on:)`'s path, answering the sibling's provisional key instead of the source's state.
+    ///
+    /// The supervisor mints that key — a fork is a *new channel*, filed under a provisional id until the engine
+    /// announces its own — and `perform` throws it away, so a host that forked had no way to name the channel it had
+    /// just opened. Without it the fork's own composer cannot be prefilled and the window cannot select it; with it
+    /// neither has to guess, and reaching below the facade for the fleet's supervisor table is contract Y5's refusal.
+    @discardableResult
+    public func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
+        let supervisor = supervisor(for: key)
+        try spawnBarrier.check()
+        return try await supervisor.fork(at: point)
+    }
+
+    /// X5's `resolvedForkKey(of:)`: the key that fork is filed under once its own session id has landed.
+    ///
+    /// Two answers for one question, because the re-key can land on either side of the caller's arrival. While the
+    /// sibling is still filed under the provisional key it is asked directly and suspends there until its identity
+    /// settles; once `publish` has moved the map the supervisor cannot be found by that key at all, and the note
+    /// `publish` left is the answer. Neither is a guess: both come from the decision the supervisor already took.
+    public func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey {
+        if let sibling = supervisors[provisional] { return await sibling.settledForkKey() }
+        return forkResolutions.removeValue(forKey: provisional) ?? provisional
+    }
+
     public func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
         try spawnBarrier.check()
         return try await supervisor(for: key).openInTerminal()
@@ -556,6 +588,19 @@ public actor Fleet: LifecycleAPI {
         let context = await supervisor.routingContext()
         return CommandRouter.route(text, handshake: context.handshake, systemInit: context.systemInit,
                                    runtime: context.runtime)
+    }
+
+    /// The two reports the engine has already made about itself, for a surface that subscribed after they arrived.
+    ///
+    /// `events(of:)` is future-only by construction — it is a fan-out of what the process sends from now on — so a
+    /// surface mounted onto a channel that handshook minutes ago sees neither the handshake nor `system/init`, and
+    /// has no permission mode to display and no engine command list to complete against. The supervisor keeps both
+    /// for its own routing; this hands the same two values out rather than leaving each surface to wait for a
+    /// stream that will not repeat itself.
+    public func engineReports(of key: ChannelKey) async -> EngineReports? {
+        guard let supervisor = supervisors[key] else { return nil }
+        let context = await supervisor.routingContext()
+        return EngineReports(handshake: context.handshake, systemInit: context.systemInit)
     }
 
     /// One routed control request, on a channel.

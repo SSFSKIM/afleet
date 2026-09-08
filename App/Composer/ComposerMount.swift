@@ -1,0 +1,483 @@
+import SwiftUI
+import AfleetCore
+import PanelHostAPI
+import FleetKit
+
+/// One `ComposerModel` per channel, and the `ChannelSurfaceState` that model shares with the
+/// channel header (spec §8.5, C6.2 *The shape: two models, one seam*).
+///
+/// The same shape as `ChannelTimelineRegistry`: built on first ask, retained across a channel
+/// switch, keyed by `ChannelKey`. Retention is not an optimisation — the draft, and later the
+/// attachments and the pending rewind, are what the user has typed and not yet sent, and a registry
+/// that rebuilt the model on every return to a channel would throw them away.
+///
+/// **There is exactly one of these in the app**, `AppModel.composers`, bound by `bindWorkspace`
+/// beside `timelines` and `panels`. Two registries would hand the header's actions (Task 8) a
+/// different `ChannelSurfaceState` from the field those actions disable, which is the one thing the
+/// seam exists to prevent — so this is an app-scoped instance and not a static. Task 2 shipped it as
+/// `ComposerRegistry.shared` because its brief's fence stopped short of `App/Composition/`; the
+/// leaf's fence does reach one registration line there, which is what this is.
+@MainActor
+final class ComposerRegistry {
+
+    /// The lifecycle every model built here sends through. Nil until a launch reaches a workspace;
+    /// production is that workspace's own fleet, and a test sets a double before the first
+    /// `model(for:)`.
+    var lifecycle: (any LifecycleAPI)?
+
+    /// The workspace's own fleet, kept beside `lifecycle` for the one caller that needs more than
+    /// X5: §7.4's *Quit* clause, whose second step is `Fleet.shutdown()` — an `AppFleet` member and
+    /// not a `LifecycleAPI` one. Nil before a launch reaches a workspace, and unaffected by the
+    /// `lifecycle` seam a test substitutes, because a double is not a fleet to shut down.
+    var fleet: (any AppFleet)?
+
+    /// How a channel's `ChannelContext` is obtained — the one thing the composer needs from X7: the
+    /// `LinkRouterCapability` the Browser route uses, and the cwd and `ResolvedEnvironment` the `!`
+    /// escape runs in.
+    ///
+    /// Resolved here, where the model is built, rather than read from `@Environment` in the view.
+    /// For the Browser route an absent context loses a URL; for `!` it would mean running a command
+    /// in the wrong directory or not at all, and a shell escape that silently does nothing is worse
+    /// than one that says it cannot run.
+    ///
+    /// **A closure and not the `PanelHostModel` itself, and that is load-bearing.** The mount is
+    /// asserted by walking the view body with `Mirror`, and holding the host would put the whole
+    /// panel graph — every channel's context, each one's captured lifecycle and link router — on
+    /// that walk. Storing the host crashed `ComposerMountTests` outright: the walk ran away into the
+    /// graph and took the bundle with it, and because `xcodebuild` retries a crashed bundle the
+    /// suite then reported "Executed 0" rather than a failure. `Mirror` does not descend into a
+    /// closure's captures, so this reference is where the walk stops. It is also the better
+    /// layering: the registry depends on the *question*, not on X7's concrete host.
+    var contextProvider: (@MainActor (ChannelKey, URL) -> ChannelContext?)?
+
+    /// How a `PaneRequest` reaches the panel host's registered runner — X7's seam, for the header's
+    /// *Open in terminal*. A closure for the reason `contextProvider` is one: holding the host would
+    /// put the app's whole object graph on the reflection walk that asserts the mounts, which is
+    /// what crashed the bundle at Task 3's boundary (tracker 147).
+    var paneRunner: (@MainActor (PaneRequest) async throws -> Void)?
+
+    /// How the composer reaches the channel's `ChannelTimelineModel` — C6.1's, read only.
+    ///
+    /// The queue chip reads `Overlay.queue.queued` out of the timeline that model publishes, which
+    /// is the channel's one fold (contract X4). A closure rather than the `ChannelTimelineRegistry`
+    /// itself, for the same reason `contextProvider` is one: `ComposerMountTests` walks this view's
+    /// body with `Mirror`, and a stored registry would put every open channel's ingestion on that
+    /// walk. `Mirror` does not descend into a closure's captures.
+    ///
+    /// Nil leaves the chip empty rather than wrong — a composer with no timeline has nothing to
+    /// read, and there is no second place to read a queue from.
+    var timelineProvider: (@MainActor (ChannelKey) -> ChannelTimelineModel?)?
+
+    /// Where each composer's `RefusalInterceptor` records a replaced drift refusal: FleetKit's own
+    /// `fleet.log`, which is where C5's diagnostics already carry the drift count. Null until a launch
+    /// reaches a workspace, so a composer built before one still counts and writes nowhere.
+    var diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics()
+
+    /// afleet's own store, for the one value this leaf writes: the bypass acceptance, in the
+    /// `fleetKit` namespace (§7.8). Taken from the workspace at `attach(to:)` — the header needs a
+    /// store and has no other way to a legal one, and the launch already chose the root every byte
+    /// afleet writes goes under.
+    var store: (any StateStore)?
+
+    /// How a channel is brought into view — C5's `ShellModel.select`, handed down by `AppModel`.
+    ///
+    /// A closure for the reason every other seam here is one: the registry depends on the *question*, and holding
+    /// the shell would put the app's object graph on the reflection walk that asserts the mounts (tracker 147). Nil
+    /// leaves the fork where the user can find it in the sidebar rather than selecting nothing.
+    var selectChannel: (@MainActor (ChannelKey) -> Void)?
+
+    /// What a channel's composer is to open with, for a channel whose composer does not exist yet.
+    ///
+    /// *Fork from here* opens a **sibling**, and the text of the edited message belongs in that sibling's field —
+    /// but a channel nobody has drawn has no composer to put it in, and building one here would build it against a
+    /// timeline the column has not opened. So the text waits under the sibling's key and the composer takes it when
+    /// it is first built. One channel holds one pending prefill: a second fork onto the same key replaces it, which
+    /// is what a user who forked twice means.
+    private var pendingPrefills: [ChannelKey: String] = [:]
+
+    /// Hands `text` to the channel's composer — now if it has one, at its first mount if it does not — and brings
+    /// that channel into view. The one path *Fork from here* takes.
+    /// `from` is the generation the fork was started under. A handoff that completes after a rebind belongs to a
+    /// workspace this registry has let go of: its models were released by `attach(to:)`, its fleet is not the one
+    /// anything else refers to, and taking it would put a draft in this workspace's registry and move the window's
+    /// selection onto a channel of the old one. Dropped, silently — there is no surface left that the fork was
+    /// about.
+    func prefill(_ text: String, for key: ChannelKey, from generation: Int) {
+        guard generation == self.generation else { return }
+        // **A draft the user has already typed into is never overwritten**, on the same rule the edit paths hold: the
+        // handoff is asynchronous, and a sibling composer the user reached first may hold words that are not this
+        // prefill's to replace. The prefill is dropped and the composer says where the edited message went, rather
+        // than the typing being lost to a fork the user did not watch complete.
+        if let existing = models[key] {
+            if existing.draft.isEmpty { existing.draft = text } else { existing.editNote = Self.typedIntoForkNote }
+        } else {
+            pendingPrefills[key] = text
+        }
+        selectChannel?(key)
+    }
+
+    /// What a fork's composer says when the prefill found words already in its field. No text of the message and no
+    /// key (§11) — the message is in the conversation the fork was made from, which is where the user just was.
+    static let typedIntoForkNote =
+        "You typed in this fork before the edited message arrived, so what you typed was kept and the edited "
+        + "message was not put in the field."
+
+
+    /// Which workspace this registry is bound to, counted up by every `attach(to:)`.
+    ///
+    /// The registry is app-scoped and survives *Check again*, which builds a whole new workspace; the models over
+    /// the previous one are released and their handoffs are not. A fork opened before the rebind completes its
+    /// `LifecycleAPI.fork` afterwards and would then prefill and select a channel of a fleet nothing else refers to
+    /// — into this registry, because the closure captures the registry and not the workspace. The generation is what
+    /// the deferred handoff carries so it can be recognised as an old workspace's and dropped.
+    private(set) var generation = 0
+
+    private var models: [ChannelKey: ComposerModel] = [:]
+    private var headers: [ChannelKey: ChannelHeaderActionsModel] = [:]
+    private var surfaces: [ChannelKey: ChannelSurfaceState] = [:]
+
+    init() {}
+
+    /// Binds the registry to the workspace a launch reached, releasing every model built over the
+    /// previous one — the same contract `ChannelTimelineRegistry.attach(to:)` carries, for the same
+    /// reason: *Check again* runs the whole launch again, and a composer still holding the previous
+    /// fleet would send into a workspace nothing else refers to. Task 2 shipped this registry as a
+    /// static with no rebind, which had exactly that defect; its worker flagged it.
+    func attach(to workspace: Workspace, context: (@MainActor (ChannelKey, URL) -> ChannelContext?)? = nil,
+                timeline: (@MainActor (ChannelKey) -> ChannelTimelineModel?)? = nil,
+                paneRunner: (@MainActor (PaneRequest) async throws -> Void)? = nil,
+                lifecycle: (any LifecycleAPI)? = nil) {
+        releaseAll()
+        generation += 1
+        self.lifecycle = lifecycle ?? workspace.fleet
+        self.fleet = workspace.fleet
+        self.diagnostics = workspace.diagnostics.fleet
+        self.store = workspace.store
+        self.contextProvider = context
+        self.paneRunner = paneRunner
+        self.timelineProvider = timeline
+    }
+
+    /// This channel's composer, built on first ask and retained afterwards.
+    ///
+    /// **Nil before a launch reaches a workspace**, because there is no X5 to send through yet and a
+    /// field that accepted a message with nowhere to put it would lose it silently.
+    ///
+    /// The `ChannelSurfaceState` is created here and shared: the composer reads it and the header
+    /// writes it, and two registries — or a surface built per view — would hand Task 8's header a
+    /// different object from the field it is disabling, which is the one thing this seam exists to
+    /// prevent.
+    /// `cwd` is the channel's working directory, which the panel host needs to build the
+    /// `ChannelContext` the Browser route and the `!` escape read. Resolved here, where the model is
+    /// built, rather than in the view: for `!` an absent context means running a command in the
+    /// wrong directory or not at all, and a shell escape that silently does nothing is worse than
+    /// one that says it cannot run.
+    func model(for key: ChannelKey, cwd: URL? = nil) -> ComposerModel? {
+        if let existing = models[key] {
+            // A row that gained a cwd after its composer was built — an archived channel since
+            // registered — gets its context now rather than never, **and a row whose directory
+            // moved is re-resolved rather than kept**: the host answers `context(for:cwd:)` for the
+            // directory it is asked about, and a composer still holding the previous answer runs
+            // `!` in the tree the channel has left. The provider's answer is taken whatever it is,
+            // nil included: no context refuses the command in this leaf's own words, while a stale
+            // one runs it somewhere else.
+            if let cwd, rowIsNews(cwd, for: key, holding: existing.context?.cwd) {
+                existing.context = contextProvider?(key, cwd)
+            }
+            followTimeline(existing)
+            return existing
+        }
+        guard let lifecycle else { return nil }
+        let surface = surfaces[key] ?? ChannelSurfaceState()
+        surfaces[key] = surface
+        let model = ComposerModel(key: key, lifecycle: lifecycle, surface: surface, diagnostics: diagnostics)
+        if let cwd { model.context = contextProvider?(key, cwd) }
+        // A fork opened before this channel was ever drawn left the edited message here; it is this composer's
+        // opening draft, and it is taken exactly once.
+        if let waiting = pendingPrefills.removeValue(forKey: key) { model.draft = waiting }
+        // How this composer's own *Fork from here* reaches the sibling it opens. The model holds a closure rather
+        // than the registry, so nothing in `App/Composer/` depends on the registry's shape. The generation is
+        // captured here, when the composer is built, so the handoff carries the workspace it belongs to and a
+        // rebind that happened while the fork was in flight discards it.
+        let generation = generation
+        model.handOffToFork = { [weak self] forked, text in self?.prefill(text, for: forked, from: generation) }
+        // How a `/cd` this composer just made reaches its own context. Installed here for the reason the
+        // handoff is, and carrying the same generation: a directory change answered after a rebind belongs
+        // to a workspace this registry has let go of.
+        model.didChangeDirectory = { [weak self] moved in self?.adoptDirectory(moved, for: key, from: generation) }
+        followTimeline(model)
+        models[key] = model
+        return model
+    }
+
+    /// A directory this channel's own `/cd` changed to, and the directory the browser row was still
+    /// reporting when it did. Both halves are needed, and the second is what keeps this from being a
+    /// permanent override: see `holdsAdoptedDirectory`.
+    private var adoptedDirectories: [ChannelKey: (moved: URL, rowWas: URL?)] = [:]
+
+    /// **A directory change is taken as soon as the engine confirms it, not when the browser row catches
+    /// up.** The row is refreshed from a later fleet update, and `!` runs in `context.cwd`: a shell command
+    /// submitted in that window ran in the directory the channel had just left, which is the one mistake a
+    /// host command cannot be undone from. The context is re-resolved through `contextProvider` — the same
+    /// question the row's own update asks — so nothing here builds a context of its own.
+    func adoptDirectory(_ moved: URL, for key: ChannelKey, from generation: Int) {
+        guard generation == self.generation, let model = models[key] else { return }
+        adoptedDirectories[key] = (moved: moved, rowWas: model.context?.cwd)
+        model.context = contextProvider?(key, moved)
+    }
+
+    /// Whether the row's `cwd` is news to this composer, or the stale directory it has already moved away
+    /// from.
+    ///
+    /// The mount asks `model(for:cwd:)` on every body evaluation, so without the hold the very next redraw
+    /// would re-resolve the context back to the directory the row has not been told about yet, and the
+    /// adoption above would last microseconds. The hold is released the moment the row says anything else —
+    /// the moved-to directory means it has caught up, a third one means the channel has moved again and the
+    /// row is the newer answer — so it cannot outlive the window it exists for.
+    private func rowIsNews(_ cwd: URL, for key: ChannelKey, holding current: URL?) -> Bool {
+        if let adopted = adoptedDirectories[key] {
+            if cwd == adopted.rowWas { return false }
+            adoptedDirectories[key] = nil
+        }
+        return current != cwd
+    }
+
+    /// Points the composer's queue chip at the channel's timeline, if there is one to point at.
+    ///
+    /// Called on every `model(for:)` and not only on the first: `ChannelTimelineRegistry` builds a
+    /// channel's model on first ask too, so a composer built before the column ever drew the channel
+    /// would otherwise follow nothing for as long as it lived. `QueueChipModel.follow` is idempotent
+    /// for the same model.
+    private func followTimeline(_ model: ComposerModel) {
+        guard let timelines = timelineProvider?(model.key) else { return }
+        // The composer holds the same model the chip follows: *Edit* reads the rendered user
+        // messages and the preceding assistant item out of it, and raises the honoured rewind's
+        // host signal through it (`EditAndRewind`). Weakly, so the reference here is not a lifetime.
+        model.timelines = timelines
+        model.queue.follow(timelines)
+    }
+
+    /// This channel's header actions, built on first ask and retained beside its composer.
+    ///
+    /// One per channel, over the same composer: the header's restart path closes the field through
+    /// the `ChannelSurfaceState` that composer shares, and a second header would be writing into a
+    /// state whose field is not the one on screen. Nil for the same reason `model(for:)` is — before
+    /// a launch reaches a workspace there is no X5 to act through.
+    func header(for key: ChannelKey, cwd: URL? = nil) -> ChannelHeaderActionsModel? {
+        if let existing = headers[key] { return existing }
+        guard let composer = model(for: key, cwd: cwd) else { return nil }
+        let header = ChannelHeaderActionsModel(composer: composer, store: store)
+        headers[key] = header
+        return header
+    }
+
+    /// This channel's shared surface state, whether or not a composer has been built. The header
+    /// needs it before the field is first drawn.
+    func surface(for key: ChannelKey) -> ChannelSurfaceState {
+        if let existing = surfaces[key] { return existing }
+        let surface = ChannelSurfaceState()
+        surfaces[key] = surface
+        return surface
+    }
+
+    /// Drops one channel's composer — the channel left the index. The surface goes with it: a
+    /// header re-attaching to a released channel builds a fresh pair rather than writing into a
+    /// state whose field is gone.
+    func release(_ key: ChannelKey) {
+        models.removeValue(forKey: key)?.stop()
+        headers.removeValue(forKey: key)
+        surfaces.removeValue(forKey: key)
+        adoptedDirectories.removeValue(forKey: key)
+    }
+
+    /// The channels a composer has been built for; the count is what a report states.
+    var openChannels: [ChannelKey] { Array(models.keys) }
+
+    private func releaseAll() {
+        for model in models.values { model.stop() }
+        models = [:]
+        pendingPrefills = [:]
+        headers = [:]
+        surfaces = [:]
+        adoptedDirectories = [:]
+    }
+}
+
+/// §7.4's *Quit* clause reaching the `!` commands (`QuitGuard`).
+///
+/// The registry is where every running host command is held — one per composer, in `hostShell` — and it is
+/// the only place that can name them all. `stop()`'s own `cancelHostShell` is what ends one; this is that
+/// path over every composer at once, with the **wait** the quit needs added to it: `cancel()` signals the
+/// group from a dispatch queue, so a quit that only asked would exit before the first `SIGTERM` left the
+/// process.
+extension ComposerRegistry: QuitHostCommands {
+
+    /// How long the quit waits for the groups it has just signalled. Long enough for a `SIGTERM` and the
+    /// escalation behind it to reach a tree that ignores the first signal, and short enough that a wedged
+    /// child cannot hold the app open: what is left at the deadline has already been signalled, which is
+    /// the thing the exit itself could never do.
+    static let hostCommandDrain = Duration.seconds(3)
+
+    func cancelHostCommands() async {
+        // Read before the cancel: `cancelHostShell` clears the handle, and a wait taken afterwards would
+        // have nothing to wait on.
+        let running = models.values.compactMap(\.hostShell)
+        for model in models.values { model.cancelHostShell() }
+        guard !running.isEmpty else { return }
+        // Each run answers when its child has settled, which is after the group was signalled and the tree
+        // is gone. Counted rather than awaited in a group, because a `Task<_, Never>`'s value is not
+        // cancellable: a structured wait could not be abandoned at the deadline, and the bound is the point.
+        let settled = HostCommandSettlement()
+        for task in running { Task { _ = await task.value; await settled.note() } }
+        let deadline = ContinuousClock.now + Self.hostCommandDrain
+        while await settled.count < running.count, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+}
+
+/// How many of the cancelled host commands have answered. A count, and the only thing the bounded wait above
+/// needs to know (§11).
+actor HostCommandSettlement {
+    private(set) var count = 0
+    func note() { count += 1 }
+}
+
+/// The composer, mounted below the channel's list — one of C6.2's two call sites in
+/// `ChannelColumnView` (spec *The fence*).
+///
+/// It takes the registry and the row's cwd rather than reading `@Environment(AppModel.self)`, and
+/// resolves the model itself. The environment version was drawable only in a running app: the
+/// reflection-based view test that is the only way this view is asserted sees an empty environment
+/// and would find no composer, so the one place the mount could be wrong was the one place no test
+/// could look.
+struct ChannelComposerMount: View {
+
+    let key: ChannelKey
+    /// The channel's working directory, from the row the column already resolved. It is what the
+    /// panel host needs to build the `ChannelContext` the composer's Browser route and `!` escape
+    /// use, and it is nil only for a row that carries none — which is a row that is never registered.
+    let cwd: URL?
+    /// The app's one registry, handed down by the column. Not `@Environment`: the column already
+    /// holds `AppModel`, and an environment read would make the mount undrawable in a test that
+    /// walks the body by reflection, which is how this view is asserted at all.
+    /// Why this row may not be written to, or nil for one that may — C5's listing policy, carried on the row the
+    /// column already resolved (`ChannelRow.readOnlyReason`).
+    let readOnly: ListingPolicy.ReadOnlyReason?
+    /// The app's one registry, handed down by the column. Not `@Environment`: the column already
+    /// holds `AppModel`, and an environment read would make the mount undrawable in a test that
+    /// walks the body by reflection, which is how this view is asserted at all.
+    let composers: ComposerRegistry
+
+    /// **A read-only row gets no field, and that gate is here rather than inside the composer.**
+    ///
+    /// C5 lists a teammate's transcript read-only, and the header's actions are already gated on the same policy
+    /// (`ChannelRow.offersOwnedActions`) — but nothing gated the composer, and every write in this leaf leaves
+    /// through it: a prompt resumes an archived session in `ChannelSupervisor.send`, and the `!` escape explicitly
+    /// permits an archived origin. Not mounting the model at all is what makes that unreachable; a disabled field
+    /// would still be a field with a send path behind it, and the surface below says why instead.
+    ///
+    /// The composer is not built either, so a read-only channel the user visits takes no event subscription and
+    /// holds no draft: there is nothing it could ever send.
+    var body: some View {
+        if let readOnly {
+            ReadOnlyComposerNotice(reason: readOnly)
+        } else if let model = resolved() {
+            ComposerView(model: model)
+        }
+    }
+
+    /// This channel's composer, subscribed.
+    ///
+    /// **The subscription follows the key and not the view's appearance.** SwiftUI keeps the channel
+    /// subtree's identity across a selection change, so switching between two channels of the same
+    /// listing mode neither disappears nor appears anything: a composer that only subscribed in
+    /// `onAppear` would sit unsubscribed for the whole of the second channel's visit — no handshake,
+    /// no slash commands, no ghost text — while its field drew normally. Resolving here, where the
+    /// key is, makes the subscription a property of the channel being drawn.
+    ///
+    /// `start()` is idempotent, so a body evaluated many times for one channel subscribes once.
+    private func resolved() -> ComposerModel? {
+        guard let model = composers.model(for: key, cwd: cwd) else { return nil }
+        model.start()
+        return model
+    }
+}
+
+/// What stands where the field would be on a row C5 listed read-only.
+///
+/// It states the reason rather than leaving the column to end in nothing: the channel is readable, and a user who
+/// finds no composer under a conversation they can see is owed the sentence that says why. Names a kind and never a
+/// path, a holder or a session (§11).
+struct ReadOnlyComposerNotice: View {
+
+    let reason: ListingPolicy.ReadOnlyReason
+
+    var body: some View {
+        Label(Self.sentence(reason), systemImage: "eye")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    static func sentence(_ reason: ListingPolicy.ReadOnlyReason) -> String {
+        switch reason {
+        case .teammate: "This conversation belongs to another user on this machine. afleet can show it and cannot write to it."
+        }
+    }
+}
+
+/// The channel header's action menu — C6.2's other call site, mounted above the list.
+///
+/// It draws Task 7's three setting pickers, whose displayed values are engine readbacks
+/// (`SettingPickers`, gate G7), and Task 8's menus (`HeaderMenus`).
+///
+/// **Two things reach it through the environment, both optional.** The `ChannelRow` this header is
+/// drawing — `offersOwnedActions` is the gate on every action here (tracker 74) — and the panel host
+/// *Open in terminal* hands its `PaneRequest` to. Optional because the reflection-based mount test
+/// installs no environment, and a non-optional read would trap there: an unresolved environment
+/// leaves the header with no row, which offers nothing, which is the safe answer rather than the
+/// convenient one.
+struct ChannelHeaderActionsSlot: View {
+
+    let key: ChannelKey
+    /// The row the column already resolved. Handed down rather than read back out of
+    /// `@Environment(AppModel.self)`, for the reason the composer's own mount is: an environment
+    /// read leaves the production path undrawable in the reflection test that is the only way these
+    /// views are asserted, so the one thing tracker 74's gate turns on — whether this row offers
+    /// owned actions — would be exercised on the model and never through the mount.
+    let row: ChannelRow?
+    /// The app's one registry, handed down by the column, exactly as the composer's mount takes it.
+    let composers: ComposerRegistry
+
+    var body: some View {
+        if let header = adopted() {
+            ChannelHeaderMenus(model: header)
+                .onChange(of: row?.mode) { _, _ in adopt(header) }
+        }
+    }
+
+    /// This channel's header actions, holding this channel's row.
+    ///
+    /// Adopted here rather than in `onAppear`, for the reason the composer's mount resolves its
+    /// model here: the subtree keeps its identity across a switch between two channels of the same
+    /// mode, so nothing appears and the mode does not move — and a header still holding the previous
+    /// channel's row would gate every owned action on a channel the user has left. `adopt` is a
+    /// plain assignment of the row the column already resolved, so a body drawn many times for one
+    /// channel adopts the same row many times.
+    private func adopted() -> ChannelHeaderActionsModel? {
+        guard let header = composers.header(for: key) else { return nil }
+        adopt(header)
+        return header
+    }
+
+    /// The row and the pane runner. Re-taken whenever the row's listing mode moves, so a channel
+    /// that turns read-only while it is on screen loses the menu with it.
+    private func adopt(_ header: ChannelHeaderActionsModel) {
+        header.adopt(row: row)
+        if let runner = composers.paneRunner {
+            header.paneRunner = runner
+        }
+    }
+}

@@ -81,6 +81,14 @@ final class AppModel {
     /// feed in its context would watch a timeline nothing updates.
     let panels: PanelHostModel
 
+    /// The per-channel composers (spec §8.5), one `ComposerModel` and one shared
+    /// `ChannelSurfaceState` per channel.
+    ///
+    /// **One instance, app-scoped**, for the reason the two above are: the channel column draws the
+    /// field from here and C6.2's header actions write the surface state from here, and a second
+    /// registry would disable a field that is not the one on screen.
+    let composers = ComposerRegistry()
+
     /// Contract Y4's seam: where an `Agent` chip in the timeline navigates to.
     ///
     /// A settable property with a default rather than a construction, the shape `HostLinkRouter`
@@ -117,8 +125,8 @@ final class AppModel {
         self.panels = panels
         self.shell = ShellModel(panels: panels)
         self.sequence = sequence
-        self.coordinatorFactory = coordinatorFactory ?? { [timelines] workspace in
-            FleetCoordinator(workspace: workspace, panels: panels, timelines: timelines)
+        self.coordinatorFactory = coordinatorFactory ?? { [timelines, composers] workspace in
+            FleetCoordinator(workspace: workspace, panels: panels, timelines: timelines, composers: composers)
         }
         // C5's one shipped tab, under `.thread`. C6 takes that id by `unregister(.thread)` and then
         // its own `register`; `register` refuses a duplicate, so the pair is the handover.
@@ -145,6 +153,14 @@ final class AppModel {
     func bindWorkspace(_ workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
         timelines.attach(to: workspace, lifecycle: lifecycle)
         panels.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
+        composers.attach(to: workspace,
+                         context: { [panels] key, cwd in panels.context(for: key, cwd: cwd) },
+                         timeline: { [timelines] key in timelines.model(for: key) },
+                         paneRunner: { [panels] request in try await panels.run(request) },
+                         lifecycle: lifecycle)
+        // *Fork from here* opens a sibling channel and the window has to move to it, which is C5's own selection
+        // path and not a second one. Set after `attach`, which releases the models of the previous workspace.
+        composers.selectChannel = { [shell] key in shell.select(key.session) }
     }
 
     /// Runs the launch and routes on its outcome. Concurrent windows await the same task;

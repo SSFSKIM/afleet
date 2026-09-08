@@ -6,6 +6,10 @@ import ClaudeWire
 /// actions the engine only reports the consequences of, and a process replacement is the host's own bookkeeping.
 public enum HostSignal: Sendable, Hashable {
     case promptSent(uuid: String, at: Date)
+    /// A prompt the host sent will never run: the engine answered `cancel_async_message` for it with
+    /// `cancelled: true`, so it produces no turn. Without it the uuid stays outstanding and the **next** turn —
+    /// some other prompt's — is attributed to the message the user cancelled.
+    case promptCancelled(uuid: String)
     case decisionAnswered(RequestID, outcome: DecisionOutcome)
     case rewound(toUUID: String)
     case processReplaced(ProcessEpoch)

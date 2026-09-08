@@ -22,7 +22,8 @@ struct ChannelColumnView: View {
     var body: some View {
         Group {
             if let row {
-                ChannelTimelineColumn(model: app.timelines.model(for: row.key), row: row)
+                ChannelTimelineColumn(model: app.timelines.model(for: row.key), row: row,
+                                      composers: app.composers)
             } else {
                 PlaceholderColumn(title: "No channel selected",
                                   detail: "Pick a channel in the sidebar, or press Command-K.")
@@ -45,10 +46,15 @@ private struct ChannelTimelineColumn: View {
 
     let model: ChannelTimelineModel
     let row: ChannelRow
+    /// C6.2's per-channel composers, handed down rather than read from the environment: the column
+    /// already receives `AppModel` and threading the one registry it needs keeps the mount a plain
+    /// value a test can walk, with no environment and no test-only seam.
+    let composers: ComposerRegistry
 
     var body: some View {
         VStack(spacing: 0) {
             ChannelHeaderView(header: model.header)
+            ChannelHeaderActionsSlot(key: row.key, row: row, composers: composers)
             Divider()
             if let failure = model.failure {
                 PlaceholderColumn(title: "This channel could not be read", detail: failure)
@@ -62,6 +68,9 @@ private struct ChannelTimelineColumn: View {
                 List(model.rows) { TimelineRowSlot(row: $0) }
                     .listStyle(.inset)
             }
+            // The row's listing policy travels with the mount: a read-only row is a teammate's transcript, and the
+            // composer is the one surface in this column that can write to a channel.
+            ChannelComposerMount(key: row.key, cwd: row.cwd, readOnly: row.readOnlyReason, composers: composers)
         }
         // The header and the opening are two concerns, and keying one task on both was a defect.
         // The header has to follow a channel that goes busy, raises a banner or crashes while it
