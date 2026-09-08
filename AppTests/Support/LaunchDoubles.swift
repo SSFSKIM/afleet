@@ -36,16 +36,19 @@ final class SeamLog: @unchecked Sendable {
 actor StubFleet: AppFleet {
     nonisolated let updates: AsyncStream<ChannelState>
     private let continuation: AsyncStream<ChannelState>.Continuation
+    nonisolated let jobUpdates: AsyncStream<[JobEntry]>
+    private let jobContinuation: AsyncStream<[JobEntry]>.Continuation
     private(set) var started = false
     private(set) var registrations: [ChannelKey] = []
 
     init() {
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (jobUpdates, jobContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
     func start() async { started = true }
     func register(_ key: ChannelKey, cwd: URL, recent: Bool) async { registrations.append(key) }
-    func shutdown() async { continuation.finish() }
+    func shutdown() async { continuation.finish(); jobContinuation.finish() }
 
     func state(of key: ChannelKey) async -> ChannelState? { nil }
     func states() async -> [ChannelState] { [] }

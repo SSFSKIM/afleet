@@ -20,6 +20,9 @@ actor LifecycleDouble: LifecycleAPI {
     nonisolated let updates: AsyncStream<ChannelState>
     private nonisolated let continuation: AsyncStream<ChannelState>.Continuation
 
+    nonisolated let jobUpdates: AsyncStream<[JobEntry]>
+    private nonisolated let jobContinuation: AsyncStream<[JobEntry]>.Continuation
+
     /// What the next `perform` does. A queue, so a test can stage a refusal followed by a success and
     /// see which one a surface that retried would have reached.
     private var outcomes: [Result<ChannelState, LifecycleError>] = []
@@ -57,6 +60,7 @@ actor LifecycleDouble: LifecycleAPI {
 
     init() {
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (jobUpdates, jobContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
     // MARK: - Driving it
@@ -69,7 +73,11 @@ actor LifecycleDouble: LifecycleAPI {
     /// never called.
     func setSpawn(_ factory: @escaping ProcessFactory) { spawn = factory }
     nonisolated func emit(_ state: ChannelState) { continuation.yield(state) }
-    nonisolated func finish() { continuation.finish() }
+    /// Publishes a roster the way `Fleet` publishes one: the full current list, on `jobUpdates`. It deliberately
+    /// does **not** change what `jobs()` answers, so a surface that reads the stream and a surface that re-polls
+    /// are told different things and a test can see which one the code under test believed.
+    nonisolated func emitJobs(_ jobs: [JobEntry]) { jobContinuation.yield(jobs) }
+    nonisolated func finish() { continuation.finish(); jobContinuation.finish() }
 
     var performCount: Int { performed.count }
 
@@ -96,7 +104,15 @@ actor LifecycleDouble: LifecycleAPI {
         return state
     }
 
-    func jobs() async -> [JobEntry] { roster }
+    /// How many times `jobs()` was answered. The Background list is supposed to take one snapshot and then listen,
+    /// so the count is the property: a second call means a surface went back to the CLI for something the stream
+    /// had already told it.
+    private(set) var jobsCalls = 0
+
+    func jobs() async -> [JobEntry] {
+        jobsCalls += 1
+        return roster
+    }
 
     func states() async -> [ChannelState] {
         let interlude = statesInterlude
@@ -208,15 +224,19 @@ actor FleetDouble: AppFleet {
 
     nonisolated let updates: AsyncStream<ChannelState>
     private nonisolated let continuation: AsyncStream<ChannelState>.Continuation
+
+    nonisolated let jobUpdates: AsyncStream<[JobEntry]>
+    private nonisolated let jobContinuation: AsyncStream<[JobEntry]>.Continuation
     private(set) var started = false
     private(set) var registrations: [ChannelKey] = []
 
     init() {
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (jobUpdates, jobContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
     func start() async { started = true }
-    func shutdown() async { continuation.finish() }
+    func shutdown() async { continuation.finish(); jobContinuation.finish() }
     func register(_ key: ChannelKey, cwd: URL, recent: Bool) async { registrations.append(key) }
     nonisolated func emit(_ state: ChannelState) { continuation.yield(state) }
 
