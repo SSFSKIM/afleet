@@ -18,8 +18,10 @@ import AfleetCore
 /// Every assertion here is on the whole published sequence, drawn after `shutdown()` has finished the stream: "and
 /// nothing else was published" is then a drain to `nil` rather than a wait long enough to feel safe.
 ///
-/// Deliberate break: make `FleetObserver.perform` yield on `jobsContinuation` unconditionally → the holder-only and
-/// unchanged-roster tests each gain a publication and fail.
+/// Deliberate break: make `FleetObserver.perform` yield on `jobsContinuation` unconditionally → three of the four
+/// fail on their publication counts (measured: 3, 4 and 3 where 1, 2 and 1 are owed). Only the state-change test
+/// still passes, which is the point of the other three: "it published the right roster" is satisfied by publishing
+/// the same roster on every read, and the cost of that is what this suite is for.
 final class RosterSignalTests: XCTestCase {
 
     private var harness: Harness!
