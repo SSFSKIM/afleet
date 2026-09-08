@@ -377,20 +377,23 @@ final class ActivityModel {
     /// would have built for it (spec D14). The card itself, its actions and its answers are
     /// `DecisionCardView`'s and `DecisionCard.answer(_:)`'s — Activity constructs none of them.
     ///
-    /// Nil for every kind but a decision, and for a decision it is nil unless the request is a
-    /// `can_use_tool` without `requires_user_interaction` — C5's rule, unchanged by the adoption.
-    /// That flag is the engine saying
-    /// the tool's own card is the surface, so an *Allow once* button here would answer a question
-    /// the user has not been shown. Every other kind — question, plan, elicitation, dialog — gets
-    /// its row and a *Go to channel*, because half a card is a wrong affordance rather than a
-    /// partial one (C5's human-gate ruling 4, spec D4).
+    /// Nil for every kind but a decision, and for a decision it is nil unless **both** hold: the
+    /// card's kind is `.permission`, and the request does not carry `requires_user_interaction`
+    /// (spec D17). Neither implies the other. The flag is the engine saying the tool's own card is
+    /// the surface, so an *Allow once* button here would answer a question the user has not been
+    /// shown; the kind is the human ruling about what Activity may answer at all, so a question or
+    /// a plan that arrives *without* the flag is still refused inline. Every other kind — question,
+    /// plan, elicitation, dialog — gets its row and a *Go to channel*, because half a card is a
+    /// wrong affordance rather than a partial one (C5's human-gate ruling 4, spec D4).
     private func card(for row: ActivityRow) -> DecisionCard? {
         guard case .decision(let id) = row.kind,
               let request = pumps[row.key]?.requests[id],
               case .canUseTool(let tool) = request.payload,
               tool.requiresUserInteraction != true,
               let item = DecisionItem(surfacing: request, in: row.key) else { return nil }
-        return DecisionCard(item)
+        let card = DecisionCard(item)
+        guard case .permission = card.kind else { return nil }
+        return card
     }
 
     // MARK: - Badges and the unread cursor

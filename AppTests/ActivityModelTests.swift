@@ -717,24 +717,33 @@ final class ActivityModelTests: XCTestCase {
 
     /// An ask carrying `requires_user_interaction` gets a *Go to channel* row, because §8.4 makes
     /// that flag the engine saying the tool's own card is the surface. The floor is the same
-    /// recorded ask with the flag cleared, which *is* answerable — without it a model that never
+    /// recorded ask with the flag absent, which *is* answerable — without it a model that never
     /// offered an inline answer at all would pass.
+    ///
+    /// The subject is a **permission** ask with the flag set by override, not a question with it
+    /// cleared (spec D17). Since eligibility is the kind *and* the flag, a question would be
+    /// excluded by its kind and this test would pass with the flag ignored entirely. On a
+    /// permission ask the flag is the only thing that can exclude it, so this test fails alone when
+    /// the flag stops being read. The kind clause has its own test below.
     func testAnAskRequiringUserInteractionIsNotAnsweredInline() async throws {
         let harness = try Harness()
         let interactive = harness.key("1"), plain = harness.key("2")
-        let flagged = try FixtureRunner.request("ask-user-question", subtype: "can_use_tool",
-                                                id: "11111111-1111-4111-8111-111111111111")
-        let cleared = try FixtureRunner.request("ask-user-question", subtype: "can_use_tool",
-                                                id: "22222222-2222-4222-8222-222222222222",
-                                                overrides: ["requires_user_interaction": false])
+        let flagged = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                                id: "11111111-1111-4111-8111-111111111111",
+                                                overrides: ["requires_user_interaction": true])
+        let plainAsk = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                                 id: "22222222-2222-4222-8222-222222222222")
         guard case .canUseTool(let tool) = flagged.payload else { return XCTFail("not a can_use_tool") }
-        XCTAssertEqual(tool.requiresUserInteraction, true, "the fixture no longer carries the flag")
+        XCTAssertEqual(tool.requiresUserInteraction, true, "the override never reached the request")
+        guard case .canUseTool(let plainTool) = plainAsk.payload else { return XCTFail("not a can_use_tool") }
+        XCTAssertNotEqual(plainTool.requiresUserInteraction, true,
+                          "the recorded permission ask now carries the flag, so the floor proves nothing")
 
         await arm(harness, interactive, pending: [ActivityFixtures.pending(flagged)])
-        await arm(harness, plain, pending: [ActivityFixtures.pending(cleared)])
+        await arm(harness, plain, pending: [ActivityFixtures.pending(plainAsk)])
         await harness.model.start()
         await harness.lifecycle.push(.request(flagged), to: interactive)
-        await harness.lifecycle.push(.request(cleared), to: plain)
+        await harness.lifecycle.push(.request(plainAsk), to: plain)
         await harness.model.whenSettled { model in
             model.pump(for: interactive)?.requests.count == 1 && model.pump(for: plain)?.requests.count == 1
         }
@@ -743,6 +752,33 @@ final class ActivityModelTests: XCTestCase {
         XCTAssertNil(interactiveItem.card, "an ask requiring user interaction was answered inline")
         let plainItem = try XCTUnwrap(harness.model.items.first { $0.key == plain })
         XCTAssertNotNil(plainItem.card, "the same ask without the flag was not answerable")
+    }
+
+    /// A question that does **not** carry `requires_user_interaction` still gets a row and no
+    /// inline answer, because eligibility is the kind as well as the flag (spec D17).
+    ///
+    /// This is the clause the kind guard alone can fail: the flag is cleared here, so a model that
+    /// keyed only on the flag would offer the question card's actions inside Activity — C5's
+    /// human-gate ruling 4 widened by accident. The row is asserted present as well, so a model
+    /// that dropped the request entirely does not pass by having nothing to answer.
+    func testAQuestionWithoutTheInteractionFlagIsStillNotAnsweredInline() async throws {
+        let harness = try Harness()
+        let channel = harness.key("1")
+        let question = try FixtureRunner.request("ask-user-question", subtype: "can_use_tool",
+                                                 id: "33333333-3333-4333-8333-333333333333",
+                                                 overrides: ["requires_user_interaction": false])
+        guard case .canUseTool(let tool) = question.payload else { return XCTFail("not a can_use_tool") }
+        XCTAssertNotEqual(tool.requiresUserInteraction, true,
+                          "the flag is still set, so the flag rather than the kind could refuse it")
+
+        await arm(harness, channel, pending: [ActivityFixtures.pending(question)])
+        await harness.model.start()
+        await harness.lifecycle.push(.request(question), to: channel)
+        await harness.model.whenSettled { model in model.pump(for: channel)?.requests.count == 1 }
+
+        let item = try XCTUnwrap(harness.model.items.first { $0.key == channel },
+                                 "the question earned no row at all")
+        XCTAssertNil(item.card, "a question without the interaction flag was answered inline")
     }
 
     // MARK: - The launch order
