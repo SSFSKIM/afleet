@@ -15,8 +15,10 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
     private typealias Waiter = (deadline: Instant, id: UUID, continuation: CheckedContinuation<Void, any Error>)
     private var waiters: [Waiter] = []
     private var _requested: [Duration] = []
-    private typealias CountWaiter = (threshold: Int, id: UUID, continuation: CheckedContinuation<Void, Never>)
-    /// Parties waiting for `waiters.count` to reach a threshold, registered and checked under `lock` so the
+    private typealias CountWaiter = (due: Duration?, threshold: Int, id: UUID,
+                                     continuation: CheckedContinuation<Void, Never>)
+    /// Parties waiting for a sleeper count to reach a threshold — every sleeper when `due` is nil, only the ones
+    /// parked with exactly that much time left when it is not. Registered and checked under `lock` so the
     /// registration cannot straddle the moment the count actually gets there.
     private var countWaiters: [CountWaiter] = []
     public init() {}
@@ -46,31 +48,45 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
         }
     }
 
-    /// Suspends until at least `n` sleepers are parked — resumed the instant whichever `sleep` call makes that true,
-    /// registered under the same lock that governs `waiters` so the check-and-register cannot straddle the count
-    /// actually reaching `n`. No polling, no wall time: a genuine synchronisation point on the clock's own state,
-    /// the thing tests that need both of the observer's timers armed are actually waiting on.
+    /// Suspends until at least `n` sleepers are parked — every sleeper when `due` is nil, only the ones parked with
+    /// exactly that much time left when it is not, because a count of sleepers of *any* kind is satisfied by
+    /// whichever timer happens to exist rather than by the one the caller is about to fire. Resumed the instant
+    /// whichever `sleep` call makes that true, registered under the same lock that governs `waiters` so the
+    /// check-and-register cannot straddle the count actually reaching `n`. No polling, no wall time: a genuine
+    /// synchronisation point on the clock's own state, the thing tests that need the observer's timers armed before
+    /// they advance are actually waiting on.
     ///
     /// Bounded by a wall-clock guard that is never reached on a correct path: the count is normally there within
     /// microseconds. It exists so a misuse — waiting for timers that will never be armed, say after `stop()` — fails
     /// with the count it was waiting for and the count it got, rather than hanging until XCTest's global timeout
     /// with nothing said. The guard moves no part of the lifecycle; only `advance(by:)` does that.
-    func waitForSleeperCount(atLeast n: Int, within limit: Duration = .seconds(30),
+    func waitForSleeperCount(atLeast n: Int, due: Duration? = nil, within limit: Duration = .seconds(30),
                              file: StaticString = #filePath, line: UInt = #line) async {
         let id = UUID()
+        let what = due.map { "sleepers due in \($0)" } ?? "sleepers"
         let guardTask = Task { [weak self] in
             try? await Task.sleep(for: limit)
             guard let self, !Task.isCancelled, self.expireCountWaiter(id) else { return }
-            XCTFail("the clock never parked \(n) sleepers; \(self.sleeperCount) are parked", file: file, line: line)
+            XCTFail("the clock never parked \(n) \(what); \(self.lockedCount(due: due)) are parked",
+                    file: file, line: line)
         }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             lock.lock()
-            if waiters.count >= n { lock.unlock(); continuation.resume(); return }
-            countWaiters.append((n, id, continuation))
+            if count(due: due) >= n { lock.unlock(); continuation.resume(); return }
+            countWaiters.append((due, n, id, continuation))
             lock.unlock()
         }
         guardTask.cancel()
     }
+
+    /// How many sleepers match `due` — every one of them when it is nil. Callers hold `lock`, except
+    /// `sleeperCount(due:)` and the guard message, which take it themselves.
+    private func count(due: Duration?) -> Int {
+        guard let due else { return waiters.count }
+        return waiters.filter { _now.duration(to: $0.deadline) == due }.count
+    }
+
+    private func lockedCount(due: Duration?) -> Int { lock.lock(); defer { lock.unlock() }; return count(due: due) }
 
     /// Removes the count-waiter with this id and resumes it, answering whether it was still registered. The guard
     /// only reports when this says yes, so a wait that was satisfied a moment earlier reports nothing.
@@ -89,7 +105,7 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
     private func takeReadyCountWaiters() -> [CheckedContinuation<Void, Never>] {
         var ready: [CheckedContinuation<Void, Never>] = []
         countWaiters.removeAll { waiter in
-            guard waiters.count >= waiter.threshold else { return false }
+            guard count(due: waiter.due) >= waiter.threshold else { return false }
             ready.append(waiter.continuation)
             return true
         }
@@ -116,8 +132,5 @@ public final class TestClock: Clock, @unchecked Sendable {   // `lock` serialise
     public var sleeperCount: Int { lock.lock(); defer { lock.unlock() }; return waiters.count }
     /// How many sleepers are parked with exactly this much time left. A count of sleepers of *any* kind is satisfied
     /// by whichever timer happens to exist, so a test that means "the one-second backoff is armed" asks for that.
-    public func sleeperCount(due duration: Duration) -> Int {
-        lock.lock(); defer { lock.unlock() }
-        return waiters.filter { _now.duration(to: $0.deadline) == duration }.count
-    }
+    public func sleeperCount(due duration: Duration) -> Int { lockedCount(due: duration) }
 }
