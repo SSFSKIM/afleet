@@ -2387,7 +2387,15 @@ SwiftPM package or target that builds and tests without the children above it, p
   output file, last frame time) are FleetKit types. Owner: C3. Binds C4, C6, and every
   leaf C6's cut produces. Amended 2026-09-05 from C7's cut: a recent-URL query over the
   channel's reduced items (URL, first-seen item, time; de-duplicated, most recent first),
-  with the contributing item kinds a named constant, feeds X7's channel context.
+  with the contributing item kinds a named constant, feeds X7's channel context. Amended
+  2026-09-08 from C6's cut (corrective `01eb7a7` on `main`): a channel's wire is folded once,
+  in C3's `StreamIngestion` — it holds the channel's `WireReducer`, folds its own subscription,
+  and publishes both halves on `effects` (`Effect.changes` carries durable and overlay item
+  changes plus `.previewChanged`, `.overlayChanged`, `.sessionStateChanged`; the record
+  bookkeeping fields stay the durable half's and read zero on a purely live effect); it exposes
+  `overlay`, `preview` and `timeline` (the three in one read, the only one that cannot straddle
+  a mutation). C6 subscribes to `effects` and reads `timeline`; it never folds the wire itself
+  and never holds a second reducer.
 - **X5 Lifecycle API.** Channel origin and sub-state as observable state; the actions
   open, send, reap, adopt, sendToBackground, openInTerminal, fork, quiescentRestart,
   stopEverything, backgroundAll, logout; the preconditions as a typed result (ready,
@@ -2419,7 +2427,13 @@ SwiftPM package or target that builds and tests without the children above it, p
   naming the blocker (a turn, a decision, queued input, a wedge, a background task by id).
   Amended 2026-09-06: the router is reachable through this API on a `ChannelKey` — `route(_:on:)`,
   `send(_:on:)` and `run(_:arguments:on:ui:)` — so C6's composer routes a line and executes what it
-  named without holding anything under the facade.
+  named without holding anything under the facade. Amended 2026-09-08 from C6's cut (corrective
+  `01eb7a7` on `main`): host-side facts that change the overlay without a wire frame —
+  `HostSignal.decisionAnswered`, the queue and rewind moves — reach the fold through
+  `StreamIngestion.signal(_:) async -> Effect`; after `perform(.answer)` succeeds the host
+  raises `.decisionAnswered` there, so the card leaves the overlay on the host's own evidence
+  rather than waiting for the engine's next frame. Nothing had raised the signal before this
+  corrective (C3 Revision Note 2026-09-08).
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
   types; FleetKit never models upper-layer state — and state its own listing and unread
@@ -4588,3 +4602,8 @@ Pending — written at finish.
   user message; `"stale target"` is what a host gets for omitting the field. §8.5 corrected; item
   13's fork fallback is the rare path; the `rewind-turn` fixture stays valid as the without-field
   recording and is re-recorded with the field at C1's next re-pin.
+- 2026-09-08 one wire fold per channel (corrective `01eb7a7`, ruled while C6.1's seam commit and
+  C3's host-signal corrective were both about to fold the wire). X4 and X5 amended as above: C3's
+  `StreamIngestion` owns the channel's single `WireReducer`, publishes the live half on `effects`
+  and exposes `timeline`; `HostSignal` reaches it through `signal(_:)`. C6.1 consumes the fold;
+  its own reducer and second subscription were withdrawn before they landed.
