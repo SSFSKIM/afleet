@@ -308,6 +308,14 @@ private struct EditorHeader: View {
                     Image(systemName: "doc.on.doc")
                 }
                 .help("Copy path")
+                // The session's `close` — the watcher stops with the file and the banner goes with
+                // it — reached from the one place that names a single open file.
+                Button {
+                    Task { await session.close(file.url) }
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .help("Close")
             }
         }
         .buttonStyle(.borderless)

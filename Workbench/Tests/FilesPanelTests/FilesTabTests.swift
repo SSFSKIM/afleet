@@ -208,6 +208,23 @@ final class FilesTabTests: XCTestCase {
         XCTAssertEqual(readout.viewer, .nothing)
     }
 
+    /// The header's *Close*: the count falls and the panel falls back to whatever is left.
+    func testClosingTheSelectedFileLeavesTheOtherOpenFileOnScreen() async throws {
+        let first = try tree.file("workspace/one.swift", "let a = 1\n")
+        let second = try tree.file("workspace/two.swift", "let b = 2\n")
+        let session = try makeSession()
+        await session.openFile(at: first, line: nil)
+        await session.openFile(at: second, line: nil)
+        XCTAssertEqual(FilesPanelReadout(session: session).openFileCount, 2)
+
+        await session.close(second)
+
+        let readout = FilesPanelReadout(session: session)
+        XCTAssertEqual(readout.openFileCount, 1)
+        XCTAssertEqual(readout.selectedName, "one.swift")
+        XCTAssertEqual(readout.viewer, .editor)
+    }
+
     func testAFilterOverTheTreeIsReportedAsActive() throws {
         let session = try makeSession()
 
