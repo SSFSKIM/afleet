@@ -451,12 +451,13 @@ final class PTYTerminationTests: XCTestCase {
         usleep(250_000)
 
         XCTAssertTrue(PTYTestChild.isRunning(identity), "unrelated-process-group=signalled")
-        // And the helper still does its job for the identity it can prove.
+        // And the helper still does its job for the identity it can prove. It ends the child; it
+        // does not reap it. This bystander has no production waiter behind it, so it stays a
+        // zombie until this test's own `defer` takes the status — which is the point: cleanup
+        // that reaped here would be taking a status that, for a pty child, belongs to the
+        // waiter.
         PTYTestChild.terminateAndReap(identity)
-        XCTAssertFalse(
-            PTYTestChild.stillNamesTheSameChild(identity),
-            "proven-child=not-reaped"
-        )
+        XCTAssertFalse(PTYTestChild.isRunning(identity), "proven-child=still-running")
     }
 
     /// A child of this test process in a process group of its own — the shape of a pty child, so
@@ -599,6 +600,108 @@ final class PTYTerminationTests: XCTestCase {
 
         XCTAssertTrue(livingDisposition == .sent, "living-child-cleanup=refused")
         XCTAssertTrue(reapedDisposition == .notOwned, "reaped-child-cleanup=signalled")
+    }
+
+    /// The owner-release cleanup shares the reaper's gate. Its two signals are separated by a
+    /// window in which the production waiter can reap — and a reaped pid, with the process group
+    /// that shares its number, is reusable at once — so one proof cannot authorise both. The
+    /// window cannot be arranged against the real scheduler, so the proof itself is what is
+    /// driven here: it is invalidated between the signals, exactly as a reap would invalidate it.
+    func testOwnerReleaseCleanupRefusesTheSecondSignalOnceTheProofIsGone() {
+        let identity = PTYTestChild.ChildIdentity(
+            pid: 424_242,
+            startedAtSeconds: 1_700_000_000,
+            startedAtMicroseconds: 123_456
+        )
+        let proofCallCount = Mutex(0)
+        let signalsSent = Mutex<[Int32]>([])
+        let watchCallCount = Mutex(0)
+
+        PTYTestChild.terminateAndReap(
+            identity,
+            probes: PTYTestChild.ChildCleanupProbes(
+                // Ours for the first signal, reaped by the production waiter before the second.
+                stillNamesTheSameChild: { _ in
+                    proofCallCount.withLock { count in
+                        count += 1
+                        return count == 1
+                    }
+                },
+                signalProcessGroup: { _, signal in signalsSent.withLock { $0.append(signal) } },
+                isRunning: { _ in
+                    watchCallCount.withLock { $0 += 1 }
+                    return false
+                },
+                settle: {}
+            )
+        )
+
+        XCTAssertEqual(signalsSent.withLock { $0 }, [SIGCONT], "cleanup-signals=\(signalsSent.withLock { $0 })")
+        XCTAssertEqual(proofCallCount.withLock { $0 }, 2, "cleanup-proofs=\(proofCallCount.withLock { $0 })")
+        XCTAssertEqual(watchCallCount.withLock { $0 }, 0, "cleanup-watched-a-child-it-lost=\(watchCallCount.withLock { $0 })")
+    }
+
+    /// The same cleanup against a real child, with the production waiter alive. Releasing the
+    /// owner without a teardown abandons the stream by design, so what is observable here is the
+    /// child and the pid: the cleanup must end the child, and the pid must then go away — and it
+    /// can only go away because the *production waiter* reaped it, since this cleanup never
+    /// claims a status of its own.
+    func testOwnerReleaseCleanupEndsTheChildAndLeavesTheReapToTheProductionWaiter() async throws {
+        let directory = try PTYTestChild.temporaryDirectory()
+        defer { PTYTestChild.remove(directory) }
+        var process: PTYProcess? = try PTYProcess(
+            spawning: PTYTestChild.request(
+                cwd: directory,
+                script: PTYTestChild.selfTerminating(after: 30, "/bin/stty raw -echo; exec /bin/cat")
+            )
+        )
+        let identity = try XCTUnwrap(PTYTestChild.identity(ofChild: process!.processIdentifier))
+        process = nil
+
+        PTYTestChild.terminateAndReap(identity)
+
+        XCTAssertFalse(PTYTestChild.isRunning(identity), "owner-release-cleanup-child=alive")
+        try await PTYTestChild.waitUntil(seconds: 5) {
+            !PTYTestChild.stillNamesTheSameChild(identity)
+        }
+    }
+
+    /// The deadline has to be one. `teardown` awaits its waiter's value without observing
+    /// cancellation, and a throwing task group's scope waits for every child it cancelled, so a
+    /// deadline built from one returned when the operation felt like it — the seconds in the call
+    /// bounded nothing. What is asserted is the return, that the operation had not finished when
+    /// it happened, and that the abandoned operation still reaches its own end.
+    func testDeadlineReturnsWhileANonCancellableOperationIsStillRunning() async throws {
+        let operationSeconds = 3.0
+        let deadlineSeconds = 0.5
+        let didFinish = Mutex(false)
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+
+        do {
+            _ = try await PTYTestChild.withDeadline(seconds: deadlineSeconds) {
+                // Cancellation-proof by construction: a continuation resumed off a queue that
+                // knows nothing about tasks — the shape `teardown` has when it awaits its waiter.
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    DispatchQueue.global().asyncAfter(deadline: .now() + operationSeconds) {
+                        didFinish.withLock { $0 = true }
+                        continuation.resume()
+                    }
+                }
+                return 0
+            }
+            XCTFail("deadline-elapsed=absent")
+        } catch PTYTestChild.Failure.timedOut {
+            // The deadline is what must be observed.
+        }
+
+        let elapsed = clock.now - startedAt
+        XCTAssertLessThan(elapsed, .seconds(operationSeconds / 2), "deadline-return=\(elapsed)")
+        XCTAssertFalse(didFinish.withLock { $0 }, "deadline-waited-for-the-operation")
+
+        try await PTYTestChild.waitUntil(seconds: operationSeconds * 2) {
+            didFinish.withLock { $0 }
+        }
     }
 
     private func record(

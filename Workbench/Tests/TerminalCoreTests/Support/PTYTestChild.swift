@@ -113,23 +113,42 @@ enum PTYTestChild {
         }
     }
 
-    /// A deadline for a step that must not block. Under a blocking implementation the step never
-    /// returns and this throws instead of leaving the test to hang.
+    /// A deadline that returns at the deadline, whatever the operation is doing.
+    ///
+    /// The operation races the timer as an unstructured task, not as a child of a task group: a
+    /// throwing group's scope waits for every child even after the timeout cancels them, so a
+    /// body that does not observe cancellation — `teardown`, which awaits its waiter's value —
+    /// kept the call open for as long as it liked and the seconds in it were not a bound at all.
+    ///
+    /// The operation that loses the race is abandoned rather than cancelled: its cleanup is the
+    /// reason it is running, and what this call gives up is waiting for it, not the work it still
+    /// has to do.
     static func withDeadline<Value: Sendable>(
         seconds: Double,
         _ body: @escaping @Sendable () async throws -> Value
     ) async throws -> Value {
-        try await withThrowingTaskGroup(of: Value.self) { group in
-            group.addTask { try await body() }
-            group.addTask {
-                try await Task.sleep(for: .seconds(seconds))
-                throw Failure.timedOut
+        let isDelivered = Mutex(false)
+        return try await withCheckedThrowingContinuation { continuation in
+            let deliver: @Sendable (Result<Value, Error>) -> Void = { result in
+                let isFirst = isDelivered.withLock { delivered -> Bool in
+                    guard !delivered else { return false }
+                    delivered = true
+                    return true
+                }
+                guard isFirst else { return }
+                continuation.resume(with: result)
             }
-            guard let first = try await group.next() else {
-                throw Failure.timedOut
+            Task.detached {
+                do {
+                    deliver(.success(try await body()))
+                } catch {
+                    deliver(.failure(error))
+                }
             }
-            group.cancelAll()
-            return first
+            Task.detached {
+                try? await Task.sleep(for: .seconds(seconds))
+                deliver(.failure(Failure.timedOut))
+            }
         }
     }
 
@@ -297,23 +316,49 @@ enum PTYTestChild {
         return state != Int8(SZOMB)
     }
 
+    /// The kernel calls owner-release cleanup makes, behind a seam. Production binds them to the
+    /// kernel; a test binds them to a proof it can invalidate between two signals, which is the
+    /// race this gate exists for and the one nothing can arrange against the real scheduler.
+    struct ChildCleanupProbes: Sendable {
+        var stillNamesTheSameChild: @Sendable (ChildIdentity) -> Bool
+        var signalProcessGroup: @Sendable (ChildIdentity, Int32) -> Void
+        var isRunning: @Sendable (ChildIdentity) -> Bool
+        var settle: @Sendable () -> Void
+
+        static let kernel = ChildCleanupProbes(
+            stillNamesTheSameChild: { PTYTestChild.stillNamesTheSameChild($0) },
+            signalProcessGroup: { identity, signal in
+                _ = Darwin.kill(-identity.pid, signal)
+            },
+            isRunning: { PTYTestChild.isRunning($0) },
+            settle: { usleep(statusSettlingMicroseconds) }
+        )
+    }
+
     /// Cleanup for a child whose `PTYProcess` is gone. The actor's waiter outlives the actor and
-    /// reaps on its own, so this is not the only reaper and it never assumes it is: it signals
-    /// only a group it can still prove is this child's, and it reaps by polling under that same
-    /// proof, so it neither signals a stranger that inherited the number nor blocks on a pid
-    /// somebody else has already taken the status of.
-    static func terminateAndReap(_ identity: ChildIdentity) {
-        guard stillNamesTheSameChild(identity) else { return }
-        _ = Darwin.kill(-identity.pid, SIGCONT)
-        _ = Darwin.kill(-identity.pid, SIGKILL)
-        var status: Int32 = 0
+    /// goes on reaping, so this is neither the only reaper nor the owner of the child's status,
+    /// and it holds itself to both facts.
+    ///
+    /// The identity is re-proved immediately before *each* signal rather than once for the pair.
+    /// The waiter can reap between one signal and the next, and a reaped pid — with the process
+    /// group that shares its number — is reusable the instant it does; a proof taken before the
+    /// first signal says nothing about the second.
+    ///
+    /// It never calls `waitpid`. That would be a second claim on a status the production waiter
+    /// owns, and winning it would take the child's termination away from the one reaper that
+    /// reports it. It watches instead, under the same proof, and stops as soon as the pid stops
+    /// naming a running child of ours — gone, or a zombie whose status is the waiter's to take.
+    static func terminateAndReap(
+        _ identity: ChildIdentity,
+        probes: ChildCleanupProbes = .kernel
+    ) {
+        for signal in [SIGCONT, SIGKILL] {
+            guard probes.stillNamesTheSameChild(identity) else { return }
+            probes.signalProcessGroup(identity, signal)
+        }
         for _ in 0..<statusSettlingAttempts {
-            let waited = Darwin.waitpid(identity.pid, &status, WNOHANG)
-            if waited == identity.pid { return }
-            if waited == -1, errno != EINTR { return }
-            // The actor's waiter may have taken the status instead; either way the child is gone.
-            guard stillNamesTheSameChild(identity) else { return }
-            usleep(statusSettlingMicroseconds)
+            guard probes.isRunning(identity) else { return }
+            probes.settle()
         }
     }
 
