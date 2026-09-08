@@ -16,11 +16,13 @@ protocol FileHeadReading: Sendable {
 
 /// The shipped head reader.
 ///
-/// **No descriptor is constructed here either.** The bound comes from mapping the file rather than
-/// from seeking in it: `Data(contentsOf:options:.mappedIfSafe)` hands back a value whose pages are
-/// faulted in as they are touched, so taking a prefix of it materialises the prefix and not the
-/// file. Nothing here builds a `FileHandle`, an `InputStream` or a file descriptor, which is the
-/// rule the diff reader beside it follows for the same reason.
+/// **The bound is on the read now, not on what is kept afterwards** (the amended user-content rule;
+/// `BoundedFileRead` beside it is the shared shape). The previous form asked
+/// `Data(contentsOf:options:.mappedIfSafe)` for the file and took a prefix of the result, and
+/// `mappedIfSafe` is a *hint*: for a file the kernel will not map — a network volume, a character
+/// device, a file being appended to — Foundation falls back to an ordinary whole-file allocation, so
+/// a multi-gigabyte path cost a multi-gigabyte read to preview eight lines of it. `prefix(limit)`
+/// ran only after that had already happened.
 ///
 /// The work runs off the main actor, which is the half a caller cannot arrange for itself: the
 /// first `open(2)` on a path the user has not consented to does not return until they answer the
@@ -28,16 +30,18 @@ protocol FileHeadReading: Sendable {
 struct FileHeadReader: FileHeadReading {
 
     func head(atPath path: String, upTo limit: Int) async -> FileText {
-        await Task.detached(priority: .utility) {
-            guard !path.isEmpty else { return FileText.unreadable }
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else { return .absent }
-            guard !isDirectory.boolValue else { return .unreadable }
-            guard let mapped = try? Data(contentsOf: URL(filePath: path), options: .mappedIfSafe) else {
-                return .unreadable
-            }
-            return Self.decode(mapped.prefix(limit))
-        }.value
+        await Task.detached(priority: .utility) { Self.bounded(atPath: path, upTo: limit) }.value
+    }
+
+    /// At most `limit` bytes of a regular file, decoded. A head is allowed to be a head, so a
+    /// truncated read is contents and not a failure — which is the one way this differs from the
+    /// diff's reader, and the reason the two are separate members rather than one.
+    static func bounded(atPath path: String, upTo limit: Int) -> FileText {
+        switch BoundedFileRead.read(atPath: path, upTo: limit) {
+        case .absent: return .absent
+        case .unreadable: return .unreadable
+        case .bytes(let data, _): return decode(data)
+        }
     }
 
     /// A prefix of bytes as text. A bound cut in the middle of a multi-byte character leaves the

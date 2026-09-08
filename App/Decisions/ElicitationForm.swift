@@ -30,7 +30,12 @@ struct ElicitationForm: Sendable, Hashable {
         case toggle(default: Bool)
         /// Array of string. `options` is the item `enum` when the schema named one, and nil when the
         /// user types the values instead.
-        case multiSelect(options: [String]?, default: [String])
+        ///
+        /// `default` is **optional**, and the two empty cases it separates are different answers
+        /// (scalpel-4#2): a property with no `default` starts unanswered, and one declaring
+        /// `default: []` starts answered with "none of these". Collapsing them dropped a server's
+        /// own explicit empty list out of `content`.
+        case multiSelect(options: [String]?, default: [String]?)
         /// Outside the subset: the property's own schema, shown, and a JSON value typed by hand.
         case raw(schema: JSONValue)
     }
@@ -90,7 +95,7 @@ struct ElicitationForm: Sendable, Hashable {
             else { return .raw(schema: property) }
             let options = items["enum"]?.arrayValue?.compactMap(\.stringValue)
             return .multiSelect(options: (options?.isEmpty ?? true) ? nil : options,
-                                default: fallback?.arrayValue?.compactMap(\.stringValue) ?? [])
+                                default: fallback?.arrayValue?.compactMap(\.stringValue))
         default:
             return .raw(schema: property)
         }
@@ -138,7 +143,8 @@ struct ElicitationForm: Sendable, Hashable {
         case .picker(_, let value): value.map(JSONValue.string)
         case .number(let isInteger, let value): value.flatMap { numberValue($0, isInteger: isInteger) }
         case .toggle(let value): .bool(value)
-        case .multiSelect(_, let value): value.isEmpty ? nil : .array(value.map(JSONValue.string))
+        // `[]` is a value here and `nil` is not: see `Control.multiSelect`.
+        case .multiSelect(_, let value): value.map { .array($0.map(JSONValue.string)) }
         case .raw: nil
         }
     }
@@ -154,13 +160,32 @@ struct ElicitationForm: Sendable, Hashable {
         .object(values)
     }
 
-    /// A raw field's typed text as JSON, and as a string when it does not parse. The point of the
-    /// raw field is that a schema outside the subset can still be answered (§6.4).
-    static func rawValue(_ text: String) -> JSONValue? {
+    /// What a raw field's typed text is: nothing, a value, or a mistake.
+    ///
+    /// The raw field exists so that a schema outside the subset can still be answered (§6.4), and
+    /// most such schemas accept a bare string — so text that is not JSON is carried as a string,
+    /// which is what a user typing `an invented phrase` into a `oneOf` field means.
+    ///
+    /// **Text that was written as JSON and does not parse is a mistake, not a string**
+    /// (scalpel-4#3). `{"a": 1` used to reach the server as the *literal text* `{"a": 1`, and a
+    /// server asking for an object then received a string that looks like a half-typed one. The
+    /// discriminator is the opening character, because that is what makes the intent unambiguous:
+    /// `{`, `[` and `"` open the three JSON forms a bare word cannot be mistaken for, and nothing
+    /// else can begin a JSON object, array or string.
+    enum RawEntry: Sendable, Hashable {
+        case empty
+        case malformed
+        case value(JSONValue)
+    }
+
+    /// The characters that begin a JSON object, array or string.
+    static let jsonOpeners: Set<Character> = ["{", "[", "\""]
+
+    static func rawEntry(_ text: String) -> RawEntry {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if let parsed = try? JSONDecoder().decode(JSONValue.self, from: Data(trimmed.utf8)) { return parsed }
-        return .string(trimmed)
+        guard let first = trimmed.first else { return .empty }
+        if let parsed = try? JSONDecoder().decode(JSONValue.self, from: Data(trimmed.utf8)) { return .value(parsed) }
+        return jsonOpeners.contains(first) ? .malformed : .value(.string(trimmed))
     }
 
     /// The one line a raw field shows: the property's schema, so the user can see what was asked for.

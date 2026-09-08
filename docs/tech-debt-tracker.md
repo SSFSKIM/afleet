@@ -2018,6 +2018,33 @@ C6.1's and C6.2's reservations and is expected.
      refuse a value with a fractional part in an integer control, the way an out-of-range one is
      refused. Owner: C6.3's successor.
 
+303. **A card's diff is prepared once per view instance, not once per decision.** `DiffView` reads
+     the other side of a change through `.task(id:)`, so a card drawn in both presentations — the
+     compact card in Activity and the full card in the timeline — makes the read twice, and a view
+     SwiftUI rebuilds for an unrelated reason makes it again. The line-level difference is cached by
+     its two sides and does not repeat, so what is left is one bounded read per instance rather than
+     one per render pass, which is the cost the fix was about. Found by the second review wave on
+     C6.3 (scalpel-5#1). Closer: a preparation cache keyed by the request id, invalidated when the
+     card leaves `.pending`. Owner: C6.3's successor, with C7.2's `MonacoEditorView` seam.
+
+304. **A raw elicitation field cannot answer a schema with a string that begins like JSON.** The
+     discriminator between "a string" and "a syntax error" is the opening character: text beginning
+     `{`, `[` or `"` must parse, everything else is carried as a string. A server whose schema
+     genuinely wants the *string* `{not json` therefore cannot be answered through the raw field.
+     Nothing recorded asks for one, and the alternative — a control that says which of the two it is
+     — is a design question rather than a repair. Found by the second review wave on C6.3
+     (scalpel-4#3). Closer: a per-field switch between "as JSON" and "as text". Owner: C6.3's
+     successor, with entries 165 and 296.
+
+305. **A file over 16 MiB shows the tool's input instead of a diff.** `FileTextReader` reports a
+     file past `defaultLimitBytes` as unreadable, because a diff of a truncated file draws the
+     missing half as a deletion nobody proposed, and the card then falls back to the verbatim input
+     with the line that says why. That is true but unhelpful for a legitimately large file — a
+     generated bundle, a lockfile — where a diff of the changed region would be exactly what the
+     user needs. Found by the second review wave on C6.3 (scalpel-5#2). Closer: an `Edit` reads a
+     window around its `old_string` rather than the whole file, which needs a seek the bounded read
+     already has the descriptor for. Owner: C6.3's successor, with tracker 292.
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**

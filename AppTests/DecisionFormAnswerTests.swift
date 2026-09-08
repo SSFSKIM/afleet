@@ -253,6 +253,144 @@ final class DecisionFormAnswerTests: XCTestCase {
         XCTAssertTrue(untouched.content == .object([:]), "an untouched raw field reached the answer")
     }
 
+    /// sweep#2: the third state applies to **numbers** too.
+    ///
+    /// A number control stored `nil` for anything it could not parse and touched nothing else, so
+    /// the getter and `content` both fell back to the schema's `default`: a defaulted number could
+    /// not be cleared, and the field redrew the value the user had just deleted. Both halves are
+    /// asserted — what the control shows and what an accept would carry — because a card that
+    /// cleared one and not the other is the failure this is about.
+    func testAnEmptiedNumberDoesNotRestoreTheSchemasDefault() async throws {
+        let (_, answering) = await hosted()
+        let draft = ElicitationCardView.Draft()
+        let view = try formView(id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbe8",
+                                properties: ["count": ["type": "integer", "default": 3],
+                                             "ratio": ["type": "number", "default": 1.5],
+                                             "kept": ["type": "integer", "default": 9]],
+                                draft: draft, answering: answering)
+
+        XCTAssertTrue(view.content["count"] == .integer(3), "an untouched number lost the schema's default")
+
+        view.number("count", isInteger: true, default: 3).wrappedValue = ""
+        XCTAssertNil(view.content["count"], "an emptied number restored the schema's default")
+        XCTAssertEqual(view.number("count", isInteger: true, default: 3).wrappedValue, "",
+                       "an emptied number redrew the schema's default")
+
+        // Text that is not a number is not a number, and not the default either.
+        view.number("ratio", isInteger: false, default: 1.5).wrappedValue = "not a number"
+        XCTAssertNil(view.content["ratio"], "unparseable text in a number field restored the schema's default")
+        XCTAssertEqual(view.number("ratio", isInteger: false, default: 1.5).wrappedValue, "not a number",
+                       "a number field threw away the text the user was typing")
+
+        XCTAssertTrue(view.content["kept"] == .integer(9), "an untouched number lost the schema's default")
+
+        // Typing again is an answer again, not a permanent emptiness.
+        view.number("count", isInteger: true, default: 3).wrappedValue = "12"
+        XCTAssertTrue(view.content["count"] == .integer(12),
+                      "a number emptied and then retyped did not carry the second value")
+    }
+
+    /// sweep#3: an enum-array control has to say which of its options are chosen.
+    ///
+    /// The row was a plain `Button(option)`, which draws the same whether the option is in the
+    /// answer or not: the user pressed and the card looked unchanged. The two halves are asserted
+    /// as one — the state the control draws and the value an accept would carry — so neither a
+    /// control that shows a selection it would not send nor one that sends a selection it does not
+    /// show can pass.
+    func testAnEnumArrayControlDrawsWhichOptionsAreSelected() async throws {
+        let (_, answering) = await hosted()
+        let draft = ElicitationCardView.Draft()
+        let view = try formView(id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbe9",
+                                properties: ["tags": ["type": "array",
+                                                      "items": ["type": "string",
+                                                                "enum": ["one", "two", "three"]],
+                                                      "default": ["two"]]],
+                                draft: draft, answering: answering)
+        let tags = try field(view, "tags")
+
+        // The row is a control with an on-state, and that state is the binding asserted below —
+        // a `Button` label, which is what it was, carries neither.
+        XCTAssertTrue(String(describing: type(of: view.option("one", in: tags))).contains("Toggle"),
+                      "an enum-array option is drawn by a control that has no selected state")
+
+        func drawn(_ option: String) -> Bool { view.optionSelection(option, in: tags).wrappedValue }
+
+        XCTAssertTrue(drawn("two"), "the schema's defaulted option was not drawn as selected")
+        XCTAssertFalse(drawn("one"), "an option nobody chose was drawn as selected")
+
+        view.pick("one", in: "tags", default: ["two"])
+        XCTAssertTrue(drawn("one"), "a chosen option was not drawn as selected")
+        XCTAssertTrue(view.content["tags"] == .array([.string("two"), .string("one")]),
+                      "the accept would not carry the options the control draws as selected")
+
+        view.pick("two", in: "tags", default: ["two"])
+        XCTAssertFalse(drawn("two"), "a deselected option was still drawn as selected")
+    }
+
+    /// scalpel-4#2: `default: []` is an answer and an absent `default` is not.
+    ///
+    /// Schema decoding collapsed the two into one empty array and `initialValue` then returned nil
+    /// for both, so a server that asked for "none of these by default" got a property missing from
+    /// `content` instead — and a required one could not be accepted at all without touching a
+    /// control whose state was already correct.
+    func testAnExplicitlyEmptyArrayDefaultIsAnAnswer() async throws {
+        let (lifecycle, answering) = await hosted()
+        let view = try formView(id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbea",
+                                properties: [
+                                    "chosen": ["type": "array", "items": ["type": "string", "enum": ["one"]],
+                                               "default": []],
+                                    "unset": ["type": "array", "items": ["type": "string", "enum": ["one"]]]
+                                ], required: ["chosen"], answering: answering)
+
+        XCTAssertTrue(view.content["chosen"] == .array([]),
+                      "an explicitly empty array default did not reach the answer")
+        XCTAssertNil(view.content["unset"], "a property with no default reached the answer anyway")
+        XCTAssertTrue(view.canAccept, "a required property answered by its own empty default could not be accepted")
+
+        try press("Accept", in: view.body)
+        await answering.whenIdle()
+        let body = try await sentBody(lifecycle, "Accept")
+        XCTAssertTrue(body == (try json(#"{"action":"accept","content":{"chosen":[]}}"#)),
+                      "the accept body did not carry the server's own empty-array default")
+    }
+
+    /// scalpel-4#3: text written as JSON that does not parse is a **mistake**, not a string.
+    ///
+    /// `{"a": 1` used to be carried to the server as the literal text `{"a": 1`, so a property
+    /// asking for an object was answered with a string that looks like a half-typed one. Both sides
+    /// of the discriminator are asserted here, because refusing everything that does not parse
+    /// would break the raw field's whole purpose: a bare phrase is still a string.
+    func testMalformedJSONBlocksAcceptAndABareStringDoesNot() async throws {
+        let (_, answering) = await hosted()
+        let draft = ElicitationCardView.Draft()
+        let view = try formView(id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbeb",
+                                properties: ["nested": ["type": "object",
+                                                        "properties": ["inner": ["type": "string"]]],
+                                             "branchy": ["type": "string", "oneOf": [["const": "one"]]]],
+                                draft: draft, answering: answering)
+
+        view.raw("nested").wrappedValue = #"{"inner": 1"#
+        XCTAssertNil(view.content["nested"], "an incomplete object was carried into the answer")
+        XCTAssertFalse(view.canAccept, "a field written as JSON that does not parse could be accepted")
+        XCTAssertEqual(view.raw("nested").wrappedValue, #"{"inner": 1"#,
+                       "the card threw away the text the user was writing")
+        XCTAssertTrue(CardTree.texts(in: view.control(try field(view, "nested")))
+                        .contains(ElicitationCardView.malformedReading),
+                      "the card refused the value without saying why")
+
+        // A bare phrase is not JSON and is not a mistake: the raw field exists to answer schemas
+        // outside the subset (§6.4), and most of them accept a string.
+        view.raw("branchy").wrappedValue = "an invented phrase"
+        XCTAssertTrue(view.content["branchy"] == .string("an invented phrase"),
+                      "a bare phrase in a raw field was refused rather than carried as a string")
+
+        // Completing the object clears the refusal.
+        view.raw("nested").wrappedValue = #"{"inner": "an invented value"}"#
+        XCTAssertTrue(view.content["nested"] == .object(["inner": .string("an invented value")]),
+                      "a completed object did not reach the answer")
+        XCTAssertTrue(view.canAccept, "a corrected field left the form unacceptable")
+    }
+
     // MARK: - The subset's boundary
 
     /// D8's boundary is a property's **shape**, not its `type` keyword. A `oneOf` beside a
