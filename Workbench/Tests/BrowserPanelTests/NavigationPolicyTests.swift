@@ -83,6 +83,62 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(NavigationPolicy.decide(request), .refuse(.unsupportedURL))
     }
 
+    // MARK: D29 — the two schemes that are refused from every source
+
+    private static let script = URL(string: "javascript:alert(1)")!
+    private static let inlineDocument = URL(string: "data:text/html;base64,PGgxPmhpPC9oMT4=")!
+
+    /// Every way a URL can arrive, so the assertion below is over the whole surface and not one
+    /// branch of it: a click, a Cmd-click, a `_blank`, a redirect and the URL bar.
+    private func everySource(_ url: URL) -> [NavigationRequest] {
+        [click(url),
+         click(url, modifiers: .command),
+         click(url, hasTargetFrame: false),
+         scriptInitiated(url),
+         scriptInitiated(url, hasTargetFrame: false),
+         .urlBarEntry(url)]
+    }
+
+    /// D29. A `javascript:` URL loaded into a tab executes in that page's origin — the classic way
+    /// an address bar becomes a script injection — so it is refused before any gesture is read.
+    func testAJavascriptURLIsRefusedFromEverySource() {
+        for request in everySource(Self.script) {
+            XCTAssertEqual(NavigationPolicy.decide(request), .refuse(.executableOrInlineContent("javascript")),
+                           "a javascript: URL from \(request.navigationType) must never load")
+        }
+    }
+
+    /// D29. A `data:` URL renders attacker-controlled markup in an origin the user reads as the
+    /// panel's own.
+    func testADataURLIsRefusedFromEverySource() {
+        for request in everySource(Self.inlineDocument) {
+            XCTAssertEqual(NavigationPolicy.decide(request), .refuse(.executableOrInlineContent("data")),
+                           "a data: URL from \(request.navigationType) must never load")
+        }
+    }
+
+    /// The load-bearing half of D29: handing either scheme to `NSWorkspace.shared.open` is not
+    /// safety, only someone else's problem. Neither may ever come back as `.allow` or as
+    /// `.openExternally`, however user-initiated the gesture that carried it.
+    func testNeitherSchemeIsEverAllowedOrHandedToTheSystemOpener() {
+        for url in [Self.script, Self.inlineDocument] {
+            for request in everySource(url) {
+                switch NavigationPolicy.decide(request) {
+                case .refuse:
+                    continue
+                case .allow, .openExternally, .newPanelTab:
+                    XCTFail("\(url.scheme ?? "?") escaped the policy as a non-refusal")
+                }
+            }
+        }
+    }
+
+    /// The refusal is shown, not merely logged: the common source is the user's own URL bar, and a
+    /// bar that swallows what was typed without a word is a bar that looks broken.
+    func testTheRefusalIsShownToTheUser() {
+        XCTAssertEqual(NavigationPolicy.Reason.executableOrInlineContent("javascript").isDiagnosticOnly, false)
+    }
+
     // MARK: Q11 — the gestures
 
     func testCommandClickOnALinkGoesToTheExternalOpener() {

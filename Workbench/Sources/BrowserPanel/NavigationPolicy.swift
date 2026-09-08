@@ -88,6 +88,20 @@ public enum NavigationPolicy {
         /// No scheme at all, or an `about:` URL that is not `about:blank`.
         case unsupportedURL
 
+        /// A `javascript:` or `data:` URL, from any source at all — the URL bar, a link, a redirect
+        /// or a script-initiated load. Refused, and never handed to the system opener (D29).
+        ///
+        /// A `javascript:` URL loaded into a tab executes **in the current page's origin**, which is
+        /// exactly how an address bar becomes a script injection: anything that can put a string in
+        /// front of the bar can then run code as the page the user is reading. A `data:` URL renders
+        /// attacker-controlled markup in an origin the user reads as the panel's own, which is the
+        /// same trick with the payload inlined instead of typed.
+        ///
+        /// Handing either to `NSWorkspace.shared.open` is not safety, only someone else's problem —
+        /// so this case sits above the gesture gate rather than beside it, and the scheme is named
+        /// because a diagnostic that cannot say what was refused is not one.
+        case executableOrInlineContent(String)
+
         /// Whether this refusal is a log line rather than something the user is shown. The two
         /// cases differ: a `file:` link is a thing the user clicked and is owed an answer about,
         /// while a page redirecting itself to an app scheme is a thing the user never asked for
@@ -97,6 +111,9 @@ public enum NavigationPolicy {
             case .localFile: false
             case .schemeNeedsAUserGesture: true
             case .unsupportedURL: true
+            // Shown, for the same reason `file:` is: the common source is the user's own URL bar,
+            // and a bar that swallows what was typed without a word is a bar that looks broken.
+            case .executableOrInlineContent: false
             }
         }
     }
@@ -115,9 +132,19 @@ public enum NavigationPolicy {
     /// Schemes the panel renders. `about` is qualified below: only `about:blank`.
     private static let renderableSchemes: Set<String> = ["http", "https", "about"]
 
+    /// Schemes refused everywhere, before any gesture is read (D29). See
+    /// `Reason.executableOrInlineContent` for why neither may become `.openExternally` either.
+    private static let deniedSchemes: Set<String> = ["javascript", "data"]
+
     public static func decide(_ request: NavigationRequest) -> Decision {
         guard let scheme = request.url.scheme?.lowercased() else {
             return .refuse(.unsupportedURL)
+        }
+
+        // The deny-list is read first, so that no later branch — the gesture gate, `_blank`, a
+        // Cmd-click — can turn one of these two into a load or into an `NSWorkspace` call.
+        if deniedSchemes.contains(scheme) {
+            return .refuse(.executableOrInlineContent(scheme))
         }
 
         // The scheme is settled before any gesture is, so that a `_blank` or a Cmd-click cannot be

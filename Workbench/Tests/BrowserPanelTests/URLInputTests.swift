@@ -28,7 +28,7 @@ final class URLInputTests: XCTestCase {
         }
     }
 
-    // MARK: Row 2 — an explicit http, https or about scheme
+    // MARK: Row 2 — any valid scheme, as typed (D29)
 
     func testAnExplicitHTTPHTTPSOrAboutSchemeIsTakenAsTyped() {
         XCTAssertEqual(url("http://example.invalid/a")?.absoluteString, "http://example.invalid/a")
@@ -44,6 +44,32 @@ final class URLInputTests: XCTestCase {
 
     func testSurroundingWhitespaceIsTrimmedBeforeAnythingElse() {
         XCTAssertEqual(url("  https://example.invalid/  ")?.absoluteString, "https://example.invalid/")
+    }
+
+    /// D29: row 2 is not a list of three schemes. A string that genuinely carries a scheme is
+    /// handed on as that URL, and `NavigationPolicy` — the one place that decides what loads, what
+    /// leaves and what is refused — answers for it. A table and a policy that must agree is a
+    /// disagreement waiting to happen.
+    func testAnyValidSchemeIsHandedOnAsTyped() {
+        XCTAssertEqual(url("mailto:someone@example.invalid")?.absoluteString, "mailto:someone@example.invalid")
+        XCTAssertEqual(url("x-apple-something://open")?.absoluteString, "x-apple-something://open")
+        XCTAssertEqual(url("ftp://example.invalid/pub")?.scheme, "ftp")
+    }
+
+    /// The bar does not judge; it parses. `javascript:` and `data:` reach the policy as URLs and are
+    /// refused there, from every source at once, rather than being silently re-prefixed here into
+    /// something that would load.
+    func testAJavascriptOrDataURLIsParsedAndLeftToThePolicy() {
+        XCTAssertEqual(url("javascript:alert(1)")?.scheme, "javascript")
+        XCTAssertEqual(url("data:text/html;base64,PGgxPmhpPC9oMT4=")?.scheme, "data")
+    }
+
+    /// A scheme is never re-prefixed. `ftp://example.invalid` becoming `https://ftp://…` is the
+    /// failure this row's wording exists to prevent.
+    func testASchemeIsNeverRePrefixed() {
+        guard let resolved = url("ftp://example.invalid/pub") else { return }
+        XCTAssertFalse(resolved.absoluteString.hasPrefix("https://"),
+                       "\(resolved.absoluteString) was re-prefixed")
     }
 
     // MARK: Row 3 — loopback, and the scheme trap the row exists to close
@@ -81,10 +107,16 @@ final class URLInputTests: XCTestCase {
         XCTAssertEqual(url("build:9000/status")?.absoluteString, "http://build:9000/status")
     }
 
-    /// Row 4 needs an *all-digit* port. `notahost:eight` has a colon and no dot, so with the digit
-    /// requirement dropped it would silently become `http://notahost:eight`.
-    func testAColonWithANonDigitTailIsNotAHostAndPort() {
-        XCTAssertEqual(normalized("notahost:eight"), .notAURL)
+    /// Row 4 needs an *all-digit* port, and rows 3 and 4 are consulted *before* row 2 — that
+    /// ordering is what keeps `localhost:8123` and `build:9000` out of row 2's hands, now that row 2
+    /// believes any scheme (D29). With the digit requirement dropped, `notahost:eight` would
+    /// silently become `http://notahost:eight`.
+    func testAColonWithANonDigitTailIsNotAHostAndPortButIsAScheme() {
+        XCTAssertEqual(url("notahost:eight")?.scheme, "notahost")
+        XCTAssertNotEqual(url("notahost:eight")?.scheme, "http",
+                          "a non-digit tail must not be read as a port")
+        XCTAssertEqual(url("localhost:8123")?.scheme, "http", "row 3 still wins over row 2")
+        XCTAssertEqual(url("build:9000/status")?.scheme, "http", "row 4 still wins over row 2")
     }
 
     // MARK: Row 5 — a dot, no whitespace

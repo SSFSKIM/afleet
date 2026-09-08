@@ -13,6 +13,14 @@ import Foundation
 /// path `8123` — and a URL bar that trusted `URL(string:)` would fail silently on the single most
 /// common thing anyone types into a developer tool's browser. The loopback and `host:port` rows
 /// below are checked *before* any scheme is believed, which is the whole reason they are rows.
+///
+/// **The bar does not judge; it parses (D29).** Row 2 is "any valid scheme, as typed": a string that
+/// genuinely carries a scheme is handed on as that URL rather than re-prefixed or rejected here.
+/// What may then load, what leaves for the system opener and what is refused outright — `file:`,
+/// `javascript:`, `data:`, an app scheme without a gesture — is `NavigationPolicy`'s single
+/// decision, reached the same way whether the URL came from this bar, a link, a redirect or a
+/// script. A table here and a policy there, each deciding what loads, is a disagreement waiting to
+/// happen; there is one rule, in one place.
 public enum URLInput {
 
     /// The three outcomes. `empty` is not an error: an empty URL bar submitted does nothing.
@@ -22,27 +30,27 @@ public enum URLInput {
         case notAURL
     }
 
-    /// Schemes typed in full and taken as typed (Q9 row 2). Everything a page can *link* to is
-    /// `NavigationPolicy`'s business; this is only what the bar itself resolves.
-    private static let literalSchemes: Set<String> = ["http", "https", "about"]
-
     public static func normalize(_ raw: String) -> Normalized {
         let input = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Row 1.
         guard !input.isEmpty else { return .empty }
 
-        // Row 2 — but only for the three schemes the table names, so that `localhost:8123` never
-        // reaches this branch as scheme `localhost`.
-        if let scheme = leadingScheme(of: input), literalSchemes.contains(scheme) {
-            return resolve(input)
-        }
-
-        // Rows 3 and 4: anything loopback, and anything `host:<digits>`, is a local server and
-        // takes plain HTTP. `https://localhost:8123` would fail a TLS handshake that was never
-        // offered, which is the failure this row exists to prevent.
+        // Rows 3 and 4 come before row 2, and the order is the point. Anything loopback, and
+        // anything `host:<digits>`, is a local server and takes plain HTTP — and both of those
+        // shapes *also* parse as a scheme, so a row 2 that believes any scheme (D29) would swallow
+        // `localhost:8123` before this row ever saw it. `https://localhost:8123` would fail a TLS
+        // handshake that was never offered, which is the failure these rows exist to prevent.
         if isLoopback(input) || isHostAndNumericPort(input) {
             return resolve("http://" + input)
+        }
+
+        // Row 2, as amended by D29: any valid scheme, as typed. Not a list of three — a `mailto:`,
+        // an app scheme, a `javascript:` and a `data:` all reach `NavigationPolicy` as the URL they
+        // are, and it answers for each. Re-prefixing one would produce `https://ftp://…`, and
+        // rejecting one here would mean two places decided what may load.
+        if leadingScheme(of: input) != nil {
+            return resolve(input)
         }
 
         // Row 5.
