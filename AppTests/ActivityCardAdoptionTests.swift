@@ -174,6 +174,57 @@ final class ActivityCardAdoptionTests: XCTestCase {
         return try response.canonicalData()
     }
 
+    // MARK: - Row identity
+
+    /// sweep#2: a row's identity carries the **request**, not only its position.
+    ///
+    /// `ActivityItem.id` was the position alone, and the compact permission card holds `@State` —
+    /// the destination an *Always allow* would be filed at. A List that reuses the row for a
+    /// different request at the same position keeps that state, and the retained destination is
+    /// then applied to the replacement request's rules. Two clauses, because either alone can be
+    /// satisfied by an implementation that still reuses the card: the item's identity must move
+    /// with the request, and the card itself must be keyed by the request it is drawing.
+    func testARowsIdentityMovesWithTheRequestItDraws() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        await harness.lifecycle.always(.success(ActivityFixtures.state(key)))
+
+        func item(_ id: String, at position: Int) throws -> ActivityItem {
+            let request = try FixtureRunner.request("permission-allow", subtype: "can_use_tool", id: id)
+            let decision = try XCTUnwrap(DecisionItem(surfacing: request, in: key), "no item was opened")
+            return ActivityItem(row: ActivityRow(key: key, kind: .decision(request.id), text: "can_use_tool"),
+                                card: DecisionCard(decision), position: position)
+        }
+
+        let first = try item("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaac01", at: 0)
+        let second = try item("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaac02", at: 0)
+        XCTAssertNotEqual(first.id, second.id,
+                          "two different requests drawn at one position share a row identity")
+
+        let row = ActivityRowView(item: second, title: "An invented channel",
+                                  activity: harness.model, shell: harness.shell)
+        let requestID = try XCTUnwrap(second.card?.requestID.rawValue, "the row drew no card to key")
+        XCTAssertTrue(Self.explicitIdentities(in: row.body).contains(requestID),
+                      "the row hosts a stateful card that is not keyed by the request it draws")
+    }
+
+    /// Every identity a body pins with `.id(_:)`, read from the view value SwiftUI built.
+    ///
+    /// `.id(_:)` wraps its content in a generic whose stored `id` is the value passed. Reflecting
+    /// for it is how a test sees an identity that a rendered hierarchy would otherwise only show by
+    /// behaviour — and the identity is exactly what stops `@State` from being carried onto a
+    /// different request.
+    private static func explicitIdentities(in value: Any) -> [String] {
+        let mirror = Mirror(reflecting: value)
+        var found: [String] = []
+        if String(describing: mirror.subjectType).hasPrefix("IDView<"),
+           let id = mirror.descendant("id") as? String {
+            found.append(id)
+        }
+        for child in mirror.children { found += explicitIdentities(in: child.value) }
+        return found
+    }
+
     // MARK: - C5's ruling, after the adoption
 
     /// G3c: every decision kind still gets a row, and only a plain permission ask answers inline.

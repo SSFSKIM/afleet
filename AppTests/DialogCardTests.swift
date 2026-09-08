@@ -262,6 +262,35 @@ final class DialogCardTests: XCTestCase {
         }
     }
 
+    /// sweep#9: a retraction is a **resolution**, so it waits for the answer to succeed.
+    ///
+    /// The registry has no rollback: once a uuid is in, the message is gone from the list for the
+    /// life of the channel. Feeding it when the answer is merely *scheduled* deletes streamed
+    /// messages for a `perform` that then threw — the dialog is still open, the engine was never
+    /// told, and the conversation it was raised about has holes in it. The lifecycle refuses every
+    /// answer here, which is the one arm that can tell a registry fed on dispatch from one fed on
+    /// success.
+    func testARefusedAnswerRetractsNothing() async throws {
+        let registry = RetractionRegistry()
+        let lifecycle = LifecycleDouble()
+        await lifecycle.always(.failure(.notOwned))
+        let answering = DecisionAnswering(lifecycle: lifecycle)
+
+        let raised = try card("dialog-refusal-fallback", at: 1)
+        let retracted = try XCTUnwrap(raised.refusalFallback?.retractedMessageUUIDs.first,
+                                      "the recorded dialog retracts nothing")
+        let items = try reduced("dialog-refusal-fallback", untilDialog: 1).durable.items
+        let doomed = items.filter { $0.id.key == retracted }
+        XCTAssertEqual(doomed.count, 1, "the recording holds \(doomed.count) items for the retracted uuid")
+
+        try press("Retry on the fallback model", in: try dialogView(raised, answering, retraction: registry).body)
+        await answering.whenIdle()
+
+        XCTAssertNotNil(answering.banner, "the refused answer raised no banner, so nothing was refused")
+        XCTAssertTrue(doomed.allSatisfy(registry.retains),
+                      "a refused answer took back the messages its dialog names")
+    }
+
     /// §8.4: a `control_cancel_request` that retires the dialog is a resolution too. The card reads
     /// D12's first row, the retraction settles, and **nothing** goes on the wire — the binary
     /// already settled the request.

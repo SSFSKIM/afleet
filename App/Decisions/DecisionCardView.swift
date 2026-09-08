@@ -24,6 +24,10 @@ struct DecisionCardView: View {
     /// half of D12's `.inert` reading and the card cannot derive it, because it is a property of
     /// the overlay and not of the item.
     let isStale: Bool
+    /// Whether this is the card the user is acting on, among however many its host is drawing.
+    /// Only an active card claims the keyboard default action; a host that draws a list of cards
+    /// and has no notion of an active one passes nothing, and none of them claims it.
+    let isActive: Bool
     let answering: DecisionAnswering
     /// Where a resolved refusal dialog's retracted uuids go (spec D11). A host with no list to
     /// filter passes none.
@@ -37,6 +41,7 @@ struct DecisionCardView: View {
          presentation: Presentation,
          in channel: ChannelKey,
          isStale: Bool = false,
+         isActive: Bool = false,
          answering: DecisionAnswering,
          retraction: RetractionRegistry? = nil,
          consentFallback: ModelConsentFallback? = nil) {
@@ -44,6 +49,7 @@ struct DecisionCardView: View {
         self.presentation = presentation
         self.channel = channel
         self.isStale = isStale
+        self.isActive = isActive
         self.answering = answering
         self.retraction = retraction
         self.consentFallback = consentFallback
@@ -71,6 +77,7 @@ struct DecisionCardView: View {
                                tool: tool,
                                presentation: presentation,
                                channel: channel,
+                               isActive: isActive,
                                answering: answering)
         case .question(let tool):
             QuestionCardView(card: card, tool: tool, presentation: presentation,

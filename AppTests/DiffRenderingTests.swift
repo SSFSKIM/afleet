@@ -51,7 +51,7 @@ final class DiffRenderingTests: XCTestCase {
     }
 
     /// The tool input as the wire carries it, parsed the way the card parses it.
-    private func toolInput(_ name: String, _ fields: [String: String]) throws -> ToolInput {
+    private func toolInput(_ name: String, _ fields: [String: Any]) throws -> ToolInput {
         let data = try JSONSerialization.data(withJSONObject: fields)
         return ToolInput.parse(name: name, input: try JSONDecoder().decode(JSONValue.self, from: data))
     }
@@ -139,6 +139,35 @@ final class DiffRenderingTests: XCTestCase {
                        ["line-2", "line-3", "line-4", "line-6", "line-7", "line-8"],
                        "\(kinds(lines, .context).count) of 6 context lines came from the file")
         XCTAssertEqual(reader.requested.count, 1, "\(reader.requested.count) reads for one Edit")
+    }
+
+    /// sweep#8: `replace_all` changes **every** occurrence, and the diff has to show that.
+    ///
+    /// The proposed change is what the user is consenting to. A diff built from the first match
+    /// alone understates a `replace_all` by however many other occurrences the file holds, and the
+    /// two clauses below are the two halves of the same fact: nothing the tool would change is left
+    /// on the after side, and the occurrences it would leave alone on a plain `Edit` are still
+    /// there. Both arms run over one file, so the flag is the only difference between them.
+    func testReplaceAllChangesEveryOccurrenceAndAPlainEditChangesOne() throws {
+        let tree = try TempTree()
+        let body = (1...9).map { $0 % 3 == 0 ? "target" : "line-\($0)" }.joined(separator: "\n")
+        let target = try tree.file("invented-module/repeated.txt", body)
+        XCTAssertEqual(body.components(separatedBy: "target").count - 1, 3,
+                       "the invented file does not carry the three occurrences this test needs")
+
+        let all = try toolInput("Edit", ["file_path": target.path, "old_string": "target",
+                                         "new_string": "replaced", "replace_all": true])
+        let everywhere = try sides(try prepared(all, RecordingReader()))
+        XCTAssertEqual(everywhere.after.components(separatedBy: "target").count - 1, 0,
+                       "the after side still carries occurrences a replace_all would have changed")
+        XCTAssertEqual(everywhere.after.components(separatedBy: "replaced").count - 1, 3,
+                       "the after side carries fewer replacements than the tool would make")
+
+        let one = try toolInput("Edit", ["file_path": target.path, "old_string": "target",
+                                         "new_string": "replaced"])
+        let once = try sides(try prepared(one, RecordingReader()))
+        XCTAssertEqual(once.after.components(separatedBy: "replaced").count - 1, 1,
+                       "a plain Edit was drawn as changing more than the one occurrence it changes")
     }
 
     // MARK: - The file that cannot be read

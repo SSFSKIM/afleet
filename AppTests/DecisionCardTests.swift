@@ -79,9 +79,10 @@ final class DecisionCardTests: XCTestCase {
 
     private func permissionView(_ card: DecisionCard,
                                 _ presentation: DecisionCardView.Presentation = .full,
-                                _ answering: DecisionAnswering) throws -> PermissionCardView {
+                                _ answering: DecisionAnswering,
+                                isActive: Bool = true) throws -> PermissionCardView {
         PermissionCardView(card: card, tool: try tool(of: card), presentation: presentation,
-                           channel: Self.channel, answering: answering)
+                           channel: Self.channel, isActive: isActive, answering: answering)
     }
 
     /// A lifecycle that accepts every answer, and the answering object over it.
@@ -205,6 +206,66 @@ final class DecisionCardTests: XCTestCase {
         XCTAssertTrue(plainView.offersOneTapAnswer, "the same ask without the flag offered no answer")
         XCTAssertNotNil(ViewTree.button("Allow once", in: plainView.body), "Allow once was absent")
         XCTAssertNotNil(ViewTree.button("Deny", in: plainView.body), "Deny was absent")
+    }
+
+    /// scalpel-5#2: **no card owns Return by default.** `default_to_no` unbinding the shortcut is
+    /// not the whole rule — a card that is one of many in a list must not bind it either, because
+    /// Activity draws a compact card per waiting channel and a single Return would answer whichever
+    /// of them registered the default action first.
+    ///
+    /// Asserted on the compact presentation, which is the one Activity draws.
+    func testACompactCardBindsNoApproveShortcut() async throws {
+        let (_, answering) = await answering()
+        let plain = try card("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaab01")
+        XCTAssertNil(try permissionView(plain, .compact, answering, isActive: false).approveShortcut,
+                     "a compact card in a multi-channel list claimed Return as its default action")
+
+        // And the same for a full card the host has not marked active: a timeline of pending cards
+        // is a list too, and Return belongs to one of them or to none.
+        XCTAssertNil(try permissionView(plain, .full, answering, isActive: false).approveShortcut,
+                     "an inactive card claimed Return as its default action")
+        XCTAssertEqual(try permissionView(plain, .full, answering, isActive: true).approveShortcut,
+                       .defaultAction, "the active card bound no approve shortcut")
+    }
+
+    // MARK: - What Always allow will do
+
+    /// scalpel-2#2: the card **says what each suggestion will do** before the user chooses it.
+    ///
+    /// `permission-allow`'s only suggestion is `setMode(acceptEdits, session)`, which the mapping
+    /// sends verbatim: pressing *Always allow* on this ask makes every later edit in the session
+    /// automatic. A card that offered the button without saying so would collect consent for an
+    /// expansion it never described. The mode and its scope are both asserted, because either alone
+    /// leaves the sentence uninformative.
+    func testTheCardDescribesASetModeSuggestionBeforeOfferingIt() async throws {
+        let (_, answering) = await answering()
+        let card = try card("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaab02")
+        for presentation in [DecisionCardView.Presentation.full, .compact] {
+            let texts = CardTree.texts(in: try permissionView(card, presentation, answering).body)
+            XCTAssertTrue(texts.contains { $0.contains("Accept edits") },
+                          "the card offered Always allow without naming the mode it would set")
+            XCTAssertTrue(texts.contains { $0.contains("this session") },
+                          "the card offered Always allow without naming the scope of the mode")
+        }
+    }
+
+    /// scalpel-2#3: a rule-carrying suggestion names the rule **and the destination it will be
+    /// filed at**, in both presentations — the compact card shows no picker, so the destination it
+    /// would submit is the one thing it has to disclose.
+    ///
+    /// `send-user-file` records the one `addRules` ask in the corpus, at `localSettings`.
+    func testARuleSuggestionNamesItsRuleAndDestinationInBothPresentations() async throws {
+        let (_, answering) = await answering()
+        let card = try card("send-user-file", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaab03")
+        let offer = try XCTUnwrap(card.alwaysAllow, "the recorded ask offers no Always allow")
+        XCTAssertFalse(offer.destinations.isEmpty, "the recorded ask carries no rule to file")
+        for presentation in [DecisionCardView.Presentation.full, .compact] {
+            let texts = CardTree.texts(in: try permissionView(card, presentation, answering).body)
+            XCTAssertTrue(texts.contains { $0.contains("send_user_file") },
+                          "the card offered Always allow without naming the rule it would add")
+            XCTAssertTrue(texts.contains { $0.contains("This project, locally") },
+                          "the card offered Always allow without naming where the rule would be filed")
+        }
     }
 
     // MARK: - Why the engine is asking

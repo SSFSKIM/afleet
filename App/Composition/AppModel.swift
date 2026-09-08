@@ -282,6 +282,11 @@ final class AppModel {
                                   router: router,
                                   store: workspace.store)
         sink.model = model
+        // Contract X4 and spec D2: a card answered from Activity raises `decisionAnswered` on the
+        // channel's own fold. Activity holds no timeline model — it answers for channels the user
+        // has never opened — so it is given the app's one registry as a provider, the shape the
+        // composer registry receives its seams in.
+        model.timeline = { [timelines] key in timelines.model(for: key) }
         activity = model
         model.attach(to: browser)
         // Activity first, authorisation after and not awaited here — see `ActivityLaunch`.

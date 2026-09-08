@@ -102,7 +102,8 @@ enum DiffSource {
         case .edit(let edit):
             switch reader.read(atPath: edit.filePath) {
             case .contents(let current):
-                let sides = inPlace(old: edit.oldString, new: edit.newString, within: current)
+                let sides = inPlace(old: edit.oldString, new: edit.newString, within: current,
+                                    everywhere: edit.replaceAll == true)
                 return .diff(before: sides.before, after: sides.after, path: edit.filePath)
             case .absent:
                 // The two strings are the whole change; there is no file to take context from.
@@ -122,7 +123,19 @@ enum DiffSource {
     /// When the file does not contain `old` — a stale card, or a replacement the engine will
     /// make somewhere this build cannot see — the two strings are diffed on their own rather
     /// than against a guess at where they belong.
-    static func inPlace(old: String, new: String, within file: String) -> (before: String, after: String) {
+    ///
+    /// **`everywhere` is `Edit.replace_all`, and it changes the shape of the answer rather than
+    /// its wording.** A `replace_all` changes every occurrence, which can be anywhere in the file;
+    /// there is no one place to take context around, and a window drawn around the first match
+    /// would tell the user the change is smaller than it is. So that arm diffs the whole file
+    /// against the whole result — which is exactly what the `Write` arm above already does, for
+    /// the same reason: the card shows the change the tool would make, not a sample of it.
+    static func inPlace(old: String, new: String, within file: String,
+                        everywhere: Bool = false) -> (before: String, after: String) {
+        guard !old.isEmpty, file.contains(old) else { return (old, new) }
+        if everywhere {
+            return (file, file.replacingOccurrences(of: old, with: new))
+        }
         guard let range = file.range(of: old) else { return (old, new) }
         let head = String(file[..<range.lowerBound]).components(separatedBy: "\n")
         let tail = String(file[range.upperBound...]).components(separatedBy: "\n")

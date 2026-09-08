@@ -215,14 +215,17 @@ struct DialogCardView: View {
 
     // MARK: - Sending
 
-    /// One action on its way out, and the retraction it resolves.
+    /// One action on its way out, and the retraction its **success** resolves.
     ///
-    /// The registry is fed **here and only here** — after the mapping has produced a body, which is
-    /// the same condition `DecisionAnswering.send(_:on:in:)` sends on. An action that puts nothing
-    /// on the wire, which is *Set up usage credits…*, resolves nothing and leaves the card pending.
+    /// The registry is fed here and only here, on the path that raises `decisionAnswered` — not
+    /// when the answer is scheduled. §8.4 retracts on a *resolution*, and an answer `perform`
+    /// refused resolved nothing: the dialog is still open and the engine was never told. The
+    /// registry has no rollback, so a uuid handed to it on dispatch is a streamed message deleted
+    /// from the channel for a request that is still waiting. An action that puts nothing on the
+    /// wire, which is *Set up usage credits…*, never reaches this closure at all.
     private func send(_ action: DecisionAction) {
-        answering.send(action, on: card, in: channel)
-        guard card.answer(action) != nil else { return }
-        retraction?.resolved(card, in: channel)
+        answering.send(action, on: card, in: channel) { [card, channel, retraction] in
+            retraction?.resolved(card, in: channel)
+        }
     }
 }

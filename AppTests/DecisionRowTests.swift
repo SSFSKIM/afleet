@@ -34,21 +34,37 @@ final class DecisionRowTests: XCTestCase {
                       name: .main)
     }
 
+    private static func sentFileItem(files: [String], caption: String? = nil,
+                                     delivered: Bool? = nil) -> SentFileItem {
+        SentFileItem(id: ItemID(stream: stream, key: "invented-sent-file-1"),
+                     provenance: Provenance(stream: stream, origin: .wire),
+                     toolUseID: "toolu_invented_0001",
+                     files: files, caption: caption, delivered: delivered)
+    }
+
     private static func sentFile(files: [String], caption: String? = nil,
                                  delivered: Bool? = nil) -> TimelineItem {
-        .sentFile(SentFileItem(id: ItemID(stream: stream, key: "invented-sent-file-1"),
-                               provenance: Provenance(stream: stream, origin: .wire),
-                               toolUseID: "toolu_invented_0001",
-                               files: files, caption: caption, delivered: delivered))
+        .sentFile(sentFileItem(files: files, caption: caption, delivered: delivered))
     }
 
     /// A reader that answers whatever the test staged, and records what it was asked for. The
-    /// count is the assertion; the paths it was handed are never printed.
-    private final class ReaderDouble: FileTextReading {
+    /// count and the bound are the assertions; the paths it was handed are never printed.
+    ///
+    /// An actor, because the row's read seam is `async` and off the main actor by design — a
+    /// double that could only be called from the main actor would not be able to stand in for the
+    /// thing under test.
+    private actor ReaderDouble: FileHeadReading {
         private let answer: FileText
         private(set) var reads = 0
+        private(set) var requested: [String] = []
+        private(set) var bounds: [Int] = []
         init(_ answer: FileText) { self.answer = answer }
-        func read(atPath path: String) -> FileText { reads += 1; return answer }
+        func head(atPath path: String, upTo limit: Int) async -> FileText {
+            reads += 1
+            requested.append(path)
+            bounds.append(limit)
+            return answer
+        }
     }
 
     // MARK: - The registry fills its two kinds
@@ -110,20 +126,31 @@ final class DecisionRowTests: XCTestCase {
 
     /// Item 29's readable half: the caption, the count and the delivery status, plus a head of the
     /// first file — read through the one `FileTextReading` seam and no second one.
-    func testTheSentFileRowRendersItsCaptionCountAndStatus() throws {
+    func testTheSentFileRowRendersItsCaptionCountAndStatus() async throws {
         let reader = ReaderDouble(.contents("first line\nsecond line"))
-        let row = SentFileRowView(row: TimelineRow(Self.sentFile(files: ["/invented/a.txt", "/invented/b.txt"],
-                                                                caption: "an invented caption",
-                                                                delivered: true)),
-                                  reader: reader)
+        let item = Self.sentFileItem(files: ["/invented/a.txt", "/invented/b.txt"],
+                                     caption: "an invented caption", delivered: true)
+        let row = SentFileRowView(row: TimelineRow(.sentFile(item)), reader: reader)
         let texts = CardTree.texts(in: row.body)
 
         XCTAssertTrue(texts.contains("an invented caption"), "the row drew no caption")
         XCTAssertTrue(texts.contains(SentFileRowView.countReading(2)),
                       "the row drew no count line; it drew \(texts.count) string(s)")
         XCTAssertTrue(texts.contains(SentFileRowView.deliveredReading), "the row drew no delivery status")
-        XCTAssertTrue(texts.contains("first line\nsecond line"), "the row drew no head of the first file")
-        XCTAssertEqual(reader.reads, 1, "the row read the file \(reader.reads) time(s), not once")
+
+        // The preview arrives from the read the row's task makes, and is drawn from what it
+        // returned. Both halves are asserted: the read happened, and what it returned is what the
+        // row draws.
+        let read = await row.load(for: item)
+        let loaded = try XCTUnwrap(read, "the row read nothing for a named file")
+        let reads = await reader.reads
+        XCTAssertEqual(reads, 1, "the row read the file \(reads) time(s), not once")
+        XCTAssertEqual(SentFileRowView.previewReading(loaded), "first line\nsecond line",
+                       "the row drew no head of the first file")
+        let bounds = await reader.bounds
+        let bound = try XCTUnwrap(bounds.first, "the read carried no bound")
+        XCTAssertEqual(bound, SentFileRowView.previewBytes,
+                       "the row asked for \(bound) bytes of a file it previews \(SentFileRowView.previewCharacters) characters of")
     }
 
     /// The discriminating half: a file the reader could not read degrades, and the row says so.
@@ -131,19 +158,105 @@ final class DecisionRowTests: XCTestCase {
     /// A row that fabricated a preview would draw an empty head — indistinguishable from an empty
     /// file — and the user would be told the engine was sent nothing. Asserted in both directions,
     /// so a row that says *unreadable* about every file cannot pass either.
-    func testAnUnreadableFileDegradesRatherThanFabricatingAPreview() throws {
-        let unreadable = ReaderDouble(.unreadable)
-        let item = Self.sentFile(files: ["/invented/a.txt"], caption: "an invented caption", delivered: false)
-        let degraded = CardTree.texts(in: SentFileRowView(row: TimelineRow(item), reader: unreadable).body)
-        XCTAssertTrue(degraded.contains(SentFileRowView.unreadableReading), "an unreadable file drew no notice")
-        XCTAssertTrue(degraded.contains(SentFileRowView.notDeliveredReading),
+    func testAnUnreadableFileDegradesRatherThanFabricatingAPreview() async throws {
+        let item = Self.sentFileItem(files: ["/invented/a.txt"], caption: "an invented caption",
+                                     delivered: false)
+        let statuses = CardTree.texts(in: SentFileRowView(row: TimelineRow(.sentFile(item)),
+                                                          reader: ReaderDouble(.unreadable)).body)
+        XCTAssertTrue(statuses.contains(SentFileRowView.notDeliveredReading),
                       "an undelivered send drew no status of its own")
 
-        let readable = ReaderDouble(.contents("a line the file really carries"))
-        let drawn = CardTree.texts(in: SentFileRowView(row: TimelineRow(item), reader: readable).body)
-        XCTAssertTrue(drawn.contains("a line the file really carries"), "a readable file drew no preview")
-        XCTAssertFalse(drawn.contains(SentFileRowView.unreadableReading),
-                       "a readable file was reported as unreadable")
+        let degraded = await SentFileRowView(row: TimelineRow(.sentFile(item)),
+                                             reader: ReaderDouble(.unreadable)).load(for: item)
+        XCTAssertEqual(SentFileRowView.previewReading(degraded), SentFileRowView.unreadableReading,
+                       "an unreadable file drew no notice")
+
+        let read = await SentFileRowView(row: TimelineRow(.sentFile(item)),
+                                         reader: ReaderDouble(.contents("a line the file really carries")))
+            .load(for: item)
+        XCTAssertEqual(SentFileRowView.previewReading(read), "a line the file really carries",
+                       "a readable file drew no preview")
+
+        // And the floor: nothing read yet is not the same as unreadable.
+        XCTAssertNil(SentFileRowView.previewReading(nil),
+                     "the row reported a file unreadable before anything had been read")
+    }
+
+    /// sweep#6: the path the row reads is the path the tool resolved, not the string the model
+    /// wrote.
+    ///
+    /// `SendUserFileTool` expands a leading `~` and resolves anything relative against the
+    /// channel's cwd before it sends a file; the timeline item is built from the tool-use input,
+    /// which is the unresolved string. A row that read that string as given asks the filesystem
+    /// about a path relative to the app's own directory — a different file, or none.
+    ///
+    /// The fourth clause is the one that keeps the fix honest: with no cwd to resolve against, a
+    /// relative path is **not** read at all.
+    func testTheRowResolvesItsPathTheWayTheToolDid() async throws {
+        let tree = try TempTree()
+        let cwd = try tree.directory("invented-project")
+        let relative = try XCTUnwrap(SentFileRowView.resolve("notes/report.md", against: cwd),
+                                     "a relative path with a cwd resolved to nothing")
+        XCTAssertTrue(relative.hasPrefix(cwd.standardizedFileURL.path),
+                      "a relative path was not resolved against the channel's working directory")
+        XCTAssertTrue(relative.hasSuffix("notes/report.md"), "the resolved path is not the one the item named")
+
+        let home = try XCTUnwrap(SentFileRowView.resolve("~/report.md", against: cwd),
+                                 "a tilde path resolved to nothing")
+        XCTAssertFalse(home.contains("/~/"), "a leading tilde was resolved as a directory name")
+        XCTAssertTrue(home.hasPrefix(NSHomeDirectory()), "a leading tilde did not expand to the home directory")
+
+        XCTAssertEqual(SentFileRowView.resolve("/invented/absolute.md", against: nil),
+                       "/invented/absolute.md", "an absolute path was rewritten")
+        XCTAssertNil(SentFileRowView.resolve("notes/report.md", against: nil),
+                     "a relative path with no working directory was read against the app's own")
+
+        // End to end: the row hands the seam the resolved path and nothing else.
+        let reader = ReaderDouble(.contents("a line"))
+        let item = Self.sentFileItem(files: ["notes/report.md"])
+        _ = await SentFileRowView(row: TimelineRow(.sentFile(item)), cwd: cwd, reader: reader).load(for: item)
+        let requested = await reader.requested
+        XCTAssertEqual(requested.count, 1, "the row made \(requested.count) read(s) for one file")
+        XCTAssertEqual(requested.first, relative, "the row read a path the tool would not have sent")
+    }
+
+    /// The shipped head reader really is bounded: a file far larger than the bound comes back as
+    /// its own first bytes, and no more.
+    func testTheShippedReaderReturnsABoundedHead() async throws {
+        let tree = try TempTree()
+        let bound = 64
+        let body = String(repeating: "abcdefghij\n", count: 2_000)
+        let target = try tree.file("invented-module/large.txt", body)
+        XCTAssertGreaterThan(body.utf8.count, bound * 10, "the invented file is not larger than the bound")
+
+        guard case .contents(let head) = await FileHeadReader().head(atPath: target.path, upTo: bound) else {
+            return XCTFail("the shipped reader could not read a file it had just written")
+        }
+        XCTAssertLessThanOrEqual(head.utf8.count, bound,
+                                 "the reader returned \(head.utf8.count) bytes for a bound of \(bound)")
+        XCTAssertTrue(body.hasPrefix(head), "the bounded head is not the file's own first bytes")
+
+        let absent = await FileHeadReader().head(atPath: tree.root.appending(path: "no-such-file").path,
+                                                 upTo: bound)
+        XCTAssertEqual(absent, .absent, "a file that is not there was not reported absent")
+    }
+
+    /// sweep#7: **no file is read while the row's body is being evaluated.**
+    ///
+    /// A row draws inside SwiftUI's layout pass. A read there is a blocking filesystem call on the
+    /// main actor for every sent-file row on screen, and C5's TCC finding makes the worst case a
+    /// wedge rather than a stall: the first `open(2)` on a consented directory does not return until
+    /// the user answers a system dialog. The preview therefore arrives from a bounded read that runs
+    /// off the main actor; the count of reads made during `body` is what says so.
+    func testTheRowReadsNothingWhileItsBodyIsEvaluated() async throws {
+        let reader = ReaderDouble(.contents("first line\nsecond line"))
+        let row = SentFileRowView(row: TimelineRow(Self.sentFile(files: ["/invented/a.txt"],
+                                                                caption: "an invented caption",
+                                                                delivered: true)),
+                                  reader: reader)
+        _ = CardTree.texts(in: row.body)
+        let reads = await reader.reads
+        XCTAssertEqual(reads, 0, "the row made \(reads) blocking read(s) while drawing")
     }
 
     // MARK: - D2: the raise

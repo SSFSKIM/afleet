@@ -18,7 +18,25 @@ struct ActivityItem: Identifiable, Sendable {
     /// rows with identical contents — so the position is what separates them.
     let position: Int
 
-    var id: String { "\(position)" }
+    /// Position **and** the row's own identity.
+    ///
+    /// The position alone separates two rows with identical contents, which is what it was added
+    /// for; it does not separate two *different* rows that happen to occupy one position across a
+    /// rebuild. A List keys its row views on this, and the compact permission card it hosts holds
+    /// view state — the destination an *Always allow* would be filed at. Under the position alone,
+    /// a request answered and replaced by the next one inherits that state, and the retained
+    /// destination is applied to a different request's rules.
+    var id: String { "\(position)|\(identity)" }
+
+    /// What this row is *about*, as far as anything here can name it: the request a decision waits
+    /// on, the transcript item a frame-derived row links to, or the row's own short text.
+    private var identity: String {
+        switch row.kind {
+        case .decision(let request): request.rawValue
+        case .agentRunning(let task), .agentFailed(let task): task
+        default: row.itemUUID ?? row.text
+        }
+    }
     var key: ChannelKey { row.key }
 
     /// What kind of thing this is, in one word the view puts in front of the text. Exhaustive over
@@ -83,6 +101,20 @@ final class ActivityModel {
     /// The one path a card's answer leaves by, shared with the timeline's host (contract Y2).
     /// Activity performs no answer of its own and constructs no `InboundAnswer`.
     let answering: DecisionAnswering
+
+    /// Where a channel's fold is, for the host signal a successful answer raises (spec D2,
+    /// contract X4).
+    ///
+    /// The engine sends no frame back for an answer, so the only thing that can move a decision out
+    /// of `.pending` is the host saying it answered. Activity answers for channels whose
+    /// `ChannelTimelineModel` it does not own, so it is handed the app's one
+    /// `ChannelTimelineRegistry` as a provider — the shape the composer registry already receives
+    /// its own seams in — rather than reaching for a registry of its own, which is the second
+    /// capability path the C6 cut exists to prevent.
+    ///
+    /// Nil for a model built without one: it then raises nowhere, which is right for a surface with
+    /// no fold to tell.
+    var timeline: (@MainActor (ChannelKey) -> ChannelTimelineModel)?
 
     private let lifecycle: any LifecycleAPI
     private let configHome: URL
@@ -160,6 +192,12 @@ final class ActivityModel {
         // The same seam for a card's answer: the engine sends no frame back for one, so the pump
         // learns the request is closed only by being told, and the state `perform` returned is the
         // fleet's newest.
+        // D2's raise: the fold this answer belongs to hears that the host answered it, so the
+        // card leaves `.pending` on screen and not only in a test that hands the fold in.
+        answering.raise = { [weak self] key, signal in
+            guard let model = self?.timeline?(key) else { return }
+            await model.signal(signal)
+        }
         answering.settled = { [weak self] id, key, state in
             guard let self else { return }
             self.pumps[key]?.forget(id)

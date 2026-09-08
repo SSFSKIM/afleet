@@ -109,10 +109,14 @@ struct ActivityRowView: View {
                 .frame(width: 92, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
                 if let card = item.card {
+                    // Keyed by the request. The card holds view state of its own and this row is
+                    // one of a reused list; without an identity that moves with the request, a
+                    // replacement request inherits the previous card's state.
                     DecisionCardView(card: card,
                                      presentation: .compact,
                                      in: item.key,
                                      answering: activity.answering)
+                        .id(card.requestID.rawValue)
                 } else {
                     Text(item.row.text.isEmpty ? item.kindLabel : item.row.text)
                 }
