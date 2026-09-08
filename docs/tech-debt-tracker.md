@@ -1877,6 +1877,34 @@ is renumbered.
      exact, which is the same corrective tracker 127 asks for and could land with it. Owner: C3 for
      the field, C6.1 for reading it.
 
+139. **The header's permission-mode readback is the launch handshake's, so a mode changed inside a
+     process is invisible until that process is replaced.** The child spec's §10 names `get_settings`
+     as the source of model, mode and effort. The engine reports two of the three there: its answer
+     is `{applied: {model, effort, advisor, ultracode}, effective, sources}` (2.1.257
+     `cli.pretty.js:178217`, and both recordings that carry the subtype — `control-shapes` and
+     `zero-cost`), where `effective` is the merged *settings files* and a mode read out of it would
+     be what a file asks for rather than what the process runs. The readback the engine does offer is
+     `InitializeResponse.current_permission_mode`, which is what `Readback.verify` compares a restart
+     against and what C6.2's picker displays, so the strip reads it from `engineReports(of:)`. That
+     value is *retained per process*: a `set_permission_mode` mid-session produces no new handshake,
+     so the strip keeps showing the launch mode until a quiescent restart mints one. C6.2's picker
+     has the same limit and covers it with a disagreement note; the strip has no note. Found at C6.1
+     Task 5, where G4's clause is asserted across two replayed handshakes. Closer: the fleet's
+     runtime record (`SessionRuntimeState.permissionMode`) already tracks every applied mode and is
+     the honest source for a display; exposing it on `LifecycleAPI` — or having the strip read the
+     `set_permission_mode` echo off its own event subscription — closes it. Owner: C6.2 for the
+     display's story about a click, X5 for the accessor. The spec's §10 wants the same correction.
+
+140. **`HeaderReadoutView` has no production mount until C6.2's header bar calls it.** C6.1 owns the
+     readout and its view and C6.2 owns `App/Header/`, so the one line that mounts the strip is the
+     other leaf's, exactly as the child spec's *Parent revision* has it. Until that line lands, every
+     member the strip reaches — `ChannelTimelineModel.startReadbacks()` among them — is production
+     code the app never runs, and `check-app-wiring` cannot say so, because the calls are all inside
+     `App/`. This is the same shape as entry 129 and it is filed for the same reason: the letter of
+     the check is satisfied while its substance is not. Found at C6.1 Task 5. Closer: C6.2 mounts
+     `HeaderReadoutView(model:)` in its header bar, and the leaf that does it asserts the mount the
+     way `ComposerMountTests` asserts the composer's. Owner: C6.2.
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
