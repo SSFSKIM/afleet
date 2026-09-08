@@ -889,6 +889,176 @@ symlink-containment debt in entry 78 is unchanged.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
 
+## From C7.3
+
+Filed at the close of C7.3 (Source Control core; ledger
+`docs/doperpowers/ledgers/2026-09-07-c7.3-scm-core.md`). Numbers 112 through 126 are this
+leaf's reservation; 125 onward are unused.
+
+112. **`SourceControlCore.ToolRunner` duplicates C2's process mechanics.** Termination-handler
+     exit observation, non-blocking pipe drains, timeout with grace and `SIGKILL` are written
+     twice: once in `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift` and once in
+     `Workbench/Sources/SourceControlCore/ToolRunner.swift`. The duplication is forced, not
+     careless: contract X1 forbids Workbench from importing `ClaudeWire`, and X2 keeps
+     `AfleetCore` to value types, so neither existing home was available. Two copies is
+     tolerable; a third is the signal to extract a process package below both. Owner: whichever
+     child needs the third copy, or C2 if it revisits the package split.
+
+113. **Workbench has no §11 diagnostics domain.** §11's table names four log files
+     (`diagnostics.log`, `fleet.log`, `timeline.log`, `app.log`) and none belongs to the panel
+     layer, so C7.3 logs nothing and returns typed errors for the panel to render (§10). When a
+     panel wants a durable record of a failing `git` or `gh` invocation, the domain has to be
+     opened in §11's table with a writer that owns the file — one writer per file, per the
+     2026-09-07 amendment. Owner: C7.7, or C5 if it opens it first.
+
+114. **The commit graph is read in a fixed window with no paging above it.** `GitLog.commits`
+     defaults to 2,000 commits (`-n`/`--skip`); lane assignment marks an edge to a parent
+     outside the window `truncated`, but nothing fetches the next page. Correct for a viewport,
+     incomplete for a scroll. Owner: C7.7 when the panel's scroll needs it.
+
+115. **Closed 2026-09-08 (`3c0ec27`).** The architect amended contract W7 to `--decorate=full`,
+     so `%D` arrives as full ref paths and `GitLog.refs(from:)` strips `refs/heads/`,
+     `refs/remotes/` and `refs/tags/` instead of guessing at the first slash; the pin stays
+     explicit because `log.decorate=short` is now the adverse setting. **`%D`'s shortened
+     decorations cannot distinguish a remote-tracking branch from a local branch whose name
+     contains a slash.** Measured on `git` 2.55.0: `feature/x` is reported as
+     `.remoteBranch(remote: "feature")` named `x`, and a local branch literally named
+     `origin/feature` is indistinguishable from the remote-tracking one. The arrow form
+     (`HEAD -> feature/x`) is exempt because it names a local branch by construction. No parser
+     of `%D` can resolve this; the remedy is `--decorate=full`, which prints `refs/heads/…` and
+     `refs/remotes/…` unambiguously and would simplify the parser rather than complicate it —
+     but it amends contract W7's command line, which this leaf does not own. Raised to the
+     architect as a parent revision at merge. Owner: whoever revises W7, most likely C7.7 when
+     the panel draws ref badges and the distinction becomes visible.
+
+116. **`ToolRunner` has no `timeoutState`.** C2's `ProcessRunner` sampled a
+     `describeAtTimeout()` before signalling the child, which is what separated a hung child
+     from one that exited without the runner observing it. That sampling was not carried across;
+     the residual tell is the pair `exitCode == -1 && timedOut`, which is enough for a panel to
+     render "the tool did not answer" and not enough to say which of the two happened. Filed
+     rather than fixed because the state is only worth its cost once something consumes it, and
+     nothing does yet (entry 113). Owner: whoever opens the Workbench diagnostics domain.
+
+117. **`ToolJob.drainRemaining` is not falsifiable by any black-box test on macOS.** The final
+     non-blocking pass over each pipe on the exit path always finds the pipe empty, because the
+     readable event reaches the runner's queue ahead of the exit in every construction tried, so
+     deleting it changes no observable behaviour. It is kept as defence for the ordering a loaded
+     queue or another platform could produce, and the review that found this was explicit that
+     an earlier apparent demonstration was an artifact of the assertion, not of the drain.
+     Closing this means a seam that lets a test hold the queue busy across the child's last
+     write. Owner: whoever next revises the process layer, or the extraction entry 112
+     anticipates.
+
+118. **`gh pr checks`' documented exit code 8 has no live confirmation.** C7.3 accepts 0 and 8
+     from that verb because `gh`'s own help and its `cmdutil.PendingError` say 8 means "checks
+     are still pending", and the behaviour is asserted with a stub runner. Twenty-six open pull
+     requests across four large public repositories had all settled at the time of the gate, so
+     no live run produced it. One live confirmation against a repository with a check in flight
+     would close this. Owner: C7.7 at its GitHub-tab gate.
+
+119. **`GraphRow.Edge.truncated` is easy to misread as "the line ends here".** It means only
+     that the edge's target commit is outside the window `GitLog` read: the parent is never
+     read, so its lane reservation is never released, and the lane repeats the same truncated
+     straight-down edge on every row below to the bottom of the window. That is the wanted
+     rendering — a line leaving a viewport does continue — but a consumer that read the flag as
+     a terminator would stop the line at the first row that named it and draw a graph that
+     disagrees with the lane state. Documented on the flag and pinned by a multi-row test;
+     what would close it is either a name that cannot be misread or a rendering contract the
+     panel and this type share. Owner: C7.7, the first consumer.
+
+120. **One mutation of the first-parent rule survives C7.3's suite and may be equivalent.**
+     Writing rule 3 as "the first parent takes the leftmost *free* lane" rather than the
+     commit's own lane passes every test, because a commit's own lane is released immediately
+     before that rule runs and is the leftmost free one in every fixture. Distinguishing the two
+     needs a row read at a *reserved* lane while a lane to its left is free; a lane is freed only
+     by a parentless commit or by a released duplicate, and three probed shapes — two roots with
+     interleaved dates, and an unrelated-history merge in each direction — all had
+     `git log --topo-order --all` follow one chain to its end before starting another, which
+     frees lanes right to left. So the mutant may be equivalent under git's ordering rather than
+     merely uncovered. Filed rather than chased: closing it means either a shape that orders the
+     other way, or an argument that none exists. Owner: whoever next revises lane assignment.
+
+121. **`GraphRow.edges` may contain several edges arriving in the same `toLane`.** A consumer
+     that indexes a row's edges by destination lane silently drops one of each pair and
+     disconnects a line at that row. It happens two ways: a merge reaching into a lane another
+     child already reserved, where the lane carries both the merge's edge and the pass-through
+     of the line already running down it; and two lanes converging on one parent, where both
+     bend into the lane the parent was read at. This was three of the five findings at C7.3's
+     whole-branch review, and the model was changed once to allow it (ledger D43). Documented on
+     `GraphRow.Edge` and pinned by a connectivity assertion over every lane fixture; what would
+     close it is a rendering contract the panel and this type share. Owner: C7.7, the first
+     consumer.
+
+122. **`log.excludeDecoration` silently removes decorations from `%D` and no command-line option
+     overrides it.** Measured on `git` 2.55.0: a user who sets `log.excludeDecoration=refs/tags/*`
+     — a reasonable thing to hold for one's own `git log` — gets a commit graph with no tags on it,
+     and the same for any pattern they chose. Every other configuration this module is sensitive to
+     is pinned on the command line (D45); this one is not pinnable. `--decorate-refs=<pattern>`
+     does override the setting but replaces the whole decoration set, and was measured to drop
+     `HEAD` while restoring tags, which is a worse answer than the one it fixes; `-c
+     log.excludeDecoration=` adds an empty pattern that matches everything and removes all
+     decorations. The blast radius is bounded — decorations missing from the graph, never a wrong
+     edge or a wrong commit — and `AdverseConfigurationTests` documents it as unpinned rather than
+     ruled out. What would close it: read decorations from `git for-each-ref` and join them to the
+     window by object name, instead of from `%D`. Owner: whoever next revises `GitLog`, and a
+     natural companion to the `--decorate=full` swap entry 115 records as taken.
+
+123. **Nothing enforces that a setting `AdverseConfigurationTests.ruledOut` names can be exhibited
+     by the fixture that measures it.** The suite carries two dictionaries: `hostile`, the settings
+     the command-line pins defend against, and `ruledOut`, the settings measured to reach no byte
+     any parser here reads. `ruledOut` is a tripwire, and a tripwire is only worth its name if the
+     repository under it can make the setting speak. Two of C7.3's eighteen could not be:
+     `log.showSignature` acts only over a *signed* commit and every fixture was unsigned, and
+     `diff.renameLimit` acts only on the *inexact* half of rename detection and the only rename in
+     the fixture was exact. Both measured inert, both went into the tripwire, both were live
+     silent-wrong-answer defects, and both were found by an external reviewer rather than by the
+     tripwire. R5 fixed the fixture — the repository the tripwire runs against is now signed and
+     carries a `.mailmap`, a note, an upstream, a subdirectory, an inexact rename and a modified
+     file — and wrote floor assertions saying each of those shapes is present. It did not fix the
+     *mechanism*: the enrichment and the floor are hand-written, and the next entry added to
+     `ruledOut` can be inert for the wrong reason again with nothing to say so. Bounded, because a
+     wrong verdict costs a missing pin, which is the class the suite already treats. What would
+     close it: a per-entry note of the property the fixture must have for that setting to speak,
+     checked by the test, so that adding an entry without the property fails. Owner: whoever next
+     extends `AdverseConfigurationTests`.
+
+124. **The rename-limit pin hard-codes git's default in two modules.** `GitDiff` passes `-l1000`
+     and `WorkingTreeStatus` passes `-c diff.renameLimit=1000 -c status.renameLimit=1000`, where
+     `1000` is git's documented default for `diff.renameLimit` — pinned rather than lifted to `0`
+     (unlimited) on purpose, because a user who lowered the limit lowered it for speed on a large
+     repository and the panel's answer should be git's default answer, not a slower one no
+     configuration would ever have produced. If a future git changes that default, the panel
+     freezes the old one silently, in the direction of doing more work rather than less, so nothing
+     fails and no test notices. Trivial and stable in practice; filed because the number is a copy
+     of another program's documentation with nothing linking it back. Owner: whoever next revises
+     the configuration pins.
+
+125. **Closed 2026-09-08 (`d0e32b6` on `main`): one drain pass in C2's `ProcessRunner` is bounded
+     (`PipeDrain.bytesPerPass`, one mebibyte, 64 KiB chunks); a spent budget re-arms the read source
+     and the queue turns; ClaudeWire 251/6/0. Original:** C2's `ProcessRunner` carries the same unbounded pipe drain C7.3's `ToolRunner` had.**
+     `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift` reads while data keeps arriving and
+     returns only on `EAGAIN`, on the same serial queue that runs its timeout, its `SIGKILL`
+     escalation and its settlement — the shape C7.3's R6 review found and bounded in its own copy
+     (`PipeDrain.bytesPerPass`, one mebibyte per readable event). C7.3 could not fix it: contract
+     X1 forbids Workbench from importing `ClaudeWire`, the two runners are deliberately separate
+     copies (entry 112), and the file belongs to C2. The exposure there is larger, not smaller: that
+     runner drives the engine's own long-lived processes rather than short `git` reads. What would
+     close it: the same bound applied in C2's copy, or the extraction entry 112 anticipates, which
+     would leave one copy to bound. Owner: C2, or whichever child needs the third copy.
+
+126. **The bound on one drain pass has no end-to-end tripwire.** `PipeDrain.bytesPerPass` exists so
+     that a producer cannot own the runner's queue; deleting it leaves every black-box test in the
+     suite green. Measured over five producer shapes — one `dd` at 64 KiB, 1 MiB and 4 MiB blocks,
+     and four and eight of them at once — this machine's drain consumes about 3 GB/s and no
+     user-space producer keeps a 64 KiB pipe fed at that rate, so the loop reaches `EAGAIN` between
+     events and the timeout fires within 13 ms of its deadline either way. The bound is therefore
+     pinned at the seam (`PipeDrain.pass` against a descriptor that never says `EAGAIN`) and the
+     flooding-child test is a floor rather than a discriminator. The same testability limit as
+     entry 117, one layer up, and it is what let the defect live: a review found it by reading.
+     What would close it: a seam that lets a test hold the queue busy across a producer's writes,
+     or a fake descriptor whose readability the test controls. Owner: whoever next revises the
+     process layer, or the extraction entry 112 anticipates.
+
 ## From C6.1 (`child/c6-timeline-renderer`)
 
 Entries **127 through 141** are C6.1's, as the C6 composite's leaf table allots them. Nothing above
@@ -1011,3 +1181,40 @@ is renumbered.
      local dependency and a workspace member) and point it at the project's own
      `xcshareddata/swiftpm/Package.resolved`; until then the floor's Makefile target restores the
      file after the run. Owner: C5 (`project.yml`), noted 2026-09-08.
+
+189. **`SourceControlCore` decodes pathnames lossily.** Both git parsers convert path bytes with
+     `String(decoding:as: UTF8.self)`, which replaces invalid sequences, so a non-UTF-8 path reaches a
+     panel as a path that does not exist and two distinct byte names can collapse to one key during
+     the diff join. APFS enforces UTF-8 for new names, so the exposure is history and foreign
+     checkouts, not the live working tree. Found by C7.3's merge panel. Closer: keep the raw bytes on
+     the model beside the display string, or fail the record with a typed error. Owner: C7.7, when
+     it first meets such a repository.
+
+190. **An unborn `HEAD` and a broken `HEAD` are the same to `GitDiff`.** `resolvingAnUnbornHead`
+     treats every non-zero `rev-parse --verify HEAD^{commit}` as unborn (a timed-out probe is now
+     `.timedOut`, corrective on the branch), so a corrupt or dangling `HEAD` is compared against the
+     empty tree and drawn as a repository whose whole tree is new. Found by C7.3's merge panel.
+     Closer: distinguish exit 128 with a missing ref from a resolvable symbolic `HEAD` naming a
+     missing object, and surface the latter as a repository error. Owner: C7.7.
+
+191. **Working-tree containment is not atomic across ancestors.** `workingTreeFile` refuses `..`,
+     absolute paths and `realpath` ancestors outside the root, and opens the final component with
+     `O_NOFOLLOW` + `fstat`; an ancestor swapped for a symlink between the `realpath` and the open is
+     still followed. The threat is a racing local writer on the user's own machine. Found by C7.3's
+     merge panel, ruled out of scope twice. Closer: descriptor-relative traversal (`openat` with
+     `O_NOFOLLOW` per component) from a descriptor on the root. Owner: C7.7 if the panel ever reads
+     files it did not list itself.
+
+192. **A type change from a gitlink carries no source-side kind.** `FileChange.kind` is
+     destination-biased; for mode 160000 → file or symlink the caller cannot tell that the source
+     side is a gitlink and that `GitDiff.blob` is invalid for it. Found by C7.3's merge panel.
+     Closer: carry both modes (the raw record has them) or a `sourceKind`. Owner: C7.7 when it
+     renders type changes.
+
+193. **A truncated `HEAD` lane does not continue below a limit-truncated window.** When `HEAD` lies
+     below the window (skip zero, limit reached) the working-tree row emits one truncated edge and
+     reserves nothing, so the first unrelated tip takes lane 0 and no reservation carries the edge
+     through the rows — against `GraphRow.Edge`'s rule that an unread target's lane continues to the
+     bottom. Found by C7.3's merge panel. Closer: reserve a lane for the out-of-window `HEAD` and
+     release it at the window's end, or draw the truncated edge to the row's edge. Owner: C7.7 with
+     pagination (tracker 114).

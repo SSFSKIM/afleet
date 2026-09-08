@@ -1,0 +1,81 @@
+[
+  {
+    "assignees": [
+      {
+        "id": "MDQ6VXNlcjAwMDAwMDAx",
+        "is_bot": false,
+        "login": "willow-mint",
+        "name": "Willow Mint"
+      }
+    ],
+    "author": {
+      "id": "MDQ6VXNlcjAwMDAwMDAy",
+      "is_bot": false,
+      "login": "birch-quill",
+      "name": "Birch Quill"
+    },
+    "labels": [
+      {
+        "id": "LA_kwDOsample0004",
+        "name": "bug",
+        "description": "Something behaves wrongly",
+        "color": "d73a4a"
+      }
+    ],
+    "number": 41,
+    "state": "OPEN",
+    "title": "The graph draws a lane twice after a force-push",
+    "updatedAt": "2026-04-05T13:20:09Z",
+    "url": "https://github.com/octo-invented/sample-repo/issues/41"
+  },
+  {
+    "assignees": [],
+    "author": {
+      "id": "MDQ6VXNlcjAwMDAwMDAx",
+      "is_bot": false,
+      "login": "willow-mint",
+      "name": "Willow Mint"
+    },
+    "labels": [],
+    "number": 38,
+    "state": "OPEN",
+    "title": "Document the porcelain v2 rename field order",
+    "updatedAt": "2026-04-01T07:45:00Z",
+    "url": "https://github.com/octo-invented/sample-repo/issues/38"
+  },
+  {
+    "assignees": [
+      {
+        "id": "MDQ6VXNlcjAwMDAwMDAy",
+        "is_bot": false,
+        "login": "birch-quill",
+        "name": "Birch Quill"
+      },
+      {
+        "id": "MDQ6VXNlcjAwMDAwMDAz",
+        "is_bot": true,
+        "login": "sample-bot",
+        "name": ""
+      }
+    ],
+    "author": {
+      "id": "MDQ6VXNlcjAwMDAwMDAz",
+      "is_bot": true,
+      "login": "sample-bot",
+      "name": ""
+    },
+    "labels": [
+      {
+        "id": "LA_kwDOsample0002",
+        "name": "chore",
+        "description": "",
+        "color": "cfd3d7"
+      }
+    ],
+    "number": 17,
+    "state": "CLOSED",
+    "title": "Retire the 2.3 fixture recordings",
+    "updatedAt": "2026-02-28T16:04:52Z",
+    "url": "https://github.com/octo-invented/sample-repo/issues/17"
+  }
+]

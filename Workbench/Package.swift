@@ -38,7 +38,12 @@ let package = Package(
 
         // MARK: - C7.3 source control core (owner: C7.3)
         .target(name: "SourceControlCore", dependencies: [core], swiftSettings: v6),
-        .testTarget(name: "SourceControlCoreTests", dependencies: ["SourceControlCore"], swiftSettings: v6),
+        // The `Samples` directory holds the authored `gh --json` documents C7.3's model tests
+        // decode (ledger D9): real field names, invented values, never a recorded account.
+        // `.copy` rather than `.process` — the tests read them back as bytes and assert on
+        // those bytes, so the build system must not rewrite them.
+        .testTarget(name: "SourceControlCoreTests", dependencies: ["SourceControlCore"],
+                    resources: [.copy("Samples")], swiftSettings: v6),
         // MARK: - end of C7.3
 
         // MARK: - PanelHostAPI (owner: C5; X7's protocol, declared here so Workbench and the app both import it)
