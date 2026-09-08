@@ -1355,6 +1355,23 @@ symlink-containment debt in entry 78 is unchanged.
      terminates, in the same pass that ends the channels. Owner: C6.2 (the quit clause). Raised by
      C6.2's second fix wave.
 
+225. **The delayed `SIGKILL` names a process-group id whose identity is no longer retained.**
+     `ShellChild` defers the leader's reap during a termination precisely so the pid keeps naming the
+     group, but two paths reap inside the escalation grace anyway: the budget's timer reaps and
+     settles, and a settlement reached any other way reaps too. The retained `SIGKILL` block then
+     calls `kill(-group, …)` on a stored number with nothing holding that number reserved. For the
+     signal to reach a stranger the whole group must exit inside the grace *and* the pid space must
+     wrap onto that id in the same window — at most one second, with the group's own exit as the
+     first of two coincidences. Left standing deliberately: C7.3's `ToolRunner` and every runner of
+     this shape accept the same window, and closing it means keeping identity alive across the
+     escalation (holding the leader unreaped until the last signal, or a pidfd-style handle the
+     platform does not offer for groups) — a redesign of the reap, not a patch. The one mitigation
+     worth having is taken on the branch: `kill(-group, 0)` immediately before the `SIGKILL`, which
+     skips the signal for a group that is already gone and narrows the window to the probe-to-kill
+     gap. Closer: whoever revisits the reap ordering — most likely alongside 218, which is the same
+     code in C7.3 — decides whether identity can be held to the last signal. Owner: C6.2 with C7.3.
+     Filed by C6.2's third review round (scalpel-2#1), with the architect's disposition recorded.
+
 ## From C7.2 (`child/c7-editor-core`)
 
 97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state
