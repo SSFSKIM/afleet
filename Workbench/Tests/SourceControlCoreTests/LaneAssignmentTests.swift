@@ -136,7 +136,8 @@ final class LaneAssignmentTests: XCTestCase {
         // comparison hold, so the shape is asserted before anything is read out of it.
         XCTAssertEqual(history.count, 4, "the fixture built a history of a different size")
 
-        let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: false)
+        let assignment = LaneAssignment.assign(commits: history, headOID: merge,
+                                              workingTreeIsDirty: false)
         XCTAssertEqual(assignment.rows.count, 4, "one row per commit, and no working-tree row")
 
         XCTAssertEqual(lane(of: merge, in: assignment), 0, "the merge commit is the first tip read and holds lane 0")
@@ -204,7 +205,8 @@ final class LaneAssignmentTests: XCTestCase {
         XCTAssertEqual(history.count, 6, "the fixture built a history of a different size")
         XCTAssertEqual(history.first?.parents.count, 3, "the newest row is the three-parent merge")
 
-        let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: false)
+        let assignment = LaneAssignment.assign(commits: history, headOID: octopus,
+                                              workingTreeIsDirty: false)
 
         XCTAssertEqual(lane(of: octopus, in: assignment), 0, "the octopus merge is the first tip read")
         XCTAssertEqual(lane(of: a, in: assignment), 0, "the first parent keeps the merge's lane")
@@ -259,7 +261,8 @@ final class LaneAssignmentTests: XCTestCase {
         let history = try await commits(fixture)
         XCTAssertEqual(history.count, 3, "the tag-only commit must be in the window that --all reads")
 
-        let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: false)
+        let assignment = LaneAssignment.assign(commits: history, headOID: c2,
+                                              workingTreeIsDirty: false)
 
         XCTAssertEqual(lane(of: c2, in: assignment), 0, "the branch tip is the first tip read and holds lane 0")
         XCTAssertEqual(lane(of: detached, in: assignment), 1,
@@ -305,8 +308,11 @@ final class LaneAssignmentTests: XCTestCase {
                                                      environment: fixture.environment,
                                                      runner: ToolRunner())
         XCTAssertTrue(clean.isClean, "a freshly committed fixture must have a clean working tree")
+        XCTAssertEqual(clean.headOID, headCommit,
+                       "the status header names the commit the working tree sits above")
 
-        let cleanAssignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: !clean.isClean)
+        let cleanAssignment = LaneAssignment.assign(commits: history, headOID: clean.headOID,
+                                                    workingTreeIsDirty: !clean.isClean)
         XCTAssertEqual(cleanAssignment.rows.count, 2, "a clean tree contributes no row")
         XCTAssertFalse(cleanAssignment.rows.contains { $0.content == .workingTree },
                        "no working-tree row may exist while the tree is clean")
@@ -320,7 +326,8 @@ final class LaneAssignmentTests: XCTestCase {
                                                      runner: ToolRunner())
         XCTAssertFalse(dirty.isClean, "an untracked file must make the working tree dirty")
 
-        let dirtyAssignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: !dirty.isClean)
+        let dirtyAssignment = LaneAssignment.assign(commits: history, headOID: dirty.headOID,
+                                                    workingTreeIsDirty: !dirty.isClean)
         XCTAssertEqual(dirtyAssignment.rows.count, 3, "the dirty tree adds exactly one row")
         XCTAssertEqual(dirtyAssignment.rows.first?.content, .workingTree, "the working tree is row zero")
         XCTAssertEqual(dirtyAssignment.rows.first?.lane, 0, "the working-tree row sits in lane 0")
@@ -351,7 +358,8 @@ final class LaneAssignmentTests: XCTestCase {
         let window = try await commits(fixture, limit: 3)
         XCTAssertEqual(window.count, 3, "the window must be shorter than the history it reads")
 
-        let assignment = LaneAssignment.assign(commits: window, workingTreeIsDirty: false)
+        let assignment = LaneAssignment.assign(commits: window, headOID: hashes[4],
+                                              workingTreeIsDirty: false)
         XCTAssertEqual(assignment.rows.count, 3, "one row per commit in the window")
         XCTAssertEqual(assignment.laneCount, 1, "a linear history occupies exactly one lane")
 
@@ -413,8 +421,11 @@ final class LaneAssignmentTests: XCTestCase {
                                                      environment: fixture.environment,
                                                      runner: ToolRunner())
         XCTAssertFalse(dirty.isClean, "an untracked file must make the working tree dirty")
+        XCTAssertEqual(dirty.headOID, c2,
+                       "the object id the assignment is given is HEAD's, read from git rather than assumed")
 
-        let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: !dirty.isClean)
+        let assignment = LaneAssignment.assign(commits: history, headOID: dirty.headOID,
+                                              workingTreeIsDirty: !dirty.isClean)
         XCTAssertEqual(assignment.rows.count, 4, "three commits plus the working-tree row")
 
         // The working tree is a child of `HEAD` and reserves its own lane for it, exactly as
@@ -505,7 +516,8 @@ final class LaneAssignmentTests: XCTestCase {
                        [octopus, p3, p2, p1, m2, m1, sideMerge, o1, o2, base],
                        "the measured --topo-order --all of git 2.55.0 over this shape")
 
-        let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: false)
+        let assignment = LaneAssignment.assign(commits: history, headOID: octopus,
+                                              workingTreeIsDirty: false)
         XCTAssertEqual(assignment.laneCount, 4,
                        "four lanes are the high-water mark: the freed lanes are reused, not appended to")
 
@@ -577,7 +589,8 @@ final class LaneAssignmentTests: XCTestCase {
         XCTAssertEqual(history.first(where: { $0.hash == sideMerge })?.parents, [x1, s],
                        "the older merge names the same commit as its own further parent")
 
-        let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: false)
+        let assignment = LaneAssignment.assign(commits: history, headOID: mainMerge,
+                                              workingTreeIsDirty: false)
         XCTAssertEqual(assignment.laneCount, 3,
                        "the second merge reuses the reservation instead of widening the graph to four lanes")
 
@@ -637,7 +650,8 @@ final class LaneAssignmentTests: XCTestCase {
         XCTAssertEqual(window.map(\.hash), [detached, c3, c2],
                        "the measured --topo-order --all window of git 2.55.0 over this shape")
 
-        let assignment = LaneAssignment.assign(commits: window, workingTreeIsDirty: false)
+        let assignment = LaneAssignment.assign(commits: window, headOID: c3,
+                                              workingTreeIsDirty: false)
         XCTAssertEqual(assignment.laneCount, 2, "two lanes are the high-water mark of this window")
         XCTAssertNil(lane(of: c1, in: assignment), "the shared root is outside the window")
 
@@ -656,5 +670,160 @@ final class LaneAssignmentTests: XCTestCase {
                        [edge(0, 0, truncated: true), edge(1, 1, truncated: true)],
                        "both lanes leave the bottom of the window, and neither ends at a row")
         assertEveryEdgeLands(assignment)
+    }
+
+    // MARK: - 10. a first-parent reservation outranks a further-parent one
+
+    /// A commit reached first as a merge's **further** parent and only afterwards as another
+    /// commit's **first** parent: it must be read in the lane its first-parent child reserved, not
+    /// in the merge's side lane, however far left that side lane sits.
+    ///
+    /// This is W7's rule stated the way the rule is actually written — a commit takes the lane of
+    /// the child that named it as its first parent — rather than "the leftmost lane reserved for
+    /// it", which is a fact about the order git happened to list the tips in. The two agree in
+    /// every other fixture in this file, because in all of them the first lane reserved for a
+    /// commit is a first-parent one. Here they disagree.
+    ///
+    /// Layout: `base` (root); `p` on `main`, a child of `base`; `x` on `xb`, another child of
+    /// `base`; `c` on `cb`, the only child of `x`; and `merge`, `xb` merged into `main`, with
+    /// parents `[p, x]`. `c` is committed **before** the merge, so the merge is the newest tip and
+    /// is listed first; `x` cannot be listed until `c` has been.
+    ///
+    /// Measured topological order, `git` 2.55.0: `merge`, `p`, `c`, `x`, `base`. Walking the
+    /// algorithm: `merge` takes lane 0, reserves lane 0 for `p` (first parent) and opens lane 1 for
+    /// `x` (further parent); `p` keeps lane 0 and hands it to `base`; `c` finds no lane reserved for
+    /// it and none free, so it opens lane 2 and reserves lane 2 for `x` as its first parent. `x` is
+    /// now reserved twice — lane 1 as a further parent, lane 2 as a first parent — and rule 1 must
+    /// take **lane 2**, releasing lane 1 and bending the merge's line into lane 2 at `c`'s row.
+    ///
+    /// What would have to be true for this to fail: reading `x` at the leftmost lane reserved for
+    /// it regardless of provenance, which puts `x` in lane 1 and bends `c`'s first-parent line
+    /// sideways — the one thing rule 3 exists to prevent.
+    func testACommitIsReadInTheLaneItsFirstParentChildReservedNotAMergesSideLane() async throws {
+        let fixture = try await GitFixture(tree)
+        let base = try await fixture.commit(message: "base root", files: ["base.txt": "base\n"])
+        let p = try await fixture.commit(message: "p on main", files: ["p.txt": "p\n"])
+        try await fixture.branch("xb", from: base)
+        let x = try await fixture.commit(message: "x work", files: ["x.txt": "x\n"])
+        try await fixture.branch("cb", from: x)
+        let c = try await fixture.commit(message: "c work", files: ["c.txt": "c\n"])
+        try await fixture.checkout("main")
+        try await fixture.merge(["xb"], message: "merge xb into main")
+        let merge = try await head(fixture)
+
+        let history = try await commits(fixture)
+        XCTAssertEqual(history.count, 5, "the fixture built a history of a different size")
+        XCTAssertEqual(history.map(\.hash), [merge, p, c, x, base],
+                       "the measured --topo-order --all of git 2.55.0 over this shape")
+        // The premises the fixture exists for, asserted rather than assumed: the merge names `x`
+        // second, and `c` — read before `x` — names it first.
+        XCTAssertEqual(history.first?.parents, [p, x], "the merge's parents, in git's order")
+        XCTAssertEqual(history.first(where: { $0.hash == c })?.parents, [x],
+                       "the later tip names the merge's further parent as its own first parent")
+
+        let assignment = LaneAssignment.assign(commits: history, headOID: merge,
+                                              workingTreeIsDirty: false)
+        XCTAssertEqual(assignment.laneCount, 3, "three lanes are the high-water mark of this graph")
+
+        XCTAssertEqual(lane(of: merge, in: assignment), 0, "the merge is the first tip read")
+        XCTAssertEqual(lane(of: p, in: assignment), 0, "the first parent keeps the merge's lane")
+        XCTAssertEqual(lane(of: c, in: assignment), 2,
+                       "the later tip finds lane 0 reserved and lane 1 held for the merge's side")
+        // The discriminator. Lane 1 is reserved for `x` by the merge and lane 2 by `c`; lane 1 is
+        // to the left, and provenance is the only thing that can choose lane 2.
+        XCTAssertEqual(lane(of: x, in: assignment), 2,
+                       "the commit is read where its first-parent child reserved it, not in the "
+                       + "merge's side lane")
+        XCTAssertEqual(lane(of: base, in: assignment), 0, "the root is read at the leftmost lane reserved for it")
+
+        // `c`'s own line runs straight down into `x`, and the merge's side lane converges into it
+        // at this row rather than the other way round.
+        XCTAssertEqual(edges(of: c, in: assignment),
+                       [edge(0, 0), edge(1, 2), edge(2, 2)],
+                       "the merge's side lane bends into the lane the commit is read at, and the "
+                       + "first-parent line runs straight down")
+        // Lane 1 was closed at the row above, so only lane 0 passes this row; lane 2, which `x`
+        // hands to its own first parent `base`, converges into lane 0 because that is where `base`
+        // is read (D43).
+        XCTAssertEqual(edges(of: x, in: assignment),
+                       [edge(0, 0), edge(2, 0)],
+                       "the two lines reaching the root both end in the lane it is read at")
+        XCTAssertEqual(edges(of: base, in: assignment), [], "the root commit is parentless")
+        assertEveryEdgeLands(assignment)
+    }
+
+    // MARK: - 11. HEAD outside the window
+
+    /// A window that does not cover `HEAD` — the ordinary consequence of `--skip` — must leave the
+    /// working-tree row's edge `truncated` and reserve nothing.
+    ///
+    /// The row still exists: the tree is dirty, and D6 ties the row to that and to nothing else.
+    /// What it cannot do is point at a commit it did not read. Substituting the first commit in the
+    /// window draws the user's uncommitted changes as sitting above an unrelated commit — a wrong
+    /// answer rather than a missing one, and one no assertion in this file could previously see,
+    /// because every other dirty fixture reads a window containing `HEAD`.
+    ///
+    /// Layout: five linear commits, `w1` … `w5`, `HEAD` on `w5`, one untracked file. The window is
+    /// read with `skip: 2, limit: 2`, so it is `w3`, `w2` and `HEAD` is two rows above its top.
+    func testAWindowThatExcludesHeadLeavesTheWorkingTreeEdgeTruncated() async throws {
+        let fixture = try await GitFixture(tree)
+        var hashes: [String] = []
+        for index in 1...5 {
+            hashes.append(try await fixture.commit(message: "w\(index)", files: ["w\(index).txt": "w\(index)\n"]))
+        }
+        try tree.file("repo/scratch.txt", "uncommitted\n")
+
+        let status = try await WorkingTreeStatus.read(root: fixture.root,
+                                                      environment: fixture.environment,
+                                                      runner: ToolRunner())
+        XCTAssertFalse(status.isClean, "an untracked file must make the working tree dirty")
+        XCTAssertEqual(status.headOID, hashes[4], "HEAD is the newest commit")
+
+        let window = try await GitLog.commits(root: fixture.root, environment: fixture.environment,
+                                              runner: ToolRunner(), limit: 2, skip: 2)
+        // The premise: the window really does exclude HEAD, and is not empty either.
+        XCTAssertEqual(window.map(\.hash), [hashes[2], hashes[1]],
+                       "the skipped window holds the third and second commits and not HEAD")
+
+        let assignment = LaneAssignment.assign(commits: window, headOID: status.headOID,
+                                              workingTreeIsDirty: !status.isClean)
+        XCTAssertEqual(assignment.rows.count, 3, "two commits plus the working-tree row")
+        XCTAssertEqual(assignment.rows.first?.content, .workingTree, "the working tree is row zero")
+        XCTAssertEqual(assignment.rows.first?.lane, 0, "the working-tree row sits in lane 0")
+
+        // The discriminator. The edge leaves the row and points at a commit the window never read,
+        // which is exactly what `truncated` says (tracker 119). An implementation that substitutes
+        // the first commit read emits this edge untruncated, claiming the row below is HEAD.
+        XCTAssertEqual(assignment.rows.first?.edges, [edge(0, 0, truncated: true)],
+                       "the working tree's edge points out of the window rather than at the row below")
+
+        // And nothing was reserved on the window's own first commit: it is read at lane 0 as a
+        // tip in its own right, its edge to its in-window parent is not truncated, and the graph
+        // is one lane wide rather than pushed aside by a lane held for an unread hash.
+        XCTAssertEqual(assignment.laneCount, 1, "a linear window occupies exactly one lane")
+        XCTAssertEqual(lane(of: hashes[2], in: assignment), 0, "the window's newest commit holds lane 0")
+        XCTAssertEqual(lane(of: hashes[1], in: assignment), 0, "its first parent keeps lane 0")
+        XCTAssertEqual(edges(of: hashes[2], in: assignment), [edge(0, 0, truncated: false)],
+                       "the edge to a parent inside the window is not truncated")
+        XCTAssertEqual(edges(of: hashes[1], in: assignment), [edge(0, 0, truncated: true)],
+                       "the oldest row in the window points at a parent it never read")
+        assertEveryEdgeLands(assignment)
+
+        // The other case with no row to reach: an unborn `HEAD`, where there is no commit the
+        // uncommitted changes sit above at all. The row is drawn alone, with no edge to truncate.
+        let unborn = try await GitFixture(tree, name: "unborn")
+        try tree.file("unborn/scratch.txt", "uncommitted\n")
+        let unbornStatus = try await WorkingTreeStatus.read(root: unborn.root,
+                                                            environment: unborn.environment,
+                                                            runner: ToolRunner())
+        XCTAssertFalse(unbornStatus.isClean, "the untracked file must make the empty tree dirty")
+        XCTAssertNil(unbornStatus.headOID, "a repository with no commits has no HEAD object id")
+
+        let unbornAssignment = LaneAssignment.assign(commits: [], headOID: unbornStatus.headOID,
+                                                     workingTreeIsDirty: !unbornStatus.isClean)
+        XCTAssertEqual(unbornAssignment.rows.count, 1, "the dirty row is drawn even with no history")
+        XCTAssertEqual(unbornAssignment.rows.first?.content, .workingTree, "and it is the working tree")
+        XCTAssertEqual(unbornAssignment.rows.first?.edges, [], "with no edge, because there is no HEAD")
+        XCTAssertEqual(unbornAssignment.laneCount, 1, "the row still occupies its lane")
     }
 }
