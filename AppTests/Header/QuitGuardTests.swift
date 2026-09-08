@@ -57,8 +57,11 @@ final class QuitGuardTests: XCTestCase {
 
         // Member names and never a key: an equality over the log itself would print a session id
         // on failure (§11).
-        XCTAssertEqual(fleet.memberSequence, ["listed", "terminated", "terminated", "shutdown"],
-                       "the owned set is read, then each process is terminated, then the fleet shuts down")
+        // The second `listed` is the pass's own re-census: a channel that gained a process while the
+        // terminations ran is read there, and this fleet has none, so nothing follows it.
+        XCTAssertEqual(fleet.memberSequence, ["listed", "terminated", "terminated", "listed", "shutdown"],
+                       "the owned set is read, then each process is terminated, then the set is read again, "
+                       + "then the fleet shuts down")
         let terminated = fleet.terminatedTitles
         XCTAssertEqual(terminated.count, 2, "\(terminated.count) channel(s) were terminated; 2 had a process")
         XCTAssertTrue(Set(terminated) == Set(["a", "c"]),
@@ -120,6 +123,81 @@ final class QuitGuardTests: XCTestCase {
                       "the terminated set and the owned-with-process set differ by "
                       + "\(Set(terminated).symmetricDifference(["f"]).count) channel(s)")
         XCTAssertEqual(fleet.memberSequence.last, "shutdown", "the shutdown still runs")
+    }
+
+    // MARK: - The census after the pass
+
+    /// A channel that acquires a process while the pass is running is terminated before the shutdown.
+    ///
+    /// The census is one suspended read and nothing raises a spawn barrier over it: an open, an adopt
+    /// or a pane exit can hand a channel a process after its entry was taken, and that channel is
+    /// then skipped by a saved loop. `Fleet.shutdown()` terminates nothing — streams, timers and
+    /// diagnostics only — so the process would live until the exit closed its pipe, with no
+    /// deliberate ending at all.
+    ///
+    /// The double omits the arriving channel from the first census exactly as the race does, and the
+    /// assertion is on the ordered log: the second channel is terminated, and before the shutdown.
+    func testAChannelThatGainsAProcessDuringThePassIsStillTerminated() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: true)])
+        // Lands after the first census is taken — the window the clause cannot close.
+        fleet.arriving = [1: [.owned("b", busy: false)]]
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in true })
+
+        let mayExit = await guardModel.quit()
+        XCTAssertTrue(mayExit, "the clause ran to the end")
+
+        let terminated = fleet.terminatedTitles
+        XCTAssertEqual(terminated.count, 2,
+                       "\(terminated.count) channel(s) were terminated; 2 owned channels had a process by the end")
+        XCTAssertTrue(Set(terminated) == Set(["a", "b"]),
+                      "the terminated set and the owned-with-process set differ by "
+                      + "\(Set(terminated).symmetricDifference(["a", "b"]).count) channel(s)")
+        let members = fleet.memberSequence
+        guard let shutdownAt = members.firstIndex(of: "shutdown") else {
+            return XCTFail("no shutdown was recorded")
+        }
+        XCTAssertEqual(members[shutdownAt...].filter { $0 == "terminated" }.count, 0,
+                       "a terminate landed after the shutdown")
+        XCTAssertEqual(members.last, "shutdown", "the shutdown is not the last thing the clause does")
+    }
+
+    /// The re-census is **bounded**: a fleet that keeps acquiring processes is given three passes and
+    /// then the app shuts down anyway.
+    ///
+    /// Quitting cannot become a loop the user cannot leave. What is left after the last pass — a
+    /// spawn landing after the final census — is ended by the exit closing its pipe, which is the
+    /// fact the whole clause rests on (tracker 196).
+    func testTheCensusIsBoundedAndTheAppStillShutsDown() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: false)])
+        fleet.arriving = [1: [.owned("b", busy: false)],
+                          2: [.owned("c", busy: false)],
+                          3: [.owned("d", busy: false)],
+                          4: [.owned("e", busy: false)],
+                          5: [.owned("f", busy: false)]]
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in true })
+
+        let mayExit = await guardModel.quit()
+        XCTAssertTrue(mayExit, "a fleet that keeps spawning still lets the app exit")
+
+        let passes = fleet.memberSequence.filter { $0 == "listed" }.count
+        XCTAssertEqual(passes, 3, "the clause took \(passes) census(es); it is bounded to 3")
+        XCTAssertEqual(fleet.terminatedTitles.count, 3,
+                       "\(fleet.terminatedTitles.count) channel(s) were terminated across 3 bounded passes")
+        XCTAssertEqual(fleet.memberSequence.last, "shutdown", "the app did not shut down after the bound was reached")
+    }
+
+    /// Each channel is terminated **once** across the passes: the repeat census exists to catch a
+    /// channel that was missed, not to send a second `.quit` to one that was not.
+    func testAChannelIsTerminatedOnceEvenWhenTheCensusReportsItAgain() async {
+        // The double reports the same channel with a process on every census, as a fleet whose
+        // state has not caught up would.
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: false)])
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in true })
+
+        _ = await guardModel.quit()
+
+        XCTAssertEqual(fleet.terminatedTitles.count, 1,
+                       "\(fleet.terminatedTitles.count) terminate(s) reached a channel that had already been terminated")
     }
 
     // MARK: - The mapping, over C6.2's recording double
@@ -263,7 +341,9 @@ final class QuitGuardTests: XCTestCase {
                       "the named set and the busy set differ by \(named.symmetricDifference(["a"]).count) channel(s)")
         // The question was asked of the fleet, of every owned channel, and of nothing else.
         let asked = await double.calls.filter { if case .liveTaskIDs = $0 { return true } else { return false } }.count
-        XCTAssertEqual(asked, 2, "the fleet was asked about \(asked) channel(s); 2 were owned")
+        // Two owned channels, asked about on each of the clause's two censuses: the one the dialog is
+        // built from and the one the pass takes afterwards.
+        XCTAssertEqual(asked, 4, "the fleet was asked about \(asked) channel(s); 2 were owned, on 2 censuses")
     }
 
     /// The X5 call log is read for order as well as for membership: every terminate lands before the
@@ -317,6 +397,41 @@ final class QuitGuardTests: XCTestCase {
         }
     }
 
+    /// A second termination request while the first is still deciding is answered without a second
+    /// dialog and without a second sequence.
+    ///
+    /// The guard's own `isQuitting` flag cannot do this: production `makeGuard` builds a fresh
+    /// `QuitGuard` per request, so two requests are two instances and neither can see the other. Two
+    /// concurrent sequences would ask twice, terminate twice and reply twice for one quit.
+    func testASecondTerminationRequestIsNotASecondDialog() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: true)])
+        let gate = QuitDialogGate()
+        let delegate = AfleetQuitDelegate()
+        let replies = QuitReplyRecorder()
+        delegate.reply = { replies.note($0) }
+        let built = QuitGuardCounter()
+        delegate.makeGuard = {
+            built.note()
+            return QuitGuard(fleet: fleet, confirm: { _ in await gate.answer() })
+        }
+
+        let first = delegate.applicationShouldTerminate(NSApplication.shared)
+        // The dialog is up; the second request arrives while it is.
+        await gate.settleUntilAsked()
+        let second = delegate.applicationShouldTerminate(NSApplication.shared)
+        await gate.release(true)
+        await replies.settle()
+
+        XCTAssertEqual(first, .terminateLater, "the first request was not deferred")
+        XCTAssertEqual(second, .terminateLater, "the second request answered while the first was still deciding")
+        XCTAssertEqual(built.count, 1, "\(built.count) guard(s) were built for one quit")
+        let asks = await gate.asks
+        XCTAssertEqual(asks, 1, "the user was asked \(asks) time(s) for one quit")
+        XCTAssertEqual(replies.answers.count, 1, "the hook replied \(replies.answers.count) time(s) for one quit")
+        XCTAssertEqual(fleet.terminatedTitles.count, 1,
+                       "\(fleet.terminatedTitles.count) terminate(s) ran for one quit")
+    }
+
     /// With no guard to build — a quit before a launch reached a workspace — the hook terminates now
     /// rather than deferring on a decision nobody will make.
     func testTheHookTerminatesNowWhenThereIsNoFleetToEnd() {
@@ -342,8 +457,15 @@ final class QuitFleetDouble: QuitFleet, @unchecked Sendable {
         case shutdown
     }
 
-    private let channels: [QuitChannel]
+    private var channels: [QuitChannel]
     private(set) var log: [Call] = []
+
+    /// Channels that acquire a process **after** the nth census has been taken (counted from 1) — a
+    /// spawn landing in the window between the read and the pass that reads it, which is the race
+    /// the repeat census exists for. They are not in that census's answer and are in every later one.
+    var arriving: [Int: [QuitChannel]] = [:]
+    /// How many censuses have been taken. A count (§11).
+    private(set) var censusCount = 0
 
     /// The members called, in order, with no key attached. The spelling every ordering assertion
     /// uses, because it cannot print a session id on failure (§11) — the same convention
@@ -370,7 +492,13 @@ final class QuitFleetDouble: QuitFleet, @unchecked Sendable {
     }
 
     nonisolated func quitChannels() async -> [QuitChannel] {
-        await MainActor.run { log.append(.listed); return channels }
+        await MainActor.run {
+            log.append(.listed)
+            censusCount += 1
+            let answer = channels
+            channels += arriving[censusCount] ?? []
+            return answer
+        }
     }
 
     nonisolated func terminateForQuit(_ key: ChannelKey) async {
@@ -390,6 +518,37 @@ extension QuitChannel {
     }
 }
 
+/// The dialog, held open so a second termination request can arrive while the first is deciding.
+actor QuitDialogGate {
+    private(set) var asks = 0
+    private var waiting: [CheckedContinuation<Bool, Never>] = []
+
+    /// The `confirm` closure the guard is built with.
+    func answer() async -> Bool {
+        asks += 1
+        return await withCheckedContinuation { waiting.append($0) }
+    }
+
+    /// Yields until the dialog has been put up, so the second request lands while it is on screen.
+    func settleUntilAsked() async {
+        for _ in 0..<2_000 where asks == 0 { await Task.yield() }
+    }
+
+    func release(_ answer: Bool) async {
+        let pending = waiting
+        waiting = []
+        for continuation in pending { continuation.resume(returning: answer) }
+    }
+}
+
+/// How many guards the hook built. A count, and the whole of what coalescing means for a delegate
+/// whose `makeGuard` answers a fresh instance every time.
+@MainActor
+final class QuitGuardCounter {
+    private(set) var count = 0
+    func note() { count += 1 }
+}
+
 /// How many X5 calls had been made when the shutdown ran — the positional half of the ordering
 /// assertion, over the double's own log.
 actor QuitShutdownCounter {
@@ -403,10 +562,10 @@ actor QuitShutdownCounter {
 final class QuitReplyRecorder {
     private(set) var answers: [Bool] = []
     func note(_ answer: Bool) { answers.append(answer) }
-    /// Yields until the hook's task has run. The task is main-actor and enqueued before this call,
-    /// so one hop past it is enough.
+    /// Yields until the hook's task has answered. Bounded rather than timed: the guard's own awaits
+    /// are main-actor hops, and a hook that never replies fails on the count rather than hanging.
     func settle() async {
-        for _ in 0..<8 where answers.isEmpty { await Task.yield() }
+        for _ in 0..<2_000 where answers.isEmpty { await Task.yield() }
     }
 }
 

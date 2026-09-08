@@ -418,6 +418,81 @@ final class QueueChipTests: XCTestCase {
 
         await rig.finish()
     }
+
+    // MARK: - Following again after a stop
+
+    /// A chip whose follower was cancelled follows the same timeline again when the composer is next resolved.
+    ///
+    /// `ComposerView.onDisappear` stops the composer, which cancels the chip's follower while the chip still holds
+    /// the timeline it was following. The next resolution goes through `follow` with that same model, so a guard
+    /// that compares identity alone returns early and the chip never sees another queue update — the channel is
+    /// back on screen with a queue frozen at whatever it held when the view went away.
+    ///
+    /// The first row is the floor: without it a chip that never showed anything would pass the second half.
+    func testAStoppedChipFollowsTheSameTimelineAgain() async throws {
+        let rig = try await Rig()
+        let composer = try XCTUnwrap(rig.composer, "the registry built no composer for the channel")
+        let ids = Rig.inventedCommandUUIDs
+        await rig.push(state: "queued", commandUUID: ids[0])
+        let first = await rig.settle { $0.rows.count == 1 }
+        XCTAssertTrue(first, "the chip shows \(rig.chip.rows.count) row(s) before the stop, not 1")
+
+        // What leaving the channel does, and what returning to it does.
+        composer.stop()
+        _ = rig.composers.model(for: rig.key)
+
+        await rig.push(state: "queued", commandUUID: ids[1])
+        let resumed = await rig.settle { $0.rows.count == 2 }
+        XCTAssertTrue(resumed,
+                      "the chip shows \(rig.chip.rows.count) row(s) after a stop and a re-resolve, not 2")
+
+        await rig.finish()
+    }
+
+    // MARK: - A cancelled prompt leaves the fold's attribution
+
+    /// An accepted cancel retires the prompt from the fold, so the next turn is not attributed to the message the
+    /// user cancelled — and a declined cancel retires nothing.
+    ///
+    /// Both arms run on one rig with one send each, and the assertion is the fold's own attribution rather than a
+    /// count the chip keeps about itself: `WireReducer` holds every sent uuid in `outstandingPrompts` and spends the
+    /// oldest on the next `result`. A chip that raised nothing attributes the next turn to the cancelled message; a
+    /// chip that raised on `{cancelled: false}` throws away a prompt that is still going to run, and the second arm
+    /// is what fails on that.
+    func testAnAcceptedCancelRetiresThePromptAndADeclinedOneDoesNot() async throws {
+        let rig = try await Rig()
+        let composer = try XCTUnwrap(rig.composer, "the registry built no composer for the channel")
+
+        let cancelled = UUID()
+        await rig.lifecycle.stageSendPrompt(.success(cancelled))
+        composer.draft = "an invented cancelled message"
+        await composer.send()
+        await rig.lifecycle.stageSend("cancel_async_message", .success(.object(["cancelled": .bool(true)])))
+        await rig.chip.cancel(cancelled.uuidString.lowercased())
+
+        await rig.pushResult()
+        let firstTurn = await rig.settleTurns { $0.count == 1 }
+        XCTAssertTrue(firstTurn, "the fold holds \(rig.turns.count) turn(s) after the cancelled send, not 1")
+        XCTAssertEqual(rig.turns.last?.attribution, .unprompted,
+                       "a turn was attributed to the prompt the engine said it had cancelled")
+
+        // The other answer: `{cancelled: false}` means the message already started, so its prompt is still owed a
+        // turn and the attribution must survive.
+        let running = UUID()
+        await rig.lifecycle.stageSendPrompt(.success(running))
+        composer.draft = "an invented running message"
+        await composer.send()
+        await rig.lifecycle.stageSend("cancel_async_message", .success(.object(["cancelled": .bool(false)])))
+        await rig.chip.cancel(running.uuidString.lowercased())
+
+        await rig.pushResult()
+        let secondTurn = await rig.settleTurns { $0.count == 2 }
+        XCTAssertTrue(secondTurn, "the fold holds \(rig.turns.count) turn(s) after the declined cancel, not 2")
+        XCTAssertEqual(rig.turns.last?.attribution, .prompted(uuid: running.uuidString.lowercased()),
+                       "a declined cancel retired a prompt whose message is still going to run")
+
+        await rig.finish()
+    }
 }
 
 // MARK: - Support

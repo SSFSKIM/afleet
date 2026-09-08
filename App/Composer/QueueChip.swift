@@ -66,8 +66,13 @@ final class QueueChipModel {
     /// `Effect.changes` — durable, overlay or preview since C3's corrective — so a `command_lifecycle`
     /// that moves nothing else still reaches this chip. Idempotent for the same model; a second call
     /// with a different one replaces the subscription rather than adding to it.
+    ///
+    /// **Identity alone is not the guard, because a stopped chip still holds the model it followed.**
+    /// `stop()` cancels the follower and leaves `timelines` set — `cancel` refreshes from it — so a
+    /// chip that returned early on identity would never subscribe again after the channel went off
+    /// screen and came back, and would draw a queue frozen at the moment the view disappeared.
     func follow(_ model: ChannelTimelineModel) {
-        guard timelines !== model else { return }
+        guard timelines !== model || follower == nil else { return }
         follower?.cancel()
         timelines = model
         refresh(model.timeline)
@@ -120,12 +125,21 @@ final class QueueChipModel {
     /// with **no banner**, because nothing went wrong and there is nothing for the user to do.
     ///
     /// Nothing is removed here on either answer. See the type's note on optimistic removal.
+    ///
+    /// **`{cancelled: true}` raises `HostSignal.promptCancelled`**, and only that answer does. The fold holds every
+    /// uuid the host sent in `outstandingPrompts` and spends the oldest on the next `result`; a cancelled message
+    /// produces no result, so an uncancelled entry would be spent on some other prompt's turn and the timeline
+    /// would name the wrong message as its cause. `false` means the message was not in the queue — it may be
+    /// running already — so its prompt is still owed a turn and nothing is retired.
     func cancel(_ id: String) async {
         cancelFailure = nil
         let request = AnyControlRequest(subtype: "cancel_async_message",
                                         payload: .object(["message_uuid": .string(id)]))
         do {
-            _ = try await lifecycle.send(request, on: key)
+            let answer = try await lifecycle.send(request, on: key)
+            if answer["cancelled"]?.boolValue == true {
+                await timelines?.signal(.promptCancelled(uuid: id))
+            }
             refreshFromOverlay()
         } catch let error as LifecycleError {
             // This leaf's own words about afleet's own refusal, not the engine's, so X10's
