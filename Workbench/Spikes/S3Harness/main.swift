@@ -60,6 +60,17 @@ if let index = arguments.firstIndex(of: "--bytes"), index + 1 < arguments.count,
     options.sourceBytes = bytes
 }
 
+// `--evaluate-report <path>` rules on a report read from disk and exits with the status, with
+// no window, no WebKit and no measurement. It is how the verdict is tested: the harness is an
+// executable, so its tests are its own runs, and a stubbed report is the only way to drive the
+// status function through evidence a real run does not produce on demand.
+if let index = arguments.firstIndex(of: "--evaluate-report"), index + 1 < arguments.count {
+    exit(Verdict.evaluate(path: arguments[index + 1]))
+}
+if arguments.contains("--self-check") {
+    exit(SelfCheck.run())
+}
+
 let application = NSApplication.shared
 application.setActivationPolicy(.regular)
 

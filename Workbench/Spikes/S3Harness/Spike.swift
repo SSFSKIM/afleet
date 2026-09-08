@@ -213,12 +213,6 @@ final class Spike: NSObject, WKNavigationDelegate {
 
         let chunkLoaded = (chunk as? [String: Any])?["loaded"] as? Bool ?? false
         let workers = (report["workers"] as? [String: Any]) ?? [:]
-        // `workersProven`, not `allFiveStarted`. Instantiation only records the absence of a
-        // load error inside a settle window, and a worker that never answers produces exactly
-        // that same silence — a verdict resting on it could promote a route whose language
-        // services are dead. What passes the verdict is the positive evidence: every service
-        // answered and the editor worker computed the diff.
-        let workersProven = workers["proven"] as? Bool ?? false
         var outcome = verdict(document: true, chunk: chunkLoaded, workers: workers)
         let withinBudget = (report["coldLoad"] as? [String: Any])?["withinBudget"] as? Bool ?? false
         outcome["coldLoadWithinBudget"] = withinBudget
@@ -226,11 +220,12 @@ final class Spike: NSObject, WKNavigationDelegate {
         report["humanWitnessOutstanding"] = true
         report["renderTimingsTrustworthy"] = framesAvailable
 
-        // Three statuses, because the two failures mean different things and a script that sees
-        // only "not zero" would advance the route search over a cold load that is too slow — a
-        // number no other route changes.
-        guard chunkLoaded, workersProven else { return 2 }
-        return withinBudget ? 0 : 5
+        // The status is `Verdict`'s, not a tail of this function, so the one thing a reader
+        // trusts — "exit 0 means the numbers above are real" — is a pure function of the report
+        // that `--evaluate-report` can drive from a stub and show failing.
+        let ruling = Verdict.rule(report)
+        report["verdict"] = outcome.merging(["reason": ruling.reason]) { current, _ in current }
+        return ruling.status
     }
 
     private static let chunkSample = """
@@ -349,49 +344,14 @@ final class Spike: NSObject, WKNavigationDelegate {
 
     // MARK: - The workers
 
-    private static let workerFiles = ["editor.worker.js", "ts.worker.js", "json.worker.js",
-                                      "css.worker.js", "html.worker.js"]
-
-    /// The five language services the bundle ships, and the probe key each answers under.
-    private static let languageServices = ["css", "html", "json", "typescript"]
-
     private func measureWorkers(diffComputed: Bool) async -> [String: Any] {
         let direct = (try? await call(ProbeScripts.directWorkerProbe, [
-            "files": Self.workerFiles, "route": route.javaScriptNameForProbe, "settleMs": 2500,
+            "files": WorkerEvidence.workerFiles, "route": route.javaScriptNameForProbe, "settleMs": 2500,
         ])) as? [[String: Any]] ?? []
 
         let functional = (try? await call(ProbeScripts.languageWorkerProbe, ["timeoutMs": 12000])) as? [String: Any] ?? [:]
 
-        let started = Dictionary(uniqueKeysWithValues: direct.compactMap { entry -> (String, Bool)? in
-            guard let file = entry["file"] as? String else { return nil }
-            return (file, entry["started"] as? Bool ?? false)
-        })
-        let allFive = Self.workerFiles.allSatisfy { started[$0] == true }
-
-        let answered = Dictionary(uniqueKeysWithValues: Self.languageServices.map { name in
-            (name, (functional[name] as? [String: Any])?["answered"] as? Bool ?? false)
-        })
-        let allAnswered = answered.values.allSatisfy { $0 }
-
-        return [
-            "instantiation": direct,
-            "functional": functional,
-            "allFiveStarted": allFive,
-            "startedByFile": started,
-            "answeredByService": answered,
-            "allServicesAnswered": allAnswered,
-            "editorWorkerComputedDiff": diffComputed,
-            // The verdict's own key. Every one of the four language workers answered a request
-            // only it can answer, and editor.worker computed the diff; instantiation alone is
-            // not enough, because silence during the settle window is what a dead worker also
-            // looks like.
-            "proven": allFive && allAnswered && diffComputed,
-            // Named so the report never reads as if silence proved life.
-            "note": "instantiation records the module worker's `error` event; `started: true` means"
-                + " no load error inside the settle window. The functional block is the positive"
-                + " claim: editor.worker is witnessed by the diff's computed line changes."
-                + " `proven` requires both, and is what the verdict reads.",
-        ]
+        return WorkerEvidence.summarise(direct: direct, functional: functional, diffComputed: diffComputed)
     }
 
     // MARK: - Facts and plumbing
