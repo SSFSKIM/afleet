@@ -2090,6 +2090,120 @@ C6.1's and C6.2's reservations and is expected.
      Found in the second fix wave. Closer: the pane's `PaneExit` is already reported to C4; route it
      to a re-read as well. Owner: C6.3's successor, with C7.4.
 
+306. **The diff's line difference is computed on the main actor on a cache miss.**
+     `DiffRendering.view` (`App/Decisions/DiffRendering.swift`) looks the two sides up in `DiffLineCache` and, when the digest is not
+     there, computes the line-level difference inside the render pass. The read and the repeat
+     computation were moved off the main actor, but the *first* one for any pair was not, and the
+     algorithm is quadratic in the number of lines over a ceiling of sixteen mebibytes — a large
+     `Write` or a `replace_all` therefore hitches the window once per card. It is one hitch and not
+     a hang, which is why this is a note. Closer: the difference is computed in the preparing task
+     beside the read, so the cache is warm before the card draws; or the renderer bounds itself by
+     line count and draws a summary past it. Owner: C6.3. Filed 2026-09-09 at C6.3's third review
+     round (hard stop).
+
+307. **A completed answer clears whatever draft is in the thread, not its own.** `ThreadModel.send`
+     (`App/Threads/ThreadModel.swift`) hands `perform` an `onSuccess` that clears the draft unconditionally. The answer is a round
+     trip, and the thread can be re-opened on another anchor while it is in flight, so a reply the
+     user has begun typing to a *newer* card is erased by an older card's success. The window is
+     narrow and nothing wrong is sent — what is lost is typing. Closer: the clear names the draft
+     belonging to the answer that completed, and does nothing when the thread has moved on. Owner:
+     C6.3. Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+308. **A refused thread reply is discarded rather than kept.** `ThreadModel.post` (`App/Threads/ThreadModel.swift`) clears the draft
+     before it calls `perform(.send)`, so a send the composer or the wire refuses takes the user's
+     text with it. The decision path already holds the opposite rule — the draft is cleared by the
+     answer succeeding, because the model holds the only copy of what was typed — and the reply path
+     did not get it. Closer: clear on success, as the answers do. Owner: C6.3. Filed 2026-09-09 at
+     C6.3's third review round (hard stop).
+
+309. **A settled answer announces a `ChannelState` captured before the round trip.**
+     `DecisionAnswering.deliver` (`App/Decisions/DecisionAnswering.swift`) reads the state, awaits the raise, and then announces the value it
+     captured; the settlement observer applies it. A state that arrived while the answer was in
+     flight is therefore overwritten by an older one, and the card list on screen is the one from
+     before the answer. Closer: announce the state before awaiting, or let the observer apply by
+     request id alone and take the state from the stream that owns it. Owner: C6.3. Filed 2026-09-09
+     at C6.3's third review round (hard stop).
+
+310. **A failed answer releases the reservation without settling the card.** `answerFailed` and
+     `decisionGone` (`App/Decisions/DecisionAnswering.swift`) drop the in-flight reservation and announce nothing, so a Thread card whose
+     request the engine has already closed goes back to pending and enabled — an affordance over a
+     request that can never be answered, and a second press that earns the same error. The two
+     failures are not the same shape as a refusal the user can retry: a consumed request is
+     terminal. Closer: treat a consumed-request failure as a settlement for the card. Owner: C6.3.
+     Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+311. **A settlement signalled while the timeline is opening its ingestion is dropped.**
+     `ChannelTimelineModel` (`App/Timeline/ChannelTimelineModel.swift`) holds no wire until its ingestion is open, and a signal that arrives in
+     that window meets a nil and is discarded — the card stays pending on screen although the answer
+     succeeded, until something else invalidates it. The window is short and opens once per channel,
+     which is why this is a note rather than a fix. Closer: the signal is buffered until the
+     ingestion opens, or the model retains it and replays it on open. Owner: C3/C5 with C6.3. Filed
+     2026-09-09 at C6.3's third review round (hard stop).
+
+312. **A request answered before Activity ingests it stays retained.** `ChannelEventPump.forget`
+     (`App/Activity/ChannelEventPump.swift`) marks a request the pump has already ingested; a Thread answer that lands first finds nothing
+     to mark, and the later ingest retains the payload with no settlement against it. Bounded — one
+     request's payload, released when the channel's pump goes — but it is the one bookkeeping rule
+     the reservation set exists to keep. Closer: a settlement marker that survives the later ingest,
+     so the order of the two events stops mattering. Owner: C6.3. Filed 2026-09-09 at C6.3's third
+     review round (hard stop).
+
+313. **A plan approval's `setMode` does not reach the supervisor's runtime permission mode.**
+     `RuntimeStateUpdater` (`FleetKit/Sources/FleetSessions/Lifecycle/RuntimeState.swift`) ignores `system/status`, so the mode the engine adopts when a plan
+     approval sends `setMode` is never recorded in `ChannelState.permissionMode`. The session
+     behaves as the user asked; a relaunch reads the stale mode and undoes it, silently. Closer: C4
+     reads the accepted mode from the answer it sent, or from the `system/status` frame that follows
+     it. Owner: C4. Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+314. **The trust action throws on a channel with no process.** *Review trust in terminal* (`App/Consent/PrecommitModel.swift`) goes
+     through the lifecycle's terminal handoff, which mints a `PaneRequest` from a running channel
+     and throws `notOwned` when there is none — so on a history-only channel opened from its files,
+     which is exactly the case §6.11's banner is drawn for, the action refuses before it reaches the
+     pane. Closer: with no process to hand over, the action opens a pane on the project's directory
+     directly; no handoff is involved, because there is nothing to hand off. Owner: C6.3 with C7.4.
+     Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+315. **The thread's generic reply to a question card answers only the first question.** A thread
+     reply (`App/Threads/ThreadModel.swift`, against `App/Decisions/QuestionCardView.swift`) builds one response from the text in the composer and files it against the first
+     question, so the selections and notes the user entered on the card's own controls for the other
+     questions are dropped. The card's own Answer button is correct; the thread's reply is the
+     second path to the same request and does not read what the first one holds. Closer: the thread
+     reply reads the question card's draft rather than composing its own. Owner: C6.3. Filed
+     2026-09-09 at C6.3's third review round (hard stop).
+
+316. **A list field eats its delimiter while it is being typed.** The elicitation form's list control
+     (`App/Decisions/ElicitationForm.swift`) rebuilds its text from the parsed selections on every set, so the delimiter the user has just
+     typed — the character that is about to start the next item — is parsed away before the next one
+     arrives, and a list cannot be typed straight through. Closer: the control retains the text
+     being edited and parses it for the value, rather than deriving the text from the value. Owner:
+     C6.3. Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+317. **A root schema with `allOf` and no direct properties becomes a form that accepts `{}`.** The
+     elicitation form (`App/Decisions/ElicitationForm.swift`) reads the root object's `properties`; a schema that composes its properties
+     through `allOf` has none there, so the form is empty and its Accept sends an empty object as
+     though the user had answered. Composition is outside the stated subset (tracker 165), and the
+     rule for everything outside it is the raw editor — the root did not get it. Closer: composition
+     at the root falls back to the raw editor, as an unsupported field already does. Owner: C6.3.
+     Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+318. **Question and elicitation drafts are lost on a channel switch.** Both live in view `@State`
+     (`App/Decisions/QuestionCardView.swift`, `App/Decisions/ElicitationCardView.swift`),
+     which SwiftUI discards when the subtree goes away, so a half-filled form or a typed note is
+     gone the moment the user looks at another channel and comes back. The card is still pending and
+     still answerable; what is lost is typing. The same class as 307 and 308, and the same cure.
+     Closer: the drafts move to the retained model, which is where the reply draft already lives.
+     Owner: C6.3. Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+319. **An older read can overwrite a newer preview.** `SentFileRowView` and `DiffView`
+     (`App/Decisions/SentFileRowView.swift`, `App/Decisions/DiffRendering.swift`) assign the
+     result of an awaited read without checking that the source it was started for is still the one
+     on screen, so two reads in flight settle in completion order rather than in request order and
+     the slower, older one wins. Both are keyed by `.task(id:)`, which cancels the previous task —
+     which is why this is a note and not a fix — but cancellation is cooperative and the read does
+     not check it. Closer: a generation captured before the await and compared after it, the fence
+     `PrecommitModel.evaluate` already takes. Owner: C6.3. Filed 2026-09-09 at C6.3's third review
+     round (hard stop).
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**

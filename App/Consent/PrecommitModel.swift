@@ -46,12 +46,20 @@ final class PrecommitModel {
         let project: URL
     }
 
-    /// What the sheet was shown with: an evaluation and the servers §6.12 is asking about, as one
-    /// value. The sheet's three answers carry it back, so none can be paired with a project the
-    /// user never saw. `id` is the evaluation's, which is what makes a superseded sheet a different
-    /// item to SwiftUI and gets it taken down.
+    /// What the sheet was shown with: an evaluation, the project the *fleet* read the servers for,
+    /// and the servers §6.12 is asking about, as one value. The sheet's three answers carry it back,
+    /// so none can be paired with a project the user never saw. `id` is the evaluation's, which is
+    /// what makes a superseded sheet a different item to SwiftUI and gets it taken down.
+    ///
+    /// **`project` is the verdict's, not the evaluation's** (scalpel-3#1). The mount supplies the
+    /// row's directory and the fleet reads the launch's own `cwd`; a relocation parts the two, and
+    /// a decline is a write into the project's `.claude/settings.local.json`. The project a verdict
+    /// was computed for is the only one an answer to it may name, so it comes from
+    /// `SpawnPrecondition.consentNeeded` and never from `evaluation.project`, which stays what it
+    /// is — the context fence that says which sheet is current.
     struct ConsentRequest: Identifiable, Sendable {
         let evaluation: Evaluation
+        let project: URL
         let servers: [ProjectMCPServer]
         var id: Int { evaluation.id }
     }
@@ -113,8 +121,8 @@ final class PrecommitModel {
     /// for, which the sheet's three answers hand back.
     var consentRequest: ConsentRequest? {
         guard let evaluation, deferredChannel != evaluation.channel,
-              case .consentNeeded(let servers) = precondition else { return nil }
-        return ConsentRequest(evaluation: evaluation, servers: servers)
+              case .consentNeeded(let project, let servers) = precondition else { return nil }
+        return ConsentRequest(evaluation: evaluation, project: project, servers: servers)
     }
 
     /// §6.11: an untrusted project opens history-only. Nothing here spawns and nothing offers to.
@@ -177,7 +185,7 @@ final class PrecommitModel {
         guard isCurrent(request.evaluation), claim() else { return }
         Task {
             defer { isAnswering = false }
-            await lifecycle.acceptProjectServers(request.servers, project: request.evaluation.project)
+            await lifecycle.acceptProjectServers(request.servers, project: request.project)
             clear(request.evaluation)
             await reread(request.evaluation)
         }
@@ -191,7 +199,7 @@ final class PrecommitModel {
             defer { isAnswering = false }
             do {
                 try await lifecycle.declineProjectServers(request.servers.map(\.name),
-                                                          project: request.evaluation.project)
+                                                          project: request.project)
                 clear(request.evaluation)
                 await reread(request.evaluation)
             } catch let error as LifecycleError {

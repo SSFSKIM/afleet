@@ -103,7 +103,7 @@ final class ConsentAndTrustTests: XCTestCase {
     /// dialog that hides what it is consenting to is not consent, so both halves are asserted for
     /// both transports.
     func testTheSheetListsEveryServerWithItsNameAndTransportSummary() async throws {
-        let (_, model) = await evaluated([.consentNeeded(Self.servers)])
+        let (_, model) = await evaluated([.consentNeeded(project: Self.project, servers: Self.servers)])
         let servers = try XCTUnwrap(model.consentRequest?.servers, "the consentNeeded verdict raised no sheet")
         XCTAssertEqual(servers.count, 2, "the sheet lists a different number of servers than the verdict named")
 
@@ -123,7 +123,7 @@ final class ConsentAndTrustTests: XCTestCase {
     /// *Accept* is `acceptProjectServers` and **nothing else**: no decline, no spawn, no other
     /// lifecycle action. Asserted as the emitted call and its arguments.
     func testAcceptCallsAcceptProjectServersAndNothingElse() async throws {
-        let (lifecycle, model) = await evaluated([.consentNeeded(Self.servers), .ready])
+        let (lifecycle, model) = await evaluated([.consentNeeded(project: Self.project, servers: Self.servers), .ready])
         let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
         let servers = request.servers
 
@@ -148,7 +148,7 @@ final class ConsentAndTrustTests: XCTestCase {
     /// root. Asserted as the emitted call's arguments; a decline that sent hashes, a subset or the
     /// wrong directory fails here and nowhere else.
     func testDeclineCallsDeclineProjectServersWithExactlyTheDeclinedNames() async throws {
-        let (lifecycle, model) = await evaluated([.consentNeeded(Self.servers), .ready])
+        let (lifecycle, model) = await evaluated([.consentNeeded(project: Self.project, servers: Self.servers), .ready])
         let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
 
         try press("Decline", in: sheet(for: request, on: model).body)
@@ -171,7 +171,7 @@ final class ConsentAndTrustTests: XCTestCase {
     func testNothingSpawnedWhileTheConsentSheetWasUp() async throws {
         let counter = SpawnCounter()
         let lifecycle = ConsentDouble()
-        await lifecycle.stage([.consentNeeded(Self.servers), .ready])
+        await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers), .ready])
         await lifecycle.setSpawn(counter.factory)
         let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
         await model.evaluate(channel: Self.channel, project: Self.project)
@@ -202,7 +202,7 @@ final class ConsentAndTrustTests: XCTestCase {
     func testASupersededEvaluationsVerdictNeverReachesTheSurface() async throws {
         let lifecycle = ConsentDouble()
         // A reads `consentNeeded`; B reads `ready`. A is held, so it returns second.
-        await lifecycle.stage([.consentNeeded(Self.servers), .ready])
+        await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers), .ready])
         await lifecycle.gateNextPreconditions()
         let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
 
@@ -232,7 +232,8 @@ final class ConsentAndTrustTests: XCTestCase {
     /// accept that recorded nothing at all would pass the first clause alone.
     func testASupersededSheetRecordsNothingAndTheCurrentOneRecordsItsOwnProject() async throws {
         let lifecycle = ConsentDouble()
-        await lifecycle.stage([.consentNeeded(Self.servers), .consentNeeded(Self.otherServers)])
+        await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers),
+                               .consentNeeded(project: Self.otherProject, servers: Self.otherServers)])
         let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
 
         await model.evaluate(channel: Self.channel, project: Self.project)
@@ -258,13 +259,48 @@ final class ConsentAndTrustTests: XCTestCase {
                        "the acceptance named servers the sheet did not list")
     }
 
+    /// The two answers name **the project the fleet evaluated**, not the directory the row happened
+    /// to be showing when the button was pressed.
+    ///
+    /// `Fleet.preconditions(for:)` reads the launch's own `cwd`; the mount supplies the row's
+    /// directory independently, and the two part company the moment a channel is relocated — a
+    /// `set_cwd`, a re-registration, an index update that arrives after the verdict. A decline is
+    /// the one §6.12 write, into the project's `.claude/settings.local.json`, so a verdict computed
+    /// for A that is declined against B writes a refusal into a project nobody was asked about. The
+    /// project therefore travels *with* the verdict, and the sheet's answers take it from there.
+    func testTheAnswersNameTheEvaluatedProjectAfterTheRowsDirectoryMoves() async throws {
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers)])
+        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+        await model.evaluate(channel: Self.channel, project: Self.project)
+
+        // The row moves. The fleet still evaluates the launch it holds, so the verdict is the same
+        // one and names the same project; only the directory the mount supplies has changed.
+        await model.evaluate(channel: Self.channel, project: Self.otherProject)
+        let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
+
+        try press("Decline", in: sheet(for: request, on: model).body)
+        await model.whenIdle()
+        let declined = await lifecycle.declined
+        XCTAssertEqual(declined.count, 1, "decline did not emit exactly one declineProjectServers call")
+        XCTAssertTrue(declined.first?.project == Self.project,
+                      "the decline would have written into a project the verdict was not computed for")
+
+        try press("Accept", in: sheet(for: request, on: model).body)
+        await model.whenIdle()
+        let accepted = await lifecycle.accepted
+        XCTAssertEqual(accepted.count, 1, "accept did not emit exactly one acceptProjectServers call")
+        XCTAssertTrue(accepted.first?.project == Self.project,
+                      "the acceptance was recorded against a project the verdict was not computed for")
+    }
+
     // MARK: - G4b: a refused decline
 
     /// §6.12's fail-closed path — unparseable JSON, a symlink, a foreign uid, a write error — reads
     /// as nothing written and nothing spawned, and points at the terminal's own `/mcp` flow. It is
     /// not a retryable hiccup, so the banner must not read like one.
     func testARefusedDeclineRendersTheBannerPointingAtTheTerminal() async throws {
-        let (lifecycle, model) = await evaluated([.consentNeeded(Self.servers)])
+        let (lifecycle, model) = await evaluated([.consentNeeded(project: Self.project, servers: Self.servers)])
         await lifecycle.refuseDecline(reason: "symlink")
 
         model.decline(try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet"))
@@ -358,7 +394,7 @@ final class ConsentAndTrustTests: XCTestCase {
     /// Asserted as the words the sheet draws, in both directions: the disclosure has to be there and
     /// the old, narrower sentence has to be gone.
     func testTheSheetSaysAnAcceptanceIsRememberedAcrossSessions() async throws {
-        let (_, model) = await evaluated([.consentNeeded(Self.servers)])
+        let (_, model) = await evaluated([.consentNeeded(project: Self.project, servers: Self.servers)])
         let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
         let drawn = texts(in: sheet(for: request, on: model).body).joined(separator: " ")
 
@@ -384,7 +420,7 @@ final class ConsentAndTrustTests: XCTestCase {
     /// what makes the dismissal safe — the channel is still unspawned and still asking — and the
     /// banner clause is what keeps the unanswered decision reachable once its modal is gone.
     func testNotNowRecordsNothingAndLeavesTheChannelWaiting() async throws {
-        let (lifecycle, model) = await evaluated([.consentNeeded(Self.servers)])
+        let (lifecycle, model) = await evaluated([.consentNeeded(project: Self.project, servers: Self.servers)])
         let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
 
         try press("Not now", in: sheet(for: request, on: model).body)
@@ -421,7 +457,7 @@ final class ConsentAndTrustTests: XCTestCase {
     /// fences catch different things and both are needed.
     func testACancelledEvaluationPublishesNothing() async throws {
         let lifecycle = ConsentDouble()
-        await lifecycle.stage([.consentNeeded(Self.servers)])
+        await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers)])
         await lifecycle.gateNextPreconditions()
         let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
 
@@ -443,7 +479,8 @@ final class ConsentAndTrustTests: XCTestCase {
     /// into that emptiness. Both halves, and the second is the discriminating one.
     func testInvalidatingDropsTheVerdictAndTheReadStillInFlight() async throws {
         let lifecycle = ConsentDouble()
-        await lifecycle.stage([.untrusted(root: Self.project), .consentNeeded(Self.servers)])
+        await lifecycle.stage([.untrusted(root: Self.project),
+                               .consentNeeded(project: Self.project, servers: Self.servers)])
         let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
         await model.evaluate(channel: Self.channel, project: Self.project)
         XCTAssertTrue(model.isHistoryOnly, "the first verdict never reached the surface")

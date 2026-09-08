@@ -1858,6 +1858,9 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-09, from C6.3's third review round: `SpawnPrecondition.consentNeeded` carries the project
+  directory the evaluation read (`consentNeeded(project:servers:)`), so §6.12's one write cannot be answered
+  against a directory the verdict was not computed for.
 - 2026-09-09, from C6.2's third review round: `ChannelSupervisor.settledForkKey()` also waits while
   `resolveForkIdentity` is running — that method cancels the identity deadline before its first await and re-keys the
   channel several awaits later, and the wait's old guard read that window as settled and answered the provisional key

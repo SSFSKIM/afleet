@@ -430,7 +430,7 @@ final class PreconditionTests: XCTestCase {
         XCTAssertEqual(banner, .mcpDeclineRefused("symlink"))
 
         await XCTAssertThrowsErrorAsync(try await supervisor.spawn(reason: .open)) { error in
-            guard case .precondition(.consentNeeded(let servers))? = error as? LifecycleError else {
+            guard case .precondition(.consentNeeded(_, let servers))? = error as? LifecycleError else {
                 return XCTFail("not a consent refusal: \(error)")
             }
             XCTAssertEqual(servers.map(\.name), ["d"])
@@ -950,7 +950,7 @@ final class PreconditionTests: XCTestCase {
         }
 
         try home.trust(root: project.root)
-        guard case .consentNeeded(let servers) = await step(wedged: nil, holders: []) else {
+        guard case .consentNeeded(_, let servers) = await step(wedged: nil, holders: []) else {
             return XCTFail("consent comes last")
         }
         XCTAssertEqual(servers.map(\.name), ["d"])

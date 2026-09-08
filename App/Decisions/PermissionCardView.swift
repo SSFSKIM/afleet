@@ -225,10 +225,15 @@ struct PermissionCardView: View {
         return rules.count == 1 ? "\(word) for \(named)" : "\(behavior.rawValue) rules for \(named)"
     }
 
+    /// Every directory, named (scalpel-2#2).
+    ///
+    /// The count was the whole description of what *Always allow* would grant, and the list reaches
+    /// the engine in full: `DecisionAnswerMapping` sends the suggestion as it arrived, and no other
+    /// control on the card exposes it — the picker chooses where the rule is filed, not what it
+    /// covers. A user cannot consent to directories they were never shown.
     private static func reading(of directories: [String]) -> String {
-        directories.count == 1
-            ? "the directory \(directories[0])"
-            : "\(directories.count) directories"
+        let named = directories.joined(separator: ", ")
+        return directories.count == 1 ? "the directory \(named)" : "the directories \(named)"
     }
 
     private static func name(of mode: PermissionMode) -> String {
@@ -309,7 +314,14 @@ struct PermissionCardView: View {
 }
 
 /// The tool's input, formatted per §8.4: a shell command in monospace, a path named as itself,
-/// everything else as the tool's own summary.
+/// everything else as the tool's own summary — and, for a tool this build has no view for, the
+/// input object's own keys and values.
+///
+/// **There is no branch that draws nothing** (sweep#1). The specialised views cover the file and
+/// search tools; an MCP call parses as `.other` and `Agent` and `SendMessage` have no view of their
+/// own, so a card for one of them used to draw a title, a reason and three buttons over no
+/// arguments at all. A permission card exists to put what the engine wants to do in front of the
+/// person answering; an approval collected over an input the card did not show is not one.
 ///
 /// The path is drawn and not yet linked: the routing seam is the per-row capability environment
 /// value C6.1 lands (spec D1), and there is no `ChannelContext.links` reachable from a card until
@@ -346,8 +358,30 @@ struct ToolInputView: View {
             Text(fetch.url).font(.callout)
         case .webSearch(let search):
             Text(search.query).font(.callout)
-        default:
-            EmptyView()
+        case .agent, .askUserQuestion, .exitPlanMode, .taskStop, .sendMessage, .other:
+            GenericToolInputView(object: Self.object(of: input) ?? .object([:]))
+        }
+    }
+
+    /// The input as an object, for the branches with no view of their own.
+    ///
+    /// The switch is exhaustive on purpose: a tool this build learns to model later must be a
+    /// decision about which of the two halves it belongs in, not a silent fall into a branch that
+    /// draws nothing. The typed payloads re-encode through their own `CodingKeys`, so what is drawn
+    /// carries the engine's field names rather than Swift's; `.other` is already the wire's object.
+    static func object(of input: ToolInput) -> JSONValue? {
+        func encoded(_ value: some Encodable) -> JSONValue? {
+            guard let data = try? JSONEncoder().encode(value) else { return nil }
+            return try? JSONDecoder().decode(JSONValue.self, from: data)
+        }
+        switch input {
+        case .read, .write, .edit, .bash, .glob, .grep, .webFetch, .webSearch: return nil
+        case .other(_, let value): return value
+        case .agent(let agent): return encoded(agent)
+        case .askUserQuestion(let ask): return encoded(ask)
+        case .exitPlanMode(let plan): return encoded(plan)
+        case .taskStop(let stop): return encoded(stop)
+        case .sendMessage(let message): return encoded(message)
         }
     }
 
@@ -356,5 +390,106 @@ struct ToolInputView: View {
             .font(.system(.callout, design: .monospaced))
             .underline()
             .textSelection(.enabled)
+    }
+}
+
+// MARK: - A tool this build has no view for
+
+/// One tool input's fields, as text.
+///
+/// Separated from the view so the shape of what is drawn can be asserted without a render pass, and
+/// so the bound below is a property of the value rather than of a modifier somebody could drop.
+enum GenericToolInput {
+
+    /// One field as it will be drawn.
+    struct Field: Hashable, Identifiable {
+        var key: String
+        var text: String
+        var id: String { key }
+    }
+
+    /// How much of one value is drawn before the disclosure.
+    ///
+    /// A card sits in a scrolling list beside every other card, and an engine may send an argument
+    /// of any size — a whole prompt, a pasted document. Long enough that the ordinary argument is
+    /// drawn whole, short enough that one field cannot push the buttons off the screen.
+    static let visibleCharacters = 600
+
+    /// The fields, in key order. A non-object input — the wire allows one — is drawn as a single
+    /// unnamed value rather than dropped.
+    static func fields(of object: JSONValue) -> [Field] {
+        guard case .object(let members) = object else {
+            return [Field(key: "input", text: text(of: object))]
+        }
+        return members.keys.sorted().map { Field(key: $0, text: text(of: members[$0]!)) }
+    }
+
+    /// A scalar as itself — a string verbatim, without the quotes an encoder would add — and
+    /// anything structured as indented JSON, which is the only rendering of a nested object that
+    /// stays true to what the engine sent.
+    static func text(of value: JSONValue) -> String {
+        switch value {
+        case .string(let text): text
+        case .null: "null"
+        case .bool(let flag): flag ? "true" : "false"
+        case .integer(let number): String(number)
+        case .number(let number): String(number)
+        case .array, .object: indented(value)
+        }
+    }
+
+    /// Whether a field is longer than the card draws before the disclosure.
+    static func isElided(_ text: String) -> Bool { text.count > visibleCharacters }
+
+    /// The head of a field, when it is longer than the card draws at once.
+    static func head(of text: String) -> String {
+        isElided(text) ? String(text.prefix(visibleCharacters)) + "\u{2026}" : text
+    }
+
+    private static func indented(_ value: JSONValue) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(value), let text = String(data: data, encoding: .utf8) else {
+            // Nothing an engine can send fails here — `JSONValue` came from JSON — and a field that
+            // cannot be drawn must still say that it exists rather than vanish from the input.
+            return "(this value could not be displayed)"
+        }
+        return text
+    }
+}
+
+/// The generic rendering: every key the input carries, and its value.
+///
+/// The fields are resolved at construction and stored. They are what the view draws and the only
+/// thing it draws, so holding them is what lets a test read the input a card is offering approval
+/// over — `ForEach` builds its rows from a closure, which reflection does not enter (tracker 166).
+struct GenericToolInputView: View {
+
+    let fields: [GenericToolInput.Field]
+
+    init(object: JSONValue) {
+        fields = GenericToolInput.fields(of: object)
+    }
+
+    /// The fields the user has asked to see in full. Per key, and per card: the disclosure is about
+    /// reading, and nothing is answered by it.
+    @State private var expanded: Set<String> = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(fields) { field in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(field.key).font(.caption).foregroundStyle(.secondary)
+                    Text(expanded.contains(field.key) ? field.text : GenericToolInput.head(of: field.text))
+                        .font(.system(.callout, design: .monospaced))
+                        .textSelection(.enabled)
+                    if GenericToolInput.isElided(field.text), !expanded.contains(field.key) {
+                        Button("Show more") { expanded.insert(field.key) }
+                            .buttonStyle(.link)
+                            .font(.caption)
+                    }
+                }
+            }
+        }
     }
 }
