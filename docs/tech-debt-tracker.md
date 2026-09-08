@@ -876,7 +876,7 @@ symlink-containment debt in entry 78 is unchanged.
 
 Filed at the close of C7.3 (Source Control core; ledger
 `docs/doperpowers/ledgers/2026-09-07-c7.3-scm-core.md`). Numbers 112 through 126 are this
-leaf's reservation; 122 onward are unused.
+leaf's reservation; 125 onward are unused.
 
 112. **`SourceControlCore.ToolRunner` duplicates C2's process mechanics.** Termination-handler
      exit observation, non-blocking pipe drains, timeout with grace and `SIGKILL` are written
@@ -981,3 +981,33 @@ leaf's reservation; 122 onward are unused.
      ruled out. What would close it: read decorations from `git for-each-ref` and join them to the
      window by object name, instead of from `%D`. Owner: whoever next revises `GitLog`, and a
      natural companion to the `--decorate=full` swap the ledger's Parent-revisions item 3 proposes.
+
+123. **Nothing enforces that a setting `AdverseConfigurationTests.ruledOut` names can be exhibited
+     by the fixture that measures it.** The suite carries two dictionaries: `hostile`, the settings
+     the command-line pins defend against, and `ruledOut`, the settings measured to reach no byte
+     any parser here reads. `ruledOut` is a tripwire, and a tripwire is only worth its name if the
+     repository under it can make the setting speak. Two of C7.3's eighteen could not be:
+     `log.showSignature` acts only over a *signed* commit and every fixture was unsigned, and
+     `diff.renameLimit` acts only on the *inexact* half of rename detection and the only rename in
+     the fixture was exact. Both measured inert, both went into the tripwire, both were live
+     silent-wrong-answer defects, and both were found by an external reviewer rather than by the
+     tripwire. R5 fixed the fixture — the repository the tripwire runs against is now signed and
+     carries a `.mailmap`, a note, an upstream, a subdirectory, an inexact rename and a modified
+     file — and wrote floor assertions saying each of those shapes is present. It did not fix the
+     *mechanism*: the enrichment and the floor are hand-written, and the next entry added to
+     `ruledOut` can be inert for the wrong reason again with nothing to say so. Bounded, because a
+     wrong verdict costs a missing pin, which is the class the suite already treats. What would
+     close it: a per-entry note of the property the fixture must have for that setting to speak,
+     checked by the test, so that adding an entry without the property fails. Owner: whoever next
+     extends `AdverseConfigurationTests`.
+
+124. **The rename-limit pin hard-codes git's default in two modules.** `GitDiff` passes `-l1000`
+     and `WorkingTreeStatus` passes `-c diff.renameLimit=1000 -c status.renameLimit=1000`, where
+     `1000` is git's documented default for `diff.renameLimit` — pinned rather than lifted to `0`
+     (unlimited) on purpose, because a user who lowered the limit lowered it for speed on a large
+     repository and the panel's answer should be git's default answer, not a slower one no
+     configuration would ever have produced. If a future git changes that default, the panel
+     freezes the old one silently, in the direction of doing more work rather than less, so nothing
+     fails and no test notices. Trivial and stable in practice; filed because the number is a copy
+     of another program's documentation with nothing linking it back. Owner: whoever next revises
+     the configuration pins.
