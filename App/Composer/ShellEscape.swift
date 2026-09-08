@@ -210,7 +210,11 @@ extension ComposerModel {
                                                  environment: context.environment.variables)
         // C2's sanitiser, called. The three inputs go in exactly as they came back.
         let text = ShellEnvelope.wrap(command: command, stdout: output.stdout, stderr: output.stderr)
-        let posted = await issue { _ = try await self.lifecycle.perform(.send(UserInput(text: text)), on: self.key) }
+        // Through `post(_:)`, the one place a `UserInput` becomes a prompt: the engine answers a
+        // `<bash-stdout>`-bearing user frame with a turn (the live gate's item 12 is exactly that), so
+        // this send attributes like every other. Issued as `perform(.send)` with no raise, as it was
+        // until Task 7, that turn reduced as `.unprompted`.
+        let posted = await post(UserInput(text: text))
         if posted, output.timedOut {
             let seconds = HostShellRunner.budget.components.seconds
             refusal = "The command was still running after \(seconds) second(s) and was stopped; what it had written was sent."

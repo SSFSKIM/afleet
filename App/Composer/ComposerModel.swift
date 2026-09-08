@@ -123,6 +123,30 @@ final class ComposerModel {
     /// lifetime and its `LifecycleAPI`; it reads the channel's timeline and nothing of this model's.
     let queue: QueueChipModel
 
+    /// The three setting pickers (`SettingPickers`), whose displayed values are engine readbacks.
+    /// Built here for the same reason the chip is: one per channel, over this composer's X5, sharing
+    /// the `ChannelSurfaceState` §7.4's readback gate closes the field through.
+    let pickers: SettingPickersModel
+
+    /// Whether *Prompt suggestions* is on for this channel (`GhostText`). **Off by default**: the
+    /// flag is `--prompt-suggestions` on the launch line (§7.7's matrix), so a channel that was not
+    /// launched with it receives no `prompt_suggestion` frame at all, and one that was still shows
+    /// nothing until the user asks for it.
+    var promptSuggestionsEnabled = false
+
+    /// The suggestion the engine offered after the last turn, shown as ghost text and accepted by
+    /// Tab. Nil whenever there is nothing to accept. An observation off `events(of:)` and not a fold:
+    /// nothing is written back into the timeline (X4).
+    var ghostText: String?
+
+    /// The images pasted or dropped onto the field, in the order they arrived (`Attachments`). They
+    /// travel on the next `UserInput` and are dropped when it is sent.
+    var attachments: [ImageAttachment] = []
+
+    /// What the attachment tray has to say about something it would not take — a cap reached, an
+    /// image that could not be converted. Nil whenever it has nothing to say.
+    var attachmentNote: String?
+
     /// X5, and the only way anything in this file reaches the engine. Internal rather than private
     /// because the shortcuts are an extension in `ComposerShortcuts.swift`; Swift has no narrower
     /// scope than the module for that, and every caller is inside `App/Composer/`.
@@ -145,6 +169,7 @@ final class ComposerModel {
         self.surface = surface
         self.interceptor = RefusalInterceptor(diagnostics: diagnostics)
         self.queue = QueueChipModel(key: key, lifecycle: lifecycle)
+        self.pickers = SettingPickersModel(key: key, lifecycle: lifecycle, surface: surface)
     }
 
     // MARK: - Sending
@@ -183,25 +208,48 @@ final class ComposerModel {
             if await dispatch(routing: text), draft.hasPrefix(text) { draft = String(draft.dropFirst(text.count)) }
             return
         }
+        let images = attachments
+        guard await post(UserInput(text: text, images: images)) else { return }
+        // Only the words that were sent. A keystroke that landed during the await is the user's
+        // next message, not part of the one the engine now has.
+        if draft.hasPrefix(text) { draft = String(draft.dropFirst(text.count)) }
+        // The images that went with the message. Anything attached during the await is the next
+        // message's, on exactly the terms the draft is.
+        dropAttachments(images.count)
+        ghostText = nil
+    }
+
+    /// **The one place a `UserInput` becomes a prompt.** All three user-initiated sends in this leaf
+    /// come through here: the plain send above, the router's `.text` pass-through (`CommandRouting`)
+    /// and the `!` escape's post of what a host command wrote (`ShellEscape`).
+    ///
+    /// `sendPrompt` is `perform(.send)`'s path — same preconditions, same refusals — answering the
+    /// uuid the supervisor minted for the user frame instead of the channel's state. That uuid is the
+    /// whole reason the member exists: it is what the engine will echo, and the host cannot mint it
+    /// or read it from below X5 without breaking contract Y5.
+    ///
+    /// **The raise is inseparable from the call**, which is why the two are one function rather than
+    /// a convention three call sites are expected to keep. Each of the three causes a turn, so a site
+    /// that sent without raising would leave that turn reducing as `.unprompted` — the channel's fold
+    /// disagreeing with the engine about who asked for it. Raised **after** the call succeeds and
+    /// never before: a refused send that had already raised it would leave the reducer holding a
+    /// prompt the engine was never given. The uuid is lowercased because that is the spelling the
+    /// frame carries onto the wire, so the signal and the echo name the same prompt.
+    ///
+    /// A `LifecycleError` is explained inline and **never retried**, exactly as `issue(_:)` does for
+    /// every other X5 member.
+    @discardableResult
+    func post(_ input: UserInput) async -> Bool {
         do {
-            // `sendPrompt` is `perform(.send)`'s path — same preconditions, same refusals — answering
-            // the uuid the supervisor minted for the user frame instead of the channel's state. That
-            // uuid is the whole reason this member exists: it is what the engine will echo, and the
-            // host cannot mint it or read it from below X5 without breaking contract Y5.
-            let minted = try await lifecycle.sendPrompt(UserInput(text: text), on: key)
-            // Only the words that were sent. A keystroke that landed during the await is the user's
-            // next message, not part of the one the engine now has.
-            if draft.hasPrefix(text) { draft = String(draft.dropFirst(text.count)) }
-            // The host's own half of the fold, raised **after** the send succeeded and never before:
-            // a refused send that had already raised this would leave the channel's reducer holding a
-            // prompt the engine was never given, and the next turn would be attributed to it. The
-            // uuid is lowercased because that is the spelling the frame carries onto the wire, so the
-            // signal and the echo name the same prompt.
+            let minted = try await lifecycle.sendPrompt(input, on: key)
             await timelines?.signal(.promptSent(uuid: minted.uuidString.lowercased(), at: Date()))
+            return true
         } catch let error as LifecycleError {
             refusal = Self.explanation(of: error)
+            return false
         } catch {
             refusal = "The message was not sent; it is still in the field."
+            return false
         }
     }
 

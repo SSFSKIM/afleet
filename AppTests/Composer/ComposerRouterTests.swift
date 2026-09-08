@@ -101,8 +101,15 @@ final class ComposerRouterTests: XCTestCase {
             return ["route", "send"]
         case .rewind, .login, .permissionsView, .mcpPopover, .memoryFiles:
             return ["route", "run"]
-        case .lifecycle, .restart, .text:
+        case .lifecycle, .restart:
             return ["route", "perform"]
+        // `.text` is a prompt, not a lifecycle action: a pass-through causes a turn, so it goes out
+        // as `sendPrompt` and raises `HostSignal.promptSent` with the minted uuid, exactly as a typed
+        // message does. Task 7 moved it there; until then it was `perform(.send)` and raised nothing,
+        // which left every pass-through turn reducing as `.unprompted`. The member is asserted **by
+        // name**, so a composer back on `perform` fails here.
+        case .text:
+            return ["route", "sendPrompt"]
         case .native:
             return ["route"]
         }
@@ -124,6 +131,7 @@ final class ComposerRouterTests: XCTestCase {
             let double = ComposerLifecycleDouble()
             let key = makeKey()
             await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+            await double.alwaysSendPrompt(.success(UUID()))
             let model = makeModel(double, key: key)
             model.draft = line(for: command)
 
@@ -233,6 +241,7 @@ final class ComposerRouterTests: XCTestCase {
         let double = ComposerLifecycleDouble()
         let key = makeKey()
         await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.alwaysSendPrompt(.success(UUID()))
         let model = makeModel(double, key: key)
         let handshake = handshakeEvent(commands: ["invented-passthrough"])
         let systemInit = try systemInitEvent(slashCommands: [], terminalOnly: [])
@@ -246,12 +255,14 @@ final class ComposerRouterTests: XCTestCase {
         await model.send()
 
         let members = await double.memberSequence
-        XCTAssertEqual(members, ["route", "perform"],
+        XCTAssertEqual(members, ["route", "sendPrompt"],
                        "a pass-through reached \(members.count) member(s): " + members.joined(separator: ", "))
+        let prompts = await double.prompts
+        XCTAssertEqual(prompts.count, 1, "a pass-through sent \(prompts.count) prompt(s)")
         let actions = await double.actions
-        XCTAssertEqual(actions.count, 1, "a pass-through performed \(actions.count) action(s)")
-        guard case .send(let input)? = actions.first else {
-            return XCTFail("a pass-through performed an action that is not `.send`")
+        XCTAssertEqual(actions.count, 0, "a pass-through performed \(actions.count) lifecycle action(s) as well")
+        guard let input = prompts.first else {
+            return XCTFail("a pass-through reached a lifecycle member that is not `sendPrompt`")
         }
         XCTAssertEqual(input.text, name, "the pass-through sent \(input.text.count) character(s), not the \(name.count) typed")
     }
@@ -338,9 +349,10 @@ final class ComposerRouterTests: XCTestCase {
         for error in refusals {
             let double = ComposerLifecycleDouble()
             let model = makeModel(double)
-            await double.stagePerform(.failure(error))
-            await double.alwaysPerform(.success(SidebarFixtures.state(makeKey(), origin: .owned(.ready))))
-            // `/clear` is a `.text` row, so the refusal is raised by the one `perform` the row names.
+            await double.stageSendPrompt(.failure(error))
+            await double.alwaysSendPrompt(.success(UUID()))
+            // `/clear` is a `.text` row, so the refusal is raised by the one `sendPrompt` the row
+            // names — a pass-through is a prompt and takes the send path (Task 7).
             model.draft = "/clear"
 
             await model.send()
@@ -348,8 +360,9 @@ final class ComposerRouterTests: XCTestCase {
             XCTAssertEqual(model.refusal, ComposerModel.explanation(of: error),
                            "the refusal rendered \(model.refusal?.count ?? 0) character(s) that are not the model's own explanation")
             XCTAssertEqual(model.draft, "/clear", "the refused line left \(model.draft.count) character(s) in the field")
-            let actions = await double.actions
-            XCTAssertEqual(actions.count, 1, "a refused routed line performed \(actions.count) action(s)")
+            let prompts = await double.prompts
+            XCTAssertEqual(prompts.count, 1,
+                           "a refused routed line sent \(prompts.count) prompt(s); more than one is a retry")
         }
     }
 

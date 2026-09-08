@@ -184,11 +184,9 @@ struct ChannelComposerMount: View {
 
 /// The channel header's action menu — C6.2's other call site, mounted above the list.
 ///
-/// // C6.2 Task 8 replaces this. It fills with the MCP popover, reload skills and plugins, rename,
-/// fork, send to background, open in terminal, and the permission-mode, model and effort pickers
-/// whose displayed values are engine readbacks. The slot exists now so the mount point merges
-/// before `App/Header/` does; today it draws nothing and reaches no lifecycle, so a column that
-/// mounts it is the column C5 shipped.
+/// It draws the three setting pickers, whose displayed values are engine readbacks (`SettingPickers`,
+/// gate G7). C6.2 Task 8 fills the rest of it: the MCP popover, reload skills and plugins, rename,
+/// fork, send to background and open in terminal, and moves the whole menu into `App/Header/`.
 struct ChannelHeaderActionsSlot: View {
 
     let key: ChannelKey
@@ -197,6 +195,8 @@ struct ChannelHeaderActionsSlot: View {
     let composers: ComposerRegistry
 
     var body: some View {
-        EmptyView()
+        if let model = composers.model(for: key) {
+            SettingPickersView(model: model.pickers)
+        }
     }
 }

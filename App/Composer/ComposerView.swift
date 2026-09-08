@@ -22,6 +22,8 @@ struct ComposerView: View {
             CommandCompletionView(model: model)
             FileMentionView(model: model)
             RewindConfirmationView(model: model)
+            AttachmentTrayView(model: model)
+            GhostTextView(model: model)
             if model.surface.isDisabled, let reason = model.surface.disabledReason {
                 Label(reason, systemImage: "clock")
                     .font(.callout)
@@ -29,7 +31,9 @@ struct ComposerView: View {
             }
             ComposerField(text: $model.draft,
                           isEnabled: !model.surface.isDisabled,
-                          onSend: { Task { await model.send() } })
+                          onSend: { Task { await model.send() } },
+                          onAcceptGhost: { model.acceptGhostText() },
+                          onPasteboard: { model.attach(from: $0) })
                 .frame(minHeight: 34, maxHeight: 160)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
                 .opacity(model.surface.isDisabled ? 0.5 : 1)

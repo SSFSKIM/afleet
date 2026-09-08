@@ -102,7 +102,11 @@ extension ComposerModel {
         case .restart(let request):
             return await issue { _ = try await self.lifecycle.perform(.quiescentRestart(request), on: self.key) }
         case .text(let text):
-            return await issue { _ = try await self.lifecycle.perform(.send(UserInput(text: text)), on: self.key) }
+            // A pass-through is a prompt like any other: the user typed a line and a turn runs for
+            // it. So it goes through `post(_:)` — `sendPrompt`, and the `HostSignal.promptSent` raise
+            // that attributes the turn it causes. Issued as `perform(.send)` with no raise, as it was
+            // until Task 7, the turn reduced as `.unprompted`.
+            return await post(UserInput(text: text))
         case .native(let surface):
             // Nothing reaches the lifecycle: a picker, a list or the switcher is afleet's own screen.
             openSurface = surface
@@ -195,6 +199,11 @@ extension ComposerModel {
         switch event {
         case .handshakeCompleted(let handshake, _):
             self.handshake = handshake.initialize
+            // The mode picker's readback: `current_permission_mode` is the engine's own report and
+            // the only one that exists for permission mode (§7.4). Recorded, never queried — noting
+            // a handshake reaches no lifecycle member, so a channel that has just connected does not
+            // spend two control requests before anything has asked for a picker.
+            pickers.noteHandshake(handshake.initialize)
         case .frame(let frame, _):
             await observe(frame)
         case .sessionIdentityResolved, .request, .requestCancelled, .policyAnswered, .unansweredDialog,
@@ -209,6 +218,8 @@ extension ComposerModel {
             systemInit = initialize.fields
         case .assistant(let assistant):
             await interceptDrift(in: assistant)
+        case .promptSuggestion(let suggestion):
+            noteSuggestion(suggestion)
         default:
             break
         }

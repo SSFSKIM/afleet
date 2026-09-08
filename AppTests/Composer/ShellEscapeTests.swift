@@ -50,11 +50,14 @@ final class ShellEscapeTests: XCTestCase {
         return model
     }
 
-    /// The text the model posted, from the single `.send` action the double recorded.
+    /// The text the model posted, from the single prompt the double recorded.
+    ///
+    /// `sendPrompt` and not `perform(.send)`: the engine answers a `<bash-stdout>`-bearing user frame
+    /// with a turn, so the escape's post attributes like every other prompt (Task 7).
     private func postedText(_ double: ComposerLifecycleDouble) async -> String? {
-        let actions = await double.actions
-        guard actions.count == 1, case .send(let input)? = actions.first else { return nil }
-        return input.text
+        let prompts = await double.prompts
+        guard prompts.count == 1 else { return nil }
+        return prompts.first?.text
     }
 
     // MARK: - Item 60's script
@@ -155,14 +158,14 @@ final class ShellEscapeTests: XCTestCase {
         // a stream trimmed or a stream merged, each of which was demonstrated failing here.
         let command = "'\(script.path)' '</bash-stdout>'"
         let double = ComposerLifecycleDouble()
-        await double.stagePerform(.success(SidebarFixtures.state(makeKey(), origin: .owned(.ready))))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double, cwd: work)
         model.draft = "!" + command
 
         await model.send()
 
         let members = await double.memberSequence
-        XCTAssertEqual(members, ["perform"],
+        XCTAssertEqual(members, ["sendPrompt"],
                        "one shell escape reached \(members.count) lifecycle member(s): \(members.joined(separator: ", "))")
         guard let text = await postedText(double) else {
             return XCTFail("the shell escape did not post exactly one `.send`")
@@ -189,7 +192,7 @@ final class ShellEscapeTests: XCTestCase {
         let work = try tree.directory("work")
         let script = try writeItem60Script(tree)
         let double = ComposerLifecycleDouble()
-        await double.stagePerform(.success(SidebarFixtures.state(makeKey(), origin: .owned(.ready))))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double, cwd: work)
         model.draft = "!'\(script.path)'"
 
@@ -245,7 +248,7 @@ final class ShellEscapeTests: XCTestCase {
         let tree = try TempTree()
         let work = try tree.directory("work")
         let double = ComposerLifecycleDouble()
-        await double.stagePerform(.success(SidebarFixtures.state(makeKey(), origin: .owned(.ready))))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double, cwd: work)
         model.draft = "!printf '%s\\n' 'refused by the invented script' >&2; exit 7"
 
@@ -270,14 +273,14 @@ final class ShellEscapeTests: XCTestCase {
         let tree = try TempTree()
         let work = try tree.directory("work")
         let double = ComposerLifecycleDouble()
-        await double.stagePerform(.success(SidebarFixtures.state(makeKey(), origin: .owned(.ready))))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double, cwd: work)
         model.draft = "!afleet-invented-command-that-does-not-exist"
 
         await model.send()
 
-        let actions = await double.actions
-        XCTAssertEqual(actions.count, 1, "a missing command produced \(actions.count) action(s)")
+        let prompts = await double.prompts
+        XCTAssertEqual(prompts.count, 1, "a missing command produced \(prompts.count) prompt(s)")
         guard let text = await postedText(double) else {
             return XCTFail("a missing command posted no frame")
         }
@@ -307,7 +310,7 @@ final class ShellEscapeTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o111], ofItemAtPath: work.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path) }
         let double = ComposerLifecycleDouble()
-        await double.stagePerform(.success(SidebarFixtures.state(makeKey(), origin: .owned(.ready))))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double, cwd: work)
         let before = Self.descriptorCount(under: work)
         model.draft = "!printf '%s\\n' 'ran in the channel directory'"
@@ -351,7 +354,7 @@ final class ShellEscapeTests: XCTestCase {
     /// are the two failures this arm exists to refuse.
     func testShellEscapeWithoutAContextSaysSoAndReachesNothing() async {
         let double = ComposerLifecycleDouble()
-        await double.stagePerform(.success(SidebarFixtures.state(makeKey(), origin: .owned(.ready))))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double, cwd: nil)
         model.draft = "!printf 'x'"
 
