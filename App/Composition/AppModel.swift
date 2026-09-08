@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 import FleetKit
 
 /// The one state machine over the four routes, and the only thing the window observes.
@@ -141,7 +142,25 @@ final class AppModel {
         } catch {
             assertionFailure("the placeholder is the first registration on a freshly built host")
         }
+        // Contract Y1: this child's two kinds, claimed on the app's one registry. Here rather than
+        // in `performLaunch` because registration is synchronous and needs nothing a launch
+        // produces — unlike the `.thread` handover above, whose `unregister` is `async` and whose
+        // tab cannot answer a card without a lifecycle.
+        //
+        // **Once per process.** `RowRegistry.register(kind:)` traps on a second claim, which is the
+        // contract working: two leaves owning one kind is a breach of the C6 cut. A second
+        // `AppModel` is not that — every test that launches builds one — so the claim is guarded by
+        // this flag and the trap is left to say the one thing it exists to say.
+        if !AppModel.hasClaimedRowKinds {
+            AppModel.hasClaimedRowKinds = true
+            RowRegistry.shared.register(kind: .decision) { AnyView(DecisionRowView(row: $0)) }
+            RowRegistry.shared.register(kind: .sentFile) { AnyView(SentFileRowView(row: $0)) }
+        }
     }
+
+    /// Whether this process has already claimed Y1's two kinds. `@MainActor` on the type isolates
+    /// it, so the check and the claim cannot interleave.
+    private static var hasClaimedRowKinds = false
 
     /// Binds the two app-scoped, workspace-dependent owners to the workspace a launch reached.
     ///
