@@ -495,6 +495,15 @@ public actor ChannelSupervisor {
         await endProcess(during: .logout)
     }
 
+    /// §7.4 *Quit*'s terminate. Modelled on `terminateForLogout()` and separate from it for the same reason: what
+    /// makes it a quit is the action name the wedged row records, so a ghost the quit left behind is not read as a
+    /// reap's. Ungated and unguarded by `inFlight`: the confirmed quit must end a channel whose spawn or restart is
+    /// mid-flight too, and a channel it could not end is a ghost the trace names rather than a channel it skipped.
+    @discardableResult
+    public func terminateForQuit() async -> TerminateOutcome {
+        await endProcess(during: .quit)
+    }
+
     /// Ends this channel's process and, when it really exited, marks the channel dormant and gives its slot back.
     /// A `nil` exit stops here: no dormant mark and no released slot, because the ghost is still out there.
     private func endProcess(during action: LifecycleTable.TerminatingAction) async -> TerminateOutcome {

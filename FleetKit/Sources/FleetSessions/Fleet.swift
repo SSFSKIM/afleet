@@ -339,6 +339,11 @@ public actor Fleet: LifecycleAPI {
         return await supervisor.currentEligibility().isEligible
     }
 
+    public func liveTaskIDs(of key: ChannelKey) async -> [String] {
+        guard let supervisor = supervisors[key] else { return [] }
+        return await supervisor.liveTaskIDs()
+    }
+
     /// A fresh unbounded fan-out per call, straight from the supervisor; nil when this fleet owns no supervisor for
     /// the key. The facade keeps no stream of its own, so nothing is re-pumped and no frame is duplicated.
     public func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? {
@@ -392,6 +397,14 @@ public actor Fleet: LifecycleAPI {
             _ = try await supervisor.perform(BackgroundTasks())
         case .logout:
             try await beginLogout()
+        case .quit:
+            // Ungated, where `.reap` is gated. The reap's gate protects the reap the *user* asks for from the
+            // header: it must not end a child with a decision on screen or a background shell still working. §7.4's
+            // quit is the opposite case — the user has been warned about exactly those channels and has confirmed —
+            // and running the quit through the reap's gate would terminate none of them. The warning is X9's rule
+            // and it is what licenses this teardown; the name it terminates under is its own, so a ghost the quit
+            // leaves behind is recorded as a quit's.
+            await supervisor.terminateForQuit()
         case .reopen:
             try await supervisor.reopen()
         case .answer(let id, let answer):
@@ -660,7 +673,7 @@ private extension LifecycleAction {
     var maySpawn: Bool {
         switch self {
         case .open, .send, .adopt, .fork, .quiescentRestart, .reopen, .sendToBackground, .backgroundAll: true
-        case .reap, .stopEverything, .logout, .answer: false
+        case .reap, .stopEverything, .logout, .quit, .answer: false
         }
     }
 }

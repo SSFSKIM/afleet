@@ -53,6 +53,7 @@ actor StubFleet: AppFleet {
     func state(of key: ChannelKey) async -> ChannelState? { nil }
     func states() async -> [ChannelState] { [] }
     func isDormantEligible(_ key: ChannelKey) async -> Bool { false }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { [] }
     func jobs() async -> [JobEntry] { [] }
     func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? { nil }
     func paneExited(_ exit: PaneExit) async {}

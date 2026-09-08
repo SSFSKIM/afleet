@@ -67,6 +67,10 @@ public enum LifecycleAction: Sendable {
     case stopEverything
     case backgroundAll
     case logout
+    /// §7.4's *Quit*: the unconditional teardown of one owned channel, run over every channel that has a process
+    /// once the user has confirmed. Not a typed command — no `LifecycleActionName` names it — because the only
+    /// caller is the host's quit path.
+    case quit
     case reopen
     /// The one path a decision is answered through; `LifecycleError.decisionGone` when the id is gone.
     case answer(RequestID, InboundAnswer)
