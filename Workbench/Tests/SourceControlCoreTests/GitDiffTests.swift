@@ -23,19 +23,24 @@ import AfleetCore
 ///     $ git show --format= --numstat -z --find-renames HEAD
 ///     1	0	a.txt^@-	-	^@b.bin^@c.bin^@0	1	d.txt^@1	0	n.txt^@
 ///
-/// Two facts follow, and each has a test of its own below:
+/// Three facts follow, and each has a test of its own below:
 ///
 /// 1. `--name-status` and `--numstat` given to the *same* command do not both print — the last
-///    one wins, and no numstat section appears at all. So the changed-file list needs **two**
-///    invocations joined by path, which is the whole shape of `GitDiff.changes`.
+///    one wins, and no numstat section appears at all.
 ///    (`testNameStatusAndNumstatGivenTogetherDoNotBothPrint`.)
-/// 2. Under `-z`, a rename in `--numstat` puts an **empty** path field between the counts and the
+/// 2. `--raw` and `--numstat` given to the same command **do** both print, raw section first,
+///    from one traversal of one snapshot — and `--raw` carries the file modes as well as the
+///    status codes. That is why the changed-file list is **one** invocation rather than two reads
+///    of the same repository joined across whatever happened between them, and it is where
+///    `FileChange.Kind` comes from.
+///    (`testRawAndNumstatGivenTogetherBothPrintOneSnapshot`.)
+/// 3. Under `-z`, a rename in `--numstat` puts an **empty** path field between the counts and the
 ///    two paths, so a parser reading one path per record silently mis-joins every rename.
 ///    (`testNumstatPutsAnEmptyPathFieldBeforeARenamesTwoPaths`.) `-` for both counts is how a
 ///    binary file is reported, which is where `isBinary` comes from.
 ///
-/// For contrast, `--name-status -z` is `<status>\0<path>\0`, and for a rename
-/// `R<score>\0<old>\0<new>\0` — two paths, old first.
+/// A `--raw -z` record is `:<src mode> <dst mode> <src oid> <dst oid> <status>\0<path>\0`, and
+/// for a rename `…R<score>\0<old>\0<new>\0` — two paths, old first.
 ///
 /// A third shape was measured on 2026-09-08 and decides a strictness question rather than a
 /// parse: in a tree with an unresolved merge conflict, `git diff HEAD --name-status -z` reports
@@ -302,11 +307,51 @@ final class GitDiffTests: XCTestCase {
         XCTAssertEqual(both, nameStatusOnly,
                        "the last of --numstat and --name-status no longer wins")
         XCTAssertNotEqual(both, numstatOnly)
-        // And the consequence, stated as a parse: the combined output holds no counts at all.
-        let joined = try GitDiff.parseNameStatus(both)
-        XCTAssertEqual(joined.count, 1)
-        XCTAssertThrowsError(try GitDiff.parseNumstat(both),
-                             "the combined output parsed as numstat, so it did carry counts")
+        // And the consequence, stated as a parse: the combined output holds no counts at all, so
+        // the whole of it reads as a raw-less listing and nothing joins.
+        XCTAssertThrowsError(try GitDiff.parse(both),
+                             "the --name-status/--numstat combination parsed as one snapshot")
+    }
+
+    /// **Measured fact 2, `git` 2.55.0.** `--raw` and `--numstat` given to the same command *do*
+    /// both print: the whole raw section first, then the whole numstat section, from one traversal
+    /// of one snapshot. This is what lets `GitDiff.changes` take the status, the rename pairing,
+    /// the file modes and the line counts from a **single** invocation.
+    ///
+    /// Two reads of the same repository resolve `HEAD`, the index and the working tree
+    /// independently, so an edit landing between them either fails the strict join — a path in one
+    /// listing and not the other — or silently mixes one instant's status with another's counts.
+    /// The panel refreshes while the user is editing, which is precisely when that window is open.
+    ///
+    /// What would have to be true for this to fail: a `git` in which one of the two sections stops
+    /// printing when the other is asked for, or in which the numstat section comes first.
+    func testRawAndNumstatGivenTogetherBothPrintOneSnapshot() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "first", files: ["a.txt": "one\n"])
+        try fixture.write("a.txt", bytes: Data("one\ntwo\n".utf8))
+        _ = try await fixture.commit(message: "second", files: ["n.txt": "new\n"])
+
+        let common = ["show", "--format=", "-z", "--find-renames", "HEAD"]
+        let both = try await fixture.run(["show", "--format=", "--raw", "--numstat",
+                                          "-z", "--find-renames", "HEAD"]).stdout
+        let rawOnly = try await fixture.run(common + ["--raw"]).stdout
+        let numstatOnly = try await fixture.run(common + ["--numstat"]).stdout
+
+        XCTAssertGreaterThan(rawOnly.count, 0, "the raw listing was empty")
+        XCTAssertGreaterThan(numstatOnly.count, 0, "the numstat listing was empty")
+        XCTAssertEqual(both.count, rawOnly.count + numstatOnly.count,
+                       "the combined output is not the two sections' bytes together")
+        XCTAssertEqual(both.prefix(rawOnly.count), rawOnly,
+                       "the raw section is not the first thing the combined output prints")
+        XCTAssertEqual(both.suffix(numstatOnly.count), numstatOnly,
+                       "the numstat section does not follow the raw section unchanged")
+
+        // And the consequence, stated as a parse: one call over one output carries both halves.
+        let parsed = try GitDiff.parse(both)
+        XCTAssertEqual(parsed.count, 2, "the combined output did not parse to the two changes")
+        XCTAssertEqual(parsed.first { $0.path == "a.txt" }?.additions, 1,
+                       "the counts from the numstat section did not reach the raw section's paths")
+        XCTAssertEqual(parsed.first { $0.path == "n.txt" }?.status, .added)
     }
 
     /// **Measured fact 2, `git` 2.55.0.** Under `-z`, a rename in `--numstat` prints
@@ -332,7 +377,8 @@ final class GitDiffTests: XCTestCase {
         XCTAssertEqual(fields[2], "moved.txt", "the rename's new path is not the second path field")
         XCTAssertEqual(fields[3], "1\t0\tn.txt")
 
-        let parsed = try GitDiff.parseNumstat(bytes)
+        var cursor = 0
+        let parsed = try GitDiff.parseNumstat(GitDiff.split(bytes), from: &cursor)
         XCTAssertGreaterThan(parsed.count, 0, "the numstat parse produced nothing")
         XCTAssertEqual(parsed.count, 2, "three path fields were read as three records")
         XCTAssertEqual(parsed[0].0, "moved.txt", "a rename is reported under its new path")
@@ -348,61 +394,75 @@ final class GitDiffTests: XCTestCase {
     /// record a test exists to compare would make that test unfalsifiable, which is the failure
     /// mode §17.7 names.
     func testMalformedRecordsAreRejectedRatherThanSkipped() throws {
-        let bad: [(String, Data)] = [
-            ("a status letter this format does not define", Data("Z\0a.txt\0".utf8)),
-            ("a status field with no path after it", Data("M\0".utf8)),
-            ("a rename with only one path field", Data("R100\0a.txt\0".utf8)),
-            ("a rename whose score is not a number", Data("Rxx\0a.txt\0b.txt\0".utf8)),
+        // Every raw record here is followed by the numstat section its paths need, so that the
+        // rejection under test is the one the name describes rather than the strict join's.
+        let badRaw: [(String, String)] = [
+            ("a status letter this format does not define", ":100644 100644 aaaa bbbb Z\0a.txt\0"),
+            ("a status field with no path after it", ":100644 100644 aaaa bbbb M\0"),
+            ("a rename with only one path field", ":100644 100644 aaaa bbbb R100\0a.txt\0"),
+            ("a rename whose score is not a number", ":100644 100644 aaaa bbbb Rxx\0a.txt\0b.txt\0"),
+            ("a metadata field short of two modes, two object names and a status",
+             ":100644 100644 aaaa M\0a.txt\0"),
+            ("a score on a status that has none", ":100644 100644 aaaa bbbb M100\0a.txt\0"),
         ]
-        for (name, bytes) in bad {
-            XCTAssertThrowsError(try GitDiff.parseNameStatus(bytes), name) { error in
+        for (name, text) in badRaw {
+            XCTAssertThrowsError(try GitDiff.parse(Data(text.utf8)), name) { error in
                 guard case ToolError.decodeFailed = error else {
                     return XCTFail("\(name) did not throw .decodeFailed")
                 }
             }
         }
-        let badCounts: [(String, Data)] = [
-            ("a record with no tab-separated counts", Data("a.txt\0".utf8)),
-            ("a record with one count only", Data("1\ta.txt\0".utf8)),
-            ("counts that are neither numbers nor dashes", Data("x\ty\ta.txt\0".utf8)),
-            ("an empty path field with only one path after it", Data("1\t0\t\0a.txt\0".utf8)),
+        let badCounts: [(String, String)] = [
+            ("a record with no tab-separated counts", "a.txt\0"),
+            ("a record with one count only", "1\ta.txt\0"),
+            ("counts that are neither numbers nor dashes", "x\ty\ta.txt\0"),
+            ("an empty path field with only one path after it", "1\t0\t\0a.txt\0"),
         ]
-        for (name, bytes) in badCounts {
-            XCTAssertThrowsError(try GitDiff.parseNumstat(bytes), name) { error in
+        for (name, text) in badCounts {
+            XCTAssertThrowsError(try GitDiff.parse(Data((":100644 100644 aaaa bbbb M\0a.txt\0"
+                                                         + text).utf8)), name) { error in
                 guard case ToolError.decodeFailed = error else {
                     return XCTFail("\(name) did not throw .decodeFailed")
                 }
             }
         }
-        // The well-formed counterpart of each, so the assertions above cannot be passing because
-        // the parser rejects everything.
-        XCTAssertEqual(try GitDiff.parseNameStatus(Data("M\0a.txt\0".utf8)).count, 1)
-        XCTAssertEqual(try GitDiff.parseNumstat(Data("1\t0\ta.txt\0".utf8)).count, 1)
+        // The well-formed counterpart, so the assertions above cannot be passing because the
+        // parser rejects everything.
+        XCTAssertEqual(try GitDiff.parse(Data((":100644 100644 aaaa bbbb M\0a.txt\0"
+                                               + "1\t0\ta.txt\0").utf8)).count, 1)
     }
 
-    /// The join itself. Two invocations can only be joined by path, so a path in one listing and
-    /// not the other is an inconsistency between two reads of the same repository — reported,
-    /// never papered over with a change carrying no counts, which is indistinguishable from a
-    /// binary file.
-    func testAJoinWhoseTwoListingsDisagreeIsRejected() throws {
-        XCTAssertThrowsError(try GitDiff.join(nameStatus: [("a.txt", .modified)], numstat: [])) { error in
+    /// The join itself. The two sections are one snapshot now, so a path in one and not the other
+    /// is git contradicting itself rather than two reads disagreeing — reported either way, never
+    /// papered over with a change carrying no counts, which is indistinguishable from a binary.
+    func testAJoinWhoseTwoSectionsDisagreeIsRejected() throws {
+        func raw(_ path: String, _ status: FileChange.Status,
+                 _ destination: String = "100644") -> GitDiff.RawRecord {
+            GitDiff.RawRecord(path: path, status: status, sourceMode: "100644",
+                              destinationMode: destination)
+        }
+        XCTAssertThrowsError(try GitDiff.join(raw: [raw("a.txt", .modified)], numstat: [])) { error in
             guard case ToolError.decodeFailed = error else {
-                return XCTFail("a name-status path missing from numstat did not throw .decodeFailed")
+                return XCTFail("a raw path missing from numstat did not throw .decodeFailed")
             }
         }
-        XCTAssertThrowsError(try GitDiff.join(nameStatus: [], numstat: [("a.txt", 1, 0)])) { error in
+        XCTAssertThrowsError(try GitDiff.join(raw: [], numstat: [("a.txt", 1, 0)])) { error in
             guard case ToolError.decodeFailed = error else {
-                return XCTFail("a numstat path missing from name-status did not throw .decodeFailed")
+                return XCTFail("a numstat path missing from the raw section did not throw .decodeFailed")
             }
         }
         // The agreeing case, so the two assertions above are not passing on a join that always
-        // throws.
-        let joined = try GitDiff.join(nameStatus: [("a.txt", .modified), ("b.bin", .added)],
-                                      numstat: [("b.bin", nil, nil), ("a.txt", 3, 2)])
+        // throws. The gitlink is the classification the counts cannot carry: git prints ordinary
+        // numeric counts for a submodule, so only the mode says it is one.
+        let joined = try GitDiff.join(raw: [raw("a.txt", .modified), raw("b.bin", .added),
+                                            raw("s", .modified, "160000")],
+                                      numstat: [("b.bin", nil, nil), ("a.txt", 3, 2), ("s", 1, 1)])
         XCTAssertGreaterThan(joined.count, 0, "the join produced nothing")
         XCTAssertEqual(Set(joined), [
             FileChange(path: "a.txt", status: .modified, additions: 3, deletions: 2, isBinary: false),
             FileChange(path: "b.bin", status: .added, additions: nil, deletions: nil, isBinary: true),
+            FileChange(path: "s", status: .modified, additions: 1, deletions: 1, isBinary: false,
+                       kind: .gitlink),
         ])
     }
 
@@ -569,17 +629,266 @@ final class GitDiffTests: XCTestCase {
     /// mapping is the one place this leaf decides what "diff" means and the fixtures above would
     /// still pass if `.commitAgainstParent` quietly became `git diff <h>` on a non-root commit.
     func testTheThreeBaseCasesMapToTheirCommandLines() {
-        XCTAssertEqual(GitDiff.arguments(for: .workingTreeAgainstHEAD, listing: "--name-status"),
-                       ["diff", "--name-status", "-z", "--find-renames", "-l1000", "HEAD"])
-        XCTAssertEqual(GitDiff.arguments(for: .commit("f00d"), listing: "--numstat"),
-                       ["diff", "--numstat", "-z", "--find-renames", "-l1000", "f00d"])
-        // `--first-parent` is the R3 wave's F1 fix (D41): without it a merge commit's two
-        // listings disagree and its status codes are combined ones the parser rejects.
-        // `-l1000` and `--no-show-signature` are the R5 wave's pins (D47, D48); what each buys is
-        // asserted against a hostile repository in `AdverseConfigurationTests`, and this test pins
-        // that they are still passed at all.
-        XCTAssertEqual(GitDiff.arguments(for: .commitAgainstParent("f00d"), listing: "--name-status"),
-                       ["show", "--format=", "--first-parent", "--root", "--no-show-signature",
-                        "--name-status", "-z", "--find-renames", "-l1000", "f00d"])
+        let tail = ["--raw", "--numstat", "-z", "--find-renames", "-l1000",
+                    "--ignore-submodules=none"]
+        XCTAssertEqual(GitDiff.arguments(for: .workingTreeAgainstHEAD), ["diff"] + tail + ["HEAD"])
+        XCTAssertEqual(GitDiff.arguments(for: .commit("f00d")), ["diff"] + tail + ["f00d"])
+        // `--first-parent` is the R3 wave's F1 fix (D41): without it a merge commit's listing is
+        // git's combined diff, whose status codes the parser rejects. `-l1000` and
+        // `--no-show-signature` are the R5 wave's pins (D47, D48) and `--ignore-submodules=none`
+        // is wave 2's; what each buys is asserted against a hostile repository in
+        // `AdverseConfigurationTests`, and this test pins that they are still passed at all.
+        XCTAssertEqual(GitDiff.arguments(for: .commitAgainstParent("f00d")),
+                       ["show", "--format=", "--first-parent", "--root", "--no-show-signature"]
+                       + tail + ["f00d"])
+    }
+}
+
+// MARK: - added by the wave-2 fix wave, additively and without touching anything above
+
+extension GitDiffTests {
+
+    /// A **submodule** change: the entry decodes, and it is classified as a gitlink rather than
+    /// offered as a text file.
+    ///
+    /// Two defects meet on this fixture. The listing was empty under `diff.ignoreSubmodules=all`
+    /// (that half is `AdverseConfigurationTests`'), and the entry that did arrive was
+    /// indistinguishable from a one-line text change: `--numstat` prints ordinary numeric counts
+    /// for a gitlink, so `isBinary` was false, and a panel that then asked for either side got a
+    /// `cat-file blob` refusing a commit object and a working-tree read meeting a directory. Only
+    /// the mode `--raw` prints says what the entry is.
+    ///
+    /// What would have to be true for this to fail: the changed-file list losing the modes, or
+    /// classifying `160000` as anything but a gitlink.
+    func testASubmoduleChangeDecodesAndIsClassifiedAsAGitlink() async throws {
+        let fixture = try await GitFixture(tree)
+        let inner = try await GitFixture(tree, name: "inner")
+        _ = try await inner.commit(message: "the submodule's first commit", files: ["a.txt": "one\n"])
+        _ = try await fixture.commit(message: "the first commit", files: ["f.txt": "one\n"])
+        try await fixture.addSubmodule(inner, at: "s")
+        try await fixture.commitInsideSubmodule(at: "s", message: "the submodule's second commit",
+                                                files: ["a.txt": "one\ntwo\n"])
+
+        let list = try await changes(fixture, .workingTreeAgainstHEAD)
+        XCTAssertEqual(list.count, 1,
+                       "a submodule-only change is one entry, and \(list.count) were listed")
+        let entry = try XCTUnwrap(list.first, "the submodule entry is absent from the list")
+        XCTAssertEqual(entry.path, "s", "the submodule entry is not under the submodule's path")
+        XCTAssertEqual(entry.status, .modified, "the gitlink now names a different commit")
+        XCTAssertEqual(entry.kind, .gitlink,
+                       "a mode-160000 entry was not classified as a gitlink, so a panel would ask "
+                       + "for blob bytes git cannot give it")
+
+        // And the commit that added it, where the gitlink is an addition rather than a
+        // modification: the classification must come from the destination mode either way.
+        let head = try await fixture.run(["rev-parse", "HEAD"]).stdoutText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let added = try await changes(fixture, .commitAgainstParent(head))
+        XCTAssertEqual(Set(added.map(\.path)), [".gitmodules", "s"],
+                       "the submodule-adding commit did not list the gitlink and .gitmodules")
+        XCTAssertEqual(added.first { $0.path == "s" }?.kind, .gitlink)
+        XCTAssertEqual(added.first { $0.path == ".gitmodules" }?.kind, .file,
+                       "the ordinary file beside the gitlink was misclassified")
+    }
+
+    /// The changed-file list is **one** `git diff` command, counted through the runner.
+    ///
+    /// Two invocations resolved `HEAD`, the index and the working tree independently, so a write
+    /// landing between them produced either a decode failure naming a path present in one listing
+    /// and absent from the other, or a record silently mixing one instant's status with another's
+    /// counts. There is no way to assert the absence of a race; there is a way to assert the
+    /// property that removes it, which is that the snapshot is taken once.
+    ///
+    /// What would have to be true for this to fail: `changes` reading a second listing.
+    func testTheChangedFileListIsOneGitDiffCommand() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "the first commit",
+                                     files: ["a.txt": "one\n", "r.txt": "moved\n"])
+        try fixture.write("a.txt", bytes: Data("one\ntwo\n".utf8))
+        try await fixture.run(["mv", "r.txt", "moved.txt"])
+
+        let runner = CountingRunner()
+        let list = try await GitDiff.changes(root: fixture.root, base: .workingTreeAgainstHEAD,
+                                             environment: fixture.environment, runner: runner)
+        XCTAssertEqual(list.count, 2, "the fixture's two changes were not listed")
+        let listings = runner.invocations.filter { $0.first == "diff" || $0.first == "show" }
+        XCTAssertEqual(listings.count, 1,
+                       "the changed-file list ran \(listings.count) diff commands; a list joined "
+                       + "across two of them is joined across whatever happened between them")
+        XCTAssertTrue(listings.first?.contains("--raw") == true
+                      && listings.first?.contains("--numstat") == true,
+                      "the single listing did not ask for both sections")
+    }
+
+    // MARK: - the repository root (D13)
+
+    /// A channel whose directory is a **subdirectory** is read at the repository root.
+    ///
+    /// git prints repository-relative paths whatever directory it runs in, so a listing taken from
+    /// `repo/sub` names `sub/nested.txt` — and a reader that trusted its `root` argument then
+    /// handed `repo/sub` + `sub/nested.txt` to the working-tree read, which is a file that does
+    /// not exist. The resolver D13 promised was never written; this is what its absence did.
+    ///
+    /// What would have to be true for this to fail: a reader running at the directory it was
+    /// handed, or `repositoryRoot` returning it unchanged.
+    func testARepositoryOpenedFromASubdirectoryIsReadAtItsRoot() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "the first commit",
+                                     files: ["sub/nested.txt": "one\n", "top.txt": "top\n"])
+        try fixture.write("sub/nested.txt", bytes: Data("one\ntwo\n".utf8))
+        let opened = fixture.root.appending(path: "sub")
+
+        let root = try await GitCommands.repositoryRoot(cwd: opened,
+                                                        environment: fixture.environment,
+                                                        runner: ToolRunner())
+        let list = try await GitDiff.changes(root: opened, base: .workingTreeAgainstHEAD,
+                                             environment: fixture.environment, runner: ToolRunner())
+        XCTAssertEqual(list.map(\.path), ["sub/nested.txt"],
+                       "the change is not named relative to the repository root")
+        // The whole point of resolving: the listed path recombines with the resolved root into a
+        // file that can actually be read.
+        XCTAssertEqual(try GitDiff.workingTreeFile(root: root, path: list[0].path),
+                       Data("one\ntwo\n".utf8),
+                       "the listed path did not resolve to a readable file under the resolved root")
+
+        // And the sibling readers answer about the whole repository rather than the subtree.
+        let status = try await WorkingTreeStatus.read(root: opened,
+                                                      environment: fixture.environment,
+                                                      runner: ToolRunner())
+        XCTAssertEqual(status.entries.map(\.path), ["sub/nested.txt"],
+                       "the status read from a subdirectory is not the repository's")
+        let commits = try await GitLog.commits(root: opened, environment: fixture.environment,
+                                               runner: ToolRunner())
+        XCTAssertEqual(commits.count, 1, "the commit window read from a subdirectory is empty")
+    }
+
+    /// A directory in no repository is `.notARepository` — the panel's empty state — rather than
+    /// a generic command failure carrying git's diagnostic (§10, D13).
+    func testADirectoryInNoRepositoryIsNotARepository() async throws {
+        let outside = try tree.directory("not-a-repository")
+        let environment = ["PATH": ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin",
+                           "HOME": outside.path(percentEncoded: false),
+                           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                           "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"]
+
+        for label in ["the resolver", "the changed-file list", "the status reader"] {
+            do {
+                switch label {
+                case "the resolver":
+                    _ = try await GitCommands.repositoryRoot(cwd: outside, environment: environment,
+                                                             runner: ToolRunner())
+                case "the changed-file list":
+                    _ = try await GitDiff.changes(root: outside, base: .workingTreeAgainstHEAD,
+                                                  environment: environment, runner: ToolRunner())
+                default:
+                    _ = try await WorkingTreeStatus.read(root: outside, environment: environment,
+                                                         runner: ToolRunner())
+                }
+                XCTFail("\(label) answered for a directory in no repository")
+            } catch let error as ToolError {
+                XCTAssertEqual(error, .notARepository,
+                               "\(label) did not report a directory in no repository as the "
+                               + "panel's empty state")
+            }
+        }
+    }
+
+    // MARK: - the working-tree read stays inside the repository
+
+    /// `path` reaches this function from a panel, and a panel's rows are built from bytes the
+    /// repository supplied. An escaping path must be refused: lexically when it is written as one,
+    /// and by resolution when it is spelled through a **symbolic link in the ancestry**, which the
+    /// final component's `lstat` says nothing about.
+    ///
+    /// What would have to be true for this to fail: the lexical guard, or the resolved-parent
+    /// comparison, being dropped — the second is the one an `lstat`-only check cannot cover.
+    func testAWorkingTreeReadCannotLeaveTheRepository() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "the first commit",
+                                     files: ["sub/nested.txt": "one\n"])
+        let outside = try tree.directory("beside-the-repository")
+        try "not the repository's\n".write(to: outside.appending(path: "secret.txt"),
+                                           atomically: true, encoding: .utf8)
+        // A directory link inside the working tree, pointing out of it: the ancestry case.
+        try FileManager.default.createSymbolicLink(
+            atPath: fixture.root.appending(path: "escape").path(percentEncoded: false),
+            withDestinationPath: outside.path(percentEncoded: false))
+
+        let refused = ["../beside-the-repository/secret.txt",
+                       "sub/../../beside-the-repository/secret.txt",
+                       "escape/secret.txt",
+                       outside.appending(path: "secret.txt").path(percentEncoded: false)]
+        for path in refused {
+            XCTAssertThrowsError(try GitDiff.workingTreeFile(root: fixture.root, path: path),
+                                 "a path leaving the repository was read") { error in
+                guard case ToolError.decodeFailed = error else {
+                    return XCTFail("an escaping path did not throw a typed refusal")
+                }
+            }
+        }
+        // The floor: an ordinary nested file is still read, so the guards above are not passing
+        // because the function refuses everything.
+        XCTAssertEqual(try GitDiff.workingTreeFile(root: fixture.root, path: "sub/nested.txt"),
+                       Data("one\n".utf8),
+                       "an ordinary nested file inside the repository was refused")
+    }
+
+    // MARK: - the blob object name (2g)
+
+    /// `<rev>:<path>` is parsed by git at the **first** colon, so a rev carrying one takes the
+    /// path with it and git answers about an object nobody asked for. Refused before any command
+    /// runs, which is why the runner is a counter here: a refusal that still spawned `git` would
+    /// have already asked the question.
+    func testABlobRevisionCarryingAColonIsRefusedBeforeAnyCommandRuns() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "the first commit",
+                                     files: ["Workbench/a.txt": "one\n"])
+        let runner = CountingRunner()
+
+        for rev in ["HEAD:Workbench", ":", "-l1000"] {
+            do {
+                _ = try await GitDiff.blob(root: fixture.root, rev: rev, path: "a.txt",
+                                           environment: fixture.environment, runner: runner)
+                XCTFail("a revision that cannot name a blob was accepted")
+            } catch let error as ToolError {
+                guard case .decodeFailed = error else {
+                    return XCTFail("the refusal is not a typed decode failure")
+                }
+            }
+        }
+        XCTAssertEqual(runner.invocations.count, 0,
+                       "\(runner.invocations.count) commands ran for revisions that were refused")
+
+        // The floor: a symbolic revision is resolved and read, so the refusals above are not
+        // passing on a blob reader that refuses everything.
+        let bytes = try await GitDiff.blob(root: fixture.root, rev: "HEAD",
+                                           path: "Workbench/a.txt",
+                                           environment: fixture.environment, runner: runner)
+        XCTAssertEqual(bytes, Data("one\n".utf8),
+                       "a symbolic revision did not resolve to the committed bytes")
+        XCTAssertTrue(runner.invocations.contains { $0.first == "rev-parse" },
+                      "a symbolic revision was concatenated rather than resolved")
+    }
+}
+
+/// A `ToolRunning` that records every invocation and runs it for real, so that a test can assert
+/// **how many** commands a reader issued as well as what it answered.
+private final class CountingRunner: ToolRunning, @unchecked Sendable {
+
+    private let inner = ToolRunner()
+    private let lock = NSLock()
+    private var recorded: [[String]] = []
+
+    /// The argument vectors, in order. Arguments are authored by this module, never an environment
+    /// or a runtime path, so they are safe to compare and to name in a failure (§6.3, §11).
+    var invocations: [[String]] {
+        lock.withLock { recorded }
+    }
+
+    func run(_ tool: Tool, arguments: [String], cwd: URL, environment: [String: String],
+             timeout: Duration) async throws -> ToolOutput {
+        lock.withLock { recorded.append(arguments) }
+        return try await inner.run(tool, arguments: arguments, cwd: cwd, environment: environment,
+                                   timeout: timeout)
     }
 }

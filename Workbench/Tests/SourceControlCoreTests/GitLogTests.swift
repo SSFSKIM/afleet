@@ -102,7 +102,7 @@ final class GitLogTests: XCTestCase {
         let good = record("1111111111111111111111111111111111111111", "", "", "Wren Alcove",
                           "1614800001", "first commit")
         // Five fields: the subject is gone, which is exactly what a truncated read produces.
-        let truncated = "2222222222222222222222222222222222222222\u{1f}\u{1f}\u{1f}Wren Alcove\u{1f}1614800002\u{1e}\n"
+        let truncated = "2222222222222222222222222222222222222222\0\0\0Wren Alcove\01614800002\0"
 
         do {
             let parsed = try GitLog.parse(good + truncated)
@@ -114,8 +114,8 @@ final class GitLogTests: XCTestCase {
             XCTAssertEqual(subject, "git log record", "the decode failure does not name what it was decoding")
         }
 
-        // Seven fields fails the same way: the guard is `exactly six`, not `at least six`.
-        let overlong = good.dropLast(2) + "\u{1f}extra\u{1e}\n"
+        // Seven fields fails the same way: the frame is a whole number of six-field records.
+        let overlong = good + "extra\0"
         XCTAssertThrowsError(try GitLog.parse(String(overlong)),
                              "a seven-field record parsed instead of throwing")
     }
@@ -255,12 +255,16 @@ final class GitLogTests: XCTestCase {
         let runner = RecordingRunner()
         _ = try await GitLog.commits(root: URL(filePath: "/"), environment: ["PATH": "/usr/bin"],
                                      runner: runner, limit: 7, skip: 3)
-        XCTAssertEqual(runner.invocations.count, 1, "commits() did not run exactly one command")
-        XCTAssertEqual(runner.invocations.first?.tool, .git, "commits() ran a tool that is not git")
-        XCTAssertEqual(runner.invocations.first?.arguments,
+        let logs = runner.invocations.filter { $0.arguments.first == "log" }
+        XCTAssertEqual(logs.count, 1, "commits() did not run exactly one git log")
+        XCTAssertTrue(runner.invocations.allSatisfy { $0.tool == .git },
+                      "commits() ran a tool that is not git")
+        XCTAssertTrue(runner.invocations.contains { $0.arguments.contains("--show-toplevel") },
+                      "commits() did not resolve the repository root first (D13)")
+        XCTAssertEqual(logs.first?.arguments,
                        ["log", "--topo-order", "--all", "--parents",
-                        "--decorate=full", "--encoding=UTF-8", "--no-show-signature",
-                        "--format=%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1e",
+                        "--decorate=full", "-z", "--encoding=UTF-8", "--no-show-signature",
+                        "--format=%H%x00%P%x00%D%x00%an%x00%at%x00%s",
                         "-n", "7", "--skip", "3"],
                        "the git log argument vector is not W7's plus the window")
     }
@@ -282,10 +286,10 @@ final class GitLogTests: XCTestCase {
 
     // MARK: - helpers
 
-    /// One `git log` record in the format's own bytes: six `\u{1f}`-separated fields, a `\u{1e}`,
-    /// and the newline git emits after it.
+    /// One `git log` record in the format's own bytes: six NUL-separated fields and the NUL git
+    /// terminates each commit with under `-z` (W7 as amended on 2026-09-08).
     private func record(_ fields: String...) -> String {
-        fields.joined(separator: "\u{1f}") + "\u{1e}\n"
+        fields.joined(separator: "\0") + "\0"
     }
 }
 
@@ -317,6 +321,58 @@ private final class RecordingRunner: ToolRunning, @unchecked Sendable {
     func run(_ tool: Tool, arguments: [String], cwd: URL,
              environment: [String: String], timeout: Duration) async throws -> ToolOutput {
         lock.withLock { recorded.append(Invocation(tool: tool, arguments: arguments)) }
+        // Every reader resolves the repository root before it reads anything (D13), and a stub
+        // that answered the resolver with the fixed result below would make every call
+        // `.notARepository`. The directory it was asked about is the answer here, which is what
+        // `--show-toplevel` says for a repository opened at its own root.
+        if arguments.first == "rev-parse", arguments.contains("--show-toplevel") {
+            return ToolOutput(stdout: Data((cwd.path(percentEncoded: false) + "\n").utf8),
+                              stderr: Data(), exitCode: 0, timedOut: false)
+        }
         return ToolOutput(stdout: stdout, stderr: stderr, exitCode: exitCode, timedOut: false)
+    }
+}
+
+// MARK: - added by the wave-2 fix wave, additively and without touching anything above
+
+extension GitLogTests {
+
+    /// A subject carrying the **old framing bytes** decodes as one record with the subject intact.
+    ///
+    /// W7's original format separated the six fields with `US` (`%x1f`) and terminated the record
+    /// with `RS` (`%x1e`). Neither byte can appear in a *ref name*, which is what that reasoning
+    /// rested on; both are perfectly legal in a **commit message**, and `%s` does not escape them.
+    /// One such subject in a cloned repository split its own record into seven fields — rejected by
+    /// the field-count guard — or into two records, and either way the guard rejected the whole
+    /// history window rather than the one commit: the panel went blank for the repository.
+    ///
+    /// NUL is the one byte git guarantees cannot occur in commit metadata, which is why `-z` is
+    /// git's answer everywhere else in this module. Measured on `git` 2.55.0: under `-z` git
+    /// terminates each commit with NUL instead of a newline, so the output is a flat run of
+    /// NUL-terminated fields and the frame is the count — six per record.
+    ///
+    /// The newline is in the message for the second half of the shape: `%s` folds the first
+    /// paragraph's newlines into spaces, so the subject is one line whatever the message was, and a
+    /// parser framing on newlines would be reading a boundary git does not draw.
+    ///
+    /// What would have to be true for this to fail: the format or the `-z` returning to a framing
+    /// built out of bytes a commit message may legally carry.
+    func testASubjectCarryingTheOldFramingBytesDecodesAsOneRecord() async throws {
+        let fixture = try await GitFixture(tree)
+        // Invented text carrying U+001E, U+001F and a newline. Authored here, never read off the
+        // machine (§11).
+        let message = "framing \u{1e} and \u{1f} bytes\nplus a second line"
+        let hash = try await fixture.commit(message: message, files: ["a.txt": "one\n"])
+
+        let commits = try await GitLog.commits(root: fixture.root, environment: fixture.environment,
+                                               runner: ToolRunner())
+        XCTAssertEqual(commits.count, 1,
+                       "a subject carrying the old separators decoded to \(commits.count) records "
+                       + "instead of the one commit the fixture made")
+        XCTAssertEqual(commits.first?.hash, hash, "the parsed hash is not the commit the fixture made")
+        XCTAssertEqual(commits.first?.subject, "framing \u{1e} and \u{1f} bytes plus a second line",
+                       "the subject did not survive the framing byte-for-byte")
+        XCTAssertEqual(commits.first?.authorName, GitFixture.authorName,
+                       "the author field did not survive a subject carrying separator bytes")
     }
 }

@@ -305,8 +305,8 @@ final class WorkingTreeStatusTests: XCTestCase {
     /// four different ways and three of them leave no trace in a parse that happens to be right.
     ///
     /// `--porcelain=v2 --branch` is the format and the headers; `-z` is D7; `--untracked-files=normal`
-    /// and `--find-renames` are the R4 wave's configuration pins (D45), and the two `-c` overrides
-    /// ahead of the subcommand are R5's (D48). All four change nothing under a default
+    /// and `--find-renames` are the R4 wave's configuration pins (D45), the two `-c` overrides
+    /// ahead of the subcommand are R5's (D48), and `--ignore-submodules=none` is wave 2's. All four change nothing under a default
     /// configuration and everything under a user configuration that turns one off or down.
     /// What each pin buys is asserted against a hostile repository in `AdverseConfigurationTests`;
     /// this test pins that they are still passed at all.
@@ -314,12 +314,14 @@ final class WorkingTreeStatusTests: XCTestCase {
         XCTAssertEqual(WorkingTreeStatus.arguments(),
                        ["-c", "diff.renameLimit=1000", "-c", "status.renameLimit=1000",
                         "status", "--porcelain=v2", "--branch", "-z",
-                        "--untracked-files=normal", "--find-renames"],
+                        "--untracked-files=normal", "--find-renames",
+                        "--ignore-submodules=none"],
                        "the git status argument vector is not the documented one")
         XCTAssertEqual(WorkingTreeStatus.arguments(includeIgnored: true),
                        ["-c", "diff.renameLimit=1000", "-c", "status.renameLimit=1000",
                         "status", "--porcelain=v2", "--branch", "-z",
-                        "--untracked-files=normal", "--find-renames", "--ignored"],
+                        "--untracked-files=normal", "--find-renames",
+                        "--ignore-submodules=none", "--ignored"],
                        "asking for ignored files did not append --ignored to the same vector")
     }
 

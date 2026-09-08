@@ -11,7 +11,7 @@ import AfleetCore
 /// `isBinary` rather than diffed.
 public struct FileChange: Hashable, Sendable {
 
-    /// What the diff did to the path, as `git diff --name-status --find-renames` reports it.
+    /// What the diff did to the path, as `git diff --raw --find-renames` reports it.
     ///
     /// `renamed` and `copied` carry the path the content came from and git's similarity score
     /// (`R100` is an exact rename, `R087` a rename with edits), because a rename with a low score
@@ -23,6 +23,24 @@ public struct FileChange: Hashable, Sendable {
         case renamed(from: String, score: Int)
         case copied(from: String, score: Int)
         case typeChanged
+    }
+
+    /// What kind of entry the path names, read from the file modes `--raw` prints beside it.
+    ///
+    /// The one that is not a file is why this exists. A **gitlink** — a submodule, mode `160000` —
+    /// is a commit object recorded in the superproject's tree, and neither side of it can be read
+    /// the way a file's side is read: `git cat-file blob <rev>:<path>` refuses the object because
+    /// it is a commit, and the working-tree side is a *directory*. `--numstat` nevertheless prints
+    /// ordinary numeric counts for it, so nothing downstream of the counts can tell a submodule
+    /// from a one-line text file. A panel reads this instead and draws the entry without offering
+    /// either side.
+    public enum Kind: Hashable, Sendable {
+        case file
+        /// Mode `120000`. Both sides are readable: git stores the destination text as the blob and
+        /// `workingTreeFile` returns the same bytes for the working-tree side (D42).
+        case symlink
+        /// Mode `160000` — a submodule. Never blob-read.
+        case gitlink
     }
 
     /// Repository-relative, and for a rename or a copy the **new** path — the one the change
@@ -38,25 +56,36 @@ public struct FileChange: Hashable, Sendable {
     /// True exactly when git reported `-` for both counts. A panel shows a binary change as a
     /// change without offering a text diff of it.
     public var isBinary: Bool
+    /// Defaults to `.file`, which is what every mode but two is.
+    public var kind: Kind
 
-    public init(path: String, status: Status, additions: Int?, deletions: Int?, isBinary: Bool) {
+    public init(path: String, status: Status, additions: Int?, deletions: Int?, isBinary: Bool,
+                kind: Kind = .file) {
         self.path = path
         self.status = status
         self.additions = additions
         self.deletions = deletions
         self.isBinary = isBinary
+        self.kind = kind
     }
 }
 
 /// The changed-file list for a `DiffRef.Base`, and access to either side's bytes.
 ///
-/// **Two invocations, not one.** Measured on `git` 2.55.0: `--name-status` and `--numstat` given
-/// to the same command do not both print — the last one wins and no section of the other appears
-/// at all. So the status and rename information come from one `-z --name-status --find-renames`
-/// call, the line counts from one `-z --numstat --find-renames` call, and the two are joined by
-/// path. `GitDiffTests.testNameStatusAndNumstatGivenTogetherDoNotBothPrint` pins that fact
-/// against the machine's own `git`, so a future git whose bytes differ fails a named test rather
-/// than mis-joining here.
+/// **One invocation, not two.** Measured on `git` 2.55.0: `--name-status` and `--numstat` given to
+/// the same command do not both print — the last one wins and no section of the other appears at
+/// all, which is why this module first read the two listings separately and joined them by path.
+/// That join was over **two** reads of the same repository, each resolving `HEAD`, the index and
+/// the working tree for itself: an edit landing between them produced either a `.decodeFailed`
+/// naming a path present in one listing and absent from the other, or — when the edit merely
+/// changed a file's counts — a record silently mixing one instant's status with another's counts.
+///
+/// `--raw` is the listing that does print alongside `--numstat`: git emits the raw section, then
+/// the numstat section, from one traversal of one snapshot. It carries the same status codes and
+/// rename information `--name-status` does *and* the file modes, which is where
+/// `FileChange.Kind` comes from. `GitDiffTests.testRawAndNumstatGivenTogetherBothPrintOneSnapshot`
+/// pins both halves of that fact against the machine's own `git`, so a future git whose bytes
+/// differ fails a named test rather than mis-parsing here.
 public enum GitDiff {
 
     /// A read of the object database and the working tree, so it is bounded by disk rather than
@@ -65,11 +94,11 @@ public enum GitDiff {
     public static let readTimeout: Duration = .seconds(30)
 
     /// The subject every `.decodeFailed` from this parser carries.
-    private static let subject = "git diff --name-status/--numstat"
+    private static let subject = "git diff --raw/--numstat"
 
-    // MARK: - the command lines
+    // MARK: - the command line
 
-    /// The exact invocation for one base and one listing.
+    /// The exact invocation for one base.
     ///
     /// The three `DiffRef.Base` cases (root spec §9.6) are mapped here and nowhere else:
     ///
@@ -83,20 +112,16 @@ public enum GitDiff {
     ///
     ///   `--first-parent` is required rather than decorative, and is the one thing this mapping
     ///   adds to `git show`'s defaults (D41). Measured on `git` 2.55.0, a **merge** commit's
-    ///   default listing is unusable here in two different ways: for an ordinary merge
-    ///   `--name-status` prints nothing at all while `--numstat` prints a record per path, so the
-    ///   join below sees two listings that disagree completely; and for a merge whose tree
-    ///   differs from both parents — a resolved conflict — the default is git's *combined* diff,
-    ///   whose status field carries one letter per parent (`MM`), which the name-status parser
-    ///   rejects. `--first-parent` produces the same shape in both listings, never a combined
-    ///   status code, and answers the question a panel is asking: what the branch this merge
-    ///   landed on gained by it.
+    ///   default listing is git's *combined* diff, whose status field carries one letter per
+    ///   parent (`MM`) — a code the parser rejects — and which is not the question a panel is
+    ///   asking. `--first-parent` produces the ordinary shape and answers what the branch this
+    ///   merge landed on gained by it.
     ///
     ///   `--root` is required for the same class of reason and is the R4 wave's pin (D45).
     ///   `log.showRoot=false` — a setting a user may hold for their own `git log -p` — makes this
-    ///   `git show` print *nothing* for a root commit in **both** listings. The two agree, the join
-    ///   succeeds, and `changes` returns "no changed files" for a non-empty initial tree: a silent
-    ///   wrong answer rather than a failure. `--root` pins the default and changes nothing under it.
+    ///   `git show` print *nothing* for a root commit, so `changes` returns "no changed files" for
+    ///   a non-empty initial tree: a silent wrong answer rather than a failure. `--root` pins the
+    ///   default and changes nothing under it.
     ///
     /// `-z` because without it git C-quotes any path containing a space, a quote, a backslash or
     /// a non-ASCII byte, and this parser would have to reimplement git's quoting rules to be
@@ -108,17 +133,26 @@ public enum GitDiff {
     /// bytes, both invisible to R4 because its fixtures were too plain to exhibit them:
     ///
     /// - `log.showSignature=true` makes `git show` print its signature verdict on stdout ahead of
-    ///   the listing whenever the commit is **signed** — a line the `--name-status` parser reads
-    ///   as a status code and rejects with `.decodeFailed`. `--no-show-signature` pins the default
-    ///   and is a no-op under it. It is passed only on the `show` form: the setting is a `log`/`show`
-    ///   one, and `git diff` never consults it.
+    ///   the listing whenever the commit is **signed** — a line the raw parser reads as a record
+    ///   and rejects with `.decodeFailed`. `--no-show-signature` pins the default and is a no-op
+    ///   under it. It is passed only on the `show` form: the setting is a `log`/`show` one, and
+    ///   `git diff` never consults it.
     /// - `diff.renameLimit`, set low, makes git skip the *inexact* half of rename detection, so a
     ///   rename that also edited the file comes back as a delete and an add — the same two rows for
     ///   one change that `--find-renames` exists to prevent, reached by the other door. R4 ruled the
     ///   setting out on a fixture whose only rename was **exact**, and exact renames are paired
-    ///   before the limit applies. `-l\(renameLimit)` pins git's own documented default.
-    static func arguments(for base: DiffRef.Base, listing: String) -> [String] {
-        let tail = [listing, "-z", "--find-renames", "-l\(renameLimit)"]
+    ///   before the limit applies. `-l<limit>` pins git's own documented default.
+    ///
+    /// **The wave-2 pin.** `diff.ignoreSubmodules=all` — a setting users hold precisely because a
+    /// dirty submodule is noisy — makes a submodule-only change print *nothing at all*, in both
+    /// sections at once, so the parse agrees on "no changed files" and the panel shows a clean tree
+    /// over a real change. `--ignore-submodules=none` pins git's own default and is a no-op under
+    /// it. The same pin is on `WorkingTreeStatus`'s command line, for the same setting.
+    static func arguments(for base: DiffRef.Base) -> [String] {
+        // `--raw` before `--numstat` only for readability: git prints the raw section first
+        // whichever order they are given in, and the parser reads sections rather than positions.
+        let tail = ["--raw", "--numstat", "-z", "--find-renames", "-l\(renameLimit)",
+                    "--ignore-submodules=none"]
         switch base {
         case .workingTreeAgainstHEAD:
             return ["diff"] + tail + ["HEAD"]
@@ -142,20 +176,24 @@ public enum GitDiff {
 
     /// Every path `base` changed, in the order git printed them.
     ///
+    /// `root` is resolved through `GitCommands.repositoryRoot` first, so a channel whose directory
+    /// is a **subdirectory** of the repository is read at the repository root: git prints
+    /// root-relative paths whatever directory it runs in, so a listing taken from a subdirectory
+    /// and a `root` that is that subdirectory cannot be recombined into a readable path (D13, and
+    /// the wave-2 decision below it). A directory in no repository is `.notARepository` rather than
+    /// a generic command failure.
+    ///
     /// Only exit 0 is accepted; anything else becomes `.commandFailed`, a value the panel renders
     /// in its own area rather than an exception crossing into the conversation (§10, D3).
     public static func changes(root: URL, base: DiffRef.Base, environment: [String: String],
                                runner: any ToolRunning,
                                timeout: Duration = readTimeout) async throws -> [FileChange] {
+        let root = try await GitCommands.repositoryRoot(cwd: root, environment: environment,
+                                                        runner: runner, timeout: timeout)
         let base = try await resolvingAnUnbornHead(base, root: root, environment: environment,
                                                    runner: runner, timeout: timeout)
-        let statuses = try parseNameStatus(
-            await read(root: root, base: base, listing: "--name-status",
-                       environment: environment, runner: runner, timeout: timeout))
-        let counts = try parseNumstat(
-            await read(root: root, base: base, listing: "--numstat",
-                       environment: environment, runner: runner, timeout: timeout))
-        return try join(nameStatus: statuses, numstat: counts)
+        return try parse(await read(root: root, base: base, environment: environment,
+                                    runner: runner, timeout: timeout))
     }
 
     /// `.workingTreeAgainstHEAD` in a repository that has **no first commit**, compared against
@@ -167,10 +205,9 @@ public enum GitDiff {
     /// reports it (`headOID` nil), so leaving it failing here means two readers of one repository
     /// disagreeing about whether it can be read at all.
     ///
-    /// Resolved **before** either listing runs rather than by retrying a failure, so that both
-    /// listings are taken against the same base — a repository whose first commit lands between
-    /// the two reads would otherwise join a `HEAD` listing to an empty-tree one. The cost is one
-    /// `rev-parse` per call on this base and nothing on the other two.
+    /// Resolved **before** the listing runs rather than by retrying a failure, so that the base is
+    /// fixed before the snapshot is taken. The cost is one `rev-parse` per call on this base and
+    /// nothing on the other two.
     ///
     /// The empty tree's object name is **asked of git** rather than written down. The familiar
     /// `4b825dc…` is the SHA-1 one, and a repository initialised with `--object-format=sha256` has
@@ -208,10 +245,10 @@ public enum GitDiff {
         return name
     }
 
-    private static func read(root: URL, base: DiffRef.Base, listing: String,
+    private static func read(root: URL, base: DiffRef.Base,
                              environment: [String: String], runner: any ToolRunning,
                              timeout: Duration) async throws -> Data {
-        let output = try await runner.run(.git, arguments: arguments(for: base, listing: listing),
+        let output = try await runner.run(.git, arguments: arguments(for: base),
                                           cwd: root, environment: environment, timeout: timeout)
         guard output.exitCode == 0 else {
             throw ToolError.commandFailed(tool: .git, exitCode: output.exitCode,
@@ -220,69 +257,92 @@ public enum GitDiff {
         return output.stdout
     }
 
-    /// Joins the two listings by path.
-    ///
-    /// A path in one listing and not the other is an inconsistency between two reads of the same
-    /// repository and is reported rather than papered over: a change carrying no counts is
-    /// exactly how a *binary* file is represented, so inventing one for a path numstat did not
-    /// mention would make every such defect look like a legitimate binary.
-    static func join(nameStatus: [(String, FileChange.Status)],
-                     numstat: [(String, Int?, Int?)]) throws -> [FileChange] {
-        var counts: [String: (Int?, Int?)] = [:]
-        for (path, additions, deletions) in numstat { counts[path] = (additions, deletions) }
-        guard counts.count == numstat.count else {
-            throw fail("the numstat listing named the same path twice")
-        }
-        let changes = try nameStatus.map { path, status -> FileChange in
-            guard let entry = counts.removeValue(forKey: path) else {
-                throw fail("a path in the name-status listing is absent from the numstat listing")
-            }
-            return FileChange(path: path, status: status,
-                              additions: entry.0, deletions: entry.1,
-                              isBinary: entry.0 == nil && entry.1 == nil)
-        }
-        guard counts.isEmpty else {
-            throw fail("\(counts.count) path(s) in the numstat listing are absent from the "
-                       + "name-status listing")
-        }
-        return changes
-    }
-
     // MARK: - parsing
 
-    /// Decodes `--name-status -z`.
+    /// One record of the `--raw` section: what changed, and the modes that say what the path is.
+    struct RawRecord: Hashable, Sendable {
+        var path: String
+        var status: FileChange.Status
+        /// `100644`, `120000`, `160000`, or `000000` for a side that does not exist.
+        var sourceMode: String
+        var destinationMode: String
+
+        /// The mode that describes what the path *is* after the change, falling back to the source
+        /// mode for a deletion, where there is no destination.
+        var kind: FileChange.Kind {
+            switch destinationMode == "000000" ? sourceMode : destinationMode {
+            case "160000": .gitlink
+            case "120000": .symlink
+            default: .file
+            }
+        }
+    }
+
+    /// Decodes one `--raw --numstat -z` output into the changed-file list.
     ///
-    /// **Measured on `git` 2.55.0**, NULs shown as `^@`:
+    /// **Measured on `git` 2.55.0**, NULs shown as `^@`, for a modification, a type change, an
+    /// inexact rename and an addition:
     ///
-    ///     M^@a.txt^@R100^@r.txt^@moved.txt^@A^@n.txt^@
+    ///     :100644 100644 eaf36c1 2379b8e M^@b.bin^@:120000 100644 3fe175b 05c1e3e T^@link^@
+    ///     :100644 100644 7a28df3 aba7e16 R082^@carried.txt^@moved.txt^@
+    ///     :000000 100644 0000000 3e75765 A^@n.txt^@
+    ///     -\t-\tb.bin^@1\t1\tlink^@1\t0\t^@carried.txt^@moved.txt^@1\t0\tn.txt^@
     ///
-    /// A record is `<status>\0<path>\0`, and for a rename or a copy `R<score>\0<old>\0<new>\0` —
-    /// **two** path fields, the original first. A status letter this switch does not name throws
-    /// rather than being skipped: a parser that dropped the record a test exists to compare would
-    /// make that test unfalsifiable (§17.7). `U` is not among them deliberately — measured on the
-    /// same git, a tree with an unresolved merge conflict reports the conflicted path as an
-    /// ordinary `M` under `git diff HEAD`, never as `U`.
-    public static func parseNameStatus(_ bytes: Data) throws -> [(String, FileChange.Status)] {
+    /// The whole raw section comes first and the whole numstat section follows, from one traversal
+    /// of one snapshot. The boundary is read from the records themselves rather than counted: a raw
+    /// record's first field always begins with `:` — it is the metadata field, `:<src mode> <dst
+    /// mode> <src oid> <dst oid> <status>` — and a numstat record's never does, since it begins
+    /// with a count or a `-`. The object ids are *abbreviated* here and are deliberately unread:
+    /// the modes are the only part this module needs, and an abbreviation's length depends on the
+    /// repository's hash algorithm and object count.
+    ///
+    /// The two sections are joined by path, strictly (D31): a path in one and not the other is an
+    /// inconsistency inside a single snapshot and is reported rather than papered over.
+    public static func parse(_ bytes: Data) throws -> [FileChange] {
         let fields = split(bytes)
-        var result: [(String, FileChange.Status)] = []
         var index = 0
-        while index < fields.count {
-            let code = fields[index]
+        let raw = try parseRaw(fields, from: &index)
+        let counts = try parseNumstat(fields, from: &index)
+        return try join(raw: raw, numstat: counts)
+    }
+
+    /// Decodes the `--raw` section, stopping at the first field that is not a raw record.
+    ///
+    /// A record is `:<modes and object names> <status>\0<path>\0`, and for a rename or a copy
+    /// `…R<score>\0<old>\0<new>\0` — **two** path fields, the original first. A status letter this
+    /// switch does not name throws rather than being skipped: a parser that dropped the record a
+    /// test exists to compare would make that test unfalsifiable (§17.7). `U` is not among them
+    /// deliberately — measured on the same git, a tree with an unresolved merge conflict reports
+    /// the conflicted path as an ordinary `M` under `git diff HEAD`, never as `U`.
+    static func parseRaw(_ fields: [String], from index: inout Int) throws -> [RawRecord] {
+        var result: [RawRecord] = []
+        while index < fields.count, fields[index].hasPrefix(":") {
+            let metadata = fields[index].dropFirst().split(separator: " ",
+                                                           omittingEmptySubsequences: false)
             index += 1
+            guard metadata.count == 5 else {
+                throw fail("a raw record's metadata field did not carry two modes, two object "
+                           + "names and a status")
+            }
+            let code = String(metadata[4])
             guard let letter = code.first else {
-                throw fail("a name-status record carried an empty status field")
+                throw fail("a raw record carried an empty status field")
             }
             func nextPath(_ what: String) throws -> String {
                 guard index < fields.count, !fields[index].isEmpty else {
-                    throw fail("a name-status record had no \(what) after its status field")
+                    throw fail("a raw record had no \(what) after its status field")
                 }
                 defer { index += 1 }
                 return fields[index]
             }
+            func record(_ path: String, _ status: FileChange.Status) -> RawRecord {
+                RawRecord(path: path, status: status,
+                          sourceMode: String(metadata[0]), destinationMode: String(metadata[1]))
+            }
             switch letter {
             case "A", "M", "D", "T":
                 guard code.count == 1 else {
-                    throw fail("a name-status record carried a score on a status that has none")
+                    throw fail("a raw record carried a score on a status that has none")
                 }
                 let status: FileChange.Status = switch letter {
                 case "A": .added
@@ -290,37 +350,32 @@ public enum GitDiff {
                 case "D": .deleted
                 default: .typeChanged
                 }
-                result.append((try nextPath("path"), status))
+                result.append(record(try nextPath("path"), status))
             case "R", "C":
                 guard let score = Int(code.dropFirst()), score >= 0 else {
                     throw fail("a rename or copy record's similarity score is not a number")
                 }
                 let original = try nextPath("original path")
                 let path = try nextPath("new path")
-                result.append((path, letter == "R" ? .renamed(from: original, score: score)
-                                                   : .copied(from: original, score: score)))
+                result.append(record(path, letter == "R" ? .renamed(from: original, score: score)
+                                                         : .copied(from: original, score: score)))
             default:
-                throw fail("a name-status record carried a status letter this format does not define")
+                throw fail("a raw record carried a status letter this format does not define")
             }
         }
         return result
     }
 
-    /// Decodes `--numstat -z` into `(path, additions, deletions)`.
-    ///
-    /// **Measured on `git` 2.55.0**, NULs shown as `^@`:
-    ///
-    ///     1	0	a.txt^@-	-	b.bin^@0	0	^@r.txt^@moved.txt^@
+    /// Decodes the `--numstat` section into `(path, additions, deletions)`.
     ///
     /// A record is `<adds>\t<dels>\t<path>`, and for a rename or a copy the path field is
     /// **empty** and two path fields follow, the original first — the fact a parser reading one
     /// path per record silently mis-joins on. `-` for both counts is how a binary file is
     /// reported, and is where `FileChange.isBinary` comes from. A rename is returned under its
-    /// **new** path, so that the join with the name-status listing has one key per change.
-    public static func parseNumstat(_ bytes: Data) throws -> [(String, Int?, Int?)] {
-        let fields = split(bytes)
+    /// **new** path, so that the join with the raw section has one key per change.
+    static func parseNumstat(_ fields: [String],
+                             from index: inout Int) throws -> [(String, Int?, Int?)] {
         var result: [(String, Int?, Int?)] = []
-        var index = 0
         while index < fields.count {
             let record = fields[index]
             index += 1
@@ -346,6 +401,33 @@ public enum GitDiff {
         return result
     }
 
+    /// Joins the two sections by path.
+    ///
+    /// A path in one section and not the other is reported rather than papered over: a change
+    /// carrying no counts is exactly how a *binary* file is represented, so inventing one for a
+    /// path numstat did not mention would make every such defect look like a legitimate binary.
+    static func join(raw: [RawRecord], numstat: [(String, Int?, Int?)]) throws -> [FileChange] {
+        var counts: [String: (Int?, Int?)] = [:]
+        for (path, additions, deletions) in numstat { counts[path] = (additions, deletions) }
+        guard counts.count == numstat.count else {
+            throw fail("the numstat section named the same path twice")
+        }
+        let changes = try raw.map { record -> FileChange in
+            guard let entry = counts.removeValue(forKey: record.path) else {
+                throw fail("a path in the raw section is absent from the numstat section")
+            }
+            return FileChange(path: record.path, status: record.status,
+                              additions: entry.0, deletions: entry.1,
+                              isBinary: entry.0 == nil && entry.1 == nil,
+                              kind: record.kind)
+        }
+        guard counts.isEmpty else {
+            throw fail("\(counts.count) path(s) in the numstat section are absent from the "
+                       + "raw section")
+        }
+        return changes
+    }
+
     /// One numstat count: a number, or `-` for a binary file.
     private static func count(_ field: Substring) throws -> Int? {
         if field == "-" { return nil }
@@ -360,7 +442,7 @@ public enum GitDiff {
     /// The split is over bytes rather than a `String`, because a path on macOS need not be valid
     /// UTF-8 and slicing after a lossy decode would slice the replacement characters. The final
     /// terminator leaves no empty tail: only a non-empty remainder is appended.
-    private static func split(_ bytes: Data) -> [String] {
+    static func split(_ bytes: Data) -> [String] {
         var fields: [String] = []
         var start = bytes.startIndex
         for position in bytes.indices where bytes[position] == 0 {
@@ -381,6 +463,13 @@ public enum GitDiff {
 
     // MARK: - the two sides of a diff
 
+    /// A full object name, which is the one revision spelling that needs no resolution: 40 hex
+    /// characters for SHA-1, 64 for SHA-256.
+    static func isFullObjectName(_ rev: String) -> Bool {
+        (rev.count == 40 || rev.count == 64)
+            && rev.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
     /// The bytes of `path` as of `rev`.
     ///
     /// `cat-file blob` rather than `git show <rev>:<path>`, because the former is the stored
@@ -388,10 +477,35 @@ public enum GitDiff {
     /// and what Monaco is handed must be the file, not a rendering of it. A revision that does
     /// not carry the path exits non-zero and becomes `.commandFailed`, never empty `Data` that a
     /// panel would draw as an empty file.
+    ///
+    /// **The object name is composed, not concatenated.** `<rev>:<path>` is parsed by git at the
+    /// *first* colon, so a revision that itself contains one — `HEAD:Workbench`, which is the
+    /// spelling for a subtree — makes git read everything after that colon as the path and answer
+    /// about an object nobody asked for. A rev carrying a colon is therefore refused before any
+    /// command runs; anything that is not already a full object name is resolved through
+    /// `rev-parse --verify` and the *resolved* name is what the blob is asked for. A leading `-`
+    /// is refused for the adjacent reason: it would be read as an option rather than a revision.
     public static func blob(root: URL, rev: String, path: String, environment: [String: String],
                             runner: any ToolRunning,
                             timeout: Duration = readTimeout) async throws -> Data {
-        let output = try await runner.run(.git, arguments: ["cat-file", "blob", "\(rev):\(path)"],
+        guard !rev.isEmpty, !rev.contains(":"), !rev.hasPrefix("-") else {
+            throw fail("a revision carrying a colon or a leading dash cannot name a blob")
+        }
+        var name = rev
+        if !isFullObjectName(rev) {
+            let resolved = try await runner.run(.git,
+                                                arguments: ["rev-parse", "--verify", "--quiet", rev],
+                                                cwd: root, environment: environment, timeout: timeout)
+            guard resolved.exitCode == 0 else {
+                throw ToolError.commandFailed(tool: .git, exitCode: resolved.exitCode,
+                                              stderrTail: resolved.stderrTail)
+            }
+            name = resolved.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isFullObjectName(name) else {
+                throw fail("rev-parse did not resolve the revision to an object name")
+            }
+        }
+        let output = try await runner.run(.git, arguments: ["cat-file", "blob", "\(name):\(path)"],
                                           cwd: root, environment: environment, timeout: timeout)
         guard output.exitCode == 0 else {
             throw ToolError.commandFailed(tool: .git, exitCode: output.exitCode,
@@ -403,6 +517,9 @@ public enum GitDiff {
     /// The bytes of `path` as it stands in the working tree — the other side of every diff whose
     /// base is `.workingTreeAgainstHEAD` or `.commit`.
     ///
+    /// `root` must be the **resolved** repository root (`GitCommands.repositoryRoot`), because
+    /// `path` is repository-relative: git prints root-relative paths whatever directory it ran in.
+    ///
     /// Read directly rather than through `git`, because the working tree is a file and git has
     /// nothing to add to reading one — with one exception this function exists to handle. For a
     /// **symbolic link** git stores the link's *destination text* as the blob, so `blob` returns
@@ -411,9 +528,32 @@ public enum GitDiff {
     /// draw as a whole-file rewrite, and a dangling link — a change git tracks perfectly well —
     /// would throw. So a link is detected with `lstat` and its destination returned, which is the
     /// same git object type `blob` returns for the other side (D42).
+    ///
+    /// **`path` is confined to the repository.** It is a public `String` and the caller that
+    /// supplies it — a panel, ultimately a rendered diff row — is not a trusted source of file
+    /// system paths: `../sibling/secret` appended to a root reads a file the repository does not
+    /// contain. Two checks, because either alone is insufficient:
+    ///
+    /// - the path is rejected outright when it is absolute or carries a `..` component, which is
+    ///   the lexical half and is what makes the refusal explainable;
+    /// - the path's **parent chain is resolved** (`realpath`) and compared against the resolved
+    ///   root, which is the half that catches a *symbolic link* in the ancestry — `lstat` on the
+    ///   final component says nothing about the directories above it, so `a/link-elsewhere/x`
+    ///   passes the lexical check and still leaves the repository. The final component is
+    ///   deliberately *not* resolved: a link is what this function returns the destination of.
     public static func workingTreeFile(root: URL, path: String) throws -> Data {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !path.isEmpty, !path.hasPrefix("/"), !components.contains("..") else {
+            throw fail("a working-tree path must be repository-relative and carry no parent "
+                       + "component")
+        }
         let url = root.appending(path: path)
         let fileSystemPath = url.path(percentEncoded: false)
+        guard let anchor = resolved(root.path(percentEncoded: false)),
+              let parent = resolved(url.deletingLastPathComponent().path(percentEncoded: false)),
+              parent == anchor || parent.hasPrefix(anchor + "/") else {
+            throw fail("a working-tree path resolves outside the repository")
+        }
         var info = stat()
         guard lstat(fileSystemPath, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK else {
             return try Data(contentsOf: url)
@@ -431,5 +571,14 @@ public enum GitDiff {
             throw fail("a symbolic link's destination could not be read")
         }
         return Data(buffer[0..<written])
+    }
+
+    /// `realpath(3)`: every symbolic link and `.`/`..` component resolved, or nil when the path
+    /// does not exist. A parent directory that is not there is outside the repository as far as
+    /// this check is concerned, and the read below would fail for its own reason anyway.
+    private static func resolved(_ path: String) -> String? {
+        guard let buffer = realpath(path, nil) else { return nil }
+        defer { free(buffer) }
+        return String(cString: buffer)
     }
 }

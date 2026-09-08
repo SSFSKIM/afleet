@@ -7,13 +7,25 @@ import Foundation
 /// guarantee `--topo-order` makes.
 public enum GitLog {
 
-    /// Contract W7's format, unchanged.
+    /// Contract W7's format, as amended on 2026-09-08: six fields separated by **NUL**.
     ///
-    /// Six fields separated by `US` (`%x1f`, U+001F) and terminated by `RS` (`%x1e`, U+001E),
-    /// because neither byte can appear in a ref name and neither is produced by git's own quoting.
-    /// A separator a human would reach for — a pipe, a tab — appears in real commit subjects; that
-    /// is what `testASubjectWithAPipeATabAndANonASCIICharacterSurvives` pins.
-    public static let format = "%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1e"
+    /// W7 originally separated the fields with `US` (`%x1f`) and terminated the record with `RS`
+    /// (`%x1e`), on the reasoning that neither byte appears in a ref name. Neither byte appears in
+    /// a *ref name*; both are perfectly legal in a **commit subject**, and `%s` does not escape
+    /// them. One such subject — in any repository a user might clone — split its own record into
+    /// seven fields, or into two records, and the field-count guard then rejected the whole
+    /// history window rather than the one commit: the panel went blank for the repository.
+    ///
+    /// NUL is the one byte git guarantees cannot occur in commit metadata, which is why `-z` is
+    /// git's own answer everywhere else in this module (D7). With `-z` on the command line git
+    /// also terminates each *commit* with NUL instead of a newline, so the whole output is a flat
+    /// run of NUL-terminated fields and the frame is the **count**: six fields per record, always.
+    /// `testASubjectCarryingTheOldFramingBytesDecodesAsOneRecord` pins that against the machine's
+    /// own `git` with a subject carrying both of the old separators and a newline.
+    public static let format = "%H%x00%P%x00%D%x00%an%x00%at%x00%s"
+
+    /// The number of fields `format` prints per commit, which is the whole of the framing.
+    static let fieldsPerRecord = 6
 
     /// The default number of commits read in one call (D5). A window rather than the whole of
     /// `--all`, because `--all` on a large repository is unbounded while the panel draws a
@@ -65,9 +77,11 @@ public enum GitLog {
     public static func commits(root: URL, environment: [String: String],
                                runner: any ToolRunning, limit: Int = defaultLimit,
                                skip: Int = 0) async throws -> [GitCommit] {
+        let root = try await GitCommands.repositoryRoot(cwd: root, environment: environment,
+                                                        runner: runner, timeout: readTimeout)
         let output = try await runner.run(.git,
                                           arguments: ["log", "--topo-order", "--all", "--parents",
-                                                      "--decorate=full", "--encoding=UTF-8",
+                                                      "--decorate=full", "-z", "--encoding=UTF-8",
                                                       "--no-show-signature",
                                                       "--format=\(format)",
                                                       "-n", "\(limit)", "--skip", "\(skip)"],
@@ -82,34 +96,38 @@ public enum GitLog {
 
     /// Decodes the bytes `format` produces.
     ///
-    /// Records are `RS`-separated and git emits a newline after each one, so every record but the
-    /// first arrives with a leading newline that is not part of any field. A record must split
-    /// into **exactly six** fields; one that does not throws `.decodeFailed` and is never skipped.
-    /// Silently dropping the record a test exists to compare is root spec §17.7's seventh named
-    /// failure instance, and it is what makes such a test unfalsifiable.
+    /// Under `-z` there is no record separator to find: git terminates every field and every
+    /// commit with NUL, so the output is one flat run of fields and a record is **exactly six** of
+    /// them. A field count that is not a multiple of six throws `.decodeFailed`; no record is ever
+    /// skipped. Silently dropping the record a test exists to compare is root spec §17.7's seventh
+    /// named failure instance, and it is what makes such a test unfalsifiable.
+    ///
+    /// The one empty tail after the final terminator is dropped; an empty field anywhere else is a
+    /// legitimate value — a root commit has no parents, an undecorated commit has no refs, and a
+    /// commit may have an empty subject — and is carried as one.
     public static func parse(_ text: String) throws -> [GitCommit] {
-        var records = text.split(separator: "\u{1e}", omittingEmptySubsequences: false)
-            .map { $0.drop { $0 == "\n" || $0 == "\r" } }
-        // The trailing newline after the final record separator, and nothing else: an empty
-        // record anywhere else falls through to the field-count guard below.
-        if records.last?.isEmpty == true { records.removeLast() }
+        var fields = text.split(separator: "\0", omittingEmptySubsequences: false)
+        if fields.last?.isEmpty == true { fields.removeLast() }
+        guard fields.count % fieldsPerRecord == 0 else {
+            throw ToolError.decodeFailed(subject: "git log record",
+                                         message: "the output holds \(fields.count) NUL-separated "
+                                                + "fields, which is not a whole number of "
+                                                + "\(fieldsPerRecord)-field records")
+        }
 
-        return try records.map { record in
-            let fields = record.split(separator: "\u{1f}", omittingEmptySubsequences: false)
-            guard fields.count == 6 else {
-                throw ToolError.decodeFailed(subject: "git log record",
-                                             message: "expected 6 fields, found \(fields.count)")
-            }
-            guard let seconds = TimeInterval(fields[4]) else {
+        return try stride(from: 0, to: fields.count, by: fieldsPerRecord).map { start in
+            let record = fields[start..<(start + fieldsPerRecord)]
+            let field = { record[start + $0] }
+            guard let seconds = TimeInterval(field(4)) else {
                 throw ToolError.decodeFailed(subject: "git log record",
                                              message: "the author timestamp is not a number")
             }
-            return GitCommit(hash: String(fields[0]),
-                             parents: fields[1].split(separator: " ").map(String.init),
-                             refs: self.refs(from: fields[2]),
-                             authorName: String(fields[3]),
+            return GitCommit(hash: String(field(0)),
+                             parents: field(1).split(separator: " ").map(String.init),
+                             refs: self.refs(from: field(2)),
+                             authorName: String(field(3)),
                              authorTimestamp: Date(timeIntervalSince1970: seconds),
-                             subject: String(fields[5]))
+                             subject: String(field(5)))
         }
     }
 
