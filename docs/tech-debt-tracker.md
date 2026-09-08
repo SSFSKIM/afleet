@@ -1825,6 +1825,28 @@ is renumbered.
      column resolves a non-nil context through a real launch, once Task 4's rows give the context a
      use worth asserting on. Owner: C6.1, at Task 4.
 
+134. **The untrusted-text sanitiser splits emoji sequences and drops variation selectors.**
+     Parity §41.7's strip set includes the default-ignorable code points, and U+200D (the zero-width
+     joiner) and U+FE00–FE0F (the variation selectors) are both in it. So a family emoji renders as
+     its three component glyphs and a heart with an emoji presentation selector renders in its text
+     presentation. This is exactly what the engine's own sanitiser does — the terminal shows the same
+     thing — so it is parity and not a regression, and the security half of the pass is what the
+     entry protects. But a GUI is where a reader notices. Found at C6.1 Task 3. Closer: exempt U+200D
+     between two extended-pictographic scalars and the variation selectors, which costs one lookahead
+     per scalar and leaves the bidi and zero-width-space classes untouched; the divergence from the
+     terminal is then in afleet's favour and is stated where the exemption is written. Owner: C6.1,
+     when a reader reports it or when the row kinds land emoji-heavy content.
+
+135. **The streaming preview keeps its highlighting across a `syntaxHighlightingDisabled` flip.**
+     `TimelineTableController.preferenceChanged()` drops both caches and re-settles every row that
+     carries its own source, and deliberately leaves the streaming preview alone: rebuilding it would
+     reset the character count the delta path indexes the preview's text by, and replay text already
+     on screen. So a message in flight when the preference flips finishes drawing highlighted, and
+     the durable item that replaces it within the turn draws unhighlighted. Found at C6.1 Task 3.
+     Closer: rebuild the preview row from its source *and* carry the consumed-character count across
+     the rebuild, which is one field and is only worth doing once a settings change can arrive
+     mid-turn (Task 5's readout). Owner: C6.1, at Task 5.
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
