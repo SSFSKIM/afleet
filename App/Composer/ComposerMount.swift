@@ -181,7 +181,9 @@ final class ComposerRegistry {
             // `!` in the tree the channel has left. The provider's answer is taken whatever it is,
             // nil included: no context refuses the command in this leaf's own words, while a stale
             // one runs it somewhere else.
-            if let cwd, existing.context?.cwd != cwd { existing.context = contextProvider?(key, cwd) }
+            if let cwd, rowIsNews(cwd, for: key, holding: existing.context?.cwd) {
+                existing.context = contextProvider?(key, cwd)
+            }
             followTimeline(existing)
             return existing
         }
@@ -199,9 +201,45 @@ final class ComposerRegistry {
         // rebind that happened while the fork was in flight discards it.
         let generation = generation
         model.handOffToFork = { [weak self] forked, text in self?.prefill(text, for: forked, from: generation) }
+        // How a `/cd` this composer just made reaches its own context. Installed here for the reason the
+        // handoff is, and carrying the same generation: a directory change answered after a rebind belongs
+        // to a workspace this registry has let go of.
+        model.didChangeDirectory = { [weak self] moved in self?.adoptDirectory(moved, for: key, from: generation) }
         followTimeline(model)
         models[key] = model
         return model
+    }
+
+    /// A directory this channel's own `/cd` changed to, and the directory the browser row was still
+    /// reporting when it did. Both halves are needed, and the second is what keeps this from being a
+    /// permanent override: see `holdsAdoptedDirectory`.
+    private var adoptedDirectories: [ChannelKey: (moved: URL, rowWas: URL?)] = [:]
+
+    /// **A directory change is taken as soon as the engine confirms it, not when the browser row catches
+    /// up.** The row is refreshed from a later fleet update, and `!` runs in `context.cwd`: a shell command
+    /// submitted in that window ran in the directory the channel had just left, which is the one mistake a
+    /// host command cannot be undone from. The context is re-resolved through `contextProvider` — the same
+    /// question the row's own update asks — so nothing here builds a context of its own.
+    func adoptDirectory(_ moved: URL, for key: ChannelKey, from generation: Int) {
+        guard generation == self.generation, let model = models[key] else { return }
+        adoptedDirectories[key] = (moved: moved, rowWas: model.context?.cwd)
+        model.context = contextProvider?(key, moved)
+    }
+
+    /// Whether the row's `cwd` is news to this composer, or the stale directory it has already moved away
+    /// from.
+    ///
+    /// The mount asks `model(for:cwd:)` on every body evaluation, so without the hold the very next redraw
+    /// would re-resolve the context back to the directory the row has not been told about yet, and the
+    /// adoption above would last microseconds. The hold is released the moment the row says anything else —
+    /// the moved-to directory means it has caught up, a third one means the channel has moved again and the
+    /// row is the newer answer — so it cannot outlive the window it exists for.
+    private func rowIsNews(_ cwd: URL, for key: ChannelKey, holding current: URL?) -> Bool {
+        if let adopted = adoptedDirectories[key] {
+            if cwd == adopted.rowWas { return false }
+            adoptedDirectories[key] = nil
+        }
+        return current != cwd
     }
 
     /// Points the composer's queue chip at the channel's timeline, if there is one to point at.
@@ -249,6 +287,7 @@ final class ComposerRegistry {
         models.removeValue(forKey: key)?.stop()
         headers.removeValue(forKey: key)
         surfaces.removeValue(forKey: key)
+        adoptedDirectories.removeValue(forKey: key)
     }
 
     /// The channels a composer has been built for; the count is what a report states.
@@ -260,7 +299,48 @@ final class ComposerRegistry {
         pendingPrefills = [:]
         headers = [:]
         surfaces = [:]
+        adoptedDirectories = [:]
     }
+}
+
+/// §7.4's *Quit* clause reaching the `!` commands (`QuitGuard`).
+///
+/// The registry is where every running host command is held — one per composer, in `hostShell` — and it is
+/// the only place that can name them all. `stop()`'s own `cancelHostShell` is what ends one; this is that
+/// path over every composer at once, with the **wait** the quit needs added to it: `cancel()` signals the
+/// group from a dispatch queue, so a quit that only asked would exit before the first `SIGTERM` left the
+/// process.
+extension ComposerRegistry: QuitHostCommands {
+
+    /// How long the quit waits for the groups it has just signalled. Long enough for a `SIGTERM` and the
+    /// escalation behind it to reach a tree that ignores the first signal, and short enough that a wedged
+    /// child cannot hold the app open: what is left at the deadline has already been signalled, which is
+    /// the thing the exit itself could never do.
+    static let hostCommandDrain = Duration.seconds(3)
+
+    func cancelHostCommands() async {
+        // Read before the cancel: `cancelHostShell` clears the handle, and a wait taken afterwards would
+        // have nothing to wait on.
+        let running = models.values.compactMap(\.hostShell)
+        for model in models.values { model.cancelHostShell() }
+        guard !running.isEmpty else { return }
+        // Each run answers when its child has settled, which is after the group was signalled and the tree
+        // is gone. Counted rather than awaited in a group, because a `Task<_, Never>`'s value is not
+        // cancellable: a structured wait could not be abandoned at the deadline, and the bound is the point.
+        let settled = HostCommandSettlement()
+        for task in running { Task { _ = await task.value; await settled.note() } }
+        let deadline = ContinuousClock.now + Self.hostCommandDrain
+        while await settled.count < running.count, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+}
+
+/// How many of the cancelled host commands have answered. A count, and the only thing the bounded wait above
+/// needs to know (§11).
+actor HostCommandSettlement {
+    private(set) var count = 0
+    func note() { count += 1 }
 }
 
 /// The composer, mounted below the channel's list — one of C6.2's two call sites in

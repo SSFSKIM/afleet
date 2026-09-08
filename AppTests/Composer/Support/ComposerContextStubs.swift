@@ -52,11 +52,25 @@ enum ComposerContextFixtures {
     /// A context over the stubs above, carrying the recording link router. Everything is invented and
     /// nothing is written (X9).
     static func context(_ key: ChannelKey, links: RecordingLinkRouter) -> ChannelContext {
+        context(key, cwd: URL(fileURLWithPath: "/invented/project"), links: links)
+    }
+
+    /// The same context for a **named directory**, which is what a test about a channel that moves needs:
+    /// the registry answers `context(for:cwd:)` per directory, so a fixture with one fixed cwd cannot tell a
+    /// re-resolved context from a kept one.
+    ///
+    /// `variables` is the channel's own resolved environment and never this process's, so nothing inherited
+    /// — a `CLAUDE`-prefixed variable of the runner's included — reaches a child spawned from it (X11, §7.8).
+    static func context(_ key: ChannelKey,
+                        cwd: URL,
+                        shell: String = "/bin/zsh",
+                        variables: [String: String] = ["PATH": "/usr/bin"],
+                        links: RecordingLinkRouter = RecordingLinkRouter()) -> ChannelContext {
         ChannelContext(key: key,
                        session: key.session,
-                       cwd: URL(fileURLWithPath: "/invented/project"),
-                       environment: ResolvedEnvironment(variables: ["PATH": "/usr/bin"],
-                                                        shell: "/bin/zsh",
+                       cwd: cwd,
+                       environment: ResolvedEnvironment(variables: variables,
+                                                        shell: shell,
                                                         capturedAt: Date(timeIntervalSince1970: 0),
                                                         mode: .login),
                        store: NullComposerScopedStore(),

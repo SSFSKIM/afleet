@@ -1281,7 +1281,9 @@ symlink-containment debt in entry 78 is unchanged.
      uuid first.** Same shape as 209 from the other side: the chip retires the uuid only when
      `cancel_async_message` answers `cancelled: true`; a result ingested in between takes the cancelled
      uuid off the outstanding list, and the later removal cannot repair the attribution. Same remedy
-     and owner as 209. Filed 2026-09-08 (panel round 2, scalpel-1#2).
+     and owner as 209. Filed 2026-09-08 (panel round 2, scalpel-1#2). *Stop everything*
+     (`Interrupt(cancelQueued: true)` through `perform(.stopEverything)`) cancels every queued prompt and
+     retires none of their uuids either — the same remedy covers it (panel round 4, scalpel-3#1).
 
 211. **`Fleet.forkResolutions` is written for every fork and read by one caller.** The map recording
      a fork's provisional-to-resolved key is the only place the two ids are ever linked, so it is
@@ -1371,6 +1373,19 @@ symlink-containment debt in entry 78 is unchanged.
      gap. Closer: whoever revisits the reap ordering — most likely alongside 218, which is the same
      code in C7.3 — decides whether identity can be held to the last signal. Owner: C6.2 with C7.3.
      Filed by C6.2's third review round (scalpel-2#1), with the architect's disposition recorded.
+
+226. **A fork whose handshake crashes strands the edit's prefill under a key nobody migrates.**
+     `ChannelSupervisor.handleExit` settles the fork-identity waiters and clears the identity timer even
+     when the same exit schedules an automatic respawn, so `settledForkKey()` answers the *provisional*
+     key for the whole of the backoff. *Fork from here* takes that answer, and the registry files the
+     edited message's prefill and the selection under it; the replacement that comes back from the
+     respawn re-keys the channel, and nothing migrates a pending draft or a selection across a re-key.
+     The user's edited message is then waiting under a key no composer will ever be built for. Needs a
+     crash inside a fork's handshake window, so it is rare rather than impossible. Closer: either keep
+     the waiters pending across a scheduled respawn — bounded by the fork-identity deadline, so a fork
+     that never resolves still fails rather than hanging — or have the registry migrate pending drafts
+     and selection when a channel is re-keyed. Owner: C4 with C6.2. Filed 2026-09-09 (panel round 4,
+     scalpel-4#1).
 
 ## From C7.2 (`child/c7-editor-core`)
 

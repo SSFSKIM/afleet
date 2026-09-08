@@ -182,6 +182,14 @@ final class ComposerModel {
     /// the conversation the user is editing away from.
     @ObservationIgnored var handOffToFork: (@MainActor (ChannelKey, String) -> Void)?
 
+    /// How a `/cd` this composer just made reaches the channel's `ChannelContext` (`CommandRouting`).
+    /// Installed by `ComposerRegistry`, which owns the context question and is the only thing that can ask
+    /// it again for a new directory.
+    ///
+    /// Nil leaves the context where the browser row last put it, which is what the `!` escape runs in — so a
+    /// composer with no registry behind it refuses nothing and simply keeps the directory it was given.
+    @ObservationIgnored var didChangeDirectory: (@MainActor (URL) -> Void)?
+
     /// X5, and the only way anything in this file reaches the engine. Internal rather than private
     /// because the shortcuts are an extension in `ComposerShortcuts.swift`; Swift has no narrower
     /// scope than the module for that, and every caller is inside `App/Composer/`.

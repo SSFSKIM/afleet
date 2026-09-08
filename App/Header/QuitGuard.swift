@@ -46,11 +46,29 @@ protocol QuitFleet: Sendable {
     func shutdownForQuit() async
 }
 
+/// The `!` commands afleet itself is running on this machine, as the *Quit* clause needs them.
+///
+/// A host command is not a channel and `Fleet` does not own one: it is a child in a **process group of
+/// its own**, spawned with `/dev/null` on its stdin, and its budget, its `SIGTERM` and its `SIGKILL`
+/// all live in this process. Exiting without cancelling one therefore does not end it — it detaches
+/// it, and removes the escalation that was supposed to end it at the same moment. §6.6's `!` is a line
+/// typed into a chat field, so it must not outlive the app that ran it.
+@MainActor
+protocol QuitHostCommands: AnyObject {
+    /// Cancels every running host command and waits, **bounded**, for their groups to be signalled.
+    /// Bounded on the same rule the termination passes are: quitting must not become a wait the user
+    /// cannot leave.
+    func cancelHostCommands() async
+}
+
 /// The clause itself, over the seam.
 @MainActor
 final class QuitGuard {
 
     private let fleet: any QuitFleet
+    /// The composers whose `!` commands this quit ends. Nil for a guard built over a fleet alone —
+    /// a quit with no composer registry behind it has no host command to end.
+    private let hostCommands: (any QuitHostCommands)?
     /// The dialog. Injected because an `NSAlert` cannot be answered in a headless runner, and
     /// because the clause's decision — ask once, and only about the busy owned channels — is worth
     /// asserting without one.
@@ -63,8 +81,11 @@ final class QuitGuard {
     private(set) var lastAsked: [QuitChannel] = []
     private var isQuitting = false
 
-    init(fleet: any QuitFleet, confirm: @escaping @MainActor ([QuitChannel]) async -> Bool = QuitGuard.alert) {
+    init(fleet: any QuitFleet,
+         hostCommands: (any QuitHostCommands)? = nil,
+         confirm: @escaping @MainActor ([QuitChannel]) async -> Bool = QuitGuard.alert) {
         self.fleet = fleet
+        self.hostCommands = hostCommands
         self.confirm = confirm
     }
 
@@ -111,6 +132,17 @@ final class QuitGuard {
             }
             if pass < Self.terminationPasses - 1 { census = await fleet.quitChannels() }
         }
+        // **The `!` commands go with the app, and they are ended here rather than by the exit.**
+        // Terminating a channel ends the engine's own shells; a host command is afleet's child, in a
+        // group of its own, and nothing in `Fleet` names it. `shutdown()` terminates nothing and the
+        // exit closes no pipe of the child's — the one thing the rest of this clause rests on does not
+        // reach it — so a silent `!` would simply be released onto the machine, with the budget and the
+        // escalation that were going to end it dying with the process that held them.
+        //
+        // After the passes and before the shutdown: a cancelled run posts nothing, so nothing here is
+        // trying to reach a channel that has just been quit, and a declined quit has already returned
+        // above with every command still running.
+        await hostCommands?.cancelHostCommands()
         await fleet.shutdownForQuit()
         return true
     }
@@ -281,6 +313,8 @@ extension QuitGuard {
         return QuitGuard(fleet: FleetQuitTermination(
             lifecycle: fleet,
             shutdown: { await fleet.shutdown() },
-            title: { key in browser?.row(key.session)?.title }))
+            title: { key in browser?.row(key.session)?.title }),
+                         // The app's one composer registry, which is where every running `!` is held.
+                         hostCommands: model.composers)
     }
 }
