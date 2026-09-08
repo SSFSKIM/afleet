@@ -19,6 +19,7 @@ struct ComposerView: View {
         VStack(alignment: .leading, spacing: 6) {
             RefusalSurface(refusal: model.refusal, interception: model.lastInterception)
             CommandCompletionView(model: model)
+            FileMentionView(model: model)
             RewindConfirmationView(model: model)
             if model.surface.isDisabled, let reason = model.surface.disabledReason {
                 Label(reason, systemImage: "clock")
@@ -31,6 +32,7 @@ struct ComposerView: View {
                 .frame(minHeight: 34, maxHeight: 160)
                 .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
                 .opacity(model.surface.isDisabled ? 0.5 : 1)
+                .onChange(of: model.draft) { model.draftDidChange() }
             // Esc, Shift+Tab and Cmd+Shift+Esc. Beside the field rather than inside it because a
             // `.keyboardShortcut` is a command-table binding and `keyDown` is not.
             ComposerShortcutBar(model: model)

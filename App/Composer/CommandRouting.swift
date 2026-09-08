@@ -143,7 +143,7 @@ extension ComposerModel {
 
     /// One X5 call, with this leaf's two refusal arms around it: a `LifecycleError` is explained
     /// inline and **never retried**, and anything else says the channel did not answer.
-    private func issue(_ call: @escaping () async throws -> Void) async -> Bool {
+    func issue(_ call: @escaping () async throws -> Void) async -> Bool {
         do {
             try await call()
             return true

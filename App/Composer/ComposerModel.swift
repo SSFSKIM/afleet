@@ -77,6 +77,18 @@ final class ComposerModel {
     /// the engine, and Task 7's picker replaces this with the handshake's own `permissionMode`.
     var permissionMode: PermissionMode = .default
 
+    /// The paths the engine's index answered the current `@` token with, in its own order
+    /// (`FileMentions`). Empty whenever no popover is showing; nothing here is derived from disk.
+    var fileSuggestions: [String] = []
+
+    /// The `file_suggestions` query in flight, held so the next keystroke can cancel it.
+    @ObservationIgnored var mentionTask: Task<Void, Never>?
+
+    /// How long a keystroke waits before its query goes out. A stored value rather than a constant so
+    /// a test can widen the window and assert the cancellation on a **count of requests** rather than
+    /// on timing.
+    @ObservationIgnored var mentionDebounce: Duration = .milliseconds(120)
+
     /// True from the moment a send is accepted until its `perform` returns.
     ///
     /// The field fires `send()` from a detached `Task`, so two quick Return presses are two calls
@@ -132,6 +144,12 @@ final class ComposerModel {
         openSurface = nil
         isSending = true
         defer { isSending = false }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("!") {
+            // Host-side, and never a turn: what the command wrote is posted as one ordinary user
+            // frame (§6.6). Cleared on the same terms as any other send.
+            if await runShellEscape(text), draft.hasPrefix(text) { draft = String(draft.dropFirst(text.count)) }
+            return
+        }
         if text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") {
             // Cleared only when the dispatch went through, on the same terms as a plain send: a
             // refused command leaves the words where the user can fix them.
@@ -205,5 +223,7 @@ final class ComposerModel {
     func stop() {
         events?.cancel()
         events = nil
+        mentionTask?.cancel()
+        mentionTask = nil
     }
 }
