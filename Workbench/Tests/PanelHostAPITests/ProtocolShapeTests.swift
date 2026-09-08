@@ -159,7 +159,8 @@ final class ProtocolShapeTests: XCTestCase {
         var systemImage: String { id.defaultSystemImage }
         func isAvailable(in context: ChannelContext) -> Bool { true }
         func makeSession(for context: ChannelContext) -> any PanelTabSession { StubSession() }
-        func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView { AnyView(EmptyView()) }
+        func makeView(session: any PanelTabSession, context: ChannelContext,
+                  surface: PanelSurface) -> AnyView { AnyView(EmptyView()) }
     }
 
     @MainActor final class StubSession: PanelTabSession {}
@@ -198,7 +199,8 @@ final class ProtocolShapeTests: XCTestCase {
         }
         func popOut(_ id: PanelTabID, channel: ChannelKey) {}
         func session(for id: PanelTabID, context: ChannelContext) -> any PanelTabSession { StubSession() }
-        func view(for id: PanelTabID, context: ChannelContext) -> AnyView { AnyView(EmptyView()) }
+        func view(for id: PanelTabID, context: ChannelContext,
+                  surface: PanelSurface) -> AnyView { AnyView(EmptyView()) }
         func run(_ request: PaneRequest) async throws { throw PanelHostError.noPaneRunner(.terminal) }
     }
 

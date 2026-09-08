@@ -1132,7 +1132,8 @@ private final class StubPanelTab: PanelTab {
         return CountedSession(counter: counter)
     }
 
-    func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
+    func makeView(session: any PanelTabSession, context: ChannelContext,
+                  surface: PanelSurface) -> AnyView {
         AnyView(SessionHoldingPanel(session: session))
     }
 }

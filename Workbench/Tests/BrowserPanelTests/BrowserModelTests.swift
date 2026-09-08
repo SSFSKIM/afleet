@@ -603,6 +603,70 @@ final class BrowserModelTests: XCTestCase {
         XCTAssertNil(model.loadFailureMessage)
     }
 
+    // MARK: Q5's pop-out, connected to the pop-out lifecycle (D52)
+
+    /// The window takes the web views when it appears and gives them back when it goes away.
+    ///
+    /// "Exactly one" is asserted over every surface there is rather than over the two by name, so a
+    /// third surface could not quietly draw a second browser.
+    func testAPoppedOutWindowTakesTheWebViewsAndClosingHandsThemBack() {
+        let (model, _, _) = makeModel()
+        XCTAssertEqual(Self.surfacesRendering(model), [.panel])
+
+        model.surfaceAppeared(.poppedOutWindow)
+
+        XCTAssertEqual(Self.surfacesRendering(model), [.poppedOutWindow],
+                       "the pop-out did not take the web views, or did not take them exclusively")
+
+        model.surfaceDisappeared(.poppedOutWindow)
+
+        XCTAssertEqual(Self.surfacesRendering(model), [.panel],
+                       "closing the pop-out did not hand the web views back")
+    }
+
+    /// The main panel is on screen for as long as its window is, so it must not claim on
+    /// appearance: a re-render of the column would otherwise take the pages out of a pop-out window
+    /// that is still open.
+    func testTheMainPanelAppearingDoesNotTakeTheWebViewsFromAWindow() {
+        let (model, _, _) = makeModel()
+        model.surfaceAppeared(.poppedOutWindow)
+
+        model.surfaceAppeared(.panel)
+
+        XCTAssertEqual(Self.surfacesRendering(model), [.poppedOutWindow],
+                       "the panel took the web views back from a window that is still open")
+    }
+
+    /// A surface going away while it holds nothing changes nothing.
+    func testASurfaceThatHoldsNothingHandsNothingBack() {
+        let (model, _, _) = makeModel()
+        model.surfaceAppeared(.poppedOutWindow)
+
+        model.surfaceDisappeared(.panel)
+
+        XCTAssertEqual(Self.surfacesRendering(model), [.poppedOutWindow])
+    }
+
+    /// The other half of D52: the surface is a real input to the view the tab makes. Without this
+    /// both surfaces render the same one, and whichever `NSView` hierarchy asked last holds the
+    /// web views while the other draws a placeholder that will never come true.
+    func testTheViewTheTabMakesIsForTheSurfaceItWasAskedFor() {
+        let (model, _, _) = makeModel()
+        let tab = BrowserTab(model: model)
+        let context = makeChannelContext(mark: "surface")
+        let session = tab.makeSession(for: context)
+
+        XCTAssertEqual(tab.panelView(session: session, surface: .panel)?.surface, .panel)
+        XCTAssertEqual(tab.panelView(session: session, surface: .poppedOutWindow)?.surface,
+                       .poppedOutWindow,
+                       "the popped-out window was handed a view that claims to be the panel")
+    }
+
+    /// Every surface that would draw the web views right now.
+    private static func surfacesRendering(_ model: BrowserModel) -> [PanelSurface] {
+        PanelSurface.allCases.filter { model.rendersWebViews(on: $0) }
+    }
+
     // MARK: Chrome delegation
 
     func testBackAndForwardFollowTheSelectedTab() async throws {

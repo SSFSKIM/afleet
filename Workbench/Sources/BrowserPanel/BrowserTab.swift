@@ -27,8 +27,19 @@ public final class BrowserTab: PanelTab {
         BrowserTabSession(recentURLs: context.recentURLs)
     }
 
-    public func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
-        guard let session = session as? BrowserTabSession else { return AnyView(EmptyView()) }
-        return AnyView(BrowserPanelView(model: model, session: session, surface: .panel))
+    public func makeView(session: any PanelTabSession, context: ChannelContext,
+                         surface: PanelSurface) -> AnyView {
+        guard let view = panelView(session: session, surface: surface) else {
+            return AnyView(EmptyView())
+        }
+        return AnyView(view)
+    }
+
+    /// The same view, before it is erased. `makeView` has to answer `AnyView`, and an `AnyView` is
+    /// not a thing a test can ask which surface it was made for — which is exactly the mistake this
+    /// seam exists to prevent (D52).
+    func panelView(session: any PanelTabSession, surface: PanelSurface) -> BrowserPanelView? {
+        guard let session = session as? BrowserTabSession else { return nil }
+        return BrowserPanelView(model: model, session: session, surface: surface)
     }
 }

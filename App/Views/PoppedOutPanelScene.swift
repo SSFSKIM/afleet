@@ -24,7 +24,7 @@ struct PoppedOutPanelScene: View {
             // this body to drop the old view and the session that view retains.
             if let panel, app.panels.poppedOut.contains(panel),
                let context = app.panels.context(for: panel.channel) {
-                app.panels.view(for: panel.tab, context: context)
+                app.panels.view(for: panel.tab, context: context, surface: .poppedOutWindow)
                     .navigationTitle(panel.tab.defaultTitle)
             } else {
                 PlaceholderColumn(title: "This panel has no channel",

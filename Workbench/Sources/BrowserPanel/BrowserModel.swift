@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import PanelHostAPI
 import WebKit
 
 /// One tab of the shared set, as the panel holds it.
@@ -40,18 +41,6 @@ public final class BrowserLiveTab: Identifiable {
     }
 }
 
-/// Which surface currently holds the web views.
-///
-/// An `NSView` has one superview, so the same `WKWebView` cannot be rendered in the main panel and
-/// in a popped-out Browser window at once (Q5). The views follow the pop-out, and the surface they
-/// left draws a short "Showing in the Browser window" state instead of a second, silently different
-/// browser. One web view per surface was rejected: two loads of every page, two sets of scroll and
-/// form state, and a "shared browser" that is not one.
-public enum BrowserSurface: String, Sendable, Equatable, CaseIterable {
-    case panel
-    case poppedOutWindow
-}
-
 /// The window-wide tab set: the live tabs, their order, the selection, and every operation the
 /// chrome performs on them (Q5).
 ///
@@ -85,7 +74,14 @@ public final class BrowserModel {
     public private(set) var selectedID: UUID?
 
     /// Which surface the web views are attached to (Q5).
-    public private(set) var attachedTo: BrowserSurface = .panel
+    ///
+    /// An `NSView` has one superview, so the same `WKWebView` cannot be rendered in the main panel
+    /// and in a popped-out Browser window at once. The views follow the pop-out, and the surface
+    /// they left draws a short state instead of a second, silently different browser. One web view
+    /// per surface was rejected: two loads of every page, two sets of scroll and form state, and a
+    /// "shared browser" that is not one. X7's `PanelSurface` is what makes the two surfaces
+    /// distinguishable at all (D52).
+    public private(set) var attachedTo: PanelSurface = .panel
 
     /// A refusal the user is owed an answer about — a `file:` link, a `javascript:` or `data:` URL
     /// — as one line of copy. Cleared by the next navigation the panel accepts.
@@ -145,12 +141,33 @@ public final class BrowserModel {
 
     /// Whether `surface` is the one that draws the web views right now (Q5). The other surface
     /// draws the short "Showing in the Browser window" state and a control that brings them back.
-    public func rendersWebViews(on surface: BrowserSurface) -> Bool {
+    public func rendersWebViews(on surface: PanelSurface) -> Bool {
         attachedTo == surface
     }
 
-    public func attach(to surface: BrowserSurface) {
+    /// Moves the web views to `surface`. The "Bring them back here" control, and the one place the
+    /// attachment is chosen deliberately rather than by a window appearing or going away.
+    public func attach(to surface: PanelSurface) {
         attachedTo = surface
+    }
+
+    /// A surface began drawing this panel.
+    ///
+    /// **A pop-out claims the web views; the main panel does not.** The panel is on screen for as
+    /// long as the window is, so a panel that claimed on appearance would take the views back from
+    /// a pop-out window the moment anything re-rendered the column — which is the whole of what a
+    /// pop-out is for. The pop-out is the deliberate act, so it is the one that moves them.
+    public func surfaceAppeared(_ surface: PanelSurface) {
+        guard surface != .panel else { return }
+        attachedTo = surface
+    }
+
+    /// A surface stopped drawing this panel. If it was holding the web views they come home, which
+    /// is the hand-back half of closing a popped-out window: without it the tabs would still be
+    /// attached to a window that is gone, and every surface would draw the placeholder.
+    public func surfaceDisappeared(_ surface: PanelSurface) {
+        guard attachedTo == surface else { return }
+        attachedTo = .panel
     }
 
     // MARK: Restore (Q7)

@@ -1,4 +1,5 @@
 import AppKit
+import PanelHostAPI
 import SwiftUI
 import WebKit
 
@@ -12,9 +13,9 @@ public struct BrowserPanelView: View {
 
     @Bindable var model: BrowserModel
     @Bindable var session: BrowserTabSession
-    let surface: BrowserSurface
+    let surface: PanelSurface
 
-    public init(model: BrowserModel, session: BrowserTabSession, surface: BrowserSurface = .panel) {
+    public init(model: BrowserModel, session: BrowserTabSession, surface: PanelSurface) {
         self.model = model
         self.session = session
         self.surface = surface
@@ -30,6 +31,10 @@ public struct BrowserPanelView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task { await model.restore() }
+        // The pop-out lifecycle, and the whole of what connects it to the web views: a window that
+        // appears takes them, and one that goes away hands them back.
+        .onAppear { model.surfaceAppeared(surface) }
+        .onDisappear { model.surfaceDisappeared(surface) }
         // Not `$session.isPresented`: the sheet is closed through `closeQuickOpen`, which is also
         // what cancels the feed subscription (Q8). A binding that only flipped the flag would leave
         // a channel's subscription running behind a sheet nobody can see.
@@ -50,11 +55,13 @@ public struct BrowserPanelView: View {
         }
     }
 
-    /// Q5's consequence, stated plainly rather than papered over.
+    /// Q5's consequence, stated plainly rather than papered over. It names where the pages went,
+    /// which is the one thing the user needs and the one thing only the model knows.
     private var elsewhere: some View {
         VStack(spacing: 10) {
             Image(systemName: "macwindow.on.rectangle").font(.largeTitle).foregroundStyle(.secondary)
-            Text("Showing in the Browser window").font(.headline)
+            Text(model.attachedTo == .poppedOutWindow ? "Showing in the Browser window"
+                                                      : "Showing in the main window").font(.headline)
             Text("The tabs are the same ones; a page can only be drawn in one place at a time.")
                 .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Button("Bring them back here") { model.attach(to: surface) }
