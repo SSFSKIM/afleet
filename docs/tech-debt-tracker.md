@@ -1264,6 +1264,22 @@ symlink-containment debt in entry 78 is unchanged.
      readback waits for a handshake whose epoch is the new process's before comparing the mode —
      the same watch item 205 needs. Owner: C6.2. Raised by C6.2's fix wave.
 
+209. **`HostSignal.promptSent` is raised after `sendPrompt` returns, and an engine result can arrive
+     first.** `ComposerModel.post` registers the uuid with the fold only once the facade has answered,
+     while `ChannelSupervisor.deliver` awaits the process write and the wire fans out independently; a
+     result that lands in between is reduced `.unprompted` and the late uuid then attributes the *next*
+     result. Bounded to one misattributed turn and needs a result faster than a facade round trip (an
+     immediate refusal is the realistic case). The remedy is not a composer patch: the supervisor owns
+     both the write and the fold's inputs, so it should raise the signal itself before the write — an
+     X4/X5 design change for C3 and C4 at C6's recomposition. Owner: the C6 composite (architect).
+     Filed 2026-09-08 at C6.2's merge review (panel round 2, scalpel-1#1).
+
+210. **`HostSignal.promptCancelled` is raised after the cancel's answer, and a result can consume the
+     uuid first.** Same shape as 209 from the other side: the chip retires the uuid only when
+     `cancel_async_message` answers `cancelled: true`; a result ingested in between takes the cancelled
+     uuid off the outstanding list, and the later removal cannot repair the attribution. Same remedy
+     and owner as 209. Filed 2026-09-08 (panel round 2, scalpel-1#2).
+
 218. **`ToolRunner` carries both of the escalation defects the `!` escape just had.** C7.3's
      `Workbench/Sources/SourceControlCore/ToolRunner.swift` is the arrangement C6.2's `ShellChild`
      was copied from, and it still keys its `SIGKILL` on `settled` and its `signalTree` on `reaped`.
