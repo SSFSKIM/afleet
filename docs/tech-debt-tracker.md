@@ -876,7 +876,7 @@ symlink-containment debt in entry 78 is unchanged.
 
 Filed at the close of C7.3 (Source Control core; ledger
 `docs/doperpowers/ledgers/2026-09-07-c7.3-scm-core.md`). Numbers 112 through 126 are this
-leaf's reservation; 119 onward are unused.
+leaf's reservation; 122 onward are unused.
 
 112. **`SourceControlCore.ToolRunner` duplicates C2's process mechanics.** Termination-handler
      exit observation, non-blocking pipe drains, timeout with grace and `SIGKILL` are written
@@ -944,3 +944,26 @@ leaf's reservation; 119 onward are unused.
      disagrees with the lane state. Documented on the flag and pinned by a multi-row test;
      what would close it is either a name that cannot be misread or a rendering contract the
      panel and this type share. Owner: C7.7, the first consumer.
+
+120. **One mutation of the first-parent rule survives C7.3's suite and may be equivalent.**
+     Writing rule 3 as "the first parent takes the leftmost *free* lane" rather than the
+     commit's own lane passes every test, because a commit's own lane is released immediately
+     before that rule runs and is the leftmost free one in every fixture. Distinguishing the two
+     needs a row read at a *reserved* lane while a lane to its left is free; a lane is freed only
+     by a parentless commit or by a released duplicate, and three probed shapes — two roots with
+     interleaved dates, and an unrelated-history merge in each direction — all had
+     `git log --topo-order --all` follow one chain to its end before starting another, which
+     frees lanes right to left. So the mutant may be equivalent under git's ordering rather than
+     merely uncovered. Filed rather than chased: closing it means either a shape that orders the
+     other way, or an argument that none exists. Owner: whoever next revises lane assignment.
+
+121. **`GraphRow.edges` may contain several edges arriving in the same `toLane`.** A consumer
+     that indexes a row's edges by destination lane silently drops one of each pair and
+     disconnects a line at that row. It happens two ways: a merge reaching into a lane another
+     child already reserved, where the lane carries both the merge's edge and the pass-through
+     of the line already running down it; and two lanes converging on one parent, where both
+     bend into the lane the parent was read at. This was three of the five findings at C7.3's
+     whole-branch review, and the model was changed once to allow it (ledger D43). Documented on
+     `GraphRow.Edge` and pinned by a connectivity assertion over every lane fixture; what would
+     close it is a rendering contract the panel and this type share. Owner: C7.7, the first
+     consumer.
