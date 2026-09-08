@@ -58,6 +58,8 @@ final class PTYSpawnTests: XCTestCase {
         else
           printf 'AFLEET_REQUESTED_LAPIS=absent\\n'
         fi
+        environment_count=$(/usr/bin/env | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+        printf 'environment-count=%s\\n' "$environment_count"
         printf 'g1b-ready\\n'
         IFS= read -r hold
         """
@@ -85,12 +87,16 @@ final class PTYSpawnTests: XCTestCase {
             tokens.contains("AFLEET_REQUESTED_LAPIS=present"),
             "AFLEET_REQUESTED_LAPIS should print present"
         )
+        XCTAssertTrue(
+            tokens.contains("environment-count=5"),
+            "child environment entry count was not 5"
+        )
     }
 
     func testSpawnCreatesControllingTerminal() async throws {
         // macOS posix_spawn currently acquires the controlling terminal even when O_NOCTTY
-        // is passed through addopen. The runtime assertions prove the resulting terminal;
-        // this trace assertion additionally makes that forbidden flag mutation observable.
+        // is passed through addopen, making that behavioral mutation impossible to observe.
+        // This source trace is the substitute for a behavioral assertion on this platform.
         let workbench = URL(filePath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -99,22 +105,29 @@ final class PTYSpawnTests: XCTestCase {
             contentsOf: workbench.appending(path: "Sources/TerminalCore/PTY/Darwin+PTY.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(
-            spawnSource.contains(
-                "posix_spawn_file_actions_addopen(&fileActions, 0, $0.baseAddress, O_RDWR, 0)"
-            ),
-            "slave addopen must use O_RDWR without O_NOCTTY"
-        )
+        let addOpenLines = spawnSource
+            .split(separator: "\n")
+            .filter { $0.contains("posix_spawn_file_actions_addopen") }
+        XCTAssertEqual(addOpenLines.count, 1, "slave addopen trace count was not 1")
+        guard let addOpenLine = addOpenLines.first else { return }
+        XCTAssertTrue(addOpenLine.contains("O_RDWR"), "slave addopen did not carry O_RDWR")
+        XCTAssertFalse(addOpenLine.contains("O_NOCTTY"), "slave addopen carried O_NOCTTY")
 
         let directory = try PTYTestChild.temporaryDirectory()
         defer { PTYTestChild.remove(directory) }
         let script = """
-        if exec 3</dev/tty; then
-          printf 'dev-tty=present\\n'
+        # On Darwin /dev/tty is a clone device, so resolve the session's controlling tty to
+        # its underlying node before comparing that node's device and inode with fstat(0).
+        if tty_name=$(/bin/ps -o tty= -p $$ | /usr/bin/tr -d ' ') &&
+           [ -n "$tty_name" ] &&
+           tty_identity=$(/usr/bin/stat -f '%d:%i' "/dev/$tty_name" 2>/dev/null) &&
+           input_identity=$(/usr/bin/stat -f '%d:%i' 2>/dev/null) &&
+           [ "$tty_identity" = "$input_identity" ]; then
+          printf 'own-tty=present\\n'
         else
-          printf 'dev-tty=absent\\n'
+          printf 'own-tty=absent\\n'
         fi
-        if /bin/stty size </dev/tty >/dev/null 2>&1; then
+        if /bin/stty size <&0 >/dev/null 2>&1; then
           printf 'stty=present\\n'
         else
           printf 'stty=absent\\n'
@@ -131,8 +144,11 @@ final class PTYSpawnTests: XCTestCase {
         let tokens = Set(output.split(separator: "\n").map(String.init))
         let foregroundGroup = try await process.foregroundProcessGroup()
 
-        XCTAssertTrue(tokens.contains("dev-tty=present"), "child could not open /dev/tty")
-        XCTAssertTrue(tokens.contains("stty=present"), "stty could not read the controlling terminal")
+        XCTAssertTrue(
+            tokens.contains("own-tty=present"),
+            "the child's controlling terminal was not its own descriptor 0"
+        )
+        XCTAssertTrue(tokens.contains("stty=present"), "stty could not read descriptor 0")
         XCTAssertTrue(
             foregroundGroup == process.processIdentifier,
             "pty foreground group did not match the spawned session leader"
@@ -178,38 +194,40 @@ final class PTYSpawnTests: XCTestCase {
     }
 
     func testSpawnedChildInheritsNoDescriptorBeyondItsTerminal() async throws {
-        // An earlier pane is still alive, so this process holds its master descriptor open. A
-        // child spawned now must not receive it, or the earlier pane's terminal stays open after
-        // its own child has gone and that pane never reports an end.
+        // Unlike the pty ends, this descriptor deliberately has no close-on-exec flag. It is
+        // therefore closed only by POSIX_SPAWN_CLOEXEC_DEFAULT, whose behavior this test isolates.
+        let inheritedCandidate = Darwin.open("/dev/null", O_RDONLY)
+        guard inheritedCandidate >= 0 else {
+            XCTFail("could not open the descriptor-isolation probe")
+            return
+        }
+        defer { _ = Darwin.close(inheritedCandidate) }
+        let descriptorFlags = fcntl(inheritedCandidate, F_GETFD)
+        XCTAssertTrue(
+            descriptorFlags != -1 && descriptorFlags & FD_CLOEXEC == 0,
+            "the descriptor-isolation probe unexpectedly had FD_CLOEXEC"
+        )
+
         let directory = try PTYTestChild.temporaryDirectory()
         defer { PTYTestChild.remove(directory) }
-        let earlier = try PTYProcess(
-            spawning: PTYTestChild.request(
-                cwd: directory,
-                script: """
-                printf 'hold-ready\\n'
-                IFS= read -r hold
-                """
-            )
-        )
-        defer { PTYTestChild.terminateAndReap(earlier) }
-        _ = try await PTYTestChild.output(from: earlier.events, until: "hold-ready")
-
-        // `[ -e ]` is a shell builtin, so the survey opens nothing of its own.
+        // `[ -e ]` is a shell builtin, so the survey opens nothing of its own. It reports only
+        // the candidate descriptor's number and never identifies what that descriptor refers to.
         let survey = """
         extra=
-        for n in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-          if [ -e "/dev/fd/$n" ]; then extra="$extra $n"; fi
-        done
+        if [ -e "/dev/fd/\(inheritedCandidate)" ]; then
+          extra=" \(inheritedCandidate)"
+        fi
         printf 'extra=[%s]\\n' "$extra"
         printf 'g1-descriptors-ready\\n'
         IFS= read -r hold
         """
-        let later = try PTYProcess(spawning: PTYTestChild.request(cwd: directory, script: survey))
-        defer { PTYTestChild.terminateAndReap(later) }
+        let process = try PTYProcess(
+            spawning: PTYTestChild.request(cwd: directory, script: survey)
+        )
+        defer { PTYTestChild.terminateAndReap(process) }
 
         let output = try await PTYTestChild.output(
-            from: later.events,
+            from: process.events,
             until: "g1-descriptors-ready"
         )
         let reported = output
@@ -219,7 +237,7 @@ final class PTYSpawnTests: XCTestCase {
         XCTAssertEqual(
             reported,
             "extra=[]",
-            "the child inherited descriptors beyond its own terminal (numbers only): \(reported ?? "none")"
+            "the child inherited an extra descriptor (numbers only): \(reported ?? "none")"
         )
     }
 
@@ -344,6 +362,55 @@ final class PTYSpawnTests: XCTestCase {
             expected,
             "the bytes the child echoed back are not the bytes written, in order"
         )
+    }
+
+    func testWriteGateAdmitsQueuedCallersInActorEntryOrder() async throws {
+        let directory = try PTYTestChild.temporaryDirectory()
+        defer { PTYTestChild.remove(directory) }
+        let script = PTYTestChild.selfTerminating(after: 60, """
+        /bin/stty raw -echo
+        printf 'fifo-ready\\r\\n'
+        sleep 3
+        exec /bin/cat
+        """)
+        let process = try PTYProcess(spawning: PTYTestChild.request(cwd: directory, script: script))
+        defer { PTYTestChild.terminateAndReap(process) }
+
+        let (recorder, reader) = PTYTestChild.record(process.events)
+        defer { reader.cancel() }
+        let marker = Data("fifo-ready\r\n".utf8)
+        try await PTYTestChild.waitUntil(seconds: 5) {
+            recorder.snapshot.range(of: marker) != nil
+        }
+        let prefixLength = recorder.snapshot.count
+
+        let payload = Data((0..<(64 * 1024)).map { UInt8($0 % 251) })
+        let holder = Task { try await process.write(payload) }
+        defer { holder.cancel() }
+        try await Task.sleep(for: .milliseconds(200))
+
+        // The holder remains suspended against the stalled child. Let each following caller enter
+        // the actor and join the gate before starting the next, so their queue order is explicit.
+        let secondBytes = Data(repeating: 0xFD, count: 64)
+        let second = Task { try await process.write(secondBytes) }
+        defer { second.cancel() }
+        try await Task.sleep(for: .milliseconds(200))
+
+        let thirdBytes = Data(repeating: 0xFE, count: 64)
+        let third = Task { try await process.write(thirdBytes) }
+        defer { third.cancel() }
+        try await Task.sleep(for: .milliseconds(200))
+
+        try await PTYTestChild.withDeadline(seconds: 20) { try await holder.value }
+        try await PTYTestChild.withDeadline(seconds: 20) { try await second.value }
+        try await PTYTestChild.withDeadline(seconds: 20) { try await third.value }
+
+        let expected = payload + secondBytes + thirdBytes
+        try await PTYTestChild.waitUntil(seconds: 20) {
+            recorder.snapshot.count >= prefixLength + expected.count
+        }
+        let echoed = Data(recorder.snapshot.dropFirst(prefixLength).prefix(expected.count))
+        XCTAssertEqual(echoed, expected, "queued writes reached the child out of order")
     }
 
     func testWriteGateAcquisitionIsCancellable() async throws {

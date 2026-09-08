@@ -59,7 +59,7 @@ public actor PTYProcess {
     /// The gate that makes `write` a queue rather than a race. A caller that has to wait for the
     /// master to drain suspends, which lets a second `write` enter the actor; without the gate
     /// the two would interleave their `Darwin.write` calls and shuffle the bytes. Callers are
-    /// admitted in the order they reached the gate, so the bytes reach the child in that order.
+    /// admitted in the order they entered the actor, so the bytes reach the child in that order.
     ///
     /// Waiting for the gate is cancellable. A queue that could only be left by reaching the front
     /// would make one stalled child hold every later caller — including a pane being torn down —
