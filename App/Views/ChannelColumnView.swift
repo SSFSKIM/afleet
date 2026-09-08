@@ -28,6 +28,7 @@ struct ChannelColumnView: View {
                                   detail: "Pick a channel in the sidebar, or press Command-K.")
             }
         }
+        .modifier(ChannelDecorations(channel: row?.key, project: row?.cwd, lifecycle: workspace.fleet, panels: app.panels))
         .navigationTitle(row?.title ?? "afleet")
     }
 
