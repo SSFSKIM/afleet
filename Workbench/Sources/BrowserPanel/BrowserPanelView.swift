@@ -265,7 +265,10 @@ struct BrowserQuickOpenSheet: View {
 
     @Bindable var model: BrowserModel
     @Bindable var session: BrowserTabSession
-    @State private var highlighted: Int = 0
+    /// The row the keyboard is on. The rule lives in the value type, not here: a `@State` integer
+    /// moved inside a gesture is not something a test can drive, and Q8's "Enter opens the selected
+    /// URL" is a rule (C2 of fix wave C).
+    @State private var selection = BrowserQuickOpenSelection()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -287,6 +290,18 @@ struct BrowserQuickOpenSheet: View {
             .padding(8)
         }
         .frame(width: 520, height: 360)
+        // The arrow keys, on the sheet rather than on the field: a single-line `TextField` keeps
+        // the caret and hands these on, and the submit reads the same selection they move.
+        .onKeyPress(.upArrow) {
+            selection.moveUp()
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            selection.moveDown(resultCount: session.results.count)
+            return .handled
+        }
+        // The filter narrowing must not leave the highlight past the end of what it left behind.
+        .onChange(of: session.results.count) { _, count in selection.resultsChanged(count: count) }
         .background {
             // The Cmd-Return half of Q8. It is a button rather than a key handler on the field
             // because a submitted `TextField` cannot report its modifiers.
@@ -312,10 +327,10 @@ struct BrowserQuickOpenSheet: View {
                     .font(.caption.monospaced())
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .listRowBackground(index == highlighted ? Color.accentColor.opacity(0.2) : nil)
+                    .listRowBackground(index == selection.index ? Color.accentColor.opacity(0.2) : nil)
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        highlighted = index
+                        selection.select(index)
                         submit(commandHeld: false)
                     }
             }
@@ -325,8 +340,8 @@ struct BrowserQuickOpenSheet: View {
 
     private func submit(commandHeld: Bool) {
         let results = session.results
-        guard results.indices.contains(highlighted) else { return }
-        model.open(results[highlighted].url, in: .quickOpenSubmission(commandHeld: commandHeld))
+        guard let chosen = selection.chosenIndex(resultCount: results.count) else { return }
+        model.open(results[chosen].url, in: .quickOpenSubmission(commandHeld: commandHeld))
         session.closeQuickOpen()
     }
 }

@@ -19,6 +19,51 @@ public enum BrowserQuickOpen {
     }
 }
 
+/// Which row of quick-open's list the keyboard is on (Q8).
+///
+/// A value type, and outside the view, because "Enter opens the selected URL" is a rule and a
+/// `@State` integer mutated inside a gesture is not one a test can drive. The view owns an instance
+/// of this, the arrow keys move it, and the submit reads the same one.
+public struct BrowserQuickOpenSelection: Equatable, Sendable {
+
+    /// The highlighted row, always a valid index into the results it was last clamped against, or
+    /// 0 when there are none.
+    public private(set) var index: Int = 0
+
+    public init() {}
+
+    /// Up arrow: the row above, stopping at the first. It does not wrap — a list that jumps from
+    /// its top to its bottom under a held key is a list nobody can aim at.
+    public mutating func moveUp() {
+        index = max(0, index - 1)
+    }
+
+    /// Down arrow: the row below, stopping at the last.
+    public mutating func moveDown(resultCount: Int) {
+        guard resultCount > 0 else { return }
+        index = min(resultCount - 1, index + 1)
+    }
+
+    /// The filter changed. The highlight stays where it is if that row still exists and lands on
+    /// the last row if it does not, so a query that narrows the list cannot leave the selection
+    /// pointing past the end of it.
+    public mutating func resultsChanged(count: Int) {
+        index = min(index, max(0, count - 1))
+    }
+
+    /// A row the pointer aimed at. The tap and the arrow keys move the one selection, so what a
+    /// click submits and what Enter submits can never be two different rows.
+    public mutating func select(_ row: Int) {
+        index = max(0, row)
+    }
+
+    /// Which row a submission opens, or `nil` when there is nothing to open.
+    public func chosenIndex(resultCount: Int) -> Int? {
+        guard resultCount > 0, index < resultCount else { return nil }
+        return index
+    }
+}
+
 /// The Browser tab's per-channel state, and **only** what is per channel (Q20).
 ///
 /// The tab set is shared across the window and lives on `BrowserModel`, which the `BrowserTab`
