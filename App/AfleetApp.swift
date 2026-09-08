@@ -7,6 +7,11 @@ import PanelHostAPI
 struct AfleetApp: App {
     @State private var model = AppModel()
 
+    /// §7.4's *Quit* clause, and the only reason this scene carries a delegate: `applicationShouldTerminate`
+    /// is `NSApplicationDelegate`'s and SwiftUI publishes it nowhere else. The hook itself, the
+    /// dialog and the termination order all live in `App/Header/QuitGuard.swift`.
+    @NSApplicationDelegateAdaptor(AfleetQuitDelegate.self) private var quitDelegate
+
     /// Spike S-C5-1, on an environment variable nothing but the spike sets. An ordinary launch
     /// reads one variable and does nothing else here.
     init() { NotificationSpike.runIfRequested() }
@@ -24,6 +29,9 @@ struct AfleetApp: App {
                 // further edits, so the model reaches `ChannelRowView` through the environment
                 // rather than through four more initialiser arguments.
                 .environment(model)
+                // The guard is built at quit time, not here: `bindWorkspace` may not have run when
+                // the window first appears, and a guard captured before it would hold no fleet.
+                .task { quitDelegate.makeGuard = { QuitGuard.forApp(model) } }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                     shell.isApplicationActive = NSApplication.shared.isActive
                 }

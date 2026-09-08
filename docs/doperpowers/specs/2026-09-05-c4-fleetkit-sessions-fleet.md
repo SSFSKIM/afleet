@@ -1858,6 +1858,33 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-09, from C6.2's third review round: `ChannelSupervisor.settledForkKey()` also waits while
+  `resolveForkIdentity` is running — that method cancels the identity deadline before its first await and re-keys the
+  channel several awaits later, and the wait's old guard read that window as settled and answered the provisional key
+  a host was about to be re-keyed away from.
+- 2026-09-08, from C6.2's second review round: `ChannelSupervisor.publish()` recomputes `state.presence` before it
+  yields — `deliver`, the pump's `.user` and `.result` arms and the queued-input flush all moved `turnRunning` and
+  published without it, so a running turn was published as idle and §7.4's *Quit* clause ended it with no dialog —
+  and `LifecycleAPI` gains `resolvedForkKey(of: ChannelKey)`, answering the key a fork ends up filed under once its
+  identity resolves, because `fork(at:on:)` answers a provisional id the fleet re-keys away from and nothing in a
+  published `ChannelState` records that the two ids were one channel.
+- 2026-09-08: `LifecycleAPI` gains `fork(at:on:)`, answering the sibling's provisional
+  `ChannelKey`, and `ProcessHandle.send` now takes the caller's uuid instead of minting one.
+  `ChannelSupervisor.fork(at:)` has always answered the provisional key and `perform(.fork)` has
+  always discarded it, so a host that forked could not name, select or prefill the channel it had
+  just opened — C6.2's *Fork from here* wrote the edited message into the source instead. Same
+  preconditions and refusals as `perform(.fork(at:))`, which stays for the whole-conversation
+  *Fork*. The uuid change closes `sendPrompt`'s contract in the one state where the answer and the
+  write are separated in time: a send admitted while the channel is connecting is queued with the
+  uuid its caller was answered and written under that uuid when the handshake lands, where the
+  handle previously minted a second one that nothing above X5 ever saw.
+- 2026-09-08, from C6.2's fix wave: X5 gains `engineReports(of:)` — the handshake and
+  `system/init` this channel has already reported, for a surface that subscribed to the
+  future-only `events(of:)` after they arrived — and `resolveSetting(_:to:on:)`, which `Fleet`
+  already implemented and no protocol exposed, so a picker correcting a setting a restart did not
+  carry could not advance the fleet's own banner and left the channel connecting behind an open
+  field.
+
 - 2026-09-08 corrective on `main` from C6.2's `[parent-impact]`: X5 gains `quit` and
   `liveTaskIDs(of:)`. Parent §7.4's *Quit* clause — terminate every owned channel that has a
   process, then `Fleet.shutdown()`, then exit — was added at C5's merge, after C4's FleetKit

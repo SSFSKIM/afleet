@@ -276,11 +276,19 @@ enum PipeDrain {
 /// that followed. Reads are event-driven, non-blocking `DispatchSourceRead`s for the same reason,
 /// and the exit path takes one last non-blocking pass over each pipe so that everything the child
 /// wrote before exiting is in the result.
-private final class ToolJob: @unchecked Sendable {
+///
+/// Internal rather than file-private so that a test can drive one child directly. The two orderings
+/// this class has to survive — a budget that expires *inside* the escalation's grace, and a final
+/// drain that overruns the cap after the leader has been reaped — are reachable only in windows of
+/// tens of milliseconds through `ToolRunner.run`, which owns both the timing and the grace. Driven
+/// directly, a test chooses when `finish` is called and how long the grace is, and the ordering
+/// becomes the assertion rather than a race the machine wins or loses.
+final class ToolJob: @unchecked Sendable {
 
     /// After the first signal, how long the tree gets before `SIGKILL`, and then before we settle
-    /// anyway.
-    private static let grace = DispatchTimeInterval.milliseconds(500)
+    /// anyway. Per instance so a test can put the budget's expiry *inside* it.
+    static let defaultGrace = DispatchTimeInterval.milliseconds(500)
+    private let grace: DispatchTimeInterval
 
     private let queue = DispatchQueue(label: "afleet.source-control.tool-runner")
     private let executable: URL
@@ -298,11 +306,22 @@ private final class ToolJob: @unchecked Sendable {
     private var drains: [(fd: Int32, source: DispatchSourceRead, append: (Data) -> Void)] = []
 
     private var pid: pid_t = -1
+    /// The group the child leads, kept apart from `pid` because it outlives the reap.
+    ///
+    /// A reaped pid may be handed to a stranger, so `pid` is unusable the moment `reaped` is set; a
+    /// **group** id is not, because the kernel will not reuse a pid that still names a group with
+    /// members. `kill(-group, …)` after the leader is reaped therefore either reaches this command's
+    /// surviving descendants or answers `ESRCH`, and can never reach anyone else.
+    private var group: pid_t = -1
     private var exitSource: DispatchSourceProcess?
     private var exitStatus: Int32 = -1
     private var exited = false
     private var reaped = false
     private var terminating = false
+    /// Whether the `SIGKILL` a termination owes the group has been sent. Separate from `settled`:
+    /// the child's exit and the group's quiescence are two facts, and the call can be over while
+    /// the tree is not.
+    private var escalated = false
     private var timedOut = false
     private var cancelled = false
     private var settled = false
@@ -318,7 +337,8 @@ private final class ToolJob: @unchecked Sendable {
     private var accepting = false
 
     init(executable: URL, arguments: [String], cwd: URL, environment: [String: String],
-         outputLimitBytes: Int) {
+         outputLimitBytes: Int, grace: DispatchTimeInterval = ToolJob.defaultGrace) {
+        self.grace = grace
         self.executable = executable
         self.arguments = arguments
         self.cwd = cwd
@@ -383,6 +403,10 @@ private final class ToolJob: @unchecked Sendable {
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
             }
             pid = child
+            // `POSIX_SPAWN_SETPGROUP` with a `pgroup` of 0 makes the child its own group leader, so
+            // the group's id *is* the child's pid — recorded separately because the pid stops being
+            // usable at the reap and the group id does not.
+            group = child
             // The parent's copies of the write ends, so that the pipes report end-of-file when the
             // last writer in the child's tree is gone.
             try? out.fileHandleForWriting.close()
@@ -429,6 +453,10 @@ private final class ToolJob: @unchecked Sendable {
             // from being called an overrun; the `terminating` guard keeps a call already being torn
             // down for another reason — a cancellation, the output cap — from being relabelled.
             if self.exited {
+                // Answers the caller even when a termination is already under way — a child that
+                // exited on the `SIGTERM` has nothing more to write. What it does *not* do is call
+                // that termination off: the escalation is owed to the group, not to the caller, and
+                // is keyed on `escalated` rather than on this settlement.
                 self.settle()
             } else if !self.terminating {
                 self.timedOut = true
@@ -452,26 +480,45 @@ private final class ToolJob: @unchecked Sendable {
     // MARK: - the tree
 
     /// `SIGTERM` to the whole group, then `SIGKILL` to it after a grace, then settle.
+    ///
+    /// **Not conditioned on `settled`, at either end.** A termination is a promise made to the
+    /// *group*, and the group can outlive the call: `git` exits on `SIGTERM` while a hook's
+    /// backgrounded descendant that ignores it does not, and the awaiting caller can be answered in
+    /// between — by a budget that expired inside the grace, or by a final drain that overran the cap
+    /// after settlement had begun. Skipping the `SIGKILL` because there is nobody left to tell
+    /// leaves that descendant on the machine, which is the one outcome this path exists to prevent.
+    /// The escalation therefore runs until it has run, and `escalated` — not `settled` — is what
+    /// says it has.
+    ///
+    /// The two escalation blocks hold `self` **strongly**, unlike the budget's own timer: they are a
+    /// second apart rather than a whole budget, and a weak capture would hand the group's fate to
+    /// whether `run` happened to return first.
     private func beginTermination() {
-        guard !terminating, !settled else { return }
+        guard !terminating else { return }
         terminating = true
         signalTree(SIGTERM)
-        queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in
-            guard let self, !self.settled else { return }
-            self.signalTree(SIGKILL)
-            self.queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in self?.settle() }
+        queue.asyncAfter(deadline: .now() + grace) { [self] in
+            guard !escalated else { return }
+            escalated = true
+            signalTree(SIGKILL)
+            queue.asyncAfter(deadline: .now() + grace) { [self] in settle() }
         }
     }
 
     /// Signals the child's process group, and the child alone only if the group has already gone.
     ///
     /// The negative pid is the whole point: the child leads a group of its own, so one call reaches
-    /// every descendant it started and nothing else on the machine. It is safe because the child is
-    /// not reaped until settlement — an unreaped pid cannot be reused, so this can never name a
-    /// stranger's group.
+    /// every descendant it started and nothing else on the machine.
+    ///
+    /// The group is signalled **whether or not the leader has been reaped**, because those are two
+    /// different questions: `waitpid` collects one process, and the group is whatever is still in
+    /// it. A pid that names a group with members is not reused, so the negative form is safe here
+    /// for as long as there is anything for it to reach. The single-process fallback is not:
+    /// `kill(pid, …)` after the reap could name a stranger, so it is asked only while the pid is
+    /// still reserved.
     private func signalTree(_ signal: Int32) {
-        guard !reaped, pid > 0 else { return }
-        if kill(-pid, signal) != 0 && errno == ESRCH { _ = kill(pid, signal) }
+        guard group > 0 else { return }
+        if kill(-group, signal) != 0 && errno == ESRCH && !reaped && pid > 0 { _ = kill(pid, signal) }
     }
 
     /// The exit source fired. Outside a termination the child is reaped here and the call settles;
@@ -610,10 +657,14 @@ private final class ToolJob: @unchecked Sendable {
         guard !settled else { return }
         guard accepting else { pendingSettle = true; return }
         settled = true
+        // This last pass can be the one that overruns the cap — a `git` that exits leaving a hook's
+        // descendant on its stdout is exactly the shape — and `accept` ends the tree for it like any
+        // other. That termination is begun *here*, after `settled` and possibly after the leader was
+        // reaped, and both are why neither is a condition on it.
         drainRemaining()
         for d in drains where !d.source.isCancelled { d.source.cancel() }
         // The reap a termination deferred: the status is still there to collect, and after this the
-        // pid is nobody's to signal.
+        // pid is nobody's to signal, though the group it named still is.
         reapIfExited()
         abandonUnreapedChild()
         let output = ToolOutput(stdout: stdoutData, stderr: stderrData,

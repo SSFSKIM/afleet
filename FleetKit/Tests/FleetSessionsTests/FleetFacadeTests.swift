@@ -926,6 +926,49 @@ final class FleetFacadeTests: XCTestCase {
         XCTAssertEqual(explanation, RouterTable.explanation(forTerminalOnly: "/doctor"))
     }
 
+    /// The two reports a **late** surface reads back: the handshake and `system/init`, which the engine sends once
+    /// per process and never again.
+    ///
+    /// A composer that mounts onto a channel that came up minutes ago subscribes to a stream that will not repeat
+    /// either of them, so without this query the mode picker has nothing to display and autocomplete has no engine
+    /// command list. The values are the same ones `route` decides against — the supervisor's own — so the surface
+    /// and the router cannot come to disagree, and a key the fleet owns no supervisor for answers nil.
+    ///
+    /// Deliberate break: answer nil for an owned channel → the two unwraps below fail.
+    func testTheFacadeAnswersTheReportsALateSurfaceMissed() async throws {
+        let systemInit = try Self.recordedFrame("control-shapes", type: "system", subtype: "init")
+        await harness.tearDown()
+        harness = try Harness(replaying: [["emit": systemInit]])
+        let harness = self.harness!
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: try fixtureSession())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        try await harness.waitFor("the engine's system/init to land") {
+            await fleet.state(of: k)?.apiKeySource != nil
+        }
+
+        let answered = await fleet.engineReports(of: k)
+        let reports = try XCTUnwrap(answered, "an owned channel reported nothing")
+
+        let handshake = try XCTUnwrap(reports.handshake, "the retained handshake was not answered")
+        XCTAssertNotNil(handshake.currentPermissionMode, "the handshake carries no mode for a picker to display")
+        let commands = try XCTUnwrap(reports.systemInit?.terminalSlashCommands,
+                                     "the retained system/init was not answered")
+        XCTAssertGreaterThan(commands.count, 0,
+                             "the recorded system/init named \(commands.count) terminal command(s)")
+        // The same two values the router decides against, so the surface and the routing cannot disagree.
+        let owned = await fleet.channel(k)
+        let supervisor = try XCTUnwrap(owned, "the fleet owns no supervisor for an open channel")
+        let context = await supervisor.routingContext()
+        XCTAssertEqual(reports.systemInit?.slashCommands, context.systemInit?.slashCommands,
+                       "the surface and the router were told two different stories")
+
+        let unknown = key(SessionID())
+        let none = await fleet.engineReports(of: unknown)
+        XCTAssertNil(none, "a key the fleet owns no supervisor for reported something")
+    }
+
     /// A key the fleet owns no supervisor for is not a channel to act on, and the two acting operations refuse it
     /// with the error the facade already uses for that case. Routing is not one of them: it is a pure function of
     /// the line, and a line typed into a channel that has not opened yet still resolves against the local table.
@@ -1023,6 +1066,39 @@ final class FleetFacadeTests: XCTestCase {
 
         held.release()
         _ = try await reaping.value
+    }
+
+    // MARK: - The fork the host has to be able to name
+
+    /// `fork(at:on:)` answers the **sibling's** key; `perform(.fork(at:))` answers the source's state and names the
+    /// sibling nowhere.
+    ///
+    /// The stake is the composer's *Fork from here*: the fork's own field is what the edited message is prefilled
+    /// into and the window has to select it, and with only `perform` the host had no name for the channel it had
+    /// just opened — so it wrote the prefill into the **source**, where sending it would go to the conversation the
+    /// user was editing away from. Both doors are driven here, so a facade that opened the fork and still could not
+    /// say which channel it was fails on the first assertion.
+    ///
+    /// Deliberate break: return `key` from `Fleet.fork(at:on:)` → the answer names the source.
+    func testForkAnswersTheSiblingsKeyWhilePerformAnswersTheSourcesState() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: SessionID())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+
+        let sibling = try await fleet.fork(at: ForkPoint(entryUUID: "an-invented-record", dropsTurn: "an-invented-prompt"),
+                                           on: k)
+
+        XCTAssertNotEqual(sibling, k, "the fork answered the source's own key, so the host cannot reach the sibling")
+        let forked = await fleet.state(of: sibling)
+        XCTAssertNotNil(forked, "the fleet holds no channel under the key the fork answered")
+        XCTAssertEqual(forked?.origin, .owned(.connecting), "a fork stays connecting until its identity resolves")
+
+        let viaPerform = try await fleet.perform(.fork(at: nil), on: k)
+        XCTAssertEqual(viaPerform.key, k,
+                       "`perform(.fork)` answers something other than the source's state, which this member exists "
+                       + "because it does")
     }
 
     /// A channel held in the user's terminal refuses a prompt the way `perform(.send)` does: rule 6's

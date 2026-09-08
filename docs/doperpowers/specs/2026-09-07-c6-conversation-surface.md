@@ -202,6 +202,23 @@ lacks files a `[parent-impact]` against X5 rather than reaching around it (C5's 
 entries 74 and 77 are two such queries already filed: the owned-actions readback and the
 roster-change signal).
 
+### Contract Y6 — edit and the drift replacement cross the row/composer seam
+
+**[binding]** Named 2026-09-08 at C6.2's merge, from C6.2's tracker 153: Y4 named chip-to-run in
+one direction and the cut never named the mirror case, so with every gate green on both sides the
+app would ship an *Edit* wired to nothing and a drift replacement nobody sees. Three sites, all in
+`App/Timeline/` (C6.1), over a model that is C6.2's: an *Edit* row action on a past user message
+calls `ComposerModel.edit(_:)`, and the composer owns everything it triggers (the rewind carrying
+`last_seen_user_message_uuid`, the body reading, the *Fork from here* fallback); when a rewind was
+refused and a fork opened, the composer sets `ComposerModel.editNote` and the row renders it beside
+the edited message; an assistant row whose frame uuid is in `ComposerModel.interceptedReplacements`
+draws the replacement in place of the frame (§7.7) — a substitution, not an annotation: the frame's
+own text appears nowhere in the row, which is the clause a test must fail on, since an annotation
+passes the positive half alone — the composer owns the interception and the counts, the row owns the
+substitution. C6.1 verifies all three through the composer model or C6.2's
+recording double, no engine, and its call removes the `edit(_:)` allowlist line from
+`check-app-wiring.py`.
+
 ### Rendering (advisory, C6.1)
 
 `NSTableView`-backed list virtualized by `ItemID`, bottom-anchored, as §8.3. Streaming
@@ -311,10 +328,15 @@ leaves in one target could settle them.
   context meter from `get_settings` and `get_context_usage` readbacks replayed from
   `control-shapes`, never from a picker's last click. G5 (required, live, zero turns): opening
   a foreign session under the scratch home (C5's `ScratchLiveGate`) renders its history within
-  five seconds with zero unattributed config-home changes.
+  five seconds with zero unattributed config-home changes. G6 (required; added 2026-09-08 at
+  C6.2's merge, contract Y6): an *Edit* row action on a past user message reaches
+  `ComposerModel.edit(_:)`; a refused rewind's `editNote` renders beside that row; an assistant
+  row whose uuid is in `interceptedReplacements` draws the replacement in place of the frame —
+  through the composer model or C6.2's recording double, no engine.
 - **Edges:** blocked-by: the Y1 skeleton on `main`; blocks: C6.3 (row slot), C6.4 (view
   reuse); conditional on nothing.
-- **Contracts:** Y1 (fills), Y4 (calls), X4, X7 (reads `ChannelContext`).
+- **Contracts:** Y1 (fills), Y4 (calls), Y6 (calls and renders; named 2026-09-08 at C6.2's
+  merge), X4, X7 (reads `ChannelContext`).
 - **Design inheritance:** §8.3 (advisory), §7.3 (binding as consumed), S7 (the spike is the
   leaf's), X4.
 - **Track hint:** controlled. Tracker entries **127–141**.
@@ -348,13 +370,37 @@ leaves in one target could settle them.
   X9 seam records no write). G6 (required, live, at most four turns): items 2, 8 and 12 under
   the scratch home with the config-home witness reading zero unattributed changes. G7
   (required): every picker's displayed value is a readback replayed from `control-shapes`.
+  **Outcome 2026-09-08:** G1, G2, G3, G4, G5 and G7 met; G6's zero-turn half ran live and
+  passed, its prompted half (items 2, 8, 12) is **blocked** by the scratch account's organisation
+  policy with zero of four turns spent — carried as a manual witness with the quit `NSAlert`, the
+  delegate adaptor in the real scene and `.quit` against a busy live engine. Three
+  `[parent-impact]`s, all resolved on `main` as correctives (`6abd4a0` X10 refusal copy,
+  `d802792` `sendPrompt`, `b86a73a` `quit`/`liveTaskIDs(of:)`). Four gates found thinner than
+  their wording by the leaf's own audit and re-cut, each proved by mutation; the substitution
+  half of G1 and the visible-note half of G4 are C6.1's through Y6. Merge review: one panel round
+  (32 confirmed, 5 P1) closed by four file-partitioned waves — channel switch identity, the shell
+  escape's ownership check, bounded capture, process group and cancellation, the quit re-census,
+  the fork's own channel, the prompt's own uuid during a spawn, cancelled prompts retired from
+  attribution, restart completion judged by epoch, routed setting changes through the header's
+  gate, IME composition before Return — then a second round (22 confirmed, 4 P1) closed by three
+  more waves: presence recomputed at publication (a C4 defect the sidebar shared), no composer on
+  a read-only row, the fork's prefill delivered under its resolved identity, the restart gate as
+  one state machine with a single release point, the shell escape's escalation owed to the group
+  — then a third (14) and a fourth (11): the header's *Open in terminal* now warns from
+  `liveTaskIDs(of:)` before ending shells (X9), an image with no words is a message, quitting
+  cancels running `!` commands, and the restart-required-settings gate — three rounds of local
+  patches had each produced the next round's races — was rebuilt as one generation-fenced
+  operation behind a single predicate every entry point consults. A fifth round closed the
+  review under the convergence rule (findings dispositioned as debt or dismissed unless a rule
+  violation). X4/X5 amended as the parent records.
 - **Edges:** blocked-by: the Y1 skeleton; blocks: nothing inside C6; C6.4's *Send message*
   reuses its send path.
-- **Contracts:** Y5, X5, X10, X7 (`ChannelContext.environment` for `!`).
+- **Contracts:** Y5, Y6 (owner), X5, X10, X7 (`ChannelContext.environment` for `!`).
 - **Design inheritance:** §6.6, §7.7, §8.5, §8.6 (binding); §8.3's header list (advisory
   split: readbacks to C6.1, menus here).
 - **Track hint:** controlled. Tracker entries **142–156**.
-- **Status:** not-dispatched, dispatchable on approval. Worktree `../afleet-c6/composer`.
+- **Status:** **merged** 2026-09-08 at `c2dae0f` from `child/c6-composer` `4902242`
+  (72 commits). Worktree `../afleet-c6/composer` retired.
 
 ### C6.3: Decision cards and threads — plan
 
@@ -427,6 +473,8 @@ leaves in one target could settle them.
   (`.agents`).
 - **Y4 Chip-to-run navigation.** Owner: C6.4; C6.1 calls it. Binds both.
 - **Y5 Everything through X5.** Owner: this document (X5 and X9 ride it). Binds all four.
+- **Y6 Edit and the drift replacement across the row/composer seam.** Owner: C6.2 (the model
+  side, landed); C6.1 calls and renders. Binds both. Named 2026-09-08 at C6.2's merge.
 
 ## Ordering & Dependency Map
 
@@ -480,7 +528,7 @@ recomposition, it is a corrective child of this composite).
 |---|---|---|
 | Y1 skeleton | landed by the orchestrator on `main` at `5e24f1a` (row registry keyed by `TimelineCategory`, seven leaf directories, Y4's `AgentNavigating` seam) | landed 2026-09-08 |
 | C6.1 Timeline renderer | spec and plan `2026-09-08-c6.1-timeline-renderer.md` on `child/c6-timeline-renderer` (worktree `../afleet-c6/timeline-renderer`) | dispatched 2026-09-08 from `5e24f1a` |
-| C6.2 Composer and header | spec and plan `2026-09-08-c6.2-composer.md` on `child/c6-composer` (worktree `../afleet-c6/composer`) | dispatched 2026-09-08 from `5e24f1a` |
+| C6.2 Composer and header | `2026-09-08-c6.2-composer.md`; Outcomes in the child spec | **merged** 2026-09-08 at `c2dae0f` from `child/c6-composer` `4902242` (72 commits); G1–G5, G7 met, G6 half live and half blocked by organisation policy (manual witness); floor 1336 at the tip; tracker 142–156 (146, 151 closed by `main` correctives; 153 named as Y6; 147, 156 open) and 196–231 from the five-round merge review (208 and 218 closed; 209, 210 and 226 are recomposition items for C3/C4; five panel rounds, twelve waves) |
 | C6.3 Decision cards and threads | spec and plan `2026-09-08-c6.3-decisions.md` on `child/c6-decisions` (worktree `../afleet-c6/decisions`) | dispatched 2026-09-08 from `5e24f1a`; in-timeline row after C6.1 |
 | C6.4 Agents panel | spec and plan `…-c6.4-agents.md` on `child/c6-agents` | blocked-by C6.1, C6.3 |
 
@@ -541,3 +589,9 @@ Parent-Level Acceptance as written, then the retrospective.
 - 2026-09-08: item 13 corrected from the probe (parent Revision Note of the same date) — the
   composer always supplies `last_seen_user_message_uuid`; the fork fallback is the rare path;
   C6.2's G4 re-worded.
+- 2026-09-08 reconciliation of C6.2 (merge `c2dae0f` from `child/c6-composer` `4902242`,
+  72 commits). Contract Y6 named from tracker 153, with a G6 on C6.1 for it; C6.1 flagged.
+  Three `[parent-impact]`s resolved as `main` correctives before merge (X10 copy, `sendPrompt`,
+  `quit`). Two advisory overturns applied to the parent: §8.5's Enter and §8.7's Cmd+Enter both
+  send; §8.3's header list is split as this cut split it. §8.6 corrected: the engine compares
+  `disableBypassPermissionsMode` to the string `"disable"`. 
