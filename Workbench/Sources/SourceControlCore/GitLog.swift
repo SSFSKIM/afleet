@@ -87,6 +87,7 @@ public enum GitLog {
                                                       "-n", "\(limit)", "--skip", "\(skip)"],
                                           cwd: root, environment: environment,
                                           timeout: readTimeout)
+        try output.requireCompleted(tool: .git, timeout: readTimeout)
         guard output.exitCode == 0 else {
             throw ToolError.commandFailed(tool: .git, exitCode: output.exitCode,
                                           stderrTail: output.stderrTail)

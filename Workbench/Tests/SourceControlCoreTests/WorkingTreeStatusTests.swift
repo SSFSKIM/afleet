@@ -329,4 +329,56 @@ final class WorkingTreeStatusTests: XCTestCase {
         guard let toolError = error as? ToolError, case .decodeFailed = toolError else { return false }
         return true
     }
+
+    // MARK: - the wave stitch: a process-layer fact is read before the exit code
+
+    /// A `git status` whose budget expired exits non-zero with a partial document behind it, and
+    /// an exit-code guard alone reports that as `.commandFailed` — a *different* failure, naming
+    /// a code the command never chose. Worse in the shape where the child handles `SIGTERM` and
+    /// exits 0: the guard passes and half a status is parsed as a whole one, so a panel draws a
+    /// tree as clean that is not. The shared check (`ToolOutput.requireCompleted`) goes before the
+    /// guard; this is its representative test for the readers that resolve a root and then read.
+    func testAStatusWhoseBudgetExpiredIsTimedOutRatherThanReportedAsAFailedCommand() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "only commit", files: ["a.txt": "one\n"])
+        // 143 is SIGTERM's status, which is what a child killed at its budget leaves behind.
+        let runner = TimingOutRunner(when: { $0.contains("--porcelain=v2") }, exitCode: 143)
+
+        do {
+            _ = try await WorkingTreeStatus.read(root: fixture.root,
+                                                 environment: fixture.environment, runner: runner)
+            XCTFail("a status whose budget expired was parsed anyway")
+        } catch let error as ToolError {
+            guard case .timedOut(let tool, let afterMs) = error else {
+                return XCTFail("an expired budget threw \(error) rather than .timedOut")
+            }
+            XCTAssertEqual(tool, .git)
+            XCTAssertEqual(afterMs, 30_000, "the error named a budget other than the read timeout")
+        }
+    }
+}
+
+/// Runs every command for real except the one `when` selects, whose result carries the process-
+/// layer facts a child killed at its budget leaves behind. The facts are data on `ToolOutput`
+/// (D3), so stamping them on one command's result reproduces a killed child exactly and costs the
+/// suite no wall clock.
+private final class TimingOutRunner: ToolRunning, @unchecked Sendable {
+
+    private let inner = ToolRunner()
+    private let when: @Sendable ([String]) -> Bool
+    private let exitCode: Int32
+
+    init(when: @escaping @Sendable ([String]) -> Bool, exitCode: Int32) {
+        self.when = when
+        self.exitCode = exitCode
+    }
+
+    func run(_ tool: Tool, arguments: [String], cwd: URL, environment: [String: String],
+             timeout: Duration) async throws -> ToolOutput {
+        guard when(arguments) else {
+            return try await inner.run(tool, arguments: arguments, cwd: cwd,
+                                       environment: environment, timeout: timeout)
+        }
+        return ToolOutput(stdout: Data(), stderr: Data(), exitCode: exitCode, timedOut: true)
+    }
 }

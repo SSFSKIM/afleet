@@ -222,6 +222,10 @@ public enum GitDiff {
         let head = try await runner.run(.git, arguments: ["rev-parse", "--verify", "--quiet",
                                                           "HEAD^{commit}"],
                                         cwd: root, environment: environment, timeout: timeout)
+        // Before the unborn guard, not after it: a killed `rev-parse` exits non-zero, and this
+        // guard reads a non-zero exit as "HEAD is unborn" — so an unread timeout would not fail
+        // here, it would silently diff a repository with a history against the empty tree.
+        try head.requireCompleted(tool: .git, timeout: timeout)
         guard head.exitCode != 0 else { return base }
         return .commit(try await emptyTreeObjectName(root: root, environment: environment,
                                                      runner: runner, timeout: timeout))
@@ -236,6 +240,7 @@ public enum GitDiff {
                                             timeout: Duration) async throws -> String {
         let output = try await runner.run(.git, arguments: ["hash-object", "-t", "tree", "/dev/null"],
                                           cwd: root, environment: environment, timeout: timeout)
+        try output.requireCompleted(tool: .git, timeout: timeout)
         guard output.exitCode == 0 else {
             throw ToolError.commandFailed(tool: .git, exitCode: output.exitCode,
                                           stderrTail: output.stderrTail)
@@ -250,6 +255,7 @@ public enum GitDiff {
                              timeout: Duration) async throws -> Data {
         let output = try await runner.run(.git, arguments: arguments(for: base),
                                           cwd: root, environment: environment, timeout: timeout)
+        try output.requireCompleted(tool: .git, timeout: timeout)
         guard output.exitCode == 0 else {
             throw ToolError.commandFailed(tool: .git, exitCode: output.exitCode,
                                           stderrTail: output.stderrTail)
@@ -496,6 +502,7 @@ public enum GitDiff {
             let resolved = try await runner.run(.git,
                                                 arguments: ["rev-parse", "--verify", "--quiet", rev],
                                                 cwd: root, environment: environment, timeout: timeout)
+            try resolved.requireCompleted(tool: .git, timeout: timeout)
             guard resolved.exitCode == 0 else {
                 throw ToolError.commandFailed(tool: .git, exitCode: resolved.exitCode,
                                               stderrTail: resolved.stderrTail)
@@ -507,6 +514,7 @@ public enum GitDiff {
         }
         let output = try await runner.run(.git, arguments: ["cat-file", "blob", "\(name):\(path)"],
                                           cwd: root, environment: environment, timeout: timeout)
+        try output.requireCompleted(tool: .git, timeout: timeout)
         guard output.exitCode == 0 else {
             throw ToolError.commandFailed(tool: .git, exitCode: output.exitCode,
                                           stderrTail: output.stderrTail)
@@ -541,18 +549,24 @@ public enum GitDiff {
     ///   final component says nothing about the directories above it, so `a/link-elsewhere/x`
     ///   passes the lexical check and still leaves the repository. The final component is
     ///   deliberately *not* resolved: a link is what this function returns the destination of.
+    ///
+    /// Either refusal is `.pathOutsideRepository`, which is the module's own answer about the path
+    /// it was handed rather than a `.decodeFailed` about output git never produced: this function
+    /// runs no command at all.
     public static func workingTreeFile(root: URL, path: String) throws -> Data {
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
         guard !path.isEmpty, !path.hasPrefix("/"), !components.contains("..") else {
-            throw fail("a working-tree path must be repository-relative and carry no parent "
-                       + "component")
+            throw ToolError.pathOutsideRepository(
+                reason: "a working-tree path must be repository-relative and carry no parent "
+                        + "component")
         }
         let url = root.appending(path: path)
         let fileSystemPath = url.path(percentEncoded: false)
         guard let anchor = resolved(root.path(percentEncoded: false)),
               let parent = resolved(url.deletingLastPathComponent().path(percentEncoded: false)),
               parent == anchor || parent.hasPrefix(anchor + "/") else {
-            throw fail("a working-tree path resolves outside the repository")
+            throw ToolError.pathOutsideRepository(
+                reason: "a working-tree path's parent chain does not resolve inside the repository")
         }
         var info = stat()
         guard lstat(fileSystemPath, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK else {

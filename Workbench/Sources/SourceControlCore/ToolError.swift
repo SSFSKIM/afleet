@@ -42,6 +42,16 @@ public enum ToolError: Error, Equatable, Sendable {
     /// The directory the panel was pointed at is not inside a git repository. The panel's empty
     /// state, not an error to report (D13).
     case notARepository
+    /// A working-tree read was asked for a path that does not resolve inside the repository it
+    /// was asked of: an absolute path, one carrying a `..` component, one whose parent chain
+    /// resolves outside the root through a symbolic link in the ancestry, or one whose parent
+    /// chain does not resolve at all. The refusal is the panel's, not git's — `workingTreeFile`
+    /// reads the file system directly and the path reaches it from a rendered row (D54/4).
+    ///
+    /// `reason` names *which* of those it was, in this module's own words. It carries no path, for
+    /// the reason stated above: the offending path is the caller's byte and a rendered error is a
+    /// published one (§6.3, §11).
+    case pathOutsideRepository(reason: String)
     /// Output that did not have the shape the parser requires. `subject` names what was being
     /// decoded; a parser that silently skipped the record it could not read would make the test
     /// that compares it unfalsifiable (§17.7).

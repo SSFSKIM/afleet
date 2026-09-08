@@ -39,6 +39,7 @@ public enum GitCommands {
                                       timeout: Duration = readTimeout) async throws -> URL {
         let output = try await runner.run(.git, arguments: ["rev-parse", "--show-toplevel"],
                                           cwd: cwd, environment: environment, timeout: timeout)
+        try output.requireCompleted(tool: .git, timeout: timeout)
         let path = output.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard output.exitCode == 0, !path.isEmpty else { throw ToolError.notARepository }
         return URL(filePath: path, directoryHint: .isDirectory)

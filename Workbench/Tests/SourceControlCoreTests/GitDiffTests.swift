@@ -821,8 +821,9 @@ extension GitDiffTests {
         for path in refused {
             XCTAssertThrowsError(try GitDiff.workingTreeFile(root: fixture.root, path: path),
                                  "a path leaving the repository was read") { error in
-                guard case ToolError.decodeFailed = error else {
-                    return XCTFail("an escaping path did not throw a typed refusal")
+                guard case ToolError.pathOutsideRepository = error else {
+                    return XCTFail("an escaping path threw \(error) rather than "
+                                   + ".pathOutsideRepository")
                 }
             }
         }
@@ -868,6 +869,66 @@ extension GitDiffTests {
                        "a symbolic revision did not resolve to the committed bytes")
         XCTAssertTrue(runner.invocations.contains { $0.first == "rev-parse" },
                       "a symbolic revision was concatenated rather than resolved")
+    }
+
+    // MARK: - the wave stitch: a process-layer fact is read before the exit code
+
+    /// The one call site where an unread timeout is a *wrong answer* rather than a failure.
+    ///
+    /// `.workingTreeAgainstHEAD` first asks `rev-parse --verify --quiet HEAD^{commit}` whether
+    /// `HEAD` resolves, and reads any non-zero exit as "unborn" — which is exactly the exit a
+    /// child killed for exceeding its budget leaves behind. Without the shared check the reader
+    /// would then diff a repository with a full history against git's **empty tree** and hand the
+    /// panel a listing in which every tracked file is newly added. So the check goes on the probe
+    /// itself, before the unborn guard.
+    ///
+    /// The budget is expired by the runner rather than by a slow `git`: the process-layer facts
+    /// are data on `ToolOutput` (D3), so an interposing runner that stamps them on one command's
+    /// result reproduces a killed child exactly and costs the suite no wall clock.
+    func testATimedOutHeadProbeIsNotReadAsAnUnbornHead() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "the first commit",
+                                     files: ["a.txt": "one\n", "sub/nested.txt": "two\n"])
+        try fixture.write("a.txt", bytes: Data("one\nedited\n".utf8))
+        // 143 is SIGTERM's status, which is what a child killed at its budget leaves behind.
+        let runner = TimingOutRunner(when: { $0.first == "rev-parse" && $0.contains("HEAD^{commit}") },
+                                     exitCode: 143)
+
+        do {
+            let changes = try await GitDiff.changes(root: fixture.root, base: .workingTreeAgainstHEAD,
+                                                    environment: fixture.environment, runner: runner)
+            XCTFail("a timed-out HEAD probe was read as an unborn HEAD and produced a diff of "
+                    + "\(changes.count) change(s) against the empty tree")
+        } catch let error as ToolError {
+            guard case .timedOut(let tool, let afterMs) = error else {
+                return XCTFail("a timed-out HEAD probe threw \(error) rather than .timedOut")
+            }
+            XCTAssertEqual(tool, .git)
+            XCTAssertEqual(afterMs, 30_000, "the error named a budget other than the read timeout")
+        }
+    }
+}
+
+/// Runs every command for real except the one `when` selects, whose result carries the process-
+/// layer facts a child killed at its budget leaves behind.
+private final class TimingOutRunner: ToolRunning, @unchecked Sendable {
+
+    private let inner = ToolRunner()
+    private let when: @Sendable ([String]) -> Bool
+    private let exitCode: Int32
+
+    init(when: @escaping @Sendable ([String]) -> Bool, exitCode: Int32) {
+        self.when = when
+        self.exitCode = exitCode
+    }
+
+    func run(_ tool: Tool, arguments: [String], cwd: URL, environment: [String: String],
+             timeout: Duration) async throws -> ToolOutput {
+        guard when(arguments) else {
+            return try await inner.run(tool, arguments: arguments, cwd: cwd,
+                                       environment: environment, timeout: timeout)
+        }
+        return ToolOutput(stdout: Data(), stderr: Data(), exitCode: exitCode, timedOut: true)
     }
 }
 

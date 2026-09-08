@@ -158,6 +158,7 @@ extension WorkingTreeStatus {
                                                         runner: runner, timeout: timeout)
         let output = try await runner.run(.git, arguments: arguments(includeIgnored: includeIgnored),
                                           cwd: root, environment: environment, timeout: timeout)
+        try output.requireCompleted(tool: .git, timeout: timeout)
         guard output.exitCode == 0 else {
             throw ToolError.commandFailed(tool: .git, exitCode: output.exitCode,
                                           stderrTail: output.stderrTail)
