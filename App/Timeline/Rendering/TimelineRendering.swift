@@ -131,6 +131,14 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         tableView.reloadData()
     }
 
+    /// Adds a row and reloads only the rows that changed — the new one, and the one that was last
+    /// before it, whose separator changes. Not a whole-table reload: an assistant message arriving
+    /// in a channel with a thousand rows must not re-measure the thousand.
+    func appendRow(_ row: RenderedRow) {
+        rows.append(row)
+        tableView.insertRows(at: IndexSet(integer: rows.count - 1), withAnimation: [])
+    }
+
     /// The streaming path (§4): append to the last row's tail and reload **one row**.
     ///
     /// Returns the phase costs of this one update, which is what S7 attributes a slow frame to.
