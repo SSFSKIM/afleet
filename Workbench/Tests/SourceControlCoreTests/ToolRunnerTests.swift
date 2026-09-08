@@ -97,12 +97,17 @@ final class ToolRunnerTests: XCTestCase {
     /// git's fallback for a missing author name is the machine account's full name.
     func testTheTestProcessEnvironmentDoesNotReachTheChild() async throws {
         let sentinel = "Halvard Ossenbrink"
+        let passedEmail = "halvard@example.invalid"
+        // `setenv` is not thread-safe against a concurrent `getenv`, and `Process` reads the
+        // environment when it spawns. This is safe only because XCTest runs the tests of one
+        // class serially on one thread; if this suite ever moves to swift-testing, whose default
+        // is parallel, this mutation has to become a child process's environment instead.
         setenv("GIT_AUTHOR_NAME", sentinel, 1)
         defer { unsetenv("GIT_AUTHOR_NAME") }
         XCTAssertEqual(ProcessInfo.processInfo.environment["GIT_AUTHOR_NAME"], sentinel,
                        "the sentinel was not set in the test process's environment")
 
-        var environment = gitEnvironment(extra: ["GIT_AUTHOR_EMAIL": "halvard@example.invalid"])
+        var environment = gitEnvironment(extra: ["GIT_AUTHOR_EMAIL": passedEmail])
         environment["GIT_AUTHOR_NAME"] = nil
         XCTAssertFalse(environment.keys.contains("GIT_AUTHOR_NAME"),
                        "the passed environment still carries the variable named GIT_AUTHOR_NAME")
@@ -110,6 +115,15 @@ final class ToolRunnerTests: XCTestCase {
         let output = try await ToolRunner().run(.git, arguments: ["var", "GIT_AUTHOR_IDENT"],
                                                 cwd: tree.root, environment: environment,
                                                 timeout: .seconds(30))
+        // Two absence assertions alone can pass without the child having run at all: on a machine
+        // whose account has no full name, git's fallback for a missing author name fails and it
+        // exits 128 with an empty stdout, which contains no sentinel either. So the exit code and
+        // one positive floor come first. The floor is the invented address that *is* in the passed
+        // dictionary — leak-free, and it establishes in one assertion that the child ran and read
+        // the environment it was handed.
+        XCTAssertEqual(output.exitCode, 0, "git var GIT_AUTHOR_IDENT did not exit zero")
+        XCTAssertTrue(output.stdoutText.contains(passedEmail),
+                      "the identity git reported does not carry the address named GIT_AUTHOR_EMAIL in the passed environment, so the child did not read it")
         XCTAssertFalse(output.stdoutText.contains(sentinel),
                        "git reported the sentinel author name, so the child inherited the test process's environment")
         XCTAssertFalse(output.stderrTail.contains(sentinel),
@@ -174,8 +188,131 @@ final class ToolRunnerTests: XCTestCase {
                                                 arguments: ["rev-parse", "--verify", "nonexistent-ref"],
                                                 cwd: fixture.root, environment: fixture.environment,
                                                 timeout: .seconds(30))
-        XCTAssertNotEqual(output.exitCode, 0, "git verified a ref that does not exist")
+        // The exact code, not merely "not zero": `-1` is the runner's own sentinel for a child it
+        // settled without observing an exit, and a not-zero assertion is satisfied by exactly the
+        // observation defect this runner exists to avoid. `git rev-parse --verify` on a ref that
+        // does not resolve exits 128 (git 2.55.0, measured).
+        XCTAssertEqual(output.exitCode, 128,
+                       "git rev-parse --verify on a missing ref did not exit with git's own 128")
         XCTAssertFalse(output.timedOut, "the failing command was reported as timed out")
         XCTAssertFalse(output.stderrTail.isEmpty, "git said nothing on stderr about the missing ref")
+    }
+
+    // MARK: - R1/W1 a spawn that fails releases the descriptors it opened
+
+    /// Foundation's `Process.run()` does not close the pipes it was handed when the spawn fails,
+    /// and the termination handler installed at construction closes a `ToolJob -> process ->
+    /// handler -> ToolJob` cycle that nothing else breaks. Both together are four descriptors and
+    /// one job per failed call — and this path is not exotic: a panel polling `git` in a directory
+    /// the user has deleted takes it on every refresh.
+    ///
+    /// Descriptors are counted, never named: the assertion reports a count and no path (§6.3, §11).
+    func testAFailedSpawnDoesNotLeakDescriptors() async throws {
+        let missing = tree.root.appending(path: "no-such-executable")
+        // One failure before the baseline, so any one-time allocation on the failure path is
+        // already charged and does not read as a leak.
+        await expectSpawnFailure(executable: missing)
+        let before = Self.openDescriptorCount()
+        for _ in 0..<20 { await expectSpawnFailure(executable: missing) }
+        let leaked = Self.openDescriptorCount() - before
+        XCTAssertTrue(leaked <= 4,
+                      "20 failed spawns left \(leaked) descriptors open; the failure path does not close the pipes")
+    }
+
+    private func expectSpawnFailure(executable: URL) async {
+        do {
+            _ = try await ToolRunner().run(executable: executable, arguments: [], cwd: tree.root,
+                                           environment: [:], timeout: .seconds(5))
+            XCTFail("spawning a path that holds no executable did not throw")
+        } catch let error as ToolError {
+            guard case .spawnFailed = error else {
+                return XCTFail("a failed spawn threw something other than .spawnFailed")
+            }
+        } catch {
+            XCTFail("a failed spawn threw an error that is not a ToolError")
+        }
+    }
+
+    /// How many descriptors this process holds open right now, from `/dev/fd`, which the kernel
+    /// synthesises per process. Not `getdtablesize`, which reports the limit rather than the use.
+    private static func openDescriptorCount() -> Int {
+        (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? -1
+    }
+
+    // MARK: - R1/W3 settlement is the child's exit, and the last write is not lost
+
+    /// A grandchild that inherited stdout and outlives its parent — a pager, a credential helper,
+    /// a hook that backgrounds something — holds the write end of the pipe open after the child
+    /// itself is gone. `/bin/sh -c 'sleep 5 & echo done'` is that in miniature: measured on this
+    /// machine the child exits at ~0.00 s while end-of-file on stdout arrives at ~5.01 s, five
+    /// seconds apart.
+    ///
+    /// A runner that keyed settlement to end-of-file rather than to the exit returns five seconds
+    /// late, and this test fails it: mutated that way, the call took 5,010 ms (ledger, R1).
+    ///
+    /// It does *not* discriminate the other half of the exit path, the final non-blocking pass over
+    /// each pipe, and nothing here claims it does. With `drainRemaining()` emptied this test still
+    /// passes, and so does every construction tried against it — a delayed write, a write before
+    /// the delay, a write landing with the exit. The reason is structural rather than incidental:
+    /// the readable event goes from the kernel straight to this queue, while the exit travels
+    /// through Foundation's own reaper before it is posted here, so the read is always enqueued
+    /// first and the final pass finds the pipe already empty. The pass is defence for the case
+    /// where that ordering does not hold — a loaded queue, another platform — and its triggering
+    /// condition is not reachable from a black-box test. Recorded as tech debt rather than left as
+    /// an unfalsifiable claim.
+    func testAGrandchildHoldingStdoutOpenDoesNotDelaySettlement() async throws {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let output = try await ToolRunner().run(executable: URL(filePath: "/bin/sh"),
+                                                arguments: ["-c", "sleep 5 & echo done"],
+                                                cwd: tree.root, environment: [:],
+                                                timeout: .seconds(30))
+        let elapsed = clock.now - started
+        let elapsedMilliseconds = Int(elapsed.components.seconds * 1000)
+            + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+
+        XCTAssertEqual(output.exitCode, 0, "the shell did not exit zero")
+        XCTAssertFalse(output.timedOut, "a child that exited immediately was reported as timed out")
+        XCTAssertEqual(output.stdoutText, "done\n", "the child's write is missing from the result")
+        XCTAssertTrue(elapsedMilliseconds < 1_000,
+                      "the call took \(elapsedMilliseconds) ms for a child that exits at once, so settlement is waiting on end-of-file rather than on the exit")
+    }
+
+    // MARK: - R1/M4 a directory named like the tool is not the tool
+
+    /// Every directory carries the execute bit, so `isExecutableFile(atPath:)` is true for a
+    /// directory named `git` — and a `PATH` component holding one would resolve, then fail at
+    /// spawn with `.spawnFailed` where the honest answer is that the passed `PATH` holds no git.
+    func testADirectoryNamedLikeTheToolIsNotResolved() async throws {
+        let component = try tree.directory("path-component")
+        _ = try tree.directory("path-component/git")
+        let environment = ["PATH": component.path(percentEncoded: false)]
+        // A boolean, not `XCTAssertNil`: the operand a failing `XCTAssertNil` prints is the
+        // resolved candidate, which is a temporary path (§6.3, §11).
+        XCTAssertTrue(ToolRunner.resolve(.git, in: environment) == nil,
+                      "resolve accepted a directory named git as an executable")
+        do {
+            _ = try await ToolRunner().run(.git, arguments: ["--version"], cwd: tree.root,
+                                           environment: environment, timeout: .seconds(5))
+            XCTFail("running git on a PATH whose only git is a directory did not throw")
+        } catch let error as ToolError {
+            XCTAssertEqual(error, .binaryNotFound(tool: .git), "the wrong ToolError was thrown")
+        }
+    }
+
+    /// The other side of the same check, and the trap in it: `URLResourceKey.isRegularFileKey` is
+    /// lstat-shaped, so a symlink to a regular file reads as *not* regular. A Homebrew `git` is
+    /// exactly that symlink, so a regular-file check on the unresolved candidate would refuse the
+    /// machine's own git and take every fixture test in this suite with it.
+    func testASymlinkToAnExecutableStillResolves() async throws {
+        let component = try tree.directory("linked-path-component")
+        let real = try tree.file("real-tool/gh", "#!/bin/sh\nexit 0\n")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                              ofItemAtPath: real.path(percentEncoded: false))
+        try FileManager.default.createSymbolicLink(at: component.appending(path: "gh"),
+                                                   withDestinationURL: real)
+        let environment = ["PATH": component.path(percentEncoded: false)]
+        XCTAssertTrue(ToolRunner.resolve(.gh, in: environment) != nil,
+                      "resolve refused a symlink pointing at an executable regular file")
     }
 }

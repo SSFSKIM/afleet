@@ -68,9 +68,23 @@ public struct ToolRunner: ToolRunning {
         for component in path.split(separator: ":", omittingEmptySubsequences: true) {
             guard component.hasPrefix("/") else { continue }
             let candidate = URL(filePath: String(component)).appending(path: tool.rawValue)
-            if FileManager.default.isExecutableFile(atPath: candidate.path(percentEncoded: false)) {
-                return candidate
-            }
+            guard FileManager.default.isExecutableFile(atPath: candidate.path(percentEncoded: false))
+            else { continue }
+            // An executable *regular file*, not merely an executable path: every directory carries
+            // the execute bit, so `isExecutableFile` alone accepts a `PATH` component holding a
+            // directory named `git`, which then fails at spawn instead of resolving honestly to
+            // "the passed PATH holds no such tool".
+            //
+            // Symlinks are followed before the check and *not* in the returned URL. The resource
+            // key is lstat-shaped — it reports a symlink to a regular file as not regular — and a
+            // Homebrew `git` is exactly that symlink, so checking the unresolved URL would refuse
+            // the machine's own git. The candidate is returned unresolved so that the child is
+            // spawned at the path the passed `PATH` names (D2).
+            guard let values = try? candidate.resolvingSymlinksInPath()
+                .resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true
+            else { continue }
+            return candidate
         }
         return nil
     }
@@ -101,7 +115,12 @@ public struct ToolRunner: ToolRunning {
         do {
             try job.start()
         } catch {
-            throw ToolError.spawnFailed(tool: tool, message: (error as NSError).domain)
+            // The domain and the code, not `localizedDescription`: the domain alone is almost
+            // always `NSCocoaErrorDomain` and says nothing, while the localized description spells
+            // out the executable path, and this message is carried by a `ToolError` that may be
+            // rendered in a panel or written to a log (root spec §6.3).
+            let failure = error as NSError
+            throw ToolError.spawnFailed(tool: tool, message: "\(failure.domain) \(failure.code)")
         }
         return await withCheckedContinuation { continuation in
             job.finish(timeout: timeout) { continuation.resume(returning: $0) }
@@ -171,7 +190,26 @@ private final class ToolJob: @unchecked Sendable {
         process.terminationHandler = { [self] _ in queue.async { [self] in exited = true; settleIfComplete() } }
     }
 
-    func start() throws { try queue.sync { try process.run() } }
+    /// Starts the child, releasing everything this job holds if the spawn fails.
+    ///
+    /// Both halves are needed and both were measured. The termination handler is nilled because it
+    /// closes a `ToolJob → process → handler → ToolJob` cycle that nothing on the failure path
+    /// breaks; the four pipe handles are closed because Foundation's own failure path leaves the
+    /// descriptors it opened open, whatever happens to the objects. Without them, 20 failed spawns
+    /// leaked exactly 80 descriptors. This is not an exotic path: a panel polling `git` in a
+    /// directory the user has deleted takes it on every refresh.
+    func start() throws {
+        do {
+            try queue.sync { try process.run() }
+        } catch {
+            process.terminationHandler = nil
+            for handle in [out.fileHandleForReading, out.fileHandleForWriting,
+                           err.fileHandleForReading, err.fileHandleForWriting] {
+                try? handle.close()
+            }
+            throw error
+        }
+    }
 
     func finish(timeout: Duration, completion: @escaping @Sendable (ToolOutput) -> Void) {
         // Synchronously, so that no timeout — however small — can latch `settled` before there is
@@ -187,19 +225,23 @@ private final class ToolJob: @unchecked Sendable {
         }
         let nanos = Int(timeout.components.seconds) * 1_000_000_000
             + Int(timeout.components.attoseconds / 1_000_000_000)
-        // Scheduled on `queue`, so the body is already serialised with every other access.
-        queue.asyncAfter(deadline: .now() + .nanoseconds(nanos)) { [self] in
-            guard !settled else { return }
+        // Scheduled on `queue`, so the body is already serialised with every other access. Weakly,
+        // all three: a settled job's timer still fires at the full budget, and a strong capture
+        // would hold the job and everything it accumulated — the whole of stdout — alive until
+        // then, thirty seconds after the call returned for a git read. `run` holds the job across
+        // its `await`, so the job cannot go away before it settles and nothing here is missed.
+        queue.asyncAfter(deadline: .now() + .nanoseconds(nanos)) { [weak self] in
+            guard let self, !self.settled else { return }
             // The `exited` guard is what keeps a child that finished microseconds before this timer
             // from being called an overrun.
-            if !exited {
-                timedOut = true
-                if process.isRunning { process.terminate() }
+            if !self.exited {
+                self.timedOut = true
+                if self.process.isRunning { self.process.terminate() }
             }
-            queue.asyncAfter(deadline: .now() + Self.grace) { [self] in
-                guard !settled else { return }
-                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-                queue.asyncAfter(deadline: .now() + Self.grace) { [self] in settle() }
+            self.queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in
+                guard let self, !self.settled else { return }
+                if self.process.isRunning { kill(self.process.processIdentifier, SIGKILL) }
+                self.queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in self?.settle() }
             }
         }
     }

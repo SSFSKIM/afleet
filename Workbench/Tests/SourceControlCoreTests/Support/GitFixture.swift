@@ -8,8 +8,9 @@ import Foundation
 /// `~/.gitconfig` can set `init.defaultBranch`, `commit.gpgsign`, `log.date`, `diff.renames`,
 /// `core.hooksPath` or a merge driver, any of which changes the bytes a fixture test parses and
 /// makes the suite pass or fail by accident of the machine. So every invocation here runs with
-/// the global and system configuration disabled, `HOME` inside the temporary tree, the terminal
-/// prompt off, fixed dates, and an invented identity — never the machine's, per §11 and the
+/// the global and system configuration disabled, the system *gitattributes* tier disabled too
+/// (`GIT_CONFIG_SYSTEM` does not cover it), a fixed `TZ` and `LC_ALL`, `HOME` inside the temporary
+/// tree, the terminal prompt off, fixed dates, and an invented identity — never the machine's, per §11 and the
 /// dispatch brief.
 final class GitFixture {
 
@@ -50,6 +51,16 @@ final class GitFixture {
             "HOME": home.path(percentEncoded: false),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_SYSTEM": "/dev/null",
+            // `GIT_CONFIG_SYSTEM` disables the system *config* tier and not the system
+            // *gitattributes* tier, which is a separate file: a machine-wide `/etc/gitattributes`
+            // marking a pattern `-text` or naming a diff driver changes the bytes a later
+            // milestone's parser reads, which is the accident D14 exists to prevent.
+            "GIT_ATTR_NOSYSTEM": "1",
+            // A fixed zone and the C locale, for the same reason. Dates are pinned per commit
+            // below, but git renders them in `TZ`; and git's diagnostics and a few of its
+            // porcelain words are localised — this machine's git speaks Korean by default.
+            "TZ": "UTC",
+            "LC_ALL": "C",
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_AUTHOR_NAME": Self.authorName,
             "GIT_AUTHOR_EMAIL": Self.authorEmail,
