@@ -1887,7 +1887,7 @@ is renumbered.
      after exit. Owner: C1 (probe), C2 (`terminate()`) if it bites. Filed 2026-09-08 at the Quit
      ruling.
 
-## From C7.1 (Terminal core), in progress
+## From C7.1 (Terminal core), merged 2026-09-09
 
 82. **`openpty(3)` sets `FD_CLOEXEC` on the master one call too late.** `Darwin+PTY.swift`
     opens the pty and then sets the flag, so a concurrent spawner elsewhere in the process

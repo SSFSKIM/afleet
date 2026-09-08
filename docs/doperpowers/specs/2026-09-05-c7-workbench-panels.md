@@ -129,7 +129,13 @@ Measured 2026-09-05 in the worktree at the pin.
   prints "— done · Ctrl+Z to return —". The detach protocol (`daemonDetachApc`,
   `SUPERVISOR_DETACH_CODE`, `TRANSIENT_ATTACH_CODE`, `parseDetachMsg`) lives inside the CLI
   and is never spoken by afleet. Whether Ctrl+Z ends the process or stops it with `SIGTSTP`
-  is not determinable from the bundle text and is S1's to observe.
+  is not determinable from the bundle text and is S1's to observe. **Observed 2026-09-08 (S1,
+  C7.1 Task 7):** Ctrl+Z on `claude attach` in a pane pty produces a clean exit, code 0 — four
+  consecutive runs, with a `--hold` control that sent no Ctrl+Z and saw no event; no stop ever
+  arrived. A reading of the generic renderer's `handleSuspend` as the attach client's key
+  handler was wrong and is superseded in place in C7.1's spec; whether the client never sent
+  `SIGTSTP` or the kernel discarded one for an orphaned process group is unsettled and said so.
+  The job keeps running under the daemon either way.
 - **Monaco** (`monaco-editor` on npm): latest `0.56.0`, MIT; the full package unpacks to
   97.9 MB in 1,909 files, which is why a tree-shaken bundle, not the package, ships. The ESM
   integration requires `MonacoEnvironment.getWorker` or `getWorkerUrl` for the editor and
@@ -213,7 +219,7 @@ import test over `Workbench/Sources` (amended 2026-09-08 at C7.3's merge):
 
 | Target | Owner | Depends on | Notes |
 |---|---|---|---|
-| `TerminalCore` | C7.1 | AfleetCore, `GhosttyTerminal`, `GhosttyKit` | `TerminalSurface`, the PTY layer, the GhosttyKit adapter; SwiftTerm is added here only if S1 falls back |
+| `TerminalCore` | C7.1 | AfleetCore, `GhosttyTerminal`, `GhosttyKit`, `GhosttyTheme` | `TerminalSurface`, the PTY layer, the GhosttyKit adapter (`GhosttyTheme` added 2026-09-09 at C7.1's merge for the appearance mapping — a product of the same pinned package, no new edge); SwiftTerm was not needed (S1 promoted GhosttyKit) |
 | `EditorCore` | C7.2 | AfleetCore | `MonacoEditorView` (an `NSView` over `WKWebView`), the bridge, the committed bundle as a resource |
 | `LinkRouting` | C7.2 | AfleetCore, PanelHostAPI | `LinkRouter` and its target registry (row amended 2026-09-08 at C7.2's merge: the registry is over X7's `LinkTarget` and `PanelTabID`, which live in `PanelHostAPI`; the edge is acyclic) |
 | `SourceControlCore` | C7.3 | AfleetCore | `git log` and `git status` parsers, lane assignment, diff model, `gh` JSON models and runner |
@@ -245,6 +251,18 @@ public protocol TerminalSurface: AnyObject {
     func processDidExit(code: Int32)                            // final render; the pane decides what to show
     func setAppearance(_ appearance: TerminalAppearance)        // theme, font, follows the system by default
 }
+// Amended 2026-09-08 at C7.1's merge, from the gate's rulings and the build: the protocol is
+// `@MainActor` (its members touch the view); the adapter exposes a `terminalDescription`
+// (renderer name and version) for diagnostics; the PTY layer adds `TERM` and `TERMINFO_DIRS`
+// to the child's environment by name only (the TERM overlay; X11's table is otherwise
+// untouched) and takes a per-request stop policy — `.report` (a stopped child is reported
+// as stopped and left) or `.detach` (`SIGCONT` then `SIGHUP`) — chosen by the caller, since
+// only the pane knows whether a stopped child is an attach client or a user's own process.
+// The PTY layer's ingress is one queue: `PTYProcess.sendInput(_:)` and `sendResize(to:)` are
+// `nonisolated` entry points that serialise writes and resizes together, because a `Task` per
+// callback let two keystrokes arrive reversed and left resize outside the write gate (found by
+// the whole-branch review). `themeResolution` sits on the concrete adapter, not on the protocol:
+// W2 stays what a pane needs, and C7.4 holds the concrete type.
 public struct TerminalSize: Hashable, Sendable { public var rows: Int, columns: Int, pixelWidth: Int, pixelHeight: Int }
 ```
 
@@ -262,7 +280,10 @@ Terminal tab's process exits and its registry record is gone") is keyed on that 
 Advisory, the recommended mechanism: `openpty(3)`, then `posix_spawn` with
 `POSIX_SPAWN_SETSID` and file actions that open the slave path as descriptors 0, 1 and 2
 in the child, which makes the slave the session leader's controlling terminal at that open
-(the slave is opened after `setsid`, without `O_NOCTTY`); `ioctl(master, TIOCSWINSZ)` on
+(the slave is opened after `setsid`, without `O_NOCTTY`) — a POSIX description, corrected
+2026-09-09 at C7.1's merge: Darwin grants the controlling terminal at `setsid`, and neither
+`O_NOCTTY` nor a `dup2`-only shape changes the outcome (measured); the recommendation still leads
+to correct code, but it is not a measured fact about this platform; `ioctl(master, TIOCSWINSZ)` on
 `onResize`; a `DispatchSource` read loop on the master feeding `feed` on the main actor; and
 `waitpid` with `WUNTRACED` so a child that stops rather than exits is seen. `forkpty(3)` is
 the fallback if the controlling terminal is not acquired that way; it is not the first
@@ -280,6 +301,15 @@ stops, the PTY layer treats a stopped attach child as detached (`SIGCONT` then `
 the job keeps running under the daemon) and the finding is recorded here. Promote when all
 three hold; otherwise SwiftTerm's `TerminalView` behind `TerminalSurface`, with the PTY
 layer unchanged, as a Revision Note.
+**Outcome 2026-09-08:** promote GhosttyKit, provisionally (four legs await a human). Two markers round-tripped through the real PTY layer
+into the rendered grid; a resize 33×112 → 41×138 through `onResize` in 59.5 ms with the
+child's own `stty size` agreeing; both wire-cut mutations fail the leg; Ctrl+Z on `attach`
+exits cleanly (above), so `.detach` had nothing to answer and SwiftTerm was not touched. The
+flood leg: the renderer costs an order of magnitude in latency and caps throughput ~15× while
+`feed` itself takes 251–347 ms of ten seconds — host delivery is not the cost, so no
+host-side coalescing would help (C7.1 tracker 86). Four legs await a human: the shell prompt's
+appearance, a full-screen TUI redraw and alternate-screen exit, a live drag during that TUI,
+and a CJK composition committing.
 
 ### Monaco: bundle, bridge, view (contract W4)
 
@@ -458,6 +488,19 @@ pane, C4 owns the transition.
   Revision Note, and G2 is re-run against it. G3 (required): the adapter does nothing on
   the main thread that blocks on the child (feed is asynchronous; a flooding child cannot
   freeze the harness), proven with a `yes` child for ten seconds.
+  **Outcome 2026-09-08:** G1 met (295 package tests; the process layer owns the
+  group, the reap and a 1 MiB bounded buffer delivering 64 KiB coalesced chunks — the gate rests
+  on those two structural properties, each failing under mutation, because the per-read
+  latency bound turned out unable to fail on this hardware); G2 as the S1 outcome above; G3
+  met by the flood leg. The package-wide X1 import walk (item 6, ruled C7.1's at C7.3's merge)
+  covers every subdirectory of `Workbench/Sources`, `Spikes` and `Tests`, handles
+  declaration imports, and floors each subdirectory's contribution; run with the network denied
+  it passed (the offline bound is two caches, repository and artifact, since `TerminalCore` is
+  the only importer of the `GhosttyKit` binary target). Six claims overturned by measurement on
+  the way (`forkpty` never needed but an early close of the parent's slave resets the pty to 0×0;
+  Darwin grants the controlling terminal at `setsid`; XCTest blocks `SIGTERM`/`SIGHUP` and
+  children inherit it; Ctrl+Z on `attach` exits; G3a's bound was insensitive to the bug; the
+  overlay's `infocmp` check was vacuous because `/bin/sh` supplies `TERM=dumb`).
 - **Edges:** blocked-by: C2 (landed), the W1 skeleton on `main`; blocks: C7.4; conditional
   on nothing.
 - **Contracts:** W1 (owner of the manifest), W2 (owner), X11.
@@ -655,7 +698,9 @@ path into C7 is the parent's C4 → C5.
 - **Weekly Ghostty tags.** An exact pin (`1.5.20260903`) and a bump only by a leaf with a
   Revision Note; the adapter is the only importer, so a breaking tag is one file.
 - **Ctrl+Z semantics in a pane with no shell parent.** `waitpid(WUNTRACED)` in the PTY
-  layer and the stopped-means-detached rule, settled by S1 before any pane is built.
+  layer and the stopped-means-detached rule, settled by S1 before any pane is built. Settled
+  2026-09-08: the attach client exits (code 0) rather than stopping; `WUNTRACED` and the
+  `.detach` policy stay for any child that does stop.
 - **Controlling-terminal acquisition without `fork`.** The `posix_spawn` file-action route
   is verified by G1's `stty size` and job-control checks; `forkpty` is the named fallback.
 - **The hatch's re-adoption race** (pane exits before the registry record disappears):
@@ -691,7 +736,7 @@ parent's decision); any write under `<configHome>` (X9); IDE registration.
 | Leaf | Artifact | Status |
 |---|---|---|
 | W1 skeleton | landed by the orchestrator on `main` before dispatch | pending |
-| C7.1 Terminal core | plan `plans/<date>-c7.1-terminal-core.md` on `child/c7-terminal-core` | not-dispatched, dispatchable after W1 |
+| C7.1 Terminal core | `2026-09-07-c7.1-terminal-core.md`; plan `plans/2026-09-07-c7.1-terminal-core.md`; Outcomes in the child spec | **merged** 2026-09-08 at `855b815` from `child/c7-terminal-core` `dc34b77` (45 commits); G1–G3 met, S1 promote GhosttyKit, provisionally (four legs await a human); 295 package tests; tracker 82–92; four human legs outstanding (shell prompt, TUI redraw and alternate-screen exit, live drag, CJK composition) |
 | C7.2 Editor core | `2026-09-07-c7.2-editor-core.md`; plan `plans/2026-09-07-c7.2-editor-core.md`; Outcomes in the child spec | **merged** 2026-09-08 at `a47788a` from `child/c7-editor-core` `a6fb302` (37 commits); G1 73 → 110 package tests, G2 route 1 promoted (cold load median 556 ms at the gate, 677 ms re-measured after the waves), G3 offline-proven; bundle 13,083,139 bytes / 111 files / 2.90 MB compressed; tracker 97–107 (97, 98 closed on the branch); its own review (astra high, four fixed) then three whole-diff panel rounds at merge and three fix waves (routing epochs and host ownership, bridge visible mode and navigation fence, harness evidence by attribution); human still to witness "no visible jank" |
 | C7.3 Source Control core | ledger `ledgers/2026-09-07-c7.3-scm-core.md`; Outcomes in the ledger | **merged** 2026-09-08 at `aa5df80` from `child/c7-scm-core` `20cdbc1` (41 commits); G1–G3 met, G3 live; 128 (package 128, 0 skipped) tests; tracker 112–126 (115 closed on the branch by `--decorate=full`; 125 is a `main` corrective on C2's `ProcessRunner`); six review rounds, the last two one pinned class (tracker 123, owner C7.7) |
 | C7.4 Terminal panel | plan on `child/c7-terminal-panel` | blocked-by C7.1, C4, C5.G4 |
@@ -901,3 +946,11 @@ retrospect.
   per panel tab per channel plus `browser`, in the `workbench` namespace. C7.5's advisory Parent revisions
   (Cmd+S in §8.7; C7.7 shows a diff by emitting a `.diff` link, never by importing `FilesPanel`; the
   tree watcher narrowed to open files with refresh on expansion and on demand) are applied at its merge.
+- 2026-09-08 reconciliation of C7.1 (merge `855b815` from `child/c7-terminal-core` `dc34b77`,
+  45 commits). W2 amended as shipped: `@MainActor` protocol, `terminalDescription`, the
+  TERM overlay (`TERM`, `TERMINFO_DIRS` by name) and the per-request stop policy. S1's verdict:
+  promote GhosttyKit, provisionally (four legs await a human); the exit-or-stop question is answered by observation — Ctrl+Z on `attach` exits
+  cleanly, a bundle-text reading overturned by watching the engine and superseded in place. The
+  per-read latency bound was dropped as gate evidence because it cannot fail on this hardware; the
+  gate rests on coalescing and the bounded buffer, both mutation-checked. Host delivery is not the
+  flood's cost (tracker 86). Merge review: two panel rounds (4, then 5 confirmed) closed by two waves — child identity proved before signals, adapter backlog with backpressure to the read loop and an attachment gate, resizes on their own lane, a 1 MiB ingress cap, a ring of chunks, the S1 harness evaluating before teardown with the attach leg re-run (four clean exits at ~515 ms from the byte; the control's only end was teardown's SIGHUP).
