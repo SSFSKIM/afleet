@@ -1905,6 +1905,18 @@ is renumbered.
      `HeaderReadoutView(model:)` in its header bar, and the leaf that does it asserts the mount the
      way `ComposerMountTests` asserts the composer's. Owner: C6.2.
 
+141. **The *Edit* target is recorded by the row, so a note the row did not cause has no message to
+     sit beside.** Contract Y6 has `ComposerModel.editNote` render beside the edited message, and
+     the composer records no target — its own surface is one line above the field, where "which
+     message" is not a question. So `TimelineEditState` records what the row itself did, and only a
+     note produced by a press on a row is drawn in the timeline. Two notes are not: the ones
+     `CommandRouting` writes for `/rewind`, `/cd` and the routed settings, and any note that arrives
+     after the channel subtree was rebuilt and the state reset. Both still draw above the field
+     through `EditNoteSurface`, so nothing is lost to the user; what is lost is the placement.
+     Found at C6.1 Task 7. Closer: the composer records the target it was given — one stored
+     `promptUUID` beside `editNote` — and the row reads it instead of remembering, which also makes
+     the placement survive a re-mount. Owner: C6.2, whose file the target would live in.
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**

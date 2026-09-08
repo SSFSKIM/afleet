@@ -56,11 +56,8 @@ ALLOWLIST: dict[str, str] = {
     # `AppModel.init` claims the eleven row kinds through `RowRegistry.register(kind:builder:)`, and
     # the `Agent` chip calls `AgentNavigating.show(run:in:)` on the `agentNavigation` the composition
     # root installs. An allowlist entry outlives its reason silently, so they are removed rather
-    # than re-worded.
-    "edit": "filled by C6.1 — ComposerModel.edit(_:) is the *Edit* affordance's landing point, and "
-            "the affordance itself is a row action on a past user message, which is C6.1's "
-            "App/Timeline/. C6.2 owns the request, the refusal reading and the fork fallback; it "
-            "cannot own the button without editing another leaf's files",
+    # than re-worded. `edit` was retired 2026-09-09 by C6.1 Task 7 for the same reason: contract Y6's
+    # *Edit* row action on a past user message is `ComposerModel.edit(_:)`'s production caller.
     # Requirements of a FleetKit protocol, called by FleetKit and never by App/.
     "confirm": "a `StrategyUI` requirement (FleetKit). `StrategyExecutor.run` calls it through the "
                "`ui:` the composer hands itself in as, so its caller is outside App/ by construction "
