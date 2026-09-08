@@ -87,24 +87,33 @@ final class BridgeAdapterTests: XCTestCase {
       editor: {
         create: function () { return editor; },
         createModel: function (text, language, uri) {
-          var key = uri.toString();
+          // A model created without a URI — which is how the diff editor's two models arrive —
+          // gets a generated one, as the real ModelService does.
+          var target = uri || new Uri("inmemory://model/" + (modelCounter + 1));
+          var key = target.toString();
           // The real refusal, and the reason this file exists: Monaco throws rather than
           // handing back the model already at that URI.
           // The message is Monaco 0.56's own, as the S3 run recorded it against the real editor.
           if (registry[key]) { throw new Error("ModelService: Cannot add model because it already exists!"); }
-          var model = new Model(text, language, uri);
+          var model = new Model(text, language, target);
           registry[key] = model;
           return model;
         },
         getModel: function (uri) { return registry[uri.toString()] || null; },
         setModelLanguage: function (model, language) { model.language = language; },
         createDiffEditor: function () {
-          return { setModel: function () {}, layout: function () {} };
+          diffEditor = {
+            model: null,
+            setModel: function (models) { this.model = models; },
+            layout: function () {}
+          };
+          return diffEditor;
         },
         setTheme: function () {}
       }
     };
 
+    var diffEditor = null;
     var containers = { editor: { style: {} }, diff: { style: {} } };
 
     function bootBridge() {
@@ -220,6 +229,74 @@ final class BridgeAdapterTests: XCTestCase {
         XCTAssertEqual(dirty.first?["isDirty"] as? Bool, false)
         XCTAssertEqual(context.evaluateScript("editor.getModel().listeners.length;").toInt32(), 1,
                        "setText left a second content listener on the model")
+    }
+
+    // MARK: - Saving while the diff is the visible surface
+
+    /// The diff editor is read-only and shows a pair of models that are not the open buffer.
+    /// Without a visible mode the bridge answers `save` from whatever `open` left behind, so a
+    /// host that sent `showDiff` and then `save` would be handed — and would write — a file it
+    /// is not showing. C7.7 puts a diff on screen in the same view C7.5 saves from, so this is
+    /// the ordinary sequence between two panels, not a contrived one.
+    func testSaveIsRefusedWhileTheDiffIsTheVisibleSurface() throws {
+        let context = try bootedContext()
+
+        send(["type": "open", "path": "src/main.swift", "language": "swift", "text": "one\n"], in: context)
+        send(["type": "showDiff", "path": "src/main.swift", "language": "swift",
+              "original": "one\n", "modified": "two\n"], in: context)
+        send(["type": "save"], in: context)
+
+        XCTAssertEqual(posted(in: context).filter { $0["type"] as? String == "saveRequested" }.count, 0,
+                       "the bridge answered save with the buffer hidden behind the diff")
+        let errors = posted(in: context).filter { $0["type"] as? String == "error" }
+        XCTAssertEqual(errors.count, 1, "the refusal was silent: \(errors)")
+
+        // The guard is about the visible surface, not about save: bringing the editor back
+        // restores it, so a test that passed by refusing everything would fail here.
+        send(["type": "open", "path": "src/main.swift", "language": "swift", "text": "one\n"], in: context)
+        send(["type": "save"], in: context)
+
+        let saves = posted(in: context).filter { $0["type"] as? String == "saveRequested" }
+        XCTAssertEqual(saves.count, 1, "save stayed refused after the editor came back")
+        XCTAssertEqual(saves.first?["path"] as? String, "src/main.swift")
+        XCTAssertEqual(saves.first?["text"] as? String, "one\n")
+    }
+
+    // MARK: - The dirty flag of the buffer being replaced
+
+    /// `dirty` is a transition, and the host holds the last one it was told. Replacing a dirty
+    /// buffer resets the bridge's own baseline with the content listener detached, so without an
+    /// explicit transition the host is left believing a file it no longer shows is unsaved.
+    func testOpeningAnotherFileReportsTheDirtyBufferItReplacedClean() throws {
+        let context = try bootedContext()
+
+        send(["type": "open", "path": "a.swift", "language": "swift", "text": "one\n"], in: context)
+        context.evaluateScript("editor.getModel().setValue('edited\\n');")
+        XCTAssertEqual(posted(in: context).filter { $0["type"] as? String == "dirty" }.count, 1,
+                       "the edit did not report the buffer dirty")
+
+        send(["type": "open", "path": "b.swift", "language": "swift", "text": "two\n"], in: context)
+
+        let dirty = posted(in: context).filter { $0["type"] as? String == "dirty" }
+        XCTAssertEqual(dirty.count, 2, "the replaced buffer was never reported clean: \(dirty)")
+        XCTAssertEqual(dirty.last?["isDirty"] as? Bool, false)
+        XCTAssertEqual(dirty.last?["path"] as? String, "a.swift",
+                       "the clean transition named the wrong file")
+    }
+
+    /// The same transition when the replacement is a refresh of the file already on screen —
+    /// root spec §9.1's file watcher, arriving while the user has unsaved edits.
+    func testReopeningTheSamePathReportsItsDirtyBufferClean() throws {
+        let context = try bootedContext()
+
+        send(["type": "open", "path": "a.swift", "language": "swift", "text": "one\n"], in: context)
+        context.evaluateScript("editor.getModel().setValue('edited\\n');")
+        send(["type": "open", "path": "a.swift", "language": "swift", "text": "refreshed\n"], in: context)
+
+        let dirty = posted(in: context).filter { $0["type"] as? String == "dirty" }
+        XCTAssertEqual(dirty.count, 2, "the refresh left the host holding a stale dirty flag: \(dirty)")
+        XCTAssertEqual(dirty.last?["isDirty"] as? Bool, false)
+        XCTAssertEqual(dirty.last?["path"] as? String, "a.swift")
     }
 
     /// Opening a *different* path still disposes the model left behind, which is what keeps a
