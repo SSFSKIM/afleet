@@ -5,8 +5,8 @@
 > merge"). **Level name:** composite child, wave 4 of the v1 roadmap; its leaves are children
 > one level down. **Track:** composite — this document is the decomposing run at dispatch the
 > parent's §17 C6 row asked for; each leaf runs the controlled track (child spec → plan →
-> execute) in its own worktree. **Status:** cut written; leaves dispatchable on the human's
-> approval of this cut.
+> execute) in its own worktree. **Status:** cut **approved by the human 2026-09-08**; wave 1
+> (C6.1, C6.2, C6.3) dispatching; C6.4 blocked-by C6.1 and C6.3.
 >
 > This document treats the parent's §17 C6 section and its design inheritance (§6.6, §7.3,
 > §7.5, §7.6, §7.7, §8.3 through §8.8, contracts X4, X5, X7, X9, X10) as landed and records
@@ -506,6 +506,10 @@ recomposition, it is a corrective child of this composite).
 - (none yet; written at dispatch and as leaves land)
 
 ## Questions for the human gate
+
+Answered 2026-09-08: the cut approved as written; the ten-dollar live budget approved; the
+highlighter is **pure Swift, decided now** — C6.1 picks a Swift highlighting library at grill
+time and records it, and no code block renders in a `WKWebView`.
 
 1. **The cut** — four leaves as above. Recommendation: approve as written.
 2. **Live budget** — ten US dollars across the unit on the scratch account, replayable items
