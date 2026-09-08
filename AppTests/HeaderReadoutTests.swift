@@ -157,6 +157,36 @@ final class HeaderReadoutTests: XCTestCase {
         XCTAssertEqual(context, 2, "\(context) context readback(s) were issued, so the refusal was retried")
     }
 
+    // MARK: - A channel with no process
+
+    /// An archived channel asks for nothing, and carries the branch alone.
+    func testAnArchivedChannelIssuesNoControlRequest() async throws {
+        let rig = try await Rig(origin: .archived, live: false)
+        rig.model.startReadbacks()
+        await rig.model.refreshReadbacks()
+
+        let sent = await rig.double.sentSubtypes
+        XCTAssertTrue(sent.isEmpty, "\(sent.count) control request(s) went out for a channel with no process")
+        XCTAssertTrue(rig.model.readout.isEngineSilent, "an archived channel's readout carries an engine value")
+        XCTAssertEqual(rig.model.readout.branch, Rig.branch, "the archived channel's readout lost its branch")
+    }
+
+    // MARK: - The branch
+
+    /// The branch is the index entry's, carried through the row and never asked for.
+    func testTheBranchComesFromTheIndex() async throws {
+        let rig = try await Rig()
+        XCTAssertEqual(rig.model.readout.branch, Rig.branch, "the readout does not carry the index entry's branch")
+
+        // It follows the entry rather than being latched: a rebase under a selected channel moves it.
+        let moved = Rig.entry(rig.key, branch: "invented-branch-two")
+        rig.model.adopt(ChannelHeader(row: Rig.row(rig.key, entry: moved, origin: .owned(.ready))))
+        XCTAssertEqual(rig.model.readout.branch, "invented-branch-two", "the readout did not follow the entry's branch")
+
+        let sent = await rig.double.sentSubtypes
+        XCTAssertTrue(sent.isEmpty, "\(sent.count) control request(s) went out for a readback the index already holds")
+    }
+
     // MARK: - The rig
 
     /// One channel over a recording lifecycle double, with no workspace: nothing here opens a

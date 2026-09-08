@@ -244,6 +244,7 @@ final class ChannelTimelineModel {
     /// those four fields and calls `open` once per channel.
     func adopt(_ header: ChannelHeader) {
         self.header = header
+        readout.branch = header.branch
         // A channel that was archived or connecting when the strip was first drawn has a process
         // now, and this is the moment that becomes true. Nothing is armed on a timer, and nothing
         // starts here for a channel whose header nobody has drawn.
