@@ -6,7 +6,7 @@ import FleetKit
 
 // MARK: - The header
 
-/// The four things spec §8 puts above the placeholder timeline — origin, presence, banner and
+/// The four things spec §8 puts above the timeline — origin, presence, banner and
 /// system item — plus the title the index already knows, read off the row's `ChannelState`.
 ///
 /// A value rather than a set of accessors on the model, so the header a test asserts on is the
@@ -147,7 +147,11 @@ final class ChannelTimelineModel {
 
     var items: [TimelineItem] { timeline.items }
 
-    /// What the placeholder draws, one row per item.
+    /// What the list draws, one row per item.
+    ///
+    /// **Superseded 2026-09-09 (C6.1 Task 4).** What stood here said "what the placeholder draws":
+    /// eleven of the thirteen kinds now resolve to a C6.1 row through contract Y1's registry, and
+    /// only `decision` and `sentFile` — C6.3's — still draw C5's placeholder.
     var rows: [TimelineRow] { timeline.items.map(TimelineRow.init) }
 
     private(set) var header = ChannelHeader()

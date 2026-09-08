@@ -67,8 +67,11 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// environment does not cross an `NSHostingView` the table made itself.
     private var context: TimelineRenderContext?
 
-    private let markdown = MarkdownText()
-    private let highlighter = CodeHighlighter()
+    /// The shared pipeline, not a second one: the row builders under `Rows/` parse through
+    /// `MarkdownText.shared` and a table with a cache of its own would parse every message twice —
+    /// once to draw it and once to measure it.
+    private let markdown = MarkdownText.shared
+    private let highlighter = CodeHighlighter.shared
 
     /// How close to the document's bottom still counts as the bottom. A tolerance and not an
     /// equality, because a fractional row height leaves the viewport a hair short of the end.

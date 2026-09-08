@@ -54,7 +54,9 @@ struct TimelineListView: View {
                               links: app.panels.links,
                               signal: { [model] signal in await model.signal(signal) },
                               agents: app.agentNavigation,
-                              collapse: collapse)
+                              collapse: collapse,
+                              neighbourhood: TimelineNeighbourhood(items: model.timeline.items,
+                                                                   agents: model.timeline.agents))
     }
 }
 

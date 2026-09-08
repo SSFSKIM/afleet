@@ -66,6 +66,19 @@ struct TimelineRenderContext {
     /// Which clusters and thinking blocks this channel has folded.
     let collapse: TimelineCollapseState
 
+    /// What a row needs to know about the items *around* it, gathered once per publish (§8, §9).
+    ///
+    /// A cluster names its members by `tool_use_id` and no member travels inside the cluster item; a
+    /// thinking disclosure's duration is the span from the item before it, which is not on the item
+    /// either; and an agent chip resolves a run id through the channel's tree. All three are reads
+    /// of the same snapshot the rows were built from, so they are gathered where that snapshot is
+    /// read rather than by handing every row the whole timeline.
+    ///
+    /// Defaulted, so a row drawn by a test that cares about none of them constructs no neighbourhood
+    /// — and an empty one is the honest answer for a channel whose tree is nil, which is most of
+    /// them (tracker 187).
+    var neighbourhood = TimelineNeighbourhood()
+
     /// `get_settings`' auto-scroll preference. Task 6 lands the readout that sets it; until then a
     /// channel follows its stream, which is what the engine's own renderer does.
     var autoScrollEnabled: Bool = true
@@ -75,6 +88,51 @@ struct TimelineRenderContext {
     /// renderer honours rather than a debug switch. Task 5 lands the readout that sets it; until
     /// then fenced blocks are highlighted, which is what the engine's own renderer does.
     var syntaxHighlightingEnabled: Bool = true
+}
+
+// MARK: - The neighbourhood
+
+/// The reads a row makes of the timeline it sits in, taken once per publish.
+///
+/// A value and not a closure: a closure over the model would let a row evaluate its body against a
+/// timeline newer than the rows around it, and the three lookups here are cheap dictionaries built
+/// from the snapshot the rows themselves came from.
+struct TimelineNeighbourhood {
+
+    /// Every tool call in the channel, by its `tool_use_id`. A cluster expands through this and an
+    /// `Agent` chip finds its parallel siblings through it.
+    var toolCalls: [String: ToolCallItem] = [:]
+
+    /// The timestamp of the item before each item, by `ItemID.key`.
+    ///
+    /// Keyed by the **key string** and never by `ItemID`, which carries the config home (§11).
+    var precedingTimestamps: [String: Date] = [:]
+
+    /// The channel's agent-run tree, consulted by the chip for one thing only: the run id
+    /// `AgentNavigating.show(run:in:)` takes.
+    ///
+    /// **Nil is the ordinary case, not the edge.** A channel opened from its files — every archived
+    /// channel and every foreign session — has no tree at all (tracker 187 on `main`), so the chip
+    /// is designed for nil: it renders from what the call carries and simply does not navigate,
+    /// because navigating to a fabricated run id would land C6.4 on a node that does not exist.
+    var agents: AgentRunTree?
+
+    /// The neighbourhood of one channel's items.
+    init(items: [TimelineItem] = [], agents: AgentRunTree? = nil) {
+        self.agents = agents
+        var previous: Date?
+        for item in items {
+            if case .toolCall(let call) = item { toolCalls[call.toolUseID] = call }
+            if let previous { precedingTimestamps[item.id.key] = previous }
+            previous = item.timestamp ?? previous
+        }
+    }
+
+    /// The calls one cluster names, in the order the cluster names them, skipping any the channel
+    /// does not hold.
+    func members(of cluster: ToolClusterItem) -> [ToolCallItem] {
+        cluster.toolUseIDs.compactMap { toolCalls[$0] }
+    }
 }
 
 // MARK: - The environment value

@@ -345,6 +345,12 @@ enum RenderClock {
 /// serialising mechanism.
 final class MarkdownText: @unchecked Sendable {
 
+    /// **One markdown renderer, one cache** (§5). The table's own rows and the row builders under
+    /// `Rows/` both parse through this instance, so a block parsed for a message is not parsed again
+    /// when the same message is measured, and the bound below is a bound on the whole app rather
+    /// than on one channel's table.
+    static let shared = MarkdownText()
+
     private let lock = NSLock()
     private var cache: [String: NSAttributedString] = [:]
     /// Bounded: a day-long channel must not accumulate a transcript of attributed strings.
@@ -682,6 +688,9 @@ final class MarkdownText: @unchecked Sendable {
 ///
 /// `@unchecked Sendable` on the same terms as `MarkdownText`: one `NSLock`, every access inside it.
 final class CodeHighlighter: @unchecked Sendable {
+
+    /// One highlighter and one grammar set, for the reason `MarkdownText.shared` is one cache.
+    static let shared = CodeHighlighter()
 
     private let lock = NSLock()
     private var cache: [Key: NSAttributedString] = [:]
