@@ -26,6 +26,9 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// one here would let a test assert against the composer through its own double.
     enum Call: Sendable {
         case perform(ChannelKey, LifecycleAction)
+        /// The prompt the composer sent. `sendPrompt` **is** this leaf's surface — the send path — so it
+        /// is recorded like every other member and not trapped as C5's doubles trap it.
+        case sendPrompt(ChannelKey, UserInput)
         case route(ChannelKey, String)
         /// The subtype and the payload exactly as they go to the wire.
         case send(ChannelKey, subtype: String, payload: JSONValue)
@@ -38,6 +41,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         var member: String {
             switch self {
             case .perform: "perform"
+            case .sendPrompt: "sendPrompt"
             case .route: "route"
             case .send: "send"
             case .run: "run"
@@ -68,9 +72,10 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// Every call, in the order it arrived. The single source for every ordering assertion.
     private(set) var calls: [Call] = []
 
-    /// Holds `perform` open so a second caller can arrive while the first is still inside it. Without
-    /// it no test can tell a composer that guards reentrancy from one that merely never overlaps,
-    /// because an unheld double answers before the second call is ever made.
+    /// Holds `perform` and `sendPrompt` open so a second caller can arrive while the first is still
+    /// inside it. Without it no test can tell a composer that guards reentrancy from one that merely
+    /// never overlaps, because an unheld double answers before the second call is ever made. Both
+    /// members, because the send path is `sendPrompt` and the reentrancy guard is the send's.
     private var isPerformHeld = false
     private var heldCallers: [CheckedContinuation<Void, Never>] = []
     /// How many callers are suspended inside `perform` right now. A count, not a value (§11).
@@ -78,6 +83,9 @@ actor ComposerLifecycleDouble: LifecycleAPI {
 
     private var performOutcomes: [Result<ChannelState, LifecycleError>] = []
     private var performFallback: Result<ChannelState, LifecycleError>?
+    /// The uuids `sendPrompt` answers, in order, and the fallback for a suite that stages no particular one.
+    private var promptOutcomes: [Result<UUID, LifecycleError>] = []
+    private var promptFallback: Result<UUID, LifecycleError>?
     /// Staged answers to `send`, keyed by subtype; a subtype with no answer staged returns `.null`,
     /// which is what an engine member with an empty success body sends (`rename_session`).
     private var sendAnswers: [String: Result<JSONValue, WireError>] = [:]
@@ -103,6 +111,8 @@ actor ComposerLifecycleDouble: LifecycleAPI {
 
     func stagePerform(_ outcome: Result<ChannelState, LifecycleError>) { performOutcomes.append(outcome) }
     func alwaysPerform(_ outcome: Result<ChannelState, LifecycleError>) { performFallback = outcome }
+    func stageSendPrompt(_ outcome: Result<UUID, LifecycleError>) { promptOutcomes.append(outcome) }
+    func alwaysSendPrompt(_ outcome: Result<UUID, LifecycleError>) { promptFallback = outcome }
     func stageRoute(_ routed: Routed) { routeOutcomes.append(routed) }
     func stageRun(_ outcome: Result<StrategyOutcome, LifecycleError>) { runOutcomes.append(outcome) }
     func stageSend(_ subtype: String, _ answer: Result<JSONValue, WireError>) { sendAnswers[subtype] = answer }
@@ -137,6 +147,11 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// The members called, in order. The spelling every ordering assertion uses, because it carries
     /// no value and so cannot print one on failure (§11).
     var memberSequence: [String] { calls.map(\.member) }
+
+    /// Every prompt sent through `sendPrompt`, in order. The send path's counterpart to `actions`.
+    var prompts: [UserInput] {
+        calls.compactMap { if case .sendPrompt(_, let input) = $0 { input } else { nil } }
+    }
 
     /// Every action performed, in order.
     var actions: [LifecycleAction] {
@@ -181,6 +196,21 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         let state = try outcome.get()
         table[state.key] = state
         return state
+    }
+
+    /// `perform(.send)`'s path on the real facade, answering the uuid the supervisor minted. Held by
+    /// `holdPerform()` on the same terms as `perform`, because the reentrancy guard under test is the
+    /// send's and this is the member a send reaches.
+    @discardableResult
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        calls.append(.sendPrompt(key, input))
+        if isPerformHeld {
+            callersHeldInPerform += 1
+            await withCheckedContinuation { heldCallers.append($0) }
+        }
+        let outcome = promptOutcomes.isEmpty ? promptFallback : promptOutcomes.removeFirst()
+        guard let outcome else { throw StagingError.nothingStaged(member: "sendPrompt") }
+        return try outcome.get()
     }
 
     func route(_ text: String, on key: ChannelKey) async -> Routed {

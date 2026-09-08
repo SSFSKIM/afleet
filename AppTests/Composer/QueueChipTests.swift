@@ -173,15 +173,15 @@ final class QueueChipTests: XCTestCase {
 
     // MARK: - Both send arms
 
-    /// A send while a turn is running produces one `perform(.send)` **and** a chip; a send with no
-    /// turn running produces one `perform(.send)` and **no** chip.
+    /// A send while a turn is running produces one `sendPrompt` **and** a chip; a send with no turn
+    /// running produces one `sendPrompt` and **no** chip.
     ///
     /// Both arms, so a chip that is always on cannot pass. What separates them is the engine: a
     /// message sent into a running turn is queued and the engine says so with `command_lifecycle`,
-    /// and a message sent into an idle channel is not. The composer raises nothing either way — it
-    /// cannot, because `perform(.send)` drops the uuid `HostSignal.promptSent` needs (the
-    /// `[parent-impact]` on this leaf's spec) — so the chip is the fold's answer and not afleet's
-    /// guess about it.
+    /// and a message sent into an idle channel is not. The composer now raises
+    /// `HostSignal.promptSent` on both — and the chip still shows nothing until `command_lifecycle`
+    /// names the id, because the fold puts that signal nowhere the chip reads (see
+    /// `testPromptSentPutsNoRowInTheChip`). The chip is the fold's answer and not afleet's guess.
     func testBothSendArms() async throws {
         let rig = try await Rig()
         let idle = try XCTUnwrap(rig.composer, "the registry built no composer for the channel")
@@ -189,18 +189,16 @@ final class QueueChipTests: XCTestCase {
         // Arm one: no turn running. The engine queues nothing.
         idle.draft = "an invented first message"
         await idle.send()
-        var actions = await rig.lifecycle.actions
-        var sends = actions.filter { if case .send = $0 { return true }; return false }
-        XCTAssertEqual(sends.count, 1, "an idle send performed \(sends.count) `.send` action(s), not 1")
+        var prompts = await rig.lifecycle.prompts
+        XCTAssertEqual(prompts.count, 1, "an idle send sent \(prompts.count) prompt(s), not 1")
         XCTAssertTrue(rig.chip.rows.isEmpty,
                       "a send with no turn running showed \(rig.chip.rows.count) chip row(s)")
 
         // Arm two: a turn is running, so the engine queues the message and says so.
         idle.draft = "an invented second message"
         await idle.send()
-        actions = await rig.lifecycle.actions
-        sends = actions.filter { if case .send = $0 { return true }; return false }
-        XCTAssertEqual(sends.count, 2, "the queued send performed \(sends.count) `.send` action(s) in total, not 2")
+        prompts = await rig.lifecycle.prompts
+        XCTAssertEqual(prompts.count, 2, "the queued send sent \(prompts.count) prompt(s) in total, not 2")
         await rig.push(state: "queued", commandUUID: Rig.inventedCommandUUIDs[0])
 
         let chipped = await rig.settle { $0.rows.count == 1 }
@@ -237,6 +235,163 @@ final class QueueChipTests: XCTestCase {
         let unmatched = try XCTUnwrap(rig.chip.rows.first { $0.id == unknown },
                                       "a queued command with no timeline item was hidden instead of shown unlabelled")
         XCTAssertNil(unmatched.label, "a queued command with no timeline item was given a label from somewhere")
+
+        await rig.finish()
+    }
+
+    // MARK: - The host signal a send raises
+
+    /// A successful send raises `HostSignal.promptSent` **once**, carrying the uuid `sendPrompt`
+    /// answered, and the fold attributes the next turn to it.
+    ///
+    /// The attribution is the assertion because it is the only thing the fold does with this signal:
+    /// `WireReducer` holds the uuid in `outstandingPrompts` and spends it on the next `result` frame
+    /// as `TurnAttribution.prompted(uuid:)`. So this reads the uuid back out of a real reducer rather
+    /// than out of a counter the composer keeps about itself, and a composer that raised the wrong
+    /// uuid, raised twice, or raised nothing all fail differently:
+    /// - nothing raised, or the signal raised before the fold had it → `.unprompted`
+    /// - the wrong uuid → `.prompted` naming something else
+    /// - raised twice → the second `result` is attributed as well, which the second arm asserts is not.
+    ///
+    /// The uuid is lowercased: `sendPrompt` answers a `UUID` and the frame on the wire carries its
+    /// lowercase spelling, which is what the engine echoes and what every timeline item is keyed by.
+    func testASuccessfulSendRaisesPromptSentCarryingTheMintedUuid() async throws {
+        let rig = try await Rig()
+        let composer = try XCTUnwrap(rig.composer, "the registry built no composer for the channel")
+        let minted = UUID()
+        await rig.lifecycle.stageSendPrompt(.success(minted))
+
+        composer.draft = "an invented message"
+        await composer.send()
+        await rig.pushResult()
+
+        let attributed = await rig.settleTurns { $0.count == 1 }
+        XCTAssertTrue(attributed, "the fold holds \(rig.turns.count) turn(s) after one result frame, not 1")
+        XCTAssertEqual(rig.turns.last?.attribution, .prompted(uuid: minted.uuidString.lowercased()),
+                       "the turn after a send is not attributed to the prompt the send minted")
+
+        // Raised once and not twice: a second result with no second send is unattributed, because the
+        // one outstanding prompt was spent on the turn above.
+        await rig.pushResult()
+        let second = await rig.settleTurns { $0.count == 2 }
+        XCTAssertTrue(second, "the fold holds \(rig.turns.count) turn(s) after two result frames, not 2")
+        XCTAssertEqual(rig.turns.last?.attribution, .unprompted,
+                       "a second turn was attributed to a prompt, so the send raised more than one signal")
+
+        await rig.finish()
+    }
+
+    /// A refused send raises **no** signal, and the successful arm beside it proves the absence means
+    /// something.
+    ///
+    /// The refusal is `LifecycleError.busy`, the one the engine's own channel raises for a send behind
+    /// a lifecycle operation. A composer that raised before the X5 call — or that raised on the way
+    /// out of the `catch` — would leave the reducer holding a prompt the engine was never given, and
+    /// the next turn, whatever caused it, would be attributed to a message that was never sent.
+    func testARefusedSendRaisesNoSignalAndASuccessfulOneDoes() async throws {
+        let rig = try await Rig()
+        let composer = try XCTUnwrap(rig.composer, "the registry built no composer for the channel")
+        await rig.lifecycle.stageSendPrompt(.failure(.busy(.spawn)))
+
+        composer.draft = "an invented refused message"
+        await composer.send()
+        XCTAssertNotNil(composer.refusal, "the refused send showed no inline explanation")
+        await rig.pushResult()
+
+        let refusedTurn = await rig.settleTurns { $0.count == 1 }
+        XCTAssertTrue(refusedTurn, "the fold holds \(rig.turns.count) turn(s) after the refused send, not 1")
+        XCTAssertEqual(rig.turns.last?.attribution, .unprompted,
+                       "a refused send left a prompt in the fold for the next turn to be attributed to")
+
+        // The floor: the same rig, the same frame, one send that is not refused.
+        let minted = UUID()
+        await rig.lifecycle.stageSendPrompt(.success(minted))
+        composer.draft = "an invented accepted message"
+        await composer.send()
+        await rig.pushResult()
+
+        let acceptedTurn = await rig.settleTurns { $0.count == 2 }
+        XCTAssertTrue(acceptedTurn, "the fold holds \(rig.turns.count) turn(s) after the accepted send, not 2")
+        XCTAssertEqual(rig.turns.last?.attribution, .prompted(uuid: minted.uuidString.lowercased()),
+                       "the accepted send raised no signal either, so the refusal arm above proves nothing")
+
+        await rig.finish()
+    }
+
+    /// Two Return presses while one send is in flight are one send **and** one signal.
+    ///
+    /// `ComposerSendTests` holds the call-count half of this; what is asserted here is the fold's:
+    /// two signals would put two uuids in `outstandingPrompts` and the second turn would be
+    /// attributed to the message the user only sent once.
+    func testTwoConcurrentSendsRaiseOneSignal() async throws {
+        let rig = try await Rig()
+        let composer = try XCTUnwrap(rig.composer, "the registry built no composer for the channel")
+        let minted = UUID()
+        await rig.lifecycle.stageSendPrompt(.success(minted))
+        await rig.lifecycle.holdPerform()
+
+        composer.draft = "an invented message"
+        async let first: Void = composer.send()
+        async let second: Void = composer.send()
+        // Let both presses reach the lifecycle, and stop early the moment a second call proves the
+        // defect: a ceiling on how long a passing run waits, not a timing assumption.
+        var inFlight = 0
+        for _ in 0..<2_000 {
+            await Task.yield()
+            inFlight = await rig.lifecycle.calls.count
+            if inFlight > 1 { break }
+        }
+        await rig.lifecycle.releasePerform()
+        _ = await (first, second)
+
+        let prompts = await rig.lifecycle.prompts
+        XCTAssertEqual(prompts.count, 1, "two concurrent presses sent \(prompts.count) prompt(s), not 1")
+
+        await rig.pushResult()
+        await rig.pushResult()
+        let both = await rig.settleTurns { $0.count == 2 }
+        XCTAssertTrue(both, "the fold holds \(rig.turns.count) turn(s) after two result frames, not 2")
+        XCTAssertEqual(rig.turns.first?.attribution, .prompted(uuid: minted.uuidString.lowercased()),
+                       "the first turn after the guarded send is not attributed to the one prompt that was sent")
+        XCTAssertEqual(rig.turns.last?.attribution, .unprompted,
+                       "the second turn was attributed as well, so the guarded press raised a signal of its own")
+
+        await rig.finish()
+    }
+
+    /// **`promptSent` puts no row in the chip**, and that is the fold's answer rather than a gap in
+    /// this chip.
+    ///
+    /// The `[parent-impact]` this leaf filed expected the signal to bring the queue a pre-echo
+    /// preview. It does not: `WireReducer.apply(_ signal:)` puts a `promptSent` uuid in
+    /// `outstandingPrompts` — which is spent on the next `result` frame's attribution and is in no
+    /// snapshot the diff compares — so the signal reports **no** `TimelineChange` at all, the
+    /// `Effect` is empty, and `ChannelTimelineModel.signal` does not even republish. Nothing about
+    /// `Overlay.queue` moves, and the chip reads what C3 reduced and derives nothing (X4). A row here
+    /// would have to be invented by this side, which is exactly what the chip must not do.
+    ///
+    /// The floor is the `command_lifecycle` arm: the same rig, the same channel, one row appearing
+    /// when the engine says the message is queued. Without it an always-empty chip would pass.
+    func testPromptSentPutsNoRowInTheChip() async throws {
+        let rig = try await Rig()
+        let composer = try XCTUnwrap(rig.composer, "the registry built no composer for the channel")
+        let minted = UUID()
+        await rig.lifecycle.stageSendPrompt(.success(minted))
+
+        composer.draft = "an invented message"
+        await composer.send()
+
+        // Given every chance to appear: the same bounded wait the positive arms use, inverted.
+        let appeared = await rig.settle { !$0.rows.isEmpty }
+        XCTAssertFalse(appeared,
+                       "the chip showed \(rig.chip.rows.count) row(s) for a prompt no `command_lifecycle` has named")
+        XCTAssertTrue(rig.timeline.timeline.overlay.queue.queued.isEmpty,
+                      "the fold queued \(rig.timeline.timeline.overlay.queue.queued.count) command(s) from a host signal")
+
+        // The floor: when the engine does say so, the row is there.
+        await rig.push(state: "queued", commandUUID: minted.uuidString.lowercased())
+        let queued = await rig.settle { $0.rows.count == 1 }
+        XCTAssertTrue(queued, "the chip shows \(rig.chip.rows.count) row(s) for the command the engine queued, not 1")
 
         await rig.finish()
     }
@@ -317,6 +472,7 @@ private final class Rig {
         await lifecycle.openEvents(of: key)
         // Every send succeeds; this suite is about the chip, not about the refusal arms Task 1 owns.
         await lifecycle.alwaysPerform(.success(ActivityFixtures.state(key)))
+        await lifecycle.alwaysSendPrompt(.success(UUID()))
 
         timelines = ChannelTimelineRegistry()
         timelines.attach(to: workspace, lifecycle: lifecycle)
@@ -344,6 +500,32 @@ private final class Rig {
             return XCTFail("the invented line did not decode as a command_lifecycle frame")
         }
         lifecycle.enqueue(.frame(frame, .first), to: key)
+    }
+
+    /// Pushes one invented `result` frame onto the channel's tap: the frame the wire reducer spends an
+    /// outstanding prompt on. Every field the type requires is invented and none is engine-recorded
+    /// (§11); `num_turns` is 1 because a zero-turn result is the reducer's relocation arm.
+    func pushResult() async {
+        pushed += 1
+        let uuid = "00000000-0000-4000-8000-" + String(format: "%012x", pushed)
+        let line = Data(#"{"type":"result","subtype":"success","duration_ms":1,"is_error":false,"num_turns":1,"total_cost_usd":0.0,"uuid":"\#(uuid)","session_id":"\#(key.session.description)"}"#.utf8)
+        let frame = FrameDecoder.decode(line: line)
+        guard case .result = frame else {
+            return XCTFail("the invented line did not decode as a result frame")
+        }
+        lifecycle.enqueue(.frame(frame, .first), to: key)
+    }
+
+    /// The turns the live half holds, in the order the engine reported them.
+    var turns: [TurnSummaryItem] { timeline.timeline.overlay.turns }
+
+    /// Waits, bounded, for the fold's turns to satisfy `predicate`, and returns whether they did.
+    func settleTurns(_ predicate: @MainActor ([TurnSummaryItem]) -> Bool) async -> Bool {
+        for _ in 0..<400 {
+            if predicate(turns) { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return predicate(turns)
     }
 
     /// The first `userMessage` the fixture's transcript produced, for the label arm.

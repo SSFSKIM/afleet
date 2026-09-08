@@ -12,7 +12,7 @@ import FleetKit
 /// transcript and writes no frame: every write is one `LifecycleAPI` call (contract X5, Y5), and
 /// the only ClaudeWire value this file constructs is `UserInput`.
 ///
-/// **The draft is cleared only when `perform` returns.** A composer that emptied the field first and
+/// **The draft is cleared only when the X5 call returns.** A composer that emptied the field first and
 /// put the words back on a refusal is a composer that loses them the one time the put-back is the
 /// buggy line; clearing after the call cannot lose them at all.
 @MainActor
@@ -110,7 +110,7 @@ final class ComposerModel {
     /// on timing.
     @ObservationIgnored var mentionDebounce: Duration = .milliseconds(120)
 
-    /// True from the moment a send is accepted until its `perform` returns.
+    /// True from the moment a send is accepted until its X5 call returns.
     ///
     /// The field fires `send()` from a detached `Task`, so two quick Return presses are two calls
     /// with nothing between them: both would clear the blank-draft guard, both would read the same
@@ -149,8 +149,9 @@ final class ComposerModel {
 
     // MARK: - Sending
 
-    /// The whole send path: one `perform(.send(UserInput))` and nothing else (spec §8.5, "Sending is
-    /// always `perform(.send(UserInput))` and never anything else").
+    /// The whole send path: one `sendPrompt(UserInput)` and nothing else (spec §8.5, "Sending is
+    /// always `perform(.send(UserInput))` and never anything else" — X5's `sendPrompt` **is** that
+    /// path, differing only in answering the minted uuid rather than the channel's state).
     ///
     /// A blank draft is not a send and not a refusal either — the engine would answer a whitespace
     /// user frame with a turn, and a composer that spends one on a stray Enter is worse than a
@@ -183,18 +184,20 @@ final class ComposerModel {
             return
         }
         do {
-            // **No `HostSignal.promptSent` is raised here, and it is not an omission.** The signal
-            // needs the uuid the engine will echo; `ChannelSupervisor.send` mints it and
-            // `LifecycleAPI.perform` returns a `ChannelState` and discards it, so nothing above X5
-            // has it, and reaching below X5 for it is what contract Y5 forbids. Filed as the
-            // `[parent-impact]` "X5 drops the uuid `HostSignal.promptSent` needs" on this leaf's
-            // spec; when `perform(.send)` returns the minted uuid, the raise goes here, after the
-            // call succeeds and never before. Until then the queue chip renders from
-            // `Overlay.queue` alone, which is what §8.5 describes and G3 asserts.
-            _ = try await lifecycle.perform(.send(UserInput(text: text)), on: key)
+            // `sendPrompt` is `perform(.send)`'s path — same preconditions, same refusals — answering
+            // the uuid the supervisor minted for the user frame instead of the channel's state. That
+            // uuid is the whole reason this member exists: it is what the engine will echo, and the
+            // host cannot mint it or read it from below X5 without breaking contract Y5.
+            let minted = try await lifecycle.sendPrompt(UserInput(text: text), on: key)
             // Only the words that were sent. A keystroke that landed during the await is the user's
             // next message, not part of the one the engine now has.
             if draft.hasPrefix(text) { draft = String(draft.dropFirst(text.count)) }
+            // The host's own half of the fold, raised **after** the send succeeded and never before:
+            // a refused send that had already raised this would leave the channel's reducer holding a
+            // prompt the engine was never given, and the next turn would be attributed to it. The
+            // uuid is lowercased because that is the spelling the frame carries onto the wire, so the
+            // signal and the echo name the same prompt.
+            await timelines?.signal(.promptSent(uuid: minted.uuidString.lowercased(), at: Date()))
         } catch let error as LifecycleError {
             refusal = Self.explanation(of: error)
         } catch {

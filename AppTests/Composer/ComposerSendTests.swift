@@ -25,23 +25,28 @@ final class ComposerSendTests: XCTestCase {
         ComposerModel(key: makeKey(), lifecycle: double, surface: ChannelSurfaceState())
     }
 
-    /// A line typed and sent is exactly one `perform(.send(UserInput))`, and the field is emptied.
+    /// A line typed and sent is exactly one `sendPrompt(UserInput)`, and the field is emptied.
+    ///
+    /// The member is asserted by name. `sendPrompt` is `perform(.send)`'s path answering the uuid the
+    /// supervisor minted, and it is the only member that can answer it — a composer back on `perform`
+    /// would still send the message and would have nothing to raise `HostSignal.promptSent` with.
     func testSendPerformsOneSendActionAndClearsTheDraft() async {
         let double = ComposerLifecycleDouble()
-        let key = makeKey()
-        await double.stagePerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double)
         model.draft = "an invented line"
 
         await model.send()
 
         let members = await double.memberSequence
-        XCTAssertEqual(members, ["perform"],
+        XCTAssertEqual(members, ["sendPrompt"],
                        "one send reached \(members.count) lifecycle member(s): \(members.joined(separator: ", "))")
+        let prompts = await double.prompts
+        XCTAssertEqual(prompts.count, 1, "one send produced \(prompts.count) prompt(s)")
         let actions = await double.actions
-        XCTAssertEqual(actions.count, 1, "one send produced \(actions.count) action(s)")
-        guard case .send(let input)? = actions.first else {
-            return XCTFail("the composer performed an action that is not `.send`")
+        XCTAssertEqual(actions.count, 0, "one send performed \(actions.count) lifecycle action(s) as well")
+        guard let input = prompts.first else {
+            return XCTFail("the composer sent no prompt at all")
         }
         XCTAssertEqual(input.text, "an invented line", "the sent text is not the \(model.draft.count)-character draft")
         XCTAssertEqual(input.images.count, 0, "a text-only send carried \(input.images.count) image(s)")
@@ -56,16 +61,15 @@ final class ComposerSendTests: XCTestCase {
     /// crash on an unstaged outcome.
     func testBusyRefusalKeepsTheDraftNamesTheOperationAndDoesNotRetry() async {
         let double = ComposerLifecycleDouble()
-        let key = makeKey()
-        await double.stagePerform(.failure(.busy(.spawn)))
-        await double.stagePerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.stageSendPrompt(.failure(.busy(.spawn)))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double)
         model.draft = "an invented line"
 
         await model.send()
 
-        let actions = await double.actions
-        XCTAssertEqual(actions.count, 1, "a refused send produced \(actions.count) action(s); more than one is a retry")
+        let prompts = await double.prompts
+        XCTAssertEqual(prompts.count, 1, "a refused send produced \(prompts.count) prompt(s); more than one is a retry")
         XCTAssertEqual(model.draft, "an invented line",
                        "a refused send left \(model.draft.count) character(s) in the field instead of the 16 typed")
         guard let refusal = model.refusal else {
@@ -78,16 +82,15 @@ final class ComposerSendTests: XCTestCase {
     /// `LifecycleError.notEligible` behaves the same way and names the blocker.
     func testNotEligibleRefusalKeepsTheDraftNamesTheBlockerAndDoesNotRetry() async {
         let double = ComposerLifecycleDouble()
-        let key = makeKey()
-        await double.stagePerform(.failure(.notEligible(.turnRunning)))
-        await double.stagePerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.stageSendPrompt(.failure(.notEligible(.turnRunning)))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double)
         model.draft = "an invented line"
 
         await model.send()
 
-        let actions = await double.actions
-        XCTAssertEqual(actions.count, 1, "a refused send produced \(actions.count) action(s); more than one is a retry")
+        let prompts = await double.prompts
+        XCTAssertEqual(prompts.count, 1, "a refused send produced \(prompts.count) prompt(s); more than one is a retry")
         XCTAssertEqual(model.draft, "an invented line",
                        "a refused send left \(model.draft.count) character(s) in the field instead of the 16 typed")
         guard let refusal = model.refusal else {
@@ -101,12 +104,11 @@ final class ComposerSendTests: XCTestCase {
     /// and not as a refusal either.
     ///
     /// A success is staged even though nothing may reach it. Without one, a composer that *did*
-    /// send would trip the double's unstaged-outcome trap and take the whole bundle down with a
-    /// fatal error and no assertion; with one, it fails on the count below and says so.
+    /// send would throw the double's unstaged-outcome error and fail on a refusal rather than on the
+    /// count this test is written to report; with one, it fails on the count below and says so.
     func testWhitespaceOnlyDraftReachesTheLifecycleNotAtAll() async {
         let double = ComposerLifecycleDouble()
-        let key = makeKey()
-        await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.alwaysSendPrompt(.success(UUID()))
         let model = makeModel(double)
         model.draft = "   \n\t  "
 
@@ -122,9 +124,8 @@ final class ComposerSendTests: XCTestCase {
     /// The refusal is the *last* send's, not a sticky one: a success after a refusal clears it.
     func testASuccessfulSendAfterARefusalClearsTheInlineExplanation() async {
         let double = ComposerLifecycleDouble()
-        let key = makeKey()
-        await double.stagePerform(.failure(.busy(.restart)))
-        await double.stagePerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.stageSendPrompt(.failure(.busy(.restart)))
+        await double.stageSendPrompt(.success(UUID()))
         let model = makeModel(double)
         model.draft = "an invented line"
 
@@ -132,8 +133,8 @@ final class ComposerSendTests: XCTestCase {
         XCTAssertNotNil(model.refusal, "the first, refused, send showed no inline explanation")
         await model.send()
 
-        let actions = await double.actions
-        XCTAssertEqual(actions.count, 2, "two sends produced \(actions.count) action(s)")
+        let prompts = await double.prompts
+        XCTAssertEqual(prompts.count, 2, "two sends produced \(prompts.count) prompt(s)")
         XCTAssertNil(model.refusal, "the refusal from the first send survived a successful one")
         XCTAssertEqual(model.draft.count, 0, "the successful second send left \(model.draft.count) character(s)")
     }
@@ -141,14 +142,13 @@ final class ComposerSendTests: XCTestCase {
     /// Two Return presses while one send is still in flight are **one** send.
     ///
     /// The field fires `send()` from a detached `Task`, so nothing serialises the two: without a
-    /// guard both clear the blank-draft check, both read the same draft, and both reach `perform` —
-    /// the same message twice. The double holds `perform` open so the second press genuinely lands
+    /// guard both clear the blank-draft check, both read the same draft, and both reach `sendPrompt` —
+    /// the same message twice. The double holds the send open so the second press genuinely lands
     /// inside the first, which is the only arrangement in which an unguarded model can be seen to
     /// send twice; an unheld double answers before the second press is ever made.
     func testASecondSendWhileOneIsInFlightReachesTheLifecycleNotAtAll() async {
         let double = ComposerLifecycleDouble()
-        let key = makeKey()
-        await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.alwaysSendPrompt(.success(UUID()))
         await double.holdPerform()
         let model = makeModel(double)
         model.draft = "an invented line"
@@ -170,9 +170,9 @@ final class ComposerSendTests: XCTestCase {
 
         XCTAssertEqual(inFlight, 1,
                        "two presses during one in-flight send reached the lifecycle \(inFlight) time(s)")
-        XCTAssertEqual(held, 1, "\(held) caller(s) were inside perform at once")
-        let actions = await double.actions
-        XCTAssertEqual(actions.count, 1, "two concurrent sends produced \(actions.count) action(s)")
+        XCTAssertEqual(held, 1, "\(held) caller(s) were inside the send at once")
+        let prompts = await double.prompts
+        XCTAssertEqual(prompts.count, 1, "two concurrent sends produced \(prompts.count) prompt(s)")
         XCTAssertEqual(model.draft.count, 0, "the send left \(model.draft.count) character(s) in the field")
     }
 }

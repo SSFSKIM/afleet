@@ -116,7 +116,7 @@ final class ComposerMountTests: XCTestCase {
         let key = ChannelKey(configHome: LaunchFixtures.directoryURL(rig.configHome),
                              session: LaunchFixtures.sessionA)
         let double = ComposerLifecycleDouble()
-        await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.alwaysSendPrompt(.success(UUID()))
 
         let (app, column) = try await makeColumn(rig)
         // The registry is the app's own, bound by `bindWorkspace` during the launch above; the
@@ -139,9 +139,9 @@ final class ComposerMountTests: XCTestCase {
         XCTAssertTrue(ComposerViewTree.fireSend(of: field), "the mounted field carried no send action")
         let sent = await settle(double) { $0 >= 1 }
         XCTAssertEqual(sent, 1, "the field's send action reached the lifecycle \(sent) time(s)")
-        let actions = await double.actions
-        guard case .send(let input)? = actions.first else {
-            return XCTFail("the field's send action performed an action that is not `.send`")
+        let prompts = await double.prompts
+        guard let input = prompts.first else {
+            return XCTFail("the field's send action reached a lifecycle member that is not `sendPrompt`")
         }
         XCTAssertEqual(input.text, "an invented line",
                        "the field sent \(input.text.count) character(s), not the 16 in the draft")
