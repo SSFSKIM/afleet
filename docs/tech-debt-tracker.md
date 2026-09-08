@@ -871,3 +871,66 @@ symlink-containment debt in entry 78 is unchanged.
     the missing-control and press assertions fail closed if the framework shape changes.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
+
+## From C7.3
+
+Filed at the close of C7.3 (Source Control core; ledger
+`docs/doperpowers/ledgers/2026-09-07-c7.3-scm-core.md`). Numbers 112 through 126 are this
+leaf's reservation; 119 onward are unused.
+
+112. **`SourceControlCore.ToolRunner` duplicates C2's process mechanics.** Termination-handler
+     exit observation, non-blocking pipe drains, timeout with grace and `SIGKILL` are written
+     twice: once in `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift` and once in
+     `Workbench/Sources/SourceControlCore/ToolRunner.swift`. The duplication is forced, not
+     careless: contract X1 forbids Workbench from importing `ClaudeWire`, and X2 keeps
+     `AfleetCore` to value types, so neither existing home was available. Two copies is
+     tolerable; a third is the signal to extract a process package below both. Owner: whichever
+     child needs the third copy, or C2 if it revisits the package split.
+
+113. **Workbench has no §11 diagnostics domain.** §11's table names four log files
+     (`diagnostics.log`, `fleet.log`, `timeline.log`, `app.log`) and none belongs to the panel
+     layer, so C7.3 logs nothing and returns typed errors for the panel to render (§10). When a
+     panel wants a durable record of a failing `git` or `gh` invocation, the domain has to be
+     opened in §11's table with a writer that owns the file — one writer per file, per the
+     2026-09-07 amendment. Owner: C7.7, or C5 if it opens it first.
+
+114. **The commit graph is read in a fixed window with no paging above it.** `GitLog.commits`
+     defaults to 2,000 commits (`-n`/`--skip`); lane assignment marks an edge to a parent
+     outside the window `truncated`, but nothing fetches the next page. Correct for a viewport,
+     incomplete for a scroll. Owner: C7.7 when the panel's scroll needs it.
+
+115. **`%D`'s shortened decorations cannot distinguish a remote-tracking branch from a local
+     branch whose name contains a slash.** Measured on `git` 2.55.0: `feature/x` is reported as
+     `.remoteBranch(remote: "feature")` named `x`, and a local branch literally named
+     `origin/feature` is indistinguishable from the remote-tracking one. The arrow form
+     (`HEAD -> feature/x`) is exempt because it names a local branch by construction. No parser
+     of `%D` can resolve this; the remedy is `--decorate=full`, which prints `refs/heads/…` and
+     `refs/remotes/…` unambiguously and would simplify the parser rather than complicate it —
+     but it amends contract W7's command line, which this leaf does not own. Raised to the
+     architect as a parent revision at merge. Owner: whoever revises W7, most likely C7.7 when
+     the panel draws ref badges and the distinction becomes visible.
+
+116. **`ToolRunner` has no `timeoutState`.** C2's `ProcessRunner` sampled a
+     `describeAtTimeout()` before signalling the child, which is what separated a hung child
+     from one that exited without the runner observing it. That sampling was not carried across;
+     the residual tell is the pair `exitCode == -1 && timedOut`, which is enough for a panel to
+     render "the tool did not answer" and not enough to say which of the two happened. Filed
+     rather than fixed because the state is only worth its cost once something consumes it, and
+     nothing does yet (entry 113). Owner: whoever opens the Workbench diagnostics domain.
+
+117. **`ToolJob.drainRemaining` is not falsifiable by any black-box test on macOS.** The final
+     non-blocking pass over each pipe on the exit path always finds the pipe empty, because the
+     readable event reaches the runner's queue ahead of the exit in every construction tried, so
+     deleting it changes no observable behaviour. It is kept as defence for the ordering a loaded
+     queue or another platform could produce, and the review that found this was explicit that
+     an earlier apparent demonstration was an artifact of the assertion, not of the drain.
+     Closing this means a seam that lets a test hold the queue busy across the child's last
+     write. Owner: whoever next revises the process layer, or the extraction entry 112
+     anticipates.
+
+118. **`gh pr checks`' documented exit code 8 has no live confirmation.** C7.3 accepts 0 and 8
+     from that verb because `gh`'s own help and its `cmdutil.PendingError` say 8 means "checks
+     are still pending", and the behaviour is asserted with a stub runner. Twenty-six open pull
+     requests across four large public repositories had all settled at the time of the gate, so
+     no live run produced it. One live confirmation against a repository with a check in flight
+     would close this. Owner: C7.7 at its GitHub-tab gate.
