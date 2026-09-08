@@ -95,7 +95,7 @@ final class LaunchSequenceTests: XCTestCase {
             for await _ in gate { break }
             return environment
         }
-        let app = AppModel(sequence: rig.sequence, coordinatorFactory: { _ in
+        let app = AppModel(registry: RowRegistry(), sequence: rig.sequence, coordinatorFactory: { _ in
             log.note("makeCoordinator")
             return RecordingCoordinator()
         })
@@ -200,7 +200,7 @@ final class LaunchSequenceTests: XCTestCase {
                     installed: SemanticVersion(major: 2, minor: 1, patch: 200),
                     baseline: SemanticVersion(major: 2, minor: 1, patch: 259))
             }
-            let model = AppModel(sequence: sequence)
+            let model = AppModel(registry: RowRegistry(), sequence: sequence)
             await model.launch()
             XCTAssertTrue(model.route.workspace == nil, "the refusal unexpectedly built a workspace")
             XCTAssertTrue(model.settingsReadout == nil, "the test must exercise pre-workspace settings")

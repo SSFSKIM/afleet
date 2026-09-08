@@ -582,7 +582,7 @@ final class ChannelTimelineModelTests: XCTestCase {
     /// `AppModel` is this test, and that ingestion through it reaches the panel's feed is the
     /// end-to-end test below.
     func testAppModelExposesOneRegistry() async throws {
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         XCTAssertNil(app.timelines.workspace, "an unlaunched registry is already bound to a workspace")
         XCTAssertEqual(app.timelines.openChannels.count, 0,
                        "an unlaunched registry already holds \(app.timelines.openChannels.count) model(s)")
@@ -612,7 +612,7 @@ final class ChannelTimelineModelTests: XCTestCase {
     /// and holds the new URL after it, so a feed that answered the same list either way fails.
     func testTheChannelColumnAndThePanelContextShareOneRegistry() async throws {
         let rig = try await Rig(inventedChannels: 1)
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         // The one production seam that binds both owners to a workspace.
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let key = rig.keys[0]

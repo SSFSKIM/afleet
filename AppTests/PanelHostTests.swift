@@ -24,7 +24,7 @@ final class PanelHostTests: XCTestCase {
     /// R2: a protocol selection must invalidate the exact property the window renders.
     /// Reading host.selected alone would miss the original shell/host split entirely.
     func testProtocolSelectionUpdatesTheRenderedSelection() async throws {
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         try app.panels.register(StubPanelTab(.files))
         let changed = expectation(description: "rendered selection invalidated")
         withObservationTracking {
@@ -48,7 +48,7 @@ final class PanelHostTests: XCTestCase {
 
     /// R2: run must select the visible terminal, not just start a pane behind Thread.
     func testPaneRunUpdatesTheRenderedSelection() async throws {
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         try app.panels.register(StubPanelTab(.terminal))
         let runner = RecordingPaneRunner()
         app.panels.registerPaneRunner(runner, for: .terminal)
@@ -472,7 +472,7 @@ final class PanelHostTests: XCTestCase {
     /// permits a redraw, so a stale window cannot pass by querying the host directly.
     func testRemovedPopOutInvalidatesItsSceneAndReleasesTheRetainedSession() async throws {
         let rig = try await PanelRig(channels: 2)
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
         try app.panels.register(StubPanelTab(.files, counter: counter))
@@ -1010,7 +1010,7 @@ final class PanelHostTests: XCTestCase {
     /// that built the coordinator over a second host would release nothing here.
     func testTheAppResolvesOnePanelHost() async throws {
         let rig = try await PanelRig(channels: 1)
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
         try app.panels.register(StubPanelTab(.files, counter: counter))

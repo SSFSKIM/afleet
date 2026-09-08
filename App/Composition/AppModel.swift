@@ -119,7 +119,16 @@ final class AppModel {
     /// `coordinatorFactory` defaults to nil rather than to a literal closure because the production
     /// coordinator has to be handed *this* model's panel host — a delta that removed a channel
     /// releases that channel's panel sessions — and a default argument cannot reach `self`.
-    init(sequence: LaunchSequence = LaunchSequence(),
+    /// Contract Y1's registry, and the reason it is a parameter.
+    ///
+    /// `RowRegistry.register(kind:builder:)` traps on a second claim of a kind — two leaves owning
+    /// one row kind is a breach of the cut's fence, and the trap is what lets four worktrees build
+    /// one target. `AppModel.init` is where C6.1's eleven claims go, so on `RowRegistry.shared` the
+    /// second `AppModel` a process builds would die. Production builds one model and claims once on
+    /// the shared registry; a test gives each model its own; a genuine double claim still traps.
+    /// **Do not make `register` idempotent instead** — the trap is the contract.
+    init(registry: RowRegistry = .shared,
+         sequence: LaunchSequence = LaunchSequence(),
          coordinatorFactory: (@MainActor @Sendable (Workspace) -> any WorkspaceCoordinating)? = nil) {
         let panels = PanelHostModel()
         self.panels = panels
@@ -135,6 +144,9 @@ final class AppModel {
         // could is a future initialiser registering something first — in which case the placeholder
         // would vanish with no signal, and the tab C6 hands itself is the last thing that should
         // disappear quietly.
+        // C6.1's eleven row kinds, claimed beside the placeholder tab: the composite calls these
+        // the two one-line touch points of the skeleton, and this is the second of them.
+        TimelineRowKinds.register(on: registry)
         do {
             try panels.register(PlaceholderTab())
             panels.select(.thread)

@@ -75,7 +75,7 @@ final class ActivityAttachmentTests: XCTestCase {
     /// against a route published before Activity was attached.
     func testAnAdoptIssuedOnTheRouteIsObservedByActivity() async throws {
         let rig = try makeRig()
-        let model = AppModel(sequence: rig.sequence)
+        let model = AppModel(registry: RowRegistry(), sequence: rig.sequence)
         let key = ChannelKey(configHome: LaunchFixtures.directoryURL(rig.configHome),
                              session: LaunchFixtures.sessionB)
         let ask = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",

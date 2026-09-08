@@ -373,7 +373,7 @@ final class TimelineListTests: XCTestCase {
 
     /// The column as the window draws it, with the one channel selected.
     private static func makeColumn(_ rig: Rig) async throws -> (app: AppModel, column: ChannelColumnView) {
-        let app = AppModel(sequence: rig.sequence)
+        let app = AppModel(registry: RowRegistry(), sequence: rig.sequence)
         await app.launch()
         let workspace = try XCTUnwrap(app.route.workspace, "the launch reached no workspace to draw")
         app.shell.select(LaunchFixtures.sessionA)
