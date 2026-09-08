@@ -10,30 +10,45 @@ import FleetKit
 /// attachments and the pending rewind, are what the user has typed and not yet sent, and a registry
 /// that rebuilt the model on every return to a channel would throw them away.
 ///
-/// **There is one of these in the app.** `AppModel` owns `ChannelTimelineRegistry` and
-/// `PanelHostModel` exactly so that every consumer reads the same instance, and this belongs beside
-/// them — but C6.2's fence does not reach `App/Composition/`, so the single instance lives here
-/// instead and the architect moves it at merge. Two registries would hand the header's actions
-/// (Task 8) a different `ChannelSurfaceState` from the field those actions disable, which is the
-/// one thing the seam exists to prevent.
+/// **There is exactly one of these in the app**, `AppModel.composers`, bound by `bindWorkspace`
+/// beside `timelines` and `panels`. Two registries would hand the header's actions (Task 8) a
+/// different `ChannelSurfaceState` from the field those actions disable, which is the one thing the
+/// seam exists to prevent — so this is an app-scoped instance and not a static. Task 2 shipped it as
+/// `ComposerRegistry.shared` because its brief's fence stopped short of `App/Composition/`; the
+/// leaf's fence does reach one registration line there, which is what this is.
 @MainActor
 final class ComposerRegistry {
 
-    static let shared = ComposerRegistry()
+    /// The lifecycle every model built here sends through. Nil until a launch reaches a workspace;
+    /// production is that workspace's own fleet, and a test sets a double before the first
+    /// `model(for:)`.
+    var lifecycle: (any LifecycleAPI)?
 
     private var models: [ChannelKey: ComposerModel] = [:]
     private var surfaces: [ChannelKey: ChannelSurfaceState] = [:]
 
     init() {}
 
-    /// This channel's composer, built on first ask over the lifecycle the app has bound.
+    /// Binds the registry to the workspace a launch reached, releasing every model built over the
+    /// previous one — the same contract `ChannelTimelineRegistry.attach(to:)` carries, for the same
+    /// reason: *Check again* runs the whole launch again, and a composer still holding the previous
+    /// fleet would send into a workspace nothing else refers to. Task 2 shipped this registry as a
+    /// static with no rebind, which had exactly that defect; its worker flagged it.
+    func attach(to workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
+        releaseAll()
+        self.lifecycle = lifecycle ?? workspace.fleet
+    }
+
+    /// This channel's composer, built on first ask and retained afterwards.
     ///
     /// **Nil before a launch reaches a workspace**, because there is no X5 to send through yet and a
-    /// field that accepted a message with nowhere to put it would lose it silently. Once built, the
-    /// model is answered whatever is passed afterwards: the lifecycle is the workspace's for the
-    /// life of that workspace, and re-reading it per body evaluation would be a second opinion about
-    /// which fleet this channel belongs to.
-    func model(for key: ChannelKey, lifecycle: (any LifecycleAPI)?) -> ComposerModel? {
+    /// field that accepted a message with nowhere to put it would lose it silently.
+    ///
+    /// The `ChannelSurfaceState` is created here and shared: the composer reads it and the header
+    /// writes it, and two registries — or a surface built per view — would hand Task 8's header a
+    /// different object from the field it is disabling, which is the one thing this seam exists to
+    /// prevent.
+    func model(for key: ChannelKey) -> ComposerModel? {
         if let existing = models[key] { return existing }
         guard let lifecycle else { return nil }
         let surface = surfaces[key] ?? ChannelSurfaceState()
@@ -41,6 +56,32 @@ final class ComposerRegistry {
         let model = ComposerModel(key: key, lifecycle: lifecycle, surface: surface)
         models[key] = model
         return model
+    }
+
+    /// This channel's shared surface state, whether or not a composer has been built. The header
+    /// needs it before the field is first drawn.
+    func surface(for key: ChannelKey) -> ChannelSurfaceState {
+        if let existing = surfaces[key] { return existing }
+        let surface = ChannelSurfaceState()
+        surfaces[key] = surface
+        return surface
+    }
+
+    /// Drops one channel's composer — the channel left the index. The surface goes with it: a
+    /// header re-attaching to a released channel builds a fresh pair rather than writing into a
+    /// state whose field is gone.
+    func release(_ key: ChannelKey) {
+        models.removeValue(forKey: key)?.stop()
+        surfaces.removeValue(forKey: key)
+    }
+
+    /// The channels a composer has been built for; the count is what a report states.
+    var openChannels: [ChannelKey] { Array(models.keys) }
+
+    private func releaseAll() {
+        for model in models.values { model.stop() }
+        models = [:]
+        surfaces = [:]
     }
 }
 
@@ -54,13 +95,13 @@ final class ComposerRegistry {
 struct ChannelComposerMount: View {
 
     let key: ChannelKey
-
-    /// Optional on purpose. The mount is reached from a view hierarchy that installs `AppModel` in
-    /// the environment, and from a test that does not; the non-optional form traps in the second.
-    @Environment(AppModel.self) private var app: AppModel?
+    /// The app's one registry, handed down by the column. Not `@Environment`: the column already
+    /// holds `AppModel`, and an environment read would make the mount undrawable in a test that
+    /// walks the body by reflection, which is how this view is asserted at all.
+    let composers: ComposerRegistry
 
     var body: some View {
-        if let model = ComposerRegistry.shared.model(for: key, lifecycle: app?.timelines.lifecycle) {
+        if let model = composers.model(for: key) {
             ComposerView(model: model)
         }
     }
@@ -76,6 +117,9 @@ struct ChannelComposerMount: View {
 struct ChannelHeaderActionsSlot: View {
 
     let key: ChannelKey
+    /// Task 8's actions write the surface state this registry holds for the channel; the slot takes
+    /// it now so filling it changes this view and not the column.
+    let composers: ComposerRegistry
 
     var body: some View {
         EmptyView()

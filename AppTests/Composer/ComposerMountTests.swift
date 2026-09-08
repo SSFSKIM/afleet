@@ -117,11 +117,15 @@ final class ComposerMountTests: XCTestCase {
                              session: LaunchFixtures.sessionA)
         let double = ComposerLifecycleDouble()
         await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
-        let model = try XCTUnwrap(ComposerRegistry.shared.model(for: key, lifecycle: double),
+
+        let (app, column) = try await makeColumn(rig)
+        // The registry is the app's own, bound by `bindWorkspace` during the launch above; the
+        // double replaces the lifecycle it was bound to, which is the seam
+        // `ChannelTimelineRegistry` already carries for the same reason.
+        app.composers.lifecycle = double
+        let model = try XCTUnwrap(app.composers.model(for: key),
                                   "the registry built no composer for a channel with a lifecycle")
         model.draft = "an invented line"
-
-        let (_, column) = try await makeColumn(rig)
         let mount = try XCTUnwrap(ComposerViewTree.view(named: "ChannelComposerMount",
                                                         in: try channelBody(of: column)),
                                   "the column mounts no composer")

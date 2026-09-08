@@ -81,6 +81,14 @@ final class AppModel {
     /// feed in its context would watch a timeline nothing updates.
     let panels: PanelHostModel
 
+    /// The per-channel composers (spec §8.5), one `ComposerModel` and one shared
+    /// `ChannelSurfaceState` per channel.
+    ///
+    /// **One instance, app-scoped**, for the reason the two above are: the channel column draws the
+    /// field from here and C6.2's header actions write the surface state from here, and a second
+    /// registry would disable a field that is not the one on screen.
+    let composers = ComposerRegistry()
+
     /// Contract Y4's seam: where an `Agent` chip in the timeline navigates to.
     ///
     /// A settable property with a default rather than a construction, the shape `HostLinkRouter`
@@ -145,6 +153,7 @@ final class AppModel {
     func bindWorkspace(_ workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
         timelines.attach(to: workspace, lifecycle: lifecycle)
         panels.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
+        composers.attach(to: workspace, lifecycle: lifecycle)
     }
 
     /// Runs the launch and routes on its outcome. Concurrent windows await the same task;
