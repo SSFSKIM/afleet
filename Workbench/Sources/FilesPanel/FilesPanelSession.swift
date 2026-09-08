@@ -87,6 +87,9 @@ public final class FilesPanelSession: PanelTabSession {
         case unreadableFile
         /// The write did not land. The buffer is still dirty and nothing was saved.
         case saveFailed
+        /// The destination is inside a Claude Code config home. afleet never writes there
+        /// (CLAUDE.md's first rule, root spec X9); reading the file stays allowed.
+        case saveRefusedIntoConfigHome
         /// The bridge refused a `save` because a diff is on screen. It is refused editor-side and
         /// there is no command that asks; this is the state the refusal lands in.
         case saveRefusedWhileDiffShown
@@ -129,6 +132,8 @@ public final class FilesPanelSession: PanelTabSession {
     private let watchMode: FileWatch.Mode
     private let watchCoalescingDelay: Duration
     private let watchPollInterval: Duration
+    /// The config homes no save may land in, resolved once (CLAUDE.md rule 1, root spec X9).
+    private let protectedHomes: [URL]
 
     private var surface: (any EditorSurface)?
     /// Commands emitted before a surface was attached. The view is built after the session, and a
@@ -159,6 +164,8 @@ public final class FilesPanelSession: PanelTabSession {
         self.watchMode = watchMode
         self.watchCoalescingDelay = watchCoalescingDelay
         self.watchPollInterval = watchPollInterval
+        self.protectedHomes = Self.protectedConfigHomes(channel: context.key.configHome,
+                                                        variables: context.environment.variables)
         self.anchor.bind(self)
         if let surface { attach(surface) }
     }
@@ -320,6 +327,23 @@ public final class FilesPanelSession: PanelTabSession {
         await persist()
     }
 
+    /// The tree's hidden-files toggle. Part of the document (Design §6), so it is set through the
+    /// session rather than on the tree: a toggle written straight to `FileTree` records nothing,
+    /// and eviction releases a session with no teardown to notice it.
+    public func setShowsHiddenFiles(_ shows: Bool) async {
+        guard tree.showsHiddenFiles != shows else { return }
+        tree.showsHiddenFiles = shows
+        await persist()
+    }
+
+    /// The tree's gitignore toggle, through the tree's **async** setter: turning it on is what pays
+    /// for the classification (Design §3).
+    public func setShowsGitIgnored(_ shows: Bool) async {
+        guard tree.hidesIgnoredFiles == shows else { return }
+        await tree.setHidesIgnoredFiles(!shows)
+        await persist()
+    }
+
     /// The markdown source/rendered toggle, per open file and part of the document (Design §4).
     public func setRendersMarkdown(_ renders: Bool, for url: URL) async {
         guard let index = openFiles.firstIndex(where: { $0.url == url }),
@@ -365,6 +389,99 @@ public final class FilesPanelSession: PanelTabSession {
         return (kind, language, text, snapshot)
     }
 
+    // MARK: - Where a save may not land (CLAUDE.md rule 1, root spec X9)
+
+    /// The directories a save may never land in: the channel's own config home, the
+    /// `CLAUDE_CONFIG_DIR` of the channel's environment and of this process, and the default
+    /// `~/.claude`.
+    ///
+    /// Every mutation of a config home goes through the CLI or the control channel (CLAUDE.md's
+    /// first rule, root spec X9). `openFile` accepts whatever URL a `.file` link carries, so a
+    /// settings file is opened like any other file and *Save* would replace it; the refusal
+    /// belongs here, on the write, because **reading** one stays allowed.
+    ///
+    /// Each home is resolved, and so is the destination: an arbitrary `CLAUDE_CONFIG_DIR`, a
+    /// symlink into a home and two spellings of one directory are all the same place.
+    static func protectedConfigHomes(channel: URL, variables: [String: String],
+                                     processVariables: [String: String] = ProcessInfo.processInfo.environment,
+                                     home: URL = URL(filePath: NSHomeDirectory())) -> [URL] {
+        var homes = [channel, home.appending(path: ".claude")]
+        for configured in [variables["CLAUDE_CONFIG_DIR"], processVariables["CLAUDE_CONFIG_DIR"]] {
+            guard let configured, !configured.isEmpty else { continue }
+            homes.append(URL(filePath: configured))
+        }
+        return homes.map(resolvingSymlinks)
+    }
+
+    /// Whether `url` is one of `homes` or lies inside one.
+    static func isInside(_ homes: [URL], _ url: URL) -> Bool {
+        let candidate = resolvingSymlinks(url)
+        return homes.contains { contains($0, candidate) }
+    }
+
+    /// Identity first — macOS mounts the data volume twice, so one directory has two spellings
+    /// that share no components — and case-insensitive components second, for the part of the path
+    /// that does not exist yet and so has no inode to compare.
+    private static func contains(_ home: URL, _ candidate: URL) -> Bool {
+        if sharesIdentity(home, candidate) { return true }
+        let inside = candidate.pathComponents, outside = home.pathComponents
+        guard inside.count >= outside.count else { return false }
+        for (mine, theirs) in zip(inside, outside) where !sameComponent(mine, theirs) { return false }
+        return true
+    }
+
+    private static func sharesIdentity(_ home: URL, _ candidate: URL) -> Bool {
+        guard let target = identity(home) else { return false }
+        var probe = candidate.standardizedFileURL
+        while true {
+            if let found = identity(probe), found == target { return true }
+            let parent = probe.deletingLastPathComponent().standardizedFileURL
+            guard parent.pathComponents.count < probe.pathComponents.count else { return false }
+            probe = parent
+        }
+    }
+
+    private static func identity(_ url: URL) -> (dev_t, ino_t)? {
+        var status = stat()
+        guard lstat(url.path(percentEncoded: false), &status) == 0 else { return nil }
+        return (status.st_dev, status.st_ino)
+    }
+
+    private static func sameComponent(_ one: String, _ other: String) -> Bool {
+        one.precomposedStringWithCanonicalMapping
+            .compare(other.precomposedStringWithCanonicalMapping, options: [.caseInsensitive])
+            == .orderedSame
+    }
+
+    /// `url` with every symbolic link resolved, keeping the components that do not exist yet.
+    /// `resolvingSymlinksInPath()` resolves nothing in a path that is not there, which is the case
+    /// this has to get right: a config home that has not been created, and a destination whose
+    /// last component a save is about to make.
+    static func resolvingSymlinks(_ url: URL) -> URL {
+        let standardized = url.standardizedFileURL
+        if let resolved = realpath(standardized.path(percentEncoded: false)) {
+            return URL(filePath: resolved)
+        }
+        var missing: [String] = []
+        var probe = standardized
+        while true {
+            let parent = probe.deletingLastPathComponent().standardizedFileURL
+            guard parent.pathComponents.count < probe.pathComponents.count else { return standardized }
+            missing.append(probe.lastPathComponent)
+            probe = parent
+            guard let resolved = realpath(probe.path(percentEncoded: false)) else { continue }
+            var out = URL(filePath: resolved)
+            for component in missing.reversed() { out = out.appending(path: component) }
+            return out
+        }
+    }
+
+    private static func realpath(_ path: String) -> String? {
+        guard let resolved = Darwin.realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
     // MARK: - Save (Design §7)
 
     /// *Save*. W4's vocabulary is closed, so the editor cannot report a key press: the button and
@@ -384,15 +501,36 @@ public final class FilesPanelSession: PanelTabSession {
         guard let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
         let file = openFiles[index]
         let data = Data(text.utf8)
-        let observed = FileSnapshot.read(file.url)
+        // The destination is the file the buffer was read from, which for a link is the link's
+        // *target*: `FileSnapshot.read` and the mode lookup both follow the final component, and a
+        // rename onto the link's own name would replace the link with a regular file and leave the
+        // bytes on screen untouched. C7.3's `workingTreeFile` deliberately resolves nothing,
+        // because there a link's own text is the git object; this is the editing path.
+        let destination = Self.resolvingSymlinks(file.url)
 
-        if !file.keepsMine, let observed {
-            let known = observed.hasSameContents(as: file.lastLoaded)
-                || (file.lastWritten.map(observed.hasSameContents(as:)) ?? false)
-            if !known {
+        guard !Self.isInside(protectedHomes, destination) else {
+            issue = .saveRefusedIntoConfigHome
+            return
+        }
+
+        // **The save side of the conflict rule** (§8). A destination that has *vanished* is a
+        // conflict too: a file deleted underneath the buffer is the user's to resolve, not one to
+        // recreate silently — the watcher may already have raised the deletion.
+        var expected: FileSnapshot?
+        if !file.keepsMine {
+            guard let observed = FileSnapshot.read(destination),
+                  observed.hasSameContents(as: file.lastLoaded)
+                    || (file.lastWritten.map(observed.hasSameContents(as:)) ?? false)
+            else {
                 openFiles[index].hasConflict = true
                 return
             }
+            expected = observed
+        }
+        // *Keep mine* is the user having chosen the overwrite, so it accepts whatever is there.
+        let accepted: (FileSnapshot?) -> Bool = { later in
+            guard let expected else { return true }
+            return later.map { $0.hasSameContents(as: expected) } ?? false
         }
 
         // `lastWritten` is recorded from the bytes **before** the rename lands, so the echo cannot
@@ -400,12 +538,19 @@ public final class FilesPanelSession: PanelTabSession {
         // because a snapshot of bytes that are not on disk would make a real change look like an
         // echo and swallow it.
         let previouslyWritten = file.lastWritten
-        openFiles[index].lastWritten = FileSnapshot.predicted(contents: data)
+        let written = FileSnapshot.predicted(contents: data)
+        openFiles[index].lastWritten = written
         do {
-            try Self.atomicallyWrite(data, to: file.url)
+            try Self.atomicallyWrite(data, to: destination, accepting: accepted)
         } catch {
             openFiles[index].lastWritten = previouslyWritten
-            issue = .saveFailed
+            // A destination that moved while the temporary was being prepared is the same
+            // conflict as one that had moved before it, and not a failure the user can retry.
+            if error is SaveRefusal {
+                openFiles[index].hasConflict = true
+            } else {
+                issue = .saveFailed
+            }
             return
         }
         openFiles[index].isDirty = false
@@ -413,12 +558,26 @@ public final class FilesPanelSession: PanelTabSession {
         openFiles[index].keepsMine = false
         openFiles[index].isMissing = false
         openFiles[index].text = text
-        // `lastLoaded` is deliberately **not** moved to the bytes just written. It is what the
-        // buffer was loaded from, and the record that answers the echo is `lastWritten` — §8's
-        // first rule, keyed on the digest. Re-reading the file into `lastLoaded` here would make
-        // rule 2 answer the echo instead and leave rule 1 carrying nothing, which is a
-        // suppression that no test could tell from its own absence.
+        // **Both** baselines are now the bytes just written. `lastLoaded` describes what the buffer
+        // holds, and after a save that is no longer what the file was opened from: leaving it
+        // behind makes an external writer that restores those bytes invisible to §8's rule 2 and
+        // to the preflight above. `lastWritten` stays as well, because it is what covers the
+        // window between this record and the rename landing — §8's rule 1, keyed on the digest.
+        openFiles[index].lastLoaded = written
         issue = nil
+        // The editor's dirty baseline is the host's to clear: `readBuffer` deliberately leaves the
+        // flag set, because only the host knows whether the write landed, and `dirty` is reported
+        // on a *transition*. Without this the buffer stays dirty editor-side, the next edit
+        // reports nothing, *Save* never re-enables and a refresh discards edits nobody was told
+        // about. The bridge's own comment names this as the fix.
+        if presentedPath == file.path, !isShowingDiff { send(.setText(text: text)) }
+    }
+
+    /// A write refused rather than failed: what tells `write` to raise the conflict instead of the
+    /// panel's *could not be written*. It carries no path, like every other state here.
+    enum SaveRefusal: Error {
+        /// The destination changed between the preflight and the rename.
+        case destinationChanged
     }
 
     /// Write a sibling temporary, then `rename`. What keeps the file whole if the app dies
@@ -429,14 +588,21 @@ public final class FilesPanelSession: PanelTabSession {
     /// umask gives a fresh file, which silently disarms an executable script and re-opens a file
     /// the user had restricted. A destination that is not there yet has no mode to carry, and the
     /// file that replaces it takes the umask's — which is what creating a file means.
-    private static func atomicallyWrite(_ data: Data, to url: URL) throws {
+    ///
+    /// **`accepting` is consulted immediately before the rename**, on the destination as it stands
+    /// then. The caller's content check ran before the temporary was written, and another writer
+    /// landing in that window would otherwise be overwritten unconditionally — and suppressed by
+    /// the watcher as this save's own echo. This *narrows* the window; it does not close it. A
+    /// replace with no window at all needs an exchange primitive this leaf does not use, so what
+    /// is bought here is that a change which **is** detected is refused rather than overwritten.
+    static func atomicallyWrite(_ data: Data, to url: URL,
+                                accepting: (FileSnapshot?) -> Bool = { _ in true }) throws {
         let temporary = url.deletingLastPathComponent()
             .appending(path: ".afleet-save-\(UUID().uuidString)")
-        try data.write(to: temporary)
-        if let mode = permissions(of: url) {
-            // A mode that cannot be carried is not a reason to lose the write: the bytes are what
-            // the user asked for, and the next save that can carry it restores it.
-            _ = chmod(temporary.path(percentEncoded: false), mode)
+        try writeTemporary(data, at: temporary, mode: permissions(of: url))
+        guard accepting(FileSnapshot.read(url)) else {
+            try? FileManager.default.removeItem(at: temporary)
+            throw SaveRefusal.destinationChanged
         }
         let moved = url.withUnsafeFileSystemRepresentation { destination in
             temporary.withUnsafeFileSystemRepresentation { source in
@@ -447,6 +613,30 @@ public final class FilesPanelSession: PanelTabSession {
         guard moved else {
             try? FileManager.default.removeItem(at: temporary)
             throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    /// The temporary, created **with** the destination's mode and only then filled.
+    ///
+    /// Creating it with the umask's mode and `chmod`ing afterwards writes every byte of a 0600 file
+    /// into a 0644 one, which anyone who can traverse the directory may read; no later `chmod`
+    /// takes that back. The creation mode is the destination's, which the umask may narrow but
+    /// cannot widen, and `fchmod` restores it exactly while the file is still empty — a failure
+    /// there fails the save rather than publishing the contents. A destination that is not there
+    /// yet has no mode to carry and takes the umask's, which is what creating a file means.
+    private static func writeTemporary(_ data: Data, at temporary: URL, mode: mode_t?) throws {
+        let descriptor = temporary.path(percentEncoded: false)
+            .withCString { Darwin.open($0, O_WRONLY | O_CREAT | O_EXCL, mode ?? 0o666) }
+        guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        do {
+            if let mode, fchmod(descriptor, mode) != 0 { throw CocoaError(.fileWriteNoPermission) }
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } catch {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: temporary)
+            throw error
         }
     }
 

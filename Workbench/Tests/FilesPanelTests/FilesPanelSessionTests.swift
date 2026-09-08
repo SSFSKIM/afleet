@@ -558,6 +558,320 @@ final class FilesPanelSessionTests: XCTestCase {
         XCTAssertEqual(harness.surface.shapes.last, .setTheme(name: "vs-dark"))
     }
 
+    // MARK: - 12. where a save may not land (CLAUDE.md rule 1, root spec X9)
+
+    /// A settings file reached through a `.file` link reads like any other file, and *Save* would
+    /// replace it. Reading stays allowed; the write is refused with a panel-local state that names
+    /// the reason and no path.
+    func testASaveIntoTheChannelsConfigHomeIsRefusedAndTheFileIsUntouched() async throws {
+        let store = try makeStore()
+        let context = try makeContext(store: store)
+        let settings = context.key.configHome.appending(path: "settings.json")
+        try FileManager.default.createDirectory(at: context.key.configHome,
+                                                withIntermediateDirectories: true)
+        try "{\"model\":\"opus\"}\n".write(to: settings, atomically: true, encoding: .utf8)
+        let harness = try makeHarness(context: context)
+
+        await harness.session.openFile(at: settings, line: nil)
+        XCTAssertEqual(harness.session.openFiles.count, 1, "reading inside a config home is allowed")
+        XCTAssertNil(harness.session.issue)
+
+        harness.surface.deliver(.dirty(path: settings.path(percentEncoded: false), isDirty: true))
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: settings.path(percentEncoded: false),
+                                               text: "{\"model\":\"replaced\"}\n"))
+
+        XCTAssertEqual(harness.session.issue, .saveRefusedIntoConfigHome)
+        XCTAssertEqual(try String(contentsOf: settings, encoding: .utf8), "{\"model\":\"opus\"}\n",
+                       "the engine's own file was replaced")
+        XCTAssertEqual(harness.session.selected?.isDirty, true, "nothing was saved")
+    }
+
+    /// A link *inside* the scratch tree pointing at a file inside a config home is the same write:
+    /// the guard compares resolved paths, so the link's own spelling does not get past it.
+    func testASaveThroughALinkIntoTheConfigHomeIsRefusedToo() async throws {
+        let store = try makeStore()
+        let context = try makeContext(store: store)
+        let settings = context.key.configHome.appending(path: "settings.json")
+        try FileManager.default.createDirectory(at: context.key.configHome,
+                                                withIntermediateDirectories: true)
+        try "original\n".write(to: settings, atomically: true, encoding: .utf8)
+        try tree.symlink("elsewhere/link.json", to: settings.path(percentEncoded: false))
+        let link = tree.root.appending(path: "elsewhere/link.json")
+        let harness = try makeHarness(context: context)
+
+        await harness.session.openFile(at: link, line: nil)
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: link.path(percentEncoded: false),
+                                               text: "replaced\n"))
+
+        XCTAssertEqual(harness.session.issue, .saveRefusedIntoConfigHome)
+        XCTAssertEqual(try String(contentsOf: settings, encoding: .utf8), "original\n")
+    }
+
+    /// The set of homes, as a count and as membership decisions — never as a path.
+    func testTheProtectedHomesCoverTheChannelBothEnvironmentsAndTheDefault() throws {
+        let channel = tree.root.appending(path: "channel-home")
+        let fromChannelEnvironment = tree.root.appending(path: "env-home")
+        let fromProcess = tree.root.appending(path: "process-home")
+        let home = tree.root.appending(path: "pretend-home")
+        let homes = FilesPanelSession.protectedConfigHomes(
+            channel: channel,
+            variables: ["CLAUDE_CONFIG_DIR": fromChannelEnvironment.path(percentEncoded: false)],
+            processVariables: ["CLAUDE_CONFIG_DIR": fromProcess.path(percentEncoded: false)],
+            home: home)
+
+        XCTAssertEqual(homes.count, 4, "one home per source")
+        for inside in [channel.appending(path: "settings.json"),
+                       fromChannelEnvironment.appending(path: "deep/agent.md"),
+                       fromProcess.appending(path: "settings.json"),
+                       home.appending(path: ".claude/settings.json"),
+                       channel] {
+            XCTAssertTrue(FilesPanelSession.isInside(homes, inside),
+                          "a destination inside a config home was allowed")
+        }
+        for outside in [tree.root.appending(path: "channel-home-next-door/settings.json"),
+                        tree.root.appending(path: "workspace/settings.json"),
+                        home.appending(path: "notes.md")] {
+            XCTAssertFalse(FilesPanelSession.isInside(homes, outside),
+                           "an ordinary destination was refused")
+        }
+    }
+
+    // MARK: - 13. the save writes through a link, not over it
+
+    func testASaveThroughASymlinkReplacesTheTargetAndLeavesTheLinkALink() async throws {
+        let target = try tree.file("real/target.swift", "original\n")
+        try tree.symlink("link.swift", to: target.path(percentEncoded: false))
+        let link = tree.root.appending(path: "link.swift")
+        let harness = try makeHarness()
+        await harness.session.openFile(at: link, line: nil)
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: link.path(percentEncoded: false),
+                                               text: "edited\n"))
+
+        XCTAssertNil(harness.session.issue)
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "edited\n",
+                       "the link's target did not receive the write")
+        var status = stat()
+        XCTAssertEqual(lstat(link.path(percentEncoded: false), &status), 0)
+        XCTAssertTrue((status.st_mode & S_IFMT) == S_IFLNK, "the save replaced the link itself")
+    }
+
+    // MARK: - 14. the dirty baseline after a save
+
+    /// `readBuffer` deliberately leaves the editor's dirty flag set, and `dirty` is reported on a
+    /// transition: without the host clearing the baseline the next edit reports nothing, *Save*
+    /// stays disabled and a refresh discards edits nobody was told about.
+    func testASuccessfulSaveClearsTheEditorsBaselineWithTheBytesItWrote() async throws {
+        let file = try tree.file("baseline.swift", "one\n")
+        let harness = try makeHarness()
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+        harness.surface.reset()
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false), text: "two\n"))
+
+        XCTAssertEqual(harness.surface.shapes, [.save, .setText(text: "two\n")],
+                       "the write did not clear the editor's baseline")
+    }
+
+    /// A failed write leaves the buffer alone: the baseline it would clear describes bytes that
+    /// are not on disk.
+    func testAFailedSaveClearsNothing() async throws {
+        let directory = try tree.directory("sealed-baseline")
+        let file = try tree.file("sealed-baseline/notes.swift", "original\n")
+        let harness = try makeHarness()
+        await harness.session.openFile(at: file, line: nil)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500],
+                                              ofItemAtPath: directory.path(percentEncoded: false))
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700],
+                                                   ofItemAtPath: directory.path(percentEncoded: false))
+        }
+        harness.surface.reset()
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false), text: "no\n"))
+
+        XCTAssertEqual(harness.surface.shapes, [.save])
+    }
+
+    // MARK: - 15. the loaded baseline is retired by a save
+
+    /// After saving B the buffer's bytes are B, so **both** baselines are B. Leaving `lastLoaded`
+    /// on A is what makes an external writer restoring A invisible to §8's rule 2 and to the save
+    /// preflight. Asserted as the two digests, which name no path and print no buffer.
+    ///
+    /// The end-to-end version — a watcher refresh after such a restore — cannot be driven from a
+    /// test today: `FileSnapshot.read` takes its modification time from the long-lived `URL` the
+    /// watch holds, and `URL` caches resource values, so a restore of identical bytes reaches
+    /// `FileWatch.evaluate` as a snapshot equal to the last one and is filtered before the policy
+    /// sees it. That is a `FileSnapshot` matter and outside this change.
+    func testASaveRetiresTheLoadedBaselineAlongWithTheWrittenOne() async throws {
+        let file = try tree.file("retired.swift", "loaded\n")
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .seconds(30))
+        await harness.session.openFile(at: file, line: nil)
+        let opened = try XCTUnwrap(harness.session.selected?.lastLoaded)
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false), text: "saved\n"))
+
+        let saved = try XCTUnwrap(harness.session.selected)
+        let written = FileSnapshot.predicted(contents: Data("saved\n".utf8))
+        XCTAssertNotEqual(opened.digest, written.digest, "the two baselines are distinguishable")
+        XCTAssertEqual(saved.lastWritten?.digest, written.digest)
+        XCTAssertEqual(saved.lastLoaded.digest, written.digest,
+                       "the buffer's loaded baseline is still the bytes the file was opened from")
+    }
+
+    /// The same rule on the save side: the preflight accepts only what the buffer's bytes are now.
+    func testASaveOverAFileRestoredToTheLoadedBytesIsRefusedAndRaisesTheConflict() async throws {
+        let file = try tree.file("restored.swift", "loaded\n")
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .seconds(30))
+        await harness.session.openFile(at: file, line: nil)
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false), text: "saved\n"))
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+
+        try "loaded\n".write(to: file, atomically: true, encoding: .utf8)
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false), text: "mine\n"))
+
+        XCTAssertEqual(harness.session.selected?.hasConflict, true)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "loaded\n",
+                       "the other writer's bytes were overwritten")
+    }
+
+    // MARK: - 16. a destination that vanished
+
+    func testASaveOverADestinationThatVanishedIsAConflictAndRecreatesNothing() async throws {
+        let file = try tree.file("vanished.swift", "original\n")
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .seconds(30))
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+        try FileManager.default.removeItem(at: file)
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false), text: "mine\n"))
+
+        XCTAssertEqual(harness.session.selected?.hasConflict, true)
+        XCTAssertEqual(harness.session.selected?.isDirty, true, "nothing was saved")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path(percentEncoded: false)),
+                       "a deleted destination was recreated behind the user")
+    }
+
+    /// *Keep mine* is the user resolving exactly that conflict, and it does write the file back.
+    func testKeepMineOverADestinationThatVanishedWritesIt() async throws {
+        let file = try tree.file("vanished-kept.swift", "original\n")
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .seconds(30))
+        await harness.session.openFile(at: file, line: nil)
+        try FileManager.default.removeItem(at: file)
+        harness.session.keepMine(file)
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false), text: "mine\n"))
+
+        XCTAssertNil(harness.session.issue)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "mine\n")
+    }
+
+    // MARK: - 17. the temporary, and the window before the rename
+
+    /// The temporary carries the destination's mode **before** a byte reaches it: a 0600 file
+    /// written into a 0644 temporary is published to anyone who can traverse the directory, and
+    /// the later `chmod` cannot take that back. The check runs while the temporary still holds the
+    /// content, which is exactly where the exposure would be.
+    func testTheTemporaryCarriesTheDestinationsModeBeforeAnyContentReachesIt() throws {
+        let directory = try tree.directory("staging")
+        let destination = directory.appending(path: "restricted.swift")
+        try "original\n".write(to: destination, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o600)],
+                                              ofItemAtPath: destination.path(percentEncoded: false))
+        var temporaryMode: mode_t?
+        var temporarySize: Int?
+
+        try FilesPanelSession.atomicallyWrite(Data("edited\n".utf8), to: destination) { _ in
+            let temporary = Self.onlyTemporary(in: directory)
+            temporaryMode = temporary.flatMap(Self.permissions(of:))
+            temporarySize = temporary.flatMap { try? Data(contentsOf: $0).count }
+            return true
+        }
+
+        XCTAssertEqual(temporarySize, 7, "the check did not run while the temporary held the bytes")
+        XCTAssertEqual(temporaryMode, 0o600, "the content was exposed before the mode was carried")
+        XCTAssertEqual(Self.permissions(of: destination), 0o600)
+    }
+
+    /// The content check happens before the temporary is written; another writer landing in that
+    /// window would otherwise be overwritten unconditionally. The rename is refused instead.
+    func testAWriteWhoseDestinationChangedBeforeTheRenameIsRefusedAndLeavesNoTemporary() throws {
+        let directory = try tree.directory("contended-staging")
+        let destination = directory.appending(path: "contended.swift")
+        try "original\n".write(to: destination, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try FilesPanelSession.atomicallyWrite(Data("mine\n".utf8),
+                                                                  to: destination) { _ in false })
+
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "original\n",
+                       "a refused write still landed")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(
+            atPath: directory.path(percentEncoded: false)).count, 1,
+                       "the refused write left its temporary behind")
+    }
+
+    /// The only `.afleet-save-` entry in `directory`, which is what the checks above look at.
+    private static func onlyTemporary(in directory: URL) -> URL? {
+        let names = (try? FileManager.default.contentsOfDirectory(
+            atPath: directory.path(percentEncoded: false))) ?? []
+        guard let name = names.first(where: { $0.hasPrefix(".afleet-save-") }), names.count == 2
+        else { return nil }
+        return directory.appending(path: name)
+    }
+
+    // MARK: - 18. the tree's toggles are part of the document
+
+    /// A toggle records the document like every other change, so an eviction — which releases the
+    /// session with no `teardown()` — cannot lose it. `teardown()` is deliberately not called: it
+    /// would record the state itself and prove nothing about the toggle.
+    func testATreeToggleIsRecordedWithoutATeardown() async throws {
+        let store = try makeStore()
+        let context = try makeContext(store: store)
+        let harness = try makeHarness(context: context)
+
+        await harness.session.setShowsHiddenFiles(true)
+        await harness.session.setShowsGitIgnored(true)
+
+        var landed: FilesPanelState?
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, landed == nil {
+            landed = try await store.read(FilesPanelState.self, key: harness.session.storeKey)
+            if landed == nil { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        let document = try XCTUnwrap(landed, "a toggle recorded no document")
+        XCTAssertTrue(document.showsHiddenFiles, "the hidden-files toggle was not recorded")
+        XCTAssertTrue(document.showsGitIgnored, "the gitignore toggle was not recorded")
+    }
+
+    /// The other half: what was recorded is what a later session comes back with.
+    func testTheTreesTogglesAreRestored() async throws {
+        let store = try makeStore()
+        let context = try makeContext(store: store)
+        let first = try makeHarness(context: context)
+
+        await first.session.setShowsHiddenFiles(true)
+        await first.session.setShowsGitIgnored(true)
+        await first.session.teardown()
+
+        let second = try makeHarness(context: context)
+        await second.session.restore()
+
+        XCTAssertTrue(second.session.tree.showsHiddenFiles)
+        XCTAssertFalse(second.session.tree.hidesIgnoredFiles)
+    }
+
     // MARK: - Harness
 
     /// A session and the recorder it drives, held together so a test cannot let the session go by

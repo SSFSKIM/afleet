@@ -91,16 +91,21 @@ private struct FileTreeColumn: View {
             .padding(.vertical, 6)
 
             HStack(spacing: 12) {
-                Toggle("Hidden", isOn: $tree.showsHiddenFiles)
-                // The gitignore toggle binds through the tree's **async** setter, because turning
-                // it on is what pays for the classification: a plain boolean would hide nothing
-                // until the user happened to refresh (Design §3).
+                // Both toggles go through the **session**, not the tree: they are part of the
+                // persisted document (Design §6), and a set written straight to `FileTree` records
+                // nothing — production eviction releases a session with no teardown to notice it.
+                Toggle("Hidden", isOn: Binding(
+                    get: { session.tree.showsHiddenFiles },
+                    set: { shows in
+                        Task { @MainActor in await session.setShowsHiddenFiles(shows) }
+                    }))
+                // The gitignore toggle stays on the tree's **async** setter underneath, because
+                // turning it on is what pays for the classification: a plain boolean would hide
+                // nothing until the user happened to refresh (Design §3).
                 Toggle("Ignored", isOn: Binding(
                     get: { !session.tree.hidesIgnoredFiles },
                     set: { shows in
-                        Task { @MainActor in
-                            await session.tree.setHidesIgnoredFiles(!shows)
-                        }
+                        Task { @MainActor in await session.setShowsGitIgnored(shows) }
                     }))
                 .disabled(tree.gitignore == .unavailable)
                 .help(tree.gitignore == .unavailable

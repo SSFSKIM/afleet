@@ -82,6 +82,8 @@ public struct FilesPanelReadout: Equatable {
         case .unreadableFile: return "This file could not be opened."
         case .saveFailed: return "The file could not be written. Your changes are still here."
         case .saveRefusedWhileDiffShown: return "Close the diff before saving."
+        case .saveRefusedIntoConfigHome:
+            return "afleet never writes inside a Claude Code configuration directory."
         case .editorReported: return "The editor reported a problem."
         case .diffUnavailable: return "The repository could not be read."
         case .noTextDiff(let reason):
