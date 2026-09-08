@@ -671,6 +671,133 @@ final class ToolRunnerTests: XCTestCase {
         }
     }
 
+    // MARK: - C6.2's merge review: the escalation is owed to the group, not to the caller
+
+    /// **A budget that expires inside the grace still kills the group.** `SIGTERM` ends the leader
+    /// while a descendant that ignores it survives; the caller can then be answered — by the budget,
+    /// which reaps an exited leader and settles — *before* the `SIGKILL` the termination owed the
+    /// group is due. An escalation conditioned on `settled` skips it and leaves that descendant on
+    /// the machine, having reported the command as stopped.
+    ///
+    /// The ordering is arranged rather than raced: the grace is four seconds and the budget two, so
+    /// the settlement provably lands inside the escalation window. `timedOut` being false is the
+    /// proof that the cancellation, not the budget, began the termination.
+    func testABudgetExpiringInsideTheGraceStillKillsTheGroup() async throws {
+        let work = try tree.directory("grace-work")
+        let pidFile = work.appending(path: "descendant-pid")
+        // `trap "" TERM` sets the disposition to *ignore*, which survives the `exec` that follows it,
+        // so nothing short of `SIGKILL` ends this descendant. The leader keeps its own default
+        // disposition and dies on the first signal, which is what separates the two facts.
+        let job = ToolJob(executable: URL(filePath: "/bin/sh"),
+                          arguments: ["-c", "/bin/sh -c 'trap \"\" TERM; exec /bin/sleep 30' & "
+                                      + "printf '%s' \"$!\" > '\(pidFile.path(percentEncoded: false))'; wait"],
+                          cwd: work, environment: ["PATH": "/usr/bin:/bin"],
+                          outputLimitBytes: ToolRunner.defaultOutputLimitBytes,
+                          grace: .seconds(4))
+        try job.start()
+        let settlement = Settlement()
+        job.finish(timeout: .seconds(2)) { output in Task { await settlement.mark(output) } }
+        guard let descendant = try await recordedPID(in: pidFile, within: 20) else {
+            job.cancel()
+            return XCTFail("the command recorded no descendant to probe")
+        }
+        defer { _ = kill(descendant, SIGKILL) }
+
+        // The termination begins here; its escalation is due four seconds later, and the budget
+        // expires two seconds from now — inside it.
+        job.cancel()
+
+        guard let output = try await settled(settlement, within: 80) else {
+            return XCTFail("the cancelled call had not settled 8 second(s) later")
+        }
+        XCTAssertFalse(output.timedOut,
+                       "the budget expired before the cancellation, so this arm did not put the two in the order it tests")
+        let ended = try await died(descendant, within: 80)
+        XCTAssertTrue(ended,
+                      "the call's descendant outlived the escalation the cancellation owed its group")
+    }
+
+    /// **A final drain that overruns the cap still ends the group.** A `git` that exits leaving a
+    /// hook's descendant on its stdout is reaped by the exit handler, and the settlement that follows
+    /// takes one last pass over the pipe. When *that* pass is the one that fills the cap, the call
+    /// reports an output-limited stop — and a termination that refuses to begin because the call has
+    /// settled, or refuses to signal because the leader has been reaped, reports a stop that never
+    /// happened.
+    ///
+    /// The ordering is arranged rather than raced: `finish` is called only after the leader has
+    /// exited and the descendant has written, so there is no drain in place before the last one and
+    /// the whole capture happens inside settlement. `outputLimitBytes` being set is the proof the
+    /// arrangement held.
+    func testAFinalDrainOverrunStillEndsTheGroup() async throws {
+        let work = try tree.directory("drain-work")
+        let pidFile = work.appending(path: "descendant-pid")
+        let cap = 4096
+        let burst = 2 * cap
+        // The leader exits at once; the descendant writes twice the cap into the inherited pipe and
+        // then holds its write end open, ignoring `SIGTERM` throughout.
+        let job = ToolJob(executable: URL(filePath: "/bin/sh"),
+                          arguments: ["-c", "/bin/sh -c 'trap \"\" TERM; "
+                                      + "/bin/dd if=/dev/zero bs=\(burst) count=1 2>/dev/null | /usr/bin/tr \"\\0\" a; "
+                                      + "exec /bin/sleep 30' & "
+                                      + "printf '%s' \"$!\" > '\(pidFile.path(percentEncoded: false))'; exit 0"],
+                          cwd: work, environment: ["PATH": "/usr/bin:/bin"],
+                          outputLimitBytes: cap)
+        try job.start()
+        guard let descendant = try await recordedPID(in: pidFile, within: 20) else {
+            job.cancel()
+            return XCTFail("the command recorded no descendant to probe")
+        }
+        defer { _ = kill(descendant, SIGKILL) }
+        // The leader has exited and been reaped, and the burst is sitting in the pipe with nobody
+        // draining it. Everything the call captures, it captures in the last pass.
+        try await Task.sleep(for: .milliseconds(500))
+
+        let settlement = Settlement()
+        job.finish(timeout: .seconds(30)) { output in Task { await settlement.mark(output) } }
+
+        guard let output = try await settled(settlement, within: 60) else {
+            return XCTFail("the call had not settled 6 second(s) after its last drain")
+        }
+        XCTAssertEqual(output.outputLimitBytes, cap,
+                       "the last pass did not overrun the cap, so this arm did not test the settlement it exists for")
+        XCTAssertEqual(output.stdout.count, cap,
+                       "the call retained \(output.stdout.count) byte(s) against a cap of \(cap)")
+        let ended = try await died(descendant, within: 80)
+        XCTAssertTrue(ended,
+                      "the call reported an output-limited stop and left the command's descendant on the machine")
+    }
+
+    /// The pid the command wrote down, waited for a tenth of a second at a time. The pid itself is
+    /// never printed.
+    private func recordedPID(in file: URL, within attempts: Int) async throws -> pid_t? {
+        for _ in 0..<attempts {
+            if let text = try? String(contentsOf: file, encoding: .utf8),
+               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return pid
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return nil
+    }
+
+    /// Whether `pid` is gone, polled a tenth of a second at a time.
+    private func died(_ pid: pid_t, within attempts: Int) async throws -> Bool {
+        for _ in 0..<attempts {
+            if kill(pid, 0) != 0 && errno == ESRCH { return true }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return kill(pid, 0) != 0 && errno == ESRCH
+    }
+
+    /// What the job settled with, polled a tenth of a second at a time.
+    private func settled(_ settlement: Settlement, within attempts: Int) async throws -> ToolOutput? {
+        for _ in 0..<attempts {
+            if let output = await settlement.output { return output }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return await settlement.output
+    }
+
     /// Blocks until `pattern` matches a running process, so that a cancellation lands on a child
     /// that exists. `pgrep` exits 1 when nothing matched, which is its documented "no match".
     private func waitUntilRunning(matching pattern: String,
@@ -702,4 +829,11 @@ final class ToolRunnerTests: XCTestCase {
                                    environment: [:], timeout: .seconds(10)).exitCode
     }
 
+}
+
+/// What one `ToolJob` handed back, for a test that drives the job directly rather than through
+/// `ToolRunner.run`.
+private actor Settlement {
+    private(set) var output: ToolOutput?
+    func mark(_ output: ToolOutput) { self.output = output }
 }

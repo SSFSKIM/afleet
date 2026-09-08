@@ -737,6 +737,40 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     `Fleet.shutdown()`, then exits. Foreign and background-job channels are never touched.
     Closer: implement that clause. Owner: C6, which owns the surface where a running conversation
     is visible when the user quits.
+    **DONE at C6.2 Task 9**: `App/Header/QuitGuard.swift` and one `applicationShouldTerminate` hook
+    in `App/AfleetApp.swift`, asserted in `AppTests/Header/QuitGuardTests.swift`. `AppFleet.shutdown()`
+    now has a production caller. Two things the implementation found, both for the architect rather
+    than for a later worker to rediscover. **First, §7.4 asks for a capability X5 does not publish.**
+    `terminate()` on a channel is `perform(.reap)`, and `Fleet` gates that reap on dormant
+    eligibility — deliberately, because the reap the *user* asks for must not end a channel with a
+    turn in flight — so the channels the quit dialog just asked about are exactly the ones the reap
+    refuses. `ChannelSupervisor.reap()` is the unconditional terminate and is not reachable through
+    the facade. The clause is implemented by escalating a refused reap through `.stopEverything` and
+    reaping again, which ends what the user was told quitting ends, using only X5 verbs; the clean
+    fix is an unconditional terminate on `LifecycleAPI` for this one caller, which is C4's to add.
+    **Second, "a turn running or running local shells" is read from two places**, because no single
+    published value carries both: `ChannelState.presence == .busy` is the turn (the sidebar's and the
+    composer's own notion), and the running background tasks come from
+    `ChannelHeaderActionsModel.liveTaskIDs`, over the timeline the *Send to background* confirm
+    already reads. A channel the user never opened has no timeline, so at quit it is judged by its
+    presence alone — the guard constructs no composer and no ingestion at the moment the app is being
+    asked to stop. `ChannelState` carrying a live-task count would close that gap and is C4's too.
+    **Ruled 2026-09-08, and the escalation withdrawn.** The architect read §7.4's *Quit* as the
+    literal bare `terminate()` and accepted the missing verb as a parent gap: the clause was added at
+    C5's merge a day after C4 merged, so X5 never received it. The escalation's argument was wrong on
+    the point that mattered — the engine's `end_session` already records `task_updated
+    {status: "killed"}` and `task_notification {status: "stopped"}` for its shells and writes the
+    trailing `last-prompt` during shutdown, so the bare form is a *recorded* teardown rather than a
+    pipe yank, while the escalation's failure path (a reap still refused after `.stopEverything`)
+    exits with no SIGTERM/SIGKILL and no wedge record, regressing §6.7. The replacement lands on
+    `main` as `LifecycleAction.quit` (per channel, unconditional, `maySpawn: false`, no eligibility
+    gate, no `inFlight` guard, with `LifecycleTable.TerminatingAction.quit` so a ghost a quit leaves
+    is recorded as one) plus `LifecycleAPI.liveTaskIDs(of:)`, which also closes the presence-only
+    narrowing above: busy becomes `presence == .busy || !liveTaskIDs(of:).isEmpty`, the fleet's fact
+    rather than a surface's local count. **Still open at C6.2 Task 10:** neither member exists in this
+    leaf's tree, so `QuitGuard` still ships the withdrawn escalation and `QuitGuardTests` still
+    asserts it. Closer: the adoption task swaps both and re-points the two assertions. Owner: C6.2's
+    adoption task.
 72. **A member declared in `App/` whose only callers are in `AppTests/` is not detectable by any
     check this repo runs.** Two real defects in one review cycle had that exact shape:
     `PanelHost.selectIndex(_:in:)`, correct and tested with no production caller while the menu
@@ -777,7 +811,16 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     coordinator makes, moving the two tests that use it onto `paint`. Owner: C6, which is the first
     child with a reason to read those numbers back. Until then each is allowlisted in the check
     with this entry's number as its reason.
-74. **`ChannelRow.offersOwnedActions` and `readOnlyReason` have no consumer, because C5's sidebar
+74. **Closed 2026-09-08 by C6.2 Task 8.** The channel header's action menu is the first consumer of
+    both properties: every owned action is gated on `offersOwnedActions`, and a read-only row draws
+    `readOnlyReason` **in place of** the menu rather than a disabled list.
+    `HeaderActionTests.testAReadOnlyRowOffersNoOwnedActionAtAll` asserts it, and the mutation that
+    opens the gate unconditionally fails twenty assertions across the read-only and no-row tests.
+    The row is threaded into the mount from the column rather than read back out of the
+    environment, so the gate is exercised through the production path and not only on the model.
+    Original entry follows.
+
+    **`ChannelRow.offersOwnedActions` and `readOnlyReason` have no consumer, because C5's sidebar
     offers no channel action at all.** `ListingPolicy` decides the mode, `ChannelRegistrar` carries
     it onto the row, `SidebarModelTests` asserts a teammate transcript is listed read-only — and
     `ChannelRowView` draws a glyph, a title, a subtitle and a badge, with no context menu and no
@@ -889,6 +932,516 @@ symlink-containment debt in entry 78 is unchanged.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
 
+## From C6.2 (`child/c6-composer`)
+
+142. **`cancel_async_message` has no typed spec in ClaudeWire, though the engine declares one.**
+     The queue chip's cancel goes out as `AnyControlRequest(subtype: "cancel_async_message",
+     payload: ["message_uuid": …])` through `RawControlRequest`, which carries the same bytes as a
+     typed spec would. The engine declares the pair in its own request table (2.1.263
+     `cli.pretty.js:94602`; handler `:452054-452063`, schema `:94598`), so the shape is known and
+     stable: `{message_uuid: String}` in, `{cancelled: Bool}` out, where `false` means the message
+     was never in the queue. Filed rather than fixed because `ClaudeWire` is C2's file and this
+     leaf's fence stops at `App/`. Closer: add `CancelAsyncMessage` to
+     `ClaudeWire/Sources/WireFrames/OutboundRequests.swift` at the next typings pass and let the
+     composer construct it. Owner: C2.
+
+143. **`RewindOutcome` models neither `precedingAssistantUuid` nor `targetMessageUuid`.** The
+     engine's `rewind_conversation` body carries both (`control-shapes`, `rewind-turn`), and
+     `precedingAssistantUuid` is the fork point *Fork from here* needs. C6.2's *Edit* path is
+     unaffected because it reads the raw `JSONValue` off `LifecycleAPI.send(_:on:)` rather than
+     going through `StrategyExecutor`, but `/rewind`'s strategy does go through it, so a *Fork from
+     here* ever offered from `/rewind` would have no fork point to offer. Closer: add the two
+     fields to `RewindOutcome` and populate them where the executor already reads the body. Owner:
+     C4 (`FleetKit/Sources/FleetSessions/Router/CommandRouter.swift`).
+
+144. **Closed 2026-09-08 on `main` at `6abd4a0`.** The engine has two refusal sentences, not one:
+     the bare form (2.1.263 `cli.pretty.js:540254`) and an interactive-panel form (`:540305`) that
+     ends by telling the user to run the command from the Claude Code terminal.
+     `RouterTable.bareRefusalPattern` is anchored at both ends and matched only the first, so the
+     second reached the channel unintercepted and uncounted — carrying, in the engine's own words,
+     the one sentence §7.7 forbids afleet from showing, while the drift log read zero for the whole
+     class. Filed by C6.2 as a `[parent-impact]` against X10 and fixed by the C4 corrective
+     (`8dd10fe`, `2cfc67a`): a second pattern, a `RefusalShape` on `Intercepted`, per-shape counts
+     through `driftCount(of:)`, `refusal_shape` on the drift-log entry, and copy that no longer
+     sends anyone to the terminal on either path.
+
+145. **Closed 2026-09-08 by probe `spike_rewind_last_seen` (`77a0d62`), spec corrected at
+     `81a3dca`.** §8.5 read `rewind_conversation`'s `"stale target"` as a fact about which process
+     sent the message, so item 13 was written around a fallback. It is not: the engine runs a
+     later-turn scan whose reach is set by the optional `last_seen_user_message_uuid`
+     (`:452145-452153`). Measured on 2.1.263, zero turns, three forks of a scratch session — with
+     the field naming the newest user message an older target is **honoured**; with the field
+     omitted the same target is `"stale target"`; with the field naming the target itself it is
+     `"unseen later turn"`. So the composer always sends the field, the rewind is the ordinary path
+     and the fork is the exception. The wrong-but-obvious value — the target's own uuid — refuses
+     every older edit and hides behind the fallback, which is why C6.2's G4 asserts the payload
+     names the newest message and not the target.
+
+146. **`LifecycleRowTests.testPaneExitReAdoptsWhenTheRecordIsGone` fails when the machine's pid
+     counter wraps.** **Closed 2026-09-08 by the `main` corrective `85006b4`** (a two-helper decoy;
+     no ordering assumption on pids). The test arranges a decoy job holder at `ScriptedHolderFiles.livePID` — the
+     test runner's own pid, which never dies — and asserts it sorts ahead of the helper process the
+     test then spawns (`XCTAssertLessThan(livePID, tab)`, "the decoy holder sorts first"). That
+     holds only while pids increase monotonically. macOS wraps them near 100000, so a run whose
+     runner starts at a high pid and whose helper is spawned after the wrap gets a *lower* helper
+     pid and the arrangement inverts. Observed here at C6.2's Task 1 boundary: runner 97819, helper
+     715, one failure; the same test passed alone minutes later with the runner at a low pid, and
+     passed in the leaf's baseline run half an hour earlier. So it is neither a regression from the
+     roster-signal commits nor anything C6.2 touched — it is latent in the arrangement and fires on
+     roughly one run in a thousand-pid window.
+     Closer: do not derive the decoy pid from the runner. Spawn a second helper for the decoy and
+     order the two by their observed pids, or keep the runner's pid and *skip* with a named reason
+     when `livePID >= tab`, so an impossible arrangement reports as a skip rather than as a product
+     failure. The `XCTAssertLessThan` is already an arrangement guard rather than a subject
+     assertion, which is why it reads as a defect in the code under test when it fires.
+     Owner: C4 (`FleetKit/Tests/FleetSessionsTests/LifecycleRowTests.swift`). Found by C6.2.
+
+147. **A test that crashes the bundle is retried by `xcodebuild` and reports "Executed 0", not a
+     failure.** Found at C6.2's Task 3 boundary. `ComposerMountTests` walks the channel column's
+     view body with `Mirror` to assert the two mount points; when the composer's registry gained a
+     route to `PanelHostModel`, that walk left the view layer and ran into the app's object graph —
+     view struct → model → `ChannelContext` → link router, store, pane-exit closure — which is
+     cyclic. It recursed until the stack ended. The bundle died, `xcodebuild` restarted it, and the
+     final summary read `Test Suite 'ComposerMountTests' passed … Executed 0 tests, with 0 failures`.
+     A suite that executes nothing is indistinguishable, in the summary a reviewer reads, from a
+     suite that has nothing to run — and the run's overall exit code was still 0. The seven tests
+     were only noticed missing because a per-suite count was compared against the previous run.
+     Fixed locally for this walk (`ComposerViewTree` no longer descends into a reference type that
+     is not itself a view; C5's `ViewTree` has the same unbounded shape but has never reached such
+     a graph). The general hazard is not fixed: nothing in this repo's `make test` notices that a
+     bundle restarted or that a suite's executed count fell to zero.
+     Closer: have the test target's runner fail when a suite reports zero executed tests while
+     declaring test methods, or diff per-suite counts against a committed baseline in `make test`.
+     Owner: C5's test tooling (`Tools/c5/`), which already owns the wiring check.
+
+148. **`check-app-wiring.py` cannot see a member whose only caller is inside a package.**
+     `ComposerModel.confirm(preview:)` witnesses `FleetKit.StrategyUI`; `StrategyExecutor.run` calls
+     it through the `ui:` argument the composer hands itself in as, so no source under `App/` calls
+     it and none should. The checker reported it as declared in `App/` and called only from
+     `AppTests/`, which is the same category its `FRAMEWORK` set already covers for SwiftUI — for a
+     protocol the check does not know about. C6.2 added one allowlist line with its reason
+     (`2b2a236`, isolated so it can be reverted alone) rather than changing the rule or dropping the
+     conformance. Note the asymmetry that made this visible at all: the sibling requirement
+     `open(url:)` escapes the check entirely, because the check keys on a bare name and `open` is
+     used elsewhere under `App/` — the known blind spot in entry 72. So the mechanism reports one of
+     two identical cases and is silent about the other.
+     Closer: teach the check about protocol witnesses — a member whose name and signature match a
+     requirement of a protocol the type conforms to is called by whoever calls the protocol. Owner:
+     C5's test tooling.
+
+149. **`ProcessRunner` cannot set a child's working directory.**
+     `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift`'s `run` takes an executable,
+     arguments, an environment and a timeout, and no directory. C6.2's `!` escape is defined by the
+     directory it runs in (§6.6: "in the channel's directory with the resolved environment"), so it
+     could not reuse the runner and spawns locally in `HostShellRunner`, copying `ProcessJob`'s
+     settlement rather than its code — exit-driven completion rather than EOF on the pipes, so a `!`
+     that backgrounds a daemon does not hang; non-blocking drains; a budget then SIGTERM/SIGKILL.
+     The rejected alternative was prefixing `cd <dir> &&` to the user's command, which puts a line
+     in front of what they typed and changes what the transcript shows them running.
+     Closer: a `directory:` parameter on `ProcessRunner`, after which `HostShellRunner` collapses
+     into `FoundationProcessRunner`. Owner: C2. Found by C6.2 Task 4.
+
+150. **`ShellEnvelope.neutralize` is idempotent, so double sanitisation is byte-invisible.** An
+     escaped `<` has no `<` left, an escaped turn marker no longer matches, a defused prefix no
+     longer starts its line. A host that neutralised a command or a stream before handing it to
+     `wrap` therefore produces byte-identical output, and C6.2's G2 equality assertion — written
+     believing it proved the composer sanitised nothing itself — passes. Demonstrated at Task 4 by
+     three mutations, one carrying a marker through the command; all passed. The same assertion does
+     catch a rule of the host's own: an appended element, a dropped byte, a merged or trimmed
+     stream, each demonstrated failing. This is not a defect in the envelope — idempotence is a
+     property worth having — but it means "called, never copied" (§6.6) is enforced by structure and
+     review, not by any test, and C6.2's gate has been corrected in place to say so.
+     Closer: if the property is ever worth testing, give `neutralize` a way to report whether it
+     changed anything, and assert the host's call is the first. Owner: C2 if it is worth it; filed
+     mainly so no later reader re-derives the false confidence. Found by C6.2 Task 4.
+
+151. **`ChannelTimelineModelTests.testOpenSettlesOnAFinishedEventStream` has a wall-clock budget that
+     fails under load. Recurred; worth fixing now rather than watching.** **Closed 2026-09-08 by the
+     `main` corrective `8e0f0d7`** (delivery-fulfilled wait; the one-round claim moved to
+     `FleetTimelineTests.IngestionTests`). Observed twice during
+     C6.2: 621 ms at Task 5 and **1022 ms at Task 6's boundary**, both against a 500 ms budget, both
+     while other builds were competing for the machine; alone on a quiet machine it settles in
+     **51 ms**, so the budget is 10x the real cost and the failures are entirely load. Original note:
+     observed once during C6.2's Task 5: 621 ms against a 500 ms budget while
+     mutation builds were competing for the machine; it passed on the clean run and on the retry.
+     Same family as entry 146 and as C2's entry 2 — a test whose failure reads as a product defect
+     when what it measured was a busy host, and this repo now runs several `xcodebuild` invocations
+     at once during a fix wave, so the condition is ordinary rather than exotic.
+     Closer: raise the budget substantially, or make the assertion insensitive to load by settling on
+     an observed event rather than on elapsed time. Owner: C6.1
+     (`AppTests/ChannelTimelineModelTests.swift`). Found by C6.2 Task 5.
+
+152. **`HostSignal.rewound` moves only the live half, and that is the design — recorded so nobody
+     re-derives the alarm.** `StreamIngestion.signal` folds through `wire?.apply` and reports
+     `liveChanges` only (`StreamIngestion.swift:192-201`); the durable projection is a separate
+     cache and is untouched. C6.2's Task 6 read that as "an honoured rewind leaves the discarded
+     turn on screen" and wrote an assertion that failed. It is not a defect. The durable half is
+     built by walking back from the transcript's own leaf (`last-prompt.leafUuid`, else the last
+     conversation record) through `parentUuid` — `Reader/WindowedTranscript.swift:111-128` — and the
+     honoured rewind appends exactly one `last-prompt` naming the pre-rewind assistant, which
+     arrives mirrored (`Fixtures/rewind-turn/README.md`). So the abandoned records fall out of the
+     durable half as soon as that record lands, and `HostSignal.rewound` covers the live half in the
+     interval. Two halves, two mechanisms, no gap.
+     The observable a host-side test can actually assert is therefore the live one: an open
+     streaming preview is cleared by an honoured rewind and left alone by a refused one. C6.2's G4
+     asserts both arms. Filed for C6.3, which raises `decisionAnswered` through the same seam and
+     would otherwise spend the same hour. No closer; this entry is the answer.
+
+153. **C6.1 must call `ComposerModel.edit(_:)`, and no contract says so.** **Named as contract Y6 at
+     C6.2's merge, 2026-09-08; the call and the two render sites are C6.1's (its G6); this entry
+     closes when C6.1's merge shows them.** The composite gives C6.2
+     the *Edit* request, the body reading and the *Fork from here* fallback, and gives C6.1 every
+     row kind — so the affordance that starts an edit is a row action on a past user message, in
+     `App/Timeline/`, while everything it triggers is in `App/Composer/`. Neither leaf's section
+     names the call, and the cut's cross-child contracts (Y1–Y5) do not cover it: Y4 is the mirror
+     case in the other direction (C6.1 calls C6.4's `AgentNavigation.show`) and was named
+     explicitly, which is what makes the omission here visible rather than invisible.
+     Left as it stands, C6.1 ships a row with no *Edit*, or an *Edit* wired to nothing, and item 13
+     is dead at recomposition with every gate green on both sides. `check-wiring` reported
+     `ComposerModel.edit(_:)` as declared in `App/` and called only from `AppTests/` — correctly —
+     and C6.2 allowlisted it in the category the file already uses for Y4's seam ("filled by C6.n")
+     rather than inventing an affordance inside another leaf's directory.
+     Closer: name it in the composite as a cross-child contract in Y4's shape, and give C6.1 the one
+     call. Owner: the C6 composite (the architect). Raised by C6.2 Task 6.
+
+     **Two more faces of the same omission, found by Task 10's gate audit.** The call is the incoming
+     half; the missing render sites are the outgoing half, and neither is reachable from this leaf's
+     fence either.
+     (a) **`ComposerModel.editNote` is written in eight places and read by no view.** It is the note
+     G4 requires on every refused-rewind arm — "the conversation was not rewound and a fork was
+     opened instead", the no-fork-point reason, the two distinguishable refusal wordings. Every arm
+     is asserted on the model and none of them is visible anywhere, so G4's "shows a visible note"
+     clause is discharged at model level only. It has no natural home in `App/Composer/`: the note is
+     about a past message the user chose to edit, so it belongs beside that row.
+     (b) **`ComposerModel.interceptedReplacements` is written and read by nobody.** §7.7 and G1 ask
+     that the drift replacement be shown *in place of* the offending assistant frame. The map is keyed
+     by frame uuid precisely so a renderer can substitute; `RefusalSurface` instead draws
+     `lastInterception.replacement` as an **additional** label beside the field, which annotates the
+     refusal rather than replacing it. The substitution site is a timeline row — `App/Timeline/`,
+     C6.1's — so this leaf can file it and not fix it. The interception, the replacement text and the
+     per-shape counts are all asserted and correct; only the substitution is missing.
+     Closer for both: the same composite contract that gives C6.1 the `edit(_:)` call gives it the two
+     render sites — the note beside the edited row, and `interceptedReplacements[uuid]` consulted when
+     an assistant row draws. Owner: the C6 composite, with C6.1.
+
+154. **`HostSignal.promptSent` reaches the fold and produces no `TimelineChange`, so no surface can
+     show a queued message before the engine echoes it.** `WireReducer.apply(_ signal:)` appends the
+     uuid to `outstandingPrompts`; that array is not in `Snapshot`, so `difference(to:)` reports
+     nothing, `StreamIngestion.signal` returns an empty `Effect` and `ChannelTimelineModel.signal`
+     does not republish. Measured at C6.2's Task 6b against the real reducer, with the negative
+     asserted (`testPromptSentPutsNoRowInTheChip`, floored by the `command_lifecycle` arm so it
+     cannot pass vacuously).
+     This is not a defect in the X5 corrective (`d802792`), which delivered exactly what it
+     promised: the uuid is now available and `TurnAttribution.prompted(uuid:)` works, where before
+     this every turn afleet reduced was `.unprompted`. It is a gap between what the host-signal
+     corrective's design implies — a pre-echo preview — and what the fold currently models. C6.2's
+     queue chip therefore renders from `Overlay.queue` alone, which is what §8.5 describes and what
+     G3 asserts, so nothing is blocked.
+     Closer: if a pre-echo queued row is wanted, C3 models an outstanding prompt the snapshot diffs
+     and the chip reads it like any other reduced state. Owner: C3 / the C6 composite, as a design
+     decision rather than a fix. Raised by C6.2 Task 6b.
+
+155. **The permission-mode picker cannot re-read its own value.** Model and effort are confirmed by
+     a fresh `get_settings` after every click (`applied.model`, `applied.effort`), which is what
+     makes §7.4's "the displayed value is a readback, never the last click" true of them.
+     `set_permission_mode` answers an empty body, and no control request anywhere in the corpus
+     reports the mode a running process is in — the only readback is the handshake's
+     `current_permission_mode`, which arrives at connect and at a quiescent restart. So between a
+     click and the next handshake the picker either shows a value nothing confirmed or shows the
+     stale one. C6.2 chose the second: the click is remembered and never displayed, and the next
+     handshake either confirms it or raises the disagreement, so the rule holds at the cost of the
+     picker lagging its own click until the process restarts.
+     Closer: a `get_permission_mode` request, or `set_permission_mode` answering the resulting mode,
+     either of which is an engine change and not afleet's; failing that, nothing to fix — this entry
+     exists so the lag is read as the readback rule holding rather than as a bug. Owner: nobody
+     today; C1's probe suite if a readback ever appears. Raised by C6.2 Task 7.
+
+156. **§8.6's fourth arm has nothing to stand on: the bypass acceptance is written and read by
+     nobody.** C6.2 writes `FleetKitKeys.bypassAccepted` into the `fleetKit` namespace as §7.8
+     requires, and `grep` finds no other reader in the tree — only the key's declaration and this
+     leaf's code. So §8.6's "later owned spawns include the flag from the start, so the mode
+     switches without a restart" is not implemented anywhere: nothing consults the acceptance when
+     a launch configuration is built, and neither `ChannelState` nor `get_settings` reports whether
+     the running process carries `--allow-dangerously-skip-permissions`. A surface therefore cannot
+     tell arm 4 (already launched with the flag) from arm 3 (needs the restart) except by trying.
+     C6.2 implemented arm 4 as the spec's own fallback says — with the acceptance stored, send
+     `set_permission_mode` and restart nothing, and render whichever of the validator's three
+     refusal strings comes back (2.1.263 `cli.pretty.js:750921-750931`) — so the behaviour is
+     correct and self-correcting, but it asks the engine a question the host should already know
+     the answer to, and on a process without the flag the user sees a refusal rather than a
+     restart.
+     Closer, and it is a C4 decision rather than a fix: either the launch path consults
+     `bypassAccepted` when composing a spawn, or X5 publishes the launch flags the current process
+     carries so a surface can branch without asking. Owner: C4, with the C6 composite ruling which.
+     Raised by C6.2 Task 8.
+
+196. **A process acquired after the quit clause's last census is ended by the exit, not by afleet.**
+     The clause now re-reads the owned set after each termination pass and terminates whatever
+     gained a process, bounded to three passes (`App/Header/QuitGuard.swift`). What that cannot
+     close is a spawn landing after the final census: it receives no `.quit`, and `Fleet.shutdown()`
+     terminates nothing, so the engine is wound down only when the exit closes its pipe. A spawn
+     barrier over the census would close it and was ruled out — a lifecycle-wide lock taken at the
+     moment the app is trying to stop, for a window measured in one pass. Closer: X5 gains a
+     "refuse new processes" state the clause can raise, or `Fleet.shutdown()` terminates what it
+     still owns. Owner: C4, if the pipe-close teardown ever proves insufficient (see 195). Filed
+     2026-09-08 by C6.2's review wave.
+
+197. **A composer keeps its event subscription after its channel leaves the screen.** The mount
+     resolves and subscribes the composer of whichever channel is being drawn, which is what makes a
+     switch between two same-mode channels work at all; nothing stops the previous channel's
+     subscription, because its view never disappears. Each visited channel therefore holds one live
+     `events(of:)` fan-out until its composer is released. It is cheap and it keeps the queue chip
+     and the handshake current, but it grows with the session and is not a decision anyone took.
+     Closer: the mount stops the composer of the channel it is switching away from, or the registry
+     bounds how many composers stay subscribed. Owner: C6.2's next pass. Filed 2026-09-08 by C6.2's
+     review wave.
+
+198. **The late `/rewind` confirmation is declined in a property observer rather than at the
+     raise.** `ComposerModel.rewindAnswer` carries a `didSet` that resumes a continuation handed to a
+     released composer, because the raise itself — `StrategyUI.confirm(preview:)` in
+     `App/Composer/CommandRouting.swift` — was outside this wave's fence. The behaviour is right and
+     the check is in the one place every raise passes through, but the natural home is a guard at the
+     top of `confirm`. Closer: move it there and drop the observer. Owner: whichever wave next edits
+     `CommandRouting.swift`. Filed 2026-09-08 by C6.2's review wave.
+
+199. **An honoured rewind whose prefill is dropped offers no way back to it.** `ComposerModel.edit`
+     writes the engine's `prefillText` only when the field still holds what it held when the edit
+     was asked for; typing that arrived while the request was in flight is kept instead, and the
+     composer says so. That is the right side to err on — the user can see their own words and never
+     gave them to anything — but the edited message's text is then simply gone from the surface,
+     and the only way back to it is to edit the same message again. Small, and outside this wave's
+     scope: a second surface (an *Insert the edited message* affordance, or a held prefill the field
+     offers) is a design decision the composer's own spec should make rather than a fix. Raised by
+     the C6.2 fix wave for scalpel-2#6. Owner: C6.2.
+
+202. **Composer mounting asks nothing about the channel's origin.** `App/Composer/ComposerMount.swift`
+     mounts a composer for any key it is handed: it reads no `LifecycleAPI.state(of:)` and no listing
+     mode, so a channel the user's own terminal holds gets a live field whose every send is refused
+     one call later. The `!` half of this was closed in the C6.2 fix wave — the escape asks
+     `state(of:)` before it spawns anything, so no host-side effect precedes the refusal — and the
+     plain-send half is harmless in the same way every other refusal is: the words stay in the field
+     and the reason is shown. What is left is the affordance, not a correctness defect: the composer
+     offers a field where the answer is always no. Closer: the mount consults the origin and renders
+     the refusal (or the *Fork* the banner already offers) instead of the field. Owner: the C6.2 leaf
+     that owns `ComposerMount.swift`. Filed 2026-09-08 by the C6.2 fix wave.
+
+205. **A queued quiescent restart is announced and then forgotten.** `perform(.quiescentRestart)`
+     answers as soon as the change is *recorded*, and a channel that is not eligible keeps it as
+     `pendingChange` for its dormant timer. C6.2's fix wave stops the surface confirming anything
+     there — the field re-opens and the banner says the change applies when the current work
+     finishes — but nothing resumes §7.4's readback when the timer later runs it, so the user is
+     told the setting is pending and never told it took. The signal exists on the wire (the new
+     process handshakes with a fresh epoch, on `events(of:)`, which *is* a fan-out); what does not
+     exist is a reason for the surface to be watching for it, since `LifecycleAPI.updates` is one
+     stream with one consumer and cannot be joined by a second. Closer: the composer's own event
+     loop notices a handshake whose epoch differs from the one the queued restart was asked
+     against and re-runs the readback, or X5 publishes per-channel state a surface may subscribe
+     to. Owner: the C6 composite, with C4 if the second shape is chosen. Raised by C6.2's fix wave.
+     Round 5 (scalpel-1#1) restates the same gap from the gate's side: `noteQueuedRestart` marks the
+     operation done, so when the deferred restart later runs and its readiness is published, nothing
+     reconciles the composer's gate and the field can stay closed — the epoch watch this entry asks for
+     is the closer for both.
+
+206. **A strategy's answer is a one-line note where three of them are screens.** `StrategyOutcome`
+     carries `permissions` (the whole `get_settings` body), `mcp` (the server list) and `memory`
+     (the memory files) and the composer now says how many of each came back, plus the engine's own
+     sentence for a refused rewind. That is presentation, not the surface each is: bare
+     `/permissions` is §7.7's read-only rules view, `/mcp` is the header's popover (which the header
+     already draws for its own menu item and the composer cannot reach), and `/memory` is a list of
+     paths a note may not name (§11). Closer: the panel or popover each names, once C6.4 and the
+     header's popover are reachable from a routed line. Owner: the C6 composite. Raised by C6.2's
+     fix wave.
+
+207. **Three `.native` destinations have no target to open.** `modelPicker` and `effortPicker` now
+     open the header's own pickers. `tasks`, `agents` and `switcher` are handed to the workspace's
+     link router as `WorkspaceLink.command(_:)`, which is the app's only "open the surface named
+     this" API — and no `LinkTarget` claims a command link today, so the router answers with a
+     diagnostic. What is missing, named: the Agents tab is C6.4's and does not exist; a Tasks
+     surface is named by the table and by nothing else in the tree; and C5's switcher is opened by
+     `ShellModel.presentSwitcher()`, which a composer cannot reach — it holds a `ChannelContext` and
+     the shell is not on it. Closer: each surface registers a `LinkTarget` for its own command name
+     as it lands, and the shell registers one for the switcher. Owner: C6.4 (agents), C5 (the
+     switcher). Raised by C6.2's fix wave.
+
+208. **The mode half of §7.4's readback races the handshake that carries it.** The only readback
+     permission mode has is the handshake's, which reaches the pickers through the composer's own
+     `events(of:)` loop, while `confirmReadback` runs on the caller's task the moment
+     `perform(.quiescentRestart)` returns. Nothing synchronises the two: on a slow delivery the
+     comparison reads the *old* process's mode and banners a setting that did in fact survive. It
+     was latent before (the snapshot carried the same stale value, so the two agreed by accident)
+     and is visible now that the snapshot carries the mode the channel is running. Closer: the
+     readback waits for a handshake whose epoch is the new process's before comparing the mode —
+     the same watch item 205 needs. Owner: C6.2. Raised by C6.2's fix wave. **Closed** by C6.2's
+     second fix wave: the mode is read from X5's `engineReports(of:)` — the handshake the fleet
+     retains for the channel — after the epoch has been established to have advanced, and an
+     unresolved mode holds the gate instead of releasing it (item 214 is what remains of the watch).
+
+209. **`HostSignal.promptSent` is raised after `sendPrompt` returns, and an engine result can arrive
+     first.** `ComposerModel.post` registers the uuid with the fold only once the facade has answered,
+     while `ChannelSupervisor.deliver` awaits the process write and the wire fans out independently; a
+     result that lands in between is reduced `.unprompted` and the late uuid then attributes the *next*
+     result. Bounded to one misattributed turn and needs a result faster than a facade round trip (an
+     immediate refusal is the realistic case). The remedy is not a composer patch: the supervisor owns
+     both the write and the fold's inputs, so it should raise the signal itself before the write — an
+     X4/X5 design change for C3 and C4 at C6's recomposition. Owner: the C6 composite (architect).
+     Filed 2026-09-08 at C6.2's merge review (panel round 2, scalpel-1#1).
+
+210. **`HostSignal.promptCancelled` is raised after the cancel's answer, and a result can consume the
+     uuid first.** Same shape as 209 from the other side: the chip retires the uuid only when
+     `cancel_async_message` answers `cancelled: true`; a result ingested in between takes the cancelled
+     uuid off the outstanding list, and the later removal cannot repair the attribution. Same remedy
+     and owner as 209. Filed 2026-09-08 (panel round 2, scalpel-1#2). *Stop everything*
+     (`Interrupt(cancelQueued: true)` through `perform(.stopEverything)`) cancels every queued prompt and
+     retires none of their uuids either — the same remedy covers it (panel round 4, scalpel-3#1).
+
+211. **`Fleet.forkResolutions` is written for every fork and read by one caller.** The map recording
+     a fork's provisional-to-resolved key is the only place the two ids are ever linked, so it is
+     written whenever `publish` re-keys a channel — but `resolvedForkKey(of:)` is the only reader,
+     and `perform(.fork)` and a routed `/fork` never ask. Each unread fork therefore leaves one key
+     pair behind for the life of the process. Bounded by the number of forks a session opens and
+     measured in tens of bytes, so it is filed rather than fixed. Closer: record only for a
+     provisional key `Fleet.fork(at:on:)` handed out, and drop it when the channel is released.
+     Owner: C4. Raised by C6.2's second review round.
+
+212. **`EditAndRewindTests` prints a `ChannelKey` on two failures.** The pre-existing fork arms
+     compare `rig.selected` to an array of keys, so a failure prints a config home under the
+     process's temporary directory and a session id (§11). It is a failure message and not a report,
+     but the rule is about the byte reaching a file at all. The arm added in the second review round
+     compares a count and a boolean instead; the two older ones were left alone to keep the wave's
+     diff to its findings. Closer: the same count-and-boolean shape. Owner: C6.2.
+
+213. **The read-only gate is in the mount, not in the model.** A row C5 lists read-only is given no
+     composer, which makes every write path unreachable from the UI — but `ComposerModel.send()` and
+     the `!` escape carry no refusal of their own, so a caller that reached a retained composer for
+     such a channel would not be refused the way `surface.isDisabled` refuses one. There is no such
+     caller today: the registry builds a composer only for a drawn channel, and a read-only channel
+     is never drawn with one. Filed because the same reasoning was wrong once already — the header's
+     gate was in the view and this finding is what that cost. Closer: the read-only reason joins
+     `ChannelSurfaceState`, so the model refuses on the same seam the restart already closes.
+     Owner: C6.2.
+
+214. **An owed readback is settled only by a handshake that arrives afterwards.** C6.2's second fix
+     wave retains the snapshot when a confirmation cannot be completed — the channel did not answer
+     `get_settings`, or the fleet had no permission mode to report for the replacement — and the
+     field stays closed until the next handshake re-runs the comparison. That handshake is the
+     replacement reporting, so it normally arrives; but a replacement that handshook *before* the
+     hold was taken, or one whose handshake is lost, leaves the confirmation owed with nothing to
+     settle it, and the field stays shut until the user changes a setting. It is the same missing
+     watch as item 205 — a surface with no per-channel state to subscribe to — and the closer is the
+     same: the composer's own event loop, or per-channel state on X5, re-running an owed
+     confirmation on any epoch change rather than only on a handshake it happens to see. Owner: the
+     C6 composite, with C4 if the second shape is chosen. Raised by C6.2's second fix wave.
+
+215. **Answering the fleet's banner re-sends a value the engine already applied.** The fleet resolves
+     its unresolved settings strictly in order, so a correction made out of that order cannot advance
+     it; the surface now re-answers each setting the fleet still names with the value the readback
+     reports, which for a setting the user has already corrected is one extra `set_model`,
+     `apply_flag_settings` or `set_permission_mode` carrying a value the process is already running.
+     It is idempotent and bounded by the three settings the pickers own, and it is what makes the
+     banner's promise ("pick a value to continue") true for a user who picks in their own order. What
+     would remove it: `resolveSetting` accepting a correction for any unresolved setting rather than
+     only the head of the list, so one request answers both halves whatever order they arrive in.
+     Owner: C4 (`ChannelSupervisor.resolveSetting`), with C6.2 dropping the re-answer when it lands.
+     Raised by C6.2's second fix wave.
+
+218. **`ToolRunner` carries both of the escalation defects the `!` escape just had.** **Closed
+     2026-09-09 by the `main` corrective `925a6e5`** (escalation keyed on its own flag; the group
+     signalled whether or not the leader was reaped; two descendant tests). C7.3's
+     `Workbench/Sources/SourceControlCore/ToolRunner.swift` is the arrangement C6.2's `ShellChild`
+     was copied from, and it still keys its `SIGKILL` on `settled` and its `signalTree` on `reaped`.
+     Both windows are the same: a budget expiring inside a termination's grace reaps the child and
+     settles, and the escalation then skips the kill; and a settlement-time drain that ends the call
+     can no longer signal a group whose leader has been reaped. A tool a panel runs writes the
+     command, so `git` starting descendants is likelier there than in a chat field, not less.
+     Closer: record the group separately from the pid, key the escalation on whether it has run, and
+     drop `settled` from `beginTermination` — the three edits `ShellEscape.swift` took, with the two
+     arms that arrange the orderings. Owner: C7.3. Found by C6.2's second fix wave (scalpel-3#1, #2)
+     while reading the house pattern.
+
+219. **A `!` whose group is still being escalated does not survive the app quitting.** The escalation
+     is now owed to the group past the caller's answer, which means up to two graces (one second)
+     during which the `SIGKILL` is a block on a dispatch queue and nothing else. If afleet exits in
+     that window — a quit, a crash, a test host tearing down — the block dies with the process and a
+     descendant that ignored the `SIGTERM` stays on the machine. The same is true of
+     `abandonUnreapedChild`'s off-queue reap. Bounded and rare, and unfixable inside the child alone:
+     the closer is that §7.4's quit path drains what the composers still owe their groups before it
+     terminates, in the same pass that ends the channels. Owner: C6.2 (the quit clause). Raised by
+     C6.2's second fix wave.
+
+225. **The delayed `SIGKILL` names a process-group id whose identity is no longer retained.**
+     `ShellChild` defers the leader's reap during a termination precisely so the pid keeps naming the
+     group, but two paths reap inside the escalation grace anyway: the budget's timer reaps and
+     settles, and a settlement reached any other way reaps too. The retained `SIGKILL` block then
+     calls `kill(-group, …)` on a stored number with nothing holding that number reserved. For the
+     signal to reach a stranger the whole group must exit inside the grace *and* the pid space must
+     wrap onto that id in the same window — at most one second, with the group's own exit as the
+     first of two coincidences. Left standing deliberately: C7.3's `ToolRunner` and every runner of
+     this shape accept the same window, and closing it means keeping identity alive across the
+     escalation (holding the leader unreaped until the last signal, or a pidfd-style handle the
+     platform does not offer for groups) — a redesign of the reap, not a patch. The one mitigation
+     worth having is taken on the branch: `kill(-group, 0)` immediately before the `SIGKILL`, which
+     skips the signal for a group that is already gone and narrows the window to the probe-to-kill
+     gap. Closer: whoever revisits the reap ordering — most likely alongside 218, which is the same
+     code in C7.3 — decides whether identity can be held to the last signal. Owner: C6.2 with C7.3.
+     Filed by C6.2's third review round (scalpel-2#1), with the architect's disposition recorded.
+
+226. **A fork whose handshake crashes strands the edit's prefill under a key nobody migrates.**
+     `ChannelSupervisor.handleExit` settles the fork-identity waiters and clears the identity timer even
+     when the same exit schedules an automatic respawn, so `settledForkKey()` answers the *provisional*
+     key for the whole of the backoff. *Fork from here* takes that answer, and the registry files the
+     edited message's prefill and the selection under it; the replacement that comes back from the
+     respawn re-keys the channel, and nothing migrates a pending draft or a selection across a re-key.
+     The user's edited message is then waiting under a key no composer will ever be built for. Needs a
+     crash inside a fork's handshake window, so it is rare rather than impossible. Closer: either keep
+     the waiters pending across a scheduled respawn — bounded by the fork-identity deadline, so a fork
+     that never resolves still fails rather than hanging — or have the registry migrate pending drafts
+     and selection when a channel is re-keyed. Owner: C4 with C6.2. Filed 2026-09-09 (panel round 4,
+     scalpel-4#1).
+     Round 5 adds two faces (scalpel-5#1, #2): a respawn refused by a precondition or the cap arms no
+     new deadline, so waiters admitted under `forkIdentityResolving` never resume; and the deadline's
+     expiry settles waiters with the unchanged provisional key, which `EditAndRewind` reports as success
+     and hands to the registry — the draft is then stranded under a key no row resolves. Closer: the
+     settle answers nil on refusal and on deadline, and the composer reports the fork as not opened.
+
+228. **The fleet still merges two restart-required changes; no surface exercises that any more.**
+     The gate's redesign (Decision Log, 2026-09-09, the fourth fix wave) refuses a second
+     restart-required change while one is running, so the "second `quiescentRestart` merges into the
+     pending change and answers success at once" path is unreachable from a single
+     `SettingPickersModel`. `ChannelSupervisor` still merges — two afleet windows over one channel
+     each hold their own pickers and their own field, and each is independently correct about its
+     own surface — but nothing asserts what the second window's surface shows while the first
+     window's restart runs, and the arm that used to cover the merge now covers the refusal instead.
+     Small: the surfaces do not share state and the fleet's own merge is C4's, tested there. Closer:
+     one arm building two `SettingPickersModel`s over one `ChannelKey` and one double, asserting each
+     field independently. Owner: C6.2. Filed by the fourth fix wave.
+
+229. **Readiness is read as `.owned(.connecting)` and not as "anything but `.owned(.ready)`".**
+     The gate closes the field and refuses setting changes for a channel the fleet reports as
+     connecting, which is the state a restart that threw after spawning leaves and the state review
+     round 4's P1 named. `.owned(.dormant)` and `.owned(.contended)` are left alone deliberately —
+     both are other leaves' semantics, a dormant channel is woken by typing into it, and closing the
+     field over either would be this gate forming an opinion it has no evidence for. Whether a
+     setting change asked for on a dormant channel does the right thing end to end is unexamined:
+     the request would reach `ChannelSupervisor` with no process on the other end. Closer: read what
+     C4 does with a control request on a dormant channel and either widen the input or record why
+     the narrow reading is right. Owner: C6.2 with C4. Filed by the fourth fix wave.
+
+230. **The restart gate's admission is not atomic across its own awaits.** `allows(_:)` reads the
+     operation's phase, then awaits `lifecycle.state(of:)` and the fleet's held setting, and answers
+     from the earlier reading; a `beginRestart` landing inside those awaits is not seen (round 5,
+     scalpel-1#2). Both restart entry points also await the channel's state after admission and then
+     `beginRestart` unconditionally, so two concurrent callers can supersede each other's generation
+     and the supervisor's merge-and-queue path is reached after all (scalpel-1#3; 228 is the untested
+     fleet side of that path). Bounded to concurrent restart-required changes on one channel from two
+     surfaces. Closer: the admission takes the operation slot first and validates after, or the whole
+     predicate runs on one actor-isolated read. Owner: C6.2. Filed 2026-09-09 at the fifth review round.
+
+231. **An accepted bypass cannot resolve a `permissionMode` restart mismatch.** `BypassGate` asks the
+     gate for `.bypassMode`, and while the channel is connecting over an unresolved setting the gate
+     admits only `.settingChange`, so the `resolveSetting` recovery that `issueMode` offers for the other
+     modes is unreachable for bypass (round 5, scalpel-2#1). The user can still recover by picking a
+     non-bypass mode. Closer: admit `.bypassMode` as a setting change when the unresolved setting is
+     `permissionMode` and the launch prerequisite is met. Owner: C6.2. Filed 2026-09-09.
 ## From C7.2 (`child/c7-editor-core`)
 
 97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state
@@ -1310,6 +1863,29 @@ is renumbered.
      bottom. Found by C7.3's merge panel. Closer: reserve a lane for the out-of-window `HEAD` and
      release it at the window's end, or draw the truncated edge to the row's edge. Owner: C7.7 with
      pagination (tracker 114).
+
+194. **`IngestionTests.testTheWholeWireStreamThroughTheTapYieldsMirrorEffectsAndTheLiveHalf` gives
+     up on its effects under load.** In a `make test` run with a 15-minute load average of 89 (two
+     floors and a `swift test` loop in parallel), `IngestionTests` took 209 s instead of ~25 s and
+     this test collected 5 of 15 mirror effects (23 of 53 duplicates) before its wait ended at
+     23 s; alone it passes 5 of 5. Same class as 131, 146 and 151: a bounded wait read as a
+     product failure. Closer: the collection wait becomes delivery-fulfilled (await the count, with
+     a guard of a minute or more that only turns a hang into a failure) rather than a fixed window;
+     and the floor's operator rule is one xcodebuild floor at a time. Owner: C3. Filed 2026-09-08
+     at C7.2's merge.
+
+195. **What the transcript records for a turn in flight at `end_session` is unprobed.** The
+     §7.4 Quit ruling (corrective `b86a73a`) rests on `end_session` being a recorded teardown:
+     the engine writes `task_updated {status:"killed"}` and `task_notification
+     {status:"stopped"}` for its shells and the trailing `last-prompt` during shutdown (parent
+     Surprises, C1's compact-boundary second reading). Whether a *turn* still streaming at that
+     moment leaves an interruption record, a truncated assistant record, or nothing is not in any
+     fixture. If it leaves a truncated record that `--resume` then shows, the fix belongs in
+     `terminate()` itself for every terminating action (an `interrupt` before `end_session`),
+     not in one caller. Closer: a zero-turn-cost probe is impossible (a turn must be running), so
+     this is one prompted turn under the scratch home at C1's next re-pin, reading the transcript
+     after exit. Owner: C1 (probe), C2 (`terminate()`) if it bites. Filed 2026-09-08 at the Quit
+     ruling.
 
 ## From C7.1 (Terminal core), in progress
 

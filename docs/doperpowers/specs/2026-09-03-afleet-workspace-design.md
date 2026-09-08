@@ -1072,7 +1072,13 @@ per channel for `end_session`; on confirmation, or when nothing is busy, it runs
 each owned channel that has a process, then `Fleet.shutdown()` (which itself terminates nothing:
 streams, timers, diagnostics), then exits. Foreign and background-job channels are never touched.
 Owner: C6, which owns the surface where busy is visible (ruled 2026-09-07 at C5's merge from
-C5's tracker entry 71).
+C5's tracker entry 71). Amended 2026-09-08 from C6.2's `[parent-impact]` (corrective
+`b86a73a`): the `terminate()` here is X5's `quit` — the unconditional teardown, named
+(`TerminatingAction.quit`) so a ghost a quit leaves is recorded as one, and ungated because the
+warning is what licenses ending busy work. It is not `reap`, whose eligibility gate refuses
+exactly the channels the dialog has just named; implemented through `reap` the confirmed arm
+ends nothing. Busy is the fleet's own fact — `presence` and `liveTaskIDs(of:)` — never a
+surface's local count, so a channel spawned but never viewed is judged like one on screen.
 
 ### 7.5 Threads
 
@@ -1262,7 +1268,9 @@ material set; the sidebar uses native vibrancy; type is the system font.
 - **Hidden meta.** `user` frames with `isSynthetic` are not rendered; the raw view keeps
   them.
 - **Turn summary** rows show duration, cost and stop reason; compaction is a divider.
-- **Header**: branch, model, mode, effort, a context meter from `get_context_usage`, and
+- **Header** (two owners since the C6 cut, recorded 2026-09-08 at C6.2's merge: the readbacks
+  are C6.1's, the menus and actions C6.2's): branch, model, mode, effort, a context meter from
+  `get_context_usage`, and
   menus for MCP, reload skills and plugins, rename, fork, send to background, open in
   terminal.
 
@@ -1302,7 +1310,9 @@ inert.
 
 ### 8.5 Composer
 
-Markdown field, Shift+Enter newline, Enter send. `/` autocompletes through the command
+Markdown field, Shift+Enter newline, Enter send — and Cmd+Enter sends too (§8.7's shortcut),
+so a send is reachable from a field that has taken Enter for something else; the two were
+never alternatives (clarified 2026-09-08 at C6.2's merge). `/` autocompletes through the command
 router; `@` completes files via `file_suggestions`; `!` runs the command host-side and
 posts the hardened, wrapped user frame of §6.6; image paste and file drop attach. Pickers for permission mode, model and effort on the right. Sending
 while a turn runs queues; `command_lifecycle` drives a "queued" chip with cancel via
@@ -1326,7 +1336,9 @@ default.
 ### 8.6 Bypass mode
 
 `bypassPermissions` appears in the mode picker only if the account allows it
-(`disableBypassPermissionsMode` unset, read via `get_settings`). A running process makes
+(`disableBypassPermissionsMode` not equal to the string `"disable"`, read from `get_settings`'s
+`effective` — the engine compares a string, not a boolean; corrected 2026-09-08 at C6.2's merge
+from 2.1.263). A running process makes
 the mode selectable only if it was launched with `--allow-dangerously-skip-permissions`;
 `set_permission_mode` on any other process is rejected by the binary. Selecting bypass
 the first time therefore shows the same disclaimer the CLI shows; on acceptance afleet
@@ -2399,7 +2411,11 @@ SwiftPM package or target that builds and tests without the children above it, p
   agent-run tree is the reducer's `agents`, exposed as `StreamIngestion.agents: AgentRunTree?`
   (nil before `open`, and nil for a file-only channel — the tree is wire-fed) and carried on
   `ChannelTimeline.agents` so one read holds the tree beside the items its nodes point at;
-  `TimelineChange.agentsChanged` is appended once per apply when the tree moved by value.
+  `TimelineChange.agentsChanged` is appended once per apply when the tree moved by value. Amended
+2026-09-08 at C6.2's merge (`c2dae0f`): `HostSignal.promptCancelled(uuid:)` retires a prompt
+from the reducer's outstanding list; the composer raises it only when `cancel_async_message`
+answers `cancelled: true`, since `false` means the prompt may already be running and its result
+is still owed to it.
 - **X5 Lifecycle API.** Channel origin and sub-state as observable state; the actions
   open, send, reap, adopt, sendToBackground, openInTerminal, fork, quiescentRestart,
   stopEverything, backgroundAll, logout; the preconditions as a typed result (ready,
@@ -2441,7 +2457,27 @@ SwiftPM package or target that builds and tests without the children above it, p
   (corrective `d802792`): `sendPrompt(_ input: UserInput, on: ChannelKey) async throws -> UUID` —
   `perform(.send)`'s path verbatim, returning the uuid the supervisor mints and the engine echoes
   instead of the state, so the composer raises `HostSignal.promptSent(uuid:at:)` before the echo
-  arrives; `perform(.send)` stays for callers that want the state.
+  arrives; `perform(.send)` stays for callers that want the state. Amended 2026-09-08 from C6.2's
+second `[parent-impact]` (corrective `b86a73a`): `LifecycleAction.quit` — §7.4's Quit
+`terminate()`, unconditional, no spawn barrier, no in-flight guard, `TerminatingAction.quit`
+from ready and from connecting — and `liveTaskIDs(of: ChannelKey) async -> [String]`, the
+channel's running-or-armed background tasks by id, so a surface reads busy from the fleet. The
+Quit clause reached §7.4 at C5's merge, a day after C4 had merged, which is how X5 came to lack
+the verb; every other terminating action was already one named `terminateOrWedge`.
+Amended 2026-09-08 at C6.2's merge (`c2dae0f`), from its review waves: `fork(at: ForkPoint?, on:
+ChannelKey) async throws -> ChannelKey` in `sendPrompt`'s pattern (the facade had discarded the
+sibling key the supervisor returns, so the edit's prefill landed in the source conversation);
+`engineReports(of:) async -> EngineReports?` (`{handshake, systemInit}` from the supervisor's
+retained context, so a composer mounted after the handshake still knows the mode and the
+engine's command list); `resolveSetting(_:to:on:)` lifted onto the protocol (it existed on
+`Fleet` only); and `sendPrompt`'s contract now holds during a spawn — the connecting queue carries
+the caller's uuid onto the wire (`ProcessHandle.send(_:uuid:)`), where it had returned a
+throwaway. `perform(.fork)` stays for callers that want the state. From the second round:
+`resolvedForkKey(of: ChannelKey) async -> ChannelKey?` — the sibling's key once its identity has
+settled (bounded by the fork-identity deadline), because `fork` answers the provisional key while
+the sibling is still connecting and `Fleet.publish` re-keys it on resolution; and a C4 correction
+rather than an addition: `ChannelSupervisor.publish()` recomputes `presence`, which `deliver` and
+the user/result frame arms had left stale, so `ChannelState.presence` now shows a running turn.
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
   types; FleetKit never models upper-layer state — and state its own listing and unread
@@ -2596,7 +2632,7 @@ notarized distribution, and any write under `<configHome>` (X9).
 | C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` (v1 `916ce02`, parent-pin `ee94449`; v2.7 at merge `a758308`); plan `plans/2026-09-05-c3-fleetkit-timeline.md` (v5 `f9f0f2c`, 13 tasks); retrospective in the child spec's Outcomes & Retrospective | **merged** 2026-09-06 at `f4a8723` from `child/c3-timeline` `a758308` (57 commits of its own; only `FleetKit/Sources/FleetTimeline`, its tests and `docs/` touched, `FleetKit/Package.swift` byte-identical); G1–G4 green at the tip: `FleetTimelineTests` 165 tests, 4 skipped without `AFLEET_LOCAL_INDEX`, 0 failures, run twice in separate scratch paths; G1 check one over 20 mirrored streams and 518 entries, check two over 132 compared items across all twenty fixtures with no exclusion (two pinned differences on `compact-boundary`, named by shape); G2 measured opt-in on the author's config home: 365/366 ms cold build over 3,032 transcripts (limit 500), 1 ms incremental (limit 50), 667/679 ms largest history (limit 1,000); G3/G4 by the twelve named tests; X1 import graph green; X9 scratch-home fingerprint unchanged across the suite; one Codex whole-branch review (3 P1, 7 P2) and one adversarial review (6) closed by one fix wave (two dismissals logged as tracker 22 and 23); the twenty-fixture corpus surfaced three findings at merge, fixed red-first before any repin (boundary chain, `isSynthetic` union, recorded rewind); independent leak-risk review at merge (4 findings: three fixed, one logged as tracker 24); deferred debt entries 11–25 in `docs/tech-debt-tracker.md`; spend: no model turns (C3 spawns no process) |
 | C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md`; plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4, 12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-06 at `f1e35d9` from `child/c4-sessions-fleet` `26aa962` (owns `FleetKit/Package.swift`; `FleetSessions` and its tests, `docs/`, plus a C2 corrective to `ClaudeWire`'s process runner carried by the branch); suite at the tip: FleetKit 415 tests, 10 skipped without the live flags, ClaudeWire 243; G1 coverage gate 58/58 lifecycle scenarios; G2 over C3's real registry mirror, five boundary cases; G3, G4; G5 eight live scenarios green together twice on the installed 2.1.263 (runs 4 and 5: 136.6 s and 132.3 s, five turns each, $0.17 and $0.19; cumulative child live spend $1.58); two whole-branch Codex reviews (48 confirmed → 10) closed by one fix wave and two follow-up rounds under five architect rulings; four live-gate product defects found at Task 10 and three more at the merge gate; independent leak-risk review at merge: no findings; deferred debt 26–48 in `docs/tech-debt-tracker.md` |
 | C5 App shell, panel host, packaging | `2026-09-06-c5-app-shell.md`; plan `plans/2026-09-06-c5-app-shell.md` (v6, 10 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-07 at `78303c7` from `child/c5-app-shell` `4c4ede4` (212 commits; owns `App/`, `AppTests/`, `project.yml`, `Workbench/Sources/PanelHostAPI`, plus `main` correctives taken at its boundaries); G1–G4 green at the tip: test scheme 835 executed, 20 designed skips, 0 failures, zero compiler warnings at `5f3779f`, re-run green at `4c4ede4`; `make check-imports` and `make check-wiring` clean; first paint 2,505 ms median with no persisted snapshot and 2,121 ms with one, warm page cache, over 4,261 transcripts against the 5,000 ms budget; the cold case is unmeasured; three `[parent-impact]` filings reconciled (§11 per-domain logs, the per-write sink corrective `c31bebd`, the `.claude.json` sibling rule `6b3fc23`/`1c19d52`) and X7 amended as filed |
-| C6 Conversation surface and Agents panel | composite spec `2026-09-07-c6-conversation-surface.md` (four leaves, its own tracking map) | cut landed 2026-09-07 after C5's merge (`78303c7`), approved by the human 2026-09-08; Y1 skeleton on `main` at `5e24f1a`; C6.1 Timeline renderer, C6.2 Composer and header, C6.3 Decision cards and threads **dispatched** 2026-09-08; C6.4 Agents panel blocked-by C6.1 and C6.3 |
+| C6 Conversation surface and Agents panel | composite spec `2026-09-07-c6-conversation-surface.md` (four leaves, its own tracking map) | cut landed 2026-09-07 after C5's merge (`78303c7`), approved by the human 2026-09-08; Y1 skeleton on `main` at `5e24f1a`; C6.1 Timeline renderer and C6.3 Decision cards and threads **dispatched** 2026-09-08; C6.2 Composer and header **merged** 2026-09-08 at `c2dae0f` (Y6 named); C6.4 Agents panel blocked-by C6.1 and C6.3 |
 | C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core **dispatchable** — the cut approved by the human 2026-09-07, dispatch follows C6's; C7.4–C7.7 unblocked by C5's merge (`78303c7`) except where noted (C7.4 also by C4's X5, C7.6 by C4's store); C7.3 Source Control core **merged** 2026-09-08 at `aa5df80` (41 commits, 128 package tests, two whole-diff review rounds and three fix waves at merge; W7's command lines amended in the composite); C7.2 Editor core **merged** 2026-09-08 at `a47788a` (37 commits, 110 package tests; Monaco 0.56 on the custom scheme with workers proven by attribution; three whole-diff review rounds and three fix waves at merge; human still to witness "no visible jank"); C7.1 at Task 7 |
 
 Each child's spec path is filled in when it is dispatched; a composite's row points at
@@ -4615,3 +4651,18 @@ Pending — written at finish.
   `StreamIngestion` owns the channel's single `WireReducer`, publishes the live half on `effects`
   and exposes `timeline`; `HostSignal` reaches it through `signal(_:)`. C6.1 consumes the fold;
   its own reducer and second subscription were withdrawn before they landed.
+- 2026-09-08 §7.4 Quit ruling (C6.2's `[parent-impact]`, corrective `b86a73a` on `main`). The
+  clause's `terminate()` is the bare form; X5 gains `quit` and `liveTaskIDs(of:)` as above. C6.2's
+  first build escalated a refused `reap` through `.stopEverything` and reaped again — only X5
+  verbs, and argued as the clause's intent. Ruled otherwise: `/logout`'s *Stop* is a user choice
+  paired with *Wait*, and Quit's "asks once" is the deliberate contrast; the escalation's failure
+  path (a reap still refused) exits with no SIGTERM, no SIGKILL and no wedge record, against
+  §6.7; and the engine's `end_session` already records `task_updated {status:"killed"}` and
+  `task_notification {status:"stopped"}` for its shells and writes the trailing `last-prompt`
+  during shutdown, so the bare form is a recorded teardown. What the transcript records for a
+  *turn* in flight at `end_session` is unprobed (tracker 195).
+- 2026-09-08 C6.2 merged (`c2dae0f`; composite Revision Note of the same date). Advisory
+  overturns applied: §8.5 Enter and §8.7 Cmd+Enter both send; §8.3's header line is two owners
+  (readbacks C6.1, menus C6.2) as the C6 cut split it. §8.6 corrected to the engine's string
+  compare. Y6 named on the composite. The prompted live leg of C6.2's G6 is blocked by the scratch
+  account's organisation policy and carried as a manual witness.

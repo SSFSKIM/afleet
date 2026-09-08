@@ -152,8 +152,14 @@ actor LifecycleDouble: LifecycleAPI {
 
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition { unreachable("preconditions") }
     func route(_ text: String, on key: ChannelKey) async -> Routed { unreachable("route") }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { unreachable("engineReports") }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        unreachable("resolveSetting")
+    }
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue { unreachable("send") }
     func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID { unreachable("sendPrompt") }
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey { unreachable("fork") }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { unreachable("resolvedForkKey") }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey, ui: any StrategyUI) async throws -> StrategyOutcome { unreachable("run") }
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
     func attach(_ job: JobShort) async throws -> PaneRequest { unreachable("attach") }
@@ -167,6 +173,7 @@ actor LifecycleDouble: LifecycleAPI {
     func paneExited(_ exit: PaneExit) async { paneExits.append(exit) }
     func performJob(_ verb: JobVerb, _ short: JobShort) async throws { unreachable("performJob") }
     func isDormantEligible(_ key: ChannelKey) async -> Bool { unreachable("isDormantEligible") }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { unreachable("liveTaskIDs") }
     func declineProjectServers(_ names: [String], project: URL) async throws { unreachable("declineProjectServers") }
     func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async { unreachable("acceptProjectServers") }
     /// A fresh fan-out for a channel `openEvents(of:)` opened, and nil otherwise — which is
@@ -247,12 +254,19 @@ actor FleetDouble: AppFleet {
     func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? { nil }
     func paneExited(_ exit: PaneExit) async {}
     func isDormantEligible(_ key: ChannelKey) async -> Bool { false }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { [] }
 
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition { unreachable("preconditions") }
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState { unreachable("perform") }
     func route(_ text: String, on key: ChannelKey) async -> Routed { unreachable("route") }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { unreachable("engineReports") }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        unreachable("resolveSetting")
+    }
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue { unreachable("send") }
     func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID { unreachable("sendPrompt") }
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey { unreachable("fork") }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { unreachable("resolvedForkKey") }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey, ui: any StrategyUI) async throws -> StrategyOutcome { unreachable("run") }
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
     func attach(_ job: JobShort) async throws -> PaneRequest { unreachable("attach") }
@@ -347,7 +361,7 @@ final class NeverSpawnedHandle: ProcessHandle {
     var childProcessIdentifier: Int32 { get async { unreachable("childProcessIdentifier") } }
     var sessionID: SessionID? { get async { unreachable("sessionID") } }
     func spawn(handshakeTimeout: Duration) async throws -> Handshake { unreachable("spawn") }
-    func send(_ input: UserInput) async throws -> UUID { unreachable("send") }
+    func send(_ input: UserInput, uuid: UUID) async throws { unreachable("send") }
     func request<R: ControlRequestSpec>(_ spec: R, timeout: Duration?) async throws -> R.Response { unreachable("request") }
     func requestRaw(subtype: String, payload: JSONValue, timeout: Duration?) async throws -> JSONValue { unreachable("requestRaw") }
     func answer(_ id: RequestID, _ answer: InboundAnswer) async throws { unreachable("answer") }

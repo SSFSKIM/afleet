@@ -134,6 +134,11 @@ final class LifecycleRowTests: XCTestCase {
             T(.terminateExhausted, .ready, .terminateReturnedNil(during: .logout), .wedged),
             T(.terminateExhausted, .connecting, .terminateReturnedNil(during: .logout), .wedged),
             T(.readyDormantEligible, .ready, .dormantTimerFired, .dormant)],
+        // §7.4 *Quit*'s rows (the test lives in `LifecycleRowTests+Quit.swift`), the corrective of 2026-09-08: the
+        // quit is the reap's terminate under its own name, from ready and from the handshake it can catch.
+        "testTerminateReturningNilDuringQuitWedgesTheChannelAsAQuit": [
+            T(.terminateExhausted, .ready, .terminateReturnedNil(during: .quit), .wedged),
+            T(.terminateExhausted, .connecting, .terminateReturnedNil(during: .quit), .wedged)],
     ]
 
     /// The six `handoffPreempted` scenarios: three holder kinds, from ready and from dormant. Both preempt tests
