@@ -1176,3 +1176,20 @@ is renumbered.
      local dependency and a workspace member) and point it at the project's own
      `xcshareddata/swiftpm/Package.resolved`; until then the floor's Makefile target restores the
      file after the run. Owner: C5 (`project.yml`), noted 2026-09-08.
+
+154. **`HostSignal.promptSent` reaches the fold and produces no `TimelineChange`, so no surface can
+     show a queued message before the engine echoes it.** `WireReducer.apply(_ signal:)` appends the
+     uuid to `outstandingPrompts`; that array is not in `Snapshot`, so `difference(to:)` reports
+     nothing, `StreamIngestion.signal` returns an empty `Effect` and `ChannelTimelineModel.signal`
+     does not republish. Measured at C6.2's Task 6b against the real reducer, with the negative
+     asserted (`testPromptSentPutsNoRowInTheChip`, floored by the `command_lifecycle` arm so it
+     cannot pass vacuously).
+     This is not a defect in the X5 corrective (`d802792`), which delivered exactly what it
+     promised: the uuid is now available and `TurnAttribution.prompted(uuid:)` works, where before
+     this every turn afleet reduced was `.unprompted`. It is a gap between what the host-signal
+     corrective's design implies — a pre-echo preview — and what the fold currently models. C6.2's
+     queue chip therefore renders from `Overlay.queue` alone, which is what §8.5 describes and what
+     G3 asserts, so nothing is blocked.
+     Closer: if a pre-echo queued row is wanted, C3 models an outstanding prompt the snapshot diffs
+     and the chip reads it like any other reduced state. Owner: C3 / the C6 composite, as a design
+     decision rather than a fix. Raised by C6.2 Task 6b.
