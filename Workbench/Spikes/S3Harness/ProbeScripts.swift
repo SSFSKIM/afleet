@@ -211,6 +211,31 @@ enum ProbeScripts {
     };
     """
 
+    /// What the editor is showing right now: the buffer behind the visible editor, its URI, and
+    /// where the caret was left.
+    ///
+    /// The reopen check reads this rather than trusting the command it just sent — the defect it
+    /// exists for was a failed `open` that left the previous contents on screen and reported the
+    /// failure only as an `error` event, which is exactly the shape a probe that asks the host
+    /// what it sent cannot see.
+    static let bufferProbe = """
+    var editor = monaco.editor.getEditors()[0];
+    if (!editor) { return { error: "no editor" }; }
+    var model = editor.getModel();
+    if (!model) { return { error: "no model" }; }
+    var position = editor.getPosition();
+    return {
+      uri: String(model.uri),
+      languageId: model.getLanguageId(),
+      lineCount: model.getLineCount(),
+      firstLine: model.getLineContent(1),
+      lineAtCaret: position ? model.getLineContent(position.lineNumber) : null,
+      caretLine: position ? position.lineNumber : 0,
+      modelCount: monaco.editor.getModels().length,
+      errors: window.__s3.errors.slice(-4)
+    };
+    """
+
     /// Instantiates each of the five worker entries exactly the way the bootstrap does, and
     /// watches for the load to fail.
     ///

@@ -137,6 +137,9 @@
         editor: null,
         diffEditor: null,
         model: null,
+        // The single `onDidChangeContent` registration on `state.model`, held so it can be
+        // taken off before the host replaces the buffer and put back after.
+        contentSubscription: null,
         diffModels: null,
         path: "",
         savedVersionId: 0,
@@ -199,13 +202,37 @@
 
     function replaceModel(path, language, text) {
       var previous = state.model;
-      state.model = monaco.editor.createModel(text, language || undefined, modelURI(path));
+      var uri = modelURI(path);
+      // Opening the path that is already on screen is a normal command, not a mistake: a file
+      // watcher refreshing the buffer the agent just edited sends exactly this. Monaco would
+      // refuse a second model at the URI, so the model already there is REUSED rather than
+      // disposed and rebuilt — the URI is what language workers, markers, decorations and view
+      // state are keyed to, and recreating the model throws all of those away for a change that
+      // is only to the text.
+      var existing = monaco.editor.getModel(uri);
+      var model;
+      // The content subscription goes first, so the value change below cannot be mistaken for
+      // the user typing and report a file the host just replaced as dirty.
+      if (state.contentSubscription) {
+        state.contentSubscription.dispose();
+        state.contentSubscription = null;
+      }
+      if (existing) {
+        model = existing;
+        if (language && model.getLanguageId() !== language) {
+          monaco.editor.setModelLanguage(model, language);
+        }
+        model.setValue(text);
+      } else {
+        model = monaco.editor.createModel(text, language || undefined, uri);
+      }
+      state.model = model;
       state.path = path;
-      state.savedVersionId = state.model.getAlternativeVersionId();
+      state.savedVersionId = model.getAlternativeVersionId();
       state.wasDirty = false;
-      state.editor.setModel(state.model);
-      state.model.onDidChangeContent(reportDirty);
-      if (previous) previous.dispose();
+      state.editor.setModel(model);
+      state.contentSubscription = model.onDidChangeContent(reportDirty);
+      if (previous && previous !== model) previous.dispose();
     }
 
     function reveal(line, column) {
@@ -227,10 +254,17 @@
           return;
         }
         showEditor();
+        // Same reason as in replaceModel: a host-driven value change is not the user typing,
+        // and must not be announced as a dirty buffer on its way to the clean baseline below.
+        if (state.contentSubscription) {
+          state.contentSubscription.dispose();
+          state.contentSubscription = null;
+        }
         state.model.setValue(text);
         // setValue is the host replacing the buffer, so it is the new clean baseline.
         state.savedVersionId = state.model.getAlternativeVersionId();
         state.wasDirty = false;
+        state.contentSubscription = state.model.onDidChangeContent(reportDirty);
         events.dirty(state.path, false);
       },
 

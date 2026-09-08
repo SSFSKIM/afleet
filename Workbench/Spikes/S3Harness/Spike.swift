@@ -134,7 +134,7 @@ final class Spike: NSObject, WKNavigationDelegate {
             report["editorErrors"] = editorErrors
             report["postMortem"] = (try? await call(ProbeScripts.postMortem))
                 ?? ["error": "the post-mortem probe could not run in the page"]
-            report["verdict"] = verdict(document: false, chunk: false, workers: false)
+            report["verdict"] = verdict(document: false, chunk: false, workers: [:])
             return 2
         }
 
@@ -193,17 +193,33 @@ final class Spike: NSObject, WKNavigationDelegate {
               ])) ?? ["error": "scroll probe threw"])
             : ["skipped": "the window is given no animation frames"]
 
+        // Re-opening the path already on screen: C7.5's file watcher does exactly this, and until
+        // the fix below it left the old contents up and skipped the reveal.
+        Trace.log("reopen")
+        report["reopen"] = await measureReopen()
+
         Trace.log("diff")
-        report["diff"] = await measureDiff()
+        let diff = await measureDiff()
+        report["diff"] = diff
+        // The editor worker is what computes a diff in 0.56, so the change list is the one
+        // witness of it that does not depend on the worker choosing to report a failure. It is
+        // carried into the worker finding rather than merely reported beside it.
+        let diffComputed = diff["computed"] as? Bool ?? false
 
         Trace.log("workers")
-        report["workers"] = await measureWorkers()
+        report["workers"] = await measureWorkers(diffComputed: diffComputed)
         Trace.log("done")
         report["editorErrors"] = editorErrors
 
         let chunkLoaded = (chunk as? [String: Any])?["loaded"] as? Bool ?? false
-        let workersStarted = (report["workers"] as? [String: Any])?["allFiveStarted"] as? Bool ?? false
-        var outcome = verdict(document: true, chunk: chunkLoaded, workers: workersStarted)
+        let workers = (report["workers"] as? [String: Any]) ?? [:]
+        // `workersProven`, not `allFiveStarted`. Instantiation only records the absence of a
+        // load error inside a settle window, and a worker that never answers produces exactly
+        // that same silence — a verdict resting on it could promote a route whose language
+        // services are dead. What passes the verdict is the positive evidence: every service
+        // answered and the editor worker computed the diff.
+        let workersProven = workers["proven"] as? Bool ?? false
+        var outcome = verdict(document: true, chunk: chunkLoaded, workers: workers)
         let withinBudget = (report["coldLoad"] as? [String: Any])?["withinBudget"] as? Bool ?? false
         outcome["coldLoadWithinBudget"] = withinBudget
         report["verdict"] = outcome
@@ -213,7 +229,7 @@ final class Spike: NSObject, WKNavigationDelegate {
         // Three statuses, because the two failures mean different things and a script that sees
         // only "not zero" would advance the route search over a cold load that is too slow — a
         // number no other route changes.
-        guard chunkLoaded, workersStarted else { return 2 }
+        guard chunkLoaded, workersProven else { return 2 }
         return withinBudget ? 0 : 5
     }
 
@@ -275,6 +291,41 @@ final class Spike: NSObject, WKNavigationDelegate {
         return out
     }
 
+    // MARK: - Reopening the file already on screen
+
+    /// Sends `open` twice for one path and then asks the page what it is showing.
+    ///
+    /// The second `open` is the shape a file watcher sends when the agent edits the open file
+    /// (root spec §9.1). Monaco refuses a second model at a URI it already holds, so this is the
+    /// run that says whether the bridge reuses the model or drops the command on the floor.
+    private func measureReopen() async -> [String: Any] {
+        let path = "s3/reopen.swift"
+        let first = (1...40).map { "// first open, line \($0)" }.joined(separator: "\n") + "\n"
+        let second = (1...40).map { "// second open, line \($0)" }.joined(separator: "\n") + "\n"
+
+        view.send(.open(path: path, language: "swift", text: first, line: nil))
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        let beforeReopen = editorErrors.count
+
+        _ = try? await call(ProbeScripts.arm)
+        view.send(.open(path: path, language: "swift", text: second, line: 12))
+        let timings = (try? await call(ProbeScripts.awaitRecorded, ["type": "open", "timeoutMs": 15000])) as? [String: Any] ?? [:]
+        let buffer = (try? await call(ProbeScripts.bufferProbe)) as? [String: Any] ?? ["error": "buffer probe threw"]
+
+        let errorsDuringReopen = Array(editorErrors.dropFirst(beforeReopen))
+        let replaced = (buffer["firstLine"] as? String) == "// second open, line 1"
+        let revealed = (buffer["caretLine"] as? Int) == 12
+            && (buffer["lineAtCaret"] as? String) == "// second open, line 12"
+
+        var out = buffer
+        out["timings"] = timings
+        out["contentsReplaced"] = replaced
+        out["requestedLineRevealed"] = revealed
+        out["errorsDuringReopen"] = errorsDuringReopen
+        out["reopenSucceeded"] = replaced && revealed && errorsDuringReopen.isEmpty
+        return out
+    }
+
     // MARK: - The diff
 
     private func measureDiff() async -> [String: Any] {
@@ -301,7 +352,10 @@ final class Spike: NSObject, WKNavigationDelegate {
     private static let workerFiles = ["editor.worker.js", "ts.worker.js", "json.worker.js",
                                       "css.worker.js", "html.worker.js"]
 
-    private func measureWorkers() async -> [String: Any] {
+    /// The five language services the bundle ships, and the probe key each answers under.
+    private static let languageServices = ["css", "html", "json", "typescript"]
+
+    private func measureWorkers(diffComputed: Bool) async -> [String: Any] {
         let direct = (try? await call(ProbeScripts.directWorkerProbe, [
             "files": Self.workerFiles, "route": route.javaScriptNameForProbe, "settleMs": 2500,
         ])) as? [[String: Any]] ?? []
@@ -314,15 +368,29 @@ final class Spike: NSObject, WKNavigationDelegate {
         })
         let allFive = Self.workerFiles.allSatisfy { started[$0] == true }
 
+        let answered = Dictionary(uniqueKeysWithValues: Self.languageServices.map { name in
+            (name, (functional[name] as? [String: Any])?["answered"] as? Bool ?? false)
+        })
+        let allAnswered = answered.values.allSatisfy { $0 }
+
         return [
             "instantiation": direct,
             "functional": functional,
             "allFiveStarted": allFive,
             "startedByFile": started,
+            "answeredByService": answered,
+            "allServicesAnswered": allAnswered,
+            "editorWorkerComputedDiff": diffComputed,
+            // The verdict's own key. Every one of the four language workers answered a request
+            // only it can answer, and editor.worker computed the diff; instantiation alone is
+            // not enough, because silence during the settle window is what a dead worker also
+            // looks like.
+            "proven": allFive && allAnswered && diffComputed,
             // Named so the report never reads as if silence proved life.
             "note": "instantiation records the module worker's `error` event; `started: true` means"
                 + " no load error inside the settle window. The functional block is the positive"
-                + " claim: editor.worker is witnessed by the diff's computed line changes.",
+                + " claim: editor.worker is witnessed by the diff's computed line changes."
+                + " `proven` requires both, and is what the verdict reads.",
         ]
     }
 
@@ -354,12 +422,19 @@ final class Spike: NSObject, WKNavigationDelegate {
         try await view.webView.callAsyncJavaScript(body, arguments: arguments, in: nil, contentWorld: .page) as Any
     }
 
-    private func verdict(document: Bool, chunk: Bool, workers: Bool) -> [String: Any] {
-        [
+    private func verdict(document: Bool, chunk: Bool, workers: [String: Any]) -> [String: Any] {
+        let started = workers["allFiveStarted"] as? Bool ?? false
+        let answered = workers["allServicesAnswered"] as? Bool ?? false
+        let computedDiff = workers["editorWorkerComputedDiff"] as? Bool ?? false
+        let proven = workers["proven"] as? Bool ?? false
+        return [
             "documentLoaded": document,
             "dynamicImportChunkLoaded": chunk,
-            "allFiveWorkersStarted": workers,
-            "routeCarriesEveryLoadPath": document && chunk && workers,
+            "allFiveWorkersStarted": started,
+            "allLanguageServicesAnswered": answered,
+            "editorWorkerComputedDiff": computedDiff,
+            "workersProven": proven,
+            "routeCarriesEveryLoadPath": document && chunk && proven,
         ]
     }
 

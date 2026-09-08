@@ -39,6 +39,15 @@ enum Summary {
                          + " changes=\(diff["changeCount"] as? Int ?? 0)"
                          + " renderedInsertLines=\(diff["renderedInsertLines"] as? Int ?? 0)")
         }
+        if let reopen = report["reopen"] as? [String: Any] {
+            lines.append("  reopen      succeeded=\(reopen["reopenSucceeded"] as? Bool ?? false)"
+                         + " contentsReplaced=\(reopen["contentsReplaced"] as? Bool ?? false)"
+                         + " lineRevealed=\(reopen["requestedLineRevealed"] as? Bool ?? false)"
+                         + " models=\(reopen["modelCount"] as? Int ?? -1)")
+            if let errors = reopen["errorsDuringReopen"] as? [String], !errors.isEmpty {
+                for message in errors.prefix(3) { lines.append("              error: \(message)") }
+            }
+        }
         if let chunk = report["chunk"] as? [String: Any] {
             lines.append("  chunk       swift grammar loaded=\(chunk["loaded"] as? Bool ?? false)"
                          + " in \(Int(chunk["elapsedMs"] as? Double ?? -1)) ms")
@@ -54,6 +63,11 @@ enum Summary {
                     lines.append("  service     \(name.padding(toLength: 17, withPad: " ", startingAt: 0)) answered=\(answered)")
                 }
             }
+            // The verdict's own line, so a reader is never left inferring it from the rows above.
+            lines.append("  workers     proven=\(workers["proven"] as? Bool ?? false)"
+                         + "  (allFiveStarted=\(workers["allFiveStarted"] as? Bool ?? false)"
+                         + " allServicesAnswered=\(workers["allServicesAnswered"] as? Bool ?? false)"
+                         + " editorWorkerComputedDiff=\(workers["editorWorkerComputedDiff"] as? Bool ?? false))")
         }
         if let errors = report["editorErrors"] as? [String], !errors.isEmpty {
             lines.append("  editor errors:")

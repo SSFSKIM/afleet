@@ -16,8 +16,10 @@ import Foundation
 //
 // Its report goes to stdout as one JSON object and nothing else, so the run is scriptable; the
 // human-readable summary goes to stderr. Exit 0 when the route carries the document, a
-// dynamic-import chunk and all five workers; 2 when it does not, which is the signal to advance
-// to the next route.
+// dynamic-import chunk and all five workers — the workers proven by answering, not merely by
+// starting without an error; 2 when it does not, which is the signal to advance to the next
+// route; 5 when every load path is carried but the cold load is over budget, which is a
+// measurement and not a broken run.
 
 /// The kernel's own record of when this process began, which is earlier than anything Swift can
 /// observe: it includes dyld, the SwiftPM-built binary's startup and AppKit's. The gate is
