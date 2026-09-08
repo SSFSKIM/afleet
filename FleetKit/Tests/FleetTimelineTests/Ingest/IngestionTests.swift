@@ -887,7 +887,8 @@ final class IngestionTests: XCTestCase {
         let onDisk = await ingestion.projection
         XCTAssertEqual(Set(onDisk.items.map(\.provenance.origin)), [.file],
                        "once the file exists the same records are the file's")
-        XCTAssertEqual(Set(onDisk.items.compactMap(\.provenance.sourceFile)), [mainPath.standardizedFileURL])
+        XCTAssertTrue(Set(onDisk.items.compactMap(\.provenance.sourceFile)) == [mainPath.standardizedFileURL],
+                      "the items name a source file other than the one main transcript")
         await ingestion.close()
     }
 

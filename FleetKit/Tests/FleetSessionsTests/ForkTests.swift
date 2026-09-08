@@ -44,14 +44,17 @@ final class ForkTests: XCTestCase {
         try await rig.waitUntil(fork, "the fork to be ready on its resolved id") {
             $0.origin == .owned(.ready) && $0.identity == .known(resolved)
         }
-        XCTAssertEqual(fork.key, ChannelKey(configHome: provisional.configHome, session: resolved))
+        // Booleans over `ChannelKey` throughout this file: the key carries the rig's config home, which is under
+        // the temporary directory (tracker entry 75, §6.3).
+        XCTAssertTrue(fork.key == ChannelKey(configHome: provisional.configHome, session: resolved),
+                      "the fork is not keyed on the id its child resolved to")
 
         try await rig.drainPublished(of: fork)
         let published = rig.published(of: fork)
         let readyIndex = try XCTUnwrap(published.firstIndex { $0.origin == .owned(.ready) })
         for state in published[..<readyIndex] {
             XCTAssertEqual(state.identity, .awaitingFork(from: source, provisional: provisional.session))
-            XCTAssertEqual(state.key, provisional)
+            XCTAssertTrue(state.key == provisional, "a state published before ready is not on the provisional key")
         }
         XCTAssertEqual(published.filter { $0.key.session == resolved }.count, 1,
                        "the re-keyed state is published once")
@@ -121,7 +124,7 @@ final class ForkTests: XCTestCase {
         let yielded = await fork.state
         guard case .contended(let holders)? = yielded.banner else { return XCTFail("no contended banner") }
         XCTAssertEqual(holders.holders.map(\.pid), [holderPID])
-        XCTAssertEqual(fork.key, provisional, "the facade is not asked to re-index the fork over the owner")
+        XCTAssertTrue(fork.key == provisional, "the facade is not asked to re-index the fork over the owner")
         let stillProvisional = await rig.fleet.isLive(provisional)
         XCTAssertFalse(stillProvisional, "the provisional reservation was rolled back")
         // The owner's key is live because the *owner* holds it; what the rollback has to show is that the fork's
@@ -404,7 +407,7 @@ final class ForkTests: XCTestCase {
         try await rig.drainPublished(of: fork)
         XCTAssertFalse(rig.published(of: fork).contains { $0.origin == .owned(.ready) },
                        "nothing is ready over a process that has exited")
-        XCTAssertEqual(fork.key, provisional, "the channel is keyed as it was; nothing was rewritten under it")
+        XCTAssertTrue(fork.key == provisional, "the channel is keyed as it was; nothing was rewritten under it")
         let state = await fork.state
         XCTAssertEqual(state.origin, .archived, "a fork that never reached ready rests where its spawn found it")
     }
@@ -442,6 +445,6 @@ final class ForkTests: XCTestCase {
         try await rig.waitUntil(fork, "the fork to be ready") { $0.origin == .owned(.ready) }
         let holdsResolved = await rig.fleet.isLive(resolvedKey)
         XCTAssertTrue(holdsResolved, "the resolution finished on the slot it moved")
-        XCTAssertEqual(fork.key, resolvedKey)
+        XCTAssertTrue(fork.key == resolvedKey, "the fork did not end up on the resolved key")
     }
 }

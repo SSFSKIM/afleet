@@ -473,7 +473,9 @@ final class LiveCLITests: XCTestCase {
     func testEnvironmentResolverReturnsTheLoginPathAndHonoursConfigDirFromAShellProfile() async throws {
         let real = await EnvironmentResolver().resolve(shell: loginShell)
         XCTAssertNotEqual(real.mode, .processFallback, "login shell capture failed; check the rc file for prompts that block -i")
-        XCTAssertTrue(real.path.contains { $0.hasSuffix("/bin") }, "captured PATH has no bin directory: \(real.path)")
+        // The count, never the entries: the captured PATH is the running machine's environment (spec §6.3).
+        XCTAssertTrue(real.path.contains { $0.hasSuffix("/bin") },
+                      "none of the \(real.path.count) captured PATH entries ends in /bin")
         // Otherwise the assertion below could pass on the outer environment's value rather than on the one the
         // stand-in profile exports.
         XCTAssertNotEqual(real.variables["CLAUDE_CONFIG_DIR"], "/tmp/afleet-live-cfg")
@@ -486,7 +488,10 @@ final class LiveCLITests: XCTestCase {
         let captured = await EnvironmentResolver(runner: EnvironmentOverridingRunner(extra: ["ZDOTDIR": zdot.path])).resolve(shell: "/bin/zsh")
         XCTAssertNotEqual(captured.mode, .processFallback, "the stand-in profile's capture fell through the ladder")
         let home = ConfigHome.derive(from: captured)
-        XCTAssertEqual(home.root.path, "/tmp/afleet-live-cfg")
+        // A boolean: the value is invented, but an equality over a `ConfigHome` root is the shape entry 75 is
+        // about, and this file is where a resolved home would first be compared.
+        XCTAssertTrue(home.root.path == "/tmp/afleet-live-cfg",
+                      "the derived config home is not the one the stand-in profile exported")
         XCTAssertEqual(home.source, .environment)
         XCTAssertFalse(FileManager.default.fileExists(atPath: "/tmp/afleet-live-cfg"), "derive must not create the directory it names")
     }
@@ -501,7 +506,7 @@ final class LiveCLITests: XCTestCase {
         // Taken before this test does anything else. Everything the test itself does happens between here and
         // the reading just before `spawn()`.
         let atStart = witness.read()
-        XCTAssertFalse(atStart.isEmpty, "the witness read no files at all under \(Self.scratchHome.path)")
+        XCTAssertFalse(atStart.isEmpty, "the witness read no files at all under the scratch config home")
         XCTAssertTrue(atStart.keys.contains(".credentials.json"),
                       "the witness did not see the hidden credentials file, so its reading is not comparable")
 
@@ -581,7 +586,7 @@ final class LiveCLITests: XCTestCase {
         try requireLoggedInScratchHome()
         let witness = ConfigHomeWitness(root: Self.scratchHome)
         let atStart = witness.read()
-        XCTAssertFalse(atStart.isEmpty, "the witness read no files at all under \(Self.scratchHome.path)")
+        XCTAssertFalse(atStart.isEmpty, "the witness read no files at all under the scratch config home")
 
         let (env, binary) = try await resolvedBinary()
         let cwd = try temporaryWorkingDirectory()

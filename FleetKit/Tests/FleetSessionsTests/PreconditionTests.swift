@@ -95,12 +95,18 @@ final class PreconditionTests: XCTestCase {
         try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
 
         let walked = ProjectRoot.canonical(for: nested)
-        XCTAssertEqual(walked.root.path(percentEncoded: false), TemporaryProject.realpath(project.root))
-        XCTAssertEqual(walked.gitRoot?.path(percentEncoded: false), TemporaryProject.realpath(project.root))
+        // Booleans, not equalities, everywhere two resolved roots are compared in this file: both operands are
+        // rooted in the temporary directory, which carries the account hash of the machine running the suite
+        // (tracker entry 75, §6.3). The message names the relation; it never names either path.
+        XCTAssertTrue(walked.root.path(percentEncoded: false) == TemporaryProject.realpath(project.root),
+                      "the walked root is not the project's real root")
+        XCTAssertTrue(walked.gitRoot?.path(percentEncoded: false) == TemporaryProject.realpath(project.root),
+                      "the git root is not the project's real root")
 
         let plain = try newProject(git: false)
         let alone = ProjectRoot.canonical(for: plain.root)
-        XCTAssertEqual(alone.root.path(percentEncoded: false), TemporaryProject.realpath(plain.root))
+        XCTAssertTrue(alone.root.path(percentEncoded: false) == TemporaryProject.realpath(plain.root),
+                      "a directory with no `.git` above it did not resolve to itself")
         XCTAssertNil(alone.gitRoot, "no `.git` above it, so the root is the directory itself")
 
         // The `/tmp` case, which a `standardizedFileURL` would get wrong: it rewrites `/private/var` back to `/var`
@@ -109,12 +115,14 @@ final class PreconditionTests: XCTestCase {
         try FileManager.default.createDirectory(at: underTmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: underTmp) }
         let resolved = ProjectRoot.canonical(for: underTmp)
-        XCTAssertEqual(resolved.root.path(percentEncoded: false), TemporaryProject.realpath(underTmp))
-        XCTAssertTrue(resolved.root.path(percentEncoded: false).hasPrefix("/private/tmp/"),
-                      "the real path, not the `/tmp` spelling: \(resolved.root.path(percentEncoded: false))")
-        XCTAssertEqual(underTmp.resolvingSymlinksInPath().path(percentEncoded: false),
-                       underTmp.path(percentEncoded: false),
-                       "`resolvingSymlinksInPath` hands the `/tmp` spelling straight back, which is the trap")
+        XCTAssertTrue(resolved.root.path(percentEncoded: false) == TemporaryProject.realpath(underTmp),
+                      "the canonical root under /tmp is not the directory's real path")
+        let resolvedUnderTmp = resolved.root.path(percentEncoded: false)
+        XCTAssertTrue(resolvedUnderTmp.hasPrefix("/private/tmp/"),
+                      "the canonical root kept the `/tmp` spelling instead of the real one")
+        XCTAssertTrue(underTmp.resolvingSymlinksInPath().path(percentEncoded: false)
+                          == underTmp.path(percentEncoded: false),
+                      "`resolvingSymlinksInPath` hands the `/tmp` spelling straight back, which is the trap")
     }
 
     /// Anything but `hasTrustDialogAccepted: true` is untrusted, and an untrusted project renders history only.
@@ -129,7 +137,12 @@ final class PreconditionTests: XCTestCase {
         var (missing, _) = await preconditions.evaluate(key: key, cwd: project.root,
                                                         launch: launch(cwd: project.root), configHome: home.configHome, wedged: nil,
                                                         foreignHolders: [], store: store)
-        XCTAssertEqual(missing, .untrusted(root: URL(filePath: TemporaryProject.realpath(project.root))))
+        // Narrowed to the case and then to a boolean: `.untrusted` carries the project root.
+        guard case .untrusted(let namedRoot) = missing else {
+            return XCTFail("a home with no trust entry did not report the project untrusted")
+        }
+        XCTAssertTrue(namedRoot.path(percentEncoded: false) == TemporaryProject.realpath(project.root),
+                      "the refusal named a root other than the project's real root")
 
         try home.setTrust(root: project.root, false)
         (missing, _) = await preconditions.evaluate(key: key, cwd: project.root,
@@ -263,8 +276,10 @@ final class PreconditionTests: XCTestCase {
 
         let recorded = try await store.read([ProjectServerAcceptance].self, namespace: .fleetKit,
                                             key: FleetKitKeys.projectServerAcceptances) ?? []
-        XCTAssertEqual(recorded, [ProjectServerAcceptance(projectRoot: root.root.path(percentEncoded: false),
-                                                          serverName: "d", entryHash: pending.entryHash)])
+        // A boolean: `ProjectServerAcceptance` carries the project root, so an equality prints it twice.
+        XCTAssertTrue(recorded == [ProjectServerAcceptance(projectRoot: root.root.path(percentEncoded: false),
+                                                           serverName: "d", entryHash: pending.entryHash)],
+                      "the store holds \(recorded.count) acceptance(s), and not the one this project recorded")
         XCTAssertEqual(verdict(now(recorded), "d"), .approved(.acceptance))
 
         try project.writeMCPJSON(["d": ["command": "/usr/bin/false"]])
@@ -565,9 +580,9 @@ final class PreconditionTests: XCTestCase {
 
         // The name `<base>/work/proj` now reaches the decoy; the descriptor still reaches the directory that was
         // there when it was opened, which is where the file has to be.
-        XCTAssertEqual(TemporaryProject.realpath(originalRoot),
-                       TemporaryProject.realpath(decoy.appending(path: "proj")),
-                       "the name really was swapped out from under the writer")
+        XCTAssertTrue(TemporaryProject.realpath(originalRoot)
+                          == TemporaryProject.realpath(decoy.appending(path: "proj")),
+                      "the name really was swapped out from under the writer")
         let landed = moved.appending(path: "proj/.claude/settings.local.json")
         let object = try JSONSerialization.jsonObject(with: Data(contentsOf: landed)) as? [String: Any]
         XCTAssertEqual(object?["disabledMcpjsonServers"] as? [String], ["d"],
@@ -686,10 +701,10 @@ final class PreconditionTests: XCTestCase {
 
         let aliased = URL(filePath: firmlink + TemporaryProject.realpath(configHome), directoryHint: .isDirectory)
         guard FileManager.default.fileExists(atPath: aliased.path(percentEncoded: false)) else {
-            throw XCTSkip("the data volume does not reach \(aliased.path(percentEncoded: false))")
+            throw XCTSkip("the data volume does not reach the firmlinked spelling of this test's config home")
         }
-        XCTAssertNotEqual(TemporaryProject.realpath(aliased), TemporaryProject.realpath(configHome),
-                          "the two spellings are the same directory and realpath keeps them apart")
+        XCTAssertTrue(TemporaryProject.realpath(aliased) != TemporaryProject.realpath(configHome),
+                      "the two spellings are the same directory and realpath keeps them apart")
 
         let witness = TreeWitness(configHome)
         XCTAssertThrowsError(try LocalSettingsStore()

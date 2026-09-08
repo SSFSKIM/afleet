@@ -89,7 +89,8 @@ final class CLIVerbsTests: XCTestCase {
         XCTAssertEqual(calls.invocations, [["stop", "j00001"]])
         let environment = try XCTUnwrap(calls.environments.first)
         XCTAssertTrue(environment.keys.contains("CLAUDE_CONFIG_DIR"))
-        XCTAssertEqual(environment["CLAUDE_CONFIG_DIR"], home.url.path)
+        XCTAssertTrue(environment["CLAUDE_CONFIG_DIR"] == home.url.path,
+                      "the verb ran under a config home other than this test's")
         XCTAssertEqual(files.job("j00001")?.state, "stopped")
         XCTAssertNil(files.rosterWorkers()["j00001"])
     }

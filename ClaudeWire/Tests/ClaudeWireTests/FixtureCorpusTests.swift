@@ -46,7 +46,7 @@ final class FixtureCorpusTests: XCTestCase {
         let fm = FileManager.default
         var isDirectory: ObjCBool = false
         guard fm.fileExists(atPath: fixturesRoot.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            XCTFail("no Fixtures directory at \(fixturesRoot.path)")
+            XCTFail("the repository's Fixtures directory is not a readable directory")
             return []
         }
         let names = try fm.contentsOfDirectory(atPath: fixturesRoot.path).sorted()
@@ -56,13 +56,15 @@ final class FixtureCorpusTests: XCTestCase {
             var sub: ObjCBool = false
             guard fm.fileExists(atPath: url.path, isDirectory: &sub), sub.boolValue else { continue }   // Fixtures/REVIEW.md
             for file in ["frames.ndjson", "census.json"] {
-                XCTAssertTrue(fm.fileExists(atPath: url.appendingPathComponent(file).path), "\(name) has no \(file)")
+                // The existence check is hoisted off the assertion line so no assertion here mentions a path.
+                let exists = fm.fileExists(atPath: url.appendingPathComponent(file).path)
+                XCTAssertTrue(exists, "\(name) has no \(file)")
             }
             dirs.append(url)
         }
         // Equality, not a floor: with `>=`, deleting one fixture and adding another nets to green.
         XCTAssertEqual(dirs.count, Self.committedFixtureCount,
-                       "found \(dirs.count) fixtures under \(fixturesRoot.path); the committed corpus has \(Self.committedFixtureCount)")
+                       "found \(dirs.count) fixture directories; the committed corpus has \(Self.committedFixtureCount)")
         return dirs
     }
 

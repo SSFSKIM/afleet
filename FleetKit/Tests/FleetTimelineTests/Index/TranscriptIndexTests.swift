@@ -95,13 +95,18 @@ final class TranscriptIndexTests: XCTestCase {
         // no `.meta.json` — and each shared id carries the later snapshot's path.
         var expectedPaths: Set<URL> = []
         for (name, url) in tree.mains where !Self.shadowed.contains(name) { expectedPaths.insert(url) }
-        XCTAssertEqual(Set(snapshot.entries.values.map(\.path)), expectedPaths)
+        // Booleans from here down, not equalities: an `IndexEntry` path is rooted in the temporary tree, so an
+        // equality failure would print the account hash of the machine that ran the suite (tracker 75, §6.3).
+        XCTAssertTrue(Set(snapshot.entries.values.map(\.path)) == expectedPaths,
+                      "the index holds \(snapshot.entries.count) entries over \(expectedPaths.count) expected main files")
 
         let plain = try XCTUnwrap(tree.fixtures["plain-two-turn"])
         let relocation = try XCTUnwrap(tree.fixtures["session-mirror-relocation"])
-        XCTAssertEqual(snapshot.entries[plain.sessionID]?.path, tree.mains["resume-no-replay"])
+        XCTAssertTrue(snapshot.entries[plain.sessionID]?.path == tree.mains["resume-no-replay"],
+                      "the shared id's entry is not the resume-no-replay file")
         XCTAssertEqual(snapshot.entries[plain.sessionID]?.slug, "resume-no-replay")
-        XCTAssertEqual(snapshot.entries[relocation.sessionID]?.path, tree.mains["session-mirror-resume"])
+        XCTAssertTrue(snapshot.entries[relocation.sessionID]?.path == tree.mains["session-mirror-resume"],
+                      "the relocated id's entry is not the session-mirror-resume file")
         XCTAssertEqual(snapshot.entries[relocation.sessionID]?.slug, "session-mirror-resume")
 
         let withSubagents = Set(snapshot.entries.values.filter(\.hasSubagents).map(\.sessionID))
@@ -407,7 +412,7 @@ final class TranscriptIndexTests: XCTestCase {
         let old = canonical(try temp.add(fixture, slug: "old-slug"))
         let index = makeIndex(temp)
         let built = try await index.build()
-        XCTAssertEqual(built.entries[fixture.sessionID]?.path, old)
+        XCTAssertTrue(built.entries[fixture.sessionID]?.path == old, "the build did not index the old slug's file")
 
         try temp.relocate(session: fixture.sessionID, from: "old-slug", to: "new-slug")
         let new = canonical(temp.projects.appendingPathComponent("new-slug", isDirectory: true)
@@ -419,7 +424,7 @@ final class TranscriptIndexTests: XCTestCase {
         XCTAssertEqual(delta.added, [])
         let relocated = await index.entry(fixture.sessionID)
         let entry = try XCTUnwrap(relocated)
-        XCTAssertEqual(entry.path, new)
+        XCTAssertTrue(entry.path == new, "the entry did not follow the file to the new slug")
         XCTAssertEqual(entry.slug, "new-slug")
     }
 
@@ -439,7 +444,7 @@ final class TranscriptIndexTests: XCTestCase {
         let index = makeIndex(temp)
         let built = try await index.build()
         XCTAssertEqual(built.entries.count, 1, "two files, one id, one entry")
-        XCTAssertEqual(built.entries[fixture.sessionID]?.path, old, "the later mtime is the old slug's, so far")
+        XCTAssertTrue(built.entries[fixture.sessionID]?.path == old, "the later mtime is the old slug's, so far")
 
         try temp.setModificationDate(new, Self.baseDate.addingTimeInterval(10))
         let delta = await index.update(changed: order(old, new))
@@ -448,7 +453,7 @@ final class TranscriptIndexTests: XCTestCase {
         XCTAssertEqual(delta.removed, [])
         let winner = await index.entry(fixture.sessionID)
         let entry = try XCTUnwrap(winner)
-        XCTAssertEqual(entry.path, new)
+        XCTAssertTrue(entry.path == new, "the file whose mtime moved later did not win the entry")
         XCTAssertEqual(entry.slug, "new-slug")
     }
 
@@ -462,7 +467,7 @@ final class TranscriptIndexTests: XCTestCase {
 
         let index = makeIndex(temp)
         let built = try await index.build()
-        XCTAssertEqual(built.entries[fixture.sessionID]?.path, new)
+        XCTAssertTrue(built.entries[fixture.sessionID]?.path == new, "the build did not index the later-mtime file")
 
         try temp.remove(new)
         let first = await index.update(changed: [new])
@@ -471,7 +476,7 @@ final class TranscriptIndexTests: XCTestCase {
         XCTAssertEqual(first.added, [])
         let survivorEntry = await index.entry(fixture.sessionID)
         let survivor = try XCTUnwrap(survivorEntry)
-        XCTAssertEqual(survivor.path, old, "the alias only the build saw keeps the entry alive")
+        XCTAssertTrue(survivor.path == old, "the alias only the build saw keeps the entry alive")
         XCTAssertEqual(survivor.slug, "old-slug")
 
         try temp.remove(old)

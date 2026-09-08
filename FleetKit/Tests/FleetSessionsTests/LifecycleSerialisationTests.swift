@@ -121,8 +121,9 @@ final class LifecycleSerialisationTests: XCTestCase {
         try await supervisor.quiescentRestart(RestartRequest(addDirectories: [c]))
 
         let queued = await supervisor.state.pendingChange
-        XCTAssertEqual(queued?.addDirectories, [b, c],
-                       "both changes asked for behind the running restart are still there, in order")
+        // A boolean: `b` and `c` are under the rig's temporary scratch root (tracker entry 75, §6.3).
+        XCTAssertTrue(queued?.addDirectories == [b, c],
+                      "both changes asked for behind the running restart are still there, in order")
         held.release()
         try await first.value
 

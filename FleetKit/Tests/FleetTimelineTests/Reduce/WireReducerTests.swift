@@ -473,9 +473,12 @@ final class WireReducerTests: XCTestCase {
         _ = reducer.apply(.relocated(mainPath: moved), at: Date(timeIntervalSince1970: 0))
 
         for id in taskIDs {
+            // The containment is computed off the assertion line so no assertion here mentions a path.
             let url = try XCTUnwrap(reducer.agents.transcriptURL(of: id))
-            XCTAssertTrue(url.path.contains("/_other_/"), "agent \(id) moved with the slug")
-            XCTAssertFalse(url.path.contains("/_slug_/"))
+            let underNewSlug = url.path.contains("/_other_/")
+            let underOldSlug = url.path.contains("/_slug_/")
+            XCTAssertTrue(underNewSlug, "agent \(id) moved with the slug")
+            XCTAssertFalse(underOldSlug)
         }
         XCTAssertTrue(reducer.durable.items == items,
                       "a relocation renames nothing in the projection: \(reducer.durable.items.map(\.id.key))")

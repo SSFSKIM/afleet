@@ -126,8 +126,11 @@ final class RestartTests: XCTestCase {
         XCTAssertEqual(relaunched.permissionMode, .plan)
         XCTAssertEqual(relaunched.model, "opus")
         XCTAssertEqual(relaunched.effort, "low")
-        XCTAssertEqual(relaunched.addDirectories.map(\.path),
-                       [URL(fileURLWithPath: "/tmp/a").path, URL(fileURLWithPath: "/tmp/b").path])
+        // Booleans over `--add-dir` and cwd lists throughout this file: the values here are invented, but the
+        // shape is the one tracker entry 75 sweeps for, and a rig-rooted directory reaches these same assertions.
+        XCTAssertTrue(relaunched.addDirectories.map(\.path)
+                          == [URL(fileURLWithPath: "/tmp/a").path, URL(fileURLWithPath: "/tmp/b").path],
+                      "the relaunch carries \(relaunched.addDirectories.count) add-dirs, not the 2 the request named")
         XCTAssertNil(relaunched.agent, "a restart never re-passes --agent")
         XCTAssertEqual(relaunched.session, .resume(session, fork: false))
         let state = await supervisor.state
@@ -172,7 +175,8 @@ final class RestartTests: XCTestCase {
         XCTAssertEqual(handle.terminateCount, 1)
         let restarted = await supervisor.state
         XCTAssertNil(restarted.pendingChange)
-        XCTAssertEqual(rig.launches[1].addDirectories.map(\.path), [URL(fileURLWithPath: "/tmp/b").path])
+        XCTAssertTrue(rig.launches[1].addDirectories.map(\.path) == [URL(fileURLWithPath: "/tmp/b").path],
+                      "the queued restart's relaunch carries \(rig.launches[1].addDirectories.count) add-dirs, not 1")
     }
 
     // MARK: - The readbacks
@@ -299,8 +303,9 @@ final class RestartTests: XCTestCase {
         _ = try await supervisor.perform(SetCwd(path: b.path))
         try await rig.steppingClock { try await supervisor.quiescentRestart(RestartRequest()) }
 
-        XCTAssertEqual(rig.launches[1].cwd.path, b.path)
-        XCTAssertEqual(rig.launches[0].cwd.path, a.path, "the template's cwd still reads a")
+        // Both directories are under the rig's scratch root, so an equality here would print it twice.
+        XCTAssertTrue(rig.launches[1].cwd.path == b.path, "the relaunch did not run in the set_cwd directory")
+        XCTAssertTrue(rig.launches[0].cwd.path == a.path, "the template's cwd still reads a")
     }
 
     /// The cumulative `--add-dir` list is the template's plus every accepted `add_directory`; a request that names
@@ -328,15 +333,16 @@ final class RestartTests: XCTestCase {
         _ = try await supervisor.perform(RawControlRequest(subtype: "add_directory",
                                                            payload: .object(["directory": .string("/tmp/mid")])))
         try await rig.steppingClock { try await supervisor.quiescentRestart(RestartRequest()) }
-        XCTAssertEqual(rig.launches[1].addDirectories.map(\.path),
-                       [URL(fileURLWithPath: "/tmp/a").path, URL(fileURLWithPath: "/tmp/mid").path])
+        XCTAssertTrue(rig.launches[1].addDirectories.map(\.path)
+                          == [URL(fileURLWithPath: "/tmp/a").path, URL(fileURLWithPath: "/tmp/mid").path],
+                      "the cumulative list is not the template's plus the accepted add_directory")
 
         let replacing = RestartRequest(addDirectories: [URL(fileURLWithPath: "/tmp/a"),
                                                         URL(fileURLWithPath: "/tmp/b")])
         try await rig.steppingClock { try await supervisor.quiescentRestart(replacing) }
-        XCTAssertEqual(rig.launches[2].addDirectories.map(\.path),
-                       [URL(fileURLWithPath: "/tmp/a").path, URL(fileURLWithPath: "/tmp/b").path],
-                       "a request that names a list replaces the cumulative one")
+        XCTAssertTrue(rig.launches[2].addDirectories.map(\.path)
+                          == [URL(fileURLWithPath: "/tmp/a").path, URL(fileURLWithPath: "/tmp/b").path],
+                      "a request that names a list replaces the cumulative one")
     }
 
     /// The whole flag union goes out in one `apply_flag_settings`, and every key of it must come back in
@@ -451,11 +457,13 @@ final class RestartTests: XCTestCase {
         RuntimeStateUpdater.apply(subtype: "set_cwd", payload: .object(["path": .string("/tmp/two")]),
                                   answer: .object(["status": .string("ok"), "cwd": .string("/tmp/two")]),
                                   to: &state)
-        XCTAssertEqual(state.cwd.path, URL(fileURLWithPath: "/tmp/two").path)
+        XCTAssertTrue(state.cwd.path == URL(fileURLWithPath: "/tmp/two").path,
+                      "an accepted set_cwd did not move the recorded cwd")
 
         RuntimeStateUpdater.apply(subtype: "add_directory", payload: .object(["directory": .string("/tmp/mid")]),
                                   answer: .object(["directory": .string("/tmp/mid")]), to: &state)
-        XCTAssertEqual(state.addDirectories.map(\.path), [URL(fileURLWithPath: "/tmp/mid").path])
+        XCTAssertTrue(state.addDirectories.map(\.path) == [URL(fileURLWithPath: "/tmp/mid").path],
+                      "an accepted add_directory did not land in the recorded list")
 
         let before = state
         RuntimeStateUpdater.apply(subtype: "list_models", payload: .object([:]),
@@ -486,7 +494,8 @@ final class RestartTests: XCTestCase {
         XCTAssertEqual(fresh.model, "haiku")
         XCTAssertEqual(fresh.permissionMode, .acceptEdits)
         XCTAssertEqual(fresh.outputStyle, "Concise")
-        XCTAssertEqual(fresh.cwd.path, URL(fileURLWithPath: "/tmp/three").path)
+        XCTAssertTrue(fresh.cwd.path == URL(fileURLWithPath: "/tmp/three").path,
+                      "the first system/init did not seed the cwd it reports")
         XCTAssertEqual(fresh.agent, "reviewer")
         RuntimeStateUpdater.apply(frame: try Self.systemInitFrame(model: "opus", permissionMode: "plan",
                                                                   outputStyle: "default", cwd: "/tmp/four",
@@ -747,7 +756,8 @@ final class RestartTests: XCTestCase {
         let respawned = rig.launches[2]
         XCTAssertEqual(respawned.model, "opus", "the respawn continues from the restarted line")
         XCTAssertNil(respawned.agent, "and still never re-passes --agent")
-        XCTAssertEqual(respawned.addDirectories.map(\.path), [URL(fileURLWithPath: "/tmp/b").path])
+        XCTAssertTrue(respawned.addDirectories.map(\.path) == [URL(fileURLWithPath: "/tmp/b").path],
+                      "the respawn carries \(respawned.addDirectories.count) add-dirs, not the restarted line's 1")
     }
 
     // MARK: - A control answer that never arrives

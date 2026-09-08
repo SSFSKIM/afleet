@@ -370,8 +370,10 @@ final class AgentRunTreeTests: XCTestCase {
         tree.relocate(slug: Self.otherSlug)
         for id in tree.nodes.keys {
             let moved = try XCTUnwrap(tree.transcriptURL(of: id))
-            XCTAssertTrue(moved.path.contains("/projects/\(Self.otherSlug)/"), "agent \(id) did not move to the new slug")
-            XCTAssertFalse(moved.path.contains("/projects/\(Self.recordedSlug)/"), "agent \(id) kept a stale path")
+            let underNewSlug = moved.path.contains("/projects/\(Self.otherSlug)/")
+            let underOldSlug = moved.path.contains("/projects/\(Self.recordedSlug)/")
+            XCTAssertTrue(underNewSlug, "agent \(id) did not move to the new slug")
+            XCTAssertFalse(underOldSlug, "agent \(id) kept a stale path")
             XCTAssertEqual(moved.lastPathComponent, expected[id]?.lastPathComponent, "the file name changed with the slug")
         }
         XCTAssertEqual(tree.nodes, before, "relocation changes no id, parent, status or any other node field")
