@@ -226,9 +226,50 @@ public final class FileTree {
             // different number the positions no longer name the paths that were asked about, and
             // hiding the wrong rows is worse than not hiding any.
             guard records.count == batch.count else { return nil }
-            answers += records.map { !$0.hasPrefix("::\t") }
+            answers += records.map(Self.isIgnored)
         }
         return answers
+    }
+
+    /// What one `--verbose --non-matching` record says about its path.
+    ///
+    /// A record is `<source>:<linenum>:<pattern>\t<pathname>`, and a path that matched nothing has
+    /// the empty source and line number that make it read `::\t…`. **A record that matched is not
+    /// necessarily ignored:** the last pattern to match may be a negation, and git prints it with
+    /// its leading `!`. Measured on this machine's git 2.55.0, a `.gitignore` of `*.log` then
+    /// `!keep.log` prints (tabs shown):
+    ///
+    ///     .gitignore:1:*.log<TAB>./noisy.log
+    ///     .gitignore:2:!keep.log<TAB>./keep.log
+    ///     ::<TAB>./kept.txt
+    ///
+    /// so reading every non-`::` record as ignored hides a file the user explicitly re-included.
+    /// The same measurement shows what a negation cannot do: `build/` then `!build/keep.me` prints
+    /// the pattern `build/` for that file, because git will not re-include a file whose parent
+    /// directory is excluded — the record's own pattern is the whole answer, and this reading
+    /// never has to reason about the tree.
+    ///
+    /// The pattern field is found from the **right**: the line number is the field immediately in
+    /// front of it, and a source path may itself contain a colon. A record in no other shape is
+    /// read as ignored, which is where this reading was before.
+    private static func isIgnored(_ record: some StringProtocol) -> Bool {
+        guard let tab = record.firstIndex(of: "\t") else { return !record.hasPrefix("::") }
+        let source = record[record.startIndex..<tab]
+        guard source != "::" else { return false }
+        return !pattern(in: source).hasPrefix("!")
+    }
+
+    /// The `<pattern>` of a `<source>:<linenum>:<pattern>` field, or the field itself when it is
+    /// not in that shape.
+    private static func pattern(in field: some StringProtocol) -> String {
+        let colons = field.indices.filter { field[$0] == ":" }
+        for (number, pattern) in Array(zip(colons, colons.dropFirst())).reversed() {
+            let digits = field[field.index(after: number)..<pattern]
+            if !digits.isEmpty, digits.allSatisfy(\.isNumber) {
+                return String(field[field.index(after: pattern)...])
+            }
+        }
+        return String(field)
     }
 
     /// The names split into command lines whose arguments stay far below `ARG_MAX`.

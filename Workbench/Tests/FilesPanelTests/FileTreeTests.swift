@@ -220,4 +220,37 @@ final class FileTreeTests: XCTestCase {
         XCTAssertEqual(names(visible), ["kept.txt", "noisy.log"],
                        "everything is listed when the classification cannot be asked for")
     }
+
+    // MARK: - 8. a negation pattern
+
+    /// A negation pattern re-includes the file it names, and the record that says so is **not**
+    /// the `::` of a record that matched nothing: it carries the negated pattern in its pattern
+    /// field. Measured on this machine's git 2.55.0 with `*.log` then `!keep.log` (tabs shown):
+    ///
+    ///     .gitignore:1:*.log<TAB>./noisy.log
+    ///     .gitignore:2:!keep.log<TAB>./keep.log
+    ///     ::<TAB>./kept.txt
+    ///
+    /// The same measurement fixes what the fixture may claim: `build/` followed by
+    /// `!build/keep.me` re-includes nothing, because a file whose parent directory is excluded
+    /// cannot be re-included — that record's pattern is `build/`, and the entry really is ignored.
+    func testANegationPatternReIncludesTheFileItNames() async throws {
+        let repository = try await GitRepository(tree)
+        try repository.write(".gitignore", "*.log\n!keep.log\nbuild/\n!build/keep.me\n")
+        try repository.write("noisy.log", "noise\n")
+        try repository.write("keep.log", "kept\n")
+        try repository.write("kept.txt", "kept\n")
+        try repository.write("build/keep.me", "artifact\n")
+
+        let model = FileTree(root: repository.root, environment: repository.environment,
+                             runner: ToolRunner())
+        let visible = await model.children(of: repository.root)
+
+        XCTAssertEqual(model.gitignore, .available)
+        XCTAssertEqual(names(visible), ["keep.log", "kept.txt"],
+                       "a file a negation pattern re-includes is listed")
+        let ignored = Set(model.entries(of: repository.root).filter(\.isIgnored).map(\.name))
+        XCTAssertEqual(ignored, ["build", "noisy.log"],
+                       "an excluded directory stays excluded, a negation inside it or not")
+    }
 }
