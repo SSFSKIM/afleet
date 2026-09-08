@@ -1584,6 +1584,22 @@ one; entry 23 is worth more to C1 than a guessed fix would have been to C6.
 
 ## Revision Notes
 
+- 2026-09-08: **the host-signal seam, a corrective on `main`.** C6.3 filed a `[parent-impact]`
+  against X4 and X5 while planning its decision cards: `HostSignal` is modelled here and reduced
+  by `WireReducer.apply(_:at:)`, but nothing in the tree ever constructed one and the actor the
+  app holds per channel exposed no member that took one, so a card could never leave `.pending`
+  and no turn was ever attributed `.prompted` however correctly the app answered through X5's
+  lifecycle API — the app is the raiser, and it had no seam to raise through. `StreamIngestion`
+  therefore gains `signal(_: HostSignal) async -> Effect`: it holds the channel's `WireReducer`,
+  folds the tap into it so a signal lands on a current overlay, applies the signal at the actor's
+  clock and publishes the overlay changes it reports on `effects` like every other mutation,
+  publishing nothing when nothing moved. The durable half stays the record reducer's (§7.3) and
+  this reducer's own durable projection is discarded, as C6.1 discards its own;
+  `relocated(mainPath:)` keeps the single implementation of the path half and
+  `signal(.relocated(mainPath:))` calls it. *Source arbitration*'s "this actor holds no reducer"
+  no longer holds; X4's tap contract and X5's answer path are the architect's to reword at the
+  parent.
+
 - 2026-09-06: **v2.7, merged to `main`.** `main` at `1249c17` (twenty fixtures) was merged into
   the branch at `681ec88` first, and the wider corpus turned 96 assertions red. Every failure was
   classified before any repin: most were count pins, three were findings, and none was repinned
