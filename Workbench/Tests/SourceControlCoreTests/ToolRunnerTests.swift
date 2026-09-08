@@ -179,6 +179,127 @@ final class ToolRunnerTests: XCTestCase {
         XCTAssertEqual(survivors.exitCode, 1, "pgrep still matched the timed-out child after the runner settled")
     }
 
+    // MARK: - R6/F1 a child that floods the pipe cannot starve the timeout
+
+    /// The timeout, the `SIGKILL` escalation and the settlement all run on the *same* serial queue
+    /// as the pipe drains. A drain that keeps reading while data keeps arriving therefore owns that
+    /// queue for as long as the child keeps writing, and while it does, none of the three can run:
+    /// the budget passes unobserved, nothing signals the child, and the accumulated output grows
+    /// without a bound. A tool that produces continuously — or an inherited helper holding the
+    /// pipe — is enough, and `git` has both (a hook streaming progress, a pager, a credential
+    /// helper).
+    ///
+    /// `/bin/dd` from `/dev/zero` is that producer in its plainest form, and *finite* on purpose:
+    /// an endless one would hang this test rather than fail it. It offers 1 GiB as fast as the
+    /// reader will take them, far more than the budget can consume, so a child that ran to
+    /// completion here would be a child the runner never signalled.
+    ///
+    /// **What this test does not do**, and the reason `PipeDrain` is tested directly below. It
+    /// passes with the drain unbounded too. Measured over five producer shapes — one `dd` at 64 KiB,
+    /// 1 MiB and 4 MiB blocks, and four and eight of them at once — the timeout fired within 13 ms
+    /// of its deadline every time, because this machine's drain consumes about 3 GB/s and no
+    /// user-space producer keeps a 64 KiB pipe fed at that rate: the loop reaches `EAGAIN` between
+    /// events and hands the queue back by accident rather than by design. So this is a floor —
+    /// a flooding child is still killed — and not the discriminator for R6/F1.
+    ///
+    /// Byte counts, never bytes: nothing here prints a path or a payload (§6.3, §11).
+    func testAChildFloodingItsPipeIsStillTimedOutAndKilled() async throws {
+        let blockSize = 65_536, blocks = 16_384         // 1 GiB
+        let clock = ContinuousClock()
+        let started = clock.now
+        let output = try await ToolRunner().run(executable: URL(filePath: "/bin/dd"),
+                                                arguments: ["if=/dev/zero", "bs=\(blockSize)",
+                                                            "count=\(blocks)"],
+                                                cwd: tree.root, environment: [:],
+                                                timeout: .milliseconds(50))
+        let elapsed = clock.now - started
+        let elapsedMilliseconds = Int(elapsed.components.seconds * 1000)
+            + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+
+        XCTAssertTrue(output.timedOut,
+                      "a child that flooded its pipe past the budget was not reported as timed out")
+        XCTAssertTrue(elapsedMilliseconds < 5_000,
+                      "the call did not settle inside the budget plus grace; it took \(elapsedMilliseconds) ms")
+        XCTAssertTrue(output.stdout.count < blockSize * blocks,
+                      "the whole 1 GiB arrived, so the child ran to completion instead of being killed at its budget")
+    }
+
+    // MARK: - R6/F1 one pass over a descriptor is bounded
+
+    /// The property the runner actually depends on: **one readable event does a bounded amount of
+    /// work**. The timeout, the `SIGKILL` escalation and the settlement share one serial queue with
+    /// the drains, so a pass that reads while data keeps arriving is time in which none of them can
+    /// run, and the accumulated output grows with nothing to stop it.
+    ///
+    /// Demonstrated against a descriptor that *always* has more to give rather than against a
+    /// flooding child, and that is the point: a regular file never says `EAGAIN`, so the unbounded
+    /// loop's only exit is end-of-file. No producer, no scheduling race, and the same read loop.
+    func testOneDrainPassStopsAtItsBoundOnADescriptorThatAlwaysHasMore() throws {
+        let available = 8 * 1024 * 1024
+        let fd = try openScratchFile(ofSize: available)
+        defer { close(fd) }
+
+        var taken = 0
+        let outcome = PipeDrain.pass(fd) { taken += $0.count }
+
+        XCTAssertEqual(outcome, .open, "a pass that stopped at its bound reported the descriptor closed")
+        XCTAssertTrue(taken > 0, "the pass read nothing at all")
+        XCTAssertTrue(taken <= PipeDrain.bytesPerPass,
+                      "one pass took \(taken) bytes from a descriptor holding \(available); it does not yield the queue between passes")
+    }
+
+    /// And the bound loses nothing: passes repeated until the descriptor reports itself closed
+    /// deliver every byte. A bound that dropped the tail would be a runner that returns a truncated
+    /// `git` listing under load, which is worse than the defect it fixes.
+    func testRepeatedDrainPassesDeliverEveryByteAndThenReportTheDescriptorClosed() throws {
+        let available = 8 * 1024 * 1024
+        let fd = try openScratchFile(ofSize: available)
+        defer { close(fd) }
+
+        var taken = 0, passes = 0
+        var outcome = PipeDrain.Outcome.open
+        while outcome == .open, passes < 1_000 {
+            outcome = PipeDrain.pass(fd) { taken += $0.count }
+            passes += 1
+        }
+
+        XCTAssertEqual(outcome, .closed, "the descriptor was never reported closed")
+        XCTAssertEqual(taken, available, "the passes together delivered a different number of bytes than the descriptor held")
+        XCTAssertTrue(passes >= available / PipeDrain.bytesPerPass,
+                      "\(passes) pass(es) covered \(available) bytes, so a pass is not bounded")
+    }
+
+    /// The two other outcomes, which the bound must not disturb: a pipe with nothing in it right
+    /// now is *open* — the reader comes back when the source fires again — while a pipe whose
+    /// writer is gone is *closed*, which is what cancels the source and closes the descriptor.
+    func testADrainPassReadsAnEmptyPipeAsOpenAndAWriterlessOneAsClosed() throws {
+        let pipe = Pipe()
+        let fd = pipe.fileHandleForReading.fileDescriptor
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        defer { try? pipe.fileHandleForReading.close() }
+
+        var taken = 0
+        XCTAssertEqual(PipeDrain.pass(fd) { taken += $0.count }, .open,
+                       "a pipe that is merely empty was reported closed")
+        XCTAssertEqual(taken, 0, "a pass over an empty pipe appended bytes")
+
+        try pipe.fileHandleForWriting.write(contentsOf: Data("done\n".utf8))
+        try pipe.fileHandleForWriting.close()
+        XCTAssertEqual(PipeDrain.pass(fd) { taken += $0.count }, .closed,
+                       "a pipe whose only writer has gone was not reported closed")
+        XCTAssertEqual(taken, 5, "the writer's last bytes did not arrive with the end of the pipe")
+    }
+
+    /// A file of `size` zero bytes inside the scratch tree, opened for reading. The descriptor is
+    /// returned rather than the path: nothing in this suite prints one (§6.3, §11).
+    private func openScratchFile(ofSize size: Int) throws -> Int32 {
+        let url = tree.root.appending(path: "readable-\(UUID().uuidString)")
+        try Data(count: size).write(to: url, options: .atomic)
+        let fd = open(url.path(percentEncoded: false), O_RDONLY)
+        XCTAssertTrue(fd >= 0, "the scratch file could not be opened for reading")
+        return fd
+    }
+
     // MARK: - G2.6 a non-zero exit is data, not an exception
 
     func testANonZeroExitIsReturnedRatherThanThrown() async throws {
