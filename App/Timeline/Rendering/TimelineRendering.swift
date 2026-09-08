@@ -44,7 +44,15 @@ protocol TimelineRendering {
 /// the text pipeline, with the scroll behaviours to come. They are here now, in
 /// `TimelineTableController`: bottom anchoring, sticky-to-bottom with a silent re-pin, scroll
 /// anchoring on the item nearest the viewport top, and the jump-to-bottom affordance with its unseen
-/// count. Task 3 still lifts `MarkdownText` and `CodeHighlighter` out of this file into their own.
+/// count.
+///
+/// **Superseded again 2026-09-09 (C6.1 Task 3).** What stood here said Task 3 would lift
+/// `MarkdownText` and `CodeHighlighter` into files of their own. It did not, and the reason is the
+/// rule the plan states more than once: one markdown renderer, one highlighter, one cache. Moving
+/// two working types across a file boundary buys a shorter file and risks a second of each; Task 3
+/// extended them in place — the sanitiser, the escaped HTML, the native tables, the two `marked`
+/// overrides and the split's re-prepend — and put the one genuinely new concept, the untrusted-text
+/// sanitiser, in `TextSanitiser.swift` beside them.
 ///
 /// One conformer, and one table per channel: the controller is held here, so the row heights and the
 /// scroll position survive every body evaluation of the view above.
@@ -126,24 +134,43 @@ struct RenderedRow: Identifiable {
     /// fragment still lexes as code rather than flickering between code and prose mid-stream.
     private mutating func consumeClosedBlocks(from text: String, markdown: MarkdownText,
                                               highlighter: CodeHighlighter, phases: inout RenderPhases) {
+        // Sanitised here, which is the one place both halves pass through: the settled prefix goes
+        // on to the markdown pipeline and the tail is drawn as plain text without ever reaching it
+        // (§5). The character counts the streaming path keeps are of the *raw* fragment and are not
+        // affected — they index the preview's own text, not this.
+        let text = TextSanitiser.sanitise(text)
         guard let boundary = text.range(of: "\n\n", options: .backwards) else { tail = text; return }
         let closed = String(text[text.startIndex..<boundary.lowerBound])
-        var remainder = String(text[boundary.upperBound...])
+        let remainder = String(text[boundary.upperBound...])
 
-        if Self.fenceIsOpen(in: closed), let fence = Self.lastFenceLine(in: closed) {
-            // The split fell inside a fence: hand the whole thing to the tail rather than lexing a
-            // fragment as prose, and re-prepend the opening line so what is drawn is still code.
-            tail = fence + "\n" + remainder
+        if Self.fenceIsOpen(in: closed), let opening = Self.lastFenceLineIndex(in: closed) {
+            // The split fell inside a fence. The **re-prepend** of parity §41.17: the split moves
+            // back to the fence's own opening line, so the tail begins with the fence and still
+            // lexes as code rather than flickering between code and prose mid-stream.
+            //
+            // What is before the fence *has* closed and settles here. Handing the whole text to the
+            // tail instead would be safe; handing the tail the fence line alone, as this did before
+            // Task 3, dropped every character between the last boundary and the fence — a streaming
+            // message quietly lost the paragraph it opened with.
+            let lines = closed.split(separator: "\n", omittingEmptySubsequences: false)
+            settle(lines[..<opening].joined(separator: "\n"), markdown: markdown,
+                   highlighter: highlighter, phases: &phases)
+            tail = lines[opening...].joined(separator: "\n") + "\n\n" + remainder
             return
         }
         guard !closed.isEmpty else { tail = text; return }
 
-        let highlightStart = RenderClock.start()
-        let attributed = markdown.attributed(closed, highlighter: highlighter, phases: &phases)
-        _ = highlightStart
-        settled.append(attributed)
+        settle(closed, markdown: markdown, highlighter: highlighter, phases: &phases)
         tail = remainder
-        remainder = ""
+    }
+
+    /// Parses one closed block into the settled prefix. Empty text settles nothing: a block boundary
+    /// at the very start of a fragment is a boundary and not a block.
+    private mutating func settle(_ block: String, markdown: MarkdownText, highlighter: CodeHighlighter,
+                                 phases: inout RenderPhases) {
+        let block = block.trimmingCharacters(in: .newlines)
+        guard !block.isEmpty else { return }
+        settled.append(markdown.attributed(block, highlighter: highlighter, phases: &phases))
     }
 
     /// An odd number of fence openings means the last one is still open.
@@ -152,9 +179,10 @@ struct RenderedRow: Identifiable {
             .filter { $0.hasPrefix("```") }.count % 2 == 1
     }
 
-    static func lastFenceLine(in text: String) -> String? {
+    /// Which line of `text` opens the fence that is still open.
+    static func lastFenceLineIndex(in text: String) -> Int? {
         text.split(separator: "\n", omittingEmptySubsequences: false)
-            .last { $0.hasPrefix("```") }.map(String.init)
+            .lastIndex { $0.hasPrefix("```") }
     }
 
     /// A cheap height, measured from the laid-out attributed text plus the tail.
@@ -247,10 +275,26 @@ final class MarkdownText: @unchecked Sendable {
     /// Bounded: a day-long channel must not accumulate a transcript of attributed strings.
     private var order: [String] = []
     private let capacity = 512
+    private var parses = 0
+
+    /// How many blocks this cache has actually parsed, cumulatively.
+    ///
+    /// Instrumentation and not decoration: §4's claim is that nothing expensive runs per delta, and
+    /// "parsed once per content" stays a claim while nothing counts the parses. A cache that
+    /// returned one constant for every key satisfies any assertion made on the rendered text alone.
+    var parseCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return parses
+    }
 
     /// Cache-first. A miss parses here, which is what §4 bounds by only ever handing this a block
     /// that has just closed rather than a whole document.
+    ///
+    /// The **sanitiser runs first** and the cache is keyed by what it returned (§5). Keying by the
+    /// raw text would hold two entries for two strings that draw identically, and would leave the
+    /// unsanitised text sitting in a key for the next reader to pick up.
     func attributed(_ source: String, highlighter: CodeHighlighter, phases: inout RenderPhases) -> NSAttributedString {
+        let source = TextSanitiser.sanitise(source)
         if let hit = read(source) { return hit }
         let start = RenderClock.start()
         let built = Self.build(source, highlighter: highlighter, phases: &phases)
@@ -264,11 +308,22 @@ final class MarkdownText: @unchecked Sendable {
     /// a single just-closed block and is bounded by that.
     func warm(_ sources: [String], highlighter: CodeHighlighter) async {
         await Task.detached(priority: .utility) { [self] in
-            for source in sources where read(source) == nil {
+            for source in sources.map(TextSanitiser.sanitise) where read(source) == nil {
                 var phases = RenderPhases()
                 write(source, Self.build(source, highlighter: highlighter, phases: &phases))
             }
         }.value
+    }
+
+    /// Drops every parsed block.
+    ///
+    /// One caller: the syntax-highlighting preference flipping. A settled block holds its styled
+    /// code inside it, so a cache kept across that flip keeps drawing highlighted code after the
+    /// reader turned highlighting off.
+    func clear() {
+        lock.lock(); defer { lock.unlock() }
+        cache = [:]
+        order = []
     }
 
     private func read(_ key: String) -> NSAttributedString? {
@@ -278,6 +333,7 @@ final class MarkdownText: @unchecked Sendable {
 
     private func write(_ key: String, _ value: NSAttributedString) {
         lock.lock(); defer { lock.unlock() }
+        parses += 1
         if cache[key] == nil {
             order.append(key)
             if order.count > capacity { cache.removeValue(forKey: order.removeFirst()) }
@@ -294,16 +350,21 @@ final class MarkdownText: @unchecked Sendable {
     /// a rendering-injection hazard.
     static func build(_ source: String, highlighter: CodeHighlighter, phases: inout RenderPhases) -> NSAttributedString {
         let document = Document(parsing: source, options: .parseBlockDirectives)
+        // The source's own lines, carried down the walk. One override needs them: cmark truncates a
+        // table row wider than its header before the tree exists, so how wide a row *was written* is
+        // a question only the source can answer.
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let out = NSMutableAttributedString()
         for child in document.children {
-            append(child, to: out, highlighter: highlighter, indent: 0, phases: &phases)
+            append(child, to: out, highlighter: highlighter, indent: 0, lines: lines, phases: &phases)
             if out.length > 0 { out.append(NSAttributedString(string: "\n")) }
         }
         return out
     }
 
     private static func append(_ markup: Markup, to out: NSMutableAttributedString,
-                               highlighter: CodeHighlighter, indent: Int, phases: inout RenderPhases) {
+                               highlighter: CodeHighlighter, indent: Int, lines: [String],
+                               phases: inout RenderPhases) {
         switch markup {
         case let heading as Heading:
             let size: CGFloat = [24, 20, 17, 15, 14, 13][max(0, min(5, heading.level - 1))]
@@ -319,7 +380,8 @@ final class MarkdownText: @unchecked Sendable {
 
         case let quote as BlockQuote:
             for child in quote.children {
-                append(child, to: out, highlighter: highlighter, indent: indent + 1, phases: &phases)
+                append(child, to: out, highlighter: highlighter, indent: indent + 1, lines: lines,
+                       phases: &phases)
             }
 
         case let list as UnorderedList:
@@ -328,7 +390,8 @@ final class MarkdownText: @unchecked Sendable {
                 out.append(NSAttributedString(string: String(repeating: "    ", count: indent) + "• ",
                                               attributes: [.font: NSFont.systemFont(ofSize: 13)]))
                 for child in item.children {
-                    append(child, to: out, highlighter: highlighter, indent: indent + 1, phases: &phases)
+                    append(child, to: out, highlighter: highlighter, indent: indent + 1, lines: lines,
+                           phases: &phases)
                 }
             }
 
@@ -337,14 +400,21 @@ final class MarkdownText: @unchecked Sendable {
                 out.append(NSAttributedString(string: String(repeating: "    ", count: indent) + "\(offset + 1). ",
                                               attributes: [.font: NSFont.systemFont(ofSize: 13)]))
                 for child in item.children {
-                    append(child, to: out, highlighter: highlighter, indent: indent + 1, phases: &phases)
+                    append(child, to: out, highlighter: highlighter, indent: indent + 1, lines: lines,
+                           phases: &phases)
                 }
             }
 
         case let table as Markdown.Table:
-            // Native tables are Task 2's; a monospaced row here costs what laying one out costs,
-            // which is what the spike needs and is not what ships.
-            out.append(NSAttributedString(string: plain(table) + "\n",
+            appendTable(table, to: out, lines: lines)
+
+        case let html as HTMLBlock:
+            // **Escaped, never passed through** (§5). The terminal emits `token.text` unescaped and
+            // parity §41.17 names that as the one row a GUI must not copy. Note what the default arm
+            // below would do with this node instead: an `HTMLBlock` has no children, so its
+            // plain-text projection is empty and the block would vanish silently — which is not
+            // escaping either.
+            out.append(NSAttributedString(string: html.rawHTML.trimmingCharacters(in: .newlines) + "\n",
                                           attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)]))
 
         case let paragraph as Paragraph:
@@ -356,6 +426,103 @@ final class MarkdownText: @unchecked Sendable {
             if !text.isEmpty { out.append(NSAttributedString(string: text + "\n",
                                                              attributes: [.font: NSFont.systemFont(ofSize: 13)])) }
         }
+    }
+
+    // MARK: Tables
+
+    /// A GFM table as a **real table** (§5), or the paragraph the engine bails to.
+    ///
+    /// **The `marked` override, reproduced post-parse** (parity §41.17): a row with more cells than
+    /// its header bails the whole table to a paragraph. cmark does not — it truncates the row to the
+    /// header's width and says nothing — so without this a reader loses a cell rather than seeing an
+    /// ugly table, which is the worse of the two failures.
+    private static func appendTable(_ table: Markdown.Table, to out: NSMutableAttributedString,
+                                    lines: [String]) {
+        guard !hasARowWiderThanItsHeader(table, in: lines) else {
+            out.append(NSAttributedString(string: sourceText(of: table, in: lines) + "\n",
+                                          attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+            return
+        }
+        let columns = table.maxColumnCount
+        guard columns > 0 else { return }
+        let layout = NSTextTable()
+        layout.numberOfColumns = columns
+        layout.layoutAlgorithm = .automaticLayoutAlgorithm
+        layout.collapsesBorders = true
+        layout.hidesEmptyCells = false
+
+        var row = 0
+        appendRow(table.head.cells.map { inline($0) }, header: true, row: &row, in: layout, to: out)
+        for bodyRow in table.body.rows {
+            appendRow(bodyRow.cells.map { inline($0) }, header: false, row: &row, in: layout, to: out)
+        }
+    }
+
+    private static func appendRow(_ cells: [NSAttributedString], header: Bool, row: inout Int,
+                                  in layout: NSTextTable, to out: NSMutableAttributedString) {
+        for (column, content) in cells.enumerated() {
+            let block = NSTextTableBlock(table: layout, startingRow: row, rowSpan: 1,
+                                         startingColumn: column, columnSpan: 1)
+            block.setBorderColor(.separatorColor)
+            block.setWidth(1, type: .absoluteValueType, for: .border)
+            block.setWidth(4, type: .absoluteValueType, for: .padding)
+            let style = NSMutableParagraphStyle()
+            style.textBlocks = [block]
+            let cell = NSMutableAttributedString(attributedString: content)
+            cell.append(NSAttributedString(string: "\n"))
+            let whole = NSRange(location: 0, length: cell.length)
+            cell.addAttribute(.paragraphStyle, value: style, range: whole)
+            if header { cell.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 13), range: whole) }
+            out.append(cell)
+        }
+        row += 1
+    }
+
+    /// Whether any body row was **written** with more cells than the header has.
+    ///
+    /// Counted from the source line and not from the tree, because the tree no longer holds the
+    /// answer: cmark has already dropped the extra cell by the time anything here sees it.
+    static func hasARowWiderThanItsHeader(_ table: Markdown.Table, in lines: [String]) -> Bool {
+        guard let head = table.head.range?.lowerBound.line, let header = line(head, in: lines) else {
+            return false
+        }
+        let width = cellCount(in: header)
+        for row in table.body.rows {
+            guard let number = row.range?.lowerBound.line, let text = line(number, in: lines) else { continue }
+            if cellCount(in: text) > width { return true }
+        }
+        return false
+    }
+
+    /// One line of the source, by cmark's own one-based numbering.
+    private static func line(_ number: Int, in lines: [String]) -> String? {
+        let index = number - 1
+        return lines.indices.contains(index) ? lines[index] : nil
+    }
+
+    /// How many cells one row of table source declares. A `\|` is an escaped pipe and not a cell
+    /// boundary, which is the rule the engine's own tokenizer follows.
+    static func cellCount(in line: String) -> Int {
+        var trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("|") { trimmed.removeFirst() }
+        if trimmed.hasSuffix("|"), !trimmed.hasSuffix("\\|") { trimmed.removeLast() }
+        var count = 1
+        var escaped = false
+        for character in trimmed {
+            if escaped { escaped = false; continue }
+            if character == "\\" { escaped = true; continue }
+            if character == "|" { count += 1 }
+        }
+        return count
+    }
+
+    /// The lines a table was written on, for the paragraph it bails to.
+    private static func sourceText(of table: Markdown.Table, in lines: [String]) -> String {
+        guard let range = table.range else { return plain(table) }
+        let first = max(0, range.lowerBound.line - 1)
+        let last = min(lines.count, range.upperBound.line)
+        guard first < last else { return plain(table) }
+        return lines[first..<last].joined(separator: "\n")
     }
 
     /// A paragraph's inline runs: emphasis, strong, inline code and link labels.
@@ -376,6 +543,8 @@ final class MarkdownText: @unchecked Sendable {
             case let emphasis as Emphasis:
                 out.append(NSAttributedString(string: plain(emphasis),
                                               attributes: [.font: NSFont(descriptor: NSFont.systemFont(ofSize: 13).fontDescriptor.withSymbolicTraits(.italic), size: 13) ?? NSFont.systemFont(ofSize: 13)]))
+            case let strike as Strikethrough:
+                out.append(struckThrough(strike))
             case let link as Markdown.Link:
                 out.append(NSAttributedString(string: plain(link),
                                               attributes: [.font: NSFont.systemFont(ofSize: 13),
@@ -390,6 +559,34 @@ final class MarkdownText: @unchecked Sendable {
             }
         }
         return out
+    }
+
+    /// `del` matches only `~~x~~` — the first of the two reproducible `marked` overrides
+    /// (parity §41.17).
+    ///
+    /// cmark's GFM extension accepts a single tilde as a delimiter and the engine's vendored
+    /// tokenizer does not, so `~one~` reads as struck-through text here and as literal characters in
+    /// the terminal. The delimiter's width is not on the node, but it is the distance from the
+    /// node's own start to its first child's, which is one column for `~` and two for `~~`.
+    private static func struckThrough(_ strike: Strikethrough) -> NSAttributedString {
+        let content = NSMutableAttributedString(attributedString: inline(strike))
+        guard delimiterWidth(of: strike) > 1 else {
+            let literal = NSMutableAttributedString(string: "~",
+                                                    attributes: [.font: NSFont.systemFont(ofSize: 13)])
+            literal.append(content)
+            literal.append(NSAttributedString(string: "~", attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+            return literal
+        }
+        content.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue,
+                             range: NSRange(location: 0, length: content.length))
+        return content
+    }
+
+    /// How many tildes opened this node. Two when the source range is unavailable, which is the
+    /// reading that changes nothing.
+    static func delimiterWidth(of strike: Strikethrough) -> Int {
+        guard let outer = strike.range, let inner = strike.child(at: 0)?.range else { return 2 }
+        return inner.lowerBound.column - outer.lowerBound.column
     }
 
     private static func plain(_ markup: Markup) -> String {
@@ -415,22 +612,67 @@ final class CodeHighlighter: @unchecked Sendable {
     private var cache: [Key: NSAttributedString] = [:]
     private var inFlight: Set<Key> = []
     private let highlighter = Highlighter()
+    private var enabled = true
+    private var requests = 0
+    private var mainThreadRuns = 0
+    private var offMainRuns = 0
 
     struct Key: Hashable { let code: String; let language: String }
 
     /// `syntaxHighlightingDisabled` from `get_settings` is honoured — parity §41.17 records it as
-    /// an accessibility choice. Task 5's readout sets it; it defaults to on.
-    var isEnabled = true
+    /// an accessibility choice for some users. The render context carries it and the table sets it
+    /// on every publish; it defaults to on until Task 5's readout lands.
+    ///
+    /// Read and written under the same lock as the cache, because `styled` is called from the main
+    /// actor and the preference is set from there while a detached highlight is in flight.
+    var isEnabled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return enabled
+    }
+
+    /// Sets the preference and answers whether it changed, so a caller knows when the markdown
+    /// cache it shares this pipeline with has to be dropped.
+    @discardableResult
+    func setEnabled(_ value: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard enabled != value else { return false }
+        enabled = value
+        cache = [:]
+        return true
+    }
+
+    /// How many highlights have been asked for, cumulatively. §6 says an open fenced block is not
+    /// highlighted until its closing fence arrives, and this is what says so in a count.
+    var highlightRequests: Int {
+        lock.lock(); defer { lock.unlock() }
+        return requests
+    }
+
+    /// How many highlights ran on the main thread, and how many off it. §6's "never on the main
+    /// thread" is a property of where the work executes, which no assertion over the *result* can
+    /// see: these two counts are the trace that can.
+    var mainThreadHighlights: Int {
+        lock.lock(); defer { lock.unlock() }
+        return mainThreadRuns
+    }
+
+    var offMainHighlights: Int {
+        lock.lock(); defer { lock.unlock() }
+        return offMainRuns
+    }
 
     func styled(code: String, language: String?) -> NSAttributedString {
         let plain = NSAttributedString(string: code,
                                        attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)])
         guard isEnabled, let language, highlighter.hasLanguage(named: language) else { return plain }
+        count(request: 1)
         let key = Key(code: code, language: language)
         if let hit = cached(key) { return hit }
         guard claim(key) else { return plain }
         Task.detached(priority: .userInitiated) { [self] in
-            store(key, highlighter.attributedString(for: code, language: language), releasing: true)
+            let styled = highlighter.attributedString(for: code, language: language)
+            countThread()
+            store(key, styled, releasing: true)
         }
         return plain
     }
@@ -439,10 +681,13 @@ final class CodeHighlighter: @unchecked Sendable {
     func warm(_ blocks: [(code: String, language: String?)]) async {
         await Task.detached(priority: .utility) { [self] in
             for block in blocks {
-                guard let language = block.language, highlighter.hasLanguage(named: language) else { continue }
+                guard isEnabled, let language = block.language,
+                      highlighter.hasLanguage(named: language) else { continue }
                 let key = Key(code: block.code, language: language)
                 guard cached(key) == nil else { continue }
-                store(key, highlighter.attributedString(for: block.code, language: language), releasing: false)
+                let styled = highlighter.attributedString(for: block.code, language: language)
+                countThread()
+                store(key, styled, releasing: false)
             }
         }.value
     }
@@ -459,6 +704,19 @@ final class CodeHighlighter: @unchecked Sendable {
     private func claim(_ key: Key) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return inFlight.insert(key).inserted
+    }
+
+    private func count(request: Int) {
+        lock.lock(); defer { lock.unlock() }
+        requests += request
+    }
+
+    /// Records where one highlight actually ran. Called from inside the work, which is the only
+    /// place that knows.
+    private func countThread() {
+        let onMain = Thread.isMainThread
+        lock.lock(); defer { lock.unlock() }
+        if onMain { mainThreadRuns += 1 } else { offMainRuns += 1 }
     }
 
     private func store(_ key: Key, _ value: NSAttributedString, releasing: Bool) {
