@@ -1841,8 +1841,10 @@ C6.1's and C6.2's reservations and is expected.
        architect's, not a worker's. **Closed for the Thread tab, 2026-09-09**, by the architect's
        ruling: the tab is handed `ChannelFold`, two closures over the app-scoped
        `ChannelTimelineRegistry`, at its `performLaunch` construction, and assigns `raise` on the
-       answering object it builds — a panel tab has no row and needs no per-row carrier. Activity's
-       and the timeline row's assignments are unchanged and still wait here.
+       answering object it builds — a panel tab has no row and needs no per-row carrier. **Closed for
+       Activity the same day** by wave A (`ad4e854`): `ActivityModel` takes a `timeline` provider over
+       the same registry. The timeline row's assignment is the one clause still open, and it is
+       contract Y7's (C6.1's `TimelineRenderContext`).
      The mechanism in every case ships and is tested against a double; what is missing is the
      construction site. Found at Tasks 2, 6 and 8a, re-verified by reading at this child's tip.
      Closer: C6.1's merge lands `TimelineRenderContext` and constructs the answering object with the
