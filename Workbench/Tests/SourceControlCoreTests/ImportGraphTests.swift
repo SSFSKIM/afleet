@@ -33,9 +33,14 @@ final class ImportGraphTests: XCTestCase {
         XCTAssertGreaterThan(files, 0, "the walk found no Swift files at all")
         XCTAssertTrue(modules.isSubset(of: Self.allowed),
                       "imports outside the allowed set: \(modules.subtracting(Self.allowed).sorted())")
-        // The second floor: a grep that matched no import at all must not pass either.
-        XCTAssertTrue(modules.contains("Foundation"),
-                      "the walk did not find the Foundation import this target certainly has")
+        // The second floor: a grep that matched no import at all must not pass either. It names
+        // `AfleetCore` rather than `Foundation` from milestone 5 onward, because that is when
+        // the dependency this target's manifest region declares first genuinely arrives —
+        // `GitDiff` maps `DiffRef.Base`. A floor on `Foundation` would still hold in a target
+        // that had quietly stopped depending on anything; a floor on the *declared dependency*
+        // also proves the manifest region is doing something.
+        XCTAssertTrue(modules.contains("AfleetCore"),
+                      "the walk did not find the AfleetCore import this target's manifest region declares")
     }
 
     struct NoSources: Error, CustomStringConvertible {

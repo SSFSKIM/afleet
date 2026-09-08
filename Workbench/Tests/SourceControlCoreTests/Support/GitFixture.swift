@@ -134,3 +134,22 @@ final class GitFixture {
         try await run(["checkout", "--detach", ref])
     }
 }
+
+// MARK: - added by milestone 5 (`git diff`), additively and without touching anything above
+
+extension GitFixture {
+
+    /// Writes raw bytes at `relativePath`, creating every intermediate directory, without
+    /// staging or committing.
+    ///
+    /// `commit(message:files:)` takes `[String: String]` and writes UTF-8, which cannot express
+    /// the file milestone 5 needs most: a **binary** one, whose `--numstat` counts git prints as
+    /// `-` and from which `FileChange.isBinary` is derived. It is also how an *uncommitted* edit
+    /// is made, for the `.workingTreeAgainstHEAD` base.
+    func write(_ relativePath: String, bytes: Data) throws {
+        let url = root.appending(path: relativePath)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try bytes.write(to: url, options: .atomic)
+    }
+}
