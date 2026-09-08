@@ -42,6 +42,10 @@ final class HeaderActionTests: XCTestCase {
             // before it does. Nothing is staged as live here, so no confirm stands between the two.
             Case(name: "open in terminal", run: { await $0.openInTerminal() },
                  expected: ["liveTaskIDs", "openInTerminal"]),
+            // The same census, for the same reason: the handoff replaces the channel's process. Nothing is
+            // staged as live here either, so the send follows straight after it with no confirm in between.
+            Case(name: "send to background", run: { await $0.sendToBackground() },
+                 expected: ["liveTaskIDs", "perform"]),
         ]
 
         for scenario in cases {
@@ -75,7 +79,7 @@ final class HeaderActionTests: XCTestCase {
             ("reload plugins", { await $0.reloadPlugins() }),
             ("rename", { await $0.rename(to: "an invented title") }),
             ("fork", { await $0.fork() }),
-            ("send to background", { $0.sendToBackground() }),
+            ("send to background", { await $0.sendToBackground() }),
             ("open in terminal", { await $0.openInTerminal() }),
             ("stop everything", { await $0.stopEverything() }),
             ("background all", { await $0.backgroundAll() }),
@@ -231,43 +235,51 @@ final class HeaderActionTests: XCTestCase {
 
     // MARK: - The confirms
 
-    /// *Send to background* reaches nothing until the confirm is answered, and the confirm **names
-    /// the live tasks** whose shells the handoff closes.
+    /// **The live-task census is the fleet's, not the fold's.** *Send to background* replaces the
+    /// channel's process with a background job, and stream close kills every still-running local
+    /// shell (§7.4, X9) — the same cost *Open in terminal* states. A census read out of the timeline
+    /// answers "nothing is running" for every channel this window has never drawn a fold for, which
+    /// is a warning that says the handoff is free while it goes on to close the shells anyway. So the
+    /// decision to warn and the count both come from `LifecycleAPI.liveTaskIDs(of:)`.
     ///
-    /// The naming is asserted over the fold's items directly: a running task is named, a finished one
-    /// is not, which is what separates "names the live tasks" from "names every task it ever saw".
-    func testSendToBackgroundWaitsForItsConfirmAndNamesTheLiveTasks() async throws {
+    /// Deliberate break: read the census from the composer's timeline instead of the fleet.
+    func testSendToBackgroundTakesItsLiveTaskCensusFromTheFleet() async throws {
+        // A channel with no timeline model at all — the case the fold could only answer "idle" for.
         let double = ComposerLifecycleDouble()
         let key = HeaderRig.key()
         await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .backgroundJob)))
+        await double.stageLiveTasks(["invented-live"], for: key)
         let header = HeaderRig.header(double, key: key)
+        XCTAssertNil(header.composer.timelines, "the channel under test already holds a fold, so the fleet arm proves nothing")
 
-        header.sendToBackground()
+        await header.sendToBackground()
 
         let before = await double.memberSequence
-        XCTAssertEqual(before.count, 0, "the handoff reached \(before.count) member(s) before the confirm was answered")
+        XCTAssertEqual(before, ["liveTaskIDs"],
+                       "the unanswered confirm reached \(before.count) member(s): " + before.joined(separator: ", "))
         XCTAssertEqual(header.composer.pendingConfirmation, .sendToBackground, "no confirmation was raised")
+        let detail = try XCTUnwrap(header.composer.confirmationDetail, "the confirm named no running work")
+        XCTAssertTrue(detail.contains("invented-live"),
+                      "the confirm of \(detail.count) character(s) does not name the running task")
 
         await header.composer.confirmPending()
-
-        let after = await double.actions
-        XCTAssertEqual(after.count, 1, "the answered confirm performed \(after.count) action(s)")
-        guard case .sendToBackground = try XCTUnwrap(after.first, "the answered confirm performed nothing") else {
+        let performed = await double.actions
+        XCTAssertEqual(performed.count, 1, "the answered confirm performed \(performed.count) action(s)")
+        guard case .sendToBackground = try XCTUnwrap(performed.first, "the answered confirm performed nothing") else {
             return XCTFail("the answered confirm performed an action other than the handoff")
         }
 
-        // The naming, over a fold that holds one running task and one that has finished.
-        let ids = ChannelHeaderActionsModel.liveTaskIDs(in: [HeaderRig.task("invented-live", status: .running),
-                                                             HeaderRig.task("invented-done", status: .completed)])
-        XCTAssertEqual(ids, ["invented-live"],
-                       "\(ids.count) task(s) were named as live; exactly one of the two was running")
-        let named = ChannelHeaderActionsModel.confirmationDetail(forLiveTasks: ids)
-        XCTAssertTrue(named.contains("invented-live"),
-                      "the confirm of \(named.count) character(s) does not name the running task")
-        XCTAssertFalse(named.contains("invented-done"),
-                       "the confirm names a task that had already finished")
-        let quiet = ChannelHeaderActionsModel.confirmationDetail(forLiveTasks: [])
-        XCTAssertFalse(quiet.contains("invented"), "the empty confirm named a task")
+        // The other half: a channel the fleet reports idle is handed off with no dialog to answer.
+        let idle = ComposerLifecycleDouble()
+        let idleKey = HeaderRig.key("b")
+        await idle.alwaysPerform(.success(SidebarFixtures.state(idleKey, origin: .backgroundJob)))
+        let quiet = HeaderRig.header(idle, key: idleKey)
+
+        await quiet.sendToBackground()
+
+        XCTAssertNil(quiet.composer.pendingConfirmation, "an idle channel raised a confirm with no cost to state")
+        let idleActions = await idle.actions
+        XCTAssertEqual(idleActions.count, 1, "the idle handoff performed \(idleActions.count) action(s)")
     }
 
     /// *Stop everything* and *Background all* go through the composer's **one** confirmation gate —

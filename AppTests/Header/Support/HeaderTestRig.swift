@@ -66,19 +66,6 @@ enum HeaderRig {
         state.pendingChange = RestartRequest(allowBypass: true)
         return state
     }
-
-    /// One running or finished background task, as the channel's fold carries it.
-    static func task(_ id: String, status: TaskStatus) -> TimelineItem {
-        let stream = LogicalStream(configHome: URL(fileURLWithPath: "/invented/config-home"),
-                                   sessionID: SidebarFixtures.session("a"), name: .main)
-        return .taskRun(TaskRunItem(id: ItemID(stream: stream, key: id),
-                                    timestamp: Date(timeIntervalSince1970: 0),
-                                    provenance: Provenance(stream: stream, origin: .wire),
-                                    taskID: id,
-                                    kind: .localBash,
-                                    description: "an invented task",
-                                    status: status))
-    }
 }
 
 /// The two phases the gate's suites assert on, read off the one operation.

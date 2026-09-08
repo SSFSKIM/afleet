@@ -27,9 +27,10 @@ import FleetKit
 @Observable
 final class ChannelHeaderActionsModel {
 
-    /// The channel's composer. The header reaches four things through it and derives none of them:
-    /// the shared surface state, the pickers, the confirmation gate, and the channel's timeline —
-    /// which is where the live background tasks *Send to background* names are read from.
+    /// The channel's composer. The header reaches three things through it and derives none of them:
+    /// the shared surface state, the pickers and the confirmation gate. The live background tasks the
+    /// two handoffs name are **not** among them: that census is X5's (`liveTaskIDs(of:)`), because a
+    /// fold this window has not opened cannot answer for a channel whose process is about to end.
     ///
     /// Strong, and there is no cycle to pay for it: the composer refers back only through the
     /// picker's bypass route, which captures this model weakly.
@@ -184,41 +185,32 @@ final class ChannelHeaderActionsModel {
 
     /// *Send to background*, **behind a confirm naming any live task**. Nothing reaches the
     /// lifecycle until the confirm is answered: a stream close kills every still-running local shell
-    /// (§7.4), so this is the one channel action whose cost the user has to see first.
+    /// (§7.4), so this is a cost the user has to see first.
     ///
-    /// The confirm is the composer's `ComposerConfirmation`, which the two stop actions also use.
-    func sendToBackground() {
+    /// **The census is X5's own and not the fold's**, exactly as *Open in terminal* takes it. The
+    /// handoff replaces the channel's process wherever the menu was opened from, including a channel
+    /// this window has never drawn a timeline for; a fold-derived census answers "nothing is running"
+    /// for every one of those and then closes their shells anyway, which is the misleading warning
+    /// X9 forbids. So the decision to warn and the count are the fleet's.
+    ///
+    /// A channel the fleet reports idle is sent with no dialog — there is no cost to state, which is
+    /// the same rule the terminal handoff follows. The confirm is the composer's
+    /// `ComposerConfirmation`, which the two stop actions also use.
+    func sendToBackground() async {
         guard gate() else { return }
-        composer.confirmationDetail = backgroundConfirmationDetail
-        composer.pendingConfirmation = .sendToBackground
-    }
-
-    /// The live background tasks this channel has, by the engine's own task id, read out of the
-    /// channel's timeline — C3's one fold (contract X4), the same place the queue chip reads.
-    ///
-    /// A task id is an engine-assigned identifier and not a path, a title or a session id, so it may
-    /// be named (§11). Empty is a real answer and is what the confirm says when the channel has
-    /// nothing running.
-    var liveTaskIDs: [String] {
-        guard let timeline = composer.timelines?.timeline else { return [] }
-        return Self.liveTaskIDs(in: timeline.items)
-    }
-
-    /// The running tasks among a channel's items, in the fold's own order.
-    ///
-    /// A **running** task and no other status: a completed, failed or stopped run has no shell left
-    /// for the handoff to close, and naming one would tell the user this costs something it does not.
-    static func liveTaskIDs(in items: [TimelineItem]) -> [String] {
-        items.compactMap { item in
-            guard case .taskRun(let task) = item, task.status == .running else { return nil }
-            return task.taskID
+        let live = await lifecycle.liveTaskIDs(of: key)
+        guard live.isEmpty else {
+            composer.confirmationDetail = Self.confirmationDetail(forLiveTasks: live)
+            composer.pendingConfirmation = .sendToBackground
+            return
         }
+        await composer.dispatch(action: .sendToBackground)
     }
-
-    /// What the *Send to background* confirm says, with the live tasks named.
-    var backgroundConfirmationDetail: String { Self.confirmationDetail(forLiveTasks: liveTaskIDs) }
 
     /// The sentence, over the ids. Counts and engine-assigned task ids only (§11).
+    ///
+    /// A task id is an engine-assigned identifier and not a path, a title or a session id, so it may
+    /// be named. Shared by the two actions that end the channel's process, so one wording covers both.
     static func confirmationDetail(forLiveTasks ids: [String]) -> String {
         guard !ids.isEmpty else {
             return "This channel hands off to a background job. Nothing is running in it right now."
