@@ -1800,11 +1800,10 @@ is renumbered.
 
 ## From C6.3 (`child/c6-decisions`)
 
-Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–168 are
-used and 169–171 are left unspent. Nothing above is renumbered — the gap between 141 and 157 is
-Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–166 and
-169–170 are used and 167–168 and 171 are left unspent. Nothing above is renumbered — the gap between 141 and 157 is
-C6.1's and C6.2's reservations and is expected.
+Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them, and all fifteen
+are used; its merge review added 292–297, 300–319 (298–299 are C7.1's). Nothing above is renumbered —
+the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (Header re-stated
+2026-09-09 after a union merge of two waves' edits left it self-contradictory.)
 
 157. **Five deferred mounts wait on one carrier: C6.1's `TimelineRenderContext`.** Read rather than
      assumed at this child's tip: no `EnvironmentValues`, `EnvironmentKey` or `@Entry` declaration
