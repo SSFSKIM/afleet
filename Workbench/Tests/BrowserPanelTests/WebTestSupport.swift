@@ -171,19 +171,44 @@ extension XCTestCase {
     /// fails the suite instead of hanging it.
     static let webDeadline: TimeInterval = 20
 
-    /// An expectation fulfilled when `condition` holds of the chrome state, now or after any
+    /// An expectation fulfilled when `condition` holds of an observable object, now or after any
     /// observed change to a property the condition reads.
     ///
     /// It re-arms rather than observing once, because `withObservationTracking` fires a single time
-    /// and a title arrives some navigations after the URL does.
+    /// and the value a test is waiting for often arrives a change or two later — a title lands some
+    /// navigations after the URL does, a quick-open list lands after its subscription attaches.
+    @MainActor
+    func observed<T: AnyObject>(_ object: T,
+                                _ description: String,
+                                _ condition: @escaping @MainActor (T) -> Bool) -> XCTestExpectation {
+        let reached = expectation(description: description)
+        reached.assertForOverFulfill = false
+        ObservationWaiter(object: object, condition: condition, reached: reached).arm()
+        return reached
+    }
+
+    /// The chrome-state spelling of `observed`, kept because milestone 3's tests read better for it.
     @MainActor
     func chromeReaches(_ state: BrowserChromeState,
                        _ description: String,
                        _ condition: @escaping @MainActor (BrowserChromeState) -> Bool) -> XCTestExpectation {
-        let reached = expectation(description: description)
-        reached.assertForOverFulfill = false
-        ChromeWaiter(state: state, condition: condition, reached: reached).arm()
-        return reached
+        observed(state, description, condition)
+    }
+
+    /// Waits, with a deadline, until the stub store has been asked to write `count` times.
+    @MainActor
+    func writeAttempts(_ store: InMemoryScopedStore, reach count: Int) async {
+        let reached = expectation(description: "the store is asked to write \(count) times")
+        await store.expectWriteAttempts(count, reached)
+        await fulfillment(of: [reached], timeout: Self.webDeadline)
+    }
+
+    /// Waits, with a deadline, until the coalescer has opened a window and begun its sleep.
+    @MainActor
+    func sleepBegins(_ sleeper: ManualSleeper) async {
+        let began = expectation(description: "the coalescing window opens")
+        await sleeper.expectSleep(began)
+        await fulfillment(of: [began], timeout: Self.webDeadline)
     }
 
     /// Runs `body`, then waits for the tab's next settled navigation — `didFinish` or a failure,
@@ -203,21 +228,21 @@ extension XCTestCase {
     }
 }
 
-/// The re-arming half of `chromeReaches`. A `@MainActor` class, so it is `Sendable` and can be
-/// captured by observation's `onChange`; that capture is also what keeps it alive until the state
-/// it is watching moves or the deadline passes.
+/// The re-arming half of `observed`. A `@MainActor` class, so it is `Sendable` and can be captured
+/// by observation's `onChange`; that capture is also what keeps it alive until the object it is
+/// watching moves or the deadline passes.
 @MainActor
-private final class ChromeWaiter {
+private final class ObservationWaiter<T: AnyObject> {
 
-    private let state: BrowserChromeState
-    private let condition: @MainActor (BrowserChromeState) -> Bool
+    private let object: T
+    private let condition: @MainActor (T) -> Bool
     private let reached: XCTestExpectation
     private var fulfilled = false
 
-    init(state: BrowserChromeState,
-         condition: @escaping @MainActor (BrowserChromeState) -> Bool,
+    init(object: T,
+         condition: @escaping @MainActor (T) -> Bool,
          reached: XCTestExpectation) {
-        self.state = state
+        self.object = object
         self.condition = condition
         self.reached = reached
     }
@@ -226,7 +251,7 @@ private final class ChromeWaiter {
         guard !fulfilled else { return }
         var satisfied = false
         withObservationTracking {
-            satisfied = condition(state)
+            satisfied = condition(object)
         } onChange: { [self] in
             Task { @MainActor in arm() }
         }
