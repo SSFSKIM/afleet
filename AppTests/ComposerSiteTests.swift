@@ -61,6 +61,42 @@ final class ComposerSiteTests: XCTestCase {
                      "a channel with no composer offered the Edit action anyway")
     }
 
+    // MARK: - Site 2, the fork-fallback note
+
+    /// **Both arms.** With `editNote` set the note renders beside the edited message; with it nil no
+    /// note renders. A view that always drew the note would pass the first alone, which is why the
+    /// nil arm is asserted over the same row value.
+    ///
+    /// A third arm, which is what "beside the edited message" means: a *different* user message in
+    /// the same channel draws no note while the same note is set. Without it a row that drew the
+    /// composer's one note on every message would pass both of the first two.
+    func testTheEditNoteRendersOnlyWhenSet() {
+        let composer = RecordingComposerSite()
+        let editing = TimelineEditState()
+        let edited = Self.message(promptUUID: "u-invented-0003", text: "an invented question", key: "u-key-3")
+        let other = Self.message(promptUUID: "u-invented-0004", text: "another invented question", key: "u-key-4")
+        let note = "an invented sentence about where the edited message went"
+        editing.note(edited: edited.id)
+        let context = InventedItems.context(composer: composer, editing: editing)
+
+        composer.editNote = note
+        let set = ViewTree.values(of: String.self, in: UserMessageBody(item: edited, context: context).content)
+        XCTAssertTrue(set.contains(note), "the note was set and the edited message's row drew no note")
+
+        composer.editNote = nil
+        let unset = ViewTree.values(of: String.self, in: UserMessageBody(item: edited, context: context).content)
+        XCTAssertFalse(unset.contains(note), "the note was nil and the row drew one anyway")
+
+        composer.editNote = note
+        let elsewhere = ViewTree.values(of: String.self, in: UserMessageBody(item: other, context: context).content)
+        XCTAssertFalse(elsewhere.contains(note),
+                       "the note was drawn beside a message the Edit was not pressed on")
+
+        // The floor: the comparison found the rows at all, rather than three empty walks agreeing.
+        XCTAssertGreaterThan(set.count, 0, "the edited message's row drew \(set.count) string(s)")
+        XCTAssertGreaterThan(elsewhere.count, 0, "the other message's row drew \(elsewhere.count) string(s)")
+    }
+
     // MARK: - Invented items
 
     static func message(promptUUID: String, text: String, key: String = "u-invented-key") -> UserMessageItem {

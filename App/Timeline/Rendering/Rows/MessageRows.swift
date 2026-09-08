@@ -124,6 +124,12 @@ struct UserMessageBody: View {
             .buttonStyle(.link)
             .font(.caption2)
         }
+        // **Y6 site 2.** One note, beside the one message it is about.
+        if let note = ComposerSites.note(for: item, in: context) {
+            Text(note)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

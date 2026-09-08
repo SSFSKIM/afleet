@@ -56,3 +56,22 @@ final class TimelineEditState {
 
     func note(edited id: ItemID) { editedKey = id.key }
 }
+
+// MARK: - The three sites, as answers a test can ask
+
+/// The reads the two message rows make of the composer, named rather than buried in a body.
+///
+/// Each is a function over the context because that is how every other capability in this renderer
+/// is asserted (`AgentChip.content(for:in:)`, `ThinkingDisclosure.summary(of:in:)`): an environment
+/// value is not populated in a constructed view, so a decision spelled inline in `body` is a
+/// decision no test can reach.
+@MainActor
+enum ComposerSites {
+
+    /// The note that belongs beside `item`, or nil — for a channel with no composer, for a message
+    /// that is not the one edited, and for an edit that has nothing to say.
+    static func note(for item: UserMessageItem, in context: TimelineRenderContext?) -> String? {
+        guard let context, context.editing.editedKey == item.id.key else { return nil }
+        return context.composer?.editNote
+    }
+}
