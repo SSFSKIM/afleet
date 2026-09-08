@@ -868,6 +868,7 @@ private actor SlowStateLifecycle: LifecycleAPI {
     func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
         try await inner.fork(at: point, on: key)
     }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { await inner.resolvedForkKey(of: provisional) }
     func route(_ text: String, on key: ChannelKey) async -> Routed { await inner.route(text, on: key) }
     func engineReports(of key: ChannelKey) async -> EngineReports? { await inner.engineReports(of: key) }
     func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
