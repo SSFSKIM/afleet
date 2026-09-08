@@ -52,8 +52,11 @@ let package = Package(
         // and measures frame times, neither of which a `swift test` process can do honestly. It
         // is in no product and not in the `Workbench` umbrella, so nothing the app links reaches
         // it; `swift run --package-path Workbench S3Harness` is its only entry point.
+        // `measure-cold-load.sh` is excluded because the target treats its whole directory as
+        // sources; it is the shell instrument for G2's cold-load clause, which needs a
+        // distribution rather than the single sample one harness run produces.
         .executableTarget(name: "S3Harness", dependencies: ["EditorCore"], path: "Spikes/S3Harness",
-                          swiftSettings: v6),
+                          exclude: ["measure-cold-load.sh"], swiftSettings: v6),
         // MARK: - end of C7.2
 
         // MARK: - C7.3 source control core (owner: C7.3)
