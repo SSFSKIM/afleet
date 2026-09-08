@@ -27,6 +27,12 @@ public struct GraphRow: Hashable, Sendable {
         /// The commit this edge points at was not in the window `GitLog.commits` read (D5), so the
         /// line has no row to land on. A window is the ordinary case rather than a corruption, and
         /// a panel that did not know would draw a line ending in nothing.
+        ///
+        /// It means "this edge's target is outside the read window", **not** "this line ends
+        /// here": the lane stays occupied and repeats its truncated edge on every row below,
+        /// because the parent is never read and so never releases the reservation. A consumer
+        /// that read it the second way would stop drawing a line that in fact continues off the
+        /// bottom of the viewport (tracker 119).
         public var truncated: Bool
 
         public init(fromLane: Int, toLane: Int, truncated: Bool) {
@@ -94,11 +100,16 @@ public struct LaneAssignment: Hashable, Sendable {
     /// merely passing through. An edge whose target hash is not among `commits` is `truncated`.
     ///
     /// When `workingTreeIsDirty`, a `.workingTree` row is prepended at lane 0 with one edge into
-    /// the lane the first commit row occupies. That commit is `HEAD`, because `--topo-order` lists
-    /// it first among the reachable tips; the row makes no other claim.
+    /// the lane of the row carrying a `.head` ref; the row makes no other claim. It is **not** the
+    /// first row: `--topo-order --all` orders the tips by date, so a tag-only commit newer than
+    /// `HEAD` is listed ahead of it (measured on `git` 2.55.0), and attaching to row zero would
+    /// draw the uncommitted changes hanging off an unrelated tip. When no row carries `.head` —
+    /// `HEAD` fell outside the window — the first row is the only remaining approximation.
     public static func assign(commits: [GitCommit], workingTreeIsDirty: Bool) -> LaneAssignment {
-        // Membership of the window, for the `truncated` flag. A parent outside it terminates its
-        // lane's line at the last row that named it.
+        // Membership of the window, for the `truncated` flag. A parent outside it is never read,
+        // so its reservation is never released: the lane stays occupied to the bottom of the
+        // window, emitting a truncated straight-down edge on every row below the one that named
+        // it. That is the wanted rendering — a line leaving a viewport does continue.
         let inWindow = Set(commits.map(\.hash))
 
         var lanes: [String?] = []
@@ -150,7 +161,15 @@ public struct LaneAssignment: Hashable, Sendable {
         }
 
         if workingTreeIsDirty {
-            let toHead = rows.first.map { [GraphRow.Edge(fromLane: 0, toLane: $0.lane, truncated: false)] } ?? []
+            // The row `HEAD` points at, which is the row the uncommitted changes sit above — not
+            // necessarily row zero, see the note on the ordering above. `GitLog` emits `.head` for
+            // both the attached (`HEAD -> main`) and the detached (`HEAD`) decoration.
+            let headRow = rows.first { row in
+                guard case .commit(let commit) = row.content else { return false }
+                return commit.refs.contains { $0.kind == .head }
+            }
+            let toHead = (headRow ?? rows.first)
+                .map { [GraphRow.Edge(fromLane: 0, toLane: $0.lane, truncated: false)] } ?? []
             rows.insert(GraphRow(content: .workingTree, lane: 0, edges: toHead), at: 0)
             // A repository with no commits still draws its one dirty row somewhere.
             laneCount = max(laneCount, 1)

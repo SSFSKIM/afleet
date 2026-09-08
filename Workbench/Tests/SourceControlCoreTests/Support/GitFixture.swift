@@ -153,3 +153,16 @@ extension GitFixture {
         try bytes.write(to: url, options: .atomic)
     }
 }
+
+// MARK: - added by the R2 fix wave, additively and without touching anything above
+
+extension GitFixture {
+
+    /// Creates `name` starting at `ref` and switches to it.
+    ///
+    /// `branch(_:)` branches from wherever `HEAD` is, which cannot build a fixture whose branches
+    /// fan out from a commit other than the current tip — the shape the lane-reuse tests need.
+    func branch(_ name: String, from ref: String) async throws {
+        try await run(["checkout", "-b", name, ref])
+    }
+}

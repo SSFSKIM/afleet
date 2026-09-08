@@ -317,4 +317,266 @@ final class LaneAssignmentTests: XCTestCase {
         XCTAssertEqual(edges(of: hashes[2], in: assignment), [edge(0, 0, truncated: true)],
                        "the oldest row's edge points at a parent the window never read")
     }
+
+    // MARK: - 6. the working-tree row attaches to HEAD, not to whatever was read first
+
+    /// A repository whose newest tip is reachable only through a tag, with `HEAD` on an older
+    /// commit: the working-tree row's edge must land in **`HEAD`'s** lane.
+    ///
+    /// Layout: `c1` (root) ← `c2`, which carries `HEAD -> main`, and `c1` ← `detached`, which is
+    /// newer than `c2` and carries only the tag `v9`.
+    ///
+    /// Measured topological order, `git` 2.55.0: `detached`, `c2`, `c1` — the tag-only tip is
+    /// listed **before** `HEAD -> main`, which is the whole point of this fixture. So `detached`
+    /// takes lane 0, `c2` finds no lane reserved for it and no free lane and opens lane 1, and
+    /// `c1` is read at the leftmost lane reserved for it, lane 0, releasing lane 1.
+    ///
+    /// What would have to be true for this to fail: an implementation that attaches the
+    /// working-tree row to `rows.first` rather than to the row carrying a `.head` ref. That is a
+    /// real defect and not a stylistic one — it draws the user's uncommitted changes hanging off
+    /// an unrelated branch tip. The single-branch dirty-tree test above cannot see it, because
+    /// there `rows.first` *is* `HEAD`.
+    func testTheWorkingTreeRowAttachesToHeadsLaneWhenANewerTagOnlyTipIsReadFirst() async throws {
+        let fixture = try await GitFixture(tree)
+        let c1 = try await fixture.commit(message: "c1 root", files: ["a.txt": "a\n"])
+        let c2 = try await fixture.commit(message: "c2 on main", files: ["b.txt": "b\n"])
+        try await fixture.detach(c1)
+        let detached = try await fixture.commit(message: "detached work", files: ["d.txt": "d\n"])
+        try await fixture.tag("v9")
+        try await fixture.checkout("main")
+        let headHash = try await head(fixture)
+        XCTAssertEqual(headHash, c2, "the fixture must leave HEAD on the older tip")
+
+        let history = try await commits(fixture)
+        XCTAssertEqual(history.count, 3, "the fixture built a history of a different size")
+        // The premise, asserted rather than assumed: the first row read is *not* HEAD. Without
+        // this the test could pass on a repository where the two coincide.
+        XCTAssertEqual(history.first?.hash, detached,
+                       "the newer tag-only tip must precede HEAD in --topo-order --all (git 2.55.0)")
+        XCTAssertTrue(history.first?.refs.contains { $0.kind == .head } == false,
+                      "the first row read carries no HEAD ref")
+
+        try tree.file("repo/scratch.txt", "uncommitted\n")
+        let dirty = try await WorkingTreeStatus.read(root: fixture.root,
+                                                     environment: fixture.environment,
+                                                     runner: ToolRunner())
+        XCTAssertFalse(dirty.isClean, "an untracked file must make the working tree dirty")
+
+        let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: !dirty.isClean)
+        XCTAssertEqual(assignment.rows.count, 4, "three commits plus the working-tree row")
+        XCTAssertEqual(lane(of: detached, in: assignment), 0, "the tag-only tip is read first and holds lane 0")
+        XCTAssertEqual(lane(of: c2, in: assignment), 1, "HEAD opens lane 1 beside the tag-only tip")
+        XCTAssertEqual(lane(of: c1, in: assignment), 0, "the shared root is read at the leftmost lane reserved for it")
+        XCTAssertEqual(assignment.laneCount, 2, "two lanes are the high-water mark of this graph")
+
+        XCTAssertEqual(assignment.rows.first?.content, .workingTree, "the working tree is row zero")
+        XCTAssertEqual(assignment.rows.first?.edges, [edge(0, 1)],
+                       "the working-tree edge lands in HEAD's lane, not in the first row's lane")
+    }
+
+    // MARK: - 7. a freed lane is reused
+
+    /// A graph where three side lanes close well above the bottom of the window, and an older
+    /// independent tip is read afterwards: it must land in the **leftmost freed** lane rather than
+    /// in a new one.
+    ///
+    /// Lane recycling is what keeps the gutter narrow on a real repository, and no other fixture
+    /// in this file exercises it: in each of them a lane is only ever released by the final root
+    /// commit, so no row is ever placed after a lane frees. Both of the algorithm's "leftmost free
+    /// lane" clauses — rule 1's, for a commit no lane is reserved for, and rule 4's, for a merge's
+    /// further parent — are reached for the first time here.
+    ///
+    /// Layout: `base` (root); `o1` and `o2` are two children of `base`, merged into `sideMerge`
+    /// with parents `[o2, o1]`; `m1` is a third child of `base`, with four children of its own —
+    /// `p1`, `p2`, `p3` and `m2` — joined by an octopus merge with parents `[m2, p1, p2, p3]`.
+    /// The octopus is the newest commit and `sideMerge` is older than `m1`.
+    ///
+    /// Measured topological order, `git` 2.55.0: `octopus`, `p3`, `p2`, `p1`, `m2`, `m1`,
+    /// `sideMerge`, `o1`, `o2`, `base`. Note that it is not date order: `git` emits the octopus's
+    /// parents in reverse, and `o1` ahead of the newer `o2`. Walking the ledger's algorithm over
+    /// the measured order: the octopus opens lane 0 and lanes 1, 2, 3 for its three further
+    /// parents; `p3`, `p2`, `p1` and `m2` each keep their lane and hand it to `m1`; `m1` is read
+    /// at the leftmost of the four lanes reserved for it and **releases the other three**, leaving
+    /// only lane 0 reserved for `base`. `sideMerge` is then read with no lane reserved for it and
+    /// three free — it takes the leftmost, lane 1 — and its further parent `o1` takes the leftmost
+    /// of the two still free, lane 2.
+    ///
+    /// What would have to be true for this to fail: a commit or a further parent that appends a
+    /// new lane instead of reusing a freed one (`laneCount` becomes 5), or that takes the
+    /// *rightmost* free lane instead of the leftmost (`sideMerge` at lane 3, `o1` at lane 3).
+    func testAFreedLaneIsReusedByALaterTipAndByAFurtherParent() async throws {
+        let fixture = try await GitFixture(tree)
+        let base = try await fixture.commit(message: "base root", files: ["base.txt": "base\n"])
+        try await fixture.branch("old1")
+        let o1 = try await fixture.commit(message: "o1 work", files: ["o1.txt": "o1\n"])
+        try await fixture.branch("old2", from: base)
+        let o2 = try await fixture.commit(message: "o2 work", files: ["o2.txt": "o2\n"])
+        try await fixture.merge(["old1"], message: "merge old1 into old2")
+        let sideMerge = try await head(fixture)
+        try await fixture.checkout("main")
+        let m1 = try await fixture.commit(message: "m1 on main", files: ["m1.txt": "m1\n"])
+        try await fixture.branch("p1b")
+        let p1 = try await fixture.commit(message: "p1 work", files: ["p1.txt": "p1\n"])
+        try await fixture.checkout("main")
+        try await fixture.branch("p2b")
+        let p2 = try await fixture.commit(message: "p2 work", files: ["p2.txt": "p2\n"])
+        try await fixture.checkout("main")
+        try await fixture.branch("p3b")
+        let p3 = try await fixture.commit(message: "p3 work", files: ["p3.txt": "p3\n"])
+        try await fixture.checkout("main")
+        let m2 = try await fixture.commit(message: "m2 on main", files: ["m2.txt": "m2\n"])
+        try await fixture.merge(["p1b", "p2b", "p3b"], message: "octopus merge")
+        let octopus = try await head(fixture)
+
+        let history = try await commits(fixture)
+        XCTAssertEqual(history.count, 10, "the fixture built a history of a different size")
+        // The premise this fixture exists for, asserted rather than assumed: the merge whose lane
+        // is under test is read *after* the row that frees the lanes.
+        XCTAssertEqual(history.map(\.hash),
+                       [octopus, p3, p2, p1, m2, m1, sideMerge, o1, o2, base],
+                       "the measured --topo-order --all of git 2.55.0 over this shape")
+
+        let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: false)
+        XCTAssertEqual(assignment.laneCount, 4,
+                       "four lanes are the high-water mark: the freed lanes are reused, not appended to")
+
+        XCTAssertEqual(lane(of: octopus, in: assignment), 0, "the octopus is the first tip read")
+        XCTAssertEqual(lane(of: m2, in: assignment), 0, "the first parent keeps the merge's lane")
+        XCTAssertEqual(lane(of: p1, in: assignment), 1, "the second parent opens lane 1")
+        XCTAssertEqual(lane(of: p2, in: assignment), 2, "the third parent opens lane 2")
+        XCTAssertEqual(lane(of: p3, in: assignment), 3, "the fourth parent opens lane 3")
+        XCTAssertEqual(lane(of: m1, in: assignment), 0,
+                       "the shared parent is read at the leftmost lane reserved for it")
+        XCTAssertEqual(edges(of: m1, in: assignment), [edge(0, 0)],
+                       "lanes 1, 2 and 3 are released at this row, so only lane 0 leaves it")
+
+        // The discriminators. Lanes 1, 2 and 3 are free and lane 0 is reserved for `base`.
+        XCTAssertEqual(lane(of: sideMerge, in: assignment), 1,
+                       "a later tip takes the leftmost freed lane, not a new one and not the rightmost")
+        XCTAssertEqual(lane(of: o2, in: assignment), 1, "the merge's first parent keeps its lane")
+        XCTAssertEqual(lane(of: o1, in: assignment), 2,
+                       "the further parent takes the leftmost of the lanes still free")
+        XCTAssertEqual(edges(of: sideMerge, in: assignment),
+                       [edge(0, 0), edge(1, 1), edge(1, 2)],
+                       "lane 0 passes through to the root while the merge reaches into lanes 1 and 2")
+        XCTAssertEqual(lane(of: base, in: assignment), 0, "the root is read at the leftmost lane reserved for it")
+        XCTAssertEqual(edges(of: base, in: assignment), [], "the root commit is parentless")
+    }
+
+    // MARK: - 8. two merges naming the same further parent
+
+    /// Two merge commits that both name the same commit as a non-first parent: the second must
+    /// point at the lane already reserved for it instead of opening another.
+    ///
+    /// This is rule 4's "unless some lane already holds a reservation for that parent's hash"
+    /// clause, which no other fixture reaches. Without it a commit merged into two branches would
+    /// widen the gutter by one lane per merge and then close them all at its own row.
+    ///
+    /// Layout: `base` (root); `s` on `shared`, a child of `base`; `x1`, another child of `base`,
+    /// merged with `shared` into `sideMerge` with parents `[x1, s]`; `m1` on `main`, a third child
+    /// of `base`, merged with `shared` into `mainMerge` with parents `[m1, s]`.
+    ///
+    /// Measured topological order, `git` 2.55.0: `mainMerge`, `m1`, `sideMerge`, `s`, `x1`,
+    /// `base`. `mainMerge` takes lane 0 and opens lane 1 for `s`; `m1` keeps lane 0 and hands it
+    /// to `base`; `sideMerge` finds no lane free, opens lane 2, gives lane 2 to its first parent
+    /// `x1` — and finds `s` already reserved in lane 1, so it reaches sideways into lane 1 rather
+    /// than opening a lane 3.
+    ///
+    /// What would have to be true for this to fail: an implementation that ignored the existing
+    /// reservation, which opens a fourth lane and changes `sideMerge`'s outgoing edges.
+    func testASecondMergeNamingTheSameFurtherParentReusesItsReservation() async throws {
+        let fixture = try await GitFixture(tree)
+        let base = try await fixture.commit(message: "base root", files: ["base.txt": "base\n"])
+        try await fixture.branch("shared")
+        let s = try await fixture.commit(message: "s work", files: ["s.txt": "s\n"])
+        try await fixture.branch("sidex", from: base)
+        let x1 = try await fixture.commit(message: "x1 work", files: ["x1.txt": "x1\n"])
+        try await fixture.merge(["shared"], message: "merge shared into sidex")
+        let sideMerge = try await head(fixture)
+        try await fixture.checkout("main")
+        let m1 = try await fixture.commit(message: "m1 on main", files: ["m1.txt": "m1\n"])
+        try await fixture.merge(["shared"], message: "merge shared into main")
+        let mainMerge = try await head(fixture)
+
+        let history = try await commits(fixture)
+        XCTAssertEqual(history.count, 6, "the fixture built a history of a different size")
+        XCTAssertEqual(history.map(\.hash), [mainMerge, m1, sideMerge, s, x1, base],
+                       "the measured --topo-order --all of git 2.55.0 over this shape")
+        // Both merges must genuinely name `s` second, or the clause under test is never reached.
+        XCTAssertEqual(history.first?.parents, [m1, s], "the newer merge's parents, in git's order")
+        XCTAssertEqual(history.first(where: { $0.hash == sideMerge })?.parents, [x1, s],
+                       "the older merge names the same commit as its own further parent")
+
+        let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: false)
+        XCTAssertEqual(assignment.laneCount, 3,
+                       "the second merge reuses the reservation instead of widening the graph to four lanes")
+
+        XCTAssertEqual(lane(of: mainMerge, in: assignment), 0, "the newest merge is the first tip read")
+        XCTAssertEqual(lane(of: m1, in: assignment), 0, "the first parent keeps the merge's lane")
+        XCTAssertEqual(lane(of: s, in: assignment), 1, "the shared further parent is read in the lane opened for it")
+        XCTAssertEqual(lane(of: sideMerge, in: assignment), 2,
+                       "the older merge finds no lane free and opens lane 2")
+        XCTAssertEqual(lane(of: x1, in: assignment), 2, "its first parent keeps lane 2")
+        XCTAssertEqual(lane(of: base, in: assignment), 0, "the root is read at the leftmost lane reserved for it")
+
+        // The discriminator: an edge reaching sideways from lane 2 into the existing lane 1, and
+        // no fourth lane. An implementation that ignored the reservation would carry `edge(2, 3)`
+        // here instead.
+        XCTAssertEqual(edges(of: sideMerge, in: assignment),
+                       [edge(0, 0), edge(2, 1), edge(2, 2)],
+                       "the second merge reaches into the lane already reserved for the shared parent")
+    }
+
+    // MARK: - 9. a truncated lane runs to the bottom of the window
+
+    /// A parent outside the window does not end its lane at the row that named it: it is never
+    /// read, so the reservation is never released and the lane repeats a truncated straight-down
+    /// edge on every row below.
+    ///
+    /// The window test above only covers the linear last-row case, where the truncated edge leaves
+    /// the final row and there is nothing below it to check. This is the case a panel actually has
+    /// to draw: a line that leaves the bottom of the viewport.
+    ///
+    /// Layout: `c1` (root) ← `c2` ← `c3` on `main`, and `c1` ← `detached`, newer than `c3` and
+    /// tagged `v9`. Measured topological order, `git` 2.55.0: `detached`, `c3`, `c2`, `c1`; read
+    /// with `limit: 3` the window is `detached`, `c3`, `c2` and `c1` is outside it. `detached`
+    /// takes lane 0 and reserves it for the unread `c1`; `c3` opens lane 1 and reserves it for
+    /// `c2`; `c2` keeps lane 1 and reserves it for the unread `c1`.
+    ///
+    /// What would have to be true for this to fail: an implementation that dropped a lane whose
+    /// target is outside the window, which removes lane 0's edge from the two rows below the one
+    /// that opened it.
+    func testALaneWhoseParentIsOutsideTheWindowKeepsEmittingItsTruncatedEdge() async throws {
+        let fixture = try await GitFixture(tree)
+        let c1 = try await fixture.commit(message: "c1 root", files: ["a.txt": "a\n"])
+        let c2 = try await fixture.commit(message: "c2 on main", files: ["b.txt": "b\n"])
+        let c3 = try await fixture.commit(message: "c3 on main", files: ["c.txt": "c\n"])
+        try await fixture.detach(c1)
+        let detached = try await fixture.commit(message: "detached work", files: ["d.txt": "d\n"])
+        try await fixture.tag("v9")
+        try await fixture.checkout("main")
+
+        let window = try await commits(fixture, limit: 3)
+        XCTAssertEqual(window.map(\.hash), [detached, c3, c2],
+                       "the measured --topo-order --all window of git 2.55.0 over this shape")
+
+        let assignment = LaneAssignment.assign(commits: window, workingTreeIsDirty: false)
+        XCTAssertEqual(assignment.laneCount, 2, "two lanes are the high-water mark of this window")
+        XCTAssertNil(lane(of: c1, in: assignment), "the shared root is outside the window")
+
+        XCTAssertEqual(lane(of: detached, in: assignment), 0, "the newest tip holds lane 0")
+        XCTAssertEqual(lane(of: c3, in: assignment), 1, "the branch tip opens lane 1")
+        XCTAssertEqual(lane(of: c2, in: assignment), 1, "its first parent keeps lane 1")
+
+        // Lane 0's target is outside the window from the very first row, and the lane stays
+        // occupied for all three: this is the assertion the linear window test cannot make.
+        XCTAssertEqual(edges(of: detached, in: assignment), [edge(0, 0, truncated: true)],
+                       "the tag-only tip's parent was never read")
+        XCTAssertEqual(edges(of: c3, in: assignment),
+                       [edge(0, 0, truncated: true), edge(1, 1, truncated: false)],
+                       "lane 0 keeps running down past this row while lane 1 lands on the row below")
+        XCTAssertEqual(edges(of: c2, in: assignment),
+                       [edge(0, 0, truncated: true), edge(1, 1, truncated: true)],
+                       "both lanes leave the bottom of the window, and neither ends at a row")
+    }
 }
