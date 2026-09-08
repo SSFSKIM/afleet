@@ -417,6 +417,50 @@ final class DialogCardTests: XCTestCase {
         XCTAssertEqual(balance, 0, "the recorded enabled arm's balance is not the one this clause was written against")
     }
 
+    // MARK: - The kind afleet never declared
+
+    /// §6.3, and D12's third row. A `dialog_kind` afleet did not declare is the binary's to settle:
+    /// the policy leaves it unanswered, the reducer opens it `.inert`, the card reads *left to the
+    /// binary*, and no action of any kind produces an answer for it.
+    ///
+    /// **This is a trace assertion.** The dangerous path — answering a dialog afleet never declared —
+    /// cannot be executed to prove it wrong, so what is asserted is that it was never entered:
+    /// every dialog action is offered to the answering object and `perform` is reached zero times.
+    func testAnUndeclaredDialogKindIsNeverAnswered() async throws {
+        let (lifecycle, answering) = await hosted()
+        let requests = try dialogRequests("dialog-refusal-fallback")
+        let undeclared = try XCTUnwrap(requests.first { request in
+            guard case .requestUserDialog(let dialog) = request.payload else { return false }
+            return DecisionCard.DialogKind(rawValue: dialog.fields.dialogKind) == nil
+        }, "the fixture records no undeclared dialog kind")
+
+        var reducer = WireReducer(stream: Self.stream, slug: "invented-slug")
+        _ = reducer.apply(.unansweredDialog(undeclared))
+        let item = try XCTUnwrap(reducer.overlay.decisions[undeclared.id], "the reducer opened no item for it")
+        let opaque = DecisionCard(item)
+        XCTAssertNil(opaque.dialogKind, "an undeclared kind decoded as one afleet declares")
+        XCTAssertTrue(opaque.state == .inert, "an unanswered dialog did not open inert")
+        XCTAssertEqual(opaque.reading(inStaleOverlay: false)?.text,
+                       "Left to the binary: afleet does not handle this kind.",
+                       "an undeclared dialog does not read as left to the binary")
+
+        let every: [DecisionAction] = [.retryOnFallbackModel, .editPrompt, .keepTheRefusal,
+                                       .useUsageCredits, .switchToDefaultModel, .notNow,
+                                       .setUpUsageCredits, .closeDialog]
+        for action in every {
+            XCTAssertNil(opaque.answer(action), "the mapping produced an answer for an undeclared dialog kind")
+            answering.send(action, on: opaque, in: Self.channel)
+        }
+        await answering.whenIdle()
+        let count = await lifecycle.actions.count
+        XCTAssertEqual(count, 0, "\(every.count) actions on an undeclared dialog reached perform \(count) times")
+
+        // And the binary's own cancellation, which is how this dialog ends: still nothing.
+        _ = reducer.apply(.requestCancelled(undeclared.id, .first))
+        let after = await lifecycle.actions.count
+        XCTAssertEqual(after, 0, "the cancellation of an undeclared dialog put \(after) actions on the wire")
+    }
+
     /// Every `model_consent_fallback` a fixture's frames carry.
     private static func consentFallbacks(_ frames: [Frame]) -> [ModelConsentFallback] {
         frames.compactMap { frame in
