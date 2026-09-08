@@ -25,7 +25,9 @@ struct ComposerView: View {
             AttachmentTrayView(model: model)
             GhostTextView(model: model)
             if model.surface.isDisabled, let reason = model.surface.disabledReason {
-                Label(reason, systemImage: "clock")
+                // §7.4's connecting glyph while the process is being replaced; the waiting glyph
+                // once it is back and only a readback is still unconfirmed.
+                Label(reason, systemImage: model.surface.isRestarting ? "arrow.triangle.2.circlepath" : "clock")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

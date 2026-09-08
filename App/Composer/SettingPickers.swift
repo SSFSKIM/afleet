@@ -261,6 +261,16 @@ final class SettingPickersModel {
         }
     }
 
+    /// What the pickers last read, as the snapshot a restart is expected to carry across.
+    ///
+    /// The readbacks and nothing else: `RestartRequest` carries the launch flags and the fleet
+    /// snapshots the runtime values itself, so what this leaf can verify is that the new process
+    /// reports the same model, effort and mode the old one did — which is exactly what §7.4 asks it
+    /// to verify. A field nothing has read yet is nil and is not compared.
+    var currentSnapshot: RestartSnapshot {
+        RestartSnapshot(model: displayedModel?.value, effort: appliedEffort, permissionMode: handshakeMode)
+    }
+
     /// Closes the composer while a restart-required setting is being confirmed. Called before the
     /// restart is issued, so no keystroke reaches a process that is going away.
     func beginRestart(reason: String) {
@@ -270,7 +280,16 @@ final class SettingPickersModel {
         restartBanner = nil
     }
 
-    /// §7.4's readback rule, and the mechanism the header's restart actions (Task 8) drive.
+    /// A restart that never happened: the field re-opens rather than staying shut behind a process
+    /// that was never replaced.
+    func cancelRestart() {
+        surface.isRestarting = false
+        surface.isDisabled = false
+        surface.disabledReason = nil
+    }
+
+    /// §7.4's readback rule. Driven by the composer's own `.restart` route (`CommandRouting`) and, at
+    /// Task 8, by the header's restart-required settings.
     ///
     /// The composer stays disabled behind the connecting glyph until **every** readback matches; a
     /// mismatch raises a banner naming the setting that did not survive and keeps it disabled until
@@ -352,7 +371,7 @@ struct SettingPickersView: View {
                     Button(option.displayName) { Task { await model.selectModel(option.value) } }
                 }
             }
-            Menu(model.displayedEffort ?? "Default effort") {
+            Menu(model.isEffortDefault ? "Default effort" : (model.displayedEffort ?? "Effort")) {
                 Button("Default") { Task { await model.selectEffort(nil) } }
                 ForEach(model.effortOptions, id: \.self) { level in
                     Button(level) { Task { await model.selectEffort(level) } }

@@ -190,6 +190,11 @@ final class ComposerModel {
     /// answers with what afleet does about it. The composer decides nothing about the line itself.
     func send() async {
         guard !isSending else { return }
+        // §7.4: the field is closed while a restart is in flight and while a readback is
+        // unconfirmed. The view already disables the text view, but the refusal belongs to the model
+        // too — a send reaching a process that is being replaced is the defect the gate exists for,
+        // and a view is not the place that guarantee should live.
+        guard !surface.isDisabled else { return }
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let text = draft
         refusal = nil

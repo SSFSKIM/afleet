@@ -100,7 +100,19 @@ extension ComposerModel {
         case .lifecycle(let action):
             return await dispatch(action: action)
         case .restart(let request):
-            return await issue { _ = try await self.lifecycle.perform(.quiescentRestart(request), on: self.key) }
+            // §7.4: a restart-required setting closes the field first, replaces the process, and then
+            // re-opens it only once every readback matches — a mismatch banners and keeps it closed.
+            // The gate is `SettingPickersModel`'s, over the `ChannelSurfaceState` the header shares,
+            // and the two readbacks it takes are why this row reaches four members rather than two.
+            let expected = pickers.currentSnapshot
+            pickers.beginRestart(reason: "This channel is restarting to apply the setting.")
+            guard await issue({ _ = try await self.lifecycle.perform(.quiescentRestart(request), on: self.key) })
+            else {
+                pickers.cancelRestart()
+                return false
+            }
+            _ = await pickers.confirmReadback(of: expected)
+            return true
         case .text(let text):
             // A pass-through is a prompt like any other: the user typed a line and a turn runs for
             // it. So it goes through `post(_:)` — `sendPrompt`, and the `HostSignal.promptSent` raise

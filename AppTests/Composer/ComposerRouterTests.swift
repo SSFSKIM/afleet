@@ -101,8 +101,14 @@ final class ComposerRouterTests: XCTestCase {
             return ["route", "send"]
         case .rewind, .login, .permissionsView, .mcpPopover, .memoryFiles:
             return ["route", "run"]
-        case .lifecycle, .restart:
+        case .lifecycle:
             return ["route", "perform"]
+        // A restart takes §7.4's readback gate with it: the field closes, the process is replaced,
+        // and the two readbacks — `list_models` and `get_settings` — decide whether it re-opens or
+        // banners. Task 7 added them; before it a restart-required setting could silently fail to
+        // survive and the composer would never know.
+        case .restart:
+            return ["route", "perform", "send", "send"]
         // `.text` is a prompt, not a lifecycle action: a pass-through causes a turn, so it goes out
         // as `sendPrompt` and raises `HostSignal.promptSent` with the minted uuid, exactly as a typed
         // message does. Task 7 moved it there; until then it was `perform(.send)` and raised nothing,
