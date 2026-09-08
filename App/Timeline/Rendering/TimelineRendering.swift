@@ -55,10 +55,6 @@ final class NativeTimelineRenderer: TimelineRendering {
     func view(for input: TimelineRenderInput) -> AnyView {
         AnyView(TimelineTableRepresentable(controller: controller, input: input))
     }
-
-    /// The controller, for the frame-time harness, which drives updates into a live table rather
-    /// than rebuilding a SwiftUI view.
-    var tableController: TimelineTableController { controller }
 }
 
 /// The `NSViewRepresentable` half. Deliberately thin: it hands the input to the controller and the
@@ -117,9 +113,35 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
 
     // MARK: Applying input
 
+    /// Routes a publish by what actually changed, which is what makes `changes` load-bearing rather
+    /// than decoration: an appended row is an insert, a streaming delta is one row reloaded, and
+    /// only a change set that names nothing falls back to rebuilding the table.
     func apply(_ input: TimelineRenderInput) {
-        // The whole-table path, for a first render or a change set that names nothing.
-        setRows(input.rows.map { RenderedRow(key: $0.id.key, source: $0.summary) })
+        let inserted = input.changes.compactMap { change -> ItemID? in
+            if case .inserted(let id) = change { return id } else { return nil }
+        }
+        let isPreview = input.changes.contains(.previewChanged)
+
+        // A first render, or a change set naming nothing this table can act on.
+        guard !rows.isEmpty, !input.changes.isEmpty, inserted.count + (isPreview ? 1 : 0) == input.changes.count else {
+            setRows(input.rows.map { RenderedRow(key: $0.id.key, source: $0.summary) })
+            return
+        }
+
+        for id in inserted {
+            guard let row = input.rows.first(where: { $0.id == id }) else { continue }
+            var built = RenderedRow(key: row.id.key, source: row.summary)
+            built.settle(markdown: markdown, highlighter: highlighter)
+            appendRow(built)
+        }
+        if isPreview, let preview = input.preview {
+            // The streaming tail: whatever the preview holds beyond what this row already shows.
+            let shown = rows.last.map { $0.tail } ?? ""
+            let text = preview.text
+            if text.count > shown.count {
+                appendToLastRow(String(text.dropFirst(shown.count)))
+            }
+        }
     }
 
     /// The harness's entry point, and the shape the real list will use: whole documents in, parsed
@@ -129,6 +151,33 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         for index in self.rows.indices { self.rows[index].settle(markdown: markdown, highlighter: highlighter) }
         heights.removeAll()
         tableView.reloadData()
+
+        // §6's "never on the main thread": a fenced block missed the cache above and rendered
+        // unhighlighted, which is the correct thing to draw and the wrong thing to leave. The fill
+        // runs off-main and the next reload of that row picks it up.
+        let sources = rows.map(\.pendingSource)
+        let markdown = self.markdown
+        let highlighter = self.highlighter
+        Task.detached(priority: .utility) {
+            await highlighter.warm(Self.fences(in: sources))
+            await markdown.warm(sources, highlighter: highlighter)
+        }
+    }
+
+    /// Every fenced block in a set of documents, for the warm-up.
+    static func fences(in documents: [String]) -> [(code: String, language: String?)] {
+        var out: [(code: String, language: String?)] = []
+        for document in documents {
+            var lines = document.split(separator: "\n", omittingEmptySubsequences: false)[...]
+            while let open = lines.firstIndex(where: { $0.hasPrefix("```") }) {
+                let language = String(lines[open].dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                let rest = lines[lines.index(after: open)...]
+                guard let close = rest.firstIndex(where: { $0.hasPrefix("```") }) else { break }
+                out.append((rest[rest.startIndex..<close].joined(separator: "\n"), language.isEmpty ? nil : language))
+                lines = rest[rest.index(after: close)...]
+            }
+        }
+        return out
     }
 
     /// Adds a row and reloads only the rows that changed — the new one, and the one that was last
@@ -200,10 +249,13 @@ struct RenderedRow: Identifiable {
     private(set) var settled: [NSAttributedString] = []
     private(set) var tail: String = ""
     private var pending: String
+    /// What this row was built from, kept for the off-main warm-up `setRows` kicks off.
+    let pendingSource: String
 
     init(key: String, source: String) {
         self.key = key
         self.pending = source
+        self.pendingSource = source
     }
 
     /// Parses everything this row arrived with. Called once, off the streaming path.
@@ -314,13 +366,6 @@ struct RenderPhases {
                      markdown: a.markdown + b.markdown,
                      highlight: a.highlight + b.highlight)
     }
-
-    /// The largest of the three, named. `nil` when nothing was measured at all.
-    var dominant: String? {
-        let all = [("hosting", hosting), ("markdown", markdown), ("highlight", highlight)]
-        guard let top = all.max(by: { $0.1 < $1.1 }), top.1 > 0 else { return nil }
-        return top.0
-    }
 }
 
 /// A monotonic clock and the signposter Instruments reads.
@@ -328,7 +373,6 @@ struct RenderPhases {
 /// `OSSignposter` rather than `os_signpost`: contract X1's import allowlist admits `OSLog` and not
 /// `os`, and the signposter is the OSLog-module spelling of the same instrument.
 enum RenderClock {
-    static let signposter = OSSignposter(subsystem: "com.afleet.app", category: "timeline-render")
     static func start() -> ContinuousClock.Instant { ContinuousClock.now }
     static func since(_ instant: ContinuousClock.Instant) -> TimeInterval {
         Double((ContinuousClock.now - instant).components.attoseconds) / 1e18

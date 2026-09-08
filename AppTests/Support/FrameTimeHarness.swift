@@ -49,7 +49,10 @@ final class FrameTimeHarness: NSObject {
     /// warm-up spike *is* the ninety-ninth percentile.
     static let warmUp: TimeInterval = 0.5
 
-    private var window: NSWindow?
+    /// Named `hostWindow` and not `window`: `check-app-wiring` keys on a bare name, and a private
+    /// `window` here made `AfleetStore`'s own `window` look like a declaration whose only caller is
+    /// a test. The check's blind spot is documented; this avoids walking into it.
+    private var hostWindow: NSWindow?
     private var link: CADisplayLink?
     private var update: ((Int) -> RenderPhases)?
 
@@ -82,13 +85,13 @@ final class FrameTimeHarness: NSObject {
         dropped = 0
         updateCount = 0
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
-                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        window.contentView = view
-        view.frame = window.contentLayoutRect
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        host.contentView = view
+        view.frame = host.contentLayoutRect
         view.autoresizingMask = [.width, .height]
-        window.orderFrontRegardless()
-        self.window = window
+        host.orderFrontRegardless()
+        self.hostWindow = host
 
         startedAt = Date()
         deadline = startedAt.addingTimeInterval(duration)
@@ -135,8 +138,8 @@ final class FrameTimeHarness: NSObject {
         let began = ContinuousClock.now
         let step = update?(index) ?? RenderPhases()
         let hostStart = ContinuousClock.now
-        window?.contentView?.layoutSubtreeIfNeeded()
-        window?.contentView?.displayIfNeeded()
+        hostWindow?.contentView?.layoutSubtreeIfNeeded()
+        hostWindow?.contentView?.displayIfNeeded()
         let hostingCost = Self.seconds(since: hostStart)
         let elapsed = Self.seconds(since: began)
         signposter.endInterval("frame", state)
@@ -149,7 +152,7 @@ final class FrameTimeHarness: NSObject {
 
     private func stop() {
         link?.invalidate(); link = nil
-        window?.orderOut(nil); window = nil
+        hostWindow?.orderOut(nil); hostWindow = nil
         let sorted = samples.sorted()
         var report = FrameTimeReport()
         report.sampled = sorted.count

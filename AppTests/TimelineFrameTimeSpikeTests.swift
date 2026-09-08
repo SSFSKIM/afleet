@@ -130,8 +130,7 @@ final class TimelineFrameTimeSpikeTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["AFLEET_S7"] == "1",
                           "S7's gate runs for sixty seconds; run it with TEST_RUNNER_AFLEET_S7=1")
 
-        let renderer = NativeTimelineRenderer()
-        let controller = renderer.tableController
+        let controller = TimelineTableController()
 
         // Warm the caches off the main thread first, because that is the design: a settled block is
         // parsed once and a fenced block is highlighted off-main. Measuring cold caches would
@@ -167,7 +166,7 @@ final class TimelineFrameTimeSpikeTests: XCTestCase {
         let ms = report.milliseconds
         print("[S7] p50 \(String(format: "%.2f", ms.p50)) ms · p99 \(String(format: "%.2f", ms.p99)) ms · " +
               "worst \(String(format: "%.2f", ms.worst)) ms · \(report.sampled) samples · \(report.dropped) dropped · " +
-              "rows \(controller.rows.count) · dominant \(report.phases.dominant ?? "none") " +
+              "rows \(controller.rows.count) · dominant \(Self.dominantPhase(report.phases)) " +
               "(hosting \(String(format: "%.1f", report.phases.hosting * 1000)) ms, " +
               "markdown \(String(format: "%.1f", report.phases.markdown * 1000)) ms, " +
               "highlight \(String(format: "%.1f", report.phases.highlight * 1000)) ms total)")
@@ -176,9 +175,18 @@ final class TimelineFrameTimeSpikeTests: XCTestCase {
                              "the gate took \(report.sampled) sample(s) in sixty seconds at thirty hertz")
         XCTAssertLessThan(ms.p99, 16,
                           "the native path's p99 is \(String(format: "%.2f", ms.p99)) ms over \(report.sampled) samples; " +
-                          "the dominant phase was \(report.phases.dominant ?? "none"), which decides whether this is " +
+                          "the dominant phase was \(Self.dominantPhase(report.phases)), which decides whether this is " +
                           "the child spec's branch 2 (hosting — an AppKit fast path, a Y1 amendment) or branch 3 " +
                           "(markdown or highlight — the WKWebView fallback)")
+    }
+
+    /// The largest of the three phases, named. Computed here rather than on `RenderPhases`, because
+    /// a production type carrying a member only a spike reads is exactly what `check-app-wiring`
+    /// exists to flag.
+    static func dominantPhase(_ phases: RenderPhases) -> String {
+        let all = [("hosting", phases.hosting), ("markdown", phases.markdown), ("highlight", phases.highlight)]
+        guard let top = all.max(by: { $0.1 < $1.1 }), top.1 > 0 else { return "none" }
+        return top.0
     }
 
     /// Chops a document into fragments of a few characters, the size a real `content_block_delta`
