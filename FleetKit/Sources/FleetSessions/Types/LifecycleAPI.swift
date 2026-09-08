@@ -12,6 +12,10 @@ public protocol LifecycleAPI: Sendable {
     /// `HostSignal.promptSent` before the echo arrives. Every precondition and every refusal is
     /// `perform(.send(input), on:)`'s; only the answer differs.
     @discardableResult func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID
+    /// Forks an owned channel and returns the **sibling's** provisional key, so the host can select and prefill the
+    /// channel the fork produced. Every precondition and every refusal is `perform(.fork(at: point), on:)`'s; only
+    /// the answer differs — `perform` answers the *source's* state, which names the sibling nowhere.
+    @discardableResult func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey
     /// The composer's line, routed against the channel's own handshake, `system/init` and runtime record. A key the
     /// fleet owns no supervisor for routes against the local table alone.
     func route(_ text: String, on key: ChannelKey) async -> Routed

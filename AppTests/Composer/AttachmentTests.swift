@@ -177,6 +177,104 @@ final class AttachmentTests: XCTestCase {
                        "a refused send left \(model.draft.count) of the \(typed.count) character(s) in the field")
     }
 
+    /// The images the message carried leave the tray **by identity**, not by count.
+    ///
+    /// The tray stays live across the send's await: the user can remove a chip and attach another
+    /// while the prompt is in flight. Dropping "the first N" then deletes whatever is now in front —
+    /// a picture the user just attached and has not sent — while the sent one stays behind.
+    ///
+    /// Deliberate break: drop the first `images.count` attachments after the await → the new image is
+    /// the one that disappears.
+    func testOnlyTheImagesThatWereSentLeaveTheTray() async throws {
+        let double = ComposerLifecycleDouble()
+        await double.alwaysSendPrompt(.success(UUID()))
+        await double.holdPerform()
+        let model = makeModel(double)
+        model.attach([try image(.png)])
+        model.draft = "an invented message with a picture"
+
+        let sending = Task { await model.send() }
+        let reached = await settle { await double.prompts.count == 1 }
+        XCTAssertTrue(reached, "the send never reached the prompt, so nothing happened across an await")
+
+        model.removeAttachment(at: 0)
+        let arrivedSince = try XCTUnwrap(ImageIntake.normalized(try image(.tiff)), "the drawn TIFF did not normalize")
+        model.attachments.append(arrivedSince.attachment)
+        await double.releasePerform()
+        await sending.value
+
+        XCTAssertEqual(model.attachments, [arrivedSince.attachment],
+                       "the tray holds \(model.attachments.count) image(s); the one attached while the message was "
+                       + "in flight was deleted in place of the one that travelled")
+    }
+
+    /// An image dropped from Finder arrives as a **file URL** and nothing else, and it still reaches
+    /// the tray.
+    ///
+    /// The field registers `.fileURL` for drags, so this is the ordinary way a picture arrives from
+    /// the Finder: the drag pasteboard carries a URL, not the bytes. An intake that only decodes
+    /// representation bytes accepts the drop and attaches nothing.
+    ///
+    /// The file is drawn by this suite into a scratch directory of its own; nothing is read from a
+    /// fixture or from any config home (§11, X9).
+    ///
+    /// Deliberate break: remove the URL arm from `attach(from:)` → the drop attaches nothing.
+    func testAnImageDroppedAsAFileURLIsAttached() throws {
+        let double = ComposerLifecycleDouble()
+        let model = makeModel(double)
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "afleet-attachment-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appending(path: "an-invented-picture.png")
+        try image(.png).write(to: file)
+
+        let board = NSPasteboard(name: NSPasteboard.Name("afleet.invented.file-url-drop"))
+        board.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(file.absoluteString, forType: .fileURL)
+        board.writeObjects([item])
+
+        let accepted = model.attach(from: board)
+
+        XCTAssertEqual(accepted, 1, "a Finder image offered only as a file URL produced \(accepted) attachment(s)")
+        XCTAssertEqual(model.attachments.map(\.mediaType), ["image/png"],
+                       "the dropped file did not arrive as the PNG it is")
+        board.clearContents()
+    }
+
+    /// A dropped file that is not an image is refused, and so is one past the source bound — the
+    /// floor under the arm above, so an intake that read every URL it was handed cannot pass.
+    func testADroppedFileThatIsNotAnImageIsRefused() throws {
+        let double = ComposerLifecycleDouble()
+        let model = makeModel(double)
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "afleet-attachment-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appending(path: "an-invented-note.txt")
+        try Data("not an image at all".utf8).write(to: file)
+
+        let board = NSPasteboard(name: NSPasteboard.Name("afleet.invented.file-url-drop-refused"))
+        board.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(file.absoluteString, forType: .fileURL)
+        board.writeObjects([item])
+
+        XCTAssertEqual(model.attach(from: board), 0, "a dropped text file was attached as an image")
+        XCTAssertEqual(model.attachments.count, 0, "the tray holds \(model.attachments.count) item(s)")
+        board.clearContents()
+    }
+
+    /// A bounded wait for something the double answers.
+    private func settle(_ predicate: () async -> Bool) async -> Bool {
+        for _ in 0..<400 {
+            if await predicate() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await predicate()
+    }
+
     /// A pasteboard carrying an image is read through the same intake, once per item even when the
     /// same image is offered under several types.
     func testAPasteboardImageIsAttachedOncePerItem() throws {

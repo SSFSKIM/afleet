@@ -158,6 +158,9 @@ final class AppModel {
                          timeline: { [timelines] key in timelines.model(for: key) },
                          paneRunner: { [panels] request in try await panels.run(request) },
                          lifecycle: lifecycle)
+        // *Fork from here* opens a sibling channel and the window has to move to it, which is C5's own selection
+        // path and not a second one. Set after `attach`, which releases the models of the previous workspace.
+        composers.selectChannel = { [shell] key in shell.select(key.session) }
     }
 
     /// Runs the launch and routes on its outcome. Concurrent windows await the same task;

@@ -29,7 +29,7 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
     private var _spawnGate: (@Sendable () async -> Void)?
     private var _sendGate: (@Sendable () async -> Void)?
     private var _terminateGate: (@Sendable () async -> Void)?
-    private var _sent: [UserInput] = []
+    private var _sent: [(input: UserInput, uuid: UUID)] = []
     private var _pidGate: (@Sendable () async -> Void)?
 
     init(epoch: ProcessEpoch, session: SessionID?, pid: Int32 = 424_242,
@@ -119,7 +119,11 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
         set { lock.lock(); _terminateGate = newValue; lock.unlock() }
     }
     /// Every input this handle was asked to write, in order.
-    var sent: [UserInput] { lock.lock(); defer { lock.unlock() }; return _sent }
+    var sent: [UserInput] { lock.lock(); defer { lock.unlock() }; return _sent.map(\.input) }
+    /// The uuid each of those writes carried onto the wire, in the same order. The frame's own identifier: what
+    /// `sendPrompt` answers its caller has to be what appears here, whether the write happened at once or came out
+    /// of the queue a handshake later.
+    var sentUUIDs: [UUID] { lock.lock(); defer { lock.unlock() }; return _sent.map(\.uuid) }
     /// Awaited inside `childProcessIdentifier`: how a test parks the supervisor on the *first* await after a
     /// handshake — the pid read every post-handshake check begins with — and feeds an exit into that window.
     var pidGate: (@Sendable () async -> Void)? {
@@ -147,10 +151,9 @@ final class ScriptedProcessHandle: ProcessHandle, @unchecked Sendable {   // `lo
         return Handshake(initialize: InitializeResponse(raw: locked { _initialize }), pending: [])
     }
 
-    func send(_ input: UserInput) async throws -> UUID {
-        let gate = locked { () -> (@Sendable () async -> Void)? in _sent.append(input); return _sendGate }
+    func send(_ input: UserInput, uuid: UUID) async throws {
+        let gate = locked { () -> (@Sendable () async -> Void)? in _sent.append((input, uuid)); return _sendGate }
         await gate?()
-        return UUID()
     }
 
     func request<R: ControlRequestSpec>(_ spec: R, timeout: Duration?) async throws -> R.Response {

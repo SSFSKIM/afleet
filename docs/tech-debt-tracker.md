@@ -1180,6 +1180,15 @@ symlink-containment debt in entry 78 is unchanged.
      offers a field where the answer is always no. Closer: the mount consults the origin and renders
      the refusal (or the *Fork* the banner already offers) instead of the field. Owner: the C6.2 leaf
      that owns `ComposerMount.swift`. Filed 2026-09-08 by the C6.2 fix wave.
+199. **An honoured rewind whose prefill is dropped offers no way back to it.** `ComposerModel.edit`
+     writes the engine's `prefillText` only when the field still holds what it held when the edit
+     was asked for; typing that arrived while the request was in flight is kept instead, and the
+     composer says so. That is the right side to err on — the user can see their own words and never
+     gave them to anything — but the edited message's text is then simply gone from the surface,
+     and the only way back to it is to edit the same message again. Small, and outside this wave's
+     scope: a second surface (an *Insert the edited message* affordance, or a held prefill the field
+     offers) is a design decision the composer's own spec should make rather than a fix. Raised by
+     the C6.2 fix wave for scalpel-2#6. Owner: C6.2.
 ## From C7.2 (`child/c7-editor-core`)
 
 97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state

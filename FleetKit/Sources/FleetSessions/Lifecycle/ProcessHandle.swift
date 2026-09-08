@@ -14,7 +14,11 @@ public protocol ProcessHandle: Sendable {
     var childProcessIdentifier: Int32 { get async }
     var sessionID: SessionID? { get async }
     func spawn(handshakeTimeout: Duration) async throws -> Handshake
-    func send(_ input: UserInput) async throws -> UUID
+    /// Writes one user frame under `uuid`. The uuid is the *caller's*, because the supervisor has to be able to
+    /// answer it before the frame goes out: a send that arrives while the channel is connecting is queued and
+    /// written when the handshake lands, long after `send` returned, and a handle that minted its own uuid there
+    /// would put an identifier on the wire that no caller ever saw (X5's `sendPrompt` contract).
+    func send(_ input: UserInput, uuid: UUID) async throws
     func request<R: ControlRequestSpec>(_ spec: R, timeout: Duration?) async throws -> R.Response
     func requestRaw(subtype: String, payload: JSONValue, timeout: Duration?) async throws -> JSONValue
     func answer(_ id: RequestID, _ answer: InboundAnswer) async throws
@@ -44,7 +48,12 @@ public final class LiveProcessHandle: ProcessHandle {
     public func spawn(handshakeTimeout: Duration) async throws -> Handshake {
         try await process.spawn(handshakeTimeout: handshakeTimeout)
     }
-    public func send(_ input: UserInput) async throws -> UUID { try await process.send(input) }
+    /// `ClaudeProcess.send(_:)` mints its own uuid, so the caller's is carried by framing the input here — with
+    /// ClaudeWire's own `UserInput.frame(uuid:)`, the very function that path uses — and writing it as a raw
+    /// frame. Same writer, same diagnostics, same capture; nothing about the §6.6 frame is spelled twice.
+    public func send(_ input: UserInput, uuid: UUID) async throws {
+        try await process.send(raw: input.frame(uuid: uuid))
+    }
     public func request<R: ControlRequestSpec>(_ spec: R, timeout: Duration?) async throws -> R.Response {
         try await process.request(spec, timeout: timeout)
     }

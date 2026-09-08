@@ -100,7 +100,10 @@ public actor ChannelSupervisor {
     private var epoch = ProcessEpoch(rawValue: 0)
     private var process: (any ProcessHandle)?
     private var turnRunning = false
-    private var queuedInput: [UserInput] = []
+    /// The sends admitted while the channel was connecting, each with the uuid its caller was answered — the uuid
+    /// that frame carries when the queue drains. Minting a second one at the write would put an identifier on the
+    /// wire that no caller ever saw.
+    private var queuedInput: [(input: UserInput, uuid: UUID)] = []
     private var pendingHatch: PaneRequest?
     /// Where the channel was when it became Contended, so a holder set that settles to nothing goes back there
     /// rather than to a state the table would refuse.
@@ -411,13 +414,15 @@ public actor ChannelSupervisor {
         case .archived:
             return try await resume(input)
         case .owned(.connecting):
-            // A send while a spawn is in flight. The input is queued and goes out when the handshake lands; the
-            // uuid returned here is not the one the engine will echo, because `ProcessHandle.send` mints its own.
-            // This supervisor serialises its own operations and the facade adds nothing on top of that: this is the
-            // one place a second caller is admitted rather than refused, because queueing is what the user means.
-            queuedInput.append(input)
+            // A send while a spawn is in flight. The input is queued and goes out when the handshake lands, under
+            // the uuid minted here — X5's `sendPrompt` promises the caller the identifier the engine will echo, and
+            // the answer and the write are furthest apart in exactly this state. This supervisor serialises its own
+            // operations and the facade adds nothing on top of that: this is the one place a second caller is
+            // admitted rather than refused, because queueing is what the user means.
+            let uuid = UUID()
+            queuedInput.append((input, uuid))
             pushEligibility()
-            return UUID()
+            return uuid
         case .owned(.contended):
             throw LifecycleError.heldElsewhere(state.observed)
         }
@@ -443,9 +448,9 @@ public actor ChannelSupervisor {
         let wasRunning = turnRunning
         turnRunning = true
         pushEligibility()
-        let uuid: UUID
+        let uuid = UUID()
         do {
-            uuid = try await handle.send(input)
+            try await handle.send(input, uuid: uuid)
         } catch {
             turnRunning = wasRunning
             pushEligibility()
@@ -1211,8 +1216,8 @@ public actor ChannelSupervisor {
         guard !queuedInput.isEmpty, let handle = process else { return }
         let pending = queuedInput
         queuedInput = []
-        for input in pending {
-            guard let _ = try? await handle.send(input) else { continue }
+        for (input, uuid) in pending {
+            guard let _ = try? await handle.send(input, uuid: uuid) else { continue }
             turnRunning = true
             noteActivity()
         }

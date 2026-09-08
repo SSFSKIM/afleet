@@ -466,7 +466,7 @@ enum QuitRig {
     /// the whole log rather than over one member.
     static func key(of call: ComposerLifecycleDouble.Call) -> ChannelKey? {
         switch call {
-        case .perform(let key, _), .sendPrompt(let key, _), .route(let key, _), .send(let key, _, _),
+        case .perform(let key, _), .sendPrompt(let key, _), .fork(let key, _), .route(let key, _), .send(let key, _, _),
              .run(let key, _, _), .openInTerminal(let key), .events(let key), .preconditions(let key),
              .liveTaskIDs(let key):
             key

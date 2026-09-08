@@ -48,6 +48,10 @@ extension ComposerModel {
     func edit(_ target: UserMessageItem) async {
         editNote = nil
         refusal = nil
+        // What the field held when the edit was asked for. The request is an await and the user keeps typing across
+        // it, so the prefill is written only over the words the edit began with: overwriting the ones typed since
+        // would throw away input the user can see in front of them and never gave to anything.
+        let draftWhenAsked = draft
         guard let lastSeen = lastSeenUserMessageUUID else {
             editNote = Self.noRenderedMessagesNote
             return
@@ -73,7 +77,9 @@ extension ComposerModel {
             return
         }
 
-        if let prefill = answer["prefillText"]?.stringValue { draft = prefill }
+        if let prefill = answer["prefillText"]?.stringValue {
+            if draft == draftWhenAsked { draft = prefill } else { editNote = Self.typedAheadNote }
+        }
         // **The leaf the engine now holds is `precedingAssistantUuid`, not the target.** The
         // `rewind-turn` fixture measured it: after the honoured rewind the transcript's
         // `last-prompt.leafUuid` names the assistant record *before* the rewound turn, and the
@@ -91,20 +97,29 @@ extension ComposerModel {
     /// other body-level `error`.
     ///
     /// The fork point comes from the channel's own items, because the refusal's
-    /// `precedingAssistantUuid` is `null`: `entryUUID` is the `ItemID.key` of the assistant item
-    /// immediately before the edited message — the last record the fork keeps, inclusive — and
-    /// `dropsTurn` is the edited message's `promptUUID`, the turn the truncation discards.
+    /// `precedingAssistantUuid` is `null`: `entryUUID` is the **last record** of the assistant item immediately
+    /// before the edited message — the last record the fork keeps, inclusive — and `dropsTurn` is the edited
+    /// message's `promptUUID`, the turn the truncation discards.
+    ///
+    /// **The prefill belongs to the fork, not to this channel.** X5's `fork(at:on:)` answers the sibling's key —
+    /// `perform(.fork)` answers this channel's state and names the sibling nowhere — and the edited message's text
+    /// goes into that channel's composer, which the registry hands it whenever that composer is first built. This
+    /// composer's own draft is left exactly as the user left it: a prefill written here is a message the user
+    /// believes is going into the fork and which the engine receives on the conversation they edited away from.
+    ///
+    /// The **note** stays here, because this is the channel the user is looking at and the note is what explains
+    /// where the edit went.
     ///
     /// The wording distinguishes the two known refusals; the path does not.
     private func forkInstead(of target: UserMessageItem, because reason: String?) async {
-        guard let entry = precedingAssistantKey(before: target) else {
+        guard let entry = precedingAssistantRecord(before: target) else {
             editNote = Self.noForkPointNote(reason)
             return
         }
         do {
-            _ = try await lifecycle.perform(.fork(at: ForkPoint(entryUUID: entry, dropsTurn: target.promptUUID)),
-                                            on: key)
-            draft = target.text
+            let sibling = try await lifecycle.fork(at: ForkPoint(entryUUID: entry, dropsTurn: target.promptUUID),
+                                                   on: key)
+            handOffToFork?(sibling, target.text)
             editNote = Self.forkNote(reason)
         } catch let error as LifecycleError {
             editNote = Self.explanation(of: error)
@@ -113,15 +128,21 @@ extension ComposerModel {
         }
     }
 
-    /// The `ItemID.key` of the assistant item immediately preceding `target` in the fold's order, and
-    /// nil when the edited message is the first thing in the conversation — which is a message with
-    /// no fork point at all, not a fork from the beginning.
-    private func precedingAssistantKey(before target: UserMessageItem) -> String? {
+    /// The **last record** of the assistant item immediately preceding `target` in the fold's order, and nil when
+    /// the edited message is the first thing in the conversation — which is a message with no fork point at all,
+    /// not a fork from the beginning.
+    ///
+    /// **The last record, not the item's key.** `ItemBuilder` merges an assistant message's records into one item
+    /// keyed by the *first* of them and keeps them all in `recordUUIDs`; the `rewind-turn` fixture has two per
+    /// assistant message. `entryUUID` is the last record the fork **keeps**, inclusive, so naming the item's key
+    /// would cut the preceding turn in half — dropping records the user still sees while `dropsTurn` claims only
+    /// the edited turn was discarded.
+    private func precedingAssistantRecord(before target: UserMessageItem) -> String? {
         guard let timelines else { return nil }
         let items = timelines.timeline.items
         guard let index = items.firstIndex(where: { $0.id == target.id }) else { return nil }
         for item in items[..<index].reversed() {
-            if case .assistantMessage(let assistant) = item { return assistant.id.key }
+            if case .assistantMessage(let assistant) = item { return assistant.recordUUIDs.last ?? assistant.id.key }
         }
         return nil
     }
@@ -151,6 +172,12 @@ extension ComposerModel {
             "The conversation was not rewound, and there is no reply before that message to fork from, so nothing was changed."
         }
     }
+
+    /// The honoured rewind whose prefill was **not** written, because the user typed while the request was in
+    /// flight. Their own words stay in the field and the engine's are not silently dropped without saying so.
+    static let typedAheadNote =
+        "The conversation was rewound. You typed while that was in flight, so what you typed was kept and the "
+        + "edited message was not put back in the field."
 
     static let noRenderedMessagesNote =
         "This channel has shown no messages yet, so there is nothing to rewind to."

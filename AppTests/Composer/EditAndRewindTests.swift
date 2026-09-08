@@ -49,7 +49,9 @@ final class EditAndRewindTests: XCTestCase {
         XCTAssertNil(rig.composer.editNote,
                      "an honoured rewind left a note behind, which says a fork was opened when none was")
         let actions = await rig.lifecycle.actions
-        XCTAssertTrue(actions.isEmpty, "an honoured rewind performed \(actions.count) lifecycle action(s), including a fork")
+        XCTAssertTrue(actions.isEmpty, "an honoured rewind performed \(actions.count) lifecycle action(s)")
+        let forks = await rig.lifecycle.forkCount
+        XCTAssertEqual(forks, 0, "an honoured rewind opened \(forks) fork(s)")
         try await rig.assertNoFileRewind()
         await rig.finish()
     }
@@ -92,6 +94,7 @@ final class EditAndRewindTests: XCTestCase {
         let opened = await rig.settleUntil { $0.timeline.preview != nil }
         XCTAssertTrue(opened, "no streaming preview was open, so this arm proves nothing")
 
+        await rig.lifecycle.stageFork(.success(ChannelKey(configHome: rig.key.configHome, session: SessionID())))
         await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
         await rig.composer.edit(target)
 
@@ -128,31 +131,78 @@ final class EditAndRewindTests: XCTestCase {
         XCTAssertTrue(try Rig.recordedParentAssistantRecord(of: recordedTarget) == recordedPreceding,
                       "the oracle disagrees with the engine's own answer on the recorded leg, "
                       + "so it cannot be trusted on this one")
-        let entry = try rig.itemKey(holding: try Rig.recordedParentAssistantRecord(of: target.promptUUID))
+        let entry = try Rig.recordedParentAssistantRecord(of: target.promptUUID)
         XCTAssertNotEqual(entry, target.promptUUID,
                           "the fork point and the edited message are the same record, so this arm proves nothing")
+        // **The floor for the record-versus-item arm.** The fold merges an assistant message's records into one
+        // item keyed by the *first* of them, and this fixture's assistant messages carry two — so an entry taken
+        // from the item's key would name a record the fork drops while `dropsTurn` claims only the edited turn was
+        // discarded. Without this the two answers could coincide and the assertion below would prove nothing.
+        XCTAssertNotEqual(entry, try rig.itemKey(holding: entry),
+                          "the assistant item before the edited message holds one record, so this arm cannot tell "
+                          + "the last record from the item's key")
 
+        let sibling = ChannelKey(configHome: rig.key.configHome, session: SessionID())
+        await rig.lifecycle.stageFork(.success(sibling))
         await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
         await rig.composer.edit(target)
 
         XCTAssertEqual(rig.composer.rewindSignalsRaised, 0,
                        "a refused rewind raised \(rig.composer.rewindSignalsRaised) host signal(s)")
-        let actions = await rig.lifecycle.actions
-        XCTAssertEqual(actions.count, 1, "the refusal produced \(actions.count) lifecycle action(s), not exactly 1 fork")
-        guard case .fork(let point)? = actions.first else {
-            return XCTFail("the refusal's one action is not a fork")
-        }
-        let fork = try XCTUnwrap(point, "the fork carries no fork point, so it forks from the end")
+        let points = await rig.lifecycle.forkPoints
+        XCTAssertEqual(points.count, 1, "the refusal opened \(points.count) fork(s), not exactly 1")
+        let fork = try XCTUnwrap(points.first ?? nil, "the fork carries no fork point, so it forks from the end")
         XCTAssertEqual(fork.entryUUID, entry,
-                       "the fork's entry is not the item holding the assistant record the transcript names "
-                       + "before the edited message")
+                       "the fork's entry is not the last assistant record the transcript names before the edited "
+                       + "message, so the fork keeps less of the preceding turn than the timeline shows")
         XCTAssertEqual(fork.dropsTurn, target.promptUUID,
                        "the fork does not drop the edited message's own turn")
-        XCTAssertEqual(rig.composer.draft, target.text,
-                       "the field does not carry the \(target.text.count)-character text of the edited message")
+        let forked = try XCTUnwrap(rig.composers.model(for: sibling), "the fork opened no composer of its own")
+        XCTAssertEqual(forked.draft, target.text,
+                       "the fork's field does not carry the \(target.text.count)-character text of the edited message")
         let note = try XCTUnwrap(rig.composer.editNote, "the refused rewind showed no note at all")
         XCTAssertTrue(note.contains("not rewound") && note.contains("fork"),
                       "the \(note.count)-character note does not say the conversation was not rewound and a fork was opened")
+        try await rig.assertNoFileRewind()
+        await rig.finish()
+    }
+
+    /// **The fork's prefill belongs to the fork.** The edited message's text is put into the
+    /// **sibling's** composer, that channel is brought into view, and the source's own draft is left
+    /// exactly as the user left it.
+    ///
+    /// The stake is where the next Return goes. A prefill written into the source is a message the
+    /// user believes is being sent into the fork and which the engine receives on the conversation
+    /// they were editing away from — the one outcome *Fork from here* exists to avoid. The sibling
+    /// has no composer of its own when the fork returns, which is why the prefill waits under its key
+    /// and this test asks the registry for that composer only afterwards.
+    ///
+    /// Deliberate break: assign `draft` on this composer in `forkInstead` → the source carries the
+    /// prefill and the sibling opens empty.
+    func testTheForksPrefillLandsOnTheSiblingAndTheSourceDraftIsUntouched() async throws {
+        let rig = try await Rig()
+        let target = try rig.messageWithAPrecedingAssistant()
+        let sibling = ChannelKey(configHome: rig.key.configHome, session: SessionID())
+        let halfTyped = "what the user had half-typed"
+        rig.composer.draft = halfTyped
+        await rig.lifecycle.stageFork(.success(sibling))
+        await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
+
+        await rig.composer.edit(target)
+
+        let forkCount = await rig.lifecycle.forkCount
+        XCTAssertEqual(forkCount, 1, "the refusal opened \(forkCount) fork(s), not exactly 1")
+        XCTAssertEqual(rig.composer.draft, halfTyped,
+                       "the source's field was overwritten; the \(halfTyped.count) character(s) the user had "
+                       + "typed there are the source conversation's, not the fork's")
+        let forked = try XCTUnwrap(rig.composers.model(for: sibling),
+                                   "the registry built no composer for the channel the fork answered")
+        XCTAssertEqual(forked.draft, target.text,
+                       "the fork's field does not carry the \(target.text.count)-character text of the edited "
+                       + "message, so sending it would reach the conversation the edit forked away from")
+        XCTAssertEqual(rig.selected, [sibling], "the fork was not brought into view exactly once")
+        XCTAssertNotNil(rig.composer.editNote,
+                        "the note explaining what happened to the edit left the source, where the user is looking")
         try await rig.assertNoFileRewind()
         await rig.finish()
     }
@@ -166,18 +216,16 @@ final class EditAndRewindTests: XCTestCase {
         let rig = try await Rig()
         let target = try rig.messageWithAPrecedingAssistant()
 
+        await rig.lifecycle.stageFork(.success(ChannelKey(configHome: rig.key.configHome, session: SessionID())))
         await rig.lifecycle.stageSend("rewind_conversation", .success(Rig.refusal(reason: "unseen later turn")))
         await rig.composer.edit(target)
 
         XCTAssertEqual(rig.composer.rewindSignalsRaised, 0,
                        "a refused rewind raised \(rig.composer.rewindSignalsRaised) host signal(s)")
-        let actions = await rig.lifecycle.actions
-        XCTAssertEqual(actions.count, 1, "the refusal produced \(actions.count) lifecycle action(s), not exactly 1 fork")
-        if case .fork(let point)? = actions.first {
-            XCTAssertEqual(point?.dropsTurn, target.promptUUID, "the fork does not drop the edited message's own turn")
-        } else {
-            XCTFail("the refusal's one action is not a fork")
-        }
+        let points = await rig.lifecycle.forkPoints
+        XCTAssertEqual(points.count, 1, "the refusal opened \(points.count) fork(s), not exactly 1")
+        XCTAssertEqual(points.first??.dropsTurn, target.promptUUID,
+                       "the fork does not drop the edited message's own turn")
         let note = try XCTUnwrap(rig.composer.editNote, "the refused rewind showed no note at all")
         XCTAssertNotEqual(note, ComposerModel.forkNote("stale target"),
                           "the two refusals are shown with the same \(note.count)-character wording")
@@ -196,17 +244,56 @@ final class EditAndRewindTests: XCTestCase {
         let rig = try await Rig()
         let target = try rig.messageWithAPrecedingAssistant()
 
+        await rig.lifecycle.stageFork(.success(ChannelKey(configHome: rig.key.configHome, session: SessionID())))
         await rig.lifecycle.stageSend("rewind_conversation", .success(Rig.refusal(reason: "an invented reason")))
         await rig.composer.edit(target)
 
         XCTAssertEqual(rig.composer.rewindSignalsRaised, 0,
                        "an unrecognised refusal raised \(rig.composer.rewindSignalsRaised) host signal(s)")
-        let actions = await rig.lifecycle.actions
-        XCTAssertEqual(actions.count, 1, "the unrecognised refusal produced \(actions.count) lifecycle action(s), not exactly 1 fork")
+        let forks = await rig.lifecycle.forkCount
+        XCTAssertEqual(forks, 1, "the unrecognised refusal opened \(forks) fork(s), not exactly 1")
         let note = try XCTUnwrap(rig.composer.editNote, "the unrecognised refusal showed no note at all")
         XCTAssertEqual(note, ComposerModel.forkNote("an invented reason"),
                        "the \(note.count)-character note is not the unnamed-refusal wording")
         try await rig.assertNoFileRewind()
+        await rig.finish()
+    }
+
+    // MARK: - Typing across the request
+
+    /// The user keeps typing while the rewind request is in flight: **their** words stay in the field, and the
+    /// composer says why the edited message did not come back into it.
+    ///
+    /// `edit` is one await against the engine and nothing disables the field across it, so a prefill assigned on the
+    /// far side lands on top of whatever was typed in between — input the user can see in front of them and never
+    /// gave to anything. The request is held open by the double, the field is typed into while it is suspended, and
+    /// the honoured answer is then released.
+    ///
+    /// Deliberate break: assign `draft = prefill` unconditionally → the typing is gone.
+    func testTypingWhileTheRewindIsInFlightIsKeptAndTheReasonIsShown() async throws {
+        let rig = try await Rig()
+        let messages = rig.renderedUserMessages()
+        let target = try XCTUnwrap(messages.last, "the fixture folded no user message to edit")
+        let honoured = try Rig.recordedHonouredBody()
+        let prefill = try XCTUnwrap(honoured["prefillText"]?.stringValue, "the recorded honoured body carries no prefill")
+        await rig.lifecycle.stageSend("rewind_conversation", .success(honoured))
+        await rig.lifecycle.holdSend()
+
+        let editing = Task { await rig.composer.edit(target) }
+        let arrived = await rig.settleUntilAsync { await rig.lifecycle.sentSubtypes.contains("rewind_conversation") }
+        XCTAssertTrue(arrived, "the rewind request never reached the double, so nothing was typed across anything")
+        let typedSince = "a sentence typed while the rewind was in flight"
+        rig.composer.draft = typedSince
+        await rig.lifecycle.releaseSend()
+        await editing.value
+
+        XCTAssertEqual(rig.composer.draft, typedSince,
+                       "the \(typedSince.count) character(s) typed while the request was in flight were overwritten")
+        XCTAssertNotEqual(rig.composer.draft, prefill, "the prefill replaced what the user had typed since")
+        XCTAssertEqual(rig.composer.editNote, ComposerModel.typedAheadNote,
+                       "nothing said why the edited message was not put back into the field")
+        XCTAssertEqual(rig.composer.rewindSignalsRaised, 1,
+                       "the rewind itself was honoured, so its host signal is still raised exactly once")
         await rig.finish()
     }
 
@@ -231,6 +318,7 @@ final class EditAndRewindTests: XCTestCase {
         XCTAssertNotEqual(target.promptUUID, newest.promptUUID,
                           "the oldest and newest of the fold's \(messages.count) user message(s) are the same message")
 
+        await rig.lifecycle.stageFork(.success(ChannelKey(configHome: rig.key.configHome, session: SessionID())))
         await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
         await rig.composer.edit(target)
 
@@ -284,8 +372,8 @@ final class EditAndRewindTests: XCTestCase {
         await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
         await rig.composer.edit(target)
 
-        let actions = await rig.lifecycle.actions
-        XCTAssertTrue(actions.isEmpty, "a message with no fork point produced \(actions.count) lifecycle action(s)")
+        let forks = await rig.lifecycle.forkCount
+        XCTAssertEqual(forks, 0, "a message with no fork point opened \(forks) fork(s)")
         XCTAssertEqual(rig.composer.rewindSignalsRaised, 0,
                        "a refused rewind raised \(rig.composer.rewindSignalsRaised) host signal(s)")
         let note = try XCTUnwrap(rig.composer.editNote, "no reason was shown for offering no fork")
@@ -308,6 +396,7 @@ final class EditAndRewindTests: XCTestCase {
     func testTheRefusedRewindsNoteIsDrawnByTheComposer() async throws {
         let rig = try await Rig()
         let target = try rig.messageWithAPrecedingAssistant()
+        await rig.lifecycle.stageFork(.success(ChannelKey(configHome: rig.key.configHome, session: SessionID())))
         await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
 
         await rig.composer.edit(target)
@@ -356,6 +445,13 @@ private final class Rig {
     let timelines: ChannelTimelineRegistry
     let composers: ComposerRegistry
     let key: ChannelKey
+    /// Every channel the registry was asked to bring into view, in order — C5's `ShellModel.select` stands here.
+    private var selection = SelectionLog()
+    var selected: [ChannelKey] { selection.keys }
+
+    /// A box, so the closure the registry keeps does not capture the rig itself.
+    @MainActor final class SelectionLog { var keys: [ChannelKey] = [] }
+
 
     enum RigError: Error { case noMainTranscript, noRecordedLeg, noMessageWithAPrecedingAssistant }
 
@@ -401,6 +497,9 @@ private final class Rig {
         timelines = ChannelTimelineRegistry()
         timelines.attach(to: workspace, lifecycle: lifecycle)
         composers = ComposerRegistry()
+        let selection = SelectionLog()
+        self.selection = selection
+        composers.selectChannel = { key in selection.keys.append(key) }
         composers.attach(to: workspace,
                          timeline: { [timelines] in timelines.model(for: $0) },
                          lifecycle: lifecycle)
@@ -516,6 +615,16 @@ private final class Rig {
             try? await Task.sleep(for: .milliseconds(10))
         }
         return predicate(timeline)
+    }
+
+    /// The same bounded wait for a condition the double answers rather than the fold: a request the composer is
+    /// suspended inside has arrived, which is where a test types across an await.
+    func settleUntilAsync(_ predicate: () async -> Bool) async -> Bool {
+        for _ in 0..<400 {
+            if await predicate() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await predicate()
     }
 
     /// Zero `rewind_files` requests, on every arm. *Edit* is not `/rewind`.
