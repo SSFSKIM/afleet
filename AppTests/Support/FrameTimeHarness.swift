@@ -117,7 +117,12 @@ final class FrameTimeHarness: NSObject {
 
         let now = Date()
         guard now < deadline else { stop(); return }
-        guard now.timeIntervalSince(lastUpdate) >= 1.0 / updatesPerSecond else { return }
+        // **The tolerance is not slack, it is the difference between thirty hertz and twenty-three.**
+        // A bare `>= 1/rate` test on a sixty-hertz link lands exactly on a callback boundary: the
+        // callback at one period is a hair early, so the update waits for the next one and the true
+        // rate collapses to twenty. Allowing half a refresh period takes the nearer callback, which
+        // is what "thirty updates per second" means on a link that can only fire at sixty.
+        guard now.timeIntervalSince(lastUpdate) >= (1.0 / updatesPerSecond) - (nominal / 2) else { return }
         lastUpdate = now
 
         let index = updateCount

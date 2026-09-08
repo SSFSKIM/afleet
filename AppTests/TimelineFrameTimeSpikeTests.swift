@@ -122,8 +122,13 @@ final class TimelineFrameTimeSpikeTests: XCTestCase {
     /// is a designed skip named in the plan rather than an accident. Run it with the variable set to
     /// get the verdict.
     func testTheNativePathHoldsSixteenMillisecondsAtThirtyHertz() async throws {
+        // **`TEST_RUNNER_`, and the prefix is the whole point.** `xcodebuild test` does not hand the
+        // invoking shell's environment to the test host: a bare `AFLEET_S7=1` leaves this reading
+        // nil, the test skips, and a skip reads as a pass — which is how a gate reports green
+        // without ever running. C5's spec records the same trap; this comment is here so the next
+        // reader of this file does not rediscover it a third time.
         try XCTSkipUnless(ProcessInfo.processInfo.environment["AFLEET_S7"] == "1",
-                          "S7's gate runs for sixty seconds; set AFLEET_S7=1 to run it")
+                          "S7's gate runs for sixty seconds; run it with TEST_RUNNER_AFLEET_S7=1")
 
         let renderer = NativeTimelineRenderer()
         let controller = renderer.tableController
