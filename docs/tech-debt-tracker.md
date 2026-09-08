@@ -1947,3 +1947,23 @@ is renumbered.
      process, a socket or a buffer behind it has the same gap and a worse consequence. Closer:
      `func willRelease() async` on `PanelTabSession`, awaited by the host before it drops the slot.
      Owner: C5's fence, raised by C7.5; C7.4's panes are the case that will force it.
+
+239. **An atomic save carries the file's mode and nothing else.** Writing a temporary and
+     `rename`ing it installs a fresh inode, so the destination's owner, group and any ACL entries
+     are replaced by the saving process's. The mode is carried because losing it has a visible
+     consequence (an executable script stops being executable); ownership and ACLs are not, and on
+     a shared checkout a save can quietly drop a collaborator's access or an explicit deny. Found by
+     C7.5's merge panel, ruled out of scope: a faithful replace needs `copyfile(3)` with
+     `COPYFILE_ACL | COPYFILE_XATTR` onto the temporary, or an exchange primitive. Closer: that
+     call, once someone edits a file whose ACL matters. Owner: C7.5's follow-up.
+
+240. **`LinkRouterCapability.open` does not say which channel the link came from.** Every channel's
+     Files session registers a `.file` and a `.diff` target with the same tab and specificity, and
+     `LinkRouter.mostSpecific` compares specificity and tab order — never channel identity. So the
+     registry alone cannot deliver a link to the session it came from. C5 recorded the same gap in
+     `HostLinkRouter` ("`LinkRouterCapability.open(_:from:)` carrying the channel would remove the
+     case altogether, and that is an X7 amendment"); C7.5 mitigates it by registering **once per
+     tab** and routing to the channel the panel is presenting, which is right for a click the user
+     just made and wrong for a link delivered to a channel that is not on screen. Closer: the X7
+     amendment of C7.5's Parent revision 4 — the capability carries the originating `ChannelKey`
+     and `LinkTarget` may match on it. Owner: C5's fence; C7.6 and C7.7 register per channel too.
