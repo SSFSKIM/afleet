@@ -521,6 +521,50 @@ final class GitDiffTests: XCTestCase {
                        Data("one\n".utf8))
     }
 
+    // MARK: - R6/F2 the unborn HEAD
+
+    /// A repository that has been initialised and staged but never committed. `HEAD` names a
+    /// branch with no commit, so it resolves to no object at all and `git diff HEAD` exits 128 —
+    /// which this reader turned into `.commandFailed` for a repository state its sibling reader
+    /// supports and reports (`WorkingTreeStatusTests.testAnUnbornRepositoryHasNoHeadObject`, whose
+    /// `headOID` is nil for exactly this repository). Two readers of one repository disagreeing
+    /// about whether it exists is the defect; the staged files are additions and there is nothing
+    /// ambiguous about them.
+    ///
+    /// The comparison is against git's **empty tree**, which is what "before the first commit"
+    /// means to git. Measured on `git` 2.55.0.
+    func testAnUnbornRepositorysStagedFilesAreListedAsAdditions() async throws {
+        let fixture = try await GitFixture(tree)
+        try fixture.write("a.txt", bytes: Data("one\n".utf8))
+        try fixture.write("nested/b.txt", bytes: Data("two\nthree\n".utf8))
+        try await fixture.run(["add", "-A"])
+
+        let listed = try await changes(fixture, .workingTreeAgainstHEAD)
+
+        XCTAssertEqual(listed.map(\.path).sorted(), ["a.txt", "nested/b.txt"],
+                       "an unborn repository's staged files are not the changed-file list")
+        XCTAssertTrue(listed.allSatisfy { $0.status == .added },
+                      "a staged file in a repository with no first commit is not an addition")
+        XCTAssertEqual(listed.first { $0.path == "nested/b.txt" }?.additions, 2,
+                       "the added file's line count is not the two lines it holds")
+        XCTAssertTrue(listed.allSatisfy { $0.deletions == 0 && !$0.isBinary },
+                      "an addition in an unborn repository carries deletions or reads as binary")
+    }
+
+    /// And the other half of that state: an unborn repository whose files are **untracked** lists
+    /// nothing, rather than failing or inventing additions. `git diff HEAD` never reports untracked
+    /// paths, and substituting the empty tree must not change that — a substitution that listed
+    /// them would make this base mean something else in the one repository it was added for.
+    func testAnUnbornRepositoryWithNothingStagedListsNoChange() async throws {
+        let fixture = try await GitFixture(tree)
+        try fixture.write("untracked.txt", bytes: Data("one\n".utf8))
+
+        let listed = try await changes(fixture, .workingTreeAgainstHEAD)
+
+        XCTAssertEqual(listed.count, 0,
+                       "an unborn repository with nothing staged reported \(listed.count) changed file(s)")
+    }
+
     /// The command lines the three `DiffRef.Base` cases produce, asserted directly, because the
     /// mapping is the one place this leaf decides what "diff" means and the fixtures above would
     /// still pass if `.commitAgainstParent` quietly became `git diff <h>` on a non-root commit.

@@ -147,6 +147,8 @@ public enum GitDiff {
     public static func changes(root: URL, base: DiffRef.Base, environment: [String: String],
                                runner: any ToolRunning,
                                timeout: Duration = readTimeout) async throws -> [FileChange] {
+        let base = try await resolvingAnUnbornHead(base, root: root, environment: environment,
+                                                   runner: runner, timeout: timeout)
         let statuses = try parseNameStatus(
             await read(root: root, base: base, listing: "--name-status",
                        environment: environment, runner: runner, timeout: timeout))
@@ -154,6 +156,56 @@ public enum GitDiff {
             await read(root: root, base: base, listing: "--numstat",
                        environment: environment, runner: runner, timeout: timeout))
         return try join(nameStatus: statuses, numstat: counts)
+    }
+
+    /// `.workingTreeAgainstHEAD` in a repository that has **no first commit**, compared against
+    /// git's empty tree instead of against `HEAD` (R6/F2).
+    ///
+    /// In a freshly initialised repository `HEAD` names a branch that holds no commit, so it
+    /// resolves to no object and `git diff HEAD` exits 128 — while the staged files are additions
+    /// and there is nothing ambiguous about them. `WorkingTreeStatus` already reads this state and
+    /// reports it (`headOID` nil), so leaving it failing here means two readers of one repository
+    /// disagreeing about whether it can be read at all.
+    ///
+    /// Resolved **before** either listing runs rather than by retrying a failure, so that both
+    /// listings are taken against the same base — a repository whose first commit lands between
+    /// the two reads would otherwise join a `HEAD` listing to an empty-tree one. The cost is one
+    /// `rev-parse` per call on this base and nothing on the other two.
+    ///
+    /// The empty tree's object name is **asked of git** rather than written down. The familiar
+    /// `4b825dc…` is the SHA-1 one, and a repository initialised with `--object-format=sha256` has
+    /// a different one; a hard-coded constant would exit 128 there, which is the defect being fixed.
+    private static func resolvingAnUnbornHead(_ base: DiffRef.Base, root: URL,
+                                              environment: [String: String], runner: any ToolRunning,
+                                              timeout: Duration) async throws -> DiffRef.Base {
+        guard case .workingTreeAgainstHEAD = base else { return base }
+        // `--verify --quiet` so that an unresolvable HEAD is a bare non-zero exit rather than a
+        // diagnostic; `^{commit}` so that a HEAD pointing at a branch with no commit is refused
+        // for the reason it is unusable here.
+        let head = try await runner.run(.git, arguments: ["rev-parse", "--verify", "--quiet",
+                                                          "HEAD^{commit}"],
+                                        cwd: root, environment: environment, timeout: timeout)
+        guard head.exitCode != 0 else { return base }
+        return .commit(try await emptyTreeObjectName(root: root, environment: environment,
+                                                     runner: runner, timeout: timeout))
+    }
+
+    /// The object name of the empty tree in this repository's own hash algorithm.
+    ///
+    /// `hash-object` without `-w` computes and prints; it writes nothing into the object database,
+    /// which matters because a read of a repository must stay a read.
+    private static func emptyTreeObjectName(root: URL, environment: [String: String],
+                                            runner: any ToolRunning,
+                                            timeout: Duration) async throws -> String {
+        let output = try await runner.run(.git, arguments: ["hash-object", "-t", "tree", "/dev/null"],
+                                          cwd: root, environment: environment, timeout: timeout)
+        guard output.exitCode == 0 else {
+            throw ToolError.commandFailed(tool: .git, exitCode: output.exitCode,
+                                          stderrTail: output.stderrTail)
+        }
+        let name = output.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw fail("git named no empty tree object") }
+        return name
     }
 
     private static func read(root: URL, base: DiffRef.Base, listing: String,
