@@ -107,6 +107,10 @@ final class GhosttyFeedQueue: Sendable {
         var isDraining = false
         var isAttached = false
         var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+        /// Waits whose task was cancelled before the waiter reached ``registerWaiter(_:_:)``.
+        /// Cancellation and registration race, so the cancellation is recorded against the
+        /// identifier and the registration that follows refuses rather than parking for ever.
+        var cancelledWaiters: Set<UUID> = []
     }
 
     private let state = Mutex(State())
@@ -231,16 +235,35 @@ final class GhosttyFeedQueue: Sendable {
         }
     }
 
-    /// Registers a caller waiting for room, or tells it there is room already.
+    /// Registers a caller waiting for room, or tells it there is room already — or that its own
+    /// task was cancelled while it was on its way here.
     func registerWaiter(
         _ identifier: UUID,
         _ continuation: CheckedContinuation<Void, Never>
     ) -> Bool {
         state.withLock { state in
+            guard state.cancelledWaiters.remove(identifier) == nil else { return false }
             guard state.outstandingByteCount >= highWaterByteCount else { return false }
             state.waiters[identifier] = continuation
             return true
         }
+    }
+
+    /// Takes a waiter back out on cancellation, for the caller to resume outside the lock. A
+    /// cancellation that arrives before the registration is recorded instead, so the registration
+    /// refuses; ``forgetWaiter(_:)`` clears that record once the wait is over.
+    func releaseWaiter(_ identifier: UUID) -> CheckedContinuation<Void, Never>? {
+        state.withLock { state in
+            guard let waiter = state.waiters.removeValue(forKey: identifier) else {
+                state.cancelledWaiters.insert(identifier)
+                return nil
+            }
+            return waiter
+        }
+    }
+
+    func forgetWaiter(_ identifier: UUID) {
+        state.withLock { $0.cancelledWaiters.remove(identifier) }
     }
 }
 
@@ -487,14 +510,25 @@ public final class GhosttyTerminalSurface: TerminalSurface {
     /// A host awaits this between deliveries. Not consuming the PTY layer's events is what stops
     /// the read loop, fills its bounded buffer and leaves the child blocked on the pty — the flow
     /// control a terminal is built around, reaching all the way from the renderer to the child.
+    ///
+    /// Waiting is cancellable (tracker 93), the way the PTY layer's write gate already is: a
+    /// pane's read loop has a lifetime of its own, and a renderer that never catches up — a
+    /// surface that never attaches, a window that has gone away — would otherwise make a pane
+    /// impossible to close. A cancelled waiter returns without ever having had capacity, which is
+    /// the only meaning cancellation can carry here: its caller is being torn down.
     public func awaitFeedCapacity() async {
         let identifier = UUID()
-        await withCheckedContinuation { continuation in
-            guard feedQueue.registerWaiter(identifier, continuation) else {
-                continuation.resume()
-                return
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard feedQueue.registerWaiter(identifier, continuation) else {
+                    continuation.resume()
+                    return
+                }
             }
+        } onCancel: {
+            feedQueue.releaseWaiter(identifier)?.resume()
         }
+        feedQueue.forgetWaiter(identifier)
     }
 
     public func processDidExit(code: Int32) {
