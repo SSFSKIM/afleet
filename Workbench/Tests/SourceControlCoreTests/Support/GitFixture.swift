@@ -166,3 +166,50 @@ extension GitFixture {
         try await run(["checkout", "-b", name, ref])
     }
 }
+
+// MARK: - added by the R3 fix wave, additively and without touching anything above
+
+extension GitFixture {
+
+    /// Merges `ref` into the current branch expecting the merge to **conflict**, resolves every
+    /// path in `resolution`, and commits the merge.
+    ///
+    /// `merge(_:message:)` throws on a non-zero exit, which a conflicting merge always is, so it
+    /// cannot build the shape the R3 wave needs: a merge commit whose combined listing carries a
+    /// two-letter status. The conflict is asserted here rather than assumed — a fixture whose
+    /// merge quietly succeeded would build the *ordinary* shape under a name promising the other
+    /// one, and the test above it would then pin nothing.
+    func mergeResolvingConflict(_ ref: String, message: String,
+                                resolution: [String: String]) async throws {
+        commitCount += 1
+        let stamp = "\(Self.baseTimestamp + commitCount) +0000"
+        let attempt = try await runner.run(.git, arguments: ["merge", "--no-ff", "-m", message, ref],
+                                           cwd: root, environment: environment, timeout: .seconds(30))
+        guard attempt.exitCode != 0 else {
+            throw Failure(subcommand: "merge (expected a conflict)", exitCode: 0)
+        }
+        for (path, contents) in resolution {
+            let url = root.appending(path: path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try contents.write(to: url, atomically: true, encoding: .utf8)
+        }
+        try await run(["add", "-A"])
+        try await run(["commit", "-m", message],
+                      extraEnvironment: ["GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp])
+    }
+
+    /// Creates a symbolic link at `relativePath` pointing at `destination`, without staging it.
+    /// `destination` is stored verbatim, so it need not exist — a dangling link is a valid git
+    /// object and one of the two shapes the R3 wave pins.
+    func symlink(_ relativePath: String, to destination: String) throws {
+        let url = root.appending(path: relativePath)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        // `removeItem` rather than a `fileExists` guard: `fileExists` follows the link and so
+        // answers "no" for a dangling one, which is exactly the case being replaced here.
+        try? FileManager.default.removeItem(at: url)
+        try FileManager.default.createSymbolicLink(atPath: url.path(percentEncoded: false),
+                                                   withDestinationPath: destination)
+    }
+}

@@ -60,6 +60,40 @@ final class LaneAssignmentTests: XCTestCase {
         GraphRow.Edge(fromLane: from, toLane: to, truncated: truncated)
     }
 
+    /// Every edge leaving a row must arrive somewhere on the row below: at that row's own dot, or
+    /// at an edge of that row which carries the lane onward. An edge that does neither is a line
+    /// drawn into empty space.
+    ///
+    /// Asserted over every fixture in this file rather than re-derived shape by shape, because a
+    /// dangling line is wrong for every shape. This is the one property R3's F2, F3 and F4 each
+    /// broke in a different way — a convergence never drawn, a pass-through replaced by a merge
+    /// edge, and a working-tree edge that never reached `HEAD` — which is why they were one
+    /// defect in the edge model rather than three.
+    ///
+    /// The final row is exempt only for `truncated` edges: there is no row below for them to land
+    /// on, which is what the flag says. A *non*-truncated edge leaving the last row would be a
+    /// line pointing at a row the assignment claims to have read.
+    private func assertEveryEdgeLands(_ assignment: LaneAssignment,
+                                      file: StaticString = #filePath, line: UInt = #line) {
+        for (index, row) in assignment.rows.enumerated() {
+            guard index + 1 < assignment.rows.count else {
+                XCTAssertTrue(row.edges.allSatisfy(\.truncated),
+                              "the last row carries an edge that is not truncated and so points "
+                              + "at a row that does not exist",
+                              file: file, line: line)
+                continue
+            }
+            let below = assignment.rows[index + 1]
+            for edge in row.edges {
+                XCTAssertTrue(below.lane == edge.toLane
+                                || below.edges.contains { $0.fromLane == edge.toLane },
+                              "an edge leaving row \(index) into lane \(edge.toLane) reaches "
+                              + "neither the dot nor any edge of the row below it",
+                              file: file, line: line)
+            }
+        }
+    }
+
     private func commits(_ fixture: GitFixture, limit: Int = GitLog.defaultLimit) async throws -> [GitCommit] {
         try await GitLog.commits(root: fixture.root, environment: fixture.environment,
                                  runner: ToolRunner(), limit: limit)
@@ -123,11 +157,17 @@ final class LaneAssignmentTests: XCTestCase {
         // lane 0 is reserved for `c1` by `c3`'s own first-parent inheritance, so the row carries a
         // straight-down edge in each. An assignment that pointed `c3`'s first parent at the
         // already-reserved lane 1 instead would carry a single crossing edge here.
+        // Both edges leaving this row end at the row below, which is the shared root read in
+        // lane 0: the first parent's straight-down edge, and lane 1's line bending into lane 0
+        // because that is where its target sits (R3 F2, D43). An implementation that released
+        // lane 1's reservation without redirecting the line into it emits `edge(1, 1)` here and
+        // draws a line stopping in the empty lane beside the root.
         XCTAssertEqual(edges(of: c3, in: assignment),
-                       [edge(0, 0), edge(1, 1)],
-                       "the first parent stays in lane 0 while lane 1 passes through to the same root")
+                       [edge(0, 0), edge(1, 0)],
+                       "lane 1's line converges into the lane the shared root is read at")
         XCTAssertEqual(edges(of: c1, in: assignment), [],
                        "the root commit is parentless, so no edge leaves its row")
+        assertEveryEdgeLands(assignment)
     }
 
     // MARK: - 2. an octopus merge
@@ -187,6 +227,12 @@ final class LaneAssignmentTests: XCTestCase {
                        "lane 1 runs straight down to the root while lanes 0 and 2 pass through")
         XCTAssertEqual(edges(of: root, in: assignment), [],
                        "the root commit is parentless, so no edge leaves its row")
+        // The row directly above the root is `a`, and all three lanes reserved for the root
+        // converge into the lane it is read at (R3 F2, D43).
+        XCTAssertEqual(edges(of: a, in: assignment),
+                       [edge(0, 0), edge(1, 0), edge(2, 0)],
+                       "three lanes reaching the same root all bend into the lane it is read at")
+        assertEveryEdgeLands(assignment)
     }
 
     // MARK: - 3. a detached tag
@@ -229,12 +275,15 @@ final class LaneAssignmentTests: XCTestCase {
         }
         XCTAssertEqual(tagNames, ["v9"], "the tag-only commit carries its tag into the row")
 
-        // The discriminator: lane 1 runs straight down from the detached commit to the shared
-        // root, beside lane 0's pass-through. An assignment that pointed the first parent at the
-        // reservation lane 0 already holds would emit a single crossing edge here instead.
+        // The discriminator: both lanes end at the shared root on the row below — lane 0's
+        // pass-through and lane 1's line bending into the lane the root is read at. Under the
+        // pre-R3 edge model lane 1's line was emitted as `edge(1, 1)` and ended in the empty
+        // lane beside the root, which is the connection F2 named (D43). The *lane* assertions
+        // above are what pin the first-parent rule here; this one pins the convergence.
         XCTAssertEqual(edges(of: detached, in: assignment),
-                       [edge(0, 0), edge(1, 1)],
-                       "the detached commit's lane runs down to the root beside the branch's lane")
+                       [edge(0, 0), edge(1, 0)],
+                       "the detached commit's lane bends into the lane the shared root is read at")
+        assertEveryEdgeLands(assignment)
     }
 
     // MARK: - 4. a dirty working tree, both directions
@@ -280,6 +329,8 @@ final class LaneAssignmentTests: XCTestCase {
         XCTAssertEqual(lane(of: headCommit, in: dirtyAssignment), 0,
                        "the commit rows keep the lanes they had; the working-tree row is prepended, not woven in")
         XCTAssertEqual(lane(of: first, in: dirtyAssignment), 0, "the root keeps HEAD's lane as its first parent")
+        assertEveryEdgeLands(cleanAssignment)
+        assertEveryEdgeLands(dirtyAssignment)
     }
 
     // MARK: - 5. the window
@@ -316,6 +367,7 @@ final class LaneAssignmentTests: XCTestCase {
                        "an edge to a parent inside the window is not truncated")
         XCTAssertEqual(edges(of: hashes[2], in: assignment), [edge(0, 0, truncated: true)],
                        "the oldest row's edge points at a parent the window never read")
+        assertEveryEdgeLands(assignment)
     }
 
     // MARK: - 6. the working-tree row attaches to HEAD, not to whatever was read first
@@ -364,14 +416,31 @@ final class LaneAssignmentTests: XCTestCase {
 
         let assignment = LaneAssignment.assign(commits: history, workingTreeIsDirty: !dirty.isClean)
         XCTAssertEqual(assignment.rows.count, 4, "three commits plus the working-tree row")
-        XCTAssertEqual(lane(of: detached, in: assignment), 0, "the tag-only tip is read first and holds lane 0")
-        XCTAssertEqual(lane(of: c2, in: assignment), 1, "HEAD opens lane 1 beside the tag-only tip")
+
+        // The working tree is a child of `HEAD` and reserves its own lane for it, exactly as
+        // rule 3 has a commit reserve its lane for its first parent (R3 F4, D44). So `HEAD`
+        // is read in lane 0 even though it is not the first row read, and the tag-only tip —
+        // which finds lane 0 already reserved — opens lane 1 beside it.
+        XCTAssertEqual(lane(of: c2, in: assignment), 0, "HEAD is read in the lane the working tree reserved")
+        XCTAssertEqual(lane(of: detached, in: assignment), 1,
+                       "the tag-only tip, read first, finds lane 0 reserved and opens lane 1")
         XCTAssertEqual(lane(of: c1, in: assignment), 0, "the shared root is read at the leftmost lane reserved for it")
         XCTAssertEqual(assignment.laneCount, 2, "two lanes are the high-water mark of this graph")
 
         XCTAssertEqual(assignment.rows.first?.content, .workingTree, "the working tree is row zero")
-        XCTAssertEqual(assignment.rows.first?.edges, [edge(0, 1)],
-                       "the working-tree edge lands in HEAD's lane, not in the first row's lane")
+        XCTAssertEqual(assignment.rows.first?.lane, 0, "the working-tree row sits in lane 0")
+        XCTAssertEqual(assignment.rows.first?.edges, [edge(0, 0)],
+                       "one edge leaves the working-tree row, into the lane it reserved for HEAD")
+
+        // The discriminator F4 named. `HEAD` is **not** the row below the working tree — the
+        // tag-only tip is — so the connection only exists if the reserved lane is carried
+        // through that intervening row. An implementation that prepends a single edge after
+        // assignment leaves lane 0 at this row belonging to the tag-only tip's own line, and the
+        // working tree's connection dangles one row down.
+        XCTAssertEqual(edges(of: detached, in: assignment),
+                       [edge(0, 0), edge(1, 1)],
+                       "the intervening row carries the working tree's reserved lane down to HEAD")
+        assertEveryEdgeLands(assignment)
     }
 
     // MARK: - 7. a freed lane is reused
@@ -461,6 +530,7 @@ final class LaneAssignmentTests: XCTestCase {
                        "lane 0 passes through to the root while the merge reaches into lanes 1 and 2")
         XCTAssertEqual(lane(of: base, in: assignment), 0, "the root is read at the leftmost lane reserved for it")
         XCTAssertEqual(edges(of: base, in: assignment), [], "the root commit is parentless")
+        assertEveryEdgeLands(assignment)
     }
 
     // MARK: - 8. two merges naming the same further parent
@@ -519,12 +589,19 @@ final class LaneAssignmentTests: XCTestCase {
         XCTAssertEqual(lane(of: x1, in: assignment), 2, "its first parent keeps lane 2")
         XCTAssertEqual(lane(of: base, in: assignment), 0, "the root is read at the leftmost lane reserved for it")
 
-        // The discriminator: an edge reaching sideways from lane 2 into the existing lane 1, and
-        // no fourth lane. An implementation that ignored the reservation would carry `edge(2, 3)`
-        // here instead.
+        // Two discriminators in one list. First: an edge reaching sideways from lane 2 into the
+        // existing lane 1, and no fourth lane — an implementation that ignored the reservation
+        // would carry `edge(2, 3)` here instead. Second, and the one R3's F3 named: lane 1 is
+        // *also* the lane `mainMerge` opened for `s` two rows above, and that line passes
+        // through this row on its own way down. Both must be drawn, so this row carries **two**
+        // edges arriving in lane 1 (D43). An edge model allowing one edge per destination lane
+        // cannot express that: it emitted `edge(2, 1)` alone and broke `mainMerge`'s line at
+        // this row.
         XCTAssertEqual(edges(of: sideMerge, in: assignment),
-                       [edge(0, 0), edge(2, 1), edge(2, 2)],
-                       "the second merge reaches into the lane already reserved for the shared parent")
+                       [edge(0, 0), edge(1, 1), edge(2, 1), edge(2, 2)],
+                       "the merge reaches into the shared parent's lane without erasing the line "
+                       + "already running down it")
+        assertEveryEdgeLands(assignment)
     }
 
     // MARK: - 9. a truncated lane runs to the bottom of the window
@@ -578,5 +655,6 @@ final class LaneAssignmentTests: XCTestCase {
         XCTAssertEqual(edges(of: c2, in: assignment),
                        [edge(0, 0, truncated: true), edge(1, 1, truncated: true)],
                        "both lanes leave the bottom of the window, and neither ends at a row")
+        assertEveryEdgeLands(assignment)
     }
 }

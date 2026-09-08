@@ -76,12 +76,21 @@ public enum GitDiff {
     /// - `.workingTreeAgainstHEAD` → `git diff HEAD`, the whole of what is uncommitted, staged
     ///   or not.
     /// - `.commit(h)` → `git diff <h>`, the working tree against that commit.
-    /// - `.commitAgainstParent(h)` → `git show --format= <h>`, *not* `git diff <h>^ <h>`. A
-    ///   **root commit** has no `<h>^`, so the parent form fails on the first commit of every
-    ///   repository; `git show` lists that commit's whole tree as added instead. It also follows
-    ///   git's own convention of showing nothing for a merge commit rather than picking a parent
-    ///   to be right about. `--format=` suppresses the commit header, leaving the file listing
-    ///   alone.
+    /// - `.commitAgainstParent(h)` → `git show --format= --first-parent <h>`, *not*
+    ///   `git diff <h>^ <h>`. A **root commit** has no `<h>^`, so the parent form fails on the
+    ///   first commit of every repository; `git show` lists that commit's whole tree as added
+    ///   instead. `--format=` suppresses the commit header, leaving the file listing alone.
+    ///
+    ///   `--first-parent` is required rather than decorative, and is the one thing this mapping
+    ///   adds to `git show`'s defaults (D41). Measured on `git` 2.55.0, a **merge** commit's
+    ///   default listing is unusable here in two different ways: for an ordinary merge
+    ///   `--name-status` prints nothing at all while `--numstat` prints a record per path, so the
+    ///   join below sees two listings that disagree completely; and for a merge whose tree
+    ///   differs from both parents — a resolved conflict — the default is git's *combined* diff,
+    ///   whose status field carries one letter per parent (`MM`), which the name-status parser
+    ///   rejects. `--first-parent` produces the same shape in both listings, never a combined
+    ///   status code, and answers the question a panel is asking: what the branch this merge
+    ///   landed on gained by it.
     ///
     /// `-z` because without it git C-quotes any path containing a space, a quote, a backslash or
     /// a non-ASCII byte, and this parser would have to reimplement git's quoting rules to be
@@ -96,7 +105,7 @@ public enum GitDiff {
         case .commit(let hash):
             return ["diff"] + tail + [hash]
         case .commitAgainstParent(let hash):
-            return ["show", "--format="] + tail + [hash]
+            return ["show", "--format=", "--first-parent"] + tail + [hash]
         }
     }
 
@@ -314,8 +323,32 @@ public enum GitDiff {
     /// base is `.workingTreeAgainstHEAD` or `.commit`.
     ///
     /// Read directly rather than through `git`, because the working tree is a file and git has
-    /// nothing to add to reading one.
+    /// nothing to add to reading one — with one exception this function exists to handle. For a
+    /// **symbolic link** git stores the link's *destination text* as the blob, so `blob` returns
+    /// `"a.txt"` while an ordinary read follows the link and returns the bytes of `a.txt`. The
+    /// two sides of the diff would then be different kinds of thing: retargeting a link would
+    /// draw as a whole-file rewrite, and a dangling link — a change git tracks perfectly well —
+    /// would throw. So a link is detected with `lstat` and its destination returned, which is the
+    /// same git object type `blob` returns for the other side (D42).
     public static func workingTreeFile(root: URL, path: String) throws -> Data {
-        try Data(contentsOf: root.appending(path: path))
+        let url = root.appending(path: path)
+        let fileSystemPath = url.path(percentEncoded: false)
+        var info = stat()
+        guard lstat(fileSystemPath, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK else {
+            return try Data(contentsOf: url)
+        }
+        // `readlink` rather than `destinationOfSymbolicLink`, which returns a `String`: a link's
+        // destination is a path, and a path on macOS need not be valid UTF-8 (the same reason the
+        // listing parser splits over bytes). `st_size` is the destination's length for a link;
+        // the buffer is one byte longer so that a full read is distinguishable from a truncated
+        // one, and `readlink` never terminates what it writes.
+        var buffer = [UInt8](repeating: 0, count: max(Int(info.st_size), 1) + 1)
+        let written = buffer.withUnsafeMutableBytes { raw in
+            readlink(fileSystemPath, raw.baseAddress!.assumingMemoryBound(to: CChar.self), raw.count)
+        }
+        guard written >= 0, written < buffer.count else {
+            throw fail("a symbolic link's destination could not be read")
+        }
+        return Data(buffer[0..<written])
     }
 }

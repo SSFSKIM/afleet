@@ -20,7 +20,15 @@ public struct GraphRow: Hashable, Sendable {
     ///
     /// `fromLane` is where the line starts at this row and `toLane` where it arrives at the next:
     /// the two are equal for a lane running straight down, and differ where a merge's row reaches
-    /// sideways into the lane it opened for a further parent.
+    /// sideways into the lane it opened for a further parent, or where a line bends into the lane
+    /// the parent it is on its way to turned out to be read at.
+    ///
+    /// **Several edges may arrive in the same `toLane`, and one lane may be left by several
+    /// edges.** A destination lane is not a key (D43): where a merge reaches into a lane another
+    /// child already reserved, that lane carries both the merge's edge and the pass-through of
+    /// the line already running down it, and where two lanes converge on one parent both bend
+    /// into that parent's lane. A consumer that indexed edges by `toLane` would silently drop one
+    /// of each pair and disconnect a line at that row.
     public struct Edge: Hashable, Sendable {
         public var fromLane: Int
         public var toLane: Int
@@ -44,7 +52,9 @@ public struct GraphRow: Hashable, Sendable {
 
     public var content: Content
     public var lane: Int
-    /// The edges leaving this row toward the next, ordered by the lane they arrive in.
+    /// The edges leaving this row toward the next, ordered by the lane they arrive in and then by
+    /// the lane they leave from. The order is total and deterministic — no two edges of a row
+    /// share both endpoints — so two assignments of the same window compare equal.
     public var edges: [Edge]
 
     public init(content: Content, lane: Int, edges: [Edge]) {
@@ -78,14 +88,28 @@ public struct LaneAssignment: Hashable, Sendable {
     /// and consumed by the parent it names, so a lane is exactly "a line that is on its way down to
     /// a commit not yet read".
     ///
+    /// When `workingTreeIsDirty`, a `.workingTree` row is prepended **before** the loop, at lane 0,
+    /// and it reserves lane 0 for `HEAD`'s hash — it is a child of `HEAD` and takes the same rule 3
+    /// every commit does (D44). That is what makes the connection reach: `HEAD` need not be the row
+    /// below, because `--topo-order --all` orders the tips by date and a tag-only commit newer than
+    /// `HEAD` is listed ahead of it (measured on `git` 2.55.0), and a reserved lane is carried down
+    /// through every intervening row by the pass-through rule below while a single prepended edge
+    /// would dangle one row down. `HEAD` is then read in lane 0 rather than wherever it fell, and
+    /// the tips read before it open lanes beside it. When no row carries `.head` — `HEAD` fell
+    /// outside the window — the first commit read is the only remaining approximation; when there
+    /// are no commits at all, the row is drawn alone.
+    ///
     /// For each commit, in order:
     ///
     /// 1. Its lane is the leftmost lane reserved for its hash. If no lane is reserved for it — a
     ///    branch tip, or a commit reachable only through a tag — it takes the leftmost free lane,
     ///    appending a new one when none is free.
     /// 2. That reservation is freed, and then every *other* lane also reserved for this hash is
-    ///    released. A commit reached by two children closes the extra lanes at its own row, which
-    ///    is where the two lines visibly converge.
+    ///    released — and, on the row above, every edge that arrived in one of those released lanes
+    ///    is redirected to end in the lane this commit was read at. A commit reached by two
+    ///    children closes the extra lanes at its own row, and the redirection is what makes the two
+    ///    lines visibly converge *on the commit* rather than stop in the empty lanes beside it
+    ///    (D43).
     /// 3. The first parent reserves the commit's own lane. This is the rule the whole shape rests
     ///    on: it is what makes a line of history run straight down instead of wandering, and it is
     ///    what makes the *second* parent of a merge the side that gets a new lane. It reserves the
@@ -95,16 +119,20 @@ public struct LaneAssignment: Hashable, Sendable {
     ///    reservation for that parent's hash, in which case no new lane is taken and the edge
     ///    points at the existing one.
     ///
-    /// The edges leaving the row are then one per lane reserved after that update: from the
-    /// commit's own lane for a lane this commit's parents occupy, and straight down for a lane
-    /// merely passing through. An edge whose target hash is not among `commits` is `truncated`.
+    /// The edges leaving the row are then the union of two sets, which is the whole of the edge
+    /// model:
     ///
-    /// When `workingTreeIsDirty`, a `.workingTree` row is prepended at lane 0 with one edge into
-    /// the lane of the row carrying a `.head` ref; the row makes no other claim. It is **not** the
-    /// first row: `--topo-order --all` orders the tips by date, so a tag-only commit newer than
-    /// `HEAD` is listed ahead of it (measured on `git` 2.55.0), and attaching to row zero would
-    /// draw the uncommitted changes hanging off an unrelated tip. When no row carries `.head` —
-    /// `HEAD` fell outside the window — the first row is the only remaining approximation.
+    /// - one **pass-through** `i → i` for every lane `i` that held a reservation before this
+    ///   commit's parents were assigned and was not released at this row: a line merely running
+    ///   past, which this row must not interrupt;
+    /// - one edge `lane → p` for every lane `p` this commit's parents occupy.
+    ///
+    /// The two sets overlap in destination, and both edges are kept: a merge reaching into a lane
+    /// another child already reserved (rule 4's clause) leaves that lane carrying the merge's edge
+    /// *and* the pass-through of the line already running down it. Keeping one edge per
+    /// destination lane cannot represent that pair, and dropping the pass-through disconnects the
+    /// older line at this row (D43). An edge whose target hash is not among `commits` is
+    /// `truncated`.
     public static func assign(commits: [GitCommit], workingTreeIsDirty: Bool) -> LaneAssignment {
         // Membership of the window, for the `truncated` flag. A parent outside it is never read,
         // so its reservation is never released: the lane stays occupied to the bottom of the
@@ -117,8 +145,26 @@ public struct LaneAssignment: Hashable, Sendable {
         var rows: [GraphRow] = []
         rows.reserveCapacity(commits.count + (workingTreeIsDirty ? 1 : 0))
 
+        if workingTreeIsDirty {
+            // The row `HEAD` points at is the row the uncommitted changes sit above, and it is not
+            // necessarily the row below — see the note on the ordering above. `GitLog` emits
+            // `.head` for both the attached (`HEAD -> main`) and the detached (`HEAD`) decoration.
+            let head = commits.first { commit in
+                commit.refs.contains { $0.kind == .head }
+            } ?? commits.first
+            if let head {
+                lanes = [head.hash]
+            }
+            // A repository with no commits still draws its one dirty row somewhere.
+            laneCount = 1
+            rows.append(GraphRow(content: .workingTree, lane: 0,
+                                 edges: head == nil ? []
+                                                    : [GraphRow.Edge(fromLane: 0, toLane: 0,
+                                                                     truncated: false)]))
+        }
+
         for commit in commits {
-            // 1 and 2: find this commit's lane, then clear every reservation naming it.
+            // 1: find this commit's lane.
             let lane: Int
             if let reserved = lanes.firstIndex(where: { $0 == commit.hash }) {
                 lane = reserved
@@ -128,10 +174,30 @@ public struct LaneAssignment: Hashable, Sendable {
                 lanes.append(nil)
                 lane = lanes.count - 1
             }
-            for index in lanes.indices where lanes[index] == commit.hash { lanes[index] = nil }
 
-            // 3 and 4: reserve a lane for each parent. `parentLanes` is what distinguishes an edge
-            // this row *creates* from one merely passing through it.
+            // 2: release every reservation naming this commit, and bend the lines that were on
+            // their way into the released lanes into the lane the commit was actually read at.
+            var released: Set<Int> = []
+            for index in lanes.indices where lanes[index] == commit.hash {
+                if index != lane { released.insert(index) }
+                lanes[index] = nil
+            }
+            if !released.isEmpty, var above = rows.last {
+                above.edges = above.edges.map { edge in
+                    guard released.contains(edge.toLane) else { return edge }
+                    return GraphRow.Edge(fromLane: edge.fromLane, toLane: lane,
+                                         truncated: edge.truncated)
+                }
+                above.edges.sort { ($0.toLane, $0.fromLane) < ($1.toLane, $1.fromLane) }
+                rows[rows.count - 1] = above
+            }
+
+            // The lanes a line is already running down, read before rule 3 and 4 add this row's
+            // own. Rules 3 and 4 only ever write to a lane that is free or to this commit's own
+            // (just released), so these indices keep their hashes below.
+            let passingThrough = lanes.indices.filter { lanes[$0] != nil }
+
+            // 3 and 4: reserve a lane for each parent.
             var parentLanes = Set<Int>()
             for (position, parent) in commit.parents.enumerated() {
                 if position == 0 {
@@ -150,29 +216,20 @@ public struct LaneAssignment: Hashable, Sendable {
             laneCount = max(laneCount, lanes.count)
 
             var edges: [GraphRow.Edge] = []
-            for index in lanes.indices {
-                guard let target = lanes[index] else { continue }
-                edges.append(GraphRow.Edge(fromLane: parentLanes.contains(index) ? lane : index,
-                                           toLane: index,
-                                           truncated: !inWindow.contains(target)))
+            for index in passingThrough {
+                edges.append(GraphRow.Edge(fromLane: index, toLane: index,
+                                           truncated: !inWindow.contains(lanes[index]!)))
             }
+            for target in parentLanes {
+                edges.append(GraphRow.Edge(fromLane: lane, toLane: target,
+                                           truncated: !inWindow.contains(lanes[target]!)))
+            }
+            // No two edges of a row share both endpoints — `parentLanes` is a set, and a lane this
+            // commit's parents occupy is either free before the row or the commit's own, so it is
+            // never among `passingThrough` — so the order is total.
+            edges.sort { ($0.toLane, $0.fromLane) < ($1.toLane, $1.fromLane) }
 
             rows.append(GraphRow(content: .commit(commit), lane: lane, edges: edges))
-        }
-
-        if workingTreeIsDirty {
-            // The row `HEAD` points at, which is the row the uncommitted changes sit above — not
-            // necessarily row zero, see the note on the ordering above. `GitLog` emits `.head` for
-            // both the attached (`HEAD -> main`) and the detached (`HEAD`) decoration.
-            let headRow = rows.first { row in
-                guard case .commit(let commit) = row.content else { return false }
-                return commit.refs.contains { $0.kind == .head }
-            }
-            let toHead = (headRow ?? rows.first)
-                .map { [GraphRow.Edge(fromLane: 0, toLane: $0.lane, truncated: false)] } ?? []
-            rows.insert(GraphRow(content: .workingTree, lane: 0, edges: toHead), at: 0)
-            // A repository with no commits still draws its one dirty row somewhere.
-            laneCount = max(laneCount, 1)
         }
 
         return LaneAssignment(rows: rows, laneCount: laneCount)

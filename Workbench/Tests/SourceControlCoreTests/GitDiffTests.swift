@@ -406,6 +406,121 @@ final class GitDiffTests: XCTestCase {
         ])
     }
 
+    // MARK: - merge commits (R3 F1)
+
+    /// An **ordinary** merge commit's changed-file list is the merge against its *first* parent.
+    ///
+    /// **Measured on `git` 2.55.0**, with the global and system configuration disabled: for a
+    /// merge whose result equals neither parent's tree, `git show --format= --name-status -z` of
+    /// that commit prints **nothing at all**, while `git show --format= --numstat -z` of the same
+    /// commit prints a record per path. The two listings `GitDiff.changes` joins therefore
+    /// disagree completely, and the join throws — so selecting an ordinary merge row in the panel
+    /// failed outright rather than showing what the merge brought in.
+    ///
+    /// `--first-parent` is what makes the two listings agree, and it is the listing a panel wants
+    /// (D41): the merge as the branch it was merged into experienced it.
+    ///
+    /// What would have to be true for this to fail: either invocation losing `--first-parent`, or
+    /// a `git` whose combined and first-parent listings differ in shape again.
+    func testAnOrdinaryMergeListsWhatItBroughtInAgainstItsFirstParent() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "base", files: ["base.txt": "base\n"])
+        try await fixture.branch("side")
+        _ = try await fixture.commit(message: "side work", files: ["side.txt": "side\n"])
+        try await fixture.checkout("main")
+        _ = try await fixture.commit(message: "main work", files: ["main.txt": "main\n"])
+        try await fixture.merge(["side"], message: "merge side into main")
+        let merge = try await fixture.run(["rev-parse", "HEAD"]).stdoutText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let list = try await changes(fixture, .commitAgainstParent(merge))
+        XCTAssertGreaterThan(list.count, 0, "the merge commit's changed-file list was empty")
+        XCTAssertEqual(list.count, 1, "against its first parent the merge brought in one path")
+        XCTAssertEqual(list.first?.path, "side.txt", "the path the side branch added")
+        XCTAssertEqual(list.first?.status, .added, "the first parent did not carry that path")
+        XCTAssertEqual(list.first?.additions, 1)
+        XCTAssertEqual(list.first?.deletions, 0)
+    }
+
+    /// A **conflict-resolving** merge, which fails in a different way from the ordinary one.
+    ///
+    /// **Measured on `git` 2.55.0**: for a merge commit whose tree differs from both parents on a
+    /// path, `git show --format= --name-status -z` prints git's *combined* diff, whose status
+    /// field carries **one letter per parent** — `MM` for a path modified relative to both. The
+    /// name-status parser rejects a two-character code deliberately (a status letter it does not
+    /// define is never silently skipped), so this commit threw at parse time rather than at the
+    /// join. Both failures have the same cause and the same fix.
+    ///
+    /// What would have to be true for this to fail: the name-status invocation losing
+    /// `--first-parent` and handing the parser a combined status code again.
+    func testAConflictResolvingMergeIsListedAgainstItsFirstParentTooRatherThanCombined() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "base",
+                                     files: ["shared.txt": "base\n", "base.txt": "base\n"])
+        try await fixture.branch("side")
+        _ = try await fixture.commit(message: "side work",
+                                     files: ["shared.txt": "side\n", "side.txt": "side\n"])
+        try await fixture.checkout("main")
+        _ = try await fixture.commit(message: "main work", files: ["shared.txt": "main\n"])
+        try await fixture.mergeResolvingConflict("side", message: "merge side into main",
+                                                 resolution: ["shared.txt": "resolved\n"])
+        let merge = try await fixture.run(["rev-parse", "HEAD"]).stdoutText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let parentage = try await fixture.run(["rev-list", "--parents", "-n", "1", merge])
+            .stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: " ").count
+        XCTAssertEqual(parentage, 3, "the fixture must have built a two-parent merge commit")
+
+        let list = try await changes(fixture, .commitAgainstParent(merge))
+        XCTAssertGreaterThan(list.count, 0, "the conflict-resolving merge's list was empty")
+        XCTAssertEqual(Set(list.map(\.path)), ["shared.txt", "side.txt"],
+                       "against its first parent the merge brought in the side path and the resolution")
+        XCTAssertEqual(list.first(where: { $0.path == "shared.txt" })?.status, .modified,
+                       "the resolved path is a modification of the first parent's version")
+        XCTAssertEqual(list.first(where: { $0.path == "side.txt" })?.status, .added)
+    }
+
+    // MARK: - symlinks (R3 F5)
+
+    /// A tracked symbolic link: both sides of the diff must be the **link destination**, which is
+    /// what git stores, and never the bytes of the file the link points at.
+    ///
+    /// `blob` returns git's stored object, and for a symlink that object is the destination text.
+    /// Reading the working-tree side with `Data(contentsOf:)` *follows* the link, so the panel
+    /// compared a path string against a file's contents and drew a retargeting as a total
+    /// rewrite. The dangling case is worse: the read throws for a change git tracks perfectly
+    /// well.
+    ///
+    /// What would have to be true for this to fail: a working-tree read that follows the link
+    /// again, in either direction.
+    func testTheWorkingTreeReadOfASymlinkReturnsItsDestinationRatherThanTheTargetsBytes() async throws {
+        let fixture = try await GitFixture(tree)
+        try fixture.symlink("link.txt", to: "a.txt")
+        let first = try await fixture.commit(message: "first",
+                                             files: ["a.txt": "one\n", "b.txt": "two\n"])
+
+        let stored = try await GitDiff.blob(root: fixture.root, rev: first, path: "link.txt",
+                                            environment: fixture.environment, runner: ToolRunner())
+        XCTAssertEqual(stored, Data("a.txt".utf8),
+                       "git stores a symlink as its destination, with no trailing newline")
+
+        // Retargeted, not rewritten: the two sides must be two destinations.
+        try fixture.symlink("link.txt", to: "b.txt")
+        XCTAssertEqual(try GitDiff.workingTreeFile(root: fixture.root, path: "link.txt"),
+                       Data("b.txt".utf8),
+                       "the working-tree side of a symlink is its destination, not the target's bytes")
+
+        // Dangling: a valid git change, and the read must not throw.
+        try fixture.symlink("link.txt", to: "absent.txt")
+        XCTAssertEqual(try GitDiff.workingTreeFile(root: fixture.root, path: "link.txt"),
+                       Data("absent.txt".utf8),
+                       "a dangling symlink still has a destination to compare")
+
+        // An ordinary file is unaffected: the symlink branch must not capture the common case.
+        XCTAssertEqual(try GitDiff.workingTreeFile(root: fixture.root, path: "a.txt"),
+                       Data("one\n".utf8))
+    }
+
     /// The command lines the three `DiffRef.Base` cases produce, asserted directly, because the
     /// mapping is the one place this leaf decides what "diff" means and the fixtures above would
     /// still pass if `.commitAgainstParent` quietly became `git diff <h>` on a non-root commit.
@@ -414,7 +529,10 @@ final class GitDiffTests: XCTestCase {
                        ["diff", "--name-status", "-z", "--find-renames", "HEAD"])
         XCTAssertEqual(GitDiff.arguments(for: .commit("f00d"), listing: "--numstat"),
                        ["diff", "--numstat", "-z", "--find-renames", "f00d"])
+        // `--first-parent` is the R3 wave's F1 fix (D41): without it a merge commit's two
+        // listings disagree and its status codes are combined ones the parser rejects.
         XCTAssertEqual(GitDiff.arguments(for: .commitAgainstParent("f00d"), listing: "--name-status"),
-                       ["show", "--format=", "--name-status", "-z", "--find-renames", "f00d"])
+                       ["show", "--format=", "--first-parent", "--name-status", "-z",
+                        "--find-renames", "f00d"])
     }
 }
