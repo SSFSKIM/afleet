@@ -477,4 +477,172 @@ final class RestartGateStateTests: XCTestCase {
         XCTAssertEqual(resolved.count, 2,
                        "the corrections reached the fleet \(resolved.count) time(s) for two settings")
     }
+
+    // MARK: - 3. The holders are read after every await, not before the first
+
+    /// **The release consults the fleet across an await, and the machine can move inside it.** A
+    /// restart begun while that question is out has already closed the field over a process being
+    /// replaced right now; the older release must not open it again on the reading it took before
+    /// the await.
+    ///
+    /// Deliberate break: drop the second `nothingHolds` guard in `releaseOrHold`. The field then
+    /// opens, and a send goes to the process the newer restart is replacing.
+    func testARestartBegunInsideTheFleetsQuestionKeepsTheFieldClosed() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        await double.setStates([HeaderRig.replaced(key)])
+        let gated = GatedLifecycle(double)
+        let surface = ChannelSurfaceState()
+        let pickers = SettingPickersModel(key: key, lifecycle: gated, surface: surface)
+        pickers.beginRestart(reason: "an invented restart")
+
+        // The first operation ends without a replacement, and its release parks inside the fleet's
+        // own banner question.
+        await gated.holdStates()
+        let releasing = Task { await pickers.cancelRestart() }
+        try await waitFor("the release to reach the fleet's banner") { await gated.callersParked > 0 }
+
+        // A second restart, begun while that release is still out.
+        pickers.beginRestart(reason: "a second invented restart")
+        XCTAssertTrue(surface.isDisabled, "the newer restart did not close the field to begin with")
+
+        await gated.release()
+        await releasing.value
+
+        XCTAssertTrue(surface.isDisabled,
+                      "the older release opened the field over a restart that is still replacing the process")
+        XCTAssertTrue(surface.isRestarting, "the field opened its glyph over a restart that is still running")
+    }
+
+    /// **A confirmation holds the gate for as long as its readbacks are out.** Closing the operation
+    /// the moment `perform` answered, with the comparison's several requests still in flight, leaves
+    /// the machine reading *open* — and a picker click landing there releases the field over a
+    /// process whose settings nothing has verified.
+    ///
+    /// Deliberate break: drop the `awaitedRestart = expected` from `confirmReadback`. The click then
+    /// finds no holder and opens the field mid-confirmation.
+    func testAPickerClickTakenDuringAConfirmationDoesNotOpenTheField() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        let rows = try rows()
+        let picked = try XCTUnwrap(rows.first, "the recording offers no model row")
+        await double.setStates([HeaderRig.replaced(key)])
+        await double.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
+        await double.stageSend("get_settings", .success(try PickerReadbackTests.recordedBody("get_settings")))
+        let gated = GatedLifecycle(double)
+        let surface = ChannelSurfaceState()
+        let pickers = SettingPickersModel(key: key, lifecycle: gated, surface: surface)
+        await pickers.refresh()
+        pickers.beginRestart(reason: "an invented restart")
+
+        // The confirmation parks on the first of its readbacks: the replacement has reported nothing.
+        await gated.hold(subtype: "list_models")
+        let confirming = Task { await pickers.confirmReadback(of: pickers.currentSnapshot) }
+        try await waitFor("the confirmation to reach its first readback") { await gated.callersParked > 0 }
+
+        // And the user clicks a picker, which is not itself disabled.
+        await pickers.selectModel(picked.value)
+
+        XCTAssertTrue(surface.isDisabled,
+                      "a picker click opened the field while the restart's readbacks were still out")
+
+        await gated.release()
+        _ = await confirming.value
+    }
+
+    /// A bounded wait on a condition another task reaches. Counts and never a value (§11).
+    private func waitFor(_ what: String, _ condition: () async -> Bool) async throws {
+        for _ in 0..<400 {
+            if await condition() { return }
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("timed out waiting for \(what)")
+    }
+}
+
+/// A `LifecycleAPI` that can hold one member open — the fleet's `state(of:)`, or a control request of
+/// one subtype — and forwards everything else, unchanged, to the double the assertions read.
+///
+/// The hold is what makes a race a test: both defects above are a second caller arriving inside an
+/// await the model takes, and a double that answers at once closes the window before a test can
+/// reach it. Suspension rather than a delay, so nothing here is a bounded wait on the clock.
+private actor GatedLifecycle: LifecycleAPI {
+
+    private nonisolated let inner: ComposerLifecycleDouble
+    private var holdsStates = false
+    private var heldSubtype: String?
+    private var parked: [CheckedContinuation<Void, Never>] = []
+
+    /// How many callers have parked in the gate. A count, never a caller (§11).
+    private(set) var callersParked = 0
+
+    init(_ inner: ComposerLifecycleDouble) { self.inner = inner }
+
+    func holdStates() { holdsStates = true }
+    func hold(subtype: String) { heldSubtype = subtype }
+
+    func release() {
+        holdsStates = false
+        heldSubtype = nil
+        let waiting = parked
+        parked = []
+        for caller in waiting { caller.resume() }
+    }
+
+    private func park() async {
+        callersParked += 1
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    func state(of key: ChannelKey) async -> ChannelState? {
+        if holdsStates { await park() }
+        return await inner.state(of: key)
+    }
+
+    func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
+        if request.subtype == heldSubtype { await park() }
+        return try await inner.send(request, on: key)
+    }
+
+    func states() async -> [ChannelState] { await inner.states() }
+    func preconditions(for key: ChannelKey) async -> SpawnPrecondition { await inner.preconditions(for: key) }
+    func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
+        try await inner.perform(action, on: key)
+    }
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        try await inner.sendPrompt(input, on: key)
+    }
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
+        try await inner.fork(at: point, on: key)
+    }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey {
+        await inner.resolvedForkKey(of: provisional)
+    }
+    func route(_ text: String, on key: ChannelKey) async -> Routed { await inner.route(text, on: key) }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { await inner.engineReports(of: key) }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        try await inner.resolveSetting(name, to: value, on: key)
+    }
+    func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
+             ui: any StrategyUI) async throws -> StrategyOutcome {
+        try await inner.run(strategy, arguments: arguments, on: key, ui: ui)
+    }
+    func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { try await inner.openInTerminal(key) }
+    func attach(_ job: JobShort) async throws -> PaneRequest { try await inner.attach(job) }
+    func logs(_ job: JobShort) async throws -> PaneRequest { try await inner.logs(job) }
+    func paneExited(_ exit: PaneExit) async { await inner.paneExited(exit) }
+    func jobs() async -> [JobEntry] { await inner.jobs() }
+    func performJob(_ verb: JobVerb, _ short: JobShort) async throws { try await inner.performJob(verb, short) }
+    func isDormantEligible(_ key: ChannelKey) async -> Bool { await inner.isDormantEligible(key) }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { await inner.liveTaskIDs(of: key) }
+    func declineProjectServers(_ names: [String], project: URL) async throws {
+        try await inner.declineProjectServers(names, project: project)
+    }
+    func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async {
+        await inner.acceptProjectServers(servers, project: project)
+    }
+    func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? { await inner.events(of: key) }
+    nonisolated var updates: AsyncStream<ChannelState> { inner.updates }
+    nonisolated var jobUpdates: AsyncStream<[JobEntry]> { inner.jobUpdates }
 }

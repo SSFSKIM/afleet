@@ -60,15 +60,36 @@ extension ChannelHeaderActionsModel {
         // acceptance already recorded and take item 4's path — the mode alone — to a process the
         // prerequisite restart has not replaced yet. One acceptance at a time, and the second
         // selection is told so rather than being let past a gate that is still closing.
-        guard !pickers.isAcceptingBypass else {
-            say(Self.acceptanceInFlight)
-            return
-        }
-        if await refreshBypassAcceptance() {
+        // **And not only a bypass acceptance.** Any restart the gate knows about is a process being
+        // replaced, and `perform` takes control requests all through one: a mode switch issued after
+        // the restart captured its snapshot reaches the process on its way out and is then lost when
+        // the replacement restores the older mode. The disclaimer arm is refused for the same
+        // reason — it ends in a restart of its own, and two overlapping ones are §8.6's order broken
+        // by another name. The user is told, and picks again once the channel has reported.
+        guard bypassMayProceed() else { return }
+        let accepted = await refreshBypassAcceptance()
+        // The store read is an await, and a restart begun inside it is exactly the race above: the
+        // reading both guards were made on is now the machine as it was.
+        guard bypassMayProceed() else { return }
+        if accepted {
             await sendBypassPermissionMode()
             return
         }
         isShowingBypassDisclaimer = true
+    }
+
+    /// Whether the gate may act on this channel right now, saying why when it may not. The two
+    /// refusals are read together because either one alone would let the other's race through.
+    private func bypassMayProceed() -> Bool {
+        if pickers.isAcceptingBypass {
+            say(Self.acceptanceInFlight)
+            return false
+        }
+        if pickers.isRestartPending {
+            say(Self.restartInFlight)
+            return false
+        }
+        return true
     }
 
     /// *Decline*. The mode stays unavailable, nothing restarts and **nothing is written** — not to
@@ -87,6 +108,13 @@ extension ChannelHeaderActionsModel {
     func acceptBypassMode() async {
         isShowingBypassDisclaimer = false
         guard gate() else { return }
+        // The disclaimer is answered by a human, and a restart can have begun while it stood. §8.6's
+        // three steps are one restart and one mode switch, and neither belongs on top of another
+        // channel-wide restart.
+        guard !pickers.isRestartPending else {
+            say(Self.restartInFlight)
+            return
+        }
         guard pickers.beginBypassAcceptance() else {
             say(Self.acceptanceInFlight)
             return
@@ -118,6 +146,12 @@ extension ChannelHeaderActionsModel {
     /// about this channel, naming no value (§11).
     static let acceptanceInFlight =
         "The bypass permission mode is already being enabled in this channel; nothing was changed."
+
+    /// What a bypass selection is told while the channel is being restarted for anything at all. A
+    /// sentence about this channel, naming no value and no setting's value (§11).
+    static let restartInFlight =
+        "This channel is being restarted; the permission mode was not changed. Pick it again once "
+        + "the channel has reported."
 
     /// `set_permission_mode {mode: "bypassPermissions"}`, through the picker so the click is not
     /// adopted as a displayed value: the only readback permission mode has is the handshake's
