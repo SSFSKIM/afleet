@@ -1913,12 +1913,19 @@ is renumbered.
      an optional `stdin: Data` on `ToolRunning.run` written and closed before the read loop.
      Owner: C7.3's module, whichever leaf needs the second such verb.
 
-235. **The watcher re-reads the whole file to answer "did it change?".** `FileSnapshot.read` is a
-     `Data(contentsOf:)` plus a SHA-256 on every observation, and under the poll fallback that is
-     every interval for every open file. The digest is what makes the save echo correct, so it is
-     not removable; the *whole* read is. Closer: compare size and mtime first and digest only when
-     they differ, or digest a bounded prefix plus the size. Owner: C7.5's own follow-up, or the
-     first leaf that opens a large file and notices.
+235. **What a `FileSnapshot` still costs, now that it is bounded.** *Closed in part at C7.5's fix
+     wave.* `FileSnapshot.read` now `stat(2)`s first and reads the contents only when the size or
+     the modification time moved, so a quiet poll tick over an open file is one `stat` and no
+     digest; and the read is bounded by `FileKind.maximumReadableBytes`, so a file above the panel's
+     cap has no snapshot rather than a 64 MiB one. What remains: (a) the shortcut cannot see a write
+     that keeps both the size and the modification time — a swap of the same number of bytes with
+     the time put back is a change no watcher on this file system observes for free, and the panel
+     will show the old buffer until something else moves; (b) a *real* change to a file just under
+     the cap is still a whole read and a SHA-256 on the main-actor opening path, so opening a 60 MiB
+     text file still blocks a frame. Closers: for (a), nothing short of a content check, so it is a
+     documented limit rather than a bug; for (b), read and digest off the main actor, or digest a
+     bounded prefix plus the size. Owner: C7.5's own follow-up, or the first leaf that opens a large
+     file and notices.
 
 236. **The Files tree does not follow the working tree.** §9.1's watcher sentence is about open
      files, so a file the agent creates or deletes appears only on expansion, on *Refresh*, or

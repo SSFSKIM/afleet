@@ -75,6 +75,10 @@ public actor FileWatch {
         case .poll: startPolling()
         case .vnode: if !arm() { startPolling() }
         }
+        // The gap between the session's read and the arming belongs to nobody: a write that
+        // completed inside it fired no source event, and under the vnode source there is no poll
+        // to notice it later. One evaluation here is what closes it.
+        evaluate()
     }
 
     /// Releases the descriptor and the timers. Not a `deinit`: an actor's isolated state cannot be
@@ -173,7 +177,10 @@ public actor FileWatch {
     /// a difference here and are delivered: whether that matters is the policy's decision, not the
     /// watcher's. Only "nothing at all happened" is filtered, which is what keeps the poll quiet.
     private func evaluate() {
-        let observed = FileSnapshot.read(url)
+        // `unchangedFrom:` is what keeps a quiet tick to one `stat(2)`: the contents are digested
+        // only when the size or the modification time moved, and an observation that did not move
+        // comes back as the last one and is filtered below.
+        let observed = FileSnapshot.read(url, unchangedFrom: lastObserved)
         guard observed != lastObserved else { return }
         lastObserved = observed
         onEvent(observed.map(Event.changed) ?? .deleted)

@@ -311,7 +311,86 @@ final class FileWatchTests: XCTestCase {
                        "a vanished file over a dirty buffer did not conflict")
     }
 
+    // MARK: - 6. What an observation costs: the cap, and the stat that comes before the digest
+
+    /// The cap `FileKind` refuses a path by has to bound the *read* too, or the watcher hashes a
+    /// file the panel already declined to open — once on the opening path and again on every tick.
+    /// Above the cap there is no snapshot at all.
+    func testAFileAboveTheCapHasNoSnapshot() throws {
+        let target = root.appendingPathComponent("oversize.bin")
+        // Sparse, so the cap is exercised without the bytes existing.
+        XCTAssertTrue(FileManager.default.createFile(atPath: target.path, contents: Data()))
+        let handle = try FileHandle(forWritingTo: target)
+        try handle.truncate(atOffset: UInt64(FileKind.maximumReadableBytes) + 1)
+        try handle.close()
+
+        XCTAssertNil(FileSnapshot.read(target), "a file above the cap was read and digested anyway")
+    }
+
+    /// "Did it change?" is answered from size and modification time, and the contents are read only
+    /// when one of them differs. The proof a test can see is the case the shortcut is allowed to
+    /// miss: bytes swapped for others of the same length with the modification time put back is a
+    /// file the watcher does not look inside, so nothing is delivered.
+    func testAnObservationWithTheSameSizeAndTimeIsNotRead() async throws {
+        let target = root.appendingPathComponent("note.txt")
+        try write("one", to: target)
+        let loaded = try XCTUnwrap(FileSnapshot.read(target))
+        let stamp = try Self.modificationStamp(of: target)
+
+        let log = EventLog()
+        let watch = watcher(on: target, mode: .poll, log: log, poll: .milliseconds(20))
+        await watch.start(baseline: loaded)
+        defer { Task { await watch.stop() } }
+
+        try write("two", to: target)
+        try Self.restore(stamp, on: target)
+
+        try await Task.sleep(for: .milliseconds(400))
+        let events = await log.events
+        XCTAssertEqual(events.count, 0,
+                       "\(events.count) events for a file whose size and time did not move: it was read")
+    }
+
+    // MARK: - 7. The write that lands while the watch is being armed
+
+    /// The session reads a baseline and then asks for a watch; a write that completes in between
+    /// fires no source event, because the source was not armed for it. Under the vnode source with
+    /// no poll to fall back on, nothing would ever deliver it — so the watch evaluates once as
+    /// soon as it is armed.
+    func testAWriteBetweenTheBaselineAndTheArmingIsDelivered() async throws {
+        let target = root.appendingPathComponent("note.txt")
+        try write("one", to: target)
+        let loaded = try XCTUnwrap(FileSnapshot.read(target))
+
+        // The gap: the file moves on before anything is watching it.
+        try write("three", to: target)
+
+        let log = EventLog()
+        // A poll interval far longer than the wait, so only the arming path can answer.
+        let watch = watcher(on: target, mode: .vnode, log: log, poll: .seconds(120))
+        await watch.start(baseline: loaded)
+        defer { Task { await watch.stop() } }
+
+        let events = await wait(on: log, until: { $0.count >= 1 },
+                                "the write that landed before the arming was never delivered",
+                                within: .seconds(5))
+        XCTAssertEqual(events.first?.snapshot?.size, 5,
+                       "the delivery did not carry what was on disk when the watch was armed")
+    }
+
     // MARK: - Rig
+
+    /// The path's modification time as the pair `utimensat(2)` takes back.
+    private static func modificationStamp(of url: URL) throws -> timespec {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { throw CocoaError(.fileReadUnknown) }
+        return info.st_mtimespec
+    }
+
+    private static func restore(_ stamp: timespec, on url: URL) throws {
+        var times = [stamp, stamp]
+        guard utimensat(AT_FDCWD, url.path, &times, 0) == 0 else { throw CocoaError(.fileWriteUnknown) }
+    }
 
     private func watcher(on url: URL, mode: FileWatch.Mode, log: EventLog,
                          delay: Duration = .milliseconds(120),
