@@ -98,6 +98,12 @@ public final class BrowserModel {
     /// The tab-set document's own trouble, mirrored out of the store so the panel can show a row.
     public private(set) var storeError: BrowserTabStoreError?
 
+    /// A link the panel could not open: a pull request with no channel, in no repository, with no
+    /// `gh`, or with a `gh` that is not signed in (Q2, §10). It is a **row**, never an exception —
+    /// a link that fails to resolve must not take the channel down — and it is cleared by the next
+    /// navigation the panel accepts, like every other notice here.
+    public private(set) var linkError: BrowserLinkError?
+
     /// Called after the model has taken a settled navigation's URL and title. It exists so no wait
     /// in this leaf's tests is a sleep, and so a later surface can follow navigations without the
     /// model growing a listener list (D32's shape, one level up).
@@ -170,8 +176,7 @@ public final class BrowserModel {
         let tab = BrowserLiveTab(url: url, title: "")
         tabs.append(tab)
         selectedID = tab.id
-        notice = nil
-        urlBarMessage = nil
+        clearNotices()
         activate(tab)
         persistStructure()
         return tab
@@ -186,8 +191,7 @@ public final class BrowserModel {
                 openNewTab(url: url)
                 return
             }
-            notice = nil
-            urlBarMessage = nil
+            clearNotices()
             activate(tab)
             // Set before the load, so a page that never finishes still leaves the tab pointing at
             // what the user asked for; the settled navigation corrects it either way.
@@ -320,6 +324,21 @@ public final class BrowserModel {
         }
         guard changed else { return }
         persistEdit()
+    }
+
+    /// Records a link the panel could not open. Called by `BrowserLinkTargets`; the row it sets is
+    /// the whole of what a failed `.pullRequest` lookup does to the app (§10).
+    func reportLinkError(_ error: BrowserLinkError) {
+        linkError = error
+    }
+
+    /// Every line the panel shows under the URL bar, dropped together. A navigation the panel
+    /// accepted answers all of them at once, and a notice left behind by an earlier link would read
+    /// as being about the page now on screen.
+    private func clearNotices() {
+        notice = nil
+        urlBarMessage = nil
+        linkError = nil
     }
 
     private func report(_ reason: NavigationPolicy.Reason) {

@@ -189,6 +189,19 @@ struct BrowserURLBar: View {
                     .padding(.horizontal, 10)
                     .padding(.bottom, 4)
             }
+            // A link the panel could not open: its own row rather than a notice, because it comes
+            // with something to do about it (§10, Q2).
+            if let error = model.linkError {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(error.message).font(.caption2)
+                    if let hint = error.hint {
+                        Text(hint).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 4)
+            }
         }
         // The field follows the page except while the user is editing it, which is what
         // `onChange` of the *model's* URL gives and a two-way binding would not.
