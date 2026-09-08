@@ -54,11 +54,18 @@ extension ChannelHeaderActionsModel {
             say("That setting changes without a restart; the header does not replace the process for it.")
             return false
         }
+        // The gate, asked here as every other entry point asks it. A restart-required change replaces
+        // a process, and one may not begin over another, over a readback that is still out, or on a
+        // channel that is still connecting.
+        if let refusal = await pickers.refusal(of: .settingChange) {
+            say(refusal)
+            return false
+        }
         // The process this channel is running *now*: the epoch is what separates a restart that ran
         // from one that was only recorded.
         let before = await lifecycle.state(of: key)
-        let expected = pickers.currentSnapshot
-        pickers.beginRestart(reason: setting.restartReason)
+        let operation = pickers.beginRestart(reason: setting.restartReason,
+                                             expecting: pickers.currentSnapshot)
         let after: ChannelState
         do {
             after = try await lifecycle.perform(.quiescentRestart(request), on: key)
@@ -67,7 +74,7 @@ extension ChannelHeaderActionsModel {
             // replacement and only then restores the flag settings and reads them back, and both of
             // those throw: a channel left connecting has a new process on the other end. The gate is
             // kept for that one and re-opened for every other, where nothing was replaced.
-            await pickers.restartFailed(await lifecycle.state(of: key), expecting: expected)
+            await pickers.restartFailed(await lifecycle.state(of: key), operation)
             say(Self.refusal(error))
             return false
         }
@@ -78,13 +85,13 @@ extension ChannelHeaderActionsModel {
         // old process, and §8.6's mode switch would follow it onto a process that was never launched
         // with the flag it needs.
         guard SettingPickersModel.replacedTheProcess(after, from: before) else {
-            await pickers.noteQueuedRestart()
+            await pickers.noteQueuedRestart(operation)
             say(pickers.restartBanner)
             return false
         }
         // §7.4: the composer stays disabled until **every** readback matches; a mismatch banners,
         // names the setting that did not survive, and keeps it disabled until the user picks a value.
-        let survived = await pickers.confirmReadback(of: expected)
+        let survived = await pickers.confirmReadback(operation)
         if !survived { say(pickers.restartBanner) }
         return survived
     }

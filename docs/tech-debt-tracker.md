@@ -1387,6 +1387,29 @@ symlink-containment debt in entry 78 is unchanged.
      and selection when a channel is re-keyed. Owner: C4 with C6.2. Filed 2026-09-09 (panel round 4,
      scalpel-4#1).
 
+228. **The fleet still merges two restart-required changes; no surface exercises that any more.**
+     The gate's redesign (Decision Log, 2026-09-09, the fourth fix wave) refuses a second
+     restart-required change while one is running, so the "second `quiescentRestart` merges into the
+     pending change and answers success at once" path is unreachable from a single
+     `SettingPickersModel`. `ChannelSupervisor` still merges — two afleet windows over one channel
+     each hold their own pickers and their own field, and each is independently correct about its
+     own surface — but nothing asserts what the second window's surface shows while the first
+     window's restart runs, and the arm that used to cover the merge now covers the refusal instead.
+     Small: the surfaces do not share state and the fleet's own merge is C4's, tested there. Closer:
+     one arm building two `SettingPickersModel`s over one `ChannelKey` and one double, asserting each
+     field independently. Owner: C6.2. Filed by the fourth fix wave.
+
+229. **Readiness is read as `.owned(.connecting)` and not as "anything but `.owned(.ready)`".**
+     The gate closes the field and refuses setting changes for a channel the fleet reports as
+     connecting, which is the state a restart that threw after spawning leaves and the state review
+     round 4's P1 named. `.owned(.dormant)` and `.owned(.contended)` are left alone deliberately —
+     both are other leaves' semantics, a dormant channel is woken by typing into it, and closing the
+     field over either would be this gate forming an opinion it has no evidence for. Whether a
+     setting change asked for on a dormant channel does the right thing end to end is unexamined:
+     the request would reach `ChannelSupervisor` with no process on the other end. Closer: read what
+     C4 does with a control request on a dormant channel and either widen the input or record why
+     the narrow reading is right. Owner: C6.2 with C4. Filed by the fourth fix wave.
+
 ## From C7.2 (`child/c7-editor-core`)
 
 97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state

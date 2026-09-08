@@ -115,29 +115,24 @@ final class SettingPickersModel {
     private(set) var hasAskedTheEngine = false
     private(set) var lastRefreshSucceeded = false
 
-    /// The settings a restart did not carry across, by the fleet's own `Readback.verify` names.
-    ///
-    /// A list rather than a flag, because recovery is per setting: the banner promises that picking a
-    /// value continues, and a gate that reopened on the first pick would release the field with the
-    /// second setting still unanswered.
-    private(set) var restartFailures: [String] = []
-
     /// The picker a routed command with no argument asked for, by `RouterTable`'s own surface name.
     /// Nil whenever nothing was asked for; the menu clears it when it closes.
     var presentedPicker: String?
 
-    /// How many restart operations have closed the gate and not yet reached a terminal transition.
+    /// The restart-required change this model is running, if it is running one.
     ///
-    /// **A count and not a flag**, because two restart-required changes are one restart on the fleet's
-    /// side: the second `quiescentRestart` merges into the pending change and answers straight away,
-    /// and its caller's *queued* transition must not release the gate the first one is still holding.
-    private(set) var restartsInFlight = 0
+    /// **At most one, and it carries its own generation, expected snapshot and phase.** Every entry
+    /// point that begins a restart is handed the generation back and gives it to whichever transition
+    /// closes the operation; every continuation that resumes after an await checks it before it
+    /// touches anything, and drops itself when a newer operation has replaced it. A count of restarts
+    /// in flight and a free-standing owed snapshot were one fact spread over two fields nothing kept
+    /// in step — which is how four review rounds each found another decision taken on a reading an
+    /// await had already made stale.
+    private(set) var operation: RestartOperation?
 
-    /// The snapshot a restart's readback is still owed, when one is: set when the confirmation could
-    /// not be completed — the channel did not answer, or its replacement has not reported the mode —
-    /// and cleared by the confirmation that completes. While it is set the field stays closed and the
-    /// next handshake re-runs the comparison against it.
-    private(set) var awaitedRestart: RestartSnapshot?
+    /// Where the next generation comes from. Monotonic for the life of this model, so a number is
+    /// never reused and a superseded continuation cannot match by accident.
+    @ObservationIgnored private var generationsMinted = 0
 
     /// Whether §8.6's acceptance — the store write, the restart, the mode switch — is running now.
     /// Read by `BypassGate`, which refuses to re-enter while it is true.
@@ -255,7 +250,15 @@ final class SettingPickersModel {
         if hasAskedTheEngine, !lastRefreshSucceeded { await refresh() }
         // A handshake is also the moment an owed confirmation can be settled: it is the replacement
         // reporting, and the readback that could not be taken when the restart returned is taken now.
-        if let owed = awaitedRestart { await confirm(owed) }
+        if let operation, case .owed = operation.phase {
+            await confirm(operation.generation)
+            return
+        }
+        // And it is the moment a channel that was left connecting can have become ready, which is one
+        // of the gate's own inputs. The release is asked again rather than assumed: a confirmation
+        // that completed against a connecting replacement left the field closed on purpose, and
+        // nothing else would ever come back to open it.
+        await releaseOrHold()
     }
 
     /// Whether the process the fleet is running now is a later one than the process the mode request
@@ -330,13 +333,18 @@ final class SettingPickersModel {
     /// not a mismatch.
     @discardableResult
     func selectModel(_ value: String) async -> Bool {
+        guard await permitted(.settingChange) else { return false }
         guard await apply(Self.modelSetting, .string(value),
                           otherwise: AnyControlRequest(SetModel(model: value))) else { return false }
-        await readSettings()
+        // **A correction resolves on a readback that was taken, never on one that was kept.**
+        // `readSettings` leaves the last values in place when the channel does not answer, so a click
+        // on the value already displayed would agree with itself — erasing the refusal `answer(to:)`
+        // just raised and clearing an outstanding setting nothing re-read.
+        guard await readSettings() != nil else { return false }
         let clicked = modelOptions.first { $0.value == value }?.canonical ?? value
         let shown = displayedModel?.canonical ?? appliedModel
         note(agrees: shown == clicked, setting: "model")
-        await clearRestartGate(for: Self.modelSetting)
+        await resolveCorrection(of: Self.modelSetting)
         return true
     }
 
@@ -351,13 +359,15 @@ final class SettingPickersModel {
     /// `applied.effort: null`.
     @discardableResult
     func selectEffort(_ level: String?) async -> Bool {
+        guard await permitted(.settingChange) else { return false }
         let value = level.map(JSONValue.string) ?? .null
         let setting = JSONValue.object(["effortLevel": value])
         guard await apply(Self.effortSetting, value,
                           otherwise: AnyControlRequest(ApplyFlagSettings(settings: setting))) else { return false }
-        await readSettings()
+        // The same rule as the model's: a readback the channel did not answer resolves nothing.
+        guard await readSettings() != nil else { return false }
         note(agrees: appliedEffort == level, setting: "effort")
-        await clearRestartGate(for: Self.effortSetting)
+        await resolveCorrection(of: Self.effortSetting)
         return true
     }
 
@@ -387,10 +397,17 @@ final class SettingPickersModel {
         return await issueMode(mode)
     }
 
-    /// The request itself, with no gate in front of it. §8.6's third step calls this directly, after
-    /// the acceptance is written and the restart has been confirmed.
+    /// The request itself. §8.6's third step calls this directly, after the acceptance is written and
+    /// the restart has been confirmed — and, like every other entry point that changes a setting, it
+    /// asks the gate first. It was the one that did not: the permission menu changed the mode of a
+    /// process a restart was replacing, and the relaunch then restored the mode the restart had
+    /// captured, losing the change silently (review round 4, sweep#1).
     @discardableResult
     func issueMode(_ mode: PermissionMode) async -> String? {
+        if let why = await refusal(of: .settingChange) {
+            disagreement = why
+            return why
+        }
         do {
             if await fleetIsHolding(Self.modeSetting) {
                 try await lifecycle.resolveSetting(Self.modeSetting, to: .string(mode.rawValue), on: key)
@@ -406,15 +423,21 @@ final class SettingPickersModel {
         // The process the request went to, so a retained handshake handed to this model later can be
         // told from the replacement's.
         requestedModeEpoch = await lifecycle.state(of: key)?.epoch
-        await clearRestartGate(for: Self.modeSetting)
+        await resolveCorrection(of: Self.modeSetting)
         return nil
     }
 
-    /// Whether §7.4's gate is holding a restart: one still replacing a process, or a readback owed by
-    /// one that already did. Read by `BypassGate` (§8.6), which may not let a mode switch reach a
-    /// process that is on its way out — the replacement restores the snapshot the restart captured,
-    /// and a switch that raced it is simply lost.
-    var isRestartPending: Bool { restartsInFlight > 0 || awaitedRestart != nil }
+    /// Whether §7.4's gate is holding a restart: one still replacing a process, one whose readbacks
+    /// are out, or a readback owed by one that already replaced it. Read by `BypassGate` (§8.6),
+    /// which may not let a mode switch reach a process that is on its way out — the replacement
+    /// restores the snapshot the restart captured, and a switch that raced it is simply lost.
+    var isRestartPending: Bool {
+        guard let phase = operation?.phase else { return false }
+        switch phase {
+        case .replacing, .confirming, .owed: return true
+        case .failed, .done: return false
+        }
+    }
 
     /// §8.6's acceptance, claimed. Answers false when one is already running, which is what makes a
     /// second bypass selection wait rather than take the stored-acceptance path: the acceptance is
@@ -546,36 +569,87 @@ final class SettingPickersModel {
     /// key and *permission mode* is a sentence.
     static func label(of name: String) -> String { name == modeSetting ? "permission mode" : name }
 
-    /// **The gate, as a state machine.** Every transition below is one of these, and nothing else
-    /// writes `surface.isDisabled`:
+    /// One restart-required change, from the entry point that began it to the readback that closed it.
     ///
-    /// | state | field | what holds it |
+    /// **The generation is the whole point.** Every transition and every continuation inside one
+    /// names the generation it belongs to, so a completion that resumes after an await and finds a
+    /// newer operation in its place drops itself instead of writing over the newer one's state.
+    struct RestartOperation: Sendable {
+
+        /// Where the operation is. The field is closed for the first three and for `failed`; only
+        /// `done` — with nothing outstanding on this surface and none on the fleet's — can open it.
+        enum Phase: Sendable, Equatable {
+            /// `quiescentRestart` is out: a process is being replaced.
+            case replacing
+            /// The comparison is out: `list_models`, `get_settings`, the handshake the fleet retained.
+            case confirming
+            /// A replacement exists and has not reported; the next handshake re-runs the comparison.
+            case owed
+            /// The settings that did not survive, by the fleet's own `Readback.verify` names.
+            case failed([String])
+            /// Nothing further is owed to this operation.
+            case done
+        }
+
+        let generation: RestartGeneration
+        /// The values the replacement is expected to carry across (§7.4's snapshot), captured by the
+        /// entry point that began the operation and never re-derived afterwards.
+        let expected: RestartSnapshot
+        /// What the field says while the process is being replaced.
+        let reason: String
+        var phase: Phase
+    }
+
+    /// Which operation a caller is talking about. Opaque and only ever minted by `beginRestart`, so a
+    /// transition cannot be issued for an operation that was never opened.
+    struct RestartGeneration: Hashable, Sendable { fileprivate let value: Int }
+
+    /// **The gate, as one operation and one predicate.** `allows(_:)` is the only question any entry
+    /// point asks, `releaseOrHold` is the only place `surface.isDisabled` goes back to false, and
+    /// both are evaluated after the last await of whichever completion is asking.
+    ///
+    /// | phase | field | setting changes |
     /// | --- | --- | --- |
-    /// | *open* | editable | nothing: no restart running, nothing owed, nothing outstanding |
-    /// | *restarting* | closed | `restartsInFlight > 0` — a process is being replaced |
-    /// | *queued* | as the rest of the machine says | the change was recorded for the dormant timer |
-    /// | *owed* | closed | `awaitedRestart` — a replacement exists and has not reported |
-    /// | *outstanding* | closed | `restartFailures`, or a setting the **fleet** still names |
+    /// | none / `done` | open, unless the fleet names a setting | allowed |
+    /// | `replacing` | closed | refused: a process is being replaced |
+    /// | `confirming` | closed | refused: the replacement's readbacks are out |
+    /// | `owed` | closed | refused: the replacement has not reported |
+    /// | `failed` | closed | allowed — picking a value is the recovery the banner promises |
     ///
-    /// Transitions: `beginRestart` opens a restart (*restarting*, and the count is why a second one
-    /// merging into the first cannot release it); `confirmReadback` closes one, and lands in *open*,
-    /// *owed* or *outstanding* depending on what the replacement reported; `noteQueuedRestart` and
-    /// `cancelRestart` close one with nothing replaced; `restartFailed` closes one that threw and
-    /// lands in *owed* when the channel is still connecting, because a replacement is on the other
-    /// end whatever the error said. A handshake settles an *owed* one. A picker click leaves
-    /// *outstanding* only when neither this surface nor the fleet names anything further.
+    /// Beside the phase the predicate reads two more inputs: the setting the **fleet** still holds the
+    /// channel connecting over, and the channel's own readiness. A channel left `.owned(.connecting)`
+    /// keeps the field closed whatever the banners say — a restart that threw after spawning leaves
+    /// exactly that, and a send into a connecting process's queued input has no readiness transition
+    /// to flush it (review round 4, scalpel-1#1).
     ///
-    /// Closes the composer while a restart-required setting is being confirmed. Called before the
-    /// restart is issued, so no keystroke reaches a process that is going away.
-    func beginRestart(reason: String) {
-        restartsInFlight += 1
+    /// Opens an operation and closes the composer with it. Called before the restart is issued, so no
+    /// keystroke reaches a process that is going away, and answers the generation every transition of
+    /// this operation is issued under.
+    @discardableResult
+    func beginRestart(reason: String, expecting expected: RestartSnapshot) -> RestartGeneration {
+        generationsMinted += 1
+        let generation = RestartGeneration(value: generationsMinted)
+        // A newer operation supersedes an older one rather than joining it: every entry point asks
+        // the predicate first, so a second one arriving here means the first was already terminal or
+        // two entry points raced past the same verdict — and in both the newer process is the one the
+        // field must be held for. The older operation's continuations find their generation gone.
+        operation = RestartOperation(generation: generation, expected: expected, reason: reason,
+                                     phase: .replacing)
         surface.isRestarting = true
         surface.isDisabled = true
         surface.disabledReason = reason
         restartBanner = nil
-        restartFailures = []
-        awaitedRestart = nil
         corrected = []
+        return generation
+    }
+
+    /// Whether `generation` still names the operation this model is running.
+    ///
+    /// **Asked again after every await, never once at entry.** Every await is a fresh chance for a
+    /// newer restart to have replaced this one, and a completion that acted on the older reading is
+    /// precisely the race that survived three fix waves.
+    private func isCurrent(_ generation: RestartGeneration) -> Bool {
+        operation?.generation == generation
     }
 
     /// Whether the state a `quiescentRestart` answered with is a process that was really replaced.
@@ -595,21 +669,22 @@ final class SettingPickersModel {
     /// so *this* operation stops holding the field — and the change is named as pending (§7.4's
     /// *applies when the current work finishes*).
     ///
-    /// It does **not** follow that the field re-opens: a second restart-required change merges into a
-    /// restart already in flight and answers exactly like a queued one, so releasing here
-    /// unconditionally would open the field while the first operation's replacement or confirmation
-    /// is still running.
-    func noteQueuedRestart() async {
-        restartsInFlight = max(0, restartsInFlight - 1)
+    /// It does **not** follow that the field re-opens, which is why it goes through the one release
+    /// like every other transition: the fleet may still be holding the channel over an unresolved
+    /// setting, and the channel may not be ready.
+    func noteQueuedRestart(_ generation: RestartGeneration) async {
+        guard isCurrent(generation) else { return }
+        operation?.phase = .done
         let pending = "This channel is busy; the setting applies when the current work finishes."
         await releaseOrHold()
         if !surface.isDisabled { restartBanner = pending }
     }
 
     /// A restart that never happened: this operation stops holding the field, which re-opens unless
-    /// something else in the machine still holds it.
-    func cancelRestart() async {
-        restartsInFlight = max(0, restartsInFlight - 1)
+    /// something else still holds it.
+    func cancelRestart(_ generation: RestartGeneration) async {
+        guard isCurrent(generation) else { return }
+        operation?.phase = .done
         await releaseOrHold()
     }
 
@@ -621,13 +696,13 @@ final class SettingPickersModel {
     /// stays closed and the readback stays owed — re-opening it would let a send into the queued
     /// input of a process with no readiness transition to flush it. Any other state is a restart that
     /// did not replace anything, which is `cancelRestart`.
-    func restartFailed(_ state: ChannelState?, expecting expected: RestartSnapshot) async {
+    func restartFailed(_ state: ChannelState?, _ generation: RestartGeneration) async {
+        guard isCurrent(generation) else { return }
         guard case .owned(.connecting)? = state?.origin else {
-            await cancelRestart()
+            await cancelRestart(generation)
             return
         }
-        restartsInFlight = max(0, restartsInFlight - 1)
-        hold(expected, saying: Self.stillConnectingBanner)
+        hold(saying: Self.stillConnectingBanner)
     }
 
     /// §7.4's readback rule. Driven by the composer's own `.restart` route (`CommandRouting`) and by
@@ -640,32 +715,37 @@ final class SettingPickersModel {
     /// The banner names settings, never the values on either side: the engine's model id or effort
     /// level is a value read off a process, and the reader needs to know which setting to look at.
     @discardableResult
-    func confirmReadback(of expected: RestartSnapshot) async -> Bool {
-        // **The operation is closed and the snapshot becomes owed in the same breath.** The
+    func confirmReadback(_ generation: RestartGeneration) async -> Bool {
+        guard isCurrent(generation) else { return false }
+        // **The operation moves to *confirming*, and that phase holds the field on its own.** The
         // comparison below is several awaits long — `list_models`, `get_settings`, the handshake the
-        // fleet retained — and for every one of them the replacement has reported nothing yet.
-        // Dropping the count without putting the snapshot in its place leaves the machine *open*
-        // while the readbacks are still out, and a picker click landing in that window re-opens the
-        // field over a process nothing has verified. The comparison clears it on whichever arm it
-        // reaches, so the state is *owed* exactly as long as the readbacks are.
-        awaitedRestart = expected
-        restartsInFlight = max(0, restartsInFlight - 1)
-        return await confirm(expected)
+        // fleet retained — and for every one of them the replacement has reported nothing yet. An
+        // operation that ended the moment `perform` answered would leave the gate reading *open*
+        // while its readbacks were still out, and a picker click landing in that window would release
+        // the field over a process nothing had verified.
+        operation?.phase = .confirming
+        // The process is no longer being replaced, so the connecting glyph goes even though the field
+        // does not: the readbacks, not the spawn, are what is being waited on now.
+        surface.isRestarting = false
+        return await confirm(generation)
     }
 
-    /// The comparison itself, with the in-flight count already accounted for. Re-run from
-    /// `noteHandshake` for a confirmation that was owed, which is why it does not close an operation
-    /// of its own.
+    /// The comparison itself. Re-run from `noteHandshake` for a confirmation that was owed, which is
+    /// why it takes the generation rather than opening an operation of its own.
     @discardableResult
-    private func confirm(_ expected: RestartSnapshot) async -> Bool {
-        surface.isRestarting = restartsInFlight > 0
+    private func confirm(_ generation: RestartGeneration) async -> Bool {
+        guard let expected = operation?.expected, isCurrent(generation) else { return false }
         // **A comparison needs values that were read, not values that were kept.** `readSettings`
         // leaves the last readback in place when the channel does not answer — right for a display,
         // and wrong here: comparing the retained values against a snapshot taken from those same
         // values agrees with itself and releases the field without the new process having reported
         // anything at all.
-        guard await refresh() else {
-            hold(expected, saying: "The channel did not report its settings after the restart; "
+        let readbacksTaken = await refresh()
+        // The first fence: `refresh` is two control requests, and a newer restart begun across them
+        // owns the field now. This continuation's answers are about a process that is already gone.
+        guard isCurrent(generation) else { return false }
+        guard readbacksTaken else {
+            hold(saying: "The channel did not report its settings after the restart; "
                  + "the field stays closed until it does.")
             return false
         }
@@ -684,15 +764,19 @@ final class SettingPickersModel {
             // `engineReports(of:)` answers the handshake the fleet has **retained** for the channel,
             // which after a replaced epoch is the replacement's; a fleet with none to report has not
             // resolved the mode yet, and the gate stays closed rather than releasing on a stale match.
-            guard let reported = await modeOfTheRunningProcess() else {
-                hold(expected, saying: Self.unresolvedModeBanner)
+            let running = await modeOfTheRunningProcess()
+            // The second fence, and the one review round 4 found open (scalpel-1#2): this question
+            // suspends, and a newer restart taken across it has already installed its own operation.
+            // Clearing the owed snapshot here would clear *that* one's.
+            guard isCurrent(generation) else { return false }
+            guard let reported = running else {
+                hold(saying: Self.unresolvedModeBanner)
                 return false
             }
             handshakeMode = reported
             if reported != mode { failed.append(Self.modeSetting) }
         }
-        awaitedRestart = nil
-        restartFailures = failed
+        operation?.phase = failed.isEmpty ? .done : .failed(failed)
         restartBanner = failed.isEmpty ? nil : Self.banner(for: failed)
         await releaseOrHold()
         return failed.isEmpty && !surface.isDisabled
@@ -708,11 +792,10 @@ final class SettingPickersModel {
     /// and the next handshake re-runs the comparison against it. Without the snapshot the field would
     /// stay disabled for ever — a recovered readback has nothing left to confirm against, and
     /// `clearRestartGate` cannot act on an empty failure list.
-    private func hold(_ expected: RestartSnapshot, saying banner: String) {
-        awaitedRestart = expected
-        restartFailures = []
+    private func hold(saying banner: String) {
+        operation?.phase = .owed
         restartBanner = banner
-        surface.isRestarting = restartsInFlight > 0
+        surface.isRestarting = false
         surface.isDisabled = true
         surface.disabledReason = banner
     }
@@ -737,52 +820,143 @@ final class SettingPickersModel {
     /// The field re-opens only when the **last** one has been answered — this surface's and the
     /// fleet's both. A picker that moved one without the other would leave the channel connecting
     /// behind an open field or the field shut behind a ready channel.
-    private func clearRestartGate(for name: String) async {
+    private func resolveCorrection(of name: String) async {
         corrected.insert(name)
-        if let index = restartFailures.firstIndex(of: name) { restartFailures.remove(at: index) }
-        restartBanner = restartFailures.isEmpty ? nil : Self.banner(for: restartFailures)
+        if case .failed(var names)? = operation?.phase {
+            names.removeAll { $0 == name }
+            operation?.phase = names.isEmpty ? .done : .failed(names)
+            restartBanner = names.isEmpty ? nil : Self.banner(for: names)
+        }
         await releaseOrHold()
     }
 
-    /// The one place the field re-opens. It opens only when nothing holds it: no restart replacing a
-    /// process, no readback owed, no setting this surface is still waiting for a value for, and no
-    /// setting the **fleet** is still holding the channel connecting over.
+    // MARK: - One predicate, one release
+
+    /// What an entry point is asking to do.
+    enum GateAction: Sendable, Equatable {
+        /// A change to one of the settings this surface owns, from wherever it was asked for: a
+        /// picker click, the permission menu, a routed `set_model`, `apply_flag_settings` or
+        /// `set_permission_mode`, Shift+Tab's cycle, or a restart-required launch setting.
+        case settingChange
+        /// §8.6's bypass selection or its acceptance, which is a setting change plus the acceptance
+        /// this gate may only have one of at a time.
+        case bypassMode
+        /// The composer's field itself. The strictest of the three: it opens only when nothing at all
+        /// holds, this surface's outstanding settings and the fleet's included.
+        case editing
+    }
+
+    /// What the gate answered, and — when it refused — which of its inputs is holding.
+    enum GateVerdict: Sendable, Equatable {
+        case allowed
+        case refused(String)
+
+        var isAllowed: Bool { self == .allowed }
+        /// The sentence, for a caller that renders it. Nil when nothing was refused.
+        var refusal: String? {
+            guard case .refused(let why) = self else { return nil }
+            return why
+        }
+    }
+
+    /// **The one question every entry point asks.** Its inputs are the current operation's phase, the
+    /// setting the fleet still holds this channel connecting over, and the channel's readiness; a
+    /// refusal names whichever of them is holding, and no value (§11).
+    ///
+    /// A pure read: it changes nothing, so an entry point may ask it as often as it has awaits.
+    func allows(_ action: GateAction) async -> GateVerdict {
+        if action == .bypassMode, isAcceptingBypass { return .refused(Self.acceptanceInFlight) }
+        switch operation?.phase {
+        case .replacing:
+            return .refused(Self.restartInFlight)
+        case .confirming:
+            return .refused(Self.readbacksOutstanding)
+        case .owed:
+            return .refused(Self.replacementHasNotReported)
+        case .failed(let names):
+            // The banner promises that picking a value continues, so a setting change is exactly what
+            // is allowed here — and the field is exactly what is not.
+            if action == .editing { return .refused(Self.banner(for: names)) }
+        case .done, nil:
+            break
+        }
+        let isConnecting: Bool
+        if case .owned(.connecting)? = await lifecycle.state(of: key)?.origin { isConnecting = true }
+        else { isConnecting = false }
+        let held = await fleetHeldSetting()
+        if isConnecting {
+            // **A connecting channel keeps the field closed whatever the banners say.** The one way
+            // out of a channel the fleet is holding over an unresolved setting is to answer it —
+            // `ChannelSupervisor` stays connecting until its list empties — so a setting change is
+            // still allowed for exactly that case, and nothing else is.
+            guard action == .settingChange, held != nil else { return .refused(Self.stillConnecting) }
+            return .allowed
+        }
+        if action == .editing, let held { return .refused(Self.banner(for: [held])) }
+        return .allowed
+    }
+
+    /// **The predicate, asked by an entry point that is about to act.** Answers the refusal when
+    /// there is one, and nil when there is not.
+    ///
+    /// It also brings the field into line with the verdict: a reason to refuse a setting change is a
+    /// reason the field must not be editable either, and the two are the same predicate. A channel
+    /// that went connecting on its own — a restart that threw after spawning, judged on the fleet's
+    /// own state — has nothing else that would come back and close it.
+    func refusal(of action: GateAction) async -> String? {
+        guard let why = await allows(action).refusal else { return nil }
+        if !surface.isDisabled { await releaseOrHold() }
+        return why
+    }
+
+    /// The same question, for a click that renders the refusal as its own disagreement.
+    private func permitted(_ action: GateAction) async -> Bool {
+        guard let why = await refusal(of: action) else { return true }
+        disagreement = why
+        return false
+    }
+
+    /// **The one place the field re-opens**, and the only writer of `surface.isDisabled` outside the
+    /// transitions above.
+    ///
+    /// The fleet's banner is settled first, because settling it is an await and the verdict has to be
+    /// taken *after* it: a `beginRestart` that landed inside that question has already closed the
+    /// field over a process being replaced right now, and releasing on the older reading would open
+    /// the field for that restart's whole duration.
     private func releaseOrHold() async {
-        guard nothingHolds else { return closeField() }
-        surface.isRestarting = false
-        if let held = await settleFleetBanner() {
-            restartBanner = Self.banner(for: [held])
-            surface.isDisabled = true
-            surface.disabledReason = restartBanner
+        _ = await settleFleetBanner()
+        guard case .refused(let why) = await allows(.editing) else {
+            corrected = []
+            restartBanner = nil
+            surface.isRestarting = false
+            surface.isDisabled = false
+            surface.disabledReason = nil
             return
         }
-        // **Every holder is read again, because settling the fleet's banner is an await.** The
-        // reading above is of the machine as it was before it — and a `beginRestart` that arrived
-        // inside the await has since closed the field over a process that is being replaced right
-        // now. Releasing on the older reading would open the field for that restart's duration, and
-        // the send would reach the process on its way out.
-        guard nothingHolds else { return closeField() }
-        corrected = []
-        restartBanner = nil
-        surface.isDisabled = false
-        surface.disabledReason = nil
+        closeField(why)
     }
 
-    /// Whether the state table's three holders are all clear: no restart replacing a process, no
-    /// readback owed, nothing outstanding on this surface. The fleet's own hold is the fourth and is
-    /// asked for separately, because asking it is an await.
-    private var nothingHolds: Bool {
-        restartsInFlight == 0 && awaitedRestart == nil && restartFailures.isEmpty
-    }
-
-    /// The field, closed over whichever holder is set. *Restarting* keeps the reason `beginRestart`
-    /// gave it — the restart is the thing being waited on, and the banner belongs to the readback —
-    /// and every other holder shows the banner.
-    private func closeField() {
-        surface.isRestarting = restartsInFlight > 0
+    /// The field, closed over whichever input is holding. *Restarting* keeps the reason the operation
+    /// was opened with — the restart is the thing being waited on, and a banner belongs to a readback.
+    private func closeField(_ why: String) {
+        let isReplacing = operation?.phase == .replacing
+        surface.isRestarting = isReplacing
         surface.isDisabled = true
-        if restartsInFlight == 0 { surface.disabledReason = restartBanner }
+        surface.disabledReason = isReplacing ? operation?.reason : (restartBanner ?? why)
     }
+
+    /// What a refused entry is told, by the input that is holding. Sentences about this channel and
+    /// its settings, naming no value (§11).
+    static let restartInFlight =
+        "This channel is being restarted; nothing was changed. Try again once it has reported."
+    static let readbacksOutstanding =
+        "This channel has not finished reporting what the restart carried across; nothing was changed."
+    static let replacementHasNotReported =
+        "This channel has not reported since it was restarted; nothing was changed."
+    static let stillConnecting =
+        "This channel is still connecting; nothing was changed. Try again once it has reported."
+    static let acceptanceInFlight =
+        "The bypass permission mode is already being enabled in this channel; nothing was changed."
 
     /// The setting the fleet is still holding this channel connecting over, after every correction
     /// the user has already made has been re-offered to it. Nil when it holds none.

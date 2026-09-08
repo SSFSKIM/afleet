@@ -66,11 +66,11 @@ extension ChannelHeaderActionsModel {
         // the replacement restores the older mode. The disclaimer arm is refused for the same
         // reason — it ends in a restart of its own, and two overlapping ones are §8.6's order broken
         // by another name. The user is told, and picks again once the channel has reported.
-        guard bypassMayProceed() else { return }
+        guard await bypassMayProceed() else { return }
         let accepted = await refreshBypassAcceptance()
         // The store read is an await, and a restart begun inside it is exactly the race above: the
         // reading both guards were made on is now the machine as it was.
-        guard bypassMayProceed() else { return }
+        guard await bypassMayProceed() else { return }
         if accepted {
             await sendBypassPermissionMode()
             return
@@ -78,18 +78,16 @@ extension ChannelHeaderActionsModel {
         isShowingBypassDisclaimer = true
     }
 
-    /// Whether the gate may act on this channel right now, saying why when it may not. The two
-    /// refusals are read together because either one alone would let the other's race through.
-    private func bypassMayProceed() -> Bool {
-        if pickers.isAcceptingBypass {
-            say(Self.acceptanceInFlight)
-            return false
-        }
-        if pickers.isRestartPending {
-            say(Self.restartInFlight)
-            return false
-        }
-        return true
+    /// Whether the gate may act on this channel right now, saying why when it may not.
+    ///
+    /// One question and not a list of its own: `allows(.bypassMode)` reads the pickers' current
+    /// operation, the setting the fleet still holds the channel over, the channel's readiness and the
+    /// acceptance this gate may only run one of at a time — and names whichever is holding. A second
+    /// copy of any of those here would be a second chance for the two to disagree.
+    private func bypassMayProceed() async -> Bool {
+        guard let refusal = await pickers.refusal(of: .bypassMode) else { return true }
+        say(refusal)
+        return false
     }
 
     /// *Decline*. The mode stays unavailable, nothing restarts and **nothing is written** — not to
@@ -111,12 +109,26 @@ extension ChannelHeaderActionsModel {
         // The disclaimer is answered by a human, and a restart can have begun while it stood. §8.6's
         // three steps are one restart and one mode switch, and neither belongs on top of another
         // channel-wide restart.
-        guard !pickers.isRestartPending else {
-            say(Self.restartInFlight)
+        guard await bypassMayProceed() else { return }
+        // **Eligibility is re-read from the latest settings, not from the reading the disclaimer was
+        // raised on.** A disclaimer stands for as long as a human takes to answer it, and a
+        // `disableBypassPermissionsMode` of `"disable"` arriving in that window makes the mode one
+        // this account may not have: accepting on the stale reading would write an acceptance, replace
+        // the process with the launch flag and ask for a mode the engine would refuse (review round 4,
+        // scalpel-5#1). Nothing is persisted and nothing is restarted when it has arrived.
+        guard await pickers.readSettings() != nil else {
+            say("The channel did not report its settings, so the bypass permission mode was not enabled.")
             return
         }
+        guard !pickers.bypassDisabled else {
+            say("This account no longer allows the bypass permission mode; nothing was changed.")
+            return
+        }
+        // The readback is an await of the same kind as the store read below, so the gate is asked
+        // again on the far side of it.
+        guard await bypassMayProceed() else { return }
         guard pickers.beginBypassAcceptance() else {
-            say(Self.acceptanceInFlight)
+            say(SettingPickersModel.acceptanceInFlight)
             return
         }
         defer { pickers.endBypassAcceptance() }
@@ -141,17 +153,6 @@ extension ChannelHeaderActionsModel {
         //    was launched with the flag.
         await sendBypassPermissionMode()
     }
-
-    /// What a second bypass selection is told while the first acceptance is still running. A sentence
-    /// about this channel, naming no value (§11).
-    static let acceptanceInFlight =
-        "The bypass permission mode is already being enabled in this channel; nothing was changed."
-
-    /// What a bypass selection is told while the channel is being restarted for anything at all. A
-    /// sentence about this channel, naming no value and no setting's value (§11).
-    static let restartInFlight =
-        "This channel is being restarted; the permission mode was not changed. Pick it again once "
-        + "the channel has reported."
 
     /// `set_permission_mode {mode: "bypassPermissions"}`, through the picker so the click is not
     /// adopted as a displayed value: the only readback permission mode has is the handshake's

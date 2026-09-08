@@ -238,10 +238,11 @@ final class PickerReadbackTests: XCTestCase {
         await double.stageSend("list_models", .success(try Self.recordedBody("list_models")))
         await double.stageSend("get_settings", .success(try Self.settings(model: expected.canonical)))
         let model = SettingPickersModel(key: makeKey(), lifecycle: double, surface: surface)
-        model.beginRestart(reason: "an invented restart")
+        let operation = model.beginRestart(reason: "an invented restart",
+                                           expecting: .init(model: expected.value))
         XCTAssertTrue(surface.isDisabled, "the composer was not disabled while the restart was in flight")
 
-        let survived = await model.confirmReadback(of: .init(model: expected.value))
+        let survived = await model.confirmReadback(operation)
 
         XCTAssertTrue(survived, "a readback that matched was reported as a mismatch")
         XCTAssertFalse(surface.isDisabled, "the composer stayed disabled after every readback matched")
@@ -253,9 +254,10 @@ final class PickerReadbackTests: XCTestCase {
         await lost.stageSend("list_models", .success(try Self.recordedBody("list_models")))
         await lost.stageSend("get_settings", .success(try Self.settings(model: other.canonical)))
         let lostModel = SettingPickersModel(key: makeKey(), lifecycle: lost, surface: lostSurface)
-        lostModel.beginRestart(reason: "an invented restart")
+        let lostOperation = lostModel.beginRestart(reason: "an invented restart",
+                                                   expecting: .init(model: expected.value))
 
-        let confirmed = await lostModel.confirmReadback(of: .init(model: expected.value))
+        let confirmed = await lostModel.confirmReadback(lostOperation)
 
         XCTAssertFalse(confirmed, "a readback that did not match was reported as surviving")
         XCTAssertTrue(lostSurface.isDisabled, "a setting that did not survive left the composer enabled")
@@ -276,7 +278,8 @@ final class PickerReadbackTests: XCTestCase {
         let typed = "an invented message typed during a restart"
         composer.draft = typed
 
-        composer.pickers.beginRestart(reason: "an invented restart")
+        let operation = composer.pickers.beginRestart(reason: "an invented restart",
+                                                      expecting: composer.pickers.currentSnapshot)
         await composer.send()
 
         let members = await double.memberSequence
@@ -284,7 +287,7 @@ final class PickerReadbackTests: XCTestCase {
         XCTAssertEqual(composer.draft.count, typed.count,
                        "the disabled field kept \(composer.draft.count) of the \(typed.count) character(s) typed")
 
-        await composer.pickers.cancelRestart()
+        await composer.pickers.cancelRestart(operation)
         await composer.send()
 
         let after = await double.memberSequence
