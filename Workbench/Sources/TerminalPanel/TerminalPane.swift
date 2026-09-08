@@ -41,7 +41,9 @@ public final class TerminalPane {
 
     /// What the renderer is told when a pane is closed before its child ended on its own. Close
     /// hangs the child up, so the terminal is told the status a hung-up child would have carried.
-    private static let closedExitCode = 128 + SIGHUP
+    /// The session reports the same status to X5 for a request whose pane the user closed alive,
+    /// so the two answers to "what happened to this child" cannot drift apart.
+    static let closedExitCode = 128 + SIGHUP
 
     /// Concrete, not `any TerminalSurface`: tracker 94 ruled that back-pressure lives on the
     /// adapter because this leaf holds the concrete type, and the read loop below awaits
@@ -53,6 +55,11 @@ public final class TerminalPane {
     public private(set) var request: PaneRequest?
 
     public private(set) var state: PaneState = .starting
+
+    /// What this pane actually launched, kept so the shape of a spawn is assertable and so the
+    /// session can read back a shell pane's directory for the W6 document without holding a second
+    /// copy of it. `nil` until a launch is attempted.
+    public private(set) var spawn: PTYSpawnRequest?
 
     /// Fired once, with the termination the pty layer observed. The session installs it; the pane
     /// itself performs no ownership work of any kind.
@@ -156,6 +163,7 @@ public final class TerminalPane {
     }
 
     private func launch(_ spawn: PTYSpawnRequest) {
+        self.spawn = spawn
         let pty: PTYProcess
         do {
             pty = try PTYProcess(spawning: spawn)
