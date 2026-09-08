@@ -11,8 +11,8 @@ import FleetKit
 ///
 /// **What each of these would catch.** A whole-table reload on a streaming delta; a height cache
 /// dropped wholesale on every publish; a viewport shoved down by content arriving above it; a
-/// sticky-to-bottom rule that needs an affordance pressed to re-arm. Each was run against a
-/// deliberately broken controller before it was accepted.
+/// sticky-to-bottom rule that needs an affordance pressed to re-arm. Each of the four was run
+/// against a deliberately broken controller before it was accepted.
 ///
 /// Nothing here asserts over an `ItemID` or over anything holding one (§11): `ItemID.stream` carries
 /// the config home, so the answers are row counts, reload counts, measurement counts and offsets in
@@ -151,11 +151,59 @@ final class TimelineListTests: XCTestCase {
         }
     }
 
+    // MARK: - The column's one-expression swap
+
+    /// The column draws the renderer for a populated channel and its placeholders for the other
+    /// three branches, with the header slot above the timeline and the composer below it.
+    ///
+    /// Walked through `ViewTree`'s reflection, whose limits tracker 81 records: the answers are type
+    /// names, positions and counts, and nothing here prints a view's value.
+    func testTheColumnDrawsTheRendererAndKeepsItsOtherBranches() async throws {
+        let rig = try Self.makeRig()
+        let (app, column) = try await Self.makeColumn(rig)
+        let row = try XCTUnwrap(app.browser?.row(LaunchFixtures.sessionA),
+                                "the launch painted no channel row, so there is no column to walk")
+
+        // Before the channel is opened: the "Opening…" branch, and no timeline.
+        let unopened = ComposerViewTree.order(of: Self.landmarks, in: try Self.channelBody(of: column))
+        XCTAssertTrue(unopened.contains("PlaceholderColumn"),
+                      "an unopened channel drew \(unopened.count) landmark(s) and none of them a placeholder")
+        XCTAssertFalse(unopened.contains("TimelineListView"),
+                       "an unopened channel drew the timeline, which has nothing to draw")
+
+        // Opened, with items: the timeline, between the header's slot and the composer.
+        let model = app.timelines.model(for: row.key)
+        await model.open(row)
+        XCTAssertGreaterThan(model.rows.count, 0,
+                             "the opened channel holds \(model.rows.count) row(s), so the populated branch is unreachable")
+        let populated = ComposerViewTree.order(of: Self.landmarks, in: try Self.channelBody(of: column))
+        guard let slot = populated.firstIndex(of: "ChannelHeaderActionsSlot"),
+              let timeline = populated.firstIndex(of: "TimelineListView"),
+              let composer = populated.lastIndex(of: "ChannelComposerMount") else {
+            return XCTFail("the populated column drew \(populated.count) landmark(s), not the three this asserts on")
+        }
+        XCTAssertTrue(slot < timeline, "the header's action slot is drawn after the timeline, not above it")
+        XCTAssertTrue(timeline < composer, "the composer is drawn before the timeline, not below it")
+        XCTAssertFalse(populated.contains("PlaceholderColumn"),
+                       "the populated column drew a placeholder beside its timeline")
+
+        // The failure branch: a transcript that went away under an index that still lists it.
+        let failing = try await Self.makeFailingColumn()
+        let broken = ComposerViewTree.order(of: Self.landmarks, in: try Self.channelBody(of: failing))
+        XCTAssertTrue(broken.contains("PlaceholderColumn"),
+                      "a channel that could not be read drew \(broken.count) landmark(s) and none of them a placeholder")
+        XCTAssertFalse(broken.contains("TimelineListView"),
+                       "a channel that could not be read drew the timeline")
+    }
+
     // MARK: - Fixtures
 
     /// The window every scroll assertion is made in. Short enough that sixty rows overflow it, which
     /// is what makes "scrolled into the middle" a place and not a rounding error.
     private static let viewport = NSSize(width: 520, height: 300)
+
+    private static let landmarks: Set<String> = ["ChannelHeaderActionsSlot", "TimelineListView",
+                                                 "PlaceholderColumn", "ChannelComposerMount"]
 
     /// An invented stream: a repeated-nibble session id and a config home under the process's own
     /// temporary directory, so no committed byte and no real path is in this suite (§11).
@@ -221,5 +269,78 @@ final class TimelineListTests: XCTestCase {
         guard let index = controller.rows.firstIndex(where: { $0.key == key }) else { return nil }
         let visible = controller.scrollView.contentView.documentVisibleRect
         return controller.tableView.rect(ofRow: index).minY - visible.minY
+    }
+
+    // MARK: - The launch the column is walked in
+
+    private struct Rig {
+        let temp: TempTree
+        let configHome: URL
+        let sequence: LaunchSequence
+    }
+
+    /// A launch that reaches a workspace with one listed channel. Everything is invented and every
+    /// path is under the process's temporary directory (X9).
+    private static func makeRig() throws -> Rig {
+        let temp = try TempTree()
+        let configHome = try temp.directory("home")
+        // The slug matches `LaunchFixtures.snapshot`'s entry path, so the index the launch is
+        // given names the transcript that is actually on disk and the channel opens with items.
+        try LaunchFixtures.transcript(in: configHome, slug: "invented", session: LaunchFixtures.sessionA)
+        let index = StubIndex(persisted: nil,
+                              built: LaunchFixtures.snapshot(configHome: configHome,
+                                                             ids: [LaunchFixtures.sessionA]),
+                              delta: IndexDelta(added: [LaunchFixtures.sessionA]))
+        let binary = try temp.file("bin/claude", "#!/bin/sh\nexit 0\n")
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+
+        let sequence = LaunchSequence(
+            storeRoot: temp.root.appending(path: "store", directoryHint: .isDirectory),
+            diagnosticsRoot: temp.root.appending(path: "logs", directoryHint: .isDirectory),
+            resolveEnvironment: { LaunchFixtures.environment(home: temp.root, configHome: configHome) },
+            locateBinary: { _, _ in binary },
+            checkVersion: { _, _ in .accepted(SemanticVersion(major: 2, minor: 1, patch: 263)) },
+            makeStore: { base, homes in try FileStateStore(baseDirectory: base, configHomes: homes) },
+            makeDiagnostics: { DiagnosticsComposer(directory: $0) },
+            makeIndex: { _, _, _ in index },
+            fleetFactory: { _, _, _, _, _, _ in LifecycleDouble() },
+            makeWatcher: { _ in StubWatcher() },
+            readClaudeJSON: { _ in true })
+        return Rig(temp: temp, configHome: configHome, sequence: sequence)
+    }
+
+    /// The column as the window draws it, with the one channel selected.
+    private static func makeColumn(_ rig: Rig) async throws -> (app: AppModel, column: ChannelColumnView) {
+        let app = AppModel(sequence: rig.sequence)
+        await app.launch()
+        let workspace = try XCTUnwrap(app.route.workspace, "the launch reached no workspace to draw")
+        app.shell.select(LaunchFixtures.sessionA)
+        return (app, ChannelColumnView(app: app, shell: app.shell, workspace: workspace))
+    }
+
+    /// A column whose channel is listed but whose transcript is gone, which is the `failure` branch.
+    private static func makeFailingColumn() async throws -> ChannelColumnView {
+        let rig = try makeRig()
+        let (app, column) = try await makeColumn(rig)
+        let row = try XCTUnwrap(app.browser?.row(LaunchFixtures.sessionA),
+                                "the launch painted no channel row to break")
+        // A transcript that cannot be read, rather than one that is merely absent: an absent file
+        // reads as an empty channel, and what the `failure` branch is about is a read that failed.
+        // The path is replaced by a directory, which every read of it refuses.
+        let transcript = rig.configHome.appending(path: "projects/invented/\(LaunchFixtures.sessionA).jsonl")
+        try FileManager.default.removeItem(at: transcript)
+        try FileManager.default.createDirectory(at: transcript, withIntermediateDirectories: false)
+        let model = app.timelines.model(for: row.key)
+        await model.open(row)
+        XCTAssertNotNil(model.failure, "a channel whose transcript went away reported no failure")
+        return column
+    }
+
+    /// The inner per-channel view, which is `private` to `ChannelColumnView.swift` and so is reached
+    /// by opening the body rather than by naming the type.
+    private static func channelBody(of column: ChannelColumnView) throws -> Any {
+        let inner = try XCTUnwrap(ComposerViewTree.view(named: "ChannelTimelineColumn", in: column.body),
+                                  "the column drew no per-channel view, so there is no branch to assert on")
+        return ComposerViewTree.body(of: inner)
     }
 }

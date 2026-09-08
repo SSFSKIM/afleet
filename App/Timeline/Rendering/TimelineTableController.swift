@@ -61,6 +61,11 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// for the whole-table reload §3 exists to avoid.
     private(set) var reloadedRows: [Int] = []
 
+    /// The per-row capabilities. They arrive as an environment value on the list's subtree and are
+    /// handed on from here to each hosted row, because these rows are hosted by AppKit: SwiftUI's
+    /// environment does not cross an `NSHostingView` the table made itself.
+    private var context: TimelineRenderContext?
+
     private let markdown = MarkdownText()
     private let highlighter = CodeHighlighter()
 
@@ -101,7 +106,8 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
 
     /// One publish, applied: the items reconciled by key, the preview appended to, and the scroll
     /// position either held on its anchor or followed to the bottom.
-    func apply(_ input: TimelineRenderInput) {
+    func apply(_ input: TimelineRenderInput, context: TimelineRenderContext? = nil) {
+        self.context = context
         reloadedRows = []
         let anchor = anchorAtViewportTop()
         let appended = applyItems(input) + applyPreview(input.preview)
@@ -248,7 +254,7 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// the one a naive list gets wrong.
     private func settleScroll(anchor: ViewportAnchor?, appended: Int) {
         tableView.layoutSubtreeIfNeeded()
-        if scroll.isPinnedToBottom {
+        if scroll.isPinnedToBottom, context?.autoScrollEnabled ?? true {
             scrollToBottom()
             return
         }
@@ -388,9 +394,10 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         return hosting
     }
 
-    /// One item's row, drawn by whichever builder owns its kind (contract Y1).
+    /// One item's row, drawn by whichever builder owns its kind (contract Y1) and handed the render
+    /// context on its own subtree.
     private func body(for item: TimelineRow) -> some View {
-        TimelineRowSlot(row: item)
+        TimelineRowSlot(row: item).environment(\.timelineContext, context)
     }
 
     private func height(of row: RenderedRow, width: CGFloat) -> CGFloat {

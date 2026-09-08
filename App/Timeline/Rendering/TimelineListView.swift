@@ -2,6 +2,50 @@ import AppKit
 import SwiftUI
 import FleetKit
 
+// MARK: - What the channel column mounts
+
+/// The channel's timeline, and the one expression `ChannelColumnView` draws in place of C5's
+/// placeholder `List` (child spec §3).
+///
+/// **Superseded 2026-09-08 (C6.1).** C5's column drew `List(model.rows) { TimelineRowSlot(row: $0) }`
+/// and its own comments said the timeline had no markdown, no cards and no streaming because C6
+/// would replace them. This is that replacement: an `NSTableView` in an `NSScrollView`, virtualized
+/// by `ItemID`, bottom-anchored, and reloading one row for a streaming delta rather than
+/// re-evaluating a content closure over the whole collection.
+///
+/// It reaches `AppModel` through the environment rather than through an initialiser argument, which
+/// is the opposite of the choice C6.2's composer mount made and is made for the same reason: the
+/// column's outer body is shared by three leaves and `RootView` is closed, so the two capabilities
+/// this leaf needs travel the one route that adds no argument to a view another leaf owns.
+struct TimelineListView: View {
+
+    let model: ChannelTimelineModel
+
+    @Environment(AppModel.self) private var app: AppModel?
+
+    /// The renderer, and with it the table, the row heights and the scroll position. `@State`
+    /// because a SwiftUI view *value* preserves nothing across a body evaluation and all three have
+    /// to survive one; the column keys this view by the channel, so a channel switch gets its own.
+    @State private var renderer = NativeTimelineRenderer()
+
+    /// Folding is the channel's view state and outlives every row that draws a disclosure.
+    @State private var collapse = TimelineCollapseState()
+
+    var body: some View {
+        // No change set: the model republishes the whole timeline and states no diff, so the table
+        // computes one by key. When the model does start naming its changes the table prefers them.
+        renderer.view(for: TimelineRenderInput(rows: model.rows, preview: model.timeline.preview))
+            .environment(\.timelineContext, context)
+    }
+
+    /// Contract Y1's per-row capabilities, injected on this subtree and nowhere else.
+    private var context: TimelineRenderContext? {
+        guard let app else { return nil }
+        return TimelineRenderContext(key: model.key, links: app.panels.links,
+                                     agents: app.agentNavigation, collapse: collapse)
+    }
+}
+
 // MARK: - The surface the renderer returns
 
 /// The table, with the jump-to-bottom affordance over it.
@@ -50,12 +94,17 @@ struct TimelineTableRepresentable: NSViewRepresentable {
     let controller: TimelineTableController
     let input: TimelineRenderInput
 
+    /// Read here and handed down, because the rows below are hosted by AppKit: SwiftUI's environment
+    /// does not cross an `NSHostingView` the table made itself, so this is the last point at which
+    /// the context can be picked up and carried across.
+    @Environment(\.timelineContext) private var renderContext
+
     func makeNSView(context: Context) -> NSScrollView {
-        controller.apply(input)
+        controller.apply(input, context: renderContext)
         return controller.scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        controller.apply(input)
+        controller.apply(input, context: renderContext)
     }
 }
