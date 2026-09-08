@@ -650,6 +650,52 @@ final class ShellEscapeTests: XCTestCase {
                        "a cancelled shell escape reached \(members.count) lifecycle member(s)")
     }
 
+    /// **A result that arrives after `stop()` posts nothing.** Cancellation cannot undo a run that is
+    /// already over: the shell can finish while the composer is still waiting to be resumed with what
+    /// it produced, and `stop()` landing in that gap cancels a task with nothing left to cancel and
+    /// clears a handle the awaiting half is about to read. A resumption that asks only whether there
+    /// is output starts a turn on a channel the user has left.
+    ///
+    /// The gap is arranged rather than raced. The send reaches the spawn, which happens off this
+    /// actor; the main actor is then held for longer than the command takes, so the command finishes
+    /// and its result is queued behind the hold. `stop()` is called inside that hold, before the
+    /// composer can resume. The mark the command leaves is the proof the arrangement held — asserted
+    /// by existence, never by path (§11).
+    func testAResultArrivingAfterStopPostsNothing() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let mark = work.appending(path: "finished")
+        let double = ComposerLifecycleDouble()
+        await double.stageSendPrompt(.success(UUID()))
+        let model = makeModel(double, cwd: work)
+        model.draft = "!sleep 1; printf 'x' > '\(mark.path)'"
+
+        let finished = Finished()
+        let send = Task { @MainActor in
+            await model.send()
+            await finished.mark()
+        }
+        defer { send.cancel() }
+        // Yielded, so the send reaches the spawn.
+        try await Task.sleep(for: .milliseconds(300))
+        // Held: the command ends inside this, and the composer cannot be resumed with its result
+        // until the hold is over.
+        usleep(2_500_000)
+        model.stop()
+
+        var settled = false
+        for _ in 0..<60 where !settled {
+            if await finished.value { settled = true; break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertTrue(settled, "a shell escape stopped after its result arrived had not returned 6 second(s) later")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: mark.path),
+                      "the command had not finished before `stop()`, so this arm did not put the two in the order it tests")
+        let members = await double.memberSequence
+        XCTAssertEqual(members.count, 0,
+                       "a result that arrived after `stop()` reached \(members.count) lifecycle member(s)")
+    }
+
     /// **A release that lands while the ownership question is in flight starts nothing.** The view
     /// launches the send from a `Task` it does not retain, and the first suspension point in it is
     /// `state(of:)`. A composer that registers its run handle only *after* that answer comes back
@@ -746,6 +792,50 @@ final class ShellEscapeTests: XCTestCase {
                        "the budget expired before the cancellation, so this arm did not put the two in the order it tests")
         let ended = try await died(descendant, within: 80)
         XCTAssertTrue(ended, "the command's descendant outlived the escalation the cancellation owed its group")
+    }
+
+    /// **A cancellation that follows the leader's exit still ends the group.** `sleep 30 & exit 0`
+    /// is a shell that is gone before anyone awaits it: the exit handler reaps it, and settlement
+    /// waits for a caller that has not arrived. A cancellation reaching that state answers the caller
+    /// and nothing else unless it also signals — and what it would leave behind is a quiet descendant
+    /// with no leader left to name it.
+    ///
+    /// The child is driven directly so the two facts can be put in that order deliberately: the
+    /// leader has exited and been reaped before `cancel()`, and `finish` comes after it. The
+    /// descendant is identified by the pid it wrote down and probed with `kill(pid, 0)`; a pid is a
+    /// count of nothing and names no path, session or environment (§11).
+    func testCancellingAfterTheLeaderExitedStillEndsTheGroup() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let pidFile = work.appending(path: "descendant-pid")
+        // The leader exits at once, leaving the `sleep` in its group with the pipe still open.
+        let child = ShellChild(command: "sleep 30 & printf '%s' \"$!\" > '\(pidFile.path)'; exit 0",
+                               shell: "/bin/sh", directory: work,
+                               environment: ["PATH": "/usr/bin:/bin"],
+                               outputLimitBytes: HostShellRunner.defaultOutputLimitBytes)
+        try child.start()
+        guard let descendant = try await recordedPID(in: pidFile, within: 20) else {
+            child.cancel()
+            return XCTFail("the command recorded no descendant to probe")
+        }
+        defer { _ = kill(descendant, SIGKILL) }
+        // Long enough for the exit event to have been delivered and the leader reaped, so the
+        // cancellation below lands on a child that has already exited.
+        try await Task.sleep(for: .milliseconds(500))
+
+        child.cancel()
+
+        let settlement = Settlement()
+        child.finish(timeout: .seconds(30)) { output in
+            Task { await settlement.mark(output) }
+        }
+        guard let output = try await settled(settlement, within: 60) else {
+            return XCTFail("the cancelled command had not settled 6 second(s) after its caller arrived")
+        }
+        XCTAssertFalse(output.timedOut,
+                       "the budget expired rather than the cancellation ending the run, so this arm did not test what it exists for")
+        let ended = try await died(descendant, within: 80)
+        XCTAssertTrue(ended, "a cancellation that followed the leader's exit left the command's descendant on the machine")
     }
 
     /// **A final drain that overruns the cap still ends the group.** A shell that exits leaving a

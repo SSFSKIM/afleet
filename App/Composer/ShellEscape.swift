@@ -323,11 +323,20 @@ final class ShellChild: @unchecked Sendable {
 
     /// Ends the awaiting caller's interest: the tree is signalled exactly as a timeout signals it and
     /// `run` answers nil rather than a result.
+    ///
+    /// **The group is signalled whether or not the leader has exited.** `sleep 30 & exit 0` is a
+    /// command whose shell is gone before anyone awaits it: the exit handler reaps it, and the
+    /// settlement it asks for waits for a caller that has not arrived yet. A cancellation reaching
+    /// that state and only answering the caller leaves the descendant on the machine with no leader
+    /// left to name it — the outcome the timeout path exists to prevent, arrived at from the other
+    /// side. The termination is therefore begun first and the settlement asked for after it;
+    /// `beginTermination` is idempotent, so a cancellation during one signals nothing twice.
     func cancel() {
         queue.async { [self] in
             guard !settled, !cancelled else { return }
             cancelled = true
-            if exited { settleIfComplete() } else { beginTermination() }
+            beginTermination()
+            if exited { settleIfComplete() }
         }
     }
 
@@ -355,7 +364,11 @@ final class ShellChild: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + grace) { [self] in
             guard !escalated else { return }
             escalated = true
-            signalTree(SIGKILL)
+            // Asked before the second signal: a group that is already gone is not signalled again,
+            // which keeps a delayed `SIGKILL` off an id the kernel may since have handed to someone
+            // else (tracker 225). It narrows that window rather than closing it — the group can
+            // still go between the probe and the signal — and it costs one syscall.
+            if group > 0, kill(-group, 0) == 0 || errno != ESRCH { signalTree(SIGKILL) }
             queue.asyncAfter(deadline: .now() + grace) { [self] in settle() }
         }
     }
@@ -607,9 +620,18 @@ extension ComposerModel {
         }
         hostShell = running
         let output = await running.value
+        // **Ownership is asked again here, on the far side of the run.** Cancellation cannot undo a
+        // run that is already over: the command can finish while this composer is still waiting to be
+        // resumed with what it produced, and a `stop()` landing in that gap cancels a task with
+        // nothing left to cancel and clears a handle this line is about to read. Asking only whether
+        // there is output would then post into a channel the user has left — the very thing the
+        // cancellation exists to prevent, one instant too late to be prevented by cancelling.
+        // Whether this run is still the composer's is what says it may speak: `stop()` clears the
+        // handle, and so does a later `!` that has replaced this one.
+        let stillOurs = hostShell == running && !running.isCancelled
         if hostShell == running { hostShell = nil }
         // A cancelled run is not a result: nothing is posted, and the tree is already ended.
-        guard let output else { return false }
+        guard let output, stillOurs else { return false }
         // C2's sanitiser, called. The three inputs go in exactly as they came back.
         let text = ShellEnvelope.wrap(command: command, stdout: output.stdout, stderr: output.stderr)
         // Through `post(_:)`, the one place a `UserInput` becomes a prompt: the engine answers a
