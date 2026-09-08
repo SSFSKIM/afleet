@@ -206,6 +206,49 @@ final class FileWatchTests: XCTestCase {
         XCTAssertFalse(events.contains(.deleted), "a file that never existed was reported deleted")
     }
 
+    // MARK: - 4a. A watch nobody holds any more ends
+
+    /// The host's LRU releases a session by dropping the reference — there is no teardown hook —
+    /// so a watch that outlives its last owner is a stat loop for the life of the process, one per
+    /// open file that fell back to the poll. The watch must let go on its own.
+    func testAPollingWatchEndsWhenItsLastOwnerLetsGo() async throws {
+        let target = root.appendingPathComponent("orphan.txt")
+        try write("one", to: target)
+        let log = EventLog()
+
+        // The only strong reference lives in the helper's frame and dies with it.
+        let released = try await releasedPollingWatch(on: target, log: log)
+
+        try await waitUntilReleased(released, "the watch outlived its last reference")
+
+        let before = await log.events.count
+        try write("two", to: target)
+        try await Task.sleep(for: .milliseconds(300))
+        let after = await log.events.count
+        XCTAssertEqual(after, before, "a released watch delivered \(after - before) more events")
+    }
+
+    /// The other half: a vnode source is *registered* with Dispatch, so releasing a watch without
+    /// `stop()` leaks its `O_EVTONLY` descriptor for the life of the process. Counted rather than
+    /// named — the assertion is a count of open descriptors and nothing about any of them.
+    func testReleasingAnArmedWatchClosesItsDescriptor() async throws {
+        let target = root.appendingPathComponent("armed.txt")
+        try write("one", to: target)
+        let baseline = Self.openDescriptorCount()
+
+        try await releaseArmedWatches(count: 8, on: target)
+
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(10)
+        var open = Self.openDescriptorCount()
+        while clock.now < deadline, open > baseline + 2 {
+            try? await Task.sleep(for: .milliseconds(20))
+            open = Self.openDescriptorCount()
+        }
+        XCTAssertLessThanOrEqual(open, baseline + 2,
+                                 "8 released watches left \(open - baseline) descriptors open")
+    }
+
     // MARK: - 5. The policy, as a table with no file system in it
 
     func testTheSaveEchoIsIgnored() {
@@ -278,6 +321,46 @@ final class FileWatchTests: XCTestCase {
         }
     }
 
+    /// Starts a polling watch and hands back only a weak handle to it: no strong reference
+    /// survives this frame, which is what "the host let the session go" means here.
+    private func releasedPollingWatch(on url: URL, log: EventLog) async throws -> WeakWatch {
+        let watch = watcher(on: url, mode: .poll, log: log, poll: .milliseconds(20))
+        await watch.start()
+        let polling = await watch.isPolling
+        XCTAssertTrue(polling, "the premise did not hold: the watch was not polling")
+        return WeakWatch(watch)
+    }
+
+    /// Arms `count` vnode sources on one path and lets every one of them go, so the only thing
+    /// that can close their descriptors is the watch releasing its source on its own.
+    private func releaseArmedWatches(count: Int, on url: URL) async throws {
+        let log = EventLog()
+        for _ in 0..<count {
+            let watch = watcher(on: url, mode: .vnode, log: log, poll: .seconds(30))
+            await watch.start()
+            let polling = await watch.isPolling
+            XCTAssertFalse(polling, "the premise did not hold: the source was not armed")
+        }
+    }
+
+    private func waitUntilReleased(_ handle: WeakWatch, _ what: String,
+                                   within limit: Duration = .seconds(10),
+                                   file: StaticString = #filePath, line: UInt = #line) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + limit
+        while clock.now < deadline {
+            if !handle.isAlive { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail(what, file: file, line: line)
+    }
+
+    /// How many descriptors this process has open, by counting `/dev/fd` — process-local, so no
+    /// path outside the test's own tree is read.
+    private static func openDescriptorCount() -> Int {
+        (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? 0
+    }
+
     private func write(_ text: String, to url: URL) throws {
         try Data(text.utf8).write(to: url)
     }
@@ -316,6 +399,16 @@ final class FileWatchTests: XCTestCase {
         XCTFail("\(what) (\(events.count) events within the guard)", file: file, line: line)
         return events
     }
+}
+
+/// A weak handle to a watch, so a test can ask whether it is gone without holding it.
+private final class WeakWatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var held: FileWatch?
+
+    init(_ watch: FileWatch) { held = watch }
+
+    var isAlive: Bool { lock.withLock { held != nil } }
 }
 
 /// What the watcher's callback writes to. An actor, so the count a test reads is a count that was

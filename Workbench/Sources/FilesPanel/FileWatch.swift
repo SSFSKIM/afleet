@@ -38,7 +38,8 @@ public actor FileWatch {
     private let onEvent: @Sendable (Event) -> Void
     private let queue = DispatchQueue(label: "dev.afleet.filespanel.filewatch")
 
-    private var source: (any DispatchSourceFileSystemObject)?
+    /// The armed source, held outside the actor's isolation so `deinit` can cancel it.
+    private let armed = VnodeSource()
     private var settleTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var lastObserved: FileSnapshot?
@@ -56,6 +57,13 @@ public actor FileWatch {
         self.pollInterval = pollInterval
         self.onEvent = onEvent
     }
+
+    /// A watch is released by its owner going away, not by anyone remembering to end it: X7's host
+    /// drops a session's reference under LRU pressure and has no teardown hook. A resumed vnode
+    /// source is registered with Dispatch and outlives the object that holds it, so the descriptor
+    /// would stay open for the life of the process; cancelling here closes it. The tasks need
+    /// nothing: both hold the watch weakly and end at their next wake.
+    deinit { armed.cancel() }
 
     /// `baseline` is what the session loaded; deliveries are the changes away from it. Passing
     /// `nil` reads the path now, and a path that is not there yet is watched for its arrival.
@@ -85,38 +93,37 @@ public actor FileWatch {
     // MARK: - The source
 
     private func arm() -> Bool {
-        guard source == nil else { return true }
+        guard !armed.isArmed else { return true }
         // `O_CLOEXEC` for the reason C7.3 gives for its own reads: this leaf spawns `git`
         // through C7.3's runner while watches are live, and a descriptor without it is inherited
         // by every one of those children.
         let descriptor = open(url.path, O_EVTONLY | O_CLOEXEC)
         guard descriptor >= 0 else { return false }
-        let armed = DispatchSource.makeFileSystemObjectSource(
+        let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: descriptor,
             eventMask: [.write, .extend, .delete, .rename, .revoke, .link],
             queue: queue)
-        armed.setEventHandler { [weak self] in
+        source.setEventHandler { [weak self] in
             guard let self else { return }
             Task { await self.sourceFired() }
         }
-        armed.setCancelHandler { close(descriptor) }
-        source = armed
-        armed.resume()
+        source.setCancelHandler { close(descriptor) }
+        armed.hold(source)
+        source.resume()
         return true
     }
 
     private func disarm() {
-        source?.cancel()
-        source = nil
+        armed.cancel()
     }
 
     private func sourceFired() {
         guard !stopped, settleTask == nil else { return }
         // A leading schedule with a fixed window rather than a restart on each event: a burst is
         // still coalesced, and a file being written continuously is still delivered on time.
-        settleTask = Task { [coalescingDelay] in
+        settleTask = Task { [weak self, coalescingDelay] in
             try? await Task.sleep(for: coalescingDelay)
-            await self.settle()
+            await self?.settle()
         }
     }
 
@@ -134,10 +141,15 @@ public actor FileWatch {
 
     private func startPolling() {
         guard pollTask == nil, !stopped else { return }
-        pollTask = Task { [pollInterval] in
+        // **Weakly.** The watch owns the task and the task must not own the watch back: a session
+        // the host released is never told to stop, and a strong capture here would keep both alive
+        // and stat the path for the life of the process. The strong reference exists only for the
+        // duration of one tick, and the loop ends the moment the watch is gone.
+        pollTask = Task { [weak self, pollInterval] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: pollInterval)
                 if Task.isCancelled { return }
+                guard let self else { return }
                 await self.tick()
             }
         }
@@ -151,7 +163,7 @@ public actor FileWatch {
     private func tick() {
         guard !stopped else { return }
         // A path that has come back can be armed again, and the poll steps aside when it is.
-        if mode == .vnode, source == nil, arm() { stopPolling() }
+        if mode == .vnode, !armed.isArmed, arm() { stopPolling() }
         evaluate()
     }
 
@@ -165,5 +177,36 @@ public actor FileWatch {
         guard observed != lastObserved else { return }
         lastObserved = observed
         onEvent(observed.map(Event.changed) ?? .deleted)
+    }
+}
+
+/// The armed source, held behind a lock rather than in the actor's isolated state.
+///
+/// An actor's `deinit` is not isolated and may not reach isolated properties, and a resumed
+/// `DispatchSource` that is merely released is never cancelled — so its cancel handler never runs
+/// and the `O_EVTONLY` descriptor stays open. Holding it here is what lets a watch nobody stopped
+/// still give the descriptor back.
+final class VnodeSource: @unchecked Sendable {
+    private let lock = NSLock()
+    private var source: (any DispatchSourceFileSystemObject)?
+
+    var isArmed: Bool { lock.withLock { source != nil } }
+
+    /// Takes ownership of `source`, cancelling whatever was armed before it.
+    func hold(_ source: any DispatchSourceFileSystemObject) {
+        lock.lock()
+        let previous = self.source
+        self.source = source
+        lock.unlock()
+        previous?.cancel()
+    }
+
+    /// Cancels what is armed, which runs the cancel handler and closes the descriptor.
+    func cancel() {
+        lock.lock()
+        let held = source
+        source = nil
+        lock.unlock()
+        held?.cancel()
     }
 }
