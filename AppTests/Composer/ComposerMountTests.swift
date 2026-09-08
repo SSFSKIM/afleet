@@ -4,6 +4,7 @@ import XCTest
 import AfleetCore
 import ClaudeWire
 import FleetKit
+import PanelHostAPI
 @testable import Afleet
 
 /// C6.2 Task 2: the two call sites, and the three keys C5 left undeclared for this leaf.
@@ -29,14 +30,16 @@ final class ComposerMountTests: XCTestCase {
 
     /// A launch that reaches a workspace with exactly one listed channel. Everything is invented and
     /// every path is under the process's temporary directory (X9).
-    private func makeRig() throws -> Rig {
+    private func makeRig(sessions: [SessionID] = [LaunchFixtures.sessionA]) throws -> Rig {
         let temp = try TempTree()
         let configHome = try temp.directory("home")
-        try LaunchFixtures.transcript(in: configHome, slug: "invented-project", session: LaunchFixtures.sessionA)
+        for session in sessions {
+            try LaunchFixtures.transcript(in: configHome, slug: "invented-project", session: session)
+        }
         let fleet = LifecycleDouble()
         let index = StubIndex(persisted: nil,
-                              built: LaunchFixtures.snapshot(configHome: configHome, ids: [LaunchFixtures.sessionA]),
-                              delta: IndexDelta(added: [LaunchFixtures.sessionA]))
+                              built: LaunchFixtures.snapshot(configHome: configHome, ids: sessions),
+                              delta: IndexDelta(added: sessions))
         let binary = try temp.file("bin/claude", "#!/bin/sh\nexit 0\n")
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
 
@@ -57,14 +60,16 @@ final class ComposerMountTests: XCTestCase {
     }
 
     /// The column as the window draws it, with the one channel selected.
-    private func makeColumn(_ rig: Rig) async throws -> (app: AppModel, column: ChannelColumnView) {
+    private func makeColumn(_ rig: Rig,
+                            selecting session: SessionID = LaunchFixtures.sessionA)
+    async throws -> (app: AppModel, column: ChannelColumnView) {
         let app = AppModel(sequence: rig.sequence)
         await app.launch()
         let workspace = try XCTUnwrap(app.route.workspace, "the launch reached no workspace to draw")
-        app.shell.select(LaunchFixtures.sessionA)
+        app.shell.select(session)
         // A boolean, not the row: a `ChannelRow` reaches an `IndexEntry` and would print every
         // field of it on failure (§11).
-        XCTAssertTrue(app.browser?.row(LaunchFixtures.sessionA) != nil,
+        XCTAssertTrue(app.browser?.row(session) != nil,
                       "the launch painted no channel row, so the column would draw its placeholder")
         return (app, ChannelColumnView(app: app, shell: app.shell, workspace: workspace))
     }
@@ -137,8 +142,10 @@ final class ComposerMountTests: XCTestCase {
                                   "the composer drew no field")
 
         XCTAssertTrue(ComposerViewTree.fireSend(of: field), "the mounted field carried no send action")
+        // Counted as prompts and not as calls: drawing the mount also subscribes this channel's
+        // composer to `events(of:)`, which is a call on the same log and not a send.
         let sent = await settle(double) { $0 >= 1 }
-        XCTAssertEqual(sent, 1, "the field's send action reached the lifecycle \(sent) time(s)")
+        XCTAssertEqual(sent, 1, "the field's send action sent \(sent) prompt(s)")
         let prompts = await double.prompts
         guard let input = prompts.first else {
             return XCTFail("the field's send action reached a lifecycle member that is not `sendPrompt`")
@@ -243,6 +250,143 @@ final class ComposerMountTests: XCTestCase {
         XCTAssertEqual(members.count, 0, "a cancelled confirm reached \(members.count) member(s)")
     }
 
+    // MARK: - The channel switch
+
+    /// Switching to another channel **of the same mode** starts the new composer's subscription and
+    /// gives the new header its row.
+    ///
+    /// The two channels are of the same listing mode on purpose. The subtree SwiftUI draws for a
+    /// channel keeps its identity across a selection change, so nothing appears or disappears; a
+    /// composer that only subscribed on appearance stays unsubscribed for the whole of the second
+    /// channel's visit, and a header that only adopted on appearance or on a change of mode holds
+    /// no row and offers nothing. Both are silent: the field draws, and neither the queue nor the
+    /// menu ever says why it is empty.
+    ///
+    /// Asserted by drawing the two mounts, which is what the window does on every body evaluation,
+    /// and reading the one ordered X5 log for the second channel's own `events(of:)`.
+    func testSwitchingToAChannelOfTheSameModeStartsItsComposerAndAdoptsItsHeaderRow() async throws {
+        let rig = try makeRig(sessions: [LaunchFixtures.sessionA, LaunchFixtures.sessionB])
+        let home = LaunchFixtures.directoryURL(rig.configHome)
+        let first = ChannelKey(configHome: home, session: LaunchFixtures.sessionA)
+        let second = ChannelKey(configHome: home, session: LaunchFixtures.sessionB)
+        let double = ComposerLifecycleDouble()
+        await double.openEvents(of: first)
+        await double.openEvents(of: second)
+
+        let (app, column) = try await makeColumn(rig, selecting: LaunchFixtures.sessionA)
+        app.composers.lifecycle = double
+        // The modes are compared as a boolean: a `ChannelRow` reaches an `IndexEntry` (§11).
+        XCTAssertTrue(app.browser?.row(LaunchFixtures.sessionA)?.mode == app.browser?.row(LaunchFixtures.sessionB)?.mode,
+                      "the two channels are of different listing modes, so this proves nothing about a same-mode switch")
+        try draw(column)
+        let firstSubscribed = await subscriptions(double, of: first)
+        XCTAssertEqual(firstSubscribed, 1,
+                       "the first channel's composer took \(firstSubscribed) event subscription(s), not 1, so the "
+                       + "arm below would prove nothing about the switch")
+
+        app.shell.select(LaunchFixtures.sessionB)
+        try draw(column)
+
+        let subscribed = await subscriptions(double, of: second)
+        XCTAssertEqual(subscribed, 1,
+                       "the second channel's composer took \(subscribed) event subscription(s) after the switch, not 1")
+        let header = try XCTUnwrap(app.composers.header(for: second),
+                                   "the registry built no header actions for the second channel")
+        XCTAssertTrue(header.row != nil,
+                      "the second channel's header adopted no row, so it offers no action at all")
+    }
+
+    // MARK: - The composer's own lifecycle
+
+    /// A composer released while a `/rewind` confirmation is up answers it with a decline, and a
+    /// confirmation arriving after the release is declined at once.
+    ///
+    /// `StrategyExecutor` suspends inside `confirm(preview:)` until the sheet answers. Releasing the
+    /// channel — or replacing the workspace — takes the sheet off the screen through `stop()`, and a
+    /// `stop()` that did not answer would leave the strategy suspended for the life of the process
+    /// with no control left that could ever resume it.
+    func testStoppingDeclinesAPendingRewindConfirmationAndALateOne() async {
+        let double = ComposerLifecycleDouble()
+        let model = makeModel(double)
+        let preview = RewindPreview(canRewind: true, filesChanged: [], insertions: 0, deletions: 0)
+
+        async let pending = model.confirm(preview: preview)
+        for _ in 0..<64 where model.rewindPreview == nil { await Task.yield() }
+        XCTAssertNotNil(model.rewindPreview, "the confirm never put a preview in front of the user")
+
+        model.stop()
+        let answer = await pending
+        XCTAssertEqual(answer, .cancel, "the released composer answered the suspended strategy with something else")
+        XCTAssertNil(model.rewindPreview, "the released composer left its confirmation on screen")
+
+        // Late: the controls are gone, so the answer is the decline and it does not suspend.
+        let late = await model.confirm(preview: preview)
+        XCTAssertEqual(late, .cancel, "a confirmation raised after the release was not declined")
+        XCTAssertNil(model.rewindPreview, "a confirmation raised after the release put a preview back on screen")
+    }
+
+    /// A composer whose event stream finished subscribes again on the next `start()`.
+    ///
+    /// `ChannelSupervisor` finishes every subscriber when a channel goes archived. The loop then
+    /// ends on its own, and a composer that left its task handle in place refuses every later
+    /// subscription — so a channel that is reopened receives no frames at all: no handshake, no
+    /// slash commands, no ghost text, and a queue chip fed by nothing.
+    func testAComposerWhoseStreamFinishedSubscribesAgain() async {
+        let double = ComposerLifecycleDouble()
+        let key = makeKey()
+        await double.openEvents(of: key)
+        let model = ComposerModel(key: key, lifecycle: double, surface: ChannelSurfaceState())
+
+        model.start()
+        let first = await subscriptions(double, of: key, until: 1)
+        XCTAssertEqual(first, 1, "the composer took \(first) subscription(s) on the first start, not 1")
+
+        await double.finishEvents(of: key)
+        // The mount resolves the composer on every body evaluation, so `start()` is offered again
+        // and again; the loop is bounded so a composer that never frees its handle fails on a count.
+        var second = 0
+        for _ in 0..<2_000 {
+            await Task.yield()
+            model.start()
+            second = await double.calls.filter { if case .events = $0 { true } else { false } }.count
+            if second >= 2 { break }
+        }
+        XCTAssertEqual(second, 2,
+                       "the composer took \(second) subscription(s) after its stream finished; the second start was refused")
+    }
+
+    // MARK: - The channel's context
+
+    /// A composer's context is re-resolved when its channel's directory moves.
+    ///
+    /// The panel host answers `context(for:cwd:)` for the directory it is asked about, and the
+    /// registry is where that question is asked. A registry that kept the first non-nil answer for
+    /// the life of the composer leaves `!` running in the directory the channel was in before the
+    /// relocation — a host command in the wrong tree, which is worse than one that says it cannot
+    /// run.
+    ///
+    /// The paths are invented and the assertion is a boolean over them (§11).
+    func testAComposersContextFollowsAChangeOfDirectory() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = makeKey()
+        let router = RecordingLinkRouter()
+        let registry = ComposerRegistry()
+        registry.lifecycle = double
+        // The host's own question, answered for whichever directory it is asked about.
+        registry.contextProvider = { key, cwd in ComposerMountTests.context(key, cwd: cwd, links: router) }
+
+        let before = URL(fileURLWithPath: "/invented/project")
+        let after = URL(fileURLWithPath: "/invented/relocated")
+        let model = try XCTUnwrap(registry.model(for: key, cwd: before),
+                                  "the registry built no composer for a channel with a lifecycle")
+        XCTAssertTrue(model.context?.cwd == before, "the composer took no context for the directory it was built in")
+
+        _ = registry.model(for: key, cwd: after)
+
+        XCTAssertTrue(model.context?.cwd == after,
+                      "the composer kept a context for the directory the channel has left")
+    }
+
     // MARK: - The collision check (plan Task 2, deliverable 3)
 
     /// No key this leaf declares is a key C5 declared.
@@ -289,6 +433,47 @@ final class ComposerMountTests: XCTestCase {
         ComposerModel(key: makeKey(), lifecycle: double, surface: ChannelSurfaceState())
     }
 
+    /// Draws the column's two mounts, which is what the window does whenever the selection moves.
+    /// Opening a body is how this suite asserts on views at all; nothing here renders a scene.
+    private func draw(_ column: ChannelColumnView) throws {
+        let body = try channelBody(of: column)
+        for name in ["ChannelHeaderActionsSlot", "ChannelComposerMount"] {
+            let mount = try XCTUnwrap(ComposerViewTree.view(named: name, in: body),
+                                      "the column drew no \(name)")
+            _ = ComposerViewTree.body(of: mount)
+        }
+    }
+
+    /// How many `events(of:)` calls one channel has taken, waited for with the same bounded loop the
+    /// send arms use so a composer that never subscribes fails on a count rather than hanging.
+    private func subscriptions(_ double: ComposerLifecycleDouble,
+                               of key: ChannelKey,
+                               until expected: Int = 1) async -> Int {
+        var count = 0
+        for _ in 0..<2_000 {
+            await Task.yield()
+            count = await double.calls.filter { if case .events(let called) = $0 { called == key } else { false } }.count
+            if count >= expected { return count }
+        }
+        return count
+    }
+
+    /// A `ChannelContext` for one directory, over the shared stubs. Built here rather than through
+    /// `ComposerContextFixtures` because the directory is what this arm is about.
+    private static func context(_ key: ChannelKey, cwd: URL, links: RecordingLinkRouter) -> ChannelContext {
+        ChannelContext(key: key,
+                       session: key.session,
+                       cwd: cwd,
+                       environment: ResolvedEnvironment(variables: ["PATH": "/usr/bin"],
+                                                        shell: "/bin/zsh",
+                                                        capturedAt: Date(timeIntervalSince1970: 0),
+                                                        mode: .login),
+                       store: NullComposerScopedStore(),
+                       links: links,
+                       recentURLs: NullComposerRecentURLFeed(),
+                       reportPaneExit: { _ in })
+    }
+
     /// Every `set_permission_mode` payload's mode, in order.
     private func sentModes(_ double: ComposerLifecycleDouble) async -> [String] {
         await double.calls.compactMap { call in
@@ -304,7 +489,7 @@ final class ComposerMountTests: XCTestCase {
         var count = 0
         for _ in 0..<2_000 {
             await Task.yield()
-            count = await double.calls.count
+            count = await double.prompts.count
             if reached(count) { return count }
         }
         return count

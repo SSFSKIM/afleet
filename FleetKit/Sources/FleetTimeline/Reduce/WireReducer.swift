@@ -77,6 +77,13 @@ public struct WireReducer: Sendable {
         case .promptSent(let uuid, _):
             outstandingPrompts.append(uuid)
 
+        case .promptCancelled(let uuid):
+            // Retired, not spent: the prompt produces no `result`, so leaving it in the list would hand the next
+            // turn — some other prompt's — the uuid of a message the engine never ran. Removing every occurrence
+            // rather than the first is deliberate: the list is keyed by the engine's own uuid and a repeat would
+            // be the same message twice.
+            outstandingPrompts.removeAll { $0 == uuid }
+
         case .decisionAnswered(let id, let outcome):
             setDecision(id) { $0.state = .answered(outcome: outcome.label) }
 

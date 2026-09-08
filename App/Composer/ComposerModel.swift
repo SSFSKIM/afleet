@@ -48,7 +48,25 @@ final class ComposerModel {
     /// The `/rewind` dry run in front of the user, and the answer `StrategyUI.confirm` is suspended
     /// on. Both live here because the sheet is drawn by the composer's own view.
     var rewindPreview: RewindPreview?
-    @ObservationIgnored var rewindAnswer: CheckedContinuation<RewindChoice, Never>?
+    /// **A continuation handed to a released composer is declined where it arrives.** Between
+    /// `stop()` and the next `start()` there is no sheet on the screen and no control that could
+    /// answer one, so a confirmation raised in that window would suspend its strategy for ever. The
+    /// observer is where the check lives because this is the one place every raise passes through,
+    /// and the raise itself is `StrategyUI`'s and is not this file's to gate.
+    @ObservationIgnored var rewindAnswer: CheckedContinuation<RewindChoice, Never>? {
+        didSet {
+            guard isReleased, let late = rewindAnswer else { return }
+            rewindAnswer = nil
+            rewindPreview = nil
+            late.resume(returning: .cancel)
+        }
+    }
+
+    /// True from `stop()` until the next `start()`: this composer's controls are not on the screen.
+    @ObservationIgnored private var isReleased = false
+
+    /// Which event subscription is the current one; see `start()`.
+    @ObservationIgnored private var generation = 0
 
     /// The engine's own report of what it offers, taken off this channel's event stream: the
     /// handshake's `commands`, and `system/init`'s `slash_commands` and `terminal_slash_commands`.
@@ -316,9 +334,24 @@ final class ComposerModel {
     /// Takes this channel's fan-out of `events(of:)` — which **is** X5, not a reach around it — and
     /// holds it until `stop()`. Idempotent: a second call while one loop runs is ignored, because
     /// two fan-outs would deliver every frame twice.
+    ///
+    /// **A loop that ends on its own clears the handle.** `ChannelSupervisor` finishes every
+    /// subscriber when the channel goes archived, and a channel with no process answers `events(of:)`
+    /// with nil at all; in both cases the loop is over while nothing has been stopped. A composer
+    /// that left the finished task in place would refuse every later subscription, so a reopened
+    /// channel would receive no frame of any kind while looking perfectly alive.
+    ///
+    /// The generation is what makes clearing safe: a `stop()` and a fresh `start()` can both land
+    /// before the old loop notices, and the old one must not take the new one's handle with it.
     func start() {
         guard events == nil else { return }
+        isReleased = false
+        generation += 1
+        let generation = generation
         events = Task { @MainActor [weak self] in
+            defer {
+                if let self, self.generation == generation { self.events = nil }
+            }
             guard let self, let stream = await self.lifecycle.events(of: self.key) else { return }
             for await event in stream {
                 if Task.isCancelled { return }
@@ -328,7 +361,21 @@ final class ComposerModel {
         }
     }
 
+    /// Releases everything this composer is holding: the subscription, the debounced mention query,
+    /// the chip's follower — and the `/rewind` confirmation, which is a suspended caller and not a
+    /// resource.
+    ///
+    /// **A pending confirmation is answered, and answered with a decline.** `StrategyExecutor` waits
+    /// inside `StrategyUI.confirm(preview:)` for the sheet's answer, and `stop()` is what a registry
+    /// release and a workspace replacement call — the sheet goes off the screen with it. A stop that
+    /// left the continuation suspended would leave that strategy waiting for the life of the process
+    /// with no control left that could ever answer it; a decline is the only answer that touches
+    /// nothing, and the dry run behind it has already touched nothing either.
     func stop() {
+        isReleased = true
+        rewindPreview = nil
+        rewindAnswer?.resume(returning: .cancel)
+        rewindAnswer = nil
         queue.stop()
         events?.cancel()
         events = nil

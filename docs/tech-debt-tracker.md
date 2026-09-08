@@ -1189,6 +1189,35 @@ symlink-containment debt in entry 78 is unchanged.
      scope: a second surface (an *Insert the edited message* affordance, or a held prefill the field
      offers) is a design decision the composer's own spec should make rather than a fix. Raised by
      the C6.2 fix wave for scalpel-2#6. Owner: C6.2.
+196. **A process acquired after the quit clause's last census is ended by the exit, not by afleet.**
+     The clause now re-reads the owned set after each termination pass and terminates whatever
+     gained a process, bounded to three passes (`App/Header/QuitGuard.swift`). What that cannot
+     close is a spawn landing after the final census: it receives no `.quit`, and `Fleet.shutdown()`
+     terminates nothing, so the engine is wound down only when the exit closes its pipe. A spawn
+     barrier over the census would close it and was ruled out — a lifecycle-wide lock taken at the
+     moment the app is trying to stop, for a window measured in one pass. Closer: X5 gains a
+     "refuse new processes" state the clause can raise, or `Fleet.shutdown()` terminates what it
+     still owns. Owner: C4, if the pipe-close teardown ever proves insufficient (see 195). Filed
+     2026-09-08 by C6.2's review wave.
+
+197. **A composer keeps its event subscription after its channel leaves the screen.** The mount
+     resolves and subscribes the composer of whichever channel is being drawn, which is what makes a
+     switch between two same-mode channels work at all; nothing stops the previous channel's
+     subscription, because its view never disappears. Each visited channel therefore holds one live
+     `events(of:)` fan-out until its composer is released. It is cheap and it keeps the queue chip
+     and the handshake current, but it grows with the session and is not a decision anyone took.
+     Closer: the mount stops the composer of the channel it is switching away from, or the registry
+     bounds how many composers stay subscribed. Owner: C6.2's next pass. Filed 2026-09-08 by C6.2's
+     review wave.
+
+198. **The late `/rewind` confirmation is declined in a property observer rather than at the
+     raise.** `ComposerModel.rewindAnswer` carries a `didSet` that resumes a continuation handed to a
+     released composer, because the raise itself — `StrategyUI.confirm(preview:)` in
+     `App/Composer/CommandRouting.swift` — was outside this wave's fence. The behaviour is right and
+     the check is in the one place every raise passes through, but the natural home is a guard at the
+     top of `confirm`. Closer: move it there and drop the observer. Owner: whichever wave next edits
+     `CommandRouting.swift`. Filed 2026-09-08 by C6.2's review wave.
+
 ## From C7.2 (`child/c7-editor-core`)
 
 97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state

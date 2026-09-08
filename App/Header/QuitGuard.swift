@@ -85,12 +85,37 @@ final class QuitGuard {
             lastAsked = busy
             guard await confirm(busy) else { return false }
         }
-        for channel in owned where channel.hasProcess {
-            await fleet.terminateForQuit(channel.key)
+        // **The census is repeated after the pass, and that is the whole answer to the race.** One
+        // suspended read of the owned set is not atomic with the terminations that follow it: an
+        // open, an adopt or a `paneExited` can hand a channel a process after its entry was taken or
+        // after it was seen dormant, and a saved loop skips it. `shutdown()` terminates nothing, so
+        // that channel would reach the exit with no deliberate ending at all.
+        //
+        // No spawn barrier and no new X5 surface: a barrier would be a lifecycle-wide lock taken at
+        // the one moment the app is trying to stop, and the residual it would close is small. The
+        // bound is three passes, because quitting must not become a loop the user cannot leave; what
+        // lands after the last census is ended by the exit closing its pipe, which is the fact the
+        // whole clause rests on (tracker 196).
+        //
+        // A channel is terminated **once**: the repeat exists to reach a channel that was missed, not
+        // to send a second `.quit` to one that already had one.
+        var terminated: Set<ChannelKey> = []
+        var census = owned
+        for pass in 0..<Self.terminationPasses {
+            let pending = census.filter { $0.hasProcess && !terminated.contains($0.key) }
+            if pending.isEmpty { break }
+            for channel in pending {
+                terminated.insert(channel.key)
+                await fleet.terminateForQuit(channel.key)
+            }
+            if pass < Self.terminationPasses - 1 { census = await fleet.quitChannels() }
         }
         await fleet.shutdownForQuit()
         return true
     }
+
+    /// How many times the clause reads the owned set and terminates what it finds.
+    static let terminationPasses = 3
 
     /// The production dialog. Titles are what the user needs to recognise the conversation they are
     /// about to end, and the dialog is the surface they belong on.
@@ -191,9 +216,25 @@ final class AfleetQuitDelegate: NSObject, NSApplicationDelegate {
     /// which is a quit with nothing owned and nothing to end.
     var makeGuard: (@MainActor () -> QuitGuard?)?
 
+    /// The guard deciding the quit that is already in flight, held here **because the delegate is the
+    /// only thing both requests share**. `makeGuard` answers a fresh `QuitGuard` per call — it has to,
+    /// since a guard captured before `bindWorkspace` would hold no fleet — so the guard's own
+    /// `isQuitting` flag cannot coalesce anything: two requests would be two instances, two dialogs,
+    /// two termination sequences and two replies for one quit.
+    private var inFlight: QuitGuard?
+
+    /// A second request while one is deciding is deferred on the first one's answer: the app is
+    /// already being asked whether it may exit, and `reply(toApplicationShouldTerminate:)` answers
+    /// that question once for the process.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if inFlight != nil { return .terminateLater }
         guard let quitGuard = makeGuard?() else { return .terminateNow }
-        Task { @MainActor in reply(await quitGuard.quit()) }
+        inFlight = quitGuard
+        Task { @MainActor in
+            let answer = await quitGuard.quit()
+            inFlight = nil
+            reply(answer)
+        }
         return .terminateLater
     }
 }

@@ -144,8 +144,13 @@ final class ComposerRegistry {
     func model(for key: ChannelKey, cwd: URL? = nil) -> ComposerModel? {
         if let existing = models[key] {
             // A row that gained a cwd after its composer was built — an archived channel since
-            // registered — gets its context now rather than never.
-            if existing.context == nil, let cwd { existing.context = contextProvider?(key, cwd) }
+            // registered — gets its context now rather than never, **and a row whose directory
+            // moved is re-resolved rather than kept**: the host answers `context(for:cwd:)` for the
+            // directory it is asked about, and a composer still holding the previous answer runs
+            // `!` in the tree the channel has left. The provider's answer is taken whatever it is,
+            // nil included: no context refuses the command in this leaf's own words, while a stale
+            // one runs it somewhere else.
+            if let cwd, existing.context?.cwd != cwd { existing.context = contextProvider?(key, cwd) }
             followTimeline(existing)
             return existing
         }
@@ -245,9 +250,25 @@ struct ChannelComposerMount: View {
     let composers: ComposerRegistry
 
     var body: some View {
-        if let model = composers.model(for: key, cwd: cwd) {
+        if let model = resolved() {
             ComposerView(model: model)
         }
+    }
+
+    /// This channel's composer, subscribed.
+    ///
+    /// **The subscription follows the key and not the view's appearance.** SwiftUI keeps the channel
+    /// subtree's identity across a selection change, so switching between two channels of the same
+    /// listing mode neither disappears nor appears anything: a composer that only subscribed in
+    /// `onAppear` would sit unsubscribed for the whole of the second channel's visit — no handshake,
+    /// no slash commands, no ghost text — while its field drew normally. Resolving here, where the
+    /// key is, makes the subscription a property of the channel being drawn.
+    ///
+    /// `start()` is idempotent, so a body evaluated many times for one channel subscribes once.
+    private func resolved() -> ComposerModel? {
+        guard let model = composers.model(for: key, cwd: cwd) else { return nil }
+        model.start()
+        return model
     }
 }
 
@@ -275,11 +296,24 @@ struct ChannelHeaderActionsSlot: View {
     let composers: ComposerRegistry
 
     var body: some View {
-        if let header = composers.header(for: key) {
+        if let header = adopted() {
             ChannelHeaderMenus(model: header)
-                .onAppear { adopt(header) }
                 .onChange(of: row?.mode) { _, _ in adopt(header) }
         }
+    }
+
+    /// This channel's header actions, holding this channel's row.
+    ///
+    /// Adopted here rather than in `onAppear`, for the reason the composer's mount resolves its
+    /// model here: the subtree keeps its identity across a switch between two channels of the same
+    /// mode, so nothing appears and the mode does not move — and a header still holding the previous
+    /// channel's row would gate every owned action on a channel the user has left. `adopt` is a
+    /// plain assignment of the row the column already resolved, so a body drawn many times for one
+    /// channel adopts the same row many times.
+    private func adopted() -> ChannelHeaderActionsModel? {
+        guard let header = composers.header(for: key) else { return nil }
+        adopt(header)
+        return header
     }
 
     /// The row and the pane runner. Re-taken whenever the row's listing mode moves, so a channel
