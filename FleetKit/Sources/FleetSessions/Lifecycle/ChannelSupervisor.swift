@@ -164,6 +164,11 @@ public actor ChannelSupervisor {
     /// cannot cover it: without this a fork whose engine never announces an id sits connecting forever, holding a
     /// live child and a cap slot the counter can never reclaim.
     private var forkIdentityTimer: Task<Void, Never>?
+    /// Whether `resolveForkIdentity` is running. It cancels the timer before its first await and re-keys the channel
+    /// several awaits later, so between those two points there is neither a timer nor a stashed id — and the key is
+    /// still the provisional one. Without this flag `settledForkKey()` read that window as "nothing left to wait
+    /// for" and answered the provisional key to a caller that was about to be re-keyed out from under it.
+    private var forkIdentityResolving = false
     /// Callers suspended in `settledForkKey()` until this fork's own id has settled — resolved, timed out, or
     /// gone with its child. Every one of those three paths resumes them, so nothing here outlives the deadline
     /// the timer above already bounds.
@@ -968,6 +973,10 @@ public actor ChannelSupervisor {
         let ownsMarker = inFlight == nil
         if ownsMarker { inFlight = .spawn }
         defer { if ownsMarker { inFlight = nil } }
+        // Held across every await below, because the timer is cancelled on the next line and the id is not stashed
+        // on this path: this is the one thing that tells `settledForkKey()` the identity is still moving.
+        forkIdentityResolving = true
+        defer { forkIdentityResolving = false }
         unresolvedSettings = []   // whatever an earlier restart could not read back died with its process
 
         // The §6.12 gate, before the cap and before the pre-spawn check: a project afleet may not spawn into must
@@ -1311,7 +1320,8 @@ public actor ChannelSupervisor {
     /// suspends until `resolveForkIdentity`, `forkIdentityDeadlineExpired` or `handleExit` settles the wait; all
     /// three do so unconditionally, so no caller can be left here by an early return inside any of them.
     public func settledForkKey() async -> ChannelKey {
-        guard isAwaitingFork, forkIdentityTimer != nil || forkIdentityPending != nil else { return key }
+        guard isAwaitingFork,
+              forkIdentityTimer != nil || forkIdentityPending != nil || forkIdentityResolving else { return key }
         return await withCheckedContinuation { identityWaiters.append($0) }
     }
 
@@ -1337,6 +1347,10 @@ public actor ChannelSupervisor {
         let ownsMarker = inFlight == nil
         if ownsMarker { inFlight = .spawn }
         defer { if ownsMarker { inFlight = nil } }
+        // Held across every await below, because the timer is cancelled on the next line and the id is not stashed
+        // on this path: this is the one thing that tells `settledForkKey()` the identity is still moving.
+        forkIdentityResolving = true
+        defer { forkIdentityResolving = false }
         // Whatever this method decides, the identity has stopped moving by the time it returns: the clean path has
         // re-keyed the channel and the refusing ones have left it under the provisional id for good. A `defer`
         // rather than a line at the end, because four of the returns below are early ones.

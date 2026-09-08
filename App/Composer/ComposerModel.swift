@@ -197,6 +197,13 @@ final class ComposerModel {
     /// typed in and a cancelled one leaves the words where the user can see them.
     @ObservationIgnored var confirmedLine: String?
 
+    /// What the waiting confirm does when its case names no `LifecycleAction` this model can issue itself.
+    ///
+    /// The header's *Open in terminal* is the one: the handoff is X5's own member and the pane request has to reach
+    /// the window's runner, neither of which this model holds. Set with `pendingConfirmation` and cleared with it,
+    /// so a confirm can never run the previous one's work.
+    @ObservationIgnored var confirmedWork: (@MainActor () async -> Bool)?
+
     init(key: ChannelKey, lifecycle: any LifecycleAPI, surface: ChannelSurfaceState,
          diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics()) {
         self.key = key
@@ -230,19 +237,23 @@ final class ComposerModel {
         // too — a send reaching a process that is being replaced is the defect the gate exists for,
         // and a view is not the place that guarantee should live.
         guard !surface.isDisabled else { return }
-        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // **An attached image with no words is a message.** The intake fills `attachments` without touching the
+        // draft, so a guard on the trimmed draft alone refused the whole of image-only input: the picture stayed in
+        // the tray and no `UserInput` was ever posted.
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !attachments.isEmpty else { return }
         let text = draft
         refusal = nil
         openSurface = nil
         isSending = true
         defer { isSending = false }
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("!") {
+        if trimmed.hasPrefix("!") {
             // Host-side, and never a turn: what the command wrote is posted as one ordinary user
             // frame (§6.6). Cleared on the same terms as any other send.
             if await runShellEscape(text), draft.hasPrefix(text) { draft = String(draft.dropFirst(text.count)) }
             return
         }
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") {
+        if trimmed.hasPrefix("/") {
             // Cleared only when the dispatch went through, on the same terms as a plain send: a
             // refused command leaves the words where the user can fix them.
             if await dispatch(routing: text), draft.hasPrefix(text) { draft = String(draft.dropFirst(text.count)) }

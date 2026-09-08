@@ -252,6 +252,37 @@ final class ComposerMountTests: XCTestCase {
         XCTAssertEqual(members.count, 0, "a cancelled confirm reached \(members.count) member(s)")
     }
 
+    /// **The affirmative takes the answer before the dialog's dismissal clears it.**
+    ///
+    /// SwiftUI answers a confirmation dialog with two calls: the button's action, and the presentation binding
+    /// going false — which is `cancelPending()`. The dismissal is synchronous and the button's work is not, so an
+    /// action that read `pendingConfirmation` when its task began read a value that had already been cleared and
+    /// performed nothing at all: the user pressed *Stop Everything* and nothing stopped.
+    ///
+    /// The order here is the dialog's own: claim, then dismiss, then run.
+    ///
+    /// Deliberate break: run the claimed confirm by reading `pendingConfirmation` again instead of the claim.
+    func testAClaimedConfirmSurvivesTheDialogsDismissal() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = makeKey()
+        await double.stagePerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        let model = makeModel(double)
+
+        model.requestStopEverything()
+        let claim = try XCTUnwrap(model.claimPending(), "the affirmative claimed nothing while a confirm was up")
+        // The dismissal that follows the affirmative, which is what used to erase the pending action.
+        model.cancelPending()
+        await model.confirm(claim)
+
+        let actions = await double.actions
+        XCTAssertEqual(actions.count, 1,
+                       "the claimed confirm performed \(actions.count) action(s) after the dialog dismissed itself")
+        guard case .stopEverything? = actions.first else {
+            return XCTFail("the claimed confirm performed an action that is not `.stopEverything`")
+        }
+        XCTAssertNil(model.pendingConfirmation, "the claim left a confirm standing")
+    }
+
     // MARK: - The channel switch
 
     /// Switching to another channel **of the same mode** starts the new composer's subscription and
@@ -405,6 +436,36 @@ final class ComposerMountTests: XCTestCase {
         XCTAssertEqual(selected.count, 1, "the handoff made \(selected.count) selection(s), not 1")
         let after = try XCTUnwrap(app.composers.model(for: forked), "the registry built no composer for the fork")
         XCTAssertEqual(after.draft, "an invented edited message", "the fork's composer opened with something else")
+    }
+
+    /// **A fork's prefill never overwrites words the user has already typed into that fork.**
+    ///
+    /// The handoff is asynchronous: `fork(at:on:)` answers, the identity resolves, and only then does the text of
+    /// the edited message arrive. A user who reached the sibling in that window and started typing loses everything
+    /// they wrote if the prefill is assigned unconditionally — the same defect the slash-rewind path was corrected
+    /// for, and the same rule answers it here.
+    ///
+    /// Deliberate break: assign `existing.draft = text` with no check on what the draft holds.
+    func testAForkPrefillKeepsWhatTheUserTypedIntoThatForksComposer() async throws {
+        let rig = try makeRig()
+        let app = AppModel(sequence: rig.sequence)
+        await app.launch()
+        let key = ChannelKey(configHome: LaunchFixtures.directoryURL(rig.configHome), session: LaunchFixtures.sessionA)
+        app.composers.lifecycle = ComposerLifecycleDouble()
+        let model = try XCTUnwrap(app.composers.model(for: key), "the registry built no composer")
+        let handOff = try XCTUnwrap(model.handOffToFork, "the registry installed no fork handoff")
+
+        // The sibling's composer exists and the user has typed in it before the handoff resumed.
+        let forked = ChannelKey(configHome: key.configHome, session: LaunchFixtures.sessionB)
+        let sibling = try XCTUnwrap(app.composers.model(for: forked), "the registry built no composer for the fork")
+        sibling.draft = "what the user typed into the fork"
+
+        handOff(forked, "an invented edited message")
+
+        XCTAssertEqual(sibling.draft, "what the user typed into the fork",
+                       "the prefill overwrote a draft of \(sibling.draft.count) character(s) the user had typed")
+        let note = try XCTUnwrap(sibling.editNote, "the dropped prefill said nothing about where the message went")
+        XCTAssertEqual(note, ComposerRegistry.typedIntoForkNote, "the fork said something other than its own note")
     }
 
     // MARK: - The release (scalpel-4 #6)

@@ -71,18 +71,32 @@ final class QueueChipModel {
     /// `stop()` cancels the follower and leaves `timelines` set — `cancel` refreshes from it — so a
     /// chip that returned early on identity would never subscribe again after the channel went off
     /// screen and came back, and would draw a queue frozen at the moment the view disappeared.
+    /// **The subscription is taken before the snapshot, and both happen here rather than inside the task.**
+    /// `TimelineFanout.subscribe()` registers only future publications and replays nothing, so a chip that
+    /// snapshotted first and subscribed in a task it had merely scheduled lost every publication made in between and
+    /// drew a queue as it stood before them. Subscribing first cannot lose one: the stream buffers, and a
+    /// publication that overlaps the snapshot is applied again by the loop, which `refresh` is idempotent under.
     func follow(_ model: ChannelTimelineModel) {
         guard timelines !== model || follower == nil else { return }
         follower?.cancel()
         timelines = model
+        let updates = subscribing?(model) ?? model.timelineUpdates
         refresh(model.timeline)
         follower = Task { @MainActor [weak self] in
-            for await timeline in model.timelineUpdates {
+            for await timeline in updates {
                 guard let self, !Task.isCancelled else { return }
                 self.refresh(timeline)
             }
         }
     }
+
+    /// How the chip subscribes, as a seam.
+    ///
+    /// The order above is only observable from *inside* the subscribe call — both orders converge on the same rows
+    /// once everything has settled, so no assertion over the chip's final state can separate them — which is the
+    /// same reason `ChannelTimelineModel` carries a seam for its own change-feed subscription. Nil in production,
+    /// where it is `timelineUpdates` and nothing else.
+    @ObservationIgnored var subscribing: (@MainActor (ChannelTimelineModel) -> AsyncStream<ChannelTimeline>)?
 
     func stop() {
         follower?.cancel()

@@ -3,6 +3,7 @@ import AfleetCore
 import ClaudeWire
 import FleetKit
 import PanelHostAPI
+@testable import Afleet
 
 /// The capabilities a `ChannelContext` needs so C6.2's `StrategyUI` conformance can be driven
 /// without a panel host: everything answers and does nothing, except the link router, which records.
@@ -62,5 +63,20 @@ enum ComposerContextFixtures {
                        links: links,
                        recentURLs: NullComposerRecentURLFeed(),
                        reportPaneExit: { _ in })
+    }
+}
+
+/// Answering a waiting confirm the way the dialog's affirmative does — claim, then run — and
+/// **waiting for the work**, which the production path deliberately does not do.
+///
+/// `ComposerModel.answerPending()` returns as soon as it has taken the answer, because a SwiftUI
+/// button action cannot await. A test has to see the call the confirm made, so it composes the same
+/// two members itself rather than the model carrying an awaitable variant nothing in the app calls.
+@MainActor
+extension ComposerModel {
+    @discardableResult
+    func confirmPending() async -> Bool {
+        guard let claim = claimPending() else { return false }
+        return await confirm(claim)
     }
 }

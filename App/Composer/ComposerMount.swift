@@ -104,9 +104,24 @@ final class ComposerRegistry {
     /// about.
     func prefill(_ text: String, for key: ChannelKey, from generation: Int) {
         guard generation == self.generation else { return }
-        if let existing = models[key] { existing.draft = text } else { pendingPrefills[key] = text }
+        // **A draft the user has already typed into is never overwritten**, on the same rule the edit paths hold: the
+        // handoff is asynchronous, and a sibling composer the user reached first may hold words that are not this
+        // prefill's to replace. The prefill is dropped and the composer says where the edited message went, rather
+        // than the typing being lost to a fork the user did not watch complete.
+        if let existing = models[key] {
+            if existing.draft.isEmpty { existing.draft = text } else { existing.editNote = Self.typedIntoForkNote }
+        } else {
+            pendingPrefills[key] = text
+        }
         selectChannel?(key)
     }
+
+    /// What a fork's composer says when the prefill found words already in its field. No text of the message and no
+    /// key (§11) — the message is in the conversation the fork was made from, which is where the user just was.
+    static let typedIntoForkNote =
+        "You typed in this fork before the edited message arrived, so what you typed was kept and the edited "
+        + "message was not put in the field."
+
 
     /// Which workspace this registry is bound to, counted up by every `attach(to:)`.
     ///

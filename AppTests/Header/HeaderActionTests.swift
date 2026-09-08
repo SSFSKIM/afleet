@@ -38,7 +38,10 @@ final class HeaderActionTests: XCTestCase {
             Case(name: "reload plugins", run: { await $0.reloadPlugins() }, expected: ["send:reload_plugins"]),
             Case(name: "rename", run: { await $0.rename(to: "an invented title") }, expected: ["send:rename_session"]),
             Case(name: "fork", run: { await $0.fork() }, expected: ["perform"]),
-            Case(name: "open in terminal", run: { await $0.openInTerminal() }, expected: ["openInTerminal"]),
+            // The census first: the handoff ends the channel's process, so it asks the fleet what is running
+            // before it does. Nothing is staged as live here, so no confirm stands between the two.
+            Case(name: "open in terminal", run: { await $0.openInTerminal() },
+                 expected: ["liveTaskIDs", "openInTerminal"]),
         ]
 
         for scenario in cases {
@@ -325,8 +328,62 @@ final class HeaderActionTests: XCTestCase {
         XCTAssertTrue(note.contains(PanelTabID.terminal.defaultTitle),
                       "the note of \(note.count) character(s) does not name the terminal")
         let members = await refusing.memberSequence
-        XCTAssertEqual(members, ["openInTerminal"],
+        XCTAssertEqual(members, ["liveTaskIDs", "openInTerminal"],
                        "the refused handoff reached \(members.count) member(s): " + members.joined(separator: ", "))
+    }
+
+    /// **A terminal handoff warns before it kills running background work.** `handOff` terminates the owned
+    /// process before it answers the pane request, and stream close ends every still-running local shell (§7.4,
+    /// X9) — so a channel with live tasks reaches nothing until the same confirm *Send to background* shows is
+    /// answered, and the confirm names them.
+    ///
+    /// Deliberate break: call the handoff from `openInTerminal()` without reading the live tasks.
+    func testOpenInTerminalWarnsAboutRunningTasksBeforeItHandsOff() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = HeaderRig.key()
+        await double.stagePane(.success(Self.paneRequest()))
+        await double.stageLiveTasks(["invented-live"], for: key)
+        let header = HeaderRig.header(double, key: key)
+        var handed: [UUID] = []
+        header.paneRunner = { handed.append($0.id) }
+
+        await header.openInTerminal()
+
+        XCTAssertEqual(handed.count, 0, "the handoff ran \(handed.count) pane request(s) before the confirm")
+        let before = await double.memberSequence
+        XCTAssertEqual(before, ["liveTaskIDs"],
+                       "the unanswered confirm reached \(before.count) member(s): " + before.joined(separator: ", "))
+        XCTAssertEqual(header.composer.pendingConfirmation, .openInTerminal, "no confirmation was raised")
+        let detail = try XCTUnwrap(header.composer.confirmationDetail, "the confirm named no running work")
+        XCTAssertTrue(detail.contains("invented-live"),
+                      "the confirm of \(detail.count) character(s) does not name the running task")
+
+        await header.composer.confirmPending()
+
+        XCTAssertEqual(handed.count, 1, "the answered confirm ran \(handed.count) pane request(s)")
+        let after = await double.memberSequence
+        XCTAssertEqual(after, ["liveTaskIDs", "openInTerminal"],
+                       "the answered confirm reached \(after.count) member(s): " + after.joined(separator: ", "))
+    }
+
+    /// A cancelled warning hands off nothing, which is what makes the arm above about the answer.
+    func testACancelledTerminalWarningHandsOffNothing() async {
+        let double = ComposerLifecycleDouble()
+        let key = HeaderRig.key()
+        await double.stagePane(.success(Self.paneRequest()))
+        await double.stageLiveTasks(["invented-live"], for: key)
+        let header = HeaderRig.header(double, key: key)
+        var handed: [UUID] = []
+        header.paneRunner = { handed.append($0.id) }
+
+        await header.openInTerminal()
+        header.composer.cancelPending()
+
+        XCTAssertNil(header.composer.pendingConfirmation, "the cancelled confirm stayed up")
+        XCTAssertEqual(handed.count, 0, "a cancelled warning ran \(handed.count) pane request(s)")
+        let members = await double.memberSequence
+        XCTAssertEqual(members, ["liveTaskIDs"],
+                       "a cancelled warning reached \(members.count) member(s): " + members.joined(separator: ", "))
     }
 
     /// A window with no panel host at all says so, and hands the request nowhere.

@@ -79,7 +79,11 @@ struct ComposerShortcutBar: View {
                             isPresented: Binding(get: { model.pendingConfirmation != nil },
                                                  set: { if !$0 { model.cancelPending() } })) {
             if let pending = model.pendingConfirmation {
-                Button(pending.confirmTitle, role: .destructive) { Task { await model.confirmPending() } }
+                // **Claimed here, synchronously, and run in the `Task`.** SwiftUI sets the presentation binding
+                // false — which is `cancelPending()` — as the affirmative fires, so an action that read
+                // `pendingConfirmation` when its task began read a value the dismissal had already cleared and did
+                // nothing. The claim takes the answer whole before that can happen.
+                Button(pending.confirmTitle, role: .destructive) { model.answerPending() }
             }
             Button("Cancel", role: .cancel) { model.cancelPending() }
         } message: {

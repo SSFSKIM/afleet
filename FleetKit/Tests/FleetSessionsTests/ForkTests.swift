@@ -279,6 +279,52 @@ final class ForkTests: XCTestCase {
                       "the expired deadline answered a key the channel is not filed under")
     }
 
+    /// **The wait holds through the resolution itself, not only until the deadline is cancelled.**
+    ///
+    /// `resolveForkIdentity` cancels the identity deadline before its first await and re-keys the channel several
+    /// awaits later — the child's pid and the post-handshake ownership check sit in between. Nothing is stashed on
+    /// that path, so a `settledForkKey()` that asked only whether a timer or a stash existed read that window as
+    /// "settled" and answered the provisional key. The host then files the fork's draft, and moves the window's
+    /// selection, onto a key the rekey immediately abandons.
+    ///
+    /// The window is entered deliberately, through the pid gate the identity check's first await passes.
+    ///
+    /// Deliberate break: drop `forkIdentityResolving` from the guard in `settledForkKey()`.
+    func testTheSettledForkKeyKeepsWaitingWhileTheIdentityCheckIsStillRunning() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+
+        let held = HeldAnswer(), entered = HeldAnswer()
+        let reachedPIDRead = entered.expectation(description: "the identity check reached the pid read")
+        rig.configureScriptedHandles { handle in
+            handle.pidGate = { entered.release(); await held.wait() }
+        }
+        let provisional = try await supervisor.fork(at: nil)
+        let fork = try XCTUnwrap(rig.supervisor(for: provisional))
+        let handle = try XCTUnwrap(rig.scriptedHandles.last)
+        let resolved = SessionID()
+
+        let resolving = Task { await fork.handle(event: .sessionIdentityResolved(resolved, handle.epoch)) }
+        defer { held.release(); resolving.cancel() }
+        try await TestTiming.awaitDelivery([reachedPIDRead])
+        // Parked past the deadline's cancellation and before the rekey: the window the answer used to be wrong in.
+        handle.pidGate = nil
+
+        let settled = Task { await fork.settledForkKey() }
+        // Bounded, and a count: a call that answered at once would be finished long before this loop is.
+        for _ in 0..<64 { await Task.yield() }
+        held.release()
+        await resolving.value
+        let answered = await settled.value
+
+        XCTAssertTrue(answered == ChannelKey(configHome: provisional.configHome, session: resolved),
+                      "the wait answered a key that is not the one the identity check re-keyed the fork onto")
+        XCTAssertFalse(answered == provisional,
+                       "the wait answered the provisional key while the identity was still being resolved")
+    }
+
     // MARK: - What the resolved identity has to change
 
     /// Once a fork has learned its own id, every later launch of that channel resumes *it*. The template it was
