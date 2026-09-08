@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import SwiftUI
 import FleetKit
 
@@ -78,6 +79,10 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     static let measuringWidth: CGFloat = 320
 
     static let emptyRowHeight: CGFloat = 18
+
+    /// `nonisolated` because the one line it writes is written from the warm-up's detached task,
+    /// which is where the counts it reports become final. `Logger` is `Sendable`.
+    nonisolated private static let log = Logger(subsystem: "com.afleet.app", category: "timeline-render")
 
     override init() {
         super.init()
@@ -342,6 +347,11 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         Task.detached(priority: .utility) {
             await highlighter.warm(Self.fences(in: sources))
             await markdown.warm(sources, highlighter: highlighter)
+            // What the warm-up cost, in counts and never in content (§11). It is the pipeline's own
+            // account of §4 and §6 — how many blocks were parsed, how many highlights were asked for
+            // and how many of them ran anywhere near the main thread — and it is what a slow channel
+            // is read from rather than guessed at.
+            Self.log.debug("timeline warm: \(markdown.parseCount, privacy: .public) parse(s), \(highlighter.highlightRequests, privacy: .public) highlight request(s), \(highlighter.offMainHighlights, privacy: .public) off-main, \(highlighter.mainThreadHighlights, privacy: .public) on-main")
         }
     }
 
