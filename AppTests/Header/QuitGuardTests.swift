@@ -161,6 +161,52 @@ final class QuitGuardTests: XCTestCase {
         XCTAssertEqual(members.last, "shutdown", "the shutdown is not the last thing the clause does")
     }
 
+    /// **Busy work found only by a later census is warned about, once.** The first census was idle, so no dialog
+    /// was shown; a channel that starts working in the window the re-census exists for has running shells the next
+    /// pass closes, and X9 owes that warning whether the work was there at the first read or arrived after it.
+    ///
+    /// The discriminating arm is the decline: nothing that appeared after the first census is terminated, and the
+    /// termination request is answered with a cancel. What was already ended in this quit stays ended, and a quit
+    /// ends a channel dormant and resumable.
+    ///
+    /// Deliberate break: read `isBusy` in the first census only.
+    func testBusyWorkFoundByALaterCensusIsAskedAboutOnceAndADeclineStopsTheQuit() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: false)])
+        // Busy, and not in the first census: the window between the read and the pass that reads it.
+        fleet.arriving = [1: [.owned("b", busy: true)]]
+        var seen: [[QuitChannel]] = []
+        let guardModel = QuitGuard(fleet: fleet, confirm: { channels in seen.append(channels); return false })
+
+        let mayExit = await guardModel.quit()
+
+        XCTAssertFalse(mayExit, "a declined warning about newly found work still let the app exit")
+        XCTAssertEqual(guardModel.askCount, 1, "the clause asked \(guardModel.askCount) time(s) about work it found late")
+        let named = Set(seen.first?.map(\.title) ?? [])
+        XCTAssertTrue(named == ["b"],
+                      "the dialog named \(named.count) channel(s), and not the one that started working")
+        XCTAssertTrue(fleet.terminatedTitles == ["a"],
+                      "\(fleet.terminatedTitles.count) channel(s) were terminated; only the idle one the first pass "
+                      + "had already taken should have been")
+        XCTAssertFalse(fleet.memberSequence.contains("shutdown"), "the fleet shut down after a declined warning")
+    }
+
+    /// The other arm of the same rule: a user who has **already** accepted is not asked a second time when the
+    /// re-census finds more busy work, and the passes run to the shutdown.
+    func testAnAcceptedWarningIsNotRepeatedForWorkALaterCensusFinds() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: true)])
+        fleet.arriving = [1: [.owned("b", busy: true)]]
+        var asks = 0
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in asks += 1; return true })
+
+        let mayExit = await guardModel.quit()
+
+        XCTAssertTrue(mayExit, "the accepted quit did not reach the exit")
+        XCTAssertEqual(asks, 1, "\(asks) dialog(s) reached the user for one quit; the clause asks once")
+        XCTAssertEqual(fleet.terminatedTitles.count, 2,
+                       "\(fleet.terminatedTitles.count) channel(s) were terminated; 2 had a process by the end")
+        XCTAssertEqual(fleet.memberSequence.last, "shutdown", "the accepted quit did not shut the fleet down")
+    }
+
     /// The re-census is **bounded**: a fleet that keeps acquiring processes is given three passes and
     /// then the app shuts down anyway.
     ///

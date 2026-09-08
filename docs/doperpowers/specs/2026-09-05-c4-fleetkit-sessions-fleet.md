@@ -1858,6 +1858,10 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-09, from C6.2's third review round: `ChannelSupervisor.settledForkKey()` also waits while
+  `resolveForkIdentity` is running — that method cancels the identity deadline before its first await and re-keys the
+  channel several awaits later, and the wait's old guard read that window as settled and answered the provisional key
+  a host was about to be re-keyed away from.
 - 2026-09-08, from C6.2's second review round: `ChannelSupervisor.publish()` recomputes `state.presence` before it
   yields — `deliver`, the pump's `.user` and `.result` arms and the queued-input flush all moved `turnRunning` and
   published without it, so a running turn was published as idle and §7.4's *Quit* clause ended it with no dialog —

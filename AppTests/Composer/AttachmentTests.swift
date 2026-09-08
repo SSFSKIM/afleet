@@ -160,6 +160,36 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(model.draft.count, 0, "the field kept \(model.draft.count) character(s) after a send")
     }
 
+    /// **An image with no words is a message.** The intake fills the tray without touching the draft, so a send
+    /// that refused an empty draft before it looked at the tray refused image-only input outright: the picture sat
+    /// in the tray, no `UserInput` was posted, and nothing said why.
+    ///
+    /// The floor below it is the other half of the same guard: an empty field with an empty tray is still not a
+    /// send, because a stray Return must not spend a turn.
+    ///
+    /// Deliberate break: guard on the trimmed draft alone.
+    func testAnImageWithNoWordsIsSentAndAnEmptyFieldWithNoImageIsNot() async throws {
+        let double = ComposerLifecycleDouble()
+        await double.alwaysSendPrompt(.success(UUID()))
+        let model = makeModel(double)
+        model.attach([try image(.png)])
+
+        await model.send()
+
+        let prompts = await double.prompts
+        XCTAssertEqual(prompts.count, 1, "an image with no words produced \(prompts.count) prompt(s), not 1")
+        let input = try XCTUnwrap(prompts.first, "the image-only send reached no prompt")
+        XCTAssertEqual(input.images.count, 1, "the message carried \(input.images.count) image(s), not 1")
+        XCTAssertEqual(input.text.count, 0, "the image-only message carried \(input.text.count) character(s) of text")
+        XCTAssertEqual(model.attachments.count, 0,
+                       "\(model.attachments.count) image(s) stayed on the tray after the message that carried them")
+
+        await model.send()
+        let after = await double.prompts
+        XCTAssertEqual(after.count, 1,
+                       "an empty field with an empty tray produced \(after.count - 1) further prompt(s)")
+    }
+
     /// A refused send keeps the images exactly as it keeps the words.
     func testARefusedSendKeepsTheAttachments() async throws {
         let double = ComposerLifecycleDouble()

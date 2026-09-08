@@ -449,6 +449,42 @@ final class QueueChipTests: XCTestCase {
         await rig.finish()
     }
 
+    /// **The chip subscribes before it takes its first snapshot, and does both before `follow` returns.**
+    ///
+    /// `TimelineFanout.subscribe()` registers only future publications and replays nothing. A chip that read
+    /// `model.timeline` and then subscribed from inside a task it had merely scheduled lost every publication made
+    /// in between and drew the queue as it stood before them — silently, and until the next unrelated frame.
+    ///
+    /// The order is only observable from inside the subscribe call, which is why the chip carries a seam for it:
+    /// both orders converge on the same rows once everything has settled, so no assertion over the chip's final
+    /// state can separate them.
+    ///
+    /// Deliberate break: move the subscription back inside the follower task.
+    func testTheChipSubscribesBeforeItSnapshotsTheQueue() async throws {
+        let rig = try await Rig()
+        let ids = Rig.inventedCommandUUIDs
+        await rig.push(state: "queued", commandUUID: ids[0])
+        let ready = await rig.settle { $0.rows.count == 1 }
+        XCTAssertTrue(ready, "the fold holds \(rig.chip.rows.count) queued row(s), not 1, so nothing below is proven")
+
+        let fresh = QueueChipModel(key: rig.key, lifecycle: rig.lifecycle)
+        var rowsWhenSubscribed: [Int] = []
+        fresh.subscribing = { model in
+            rowsWhenSubscribed.append(fresh.rows.count)
+            return model.timelineUpdates
+        }
+
+        fresh.follow(rig.timeline)
+
+        XCTAssertEqual(rowsWhenSubscribed, [0],
+                       "the chip subscribed \(rowsWhenSubscribed.count) time(s), and not before its snapshot")
+        XCTAssertEqual(fresh.rows.count, 1,
+                       "`follow` returned with \(fresh.rows.count) row(s); the snapshot is not taken synchronously")
+        fresh.stop()
+
+        await rig.finish()
+    }
+
     // MARK: - A cancelled prompt leaves the fold's attribution
 
     /// An accepted cancel retires the prompt from the fold, so the next turn is not attributed to the message the

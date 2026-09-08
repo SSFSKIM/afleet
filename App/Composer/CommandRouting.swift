@@ -36,6 +36,11 @@ enum ComposerConfirmation: Hashable, Sendable {
     case backgroundAll
     case logout
     case sendToBackground
+    /// *Open in terminal*, when the channel has running background tasks. The handoff terminates the
+    /// owned process before the pane request is answered, and a stream close kills every still-running
+    /// local shell (X9, §7.4) — so the same confirm the handoff to a background job shows is shown here.
+    /// A channel with nothing running is released without a dialog: there is no cost to state.
+    case openInTerminal
     /// The directory the engine's `needs_trust` answer named, and the path the line asked for. Both,
     /// because the second call carries both and they are not interchangeable: `trusted_directory`
     /// must echo the **answer's** directory, which is the resolved one.
@@ -61,7 +66,10 @@ enum ComposerConfirmation: Hashable, Sendable {
         case .backgroundAll: .backgroundAll
         case .logout: .logout
         case .sendToBackground: .sendToBackground
-        case .trustDirectory: nil
+        // Neither is a `LifecycleAction`: the terminal handoff is X5's own member and the trust is a
+        // control request. `confirm(_:)` reads the case rather than every case being made to name an
+        // action it does not have.
+        case .openInTerminal, .trustDirectory: nil
         }
     }
 
@@ -73,6 +81,7 @@ enum ComposerConfirmation: Hashable, Sendable {
         case .backgroundAll: "backgroundAll"
         case .logout: "logout"
         case .sendToBackground: "sendToBackground"
+        case .openInTerminal: "openInTerminal"
         case .trustDirectory: "trustDirectory"
         }
     }
@@ -83,6 +92,7 @@ enum ComposerConfirmation: Hashable, Sendable {
         case .backgroundAll: "Move this channel's running tools to the background?"
         case .logout: "Sign out of every channel on this machine?"
         case .sendToBackground: "Send this channel to the background?"
+        case .openInTerminal: "Release this channel to your terminal?"
         case .trustDirectory: "Trust this directory?"
         }
     }
@@ -99,6 +109,9 @@ enum ComposerConfirmation: Hashable, Sendable {
                 + "Nothing stops, no session is handed off, and nothing survives a restart."
         case .logout: "Every owned channel and every afleet-launched job on this machine signs out."
         case .sendToBackground: "This channel's process is replaced by a background job; its local shells close."
+        case .openInTerminal:
+            "afleet's process for this channel ends and the conversation is handed to your terminal; "
+                + "its local shells close."
         // The directory is what the user is being asked about, so it is named: a trust dialog that
         // hid it would be asking about nothing.
         case .trustDirectory(let directory, _):
@@ -112,6 +125,7 @@ enum ComposerConfirmation: Hashable, Sendable {
         case .backgroundAll: "Move to Background"
         case .logout: "Sign Out"
         case .sendToBackground: "Send to Background"
+        case .openInTerminal: "Open in Terminal"
         case .trustDirectory: "Trust and Change"
         }
     }
@@ -236,23 +250,58 @@ extension ComposerModel {
         return await issue { _ = try await self.lifecycle.perform(action, on: self.key) }
     }
 
-    /// The waiting confirm, answered yes. The only place the three destructive actions are issued —
-    /// and the only place trust is granted for a directory.
-    @discardableResult
-    func confirmPending() async -> Bool {
-        guard let pending = pendingConfirmation else { return false }
+    /// The whole of a waiting confirm, taken out of the model in one synchronous step.
+    ///
+    /// **The affirmative button and the dialog's dismissal are two separate calls**, and SwiftUI makes the
+    /// dismissal — which is `cancelPending()` — before the affirmative's work has a chance to run. An action that
+    /// read `pendingConfirmation` when its `Task` began therefore read the value the dismissal had already cleared
+    /// and did nothing at all. So the answer is taken whole, at the moment the user gives it, and what follows may
+    /// clear the model without erasing it.
+    struct ClaimedConfirmation {
+        let confirmation: ComposerConfirmation
+        /// The line that raised it, so an issued confirm clears the field it was typed in.
+        let line: String?
+        /// What this confirm does when it is not a `LifecycleAction` this model can issue on its own — the header's
+        /// terminal handoff, which needs the window's pane runner.
+        let work: (@MainActor () async -> Bool)?
+    }
+
+    /// Takes the waiting confirm, and leaves nothing behind: a `cancelPending()` arriving after this one has nothing
+    /// left to clear, which is exactly what makes the dismissal harmless.
+    func claimPending() -> ClaimedConfirmation? {
+        guard let pending = pendingConfirmation else { return nil }
+        let claim = ClaimedConfirmation(confirmation: pending, line: confirmedLine, work: confirmedWork)
         pendingConfirmation = nil
         confirmationDetail = nil
+        confirmedLine = nil
+        confirmedWork = nil
+        return claim
+    }
+
+    /// The waiting confirm, answered yes: claimed synchronously, run in a task.
+    ///
+    /// The two halves are separate members because the claim has to happen in the button's own call — before the
+    /// dialog's dismissal, which is the very next thing SwiftUI does — while the work cannot.
+    func answerPending() {
+        guard let claim = claimPending() else { return }
+        Task { await confirm(claim) }
+    }
+
+    /// A claimed confirm, run. The only place the three destructive actions are issued, the only place trust is
+    /// granted for a directory, and the only place a confirmed handoff is performed.
+    @discardableResult
+    func confirm(_ claim: ClaimedConfirmation) async -> Bool {
         let issued: Bool
-        if let action = pending.action {
+        if let action = claim.confirmation.action {
             issued = await issue { _ = try await self.lifecycle.perform(action, on: self.key) }
-        } else if case .trustDirectory(let directory, let path) = pending {
+        } else if case .trustDirectory(let directory, let path) = claim.confirmation {
             issued = await grantTrust(directory: directory, path: path)
+        } else if let work = claim.work {
+            issued = await work()
         } else {
             issued = false
         }
-        if issued, let line = confirmedLine, draft.hasPrefix(line) { draft = String(draft.dropFirst(line.count)) }
-        confirmedLine = nil
+        if issued, let line = claim.line, draft.hasPrefix(line) { draft = String(draft.dropFirst(line.count)) }
         return issued
     }
 
@@ -370,6 +419,7 @@ extension ComposerModel {
         pendingConfirmation = nil
         confirmationDetail = nil
         confirmedLine = nil
+        confirmedWork = nil
     }
 
     /// One X5 call, with this leaf's two refusal arms around it: a `LifecycleError` is explained

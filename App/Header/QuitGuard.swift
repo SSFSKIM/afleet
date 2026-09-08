@@ -79,12 +79,7 @@ final class QuitGuard {
         defer { isQuitting = false }
 
         let owned = await fleet.quitChannels()
-        let busy = owned.filter(\.isBusy)
-        if !busy.isEmpty {
-            askCount += 1
-            lastAsked = busy
-            guard await confirm(busy) else { return false }
-        }
+        guard await ask(about: owned) else { return false }
         // **The census is repeated after the pass, and that is the whole answer to the race.** One
         // suspended read of the owned set is not atomic with the terminations that follow it: an
         // open, an adopt or a `paneExited` can hand a channel a process after its entry was taken or
@@ -104,6 +99,12 @@ final class QuitGuard {
         for pass in 0..<Self.terminationPasses {
             let pending = census.filter { $0.hasProcess && !terminated.contains($0.key) }
             if pending.isEmpty { break }
+            // **Work discovered after an idle census is warned about, once.** The re-census exists to reach a
+            // channel the first read missed, and a channel that started working in that window has running shells
+            // this pass is about to close — X9's warning is owed for them exactly as it is owed for the ones the
+            // first census saw. It is asked only if no dialog has been shown yet: the clause says *once*, and a
+            // user who has already accepted is not asked again for the same quit.
+            guard await ask(about: census.filter { !terminated.contains($0.key) }) else { return false }
             for channel in pending {
                 terminated.insert(channel.key)
                 await fleet.terminateForQuit(channel.key)
@@ -112,6 +113,21 @@ final class QuitGuard {
         }
         await fleet.shutdownForQuit()
         return true
+    }
+
+    /// The dialog, at most once per quit, about the busy channels among `channels`.
+    ///
+    /// Answers `true` when the quit may go on: nothing was busy, the user accepted, or the one dialog this quit is
+    /// allowed has already been shown and accepted. A decline stops the termination passes and the app does not
+    /// exit; channels this quit already ended are dormant and resumable, which is what the clause's own note says
+    /// about a channel that has been quit.
+    private func ask(about channels: [QuitChannel]) async -> Bool {
+        guard askCount == 0 else { return true }
+        let busy = channels.filter(\.isBusy)
+        guard !busy.isEmpty else { return true }
+        askCount += 1
+        lastAsked = busy
+        return await confirm(busy)
     }
 
     /// How many times the clause reads the owned set and terminates what it finds.

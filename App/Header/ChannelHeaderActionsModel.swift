@@ -229,24 +229,49 @@ final class ChannelHeaderActionsModel {
 
     /// *Open in terminal*: X5's handoff request, run by X7's host.
     ///
+    /// **Behind the same confirm *Send to background* shows, when the channel has running background tasks.**
+    /// `handOff` terminates the owned process before it answers the pane request, and stream close kills every
+    /// still-running local shell (§7.4, X9): a release that ended a user's running work without saying so is exactly
+    /// what that rule forbids. A channel with nothing running is released with no dialog — there is no cost to state.
+    func openInTerminal() async {
+        guard gate() else { return }
+        // X5's own answer and not the fold's, which is what *Send to background* reads: the handoff ends the
+        // channel's process wherever the menu was opened from, including a channel this window has never drawn a
+        // timeline for, and the fleet answers for that one too (§7.4's "busy", second half).
+        let live = await lifecycle.liveTaskIDs(of: key)
+        guard live.isEmpty else {
+            composer.confirmationDetail = Self.confirmationDetail(forLiveTasks: live)
+            composer.confirmedWork = { [weak self] in await self?.handOff() ?? false }
+            composer.pendingConfirmation = .openInTerminal
+            return
+        }
+        await handOff()
+    }
+
+    /// The handoff itself, which nothing but `openInTerminal()` and the confirm it raises reaches.
+    /// Answers whether the channel was handed off, which is what the confirm reports.
+    ///
     /// **The first production caller of `PanelHostModel.run(_:)`** (tracker 72 recorded it as
     /// uncalled). That method throws `PanelHostError.noPaneRunner` until C7's Terminal leaf lands, so
     /// the refusal is surfaced as an inline note naming the tab — item 47's degradation stated by the
     /// composite, and not a silent skip.
-    func openInTerminal() async {
-        guard gate() else { return }
+    @discardableResult
+    private func handOff() async -> Bool {
         do {
             let request = try await lifecycle.openInTerminal(key)
             guard let paneRunner else {
                 note = "There is no panel host in this window to run \(PanelTabID.terminal.defaultTitle) in."
-                return
+                return false
             }
             try await paneRunner(request)
             note = "Handed off to \(PanelTabID.terminal.defaultTitle)."
+            return true
         } catch let error as PanelHostError {
             note = Self.explanation(of: error)
+            return false
         } catch {
             note = Self.refusal(error)
+            return false
         }
     }
 
