@@ -173,6 +173,12 @@ final class RunLoopHeartbeat {
 
 // MARK: - The harness
 
+/// One event the PTY layer reported, and when it arrived.
+struct ChildObservation: Sendable {
+    let description: String
+    let atNanoseconds: UInt64
+}
+
 @MainActor
 final class Harness {
     private let leg: Leg
@@ -193,6 +199,12 @@ final class Harness {
     private var observations: [String] = []
     private var sawStop = false
     private var sawEnd = false
+    /// The first stop and the first end, each with the moment it arrived. A leg that asks what a
+    /// byte it sent caused has to name the event it saw *before* it started cleaning up: teardown
+    /// terminates the child itself, and the `.ended` that follows is indistinguishable, by the
+    /// `sawEnd` flag alone, from the one the byte was supposed to cause.
+    private var firstStop: ChildObservation?
+    private var firstEnd: ChildObservation?
 
     init(leg: Leg) {
         self.leg = leg
@@ -250,14 +262,29 @@ final class Harness {
                     longestFeedNanoseconds = max(longestFeedNanoseconds, spent)
                 case let .stopped(signal):
                     sawStop = true
-                    observations.append("stopped signal=\(signal)")
+                    let description = "stopped signal=\(signal)"
+                    observations.append(description)
+                    if firstStop == nil {
+                        firstStop = ChildObservation(
+                            description: description,
+                            atNanoseconds: DispatchTime.now().uptimeNanoseconds
+                        )
+                    }
                 case let .ended(termination):
                     sawEnd = true
+                    let description: String
                     switch termination {
                     case let .exited(code):
-                        observations.append("ended exited code=\(code)")
+                        description = "ended exited code=\(code)"
                     case let .signalled(signal):
-                        observations.append("ended signalled signal=\(signal)")
+                        description = "ended signalled signal=\(signal)"
+                    }
+                    observations.append(description)
+                    if firstEnd == nil {
+                        firstEnd = ChildObservation(
+                            description: description,
+                            atNanoseconds: DispatchTime.now().uptimeNanoseconds
+                        )
                     }
                     surface.processDidExit(code: termination.paneExitCode)
                 }
@@ -715,14 +742,9 @@ final class Harness {
             }
         }
 
-        var observedMilliseconds = Double.infinity
         for _ in 0 ..< Int(seconds * 4) {
             await settle(milliseconds: 250)
-            if sawStop || sawEnd {
-                observedMilliseconds =
-                    Double(DispatchTime.now().uptimeNanoseconds - sentAt) / 1_000_000
-                break
-            }
+            if sawStop || sawEnd { break }
         }
         // A stop that the policy answers is followed by an end; give the sequence its moment.
         if sawStop, !sawEnd, stopPolicy == .detach {
@@ -731,13 +753,22 @@ final class Harness {
             }
         }
 
+        // The verdict, taken here and not after teardown. Teardown terminates the child itself,
+        // and the `.ended` its termination produces reaches the same consumer; a leg that read
+        // `sawEnd` afterwards would report a client that ignored Ctrl+Z entirely as a success,
+        // on the strength of its own cleanup. What counts is the event observed before teardown
+        // begins, timed from the byte.
+        let observedBeforeTeardown = firstStop ?? firstEnd
+        let observedMilliseconds = observedBeforeTeardown.map {
+            Double($0.atNanoseconds &- sentAt) / 1_000_000
+        }
         let policyName = stopPolicy == .detach ? "detach" : "report"
         print(
             "attach: ctrl-z sent=\(sendsCtrlZ ? 1 : 0) policy=\(policyName)"
                 + " observations=\(observations.count)"
-                + (observedMilliseconds.isFinite
-                    ? String(format: " milliseconds=%.1f", observedMilliseconds)
-                    : " milliseconds=none")
+                + " event=\(observedBeforeTeardown?.description ?? "none")"
+                + (observedMilliseconds.map { String(format: " milliseconds=%.1f", $0) }
+                    ?? " milliseconds=none")
         )
         for observation in observations { print("attach: observed \(observation)") }
         if observations.isEmpty {
@@ -755,9 +786,14 @@ final class Harness {
         }
         print("attach: after teardown observations=\(observations.count)")
         for observation in observations { print("attach: final \(observation)") }
-        // Without the byte the client is expected to still be running; with it, the leg has
-        // something to report either way.
-        return sendsCtrlZ ? (sawStop || sawEnd ? 0 : 1) : 0
+        let teardownGeneratedEnd = observedBeforeTeardown == nil && sawEnd
+        print(
+            "attach: teardown-generated-end=\(teardownGeneratedEnd ? 1 : 0)"
+                + " before-teardown=\(observedBeforeTeardown == nil ? 0 : 1)"
+        )
+        // Without the byte the client is expected to still be running; with it, the leg passes
+        // only on an event the byte could have caused.
+        return sendsCtrlZ ? (observedBeforeTeardown == nil ? 1 : 0) : 0
     }
 
     private func nonBlankRowCount(_ text: String?) -> Int {

@@ -1993,3 +1993,19 @@ is renumbered.
     rather than suspending. Diagnostic-only — no pane path calls it — and the bound keeps it from
     hanging. Closer: a completion callback on the adapter's drain that the read can await, or
     upstream support. Owner: C7.1 if G2's self-test leg ever reads behind a flood.
+
+96. **The owner-release cleanup helper is called `terminateAndReap` and no longer reaps.**
+    `PTYTestChild.terminateAndReap(_ identity:)` signals the child's group and then watches it
+    die; the status belongs to the production waiter, which is the whole point of the review fix
+    that removed its `waitpid`. The sibling overload taking a `PTYProcess` has always had the
+    same shape and the same name. A reader who trusts the name will think a status is claimed
+    here. Closer: rename both to say what they do — `terminate(_:)` — in one mechanical pass over
+    the nine call sites. Owner: C7.1 tests, or whoever next touches the helper.
+298. **The adapter learns that the renderer has a surface by polling a viewport read.** The
+    backlog is held until the session is attached, because the dependency drops unattached output
+    past 1 MiB, but `libghostty-spm` publishes no attachment event and keeps `currentSurface`
+    internal, so `GhosttyTerminalSurface` probes `readViewportText() != nil` every 10 ms while it
+    has something undelivered and no surface. Cheap (an unattached read returns immediately) and
+    latched after the first attach, so it costs one poll cycle of first-paint latency and nothing
+    afterwards. Closer: an attachment callback upstream, or `currentSurface` made public, either
+    of which turns the poll into a wait. Owner: C7.1 if the dependency is bumped, else C7.4.
