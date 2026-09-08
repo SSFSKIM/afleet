@@ -51,13 +51,13 @@ final class ImportGraphTests: XCTestCase {
             "TerminalCore scan could not walk \(scan.rootsNotWalked.count) roots: \(scan.rootsNotWalked.sorted())"
         )
         XCTAssertTrue(
-            scan.directoriesWithoutSwiftFiles.isEmpty,
-            "TerminalCore scan found \(scan.directoriesWithoutSwiftFiles.count) immediate directories with no Swift files read: \(scan.directoriesWithoutSwiftFiles)"
+            scan.directoriesWithoutSourceFiles.isEmpty,
+            "TerminalCore scan found \(scan.directoriesWithoutSourceFiles.count) immediate directories with no source files read: \(scan.directoriesWithoutSourceFiles)"
         )
         XCTAssertEqual(
             scan.unreadableFiles,
             0,
-            "TerminalCore scan could not read \(scan.unreadableFiles) Swift files"
+            "TerminalCore scan could not read \(scan.unreadableFiles) source files"
         )
 
         let forbidden = scan.modules.intersection(Self.terminalCoreForbiddenModules)
@@ -81,13 +81,13 @@ final class ImportGraphTests: XCTestCase {
             "package scan could not walk \(scan.rootsNotWalked.count) roots: \(scan.rootsNotWalked.sorted())"
         )
         XCTAssertTrue(
-            scan.directoriesWithoutSwiftFiles.isEmpty,
-            "package scan found \(scan.directoriesWithoutSwiftFiles.count) immediate directories with no Swift files read: \(scan.directoriesWithoutSwiftFiles)"
+            scan.directoriesWithoutSourceFiles.isEmpty,
+            "package scan found \(scan.directoriesWithoutSourceFiles.count) immediate directories with no source files read: \(scan.directoriesWithoutSourceFiles)"
         )
         XCTAssertEqual(
             scan.unreadableFiles,
             0,
-            "package scan could not read \(scan.unreadableFiles) Swift files"
+            "package scan could not read \(scan.unreadableFiles) source files"
         )
         XCTAssertGreaterThan(
             scan.importStatementsMatched,
@@ -145,12 +145,12 @@ final class ImportGraphTests: XCTestCase {
         var importStatementsMatched = 0
         var rootsWalked: Set<String> = []
         var rootsNotWalked: Set<String> = []
-        var swiftFilesReadByDirectory: [String: Int] = [:]
+        var sourceFilesReadByDirectory: [String: Int] = [:]
         var filesRead = 0
         var unreadableFiles = 0
 
-        var directoriesWithoutSwiftFiles: [String] {
-            swiftFilesReadByDirectory
+        var directoriesWithoutSourceFiles: [String] {
+            sourceFilesReadByDirectory
                 .filter { $0.value == 0 }
                 .map(\.key)
                 .sorted()
@@ -180,8 +180,8 @@ final class ImportGraphTests: XCTestCase {
         return parsed
     }
 
-    /// Every module name imported under `roots`, together with evidence that each root and
-    /// immediate target directory contributed readable Swift source. Spaces and tabs only,
+    /// Every Swift module name imported under `roots`, together with evidence that each root
+    /// and immediate target directory contributed readable Swift or C-family source. Spaces and tabs only,
     /// never `\s`: `\s` matches a newline, so it can capture the next line's first word.
     private static func importedModules(under roots: [ScanRoot]) -> ImportScan {
         let fileManager = FileManager.default
@@ -206,7 +206,7 @@ final class ImportGraphTests: XCTestCase {
                 var isDirectory: ObjCBool = false
                 if fileManager.fileExists(atPath: entry.path, isDirectory: &isDirectory),
                    isDirectory.boolValue {
-                    scan.swiftFilesReadByDirectory["\(root.name)/\(entry.lastPathComponent)"] = 0
+                    scan.sourceFilesReadByDirectory["\(root.name)/\(entry.lastPathComponent)"] = 0
                 }
             }
 
@@ -216,7 +216,8 @@ final class ImportGraphTests: XCTestCase {
                    isDirectory.boolValue {
                     continue
                 }
-                guard url.pathExtension == "swift" else { continue }
+                let sourceExtensions: Set<String> = ["swift", "c", "h", "m", "mm"]
+                guard sourceExtensions.contains(url.pathExtension) else { continue }
                 guard let text = try? String(contentsOf: url, encoding: .utf8) else {
                     scan.unreadableFiles += 1
                     continue
@@ -226,11 +227,12 @@ final class ImportGraphTests: XCTestCase {
                 let relativeComponents = url.pathComponents.dropFirst(root.url.pathComponents.count)
                 if let immediateDirectory = relativeComponents.first {
                     let key = "\(root.name)/\(immediateDirectory)"
-                    if scan.swiftFilesReadByDirectory[key] != nil {
-                        scan.swiftFilesReadByDirectory[key, default: 0] += 1
+                    if scan.sourceFilesReadByDirectory[key] != nil {
+                        scan.sourceFilesReadByDirectory[key, default: 0] += 1
                     }
                 }
 
+                guard url.pathExtension == "swift" else { continue }
                 let parsed = importedModules(in: text, matching: expression)
                 scan.importStatementsMatched += parsed.statementsMatched
                 scan.modules.formUnion(parsed.modules)

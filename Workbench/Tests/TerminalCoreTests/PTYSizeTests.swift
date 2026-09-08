@@ -13,7 +13,7 @@ final class PTYSizeTests: XCTestCase {
         IFS= read -r resizeProbe || :
         printf 'resized=%s\\n' "$(/bin/stty size)"
         printf 'resize-reported\\n'
-        while :; do IFS= read -r hold || :; done
+        exec /bin/sleep 30
         """
         let process = try PTYProcess(
             spawning: PTYTestChild.request(cwd: directory, script: script)

@@ -1,3 +1,4 @@
+import CDarwinWaitStatus
 import Darwin
 import Dispatch
 import Foundation
@@ -35,11 +36,69 @@ final class PTYMasterDescriptor: Sendable {
     }
 }
 
+/// The signalling right for one spawned process group, shared with the waiter so reaping and
+/// signalling have one synchronization point even though they run on different executors.
+private final class PTYChildProcessGroup: Sendable {
+    private enum State {
+        case signalable
+        case consumingStatus
+        case terminal
+    }
+
+    let processIdentifier: pid_t
+    private let state = Mutex(State.signalable)
+
+    init(processIdentifier: pid_t) {
+        self.processIdentifier = processIdentifier
+    }
+
+    func beginNonterminalStatusConsumption() {
+        state.withLock { state in
+            if case .signalable = state {
+                state = .consumingStatus
+            }
+        }
+    }
+
+    func finishStatusConsumption(isTerminal: Bool) {
+        state.withLock { state in
+            if isTerminal {
+                state = .terminal
+            } else if case .consumingStatus = state {
+                state = .signalable
+            }
+        }
+    }
+
+    func markTerminal() {
+        state.withLock { $0 = .terminal }
+    }
+
+    @discardableResult
+    func signal(_ signal: Int32) -> Bool {
+        state.withLock { state in
+            guard case .signalable = state else { return false }
+            // DarwinPTY makes the child a session leader with pgid == sid == pid. Before the
+            // waiter reaps it, that pid cannot be recycled and therefore neither can its group.
+            // The waiter changes this state to `.terminal` before an observed terminal reap,
+            // or to `.consumingStatus` across a reap whose preview was nonterminal. Both states
+            // suppress this syscall, so no path can signal after ownership of the pid ends.
+            return Darwin.kill(-processIdentifier, signal) == 0
+        }
+    }
+}
+
 public actor PTYProcess {
     // Task 6 replaces this single policy with bounded, coalesced delivery. Keeping the current
     // behavior named here avoids threading an implicit AsyncStream default through the actor.
     private static let eventBufferingPolicy: AsyncStream<PTYEvent>.Continuation.BufferingPolicy =
         .unbounded
+
+    // A local pane child normally reports a signal within one scheduler turn. A quarter-second
+    // gives SIGHUP handlers time to detach cleanly; SIGTERM gets twice that to run orderly cleanup,
+    // while the full escalation still resolves quickly enough not to leave a pane visibly hung.
+    private static let hangupGracePeriod = Duration.milliseconds(250)
+    private static let terminateGracePeriod = Duration.milliseconds(500)
 
     public nonisolated let events: AsyncStream<PTYEvent>
     public nonisolated let processIdentifier: pid_t
@@ -50,11 +109,16 @@ public actor PTYProcess {
     private let eventContinuation: AsyncStream<PTYEvent>.Continuation
     private let readSource: DispatchSourceRead
     private let stopPolicy: PTYStopPolicy
+    private let processGroup: PTYChildProcessGroup
     private var masterIsOpen = true
-    private var masterReachedEnd = false
     private var termination: PTYTermination?
+    private var childIsTerminal = false
     private var childStatusUnavailable = false
     private var streamWasFinished = false
+    private var waiterIsConsumingStatus = false
+    private var statusConsumptionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var terminationWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
+    private var terminationSequence: Task<Void, Never>?
 
     /// The gate that makes `write` a queue rather than a race. A caller that has to wait for the
     /// master to drain suspends, which lets a second `write` enter the actor; without the gate
@@ -97,6 +161,7 @@ public actor PTYProcess {
         processIdentifier = spawned.processIdentifier
         master = descriptor
         readSource = source
+        processGroup = PTYChildProcessGroup(processIdentifier: spawned.processIdentifier)
         // Writability waits get their own queue: a write source stays armed until the actor can
         // take it down, and on the read queue that window would delay the child's output.
         writeQueue = DispatchQueue(label: "app.afleet.terminal-core.pty-write")
@@ -126,30 +191,86 @@ public actor PTYProcess {
         source.resume()
 
         let processIdentifier = spawned.processIdentifier
+        let processGroup = processGroup
         // The statuses `waitpid` returns are ordered — a stop, then whatever ended the child —
-        // and the actor has to see them in that order: under `.detach` the stop handler is what
-        // sends the signals that produce the end. Handing each status to its own unstructured
-        // `Task` would put that order up to the scheduler, so the waiter instead delivers one
-        // status at a time and blocks until the actor has finished with it. Only this dedicated
-        // queue's thread blocks; no cooperative executor is involved, and no further `waitpid`
-        // runs until the previous status has been handled.
-        waitQueue.async { [weak self] in
+        // and the actor has to see them in that order. `waitid(WNOWAIT)` first identifies a
+        // terminal status without consuming it, allowing signalling to be disabled before the
+        // following `waitpid` reaps the pid. A nonterminal status instead gates actor signalling
+        // only while a nonblocking `waitpid` tries to consume it: SIGCONT can discard an unread
+        // stop, in which case both gates reopen before `waitid` retries. Synchronous actor
+        // delivery prevents a later status from overtaking one that was consumed.
+        waitQueue.async { [weak self, processGroup] in
             while true {
-                var status: Int32 = 0
-                let result = Darwin.waitpid(processIdentifier, &status, WUNTRACED)
-                // Read out of the weak capture once: the delivery closure needs a value it can
-                // carry across the hop, and it is held only for the length of that hop.
-                let owner = self
-                if result == processIdentifier {
-                    let waitStatus = ChildWaitStatus(status)
-                    Self.deliver { await owner?.received(waitStatus) }
-                    if waitStatus.isTerminal { return }
-                } else if result == -1, errno == EINTR {
+                var information = siginfo_t()
+                let observed = Darwin.waitid(
+                    P_PID,
+                    id_t(processIdentifier),
+                    &information,
+                    WEXITED | WSTOPPED | WNOWAIT
+                )
+                if observed == -1, errno == EINTR {
                     continue
-                } else {
+                }
+                guard observed == 0 else {
+                    processGroup.markTerminal()
+                    let owner = self
                     Self.deliver { await owner?.waiterFinishedWithoutStatus() }
                     return
                 }
+
+                let terminalPreview = Self.isTerminalChildStatus(information.si_code)
+                let owner = self
+                if terminalPreview {
+                    processGroup.markTerminal()
+                    Self.deliver { await owner?.childWillBeReaped() }
+                } else {
+                    Self.deliver { await owner?.waiterWillConsumeNonterminalStatus() }
+                    processGroup.beginNonterminalStatusConsumption()
+                }
+
+                var status: Int32 = 0
+                let result: pid_t
+                let waitOptions = terminalPreview ? WUNTRACED : WUNTRACED | WNOHANG
+                while true {
+                    let waited = Darwin.waitpid(processIdentifier, &status, waitOptions)
+                    if waited == -1, errno == EINTR { continue }
+                    result = waited
+                    break
+                }
+                if result == 0 {
+                    // The nonterminal preview was discarded before it could be consumed. Reopen
+                    // the process-group gate first so a termination task resumed by the actor gate
+                    // can signal, then look again rather than declaring the child's fate unknown.
+                    processGroup.finishStatusConsumption(isTerminal: false)
+                    if let owner {
+                        Self.deliver { await owner.finishStatusConsumption() }
+                    } else {
+                        // Deinitialization may have tried to terminate while this gate was closed.
+                        // Complete that best-effort teardown now that signalling is safe again.
+                        Self.bestEffortTerminate(processGroup)
+                    }
+                    continue
+                }
+                let waitStatus = result == processIdentifier ? ChildWaitStatus(status) : nil
+                if !terminalPreview {
+                    processGroup.finishStatusConsumption(
+                        isTerminal: waitStatus?.isTerminal ?? true
+                    )
+                }
+
+                if let owner {
+                    if let waitStatus {
+                        Self.deliver { await owner.received(waitStatus) }
+                    } else {
+                        Self.deliver { await owner.waiterFinishedWithoutStatus() }
+                    }
+                } else if let waitStatus, !waitStatus.isTerminal {
+                    // The owner disappeared while a stop was pending. Its deinitializer could
+                    // not await this consumption gate, so finish the best-effort teardown here.
+                    Self.bestEffortTerminate(processGroup)
+                }
+
+                guard let waitStatus, !waitStatus.isTerminal else { return }
             }
         }
     }
@@ -158,7 +279,7 @@ public actor PTYProcess {
     /// keeps successive statuses in the order `waitpid` produced them. Safe to block on: the
     /// caller is the dedicated waiter queue, never a cooperative executor, and the body reaches
     /// the actor through a reference that is already `nil` once the owner has gone away.
-    private static func deliver(_ body: @escaping @Sendable () async -> Void) {
+    static func deliver(_ body: @escaping @Sendable () async -> Void) {
         let delivered = DispatchSemaphore(value: 0)
         Task {
             await body()
@@ -167,10 +288,43 @@ public actor PTYProcess {
         delivered.wait()
     }
 
+    private static func isTerminalChildStatus(_ code: Int32) -> Bool {
+        switch code {
+        case CLD_EXITED, CLD_KILLED, CLD_DUMPED:
+            true
+        case CLD_TRAPPED, CLD_STOPPED, CLD_CONTINUED:
+            false
+        default:
+            false
+        }
+    }
+
+    private static func bestEffortTerminate(_ processGroup: PTYChildProcessGroup) {
+        processGroup.signal(SIGCONT)
+        processGroup.signal(SIGHUP)
+        processGroup.signal(SIGTERM)
+        processGroup.signal(SIGKILL)
+    }
+
+    /// A best-effort safety net only: the owner is expected to call ``teardown()`` and await the
+    /// resulting `.ended`. A deinitializer cannot wait through grace periods or wait for `waitpid`,
+    /// so abandoning this actor with a live child is a programming error this type mitigates but
+    /// cannot repair contractually.
     deinit {
-        // Releasing the last master is the terminal hangup: macOS continues a stopped foreground
-        // group, sends it SIGHUP, and the dedicated waiter remains alive long enough to reap it.
         readSource.cancel()
+        guard termination == nil, !childIsTerminal, !childStatusUnavailable else { return }
+        Self.bestEffortTerminate(processGroup)
+    }
+
+    /// Closes the pty and terminates the process group, returning only after the waiter has
+    /// observed the child's terminal status and emitted the single `.ended` event.
+    ///
+    /// Teardown first continues a stopped child and sends SIGHUP, then escalates through SIGTERM
+    /// and SIGKILL after bounded grace periods. Call this before releasing the last owner.
+    public func teardown() async {
+        readEnded()
+        let sequence = startTerminationSequence()
+        await sequence.value
     }
 
     /// Writes every byte of `data` to the master, suspending rather than blocking whenever the
@@ -317,17 +471,118 @@ public actor PTYProcess {
         wait.continuation.resume(with: result)
     }
 
+    private func startTerminationSequence() -> Task<Void, Never> {
+        if let terminationSequence { return terminationSequence }
+        let sequence = Task { await runTerminationSequence() }
+        terminationSequence = sequence
+        return sequence
+    }
+
+    private func runTerminationSequence() async {
+        guard !childFateIsSettled else { return }
+
+        // A stopped process cannot act on SIGHUP until it is continued. Sending SIGCONT to a
+        // running group is harmless and gives explicit teardown the same first step as detach.
+        _ = await signalProcessGroup(SIGCONT)
+        guard await signalProcessGroup(SIGHUP) else {
+            await waitForTermination()
+            return
+        }
+        if await waitForTermination(for: Self.hangupGracePeriod) { return }
+
+        guard await signalProcessGroup(SIGTERM) else {
+            await waitForTermination()
+            return
+        }
+        if await waitForTermination(for: Self.terminateGracePeriod) { return }
+
+        guard await signalProcessGroup(SIGKILL) else {
+            await waitForTermination()
+            return
+        }
+        // SIGKILL has no handler to wait for. Keep the actor and waiter alive until the kernel's
+        // terminal status has become the promised `.ended`, rather than returning on signal send.
+        await waitForTermination()
+    }
+
+    private func signalProcessGroup(_ signal: Int32) async -> Bool {
+        await waitForStatusConsumption()
+        guard !childFateIsSettled, !childIsTerminal else { return false }
+        return processGroup.signal(signal)
+    }
+
+    private func waitForStatusConsumption() async {
+        while waiterIsConsumingStatus {
+            await withCheckedContinuation { statusConsumptionWaiters.append($0) }
+        }
+    }
+
+    private func waiterWillConsumeNonterminalStatus() {
+        waiterIsConsumingStatus = true
+    }
+
+    private func childWillBeReaped() {
+        childIsTerminal = true
+    }
+
+    private func finishStatusConsumption() {
+        guard waiterIsConsumingStatus else { return }
+        waiterIsConsumingStatus = false
+        let waiters = statusConsumptionWaiters
+        statusConsumptionWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private var childFateIsSettled: Bool {
+        termination != nil || childStatusUnavailable
+    }
+
+    private func waitForTermination(for gracePeriod: Duration) async -> Bool {
+        guard !childFateIsSettled else { return true }
+        let identifier = UUID()
+        return await withCheckedContinuation { continuation in
+            terminationWaiters[identifier] = continuation
+            Task { [weak self] in
+                try? await Task.sleep(for: gracePeriod)
+                await self?.expireTerminationWait(identifier)
+            }
+        }
+    }
+
+    private func waitForTermination() async {
+        guard !childFateIsSettled else { return }
+        let identifier = UUID()
+        _ = await withCheckedContinuation { continuation in
+            terminationWaiters[identifier] = continuation
+        }
+    }
+
+    private func expireTerminationWait(_ identifier: UUID) {
+        terminationWaiters.removeValue(forKey: identifier)?.resume(returning: false)
+    }
+
+    private func resumeTerminationWaiters() {
+        let waiters = terminationWaiters.values
+        terminationWaiters.removeAll()
+        waiters.forEach { $0.resume(returning: true) }
+    }
+
     private func received(_ status: ChildWaitStatus) {
+        finishStatusConsumption()
         switch status {
         case let .stopped(signal):
             eventContinuation.yield(.stopped(signal: signal))
             if stopPolicy == .detach {
-                _ = Darwin.kill(-processIdentifier, SIGCONT)
-                _ = Darwin.kill(-processIdentifier, SIGHUP)
+                // No useful output follows a detached stop. Closing now both performs the terminal
+                // hangup and makes `.ended` independent of a surviving slave descriptor.
+                readEnded()
+                _ = startTerminationSequence()
             }
         case let .ended(childTermination):
+            childIsTerminal = true
             termination = childTermination
             finishIfChildAndMasterEnded()
+            resumeTerminationWaiters()
         }
     }
 
@@ -337,15 +592,17 @@ public actor PTYProcess {
     /// order that has to be remembered — this before the master's end of file — is a race in
     /// production and is driven directly from the tests.
     func waiterFinishedWithoutStatus() {
+        finishStatusConsumption()
+        childIsTerminal = true
         childStatusUnavailable = true
         finishIfChildAndMasterEnded()
+        resumeTerminationWaiters()
     }
 
     /// Not `private` for the same reason as `waiterFinishedWithoutStatus`.
     func readEnded() {
         guard masterIsOpen else { return }
         masterIsOpen = false
-        masterReachedEnd = true
         for identifier in Array(writabilityWaits.keys) {
             finishWritabilityWait(identifier, with: .failure(PTYError.closed))
         }
@@ -359,7 +616,7 @@ public actor PTYProcess {
     /// The second shape carries no termination, so none is invented — the stream just finishes.
     /// Either half can arrive first, so this is called from both and reconciles what it finds.
     private func finishIfChildAndMasterEnded() {
-        guard masterReachedEnd, !streamWasFinished else { return }
+        guard !masterIsOpen, !streamWasFinished else { return }
         if let termination {
             streamWasFinished = true
             eventContinuation.yield(.ended(termination))
@@ -375,14 +632,17 @@ private enum ChildWaitStatus: Sendable {
     case stopped(signal: Int32)
     case ended(PTYTermination)
 
-    init(_ status: Int32) {
-        let waitKind = status & 0x7f
-        if waitKind == 0x7f {
-            self = .stopped(signal: (status >> 8) & 0xff)
-        } else if waitKind == 0 {
-            self = .ended(.exited(code: (status >> 8) & 0xff))
+    init?(_ status: Int32) {
+        if afleet_wait_status_stopped(status) {
+            self = .stopped(signal: Int32(afleet_wait_stop_signal(status)))
+        } else if afleet_wait_status_exited(status) {
+            self = .ended(.exited(code: Int32(afleet_wait_exit_status(status))))
+        } else if afleet_wait_status_signalled(status) {
+            self = .ended(.signalled(signal: Int32(afleet_wait_term_signal(status))))
         } else {
-            self = .ended(.signalled(signal: waitKind))
+            // `waitpid` is not currently asked for WCONTINUED, but treating an unrecognized status
+            // as no event keeps a future option change from misreporting it as a termination.
+            return nil
         }
     }
 

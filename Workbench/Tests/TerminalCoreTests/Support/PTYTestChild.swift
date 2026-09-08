@@ -136,7 +136,7 @@ enum PTYTestChild {
     /// A guard clause for a script that is meant to sit idle: the session outlives this test
     /// process, so a child that is never reaped would otherwise stay on the machine.
     static func selfTerminating(after seconds: Int, _ script: String) -> String {
-        "( sleep \(seconds); kill -9 $$ ) &\n" + script
+        "( sleep \(seconds); kill -KILL $$ ) &\n" + script
     }
 
     static func record(_ events: AsyncStream<PTYEvent>) -> (PTYOutputRecorder, Task<Void, Never>) {
@@ -218,16 +218,29 @@ enum PTYTestChild {
     }
 
     static func terminateAndReap(_ process: PTYProcess) {
-        let pid = process.processIdentifier
+        terminateAndReap(pid: process.processIdentifier)
+    }
+
+    static func terminateAndReap(pid: pid_t) {
         guard pid > 1 else { return }
-        // The child is a session leader, so its group holds every process the script started —
-        // a watchdog, a pipeline's members. The group goes first so nothing is left behind.
+        // The child is the session and process-group leader, so these group signals include the
+        // leader and every process its script started. Never signal the bare pid after waiting:
+        // the actor may already have reaped it, at which point that pid no longer belongs to us.
         _ = Darwin.kill(-pid, SIGCONT)
         _ = Darwin.kill(-pid, SIGKILL)
-        _ = Darwin.kill(pid, SIGCONT)
-        _ = Darwin.kill(pid, SIGKILL)
         var status: Int32 = 0
         while Darwin.waitpid(pid, &status, 0) == -1, errno == EINTR {}
+    }
+
+    static func processState(pid: pid_t) -> Int8? {
+        var information = kinfo_proc()
+        var byteCount = MemoryLayout<kinfo_proc>.stride
+        var name = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        let result = name.withUnsafeMutableBufferPointer { buffer in
+            sysctl(buffer.baseAddress, u_int(buffer.count), &information, &byteCount, nil, 0)
+        }
+        guard result == 0, byteCount != 0 else { return nil }
+        return information.kp_proc.p_stat
     }
 
     static func remove(_ directory: URL) {
