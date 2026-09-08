@@ -1858,6 +1858,17 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-08: `LifecycleAPI` gains `sendPrompt(_:on:)`, answering the uuid the engine will echo
+  for the user message. `ChannelSupervisor.send` has always minted and returned it and
+  `perform(.send)` has always discarded it, so the composer had no way to raise
+  `HostSignal.promptSent(uuid:at:)` before the echo arrived — C3's `StreamIngestion.signal(_:)`
+  had a receiver and no sender — and reaching below the facade for the supervisor is contract
+  Y5's refusal. What was discarded is the idea of widening `perform`'s return into a richer
+  result: `perform` is one door over eleven actions whose answer is the channel's state, and
+  paying every caller of every action for one action's extra fact is the wrong trade, so the
+  prompt gets its own member on the same path — same barrier check, same supervisor call, same
+  `busy` and `heldElsewhere` refusals — and `perform(.send)` is left exactly as it was.
+
 - 2026-09-08: `RouterTable`'s terminal-only copy ended with "Open this session in your
   terminal to use it." — the one sentence parent §7.7 says the router never shows — and
   `RefusalInterceptor` reused it verbatim on the drift path, where §7.7 asks instead for what

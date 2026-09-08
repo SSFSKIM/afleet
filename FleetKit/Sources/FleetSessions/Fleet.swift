@@ -400,6 +400,22 @@ public actor Fleet: LifecycleAPI {
         return await supervisor.state
     }
 
+    /// `perform(.send(input), on:)`'s path, answering the uuid the supervisor minted instead of the state.
+    ///
+    /// The supervisor mints the uuid the engine will echo for the user message and `perform` throws it away, so a
+    /// host had no way to know it before the echo arrived — and reaching below the facade for it is contract Y5's
+    /// refusal. With it in hand the composer raises `HostSignal.promptSent(uuid:at:)` the moment the send returns,
+    /// which is the pre-echo preview C3's `StreamIngestion.signal(_:)` exists to receive.
+    ///
+    /// Same preconditions, same refusals: the barrier is checked because a send may spawn, and everything else is
+    /// the supervisor's own — `busy` behind a lifecycle operation, `heldElsewhere` on a channel held elsewhere.
+    @discardableResult
+    public func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        let supervisor = supervisor(for: key)
+        try spawnBarrier.check()
+        return try await supervisor.send(input)
+    }
+
     public func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
         try spawnBarrier.check()
         return try await supervisor(for: key).openInTerminal()

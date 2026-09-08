@@ -1164,3 +1164,15 @@ is renumbered.
      rather than inventing an affordance inside another leaf's directory.
      Closer: name it in the composite as a cross-child contract in Y4's shape, and give C6.1 the one
      call. Owner: the C6 composite (the architect). Raised by C6.2 Task 6.
+188. **`make test` rewrites `Workbench/Package.resolved` with the app's own dependency pins.**
+     Since C6.1's seam range added HighlightKit to `project.yml` (`exactVersion: 0.2.0`), the
+     app scheme's xcodebuild resolution writes HighlightKit's pin and a new `originHash` into
+     `Workbench/Package.resolved` — the local package's committed lockfile, which C7.2's offline
+     proof relies on — leaving the tree dirty after every floor run; C6.1 and two `main`
+     correctives each reverted it by hand. Nothing is lost (the app's pin is derivable from
+     `project.yml`), but a child that commits the churn by accident changes Workbench's lockfile
+     for a dependency Workbench does not declare. Closer: find why the project's resolution
+     targets the local package's file (xcodegen's package layout, or the package being both a
+     local dependency and a workspace member) and point it at the project's own
+     `xcshareddata/swiftpm/Package.resolved`; until then the floor's Makefile target restores the
+     file after the run. Owner: C5 (`project.yml`), noted 2026-09-08.
