@@ -202,11 +202,13 @@ final class LinkRouterTests: XCTestCase {
     /// from inside `prepare` and awaited, so the interleaving is deterministic rather than timed:
     /// when `prepare` returns, the withdrawal has already been applied on the router's executor.
     ///
-    /// The resolved tab must receive nothing, and the link must fall through to the next target —
-    /// including its own `prepare`, since a pop-out prepared for the withdrawn tab is not one
-    /// prepared for the tab that ends up delivering.
+    /// The resolved tab must receive nothing. **And no second target is prepared**: `prepare` is
+    /// the host's pop-out, which presents a window, and a window presented for a tab that is not
+    /// the one delivering is not undoable. So a withdrawal that leaves only an *unrelated* target
+    /// takes W5's fallback rather than preparing a second window for it. `prepare` here counts its
+    /// own runs, which is what a `presentWindow` count is at this layer.
     @MainActor
-    func testWithdrawalDuringPrepareStopsDeliveryAndFallsThrough() async {
+    func testWithdrawalDuringPrepareStopsDeliveryAndPreparesNoOneElse() async {
         let recorder = Recorder()
         let sink = Sink()
         let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
@@ -218,11 +220,12 @@ final class LinkRouterTests: XCTestCase {
             if target.tab == .files { await router.unregister(tab: .files) }
         }
 
-        XCTAssertEqual(recorder.tabs, [.terminal],
-                       "delivery went to \(recorder.tabs) after the resolved tab withdrew during prepare")
-        XCTAssertEqual(recorder.events, ["prepare:files", "prepare:terminal", "open:terminal:newWindow"],
+        XCTAssertEqual(recorder.tabs, [],
+                       "delivery went to \(recorder.tabs) after the prepared tab withdrew during prepare")
+        XCTAssertEqual(recorder.events, ["prepare:files"],
                        "the recorded order was \(recorder.events)")
-        XCTAssertEqual(sink.messages, [], "a link that fell through to a target also produced a diagnostic")
+        XCTAssertEqual(sink.messages.count, 1,
+                       "the link produced \(sink.messages.count) diagnostics, not the one fallback")
     }
 
     /// The companion the fix has to keep passing: a withdrawal that lands during `prepare` but
@@ -273,9 +276,143 @@ final class LinkRouterTests: XCTestCase {
                            "the fallback message carries a payload token")
         }
     }
+
+    // MARK: - 9. A delivery already in flight, and the withdrawal that must wait for it
+
+    /// `unregister(tab:)` returns only after every delivery already in flight for that tab has
+    /// completed.
+    ///
+    /// The handler is `@MainActor`, so the router *suspends* between committing to a delivery and
+    /// the handler's first line, and a withdrawal that completed in that window would let the host
+    /// which awaits it release the tab's sessions under a handler that is about to run. The gate
+    /// holds one delivery open, and the assertion is that the withdrawal has not returned while it
+    /// is held — an ordering, not a timing.
+    @MainActor
+    func testUnregisterWaitsForADeliveryAlreadyInFlight() async {
+        let recorder = Recorder()
+        let gate = Gate()
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        await router.register(LinkTarget(tab: .files, specificity: 1,
+                                         handles: { _ in true },
+                                         open: { _, _ in
+                                             recorder.note("handler-start")
+                                             await gate.arrive()
+                                             recorder.note("handler-end")
+                                         }))
+
+        let routing = Task { await router.open(Fixtures.file, from: .currentPanel) }
+        await gate.waitForArrival()
+        XCTAssertEqual(recorder.events, ["handler-start"], "the recorded order was \(recorder.events)")
+
+        let withdrawal = Task {
+            await router.unregister(tab: .files)
+            recorder.note("withdrawn")
+        }
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertEqual(recorder.events, ["handler-start"],
+                       "the withdrawal returned while a delivery was in flight: \(recorder.events)")
+
+        gate.open()
+        await withdrawal.value
+        await routing.value
+        XCTAssertEqual(recorder.events, ["handler-start", "handler-end", "withdrawn"],
+                       "the recorded order was \(recorder.events)")
+    }
+
+    // MARK: - 10. Re-resolution is against the live registry
+
+    /// A tab that withdraws and registers again *during* `prepare` — X7's handover, which is the
+    /// reason `unregister(tab:)` is `async` at all — is the live target for this open.
+    ///
+    /// Re-resolving against the registry as it stood when the call began would exclude the
+    /// replacement and hand the link either to an unrelated registration or to the fallback, and
+    /// no assertion about the withdrawn target could see it. The two `.files` registrations carry
+    /// different labels, so the recorded event names which one received the link.
+    @MainActor
+    func testAReplacementRegisteredDuringPrepareReceivesTheLink() async {
+        let recorder = Recorder()
+        let sink = Sink()
+        let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
+        await router.register(Fixtures.target(.files, specificity: 10, into: recorder,
+                                              label: "placeholder"))
+        await router.register(Fixtures.target(.terminal, specificity: 1, into: recorder))
+
+        await router.open(Fixtures.file, from: .newWindow) { target, _ in
+            recorder.note("prepare:\(target.tab.rawValue)")
+            guard target.tab == .files else { return }
+            await router.unregister(tab: .files)
+            await router.register(Fixtures.target(.files, specificity: 10, into: recorder,
+                                                  label: "successor"))
+        }
+
+        XCTAssertEqual(recorder.events, ["prepare:files", "open:successor:newWindow"],
+                       "the recorded order was \(recorder.events)")
+        XCTAssertEqual(sink.messages, [], "a link that reached a target also produced a diagnostic")
+    }
+
+    /// The bound on re-resolution, and what makes it a bound rather than a hope.
+    ///
+    /// This `prepare` hands the tab over on **every** attempt, so a router that re-resolved against
+    /// the live registry and prepared each time would never leave `open`. It leaves after one
+    /// preparation and one outcome: the replacement for the tab already prepared for delivers into
+    /// the window that preparation opened, and nothing is prepared twice.
+    @MainActor
+    func testAHandoverRepeatedOnEveryAttemptStillFinishesWithOnePreparation() async {
+        let recorder = Recorder()
+        let sink = Sink()
+        let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
+        await router.register(Fixtures.target(.files, specificity: 10, into: recorder))
+
+        await router.open(Fixtures.unclaimedFile, from: .newWindow) { target, _ in
+            recorder.note("prepare:\(target.tab.rawValue)")
+            await router.unregister(tab: .files)
+            await router.register(Fixtures.target(.files, specificity: 10, into: recorder))
+        }
+
+        XCTAssertEqual(recorder.tabs, [.files], "a target delivered \(recorder.tabs.count) times, not once")
+        XCTAssertEqual(recorder.events, ["prepare:files", "open:files:newWindow"],
+                       "the recorded order was \(recorder.events)")
+        XCTAssertEqual(sink.messages, [], "a link that reached a target also produced a diagnostic")
+    }
 }
 
 // MARK: - Rigs
+
+/// A one-shot gate a `@MainActor` handler waits on, so a delivery can be held *open* while the
+/// test drives a withdrawal against it. Continuation-based rather than timed, so the interleaving
+/// is deterministic.
+@MainActor
+final class Gate {
+    private var arrivals: [CheckedContinuation<Void, Never>] = []
+    private var watchers: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+    private var hasArrived = false
+
+    /// Called from inside the handler: announces that the delivery has begun and blocks until the
+    /// test opens the gate.
+    func arrive() async {
+        hasArrived = true
+        let waiting = watchers
+        watchers = []
+        for watcher in waiting { watcher.resume() }
+        guard !isOpen else { return }
+        await withCheckedContinuation { arrivals.append($0) }
+    }
+
+    /// Called from the test: returns once the handler has begun.
+    func waitForArrival() async {
+        guard !hasArrived else { return }
+        await withCheckedContinuation { watchers.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        let waiting = arrivals
+        arrivals = []
+        for arrival in waiting { arrival.resume() }
+    }
+}
+
 
 /// What the handlers and the `prepare` hook write to. One object, so ordering is assertable.
 @MainActor
@@ -285,11 +422,12 @@ final class Recorder {
     private(set) var destinations: [LinkDestination] = []
     private(set) var events: [String] = []
 
-    func delivered(tab: PanelTabID, link: WorkspaceLink, destination: LinkDestination) {
+    func delivered(tab: PanelTabID, link: WorkspaceLink, destination: LinkDestination,
+                   label: String) {
         tabs.append(tab)
         links.append(link)
         destinations.append(destination)
-        events.append("open:\(tab.rawValue):\(destination)")
+        events.append("open:\(label):\(destination)")
     }
 
     func note(_ event: String) { events.append(event) }
@@ -339,12 +477,19 @@ enum Fixtures {
 
     /// A target that handles everything, so the resolution tests are about resolution and the
     /// delivery tests are about delivery.
+    ///
+    /// `label` names the *registration* rather than the tab, so a handover — one tab withdrawing
+    /// and registering again under the same id — is assertable. It defaults to the tab, which is
+    /// what every test that has one registration per tab reads.
     @MainActor
-    static func target(_ tab: PanelTabID, specificity: Int, into recorder: Recorder) -> LinkTarget {
-        LinkTarget(tab: tab, specificity: specificity,
-                   handles: { _ in true },
-                   open: { link, destination in
-                       recorder.delivered(tab: tab, link: link, destination: destination)
-                   })
+    static func target(_ tab: PanelTabID, specificity: Int, into recorder: Recorder,
+                       label: String? = nil) -> LinkTarget {
+        let label = label ?? tab.rawValue
+        return LinkTarget(tab: tab, specificity: specificity,
+                          handles: { _ in true },
+                          open: { link, destination in
+                              recorder.delivered(tab: tab, link: link, destination: destination,
+                                                 label: label)
+                          })
     }
 }

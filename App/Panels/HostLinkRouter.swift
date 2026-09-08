@@ -64,10 +64,17 @@ final class HostLinkRouter: LinkRouterCapability {
     /// The destination reaches the handler because C7's W5 says so: a handler given only the link
     /// cannot tell an in-panel open from a popped-out one, and a host that hard-coded
     /// `.currentPanel` would satisfy every routing test and drop that distinction at integration.
+    /// The channel is read **here, at entry**, and not inside `prepare`. Routing suspends on the way
+    /// to the registry and again on the way back, and the main actor is free throughout: the window
+    /// can move to another channel or leave every channel while one link is in flight. A pop-out
+    /// that read the host's current channel when it finally ran would open the target in a channel
+    /// the action did not come from, or report "no channel" for a link that had one. The channel an
+    /// action originated in is a property of the action, so it is captured with the action.
     func open(_ link: WorkspaceLink, from destination: LinkDestination) async {
+        let origin = self.host?.selectedChannel
         await router.open(link, from: destination) { target, destination in
             guard destination == .newWindow else { return }
-            if let host = self.host, let channel = host.selectedChannel {
+            if let host = self.host, let channel = origin {
                 host.popOut(target.tab, channel: channel)
             } else {
                 // The handler is still told `.newWindow` afterwards, so it would render for a

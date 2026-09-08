@@ -650,6 +650,75 @@ final class PanelHostTests: XCTestCase {
                        "the unclaimed .url link did not reach the injected external opener")
     }
 
+    /// The channel a `.newWindow` link pops its tab out for is the one the *action* came from.
+    ///
+    /// Routing suspends on the way to the registry, and the main actor is free while it does: the
+    /// window can move to another channel, or leave every channel, inside that window. A host that
+    /// read its current channel when the pop-out finally ran would open the target in a channel the
+    /// user was not looking at when they clicked — or emit the no-channel diagnostic for a link that
+    /// had a perfectly good channel. The focus change here lands after the routing task has entered
+    /// the router and before the pop-out runs, which is an ordering rather than a timing: the
+    /// yield's continuation is queued on the main actor ahead of anything the router queues later.
+    func testANewWindowLinkPopsOutForTheChannelItOriginatedIn() async throws {
+        let host = PanelHostModel()
+        try host.register(StubPanelTab(.files))
+        let origin = PanelFixtures.key(0)
+        let elsewhere = PanelFixtures.key(1)
+        host.focusChannel(origin)
+        let recorder = LinkRecorder()
+        host.presentWindow = { _ in recorder.note("window") }
+        await host.links.register(PanelFixtures.fileTarget(.files, specificity: 5, into: recorder))
+
+        let routing = Task { await host.links.open(PanelFixtures.fileLink, from: .newWindow) }
+        await Task.yield()
+        host.focusChannel(elsewhere)
+        await routing.value
+
+        XCTAssertEqual(host.poppedOut.count, 1,
+                       "the host recorded \(host.poppedOut.count) pop-outs, not 1")
+        XCTAssertEqual(host.poppedOut.first?.channel, origin,
+                       "the pop-out went to a channel the link did not originate in")
+        XCTAssertEqual(recorder.notes, ["window"], "the recorded order was \(recorder.notes)")
+    }
+
+    /// `unregister` withdraws the tab's link targets **before** releasing anything the tab holds.
+    ///
+    /// X7 made the host member `async` so the withdrawal could be ordered, and the order that
+    /// matters runs the other way too: a delivery already in flight is owed to a handler that has
+    /// not finished, and the tab, its runners and its sessions are what that handler is reading.
+    /// The handler here reports the tab's own title, which the host answers from the registration
+    /// and falls back to the id's default for once the tab is gone, so a release that landed under
+    /// the handler is visible rather than inferred.
+    func testUnregisterWithdrawsTheLinkTargetBeforeReleasingTheTabsState() async throws {
+        let host = PanelHostModel()
+        let title = "Invented Files Title"
+        try host.register(StubPanelTab(.files, title: title))
+        host.focusChannel(PanelFixtures.key(0))
+        let recorder = LinkRecorder()
+        let gate = HandlerGate()
+        await host.links.register(LinkTarget(tab: .files, specificity: 5,
+                                             handles: { link in if case .file = link { true } else { false } },
+                                             open: { _, _ in
+                                                 recorder.note("start:\(host.title(for: .files))")
+                                                 await gate.arrive()
+                                                 recorder.note("end:\(host.title(for: .files))")
+                                             }))
+
+        let routing = Task { await host.links.open(PanelFixtures.fileLink, from: .currentPanel) }
+        await gate.waitForArrival()
+        let withdrawal = Task {
+            await host.unregister(.files)
+            recorder.note("unregistered")
+        }
+        for _ in 0..<50 { await Task.yield() }
+        gate.open()
+        await withdrawal.value
+        await routing.value
+
+        XCTAssertEqual(recorder.notes, ["start:\(title)", "end:\(title)", "unregistered"],
+                       "the recorded order was \(recorder.notes)")
+    }
+
     // MARK: - G4d: the pane seam
 
     /// The request reaches the runner unchanged and the exit reaches the lifecycle with the same id.
@@ -744,6 +813,39 @@ final class PanelHostTests: XCTestCase {
 }
 
 // MARK: - Doubles
+
+/// A one-shot gate a `@MainActor` link handler waits on, so a delivery can be held open while the
+/// test drives the host's teardown against it. Continuation-based, so the interleaving is an
+/// ordering rather than a timing.
+@MainActor
+private final class HandlerGate {
+    private var arrivals: [CheckedContinuation<Void, Never>] = []
+    private var watchers: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+    private var hasArrived = false
+
+    func arrive() async {
+        hasArrived = true
+        let waiting = watchers
+        watchers = []
+        for watcher in waiting { watcher.resume() }
+        guard !isOpen else { return }
+        await withCheckedContinuation { arrivals.append($0) }
+    }
+
+    func waitForArrival() async {
+        guard !hasArrived else { return }
+        await withCheckedContinuation { watchers.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        let waiting = arrivals
+        arrivals = []
+        for arrival in waiting { arrival.resume() }
+    }
+}
+
 
 /// A tab whose availability, title and session accounting the test controls.
 @MainActor

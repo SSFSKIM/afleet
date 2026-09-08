@@ -134,21 +134,28 @@ final class PanelHostModel: PanelHost {
         tabs[tab.id] = tab
     }
 
-    /// Drops the tab, releases every session it held for every channel, and **awaits** the
-    /// withdrawal of its link targets.
+    /// **Awaits** the withdrawal of the tab's link targets, and only then drops the tab and releases
+    /// every session it held for every channel.
     ///
     /// The await is load-bearing rather than incidental. This is the handover path — a later child
     /// takes an id C5's placeholder holds by unregistering and then registering — and a withdrawal
     /// that landed after the replacement's registration would delete the *replacement's* target,
     /// because withdrawal is keyed by a tab id both tabs share.
+    ///
+    /// **The withdrawal goes first**, which is the other half of the same guarantee. The registry
+    /// returns from `unregister(tab:)` once no delivery for that tab is in flight, so everything
+    /// after this line runs with no handler for the tab running or about to start. Releasing the
+    /// tab and its sessions first and awaiting afterwards freed the main actor in between, and a
+    /// delivery the registry had already committed would then read a tab and sessions this method
+    /// had torn down (contract X7's 2026-09-06 amendment; tracker 97).
     func unregister(_ id: PanelTabID) async {
+        await links.unregister(tab: id)
         tabs[id] = nil
         runners[id] = nil
         for slot in sessions.keys where slot.tab == id { sessions[slot] = nil }
         forgetChannelsWithNoSessions()
         poppedOut.removeAll { $0.tab == id }
         if selected == id { selected = nil }
-        await links.unregister(tab: id)
     }
 
     func registerPaneRunner(_ runner: any PaneRunning, for tab: PanelTabID) {
@@ -209,6 +216,11 @@ final class PanelHostModel: PanelHost {
 
     // MARK: - Pop-out
 
+    /// Records the window and asks for it. **Idempotent per (tab, channel)**: the entry is recorded
+    /// once, and `presentWindow` is SwiftUI's `openWindow(value:)`, which is keyed by that same
+    /// value — a second call for a window already on screen brings it forward rather than opening a
+    /// second one. So the same tab in the same channel can never become two windows, which is what
+    /// the routing rule above it depends on when a link is prepared and then delivered.
     func popOut(_ id: PanelTabID, channel: ChannelKey) {
         let entry = PoppedOutPanel(tab: id, channel: channel)
         if !poppedOut.contains(entry) { poppedOut.append(entry) }
