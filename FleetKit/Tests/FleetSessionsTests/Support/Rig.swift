@@ -49,6 +49,12 @@ final class EligibilityBox: @unchecked Sendable {   // `lock` serialises every f
 /// The rig plays the part Task 9's `Fleet` facade will: it owns the supervisors, it fans the observer's published
 /// holder sets to each of them, and `shutdown()` shuts every one of them down.
 final class Rig: @unchecked Sendable {   // `lock` serialises every recorded array
+    /// The observer's intervals, named here because `startObserver` waits for exactly these two sleepers: a wait for
+    /// a duration nothing is ever parked at is a wait that never ends, so the rig hands the observer the same two
+    /// values it later waits on rather than repeating the defaults and hoping they stay in step.
+    static let pollInterval: Duration = .seconds(5)
+    static let reconcileInterval: Duration = .seconds(60)
+
     let home: ScratchConfigHome
     let files: ScriptedHolderFiles
     let clock = TestClock()
@@ -147,7 +153,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
 
         let box = OwnPIDBox()
         observer = FleetObserver(configHome: home.configHome, reader: reader, clock: clock,
-                                 ownPIDs: { await box.pids() })
+                                 ownPIDs: { await box.pids() },
+                                 pollInterval: Self.pollInterval, reconcileInterval: Self.reconcileInterval)
         box.rig = self
     }
 
@@ -481,6 +488,15 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
 
     /// Starts the observer's watcher and poll, and fans every published `HolderSet` to every supervisor — the part
     /// Task 9's facade plays in production.
+    ///
+    /// Returns only once both of the observer's timers are parked on the clock. `FleetObserver.start()` creates the
+    /// poll and the reconciliation as unstructured tasks and returns without waiting for either to reach its first
+    /// `sleep`, while `TestClock.advance` resumes whatever is parked and moves `now` regardless. A test that
+    /// advanced into that window advanced past a timer that had not been armed: the poll then parked a whole
+    /// interval beyond where the test left the clock and never fired, and a change only the poll can see — an
+    /// in-place rewrite of a watched file, which fires no vnode event — was never read at all. Waiting here is what
+    /// makes `advance(by:)` mean what every caller reads it as. `FleetObserverTests` and `RosterSignalTests` settle
+    /// their own observers the same way.
     func startObserver() async {
         let task = Task { [weak self] in
             guard let self else { return }
@@ -490,6 +506,8 @@ final class Rig: @unchecked Sendable {   // `lock` serialises every recorded arr
         }
         locked { tasks.append(task) }
         await observer.start()
+        await clock.waitForSleeperCount(atLeast: 1, due: Self.pollInterval)
+        await clock.waitForSleeperCount(atLeast: 1, due: Self.reconcileInterval)
     }
 
     /// Waits for a real child to reach a state. The lifecycle's own timers never move on wall time — only the

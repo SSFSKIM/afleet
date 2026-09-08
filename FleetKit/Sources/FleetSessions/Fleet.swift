@@ -339,6 +339,11 @@ public actor Fleet: LifecycleAPI {
         return await supervisor.currentEligibility().isEligible
     }
 
+    public func liveTaskIDs(of key: ChannelKey) async -> [String] {
+        guard let supervisor = supervisors[key] else { return [] }
+        return await supervisor.liveTaskIDs()
+    }
+
     /// A fresh unbounded fan-out per call, straight from the supervisor; nil when this fleet owns no supervisor for
     /// the key. The facade keeps no stream of its own, so nothing is re-pumped and no frame is duplicated.
     public func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? {
@@ -392,12 +397,36 @@ public actor Fleet: LifecycleAPI {
             _ = try await supervisor.perform(BackgroundTasks())
         case .logout:
             try await beginLogout()
+        case .quit:
+            // Ungated, where `.reap` is gated. The reap's gate protects the reap the *user* asks for from the
+            // header: it must not end a child with a decision on screen or a background shell still working. §7.4's
+            // quit is the opposite case — the user has been warned about exactly those channels and has confirmed —
+            // and running the quit through the reap's gate would terminate none of them. The warning is X9's rule
+            // and it is what licenses this teardown; the name it terminates under is its own, so a ghost the quit
+            // leaves behind is recorded as a quit's.
+            await supervisor.terminateForQuit()
         case .reopen:
             try await supervisor.reopen()
         case .answer(let id, let answer):
             try await supervisor.answer(id, answer)
         }
         return await supervisor.state
+    }
+
+    /// `perform(.send(input), on:)`'s path, answering the uuid the supervisor minted instead of the state.
+    ///
+    /// The supervisor mints the uuid the engine will echo for the user message and `perform` throws it away, so a
+    /// host had no way to know it before the echo arrived — and reaching below the facade for it is contract Y5's
+    /// refusal. With it in hand the composer raises `HostSignal.promptSent(uuid:at:)` the moment the send returns,
+    /// which is the pre-echo preview C3's `StreamIngestion.signal(_:)` exists to receive.
+    ///
+    /// Same preconditions, same refusals: the barrier is checked because a send may spawn, and everything else is
+    /// the supervisor's own — `busy` behind a lifecycle operation, `heldElsewhere` on a channel held elsewhere.
+    @discardableResult
+    public func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        let supervisor = supervisor(for: key)
+        try spawnBarrier.check()
+        return try await supervisor.send(input)
     }
 
     public func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
@@ -644,7 +673,7 @@ private extension LifecycleAction {
     var maySpawn: Bool {
         switch self {
         case .open, .send, .adopt, .fork, .quiescentRestart, .reopen, .sendToBackground, .backgroundAll: true
-        case .reap, .stopEverything, .logout, .answer: false
+        case .reap, .stopEverything, .logout, .quit, .answer: false
         }
     }
 }

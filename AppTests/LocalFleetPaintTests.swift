@@ -39,7 +39,12 @@ final class LocalFleetPaintTests: XCTestCase {
 
     func testFirstPaintMedianIsUnderFiveSeconds() async throws {
         guard ProcessInfo.processInfo.environment["AFLEET_LOCAL_INDEX"] == "1" else {
-            throw XCTSkip("set AFLEET_LOCAL_INDEX=1 to measure the local config home; read-only")
+            throw XCTSkip("""
+                set AFLEET_LOCAL_INDEX=1 to measure the local config home; read-only. Under \
+                xcodebuild the working spelling is TEST_RUNNER_AFLEET_LOCAL_INDEX=1, which the \
+                runner re-exports with the prefix stripped — an unprefixed switch never reaches \
+                the test host at all
+                """)
         }
 
         let environment = await LaunchSequence.resolveLoginShellEnvironment()

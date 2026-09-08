@@ -292,6 +292,7 @@ final class RecordingAppFleet: AppFleet {
         case .stopEverything: "stopEverything"
         case .backgroundAll: "backgroundAll"
         case .logout: "logout"
+        case .quit: "quit"
         case .reopen: "reopen"
         case .answer: "answer"
         }
@@ -329,6 +330,10 @@ final class RecordingAppFleet: AppFleet {
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         try await inner.send(request, on: key)
     }
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        log.note("send")
+        return try await inner.sendPrompt(input, on: key)
+    }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
              ui: any StrategyUI) async throws -> StrategyOutcome {
         try await inner.run(strategy, arguments: arguments, on: key, ui: ui)
@@ -342,6 +347,7 @@ final class RecordingAppFleet: AppFleet {
     func paneExited(_ exit: PaneExit) async { await inner.paneExited(exit) }
     func jobs() async -> [JobEntry] { await inner.jobs() }
     func isDormantEligible(_ key: ChannelKey) async -> Bool { await inner.isDormantEligible(key) }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { await inner.liveTaskIDs(of: key) }
     func declineProjectServers(_ names: [String], project: URL) async throws {
         try await inner.declineProjectServers(names, project: project)
     }
