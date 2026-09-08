@@ -62,8 +62,10 @@ final class ComposerMountTests: XCTestCase {
         await app.launch()
         let workspace = try XCTUnwrap(app.route.workspace, "the launch reached no workspace to draw")
         app.shell.select(LaunchFixtures.sessionA)
-        XCTAssertNotNil(app.browser?.row(LaunchFixtures.sessionA) != nil ? true : nil,
-                        "the launch painted no channel row, so the column would draw its placeholder")
+        // A boolean, not the row: a `ChannelRow` reaches an `IndexEntry` and would print every
+        // field of it on failure (§11).
+        XCTAssertTrue(app.browser?.row(LaunchFixtures.sessionA) != nil,
+                      "the launch painted no channel row, so the column would draw its placeholder")
         return (app, ChannelColumnView(app: app, shell: app.shell, workspace: workspace))
     }
 
