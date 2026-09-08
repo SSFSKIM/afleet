@@ -137,4 +137,42 @@ final class ComposerSendTests: XCTestCase {
         XCTAssertNil(model.refusal, "the refusal from the first send survived a successful one")
         XCTAssertEqual(model.draft.count, 0, "the successful second send left \(model.draft.count) character(s)")
     }
+
+    /// Two Return presses while one send is still in flight are **one** send.
+    ///
+    /// The field fires `send()` from a detached `Task`, so nothing serialises the two: without a
+    /// guard both clear the blank-draft check, both read the same draft, and both reach `perform` —
+    /// the same message twice. The double holds `perform` open so the second press genuinely lands
+    /// inside the first, which is the only arrangement in which an unguarded model can be seen to
+    /// send twice; an unheld double answers before the second press is ever made.
+    func testASecondSendWhileOneIsInFlightReachesTheLifecycleNotAtAll() async {
+        let double = ComposerLifecycleDouble()
+        let key = makeKey()
+        await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.holdPerform()
+        let model = makeModel(double)
+        model.draft = "an invented line"
+
+        async let first: Void = model.send()
+        async let second: Void = model.send()
+
+        // Let both presses reach the lifecycle, and stop early the moment a second call proves the
+        // defect: the loop is a ceiling on how long a passing run waits, not a timing assumption.
+        var inFlight = 0
+        for _ in 0..<2_000 {
+            await Task.yield()
+            inFlight = await double.calls.count
+            if inFlight > 1 { break }
+        }
+        let held = await double.callersHeldInPerform
+        await double.releasePerform()
+        _ = await (first, second)
+
+        XCTAssertEqual(inFlight, 1,
+                       "two presses during one in-flight send reached the lifecycle \(inFlight) time(s)")
+        XCTAssertEqual(held, 1, "\(held) caller(s) were inside perform at once")
+        let actions = await double.actions
+        XCTAssertEqual(actions.count, 1, "two concurrent sends produced \(actions.count) action(s)")
+        XCTAssertEqual(model.draft.count, 0, "the send left \(model.draft.count) character(s) in the field")
+    }
 }

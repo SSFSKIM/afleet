@@ -68,6 +68,14 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// Every call, in the order it arrived. The single source for every ordering assertion.
     private(set) var calls: [Call] = []
 
+    /// Holds `perform` open so a second caller can arrive while the first is still inside it. Without
+    /// it no test can tell a composer that guards reentrancy from one that merely never overlaps,
+    /// because an unheld double answers before the second call is ever made.
+    private var isPerformHeld = false
+    private var heldCallers: [CheckedContinuation<Void, Never>] = []
+    /// How many callers are suspended inside `perform` right now. A count, not a value (§11).
+    private(set) var callersHeldInPerform = 0
+
     private var performOutcomes: [Result<ChannelState, LifecycleError>] = []
     private var performFallback: Result<ChannelState, LifecycleError>?
     /// Staged answers to `send`, keyed by subtype; a subtype with no answer staged returns `.null`,
@@ -94,6 +102,15 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func stageRun(_ outcome: Result<StrategyOutcome, LifecycleError>) { runOutcomes.append(outcome) }
     func stageSend(_ subtype: String, _ answer: Result<JSONValue, WireError>) { sendAnswers[subtype] = answer }
     func stagePane(_ outcome: Result<PaneRequest, LifecycleError>) { paneRequest = outcome }
+    /// Every `perform` from here on records itself and then suspends, until `releasePerform()`.
+    func holdPerform() { isPerformHeld = true }
+    func releasePerform() {
+        isPerformHeld = false
+        let waiting = heldCallers
+        heldCallers = []
+        callersHeldInPerform = 0
+        for caller in waiting { caller.resume() }
+    }
     func stagePrecondition(_ verdict: SpawnPrecondition) { preconditionVerdict = verdict }
     func setStates(_ states: [ChannelState]) { for state in states { table[state.key] = state } }
     func openEvents(of key: ChannelKey) { opened.insert(key) }
@@ -143,6 +160,10 @@ actor ComposerLifecycleDouble: LifecycleAPI {
 
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         calls.append(.perform(key, action))
+        if isPerformHeld {
+            callersHeldInPerform += 1
+            await withCheckedContinuation { heldCallers.append($0) }
+        }
         let outcome = performOutcomes.isEmpty ? performFallback : performOutcomes.removeFirst()
         guard let outcome else { throw StagingError.nothingStaged(member: "perform") }
         let state = try outcome.get()

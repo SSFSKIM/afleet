@@ -30,6 +30,15 @@ final class ComposerModel {
     /// `LifecycleError` and verbatim from `RouterTable` for a locally refused command (Task 3).
     private(set) var refusal: String?
 
+    /// True from the moment a send is accepted until its `perform` returns.
+    ///
+    /// The field fires `send()` from a detached `Task`, so two quick Return presses are two calls
+    /// with nothing between them: both would clear the blank-draft guard, both would read the same
+    /// draft, and the engine would get the message twice. A second press is **dropped, never
+    /// queued** — a queued one would send the same words again the moment the first returned, which
+    /// is the same defect with a delay in front of it.
+    private(set) var isSending = false
+
     @ObservationIgnored private let lifecycle: any LifecycleAPI
     @ObservationIgnored private var events: Task<Void, Never>?
 
@@ -58,9 +67,12 @@ final class ComposerModel {
     /// reason it knows and this model does not; re-issuing would either duplicate the message or
     /// spin against a channel that is busy for as long as it is busy.
     func send() async {
+        guard !isSending else { return }
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let text = draft
         refusal = nil
+        isSending = true
+        defer { isSending = false }
         do {
             _ = try await lifecycle.perform(.send(UserInput(text: text)), on: key)
             // Only the words that were sent. A keystroke that landed during the await is the user's
