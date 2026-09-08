@@ -1182,7 +1182,7 @@ private final class URLBox: @unchecked Sendable {
 
 /// Every identifier these tests use. Invented throughout: a session is a hex-formatted index, a
 /// config home is a fixed invented path, a URL is under `invented.example` (§11).
-private enum PanelFixtures {
+enum PanelFixtures {
 
     static let configHome = URL(fileURLWithPath: "/invented/config-home")
     static let cwd = URL(fileURLWithPath: "/invented/project")
@@ -1293,7 +1293,7 @@ private struct CoordinatorRig {
 /// and a launch would add a binary probe, a version gate and a sign-in gate, each of which can fail
 /// for reasons that say nothing about §7.
 @MainActor
-private struct PanelRig {
+struct PanelRig {
 
     let temp: TempTree
     let home: ScratchConfigHome
