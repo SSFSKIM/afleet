@@ -24,6 +24,11 @@ final class ComposerRegistry {
     /// `model(for:)`.
     var lifecycle: (any LifecycleAPI)?
 
+    /// Where each composer's `RefusalInterceptor` records a replaced drift refusal: FleetKit's own
+    /// `fleet.log`, which is where C5's diagnostics already carry the drift count. Null until a launch
+    /// reaches a workspace, so a composer built before one still counts and writes nowhere.
+    var diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics()
+
     private var models: [ChannelKey: ComposerModel] = [:]
     private var surfaces: [ChannelKey: ChannelSurfaceState] = [:]
 
@@ -37,6 +42,7 @@ final class ComposerRegistry {
     func attach(to workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
         releaseAll()
         self.lifecycle = lifecycle ?? workspace.fleet
+        self.diagnostics = workspace.diagnostics.fleet
     }
 
     /// This channel's composer, built on first ask and retained afterwards.
@@ -53,7 +59,7 @@ final class ComposerRegistry {
         guard let lifecycle else { return nil }
         let surface = surfaces[key] ?? ChannelSurfaceState()
         surfaces[key] = surface
-        let model = ComposerModel(key: key, lifecycle: lifecycle, surface: surface)
+        let model = ComposerModel(key: key, lifecycle: lifecycle, surface: surface, diagnostics: diagnostics)
         models[key] = model
         return model
     }

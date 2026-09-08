@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import AfleetCore
 import ClaudeWire
+import PanelHostAPI
 import FleetKit
 
 /// One channel's composer (spec §8.5, C6.2 "The shape: two models, one seam").
@@ -30,15 +31,51 @@ final class ComposerModel {
     /// `LifecycleError` and verbatim from `RouterTable` for a locally refused command (Task 3).
     var refusal: String?
 
+    /// The named surface a `.native` row asked for — `modelPicker`, `effortPicker`, `tasks`,
+    /// `agents`, `switcher`. The name is the table's own string, never a literal written here: the
+    /// composer opens what the row names and re-implements no mapping (contract X10).
+    var openSurface: String?
+
+    /// A `LifecycleAction` the router produced that afleet does not issue until the user answers.
+    /// Nil whenever nothing is waiting; see `ComposerConfirmation`.
+    var pendingConfirmation: ComposerConfirmation?
+
+    /// The `/rewind` dry run in front of the user, and the answer `StrategyUI.confirm` is suspended
+    /// on. Both live here because the sheet is drawn by the composer's own view.
+    var rewindPreview: RewindPreview?
+    @ObservationIgnored var rewindAnswer: CheckedContinuation<RewindChoice, Never>?
+
+    /// The engine's own report of what it offers, taken off this channel's event stream: the
+    /// handshake's `commands`, and `system/init`'s `slash_commands` and `terminal_slash_commands`.
+    ///
+    /// They are held rather than folded into anything. Autocomplete and the terminal-only refusal
+    /// are `CommandRouter`'s answers over exactly these two values (X10), and a composer that
+    /// summarised them would be keeping a second opinion about what the engine offers.
+    var handshake: InitializeResponse?
+    var systemInit: SystemInitFields?
+
+    /// One per channel (spec §7.7). Every **complete** assistant text goes through it; a hit is
+    /// replaced and counted, a miss changes nothing. The matching is C4's and is not re-implemented.
+    @ObservationIgnored let interceptor: RefusalInterceptor
+
+    /// The replacement for each assistant message this channel's interceptor caught, keyed by the
+    /// frame's own uuid — an engine-assigned identifier and not a path, a title or a session (§11).
+    var interceptedReplacements: [String: String] = [:]
+
+    /// The most recent interception, shown above the field so afleet's own explanation is visible
+    /// whether or not a timeline row has asked for the replacement yet.
+    var lastInterception: Intercepted?
+
+    /// The channel's context, for the Browser route `StrategyUI.open(url:)` takes and, from Task 4,
+    /// the `!` escape's directory and environment. Set when the composer appears; nil for a channel
+    /// the panel host has never drawn, where there is no Browser tab to hand a URL to.
+    @ObservationIgnored var context: ChannelContext?
+
     /// Where Shift+Tab's cycle currently stands (`ComposerShortcuts`).
     ///
     /// A cursor, not a readback, and nothing displays it: §7.4 says a displayed setting comes from
     /// the engine, and Task 7's picker replaces this with the handshake's own `permissionMode`.
     var permissionMode: PermissionMode = .default
-
-    /// Cmd+Shift+Esc raised its confirm and the view is presenting it. `.stopEverything` is issued
-    /// only from the accepted arm, so nothing has reached the lifecycle while this is true.
-    var isConfirmingStopEverything = false
 
     /// True from the moment a send is accepted until its `perform` returns.
     ///
@@ -55,16 +92,21 @@ final class ComposerModel {
     @ObservationIgnored let lifecycle: any LifecycleAPI
     @ObservationIgnored private var events: Task<Void, Never>?
 
-    /// Where this channel's frames arrive. Task 1 subscribes and hands each one here; the ghost
-    /// text, the queue chip and the drift interception are what later tasks read out of it. Nothing
-    /// parses a frame yet, deliberately — a speculative decoder written before its consumer is a
-    /// second opinion about the stream that no test constrains.
+    /// Where this channel's frames arrive for anything outside the model — the queue chip and the
+    /// ghost text of later tasks. The model's own reading of the stream is `observe(_:)`, which the
+    /// loop calls after this hook.
     @ObservationIgnored var onEvent: (@MainActor (WireEvent) -> Void)?
 
-    init(key: ChannelKey, lifecycle: any LifecycleAPI, surface: ChannelSurfaceState) {
+    /// The line that raised `pendingConfirmation`, so an answered confirm clears the field it was
+    /// typed in and a cancelled one leaves the words where the user can see them.
+    @ObservationIgnored var confirmedLine: String?
+
+    init(key: ChannelKey, lifecycle: any LifecycleAPI, surface: ChannelSurfaceState,
+         diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics()) {
         self.key = key
         self.lifecycle = lifecycle
         self.surface = surface
+        self.interceptor = RefusalInterceptor(diagnostics: diagnostics)
     }
 
     // MARK: - Sending
@@ -79,13 +121,23 @@ final class ComposerModel {
     /// A `LifecycleError` is explained inline and **never retried**. The lifecycle refused for a
     /// reason it knows and this model does not; re-issuing would either duplicate the message or
     /// spin against a channel that is busy for as long as it is busy.
+    ///
+    /// A line beginning `/` is a command and goes to `route(_:on:)` instead (`CommandRouting`), which
+    /// answers with what afleet does about it. The composer decides nothing about the line itself.
     func send() async {
         guard !isSending else { return }
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let text = draft
         refusal = nil
+        openSurface = nil
         isSending = true
         defer { isSending = false }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") {
+            // Cleared only when the dispatch went through, on the same terms as a plain send: a
+            // refused command leaves the words where the user can fix them.
+            if await dispatch(routing: text), draft.hasPrefix(text) { draft = String(draft.dropFirst(text.count)) }
+            return
+        }
         do {
             _ = try await lifecycle.perform(.send(UserInput(text: text)), on: key)
             // Only the words that were sent. A keystroke that landed during the await is the user's
@@ -145,6 +197,7 @@ final class ComposerModel {
             for await event in stream {
                 if Task.isCancelled { return }
                 self.onEvent?(event)
+                await self.observe(event)
             }
         }
     }

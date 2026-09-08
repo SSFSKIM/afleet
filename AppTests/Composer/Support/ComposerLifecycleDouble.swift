@@ -82,6 +82,11 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// which is what an engine member with an empty success body sends (`rename_session`).
     private var sendAnswers: [String: Result<JSONValue, WireError>] = [:]
     private var routeOutcomes: [Routed] = []
+    /// What the engine reported about itself, as the real fleet's `route` sees it. Without these the
+    /// fallback below would route every line against the local table alone, and G1's terminal-only
+    /// arm could not fail on a composer that ignored `terminal_slash_commands`.
+    private var handshake: InitializeResponse?
+    private var systemInit: SystemInitFields?
     private var runOutcomes: [Result<StrategyOutcome, LifecycleError>] = []
     private var paneRequest: Result<PaneRequest, LifecycleError>?
     private var preconditionVerdict: SpawnPrecondition = .ready
@@ -102,6 +107,13 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func stageRun(_ outcome: Result<StrategyOutcome, LifecycleError>) { runOutcomes.append(outcome) }
     func stageSend(_ subtype: String, _ answer: Result<JSONValue, WireError>) { sendAnswers[subtype] = answer }
     func stagePane(_ outcome: Result<PaneRequest, LifecycleError>) { paneRequest = outcome }
+    /// The engine's own report, taken from the very events the composer is fed, so the double and the
+    /// model under test cannot be told two different stories. Both are `WireEvent`s because neither
+    /// `InitializeResponse`'s payload nor `SystemInitFields` can be constructed outside ClaudeWire.
+    func stageEngineReport(handshake: WireEvent?, systemInitFrom: WireEvent?) {
+        if case .handshakeCompleted(let shake, _)? = handshake { self.handshake = shake.initialize }
+        if case .frame(.system(.initialize(let fields)), _)? = systemInitFrom { self.systemInit = fields.fields }
+    }
     /// Every `perform` from here on records itself and then suspends, until `releasePerform()`.
     func holdPerform() { isPerformHeld = true }
     func releasePerform() {
@@ -177,7 +189,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         // makes G1's enumeration over `RouterTable.local` a test of the composer's dispatch rather
         // than of a table the test rewrote. A test that needs a specific `Routed` stages one.
         if !routeOutcomes.isEmpty { return routeOutcomes.removeFirst() }
-        return CommandRouter.route(text)
+        return CommandRouter.route(text, handshake: handshake, systemInit: systemInit)
     }
 
     @discardableResult

@@ -72,12 +72,18 @@ struct ComposerShortcutBar: View {
         // Task 8 gives all three a visible home in the header's menu and this bar keeps the keys.
         .frame(width: 0, height: 0)
         .opacity(0)
-        .confirmationDialog("Stop everything in this channel?",
-                            isPresented: $model.isConfirmingStopEverything) {
-            Button("Stop Everything", role: .destructive) { Task { await model.confirmStopEverything() } }
-            Button("Cancel", role: .cancel) { model.cancelStopEverything() }
+        // One dialog for all three confirmed actions (`ComposerConfirmation`), whether the chord or a
+        // routed row raised it: two dialogs would let one of them be answered while the other stayed
+        // up over the same channel.
+        .confirmationDialog(model.pendingConfirmation?.title ?? "",
+                            isPresented: Binding(get: { model.pendingConfirmation != nil },
+                                                 set: { if !$0 { model.cancelPending() } })) {
+            if let pending = model.pendingConfirmation {
+                Button(pending.confirmTitle, role: .destructive) { Task { await model.confirmPending() } }
+            }
+            Button("Cancel", role: .cancel) { model.cancelPending() }
         } message: {
-            Text("The running turn and every background task in this channel stop. Their shells close.")
+            Text(model.pendingConfirmation?.message ?? "")
         }
     }
 }
@@ -120,46 +126,10 @@ extension ComposerModel {
     }
 
     /// Cmd+Shift+Esc, first half: raise the confirm. Nothing reaches the lifecycle here.
-    func requestStopEverything() { isConfirmingStopEverything = true }
-
-    func cancelStopEverything() { isConfirmingStopEverything = false }
-
-    /// Cmd+Shift+Esc, second half. The only place `.stopEverything` is issued, and it is reachable
-    /// only from the accepted confirm: the action kills every background task's shell in the channel
-    /// (§7.4), which is not something a mistyped chord may do.
-    func confirmStopEverything() async {
-        isConfirmingStopEverything = false
-        do {
-            _ = try await lifecycle.perform(.stopEverything, on: key)
-        } catch let error as LifecycleError {
-            refusal = Self.explanation(of: error)
-        } catch {
-            refusal = "Stop everything did not run."
-        }
-    }
-
-    /// Routes one line and dispatches the case it came back as.
     ///
-    /// **Task 3 generalises this** into the dispatcher G1 enumerates over all seven `Routed` cases.
-    /// The two keys above need exactly one of them, and a speculative switch written before the gate
-    /// that constrains it would be a mapping nothing tests. Anything else coming back is reported
-    /// rather than guessed at.
-    @discardableResult
-    private func dispatch(routing line: String) async -> Bool {
-        let routed = await lifecycle.route(line, on: key)
-        guard case .controlRequest(let request) = routed else {
-            refusal = "afleet did not run that here; it is not a request this channel answers."
-            return false
-        }
-        do {
-            _ = try await lifecycle.send(request, on: key)
-            return true
-        } catch let error as LifecycleError {
-            refusal = Self.explanation(of: error)
-            return false
-        } catch {
-            refusal = "The channel did not answer."
-            return false
-        }
-    }
+    /// The chord goes through the same `pendingConfirmation` gate a routed `.lifecycle` action does
+    /// (`CommandRouting`), so *Stop everything* is one gate whether it was typed or pressed — and the
+    /// second half is `confirmPending()`, shared with it. Task 2's three stop-everything-specific
+    /// members are gone with the generalisation: two gates over one channel could be answered apart.
+    func requestStopEverything() { pendingConfirmation = .stopEverything }
 }

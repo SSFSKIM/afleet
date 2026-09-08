@@ -214,14 +214,14 @@ final class ComposerMountTests: XCTestCase {
 
         model.requestStopEverything()
 
-        XCTAssertTrue(model.isConfirmingStopEverything, "the chord raised no confirm")
+        XCTAssertEqual(model.pendingConfirmation, .stopEverything, "the chord raised no confirm")
         let before = await double.memberSequence
         XCTAssertEqual(before.count, 0,
                        "the unanswered confirm reached \(before.count) member(s): \(before.joined(separator: ", "))")
 
-        await model.confirmStopEverything()
+        await model.confirmPending()
 
-        XCTAssertFalse(model.isConfirmingStopEverything, "the accepted confirm stayed up")
+        XCTAssertNil(model.pendingConfirmation, "the accepted confirm stayed up")
         let actions = await double.actions
         XCTAssertEqual(actions.count, 1, "the accepted confirm performed \(actions.count) action(s)")
         guard case .stopEverything? = actions.first else {
@@ -236,9 +236,9 @@ final class ComposerMountTests: XCTestCase {
         let model = makeModel(double)
 
         model.requestStopEverything()
-        model.cancelStopEverything()
+        model.cancelPending()
 
-        XCTAssertFalse(model.isConfirmingStopEverything, "the cancelled confirm stayed up")
+        XCTAssertNil(model.pendingConfirmation, "the cancelled confirm stayed up")
         let members = await double.memberSequence
         XCTAssertEqual(members.count, 0, "a cancelled confirm reached \(members.count) member(s)")
     }

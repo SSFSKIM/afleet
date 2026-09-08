@@ -1,22 +1,26 @@
 import SwiftUI
 
 /// The composer, below the timeline in the channel column (spec §8.5). Thin over `ComposerModel`:
-/// it draws the inline refusal, the field, and the reason the field is closed, and it decides
-/// nothing.
+/// it draws the inline refusal, the completion list, `/rewind`'s confirmation, the field, and the
+/// reason the field is closed. It decides nothing, and it writes no user-visible sentence of its own.
 ///
 /// Mounted by `ChannelComposerMount`, below the channel's list.
 struct ComposerView: View {
 
     @Bindable var model: ComposerModel
 
+    /// The app, for the one thing the composer cannot resolve for itself: this channel's
+    /// `ChannelContext`, which carries the link-routing capability `StrategyUI.open(url:)` hands a
+    /// URL to. Read on appearance rather than in the body, and optional, so this view stays drawable
+    /// outside a rendered scene — the mount test walks this body by reflection, where no environment
+    /// has been installed.
+    @Environment(AppModel.self) private var app: AppModel?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let refusal = model.refusal {
-                Text(refusal)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
+            RefusalSurface(refusal: model.refusal, interception: model.lastInterception)
+            CommandCompletionView(model: model)
+            RewindConfirmationView(model: model)
             if model.surface.isDisabled, let reason = model.surface.disabledReason {
                 Label(reason, systemImage: "clock")
                     .font(.callout)
@@ -33,7 +37,13 @@ struct ComposerView: View {
             ComposerShortcutBar(model: model)
         }
         .padding(8)
-        .onAppear { model.start() }
+        .onAppear {
+            model.start()
+            // The host builds a context for a channel it has drawn; nil for one it has not, and then
+            // there is no Browser tab to route a URL to. Nothing is constructed here — the panel host
+            // owns the context and this reads the one it already has.
+            if model.context == nil { model.context = app?.panels.context(for: model.key) }
+        }
         .onDisappear { model.stop() }
     }
 }
