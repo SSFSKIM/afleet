@@ -162,24 +162,35 @@ by the skeleton below and by sequential merges.
 - `App/Agents/AgentNavigation.swift`: the app-level seam of contract Y4 with a no-op default,
   so C6.1's chip compiles before C6.4 exists.
 
+Amended 2026-09-09 at C6.3's merge (its D1/D1b, superseded in part by the one-fold ruling of
+2026-09-08): the skeleton's second landing (`9d6d320`) gave `TimelineRow` its `item: TimelineItem`
+with the builder arity unchanged, and the app's one wire subscription is C3's `StreamIngestion`
+fold (corrective `01eb7a7`), consumed by C6.1 — no leaf lands a reducer subscription of its own.
+
 ### Contract Y2 — one card component, two hosts
 
 **[binding — the parent's §7.6 says decisions are answered from the timeline and from
 Activity]** C6.3 owns `DecisionCardView` and its answer mapping (`§8.4` row → `InboundAnswer`
 → `LifecycleAction.answer`). The timeline (C6.1's row slot) and Activity (C5's
-`ActivityModel`, whose inline permission path predates this unit) both host that one view;
-at C6.3's merge Activity's inline card is replaced by the component and the answer path is
-one function. A card's *state* (pending, answered, cancelled by the binary, session ended,
+`ActivityModel`, whose inline permission path predates this unit) both host that one component
+and its mapping; at C6.3's merge Activity's inline card is replaced by the component and the
+answer path is one function. Activity renders it in the compact presentation for a plain
+permission ask and keeps C5's ruled behaviour for every other kind — a row and *Go to channel*
+(amended 2026-09-09 at C6.3's merge, its D4). A card's *state* (pending, answered, cancelled by the binary, session ended,
 answered elsewhere) is C3's `DecisionItem.state`; the view renders it and never keeps its own.
 Answers go through X5 and nothing else: a card never holds a `ClaudeWire` type.
 
 ### Contract Y3 — the tab handoff
 
 **[binding — X7's id set is closed]** C6.3 takes `.thread` by `unregister(.thread)` then
-`register(ThreadTab())`, in `App/Composition/AppModel.swift`, replacing C5's placeholder
-registration line; C6.4 registers `.agents`. C5's `PlaceholderTab` keeps serving the ids
-no child has taken. The two edits to `AppModel.swift` are one line each and merge in
-sequence; neither leaf touches the other's line.
+`register(ThreadTab(lifecycle:))`, and C6.4 takes `.agents` the same way. Corrected 2026-09-09
+from C6.3's `[parent-impact]`: the handover happens once a `Workspace` exists — in
+`performLaunch`, after `bindWorkspace` — not in `AppModel.init`, because `unregister` is `async`
+(X7 made it so to await the link-target withdrawal) and a tab that answers a card or runs a stop
+must be constructed with the lifecycle, which X7 keeps out of `ChannelContext` and which does not
+exist in `init`. C5's placeholder registration in `init` stays and serves the id until then, so
+the handover is real and `PlaceholderTab` stays live code. The two leaves still touch different
+statements in one file and merge in sequence; "one line each" is withdrawn.
 
 ### Contract Y4 — chip to run
 
@@ -218,6 +229,21 @@ passes the positive half alone — the composer owns the interception and the co
 substitution. C6.1 verifies all three through the composer model or C6.2's
 recording double, no engine, and its call removes the `edit(_:)` allowlist line from
 `check-app-wiring.py`.
+
+### Contract Y7 — the render context: links and the fold's signal reach a row
+
+**[binding]** Named 2026-09-09 at C6.3's merge, from its tracker 157: five mounts on the row side waited
+on one value nobody had landed. C6.1's `TimelineRenderContext` — the per-row capability environment
+value Y1's skeleton paragraph promised — carries the link capability (`ChannelContext.links`, so a
+card's paths render as links without a second registry) and the channel fold's `signal(_:)` (so an
+answering object constructed from a row raises `HostSignal.decisionAnswered` and a card leaves
+`pending` on screen). Consumers on the row side, C6.1's to mount: the decision row's actions
+(`DecisionAnswering` with `raise` assigned from the context and the app's one reservation set,
+`AppModel.decisions`, so no two surfaces answer one request), the sent-file row's *Open in Files*,
+`RetractionRegistry.retains(_:)` before drawing, and `TaskCardView` on the `taskRun` row. Activity
+and the Thread tab assign `raise` through the app-scoped `ChannelTimelineRegistry.model(for:)` and do
+not wait on the context (closed on C6.3's branch before merge). Owner: C6.1 (the value); C6.3 (the
+consumers' components). Binds both and C6.4 (node cards).
 
 ### Rendering (advisory, C6.1)
 
@@ -332,11 +358,18 @@ leaves in one target could settle them.
   C6.2's merge, contract Y6): an *Edit* row action on a past user message reaches
   `ComposerModel.edit(_:)`; a refused rewind's `editNote` renders beside that row; an assistant
   row whose uuid is in `interceptedReplacements` draws the replacement in place of the frame —
-  through the composer model or C6.2's recording double, no engine.
+  through the composer model or C6.2's recording double, no engine. G7 (required; added
+  2026-09-09 at C6.3's merge, contract Y7): `TimelineRenderContext` carries `links` and the fold's
+  `signal(_:)`; a decision card in the list leaves `pending` after an answer through a lifecycle
+  double; a path in a permission card emits a `WorkspaceLink` through `links`; `TaskCardView` is
+  mounted on `taskRun` and `RetractionRegistry.retains(_:)` is consulted before drawing, with the
+  two allowlist lines removed.
 - **Edges:** blocked-by: the Y1 skeleton on `main`; blocks: C6.3 (row slot), C6.4 (view
   reuse); conditional on nothing.
-- **Contracts:** Y1 (fills), Y4 (calls), Y6 (calls and renders; named 2026-09-08 at C6.2's
-  merge), X4, X7 (reads `ChannelContext`).
+- **Contracts:** Y1 (fills), Y2 (hosts the card in the `decision` slot and `TaskCardView` on
+  the `taskRun` row; consults `RetractionRegistry` — amended 2026-09-09 at C6.3's merge), Y4
+  (calls), Y6 (calls and renders; named 2026-09-08 at C6.2's merge), X4, X7 (reads
+  `ChannelContext`).
 - **Design inheritance:** §8.3 (advisory), §7.3 (binding as consumed), S7 (the spike is the
   leaf's), X4.
 - **Track hint:** controlled. Tracker entries **127–141**.
@@ -427,6 +460,22 @@ leaves in one target could settle them.
   requests `openInTerminal`; with no pane runner the host's refusal renders as a banner naming
   the terminal. G5 (required, live, at most six turns): items 4, 5, 6, 7 and 41 under the
   scratch home in an isolated channel, witness at zero unattributed changes.
+  **Outcome 2026-09-09:** G1–G4 met; G5's prompted half blocked by organisation policy with six turns unspent (manual witness), its zero-turn half live. Four `[parent-impact]`s: `HostSignal` unreachable
+  (resolved on `main` at `2e85ac0`/`01eb7a7`), the C7.6 conditional edge, §8.4's five corrections
+  and two facts, and Y3's handover point — all applied above and in the parent at this merge. Its
+  tracker 157 (five row-side mounts behind C6.1's render context) became contract Y7; Activity's
+  and the Thread tab's `raise` were closed on the branch before merge. Findings for the parent
+  filed by the leaf: 161 (two FleetTimeline flakes, C3), 162 (no new-channel path; a Settings
+  toggle with no consumer), 163 (`ScratchLiveGate` precondition, C5), 164 (`RowRegistry.shared`
+  traps on a second `AppModel` — Y1's skeleton, flagged to C6.1). Merge review: three panel rounds
+  (21, 16, 18 confirmed) and six waves — Activity cards keyed by request, Return owned only by an
+  active card, every `permission_suggestions` entry described before *Always allow* with its
+  directories named, consent evaluations fenced and the sheet bound to its request and to the
+  project the fleet evaluated, a no-write *Not now*, one app-scoped reservation set for every
+  answering object, thread content keyed by its subject, the reducer retaining an early
+  settlement, bounded previews and diffs, the elicitation and question forms' explicit emptiness,
+  null, exclusive *Other*, composition and numeric guards — closed under the hard stop with 306–319
+  filed.
 - **Edges:** blocked-by: the Y1 skeleton; C6.1's merge for the in-timeline row (the card
   builds and tests standalone before it); conditional-on C7.2 for Monaco diffs (attributed
   diff until then); item 47's terminal action conditional-on C7.4; blocks: C6.4 (node cards).
@@ -435,7 +484,8 @@ leaves in one target could settle them.
 - **Design inheritance:** §7.5, §7.6, §8.4, §6.12's consent flow (binding); card layout
   (advisory).
 - **Track hint:** controlled. Tracker entries **157–171**.
-- **Status:** not-dispatched, dispatchable on approval. Worktree `../afleet-c6/decisions`.
+- **Status:** **merged** 2026-09-09 at `0fe2797` from `child/c6-decisions` `79f4a9a`
+  (79 commits). Worktree `../afleet-c6/decisions` retired.
 
 ### C6.4: Agents panel — plan
 
@@ -468,13 +518,18 @@ leaves in one target could settle them.
   orchestrator's landing on `main` before dispatch. Owner: this document; C6.1 and C6.3 fill
   it. Binds all four leaves.
 - **Y2 One card component, two hosts.** Owner: C6.3. Binds C6.1 (row slot), C6.4 (node
-  cards), and C5's Activity (adoption at C6.3's merge).
+  cards), and C5's Activity (adoption at C6.3's merge). Amended 2026-09-09 at C6.3's merge:
+  C6.1's `taskRun` row hosts C6.3's `TaskCardView` on the `decision` slot's terms, and C6.1's
+  list consults C6.3's `RetractionRegistry` before drawing — §8.4's eviction of
+  `retractedMessageUuids` is a render-time filter, not a reducer (C6.3's D11, D15).
 - **Y3 Tab handoff.** Owner: this document (X7 rides it). Binds C6.3 (`.thread`) and C6.4
   (`.agents`).
 - **Y4 Chip-to-run navigation.** Owner: C6.4; C6.1 calls it. Binds both.
 - **Y5 Everything through X5.** Owner: this document (X5 and X9 ride it). Binds all four.
 - **Y6 Edit and the drift replacement across the row/composer seam.** Owner: C6.2 (the model
   side, landed); C6.1 calls and renders. Binds both. Named 2026-09-08 at C6.2's merge.
+- **Y7 The render context: links and the fold's signal reach a row.** Owner: C6.1 (the value),
+  C6.3 (the components). Binds both and C6.4. Named 2026-09-09 at C6.3's merge.
 
 ## Ordering & Dependency Map
 
@@ -486,12 +541,13 @@ main: Y1 skeleton ──► C6.1 TimelineRenderer (S7) ──┐
        lands when C6.1 is on main)                    C6.4 AgentsPanel ──► recomposition
 C7.2 (Monaco) ─ conditional ─► C6.3's diff rendering
 C7.4 (terminal panel) ─ conditional ─► item 47's terminal action
+C7.6 (Browser tab)    ─ conditional ─► item 62's billing route (added 2026-09-09; unrouted `.url` opens externally until the tab registers)
 ```
 
 Wave 1, on approval: C6.1, C6.2 and C6.3 in parallel; C6.3 merges after C6.1 so its row
 lands into the registry C6.1 filled. Wave 2: C6.4 when C6.1 and C6.3 are on `main`. Then
-recomposition. The critical path is C6.1 → C6.3 → C6.4. C7.2 and C7.4 are conditional edges
-with fallbacks, never blockers.
+recomposition. The critical path is C6.1 → C6.3 → C6.4. C7.2, C7.4 and C7.6 are conditional
+edges with fallbacks, never blockers.
 
 ## Risks & Mitigations
 
@@ -504,8 +560,9 @@ with fallbacks, never blockers.
 - **Four leaves in one target.** Y1's directories and the two one-line touch points in
   `AppModel.swift`; a leaf editing outside its directory is a review finding; merges are
   sequential and the floor runs at each.
-- **Monaco and the terminal runner are in flight (C7.2, C7.4).** Both are conditional edges
-  with stated fallbacks; a leaf never waits on them.
+- **Monaco, the terminal runner and the Browser tab are in flight (C7.2, C7.4, C7.6).** All
+  three are conditional edges with stated fallbacks; a leaf never waits on them (C7.6 added
+  2026-09-09 at C6.3's merge for item 62's billing route).
 - **The X5 queries C5 filed (tracker 74, 77).** C6.2's header actions want the owned-actions
   readback (74) and the Background list wants the roster signal (77); both are C4 correctives
   the orchestrator lands on `main` before or during wave 1 so no leaf reaches around X5.
@@ -529,7 +586,7 @@ recomposition, it is a corrective child of this composite).
 | Y1 skeleton | landed by the orchestrator on `main` at `5e24f1a` (row registry keyed by `TimelineCategory`, seven leaf directories, Y4's `AgentNavigating` seam) | landed 2026-09-08 |
 | C6.1 Timeline renderer | spec and plan `2026-09-08-c6.1-timeline-renderer.md` on `child/c6-timeline-renderer` (worktree `../afleet-c6/timeline-renderer`) | dispatched 2026-09-08 from `5e24f1a` |
 | C6.2 Composer and header | `2026-09-08-c6.2-composer.md`; Outcomes in the child spec | **merged** 2026-09-08 at `c2dae0f` from `child/c6-composer` `4902242` (72 commits); G1–G5, G7 met, G6 half live and half blocked by organisation policy (manual witness); floor 1336 at the tip; tracker 142–156 (146, 151 closed by `main` correctives; 153 named as Y6; 147, 156 open) and 196–231 from the five-round merge review (208 and 218 closed; 209, 210 and 226 are recomposition items for C3/C4; five panel rounds, twelve waves) |
-| C6.3 Decision cards and threads | spec and plan `2026-09-08-c6.3-decisions.md` on `child/c6-decisions` (worktree `../afleet-c6/decisions`) | dispatched 2026-09-08 from `5e24f1a`; in-timeline row after C6.1 |
+| C6.3 Decision cards and threads | `2026-09-08-c6.3-decisions.md`; Outcomes in the child spec | **merged** 2026-09-09 at `0fe2797` from `child/c6-decisions` `79f4a9a` (79 commits); G1–G4 met; G5's prompted half blocked by organisation policy with six turns unspent (manual witness), its zero-turn half live; floor 1463 at the tip; tracker 157–171; the in-timeline row lands when C6.1 merges (Y1's registry) |
 | C6.4 Agents panel | spec and plan `…-c6.4-agents.md` on `child/c6-agents` | blocked-by C6.1, C6.3 |
 
 ## Decision Log
@@ -595,3 +652,9 @@ Parent-Level Acceptance as written, then the retrospective.
   `quit`). Two advisory overturns applied to the parent: §8.5's Enter and §8.7's Cmd+Enter both
   send; §8.3's header list is split as this cut split it. §8.6 corrected: the engine compares
   `disableBypassPermissionsMode` to the string `"disable"`. 
+- 2026-09-09 reconciliation of C6.3 (merge `0fe2797` from `child/c6-decisions` `79f4a9a`,
+  79 commits). Y2 re-worded (one component and its mapping; Activity's compact
+  presentation); Y2 gains the `taskRun` row and the retraction filter (C6.1 flagged); Y3 corrected
+  to the `performLaunch` handover (binds C6.4 identically); the C7.6 conditional edge added; the
+  Y1 paragraph records skeleton 2 and the fold. Parent §8.4 corrected in five places with two facts
+  added, as C6.3's `[parent-impact]` states them. 

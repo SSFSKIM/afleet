@@ -1884,7 +1884,9 @@ C6.1's and C6.2's reservations and is expected.
      Closer: drop the binding to a plain `guard ingestion != nil` or use it. Owner: whoever owns
      `App/Timeline/` — C6.1.
 
-161. **Two load-dependent flakes in `FleetTimelineTests` redden the shared floor.**
+161. **Two load-dependent flakes in `FleetTimelineTests` redden the shared floor.** **Closed 2026-09-09
+     by the `main` corrective `1402cd4`** (both waits delivery-fulfilled with a 120 s hang guard; the
+     tailer test's own pre-write race fixed with it; 0 of 10 → 10 of 10 under a load average near 150).
      `IngestionTests.testTheWholeWireStreamThroughTheTapYieldsMirrorEffectsAndTheLiveHalf` failed
      once in a full-suite run (7 effects against 15, 30 entries against 53) and passes in
      isolation — 27 executed / 0 failures on a focused re-run. `TaskOutputTailerTests
@@ -2439,3 +2441,10 @@ C6.1's and C6.2's reservations and is expected.
      hunks — runs of change with a few lines of context and an elision between them — which also
      improves every long `Write`. Owner: whoever replaces the drawing, C7.2's Monaco conformer being
      the likely one. Filed 2026-09-09 at C6.3's second review round.
+
+320. **`LateMountMetadataTests.testALateComposerSeedsTheReportsTheStreamWillNotRepeat` fails under a
+     full floor and passes alone.** Seen once at C6.3's final stitch floor ("the composer read back no
+     system/init", 0.136 s) and 3 of 3 green alone at 5/5 each; the suite's files were untouched by the
+     branch. Same class as 131/146/151/194: a seeding path whose order a busy host can change. Closer:
+     the seeding test waits for delivery of the retained report rather than reading once. Owner: C6.2.
+     Filed 2026-09-09 at C6.3's merge.
