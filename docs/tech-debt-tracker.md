@@ -737,6 +737,24 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     `Fleet.shutdown()`, then exits. Foreign and background-job channels are never touched.
     Closer: implement that clause. Owner: C6, which owns the surface where a running conversation
     is visible when the user quits.
+    **DONE at C6.2 Task 9**: `App/Header/QuitGuard.swift` and one `applicationShouldTerminate` hook
+    in `App/AfleetApp.swift`, asserted in `AppTests/Header/QuitGuardTests.swift`. `AppFleet.shutdown()`
+    now has a production caller. Two things the implementation found, both for the architect rather
+    than for a later worker to rediscover. **First, §7.4 asks for a capability X5 does not publish.**
+    `terminate()` on a channel is `perform(.reap)`, and `Fleet` gates that reap on dormant
+    eligibility — deliberately, because the reap the *user* asks for must not end a channel with a
+    turn in flight — so the channels the quit dialog just asked about are exactly the ones the reap
+    refuses. `ChannelSupervisor.reap()` is the unconditional terminate and is not reachable through
+    the facade. The clause is implemented by escalating a refused reap through `.stopEverything` and
+    reaping again, which ends what the user was told quitting ends, using only X5 verbs; the clean
+    fix is an unconditional terminate on `LifecycleAPI` for this one caller, which is C4's to add.
+    **Second, "a turn running or running local shells" is read from two places**, because no single
+    published value carries both: `ChannelState.presence == .busy` is the turn (the sidebar's and the
+    composer's own notion), and the running background tasks come from
+    `ChannelHeaderActionsModel.liveTaskIDs`, over the timeline the *Send to background* confirm
+    already reads. A channel the user never opened has no timeline, so at quit it is judged by its
+    presence alone — the guard constructs no composer and no ingestion at the moment the app is being
+    asked to stop. `ChannelState` carrying a live-task count would close that gap and is C4's too.
 72. **A member declared in `App/` whose only callers are in `AppTests/` is not detectable by any
     check this repo runs.** Two real defects in one review cycle had that exact shape:
     `PanelHost.selectIndex(_:in:)`, correct and tested with no production caller while the menu
