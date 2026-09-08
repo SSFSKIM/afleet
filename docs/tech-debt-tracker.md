@@ -871,3 +871,23 @@ symlink-containment debt in entry 78 is unchanged.
     the missing-control and press assertions fail closed if the framework shape changes.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
+
+## From C7.1 (Terminal core), in progress
+
+82. **`openpty(3)` sets `FD_CLOEXEC` on the master one call too late.** `Darwin+PTY.swift`
+    opens the pty and then sets the flag, so a concurrent spawner elsewhere in the process
+    that does not use `POSIX_SPAWN_CLOEXEC_DEFAULT` can inherit the master in that window.
+    The window is small and nothing in afleet spawns that way today. Closer:
+    `posix_openpt(O_RDWR | O_CLOEXEC)` with `grantpt`/`unlockpt`/`ptsname` instead of
+    `openpty`, which never has the flag off. Found by the Task 2 independent review.
+    Owner: C7.1 if a second spawner appears, else whichever child adds one.
+83. **The child descriptor surveys scan fds 3 through 20 only.** The two isolation tests in
+    `PTYSpawnTests.swift` enumerate a fixed range rather than the child's whole `/dev/fd`.
+    A leak above 20 would pass. Closer: enumerate the directory and subtract the three
+    standard descriptors. Found by the Task 2 independent review.
+84. **`PTYTestChild.output(from:until:)` carries one fixed three-second marker deadline.**
+    The four spawn tests sit on it while the two write tests raise their own to twenty.
+    On a loaded machine the three-second cases are the first to flake, and the failure reads
+    as a product defect rather than a starved test — the same shape as tracker entry 2.
+    Closer: make the deadline a parameter with a generous default. Found by the Task 2
+    independent review.
