@@ -1882,7 +1882,25 @@ numbered from 321. Nothing above is renumbered.
      exact, which is the same corrective tracker 127 asks for and could land with it. Owner: C3 for
      the field, C6.1 for reading it.
 
-139. **The header's permission-mode readback is the launch handshake's, so a mode changed inside a
+139. **Closed 2026-09-09 by C6.1 Task 8, and the premise below was wrong.** A mid-session mode change
+     is *not* invisible until a restart: `system/status` carries `permissionMode`, `StatusFields`
+     already modelled it, and the engine populates it — across the corpus's 40 status frames exactly
+     one carries a value, `acceptEdits`, in `exit-plan-mode`, the recording where a mode actually
+     changes. So the header now follows status frames as the live readback and falls back to the
+     handshake only for the value it opens with (`ReadbackPoller.liveMode(_:)`,
+     `ChannelHeaderReadout.apply(liveMode:)`, and the precedence flag that stops the retained
+     handshake folding the launch mode back over a live one on the next turn end). Asserted by
+     `HeaderReadoutTests.testTheModeFollowsAStatusFrameAndNotTheRetainedHandshake`, which replays
+     that recorded frame and was shown failing against the handshake-only readback first. What the
+     entry got right, and what still holds, is everything it says about `get_settings`: the mode is
+     not in that answer, and `effective` is the settings files rather than the process. The rest —
+     the closer, the two owners, the note about the spec — is superseded; the spec's §10 was
+     corrected on the same day. **What this entry does not close** is C6.2's *picker*, which reads
+     the handshake through `Readback.verify` and covers the same limit with a disagreement note; the
+     picker is that leaf's and is untouched here.
+     The refuted text follows.
+
+     **The header's permission-mode readback is the launch handshake's, so a mode changed inside a
      process is invisible until that process is replaced.** The child spec's §10 names `get_settings`
      as the source of model, mode and effort. The engine reports two of the three there: its answer
      is `{applied: {model, effort, advisor, ultracode}, effective, sources}` (2.1.257
@@ -1921,6 +1939,48 @@ numbered from 321. Nothing above is renumbered.
      Found at C6.1 Task 7. Closer: the composer records the target it was given — one stored
      `promptUUID` beside `editNote` — and the row reads it instead of remembering, which also makes
      the placement survive a re-mount. Owner: C6.2, whose file the target would live in.
+
+321. **The task card mounted on the `taskRun` row has no registry mirror, so it never offers *Move
+     to background*.** §8.4 offers that action only for a running task C3's `RegistryMirror` knows,
+     with a `tool_use_id` to name in the `background_tasks` request — and no mirror is reachable from
+     the timeline's read model. `ChannelTimeline` carries the durable half, the overlay, the preview
+     and the agent tree; the fold's mirror lives inside `StreamIngestion` and is not published, and
+     the one mirror the app does hold is `ChannelEventPump.mirror`, which is Activity's and reaching
+     it from a row would be the second capability path the C6 cut exists to prevent. So
+     `TimelineRenderContext.makeTaskCard(_:)` builds the model over an empty `RegistryMirror()`: the
+     card offers *Stop*, which reads the item's own status, and the backgrounding action is absent
+     rather than wrong. The Thread tab's task card is unaffected — its host builds the model with the
+     pump's mirror. Found at C6.1 Task 8, mounting contract Y2's second host. Closer: `ChannelTimeline`
+     carries the mirror the fold already holds, and the context reads it where it reads the overlay.
+     Owner: C3 for the field, C6.1 for the read.
+
+322. **The timeline's task card takes its item by value and is rebuilt only when the task's status
+     changes, so a card's text lags its `task_progress`.** `TaskCardModel` stores the `TaskRunItem`
+     it was built with and replaces it only through `refresh`, which the card calls when the engine
+     contradicts it. The row therefore keys the model by `taskID` and `status`
+     (`TaskCardSeam.identity(of:)`): keying by the whole item would rebuild on every progress frame
+     and drop a refusal banner and an in-flight request the reader is watching, and keying by the
+     task alone would leave a finished run reading *Running* and offering *Stop*. What is lost in
+     between is a description or summary that changes without the status changing. Found at C6.1
+     Task 8. Closer: the card model takes the item as an observed input rather than a snapshot, so
+     the host replaces the value and not the object. Owner: C6.3, whose model it is.
+
+323. **Two Workbench suites carry run-to-run state and fail after a crashed test host, and one of
+     them says why in its own arithmetic.** Both reddened once at C6.1 Task 8, in the run
+     immediately after three test-host crashes, and both passed on the next clean run; neither is
+     reachable from that task's diff, which touches no file under `Workbench/`.
+     `SourceControlCoreTests.ToolRunnerTests.testAChildThatBlocksIsTimedOutAndKilled` proves the
+     child was killed with `pgrep -f "sleep 31.415926"` over a **fixed** marker, so any `sleep` with
+     that argument left behind by an earlier aborted run — which a crashed host leaves — matches and
+     fails the assertion; the marker wants to be unique per run.
+     `TerminalCoreTests.FloodTests.testMainActorStallDoesNotDuplicateOutstandingDelivery` counted
+     2,097,156 bytes against 2,097,152 expected: exactly 4 more, which is `go\r\n` echoed by the
+     PTY, so what it caught was terminal echo racing the child's read and not a duplicated delivery
+     — and the message it prints ("one in-flight output delivery was submitted more than once")
+     names a cause that was not the cause, which is the part worth fixing whatever else changes.
+     Found at C6.1 Task 8. Closer: a per-run marker in the first, and `ECHO` disabled — or the echo
+     accounted for — in the second. Owner: C7.3 for the runner, C7.1 for the PTY test.
+
 ## From C6.3 (`child/c6-decisions`)
 
 Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–168 are
