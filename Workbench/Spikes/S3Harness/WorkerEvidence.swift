@@ -24,6 +24,23 @@ enum WorkerEvidence {
         return bucket["received"] as? Int ?? 0
     }
 
+    /// The `error` events the instrumentation recorded on Monaco's own workers for `service`.
+    ///
+    /// Traffic and health are different findings. A worker can exchange messages and then fail —
+    /// the instrumentation records both, and a verdict that read only the counts would call such
+    /// a route carried. Every service the report carries a bucket for is read, not only the five
+    /// this file names, so an error filed under a label nobody anticipated is still a failure.
+    private static func errorsByService(_ instrumented: [String: Any]) -> [String: [String]] {
+        let byService = instrumented["byService"] as? [String: Any] ?? [:]
+        var errors: [String: [String]] = [:]
+        for (service, bucket) in byService {
+            let recorded = (bucket as? [String: Any])?["errors"] as? [Any] ?? []
+            guard !recorded.isEmpty else { continue }
+            errors[service] = recorded.map { String(describing: $0) }
+        }
+        return errors
+    }
+
     /// `direct` is the instantiation probe's own worker population; `instrumented` is the count
     /// of messages exchanged on the workers **Monaco itself created**, which is the only
     /// population the functional answers can be attributed to.
@@ -63,8 +80,11 @@ enum WorkerEvidence {
         let mainThreadFallback = !fallbackWarnings.isEmpty
             || languageServices.contains { (answered[$0] ?? false) && (messages[$0] ?? 0) == 0 }
 
+        let recordedErrors = errorsByService(instrumented)
+
         let proven = allFive && allAnswered && diffComputed
             && provenByService.values.allSatisfy { $0 } && editorWorkerExchanged
+            && recordedErrors.isEmpty
 
         var unprovenBecause: String?
         if !proven {
@@ -73,6 +93,13 @@ enum WorkerEvidence {
                 // about the workers, and reading its silence as "they ran on the main thread"
                 // would be the same mistake one layer along.
                 unprovenBecause = "the worker instrumentation did not report: \(failure)"
+            } else if let service = recordedErrors.keys.sorted().first {
+                // Named ahead of the derived symptoms below: a worker that died also fails the
+                // message counts, and "the service ran on the main thread" would then be the
+                // wrong story about a worker that ran and broke.
+                let recorded = recordedErrors[service] ?? []
+                unprovenBecause = "Monaco's own \(service) worker recorded \(recorded.count) error(s)"
+                    + " during the run: \(recorded.prefix(2).joined(separator: "; "))"
             } else if !allFive {
                 unprovenBecause = "a worker entry did not instantiate"
             } else if let silent = languageServices.sorted().first(where: { !(answered[$0] ?? false) }) {
@@ -100,6 +127,7 @@ enum WorkerEvidence {
             "provenByService": provenByService,
             "editorWorkerComputedDiff": diffComputed,
             "editorWorkerExchangedMessages": editorWorkerExchanged,
+            "errorsByMonacoWorker": recordedErrors,
             "mainThreadFallback": mainThreadFallback,
             "proven": proven,
             // Named so the report never reads as if silence proved life, and never as if an
@@ -108,7 +136,9 @@ enum WorkerEvidence {
                 + " module worker's `error` event. The functional block is the positive claim,"
                 + " and it is attributed: `proven` requires, per service, that the answer arrived"
                 + " AND that Monaco's own worker for that service exchanged messages — and for"
-                + " the diff, the change list AND traffic on Monaco's editor worker. Without the"
+                + " the diff, the change list AND traffic on Monaco's editor worker — and that no"
+                + " worker recorded an error, because traffic and health are not the same"
+                + " finding. Without the"
                 + " second half an answer from Monaco's silent main-thread fallback is"
                 + " indistinguishable from a working worker.",
         ]

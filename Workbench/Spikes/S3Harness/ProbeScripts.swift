@@ -132,17 +132,27 @@ enum ProbeScripts {
     /// new viewport every frame, so tokenisation, decoration and DOM recycling all run. The
     /// deltas between successive callbacks are the frame times; the histogram is what "no
     /// visible jank" gets replaced by, because a human's word cannot be a gate.
+    ///
+    /// The probe reports the frames it was asked for beside the frames it recorded, because the
+    /// timeout below can return at any point: percentiles over a truncated sample describe a
+    /// scroll that was never finished, and only the two counts together say which happened. On
+    /// that timeout the frame chain is cancelled — a chain left scheduled keeps scrolling the
+    /// editor underneath every probe that runs after this one.
     static let scrollHistogram = """
     var editor = monaco.editor.getEditors()[0];
     if (!editor) { return { error: "no editor" }; }
     editor.focus();
     var height = editor.getScrollHeight();
     var deltas = [];
+    var timedOut = false;
     await new Promise(function (resolve) {
       var frame = 0;
       var last = performance.now();
       var top = 0;
+      var pending = 0;
+      var timer = 0;
       function step() {
+        pending = 0;
         var now = performance.now();
         if (frame > 0) { deltas.push(now - last); }
         last = now;
@@ -150,20 +160,27 @@ enum ProbeScripts {
         if (top > height - 400) { top = 0; }
         editor.setScrollTop(top);
         frame += 1;
-        if (frame > frameCount) { resolve(); } else { requestAnimationFrame(step); }
+        if (frame > frameCount) { clearTimeout(timer); resolve(); }
+        else { pending = requestAnimationFrame(step); }
       }
-      requestAnimationFrame(step);
+      pending = requestAnimationFrame(step);
       // The escape hatch for a window that is getting no frames: without it this probe never
       // resolves, and a spike whose report never prints is worth less than a spike that prints
       // "no frames were available".
-      setTimeout(resolve, budgetMs);
+      timer = setTimeout(function () {
+        timedOut = true;
+        if (pending) { cancelAnimationFrame(pending); pending = 0; }
+        resolve();
+      }, budgetMs);
     });
     editor.setScrollTop(0);
     var sorted = deltas.slice().sort(function (a, b) { return a - b; });
     function at(q) { return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] : 0; }
     var sum = sorted.reduce(function (a, b) { return a + b; }, 0);
     return {
+      requestedFrames: frameCount,
       frames: sorted.length,
+      timedOut: timedOut,
       p50Ms: at(0.5),
       p95Ms: at(0.95),
       worstMs: sorted.length ? sorted[sorted.length - 1] : 0,

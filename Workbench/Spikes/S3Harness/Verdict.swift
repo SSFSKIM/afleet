@@ -24,8 +24,16 @@ enum Verdict {
             return "the 5 MB file's render recorder never completed"
         }
         let scroll = report["scroll"] as? [String: Any] ?? [:]
-        if (scroll["frames"] as? Int ?? 0) <= 0 {
+        let recordedFrames = scroll["frames"] as? Int ?? 0
+        let requestedFrames = scroll["requestedFrames"] as? Int ?? 0
+        if recordedFrames <= 0 {
             return "the scroll histogram recorded no frames"
+        }
+        // A positive count is not the workload. The probe's timeout returns whatever it has by
+        // then, and percentiles over a truncated sample describe a scroll that never finished.
+        if requestedFrames <= 0 || recordedFrames != requestedFrames {
+            return "the scroll histogram recorded \(recordedFrames) of \(requestedFrames)"
+                + " requested frames"
         }
         let diff = report["diff"] as? [String: Any] ?? [:]
         if diff["diffPaneDisplayed"] as? Bool != true {
@@ -49,7 +57,7 @@ enum Verdict {
     /// never a pass.**
     ///
     ///   0  every load path, every workload, cold load within budget
-    ///   2  a load path is missing — advance to the next route
+    ///   2  a load path is missing, or a worker answered and then errored — advance a route
     ///   4  the window was given no animation frames; the render numbers are missing
     ///   5  every load path and workload; the cold load is over budget
     ///   6  a render workload did not complete — the reason names which
