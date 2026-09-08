@@ -404,10 +404,21 @@ public final class FilesPanelSession: PanelTabSession {
 
     /// Write a sibling temporary, then `rename`. What keeps the file whole if the app dies
     /// mid-write, and what makes the watcher's re-arm the ordinary path rather than a special one.
+    ///
+    /// **The destination's mode is carried onto the temporary before the rename**, because a
+    /// rename replaces the inode: without it every save re-modes the file to whatever the process
+    /// umask gives a fresh file, which silently disarms an executable script and re-opens a file
+    /// the user had restricted. A destination that is not there yet has no mode to carry, and the
+    /// file that replaces it takes the umask's — which is what creating a file means.
     private static func atomicallyWrite(_ data: Data, to url: URL) throws {
         let temporary = url.deletingLastPathComponent()
             .appending(path: ".afleet-save-\(UUID().uuidString)")
         try data.write(to: temporary)
+        if let mode = permissions(of: url) {
+            // A mode that cannot be carried is not a reason to lose the write: the bytes are what
+            // the user asked for, and the next save that can carry it restores it.
+            _ = chmod(temporary.path(percentEncoded: false), mode)
+        }
         let moved = url.withUnsafeFileSystemRepresentation { destination in
             temporary.withUnsafeFileSystemRepresentation { source in
                 guard let source, let destination else { return false }
@@ -418,6 +429,15 @@ public final class FilesPanelSession: PanelTabSession {
             try? FileManager.default.removeItem(at: temporary)
             throw CocoaError(.fileWriteUnknown)
         }
+    }
+
+    /// The permission bits of a path that exists, and nothing else about it. It follows a symlink
+    /// for the same reason the write does: the panel saves the file the user opened, which is the
+    /// link's target.
+    private static func permissions(of url: URL) -> mode_t? {
+        var status = stat()
+        guard stat(url.path(percentEncoded: false), &status) == 0 else { return nil }
+        return status.st_mode & 0o7777
     }
 
     // MARK: - The watcher and the conflict (Design §8)

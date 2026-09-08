@@ -419,6 +419,49 @@ final class FilesPanelSessionTests: XCTestCase {
         XCTAssertNil(harness.session.selectedPath)
     }
 
+    // MARK: - 11a. a save preserves the file's mode
+
+    /// The write is a sibling temporary and a `rename`, and a rename replaces the inode: without
+    /// carrying the destination's mode onto the temporary first, every save re-modes the file to
+    /// whatever the process umask gives a fresh file. An executable script saved from the panel
+    /// would stop being executable, and a file the user restricted would be opened up again.
+    /// Only the mode is asserted — never the path (§6.3, §11).
+
+    func testASaveOverAnExecutableFileLeavesItExecutable() async throws {
+        try await assertASavePreservesTheMode(0o755)
+    }
+
+    func testASaveOverAFileTheUserRestrictedLeavesItRestricted() async throws {
+        try await assertASavePreservesTheMode(0o600)
+    }
+
+    private func assertASavePreservesTheMode(_ mode: mode_t,
+                                             file: StaticString = #filePath,
+                                             line: UInt = #line) async throws {
+        let target = try tree.file("moded.swift", "original\n")
+        let path = target.path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: mode)],
+                                              ofItemAtPath: path)
+        let harness = try makeHarness()
+        await harness.session.openFile(at: target, line: nil)
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: path, text: "edited\n"))
+
+        XCTAssertNil(harness.session.issue, "the save did not land", file: file, line: line)
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "edited\n",
+                       "the bytes did not land", file: file, line: line)
+        XCTAssertEqual(Self.permissions(of: target), mode,
+                       "the save replaced the file's mode", file: file, line: line)
+    }
+
+    /// The file's permission bits, which is the whole of what these two cases assert.
+    private static func permissions(of url: URL) -> mode_t? {
+        var status = stat()
+        guard stat(url.path(percentEncoded: false), &status) == 0 else { return nil }
+        return status.st_mode & 0o7777
+    }
+
     // MARK: - 11. the theme
 
     func testTheSessionSendsNoThemeOfItsOwnAndTheToggleSendsExactlyOne() async throws {
