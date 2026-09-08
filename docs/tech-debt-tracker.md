@@ -1709,6 +1709,11 @@ leaf's reservation; 125 onward are unused.
 Entries **127 through 141** are C6.1's, as the C6 composite's leaf table allots them. Nothing above
 is renumbered.
 
+**Extended 2026-09-09: entries 321 through 335 are also C6.1's.** The composite's leaf table allotted
+127–141 and this leaf spent all fifteen by Task 7; 142–320 are other blocks' reservations
+(292–319 C6.3's review, 298–299 C7.1's, 300–305 C6.3's). Everything C6.1 files from Task 8 onward is
+numbered from 321. Nothing above is renumbered.
+
 127. **The live thinking-token estimate has no home in C3's model.** `system/thinking_tokens`
      carries `estimated_tokens`, `estimated_tokens_delta` and a `uuid` naming the *user* message the
      turn answers (2.1.263 `cli.pretty.js:811445`; emitted at `:523066` and `:289222`). ClaudeWire
