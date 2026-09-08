@@ -967,3 +967,17 @@ leaf's reservation; 122 onward are unused.
      `GraphRow.Edge` and pinned by a connectivity assertion over every lane fixture; what would
      close it is a rendering contract the panel and this type share. Owner: C7.7, the first
      consumer.
+
+122. **`log.excludeDecoration` silently removes decorations from `%D` and no command-line option
+     overrides it.** Measured on `git` 2.55.0: a user who sets `log.excludeDecoration=refs/tags/*`
+     — a reasonable thing to hold for one's own `git log` — gets a commit graph with no tags on it,
+     and the same for any pattern they chose. Every other configuration this module is sensitive to
+     is pinned on the command line (D45); this one is not pinnable. `--decorate-refs=<pattern>`
+     does override the setting but replaces the whole decoration set, and was measured to drop
+     `HEAD` while restoring tags, which is a worse answer than the one it fixes; `-c
+     log.excludeDecoration=` adds an empty pattern that matches everything and removes all
+     decorations. The blast radius is bounded — decorations missing from the graph, never a wrong
+     edge or a wrong commit — and `AdverseConfigurationTests` documents it as unpinned rather than
+     ruled out. What would close it: read decorations from `git for-each-ref` and join them to the
+     window by object name, instead of from `%D`. Owner: whoever next revises `GitLog`, and a
+     natural companion to the `--decorate=full` swap the ledger's Parent-revisions item 3 proposes.
