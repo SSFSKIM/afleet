@@ -112,6 +112,17 @@ public final class BrowserModel {
     /// The one restoration, shared by every caller. See `restore`.
     private var restoreTask: Task<Void, Never>?
 
+    /// Set once the persisted set has been installed. What `restoreTask` alone cannot say is
+    /// whether the read has *landed*, which is the difference between a mutation that may run now
+    /// and one that has to wait (D57).
+    private var isRestored = false
+
+    /// Mutations deferred behind the restoration, in the order they were made. A chain and not a
+    /// task apiece: two controls used in the same breath must reach the set in the order the user
+    /// used them, and joining the same task twice promises nothing about which continuation runs
+    /// first.
+    private var gateChain: Task<Void, Never>?
+
     /// Persistence runs in order behind this chain. The store is an actor and each commit is a hop,
     /// so two commits spawned independently could reach it in either order — and the one that lost
     /// would be the panel's truth.
@@ -151,23 +162,37 @@ public final class BrowserModel {
         attachedTo = surface
     }
 
+    /// Every surface drawing this panel right now, oldest first. It is what makes "a surface that
+    /// is actually on screen" answerable at all: the pages have to go somewhere when the one
+    /// holding them goes away, and `.panel` is a guess rather than an answer (D58).
+    private var liveSurfaces: [PanelSurface] = []
+
     /// A surface began drawing this panel.
     ///
     /// **A pop-out claims the web views; the main panel does not.** The panel is on screen for as
     /// long as the window is, so a panel that claimed on appearance would take the views back from
     /// a pop-out window the moment anything re-rendered the column — which is the whole of what a
-    /// pop-out is for. The pop-out is the deliberate act, so it is the one that moves them.
+    /// pop-out is for. The pop-out is the deliberate act, so it is the one that moves them. Two
+    /// pop-outs are two windows and two claimants, and the newest one is the one the user just
+    /// asked for.
     public func surfaceAppeared(_ surface: PanelSurface) {
+        liveSurfaces.removeAll { $0 == surface }
+        liveSurfaces.append(surface)
         guard surface != .panel else { return }
         attachedTo = surface
     }
 
-    /// A surface stopped drawing this panel. If it was holding the web views they come home, which
-    /// is the hand-back half of closing a popped-out window: without it the tabs would still be
-    /// attached to a window that is gone, and every surface would draw the placeholder.
+    /// A surface stopped drawing this panel — a window closed, or the panel column switched to
+    /// another tab. If it was holding the web views they move to a surface that is still drawing,
+    /// newest first, and to the main panel when none is (D58).
+    ///
+    /// Handing them unconditionally back to `.panel` is what stranded them: the panel is one of the
+    /// surfaces that can go away, and a window plainly on screen was left drawing the "elsewhere"
+    /// state with no way back but the user's own hand.
     public func surfaceDisappeared(_ surface: PanelSurface) {
+        liveSurfaces.removeAll { $0 == surface }
         guard attachedTo == surface else { return }
-        attachedTo = .panel
+        attachedTo = liveSurfaces.last ?? .panel
     }
 
     // MARK: Restore (Q7)
@@ -203,12 +228,47 @@ public final class BrowserModel {
         // dispatched: `activate` navigates with the URL bar's authority, and a restore must not
         // mint the strongest authority in this design (D48). The tab stays, so the set the user
         // left behind is still the set that comes back.
-        tabs = set.tabs.map {
+        let restored = set.tabs.map {
             BrowserLiveTab(id: $0.id, url: Self.destinationForPanel($0.url), title: $0.title)
         }
-        guard let index = set.selection, tabs.indices.contains(index) else { return }
-        selectedID = tabs[index].id
-        activate(tabs[index])
+        // Nothing has touched this set: every mutation the panel can make waits for this method
+        // (see `gated`), which is what lets it replace `tabs` whole (D49, D57).
+        tabs = restored
+        isRestored = true
+        guard let index = set.selection, restored.indices.contains(index) else { return }
+        selectedID = restored[index].id
+        activate(restored[index])
+    }
+
+    /// Runs `operation` once the restoration has landed, or now if there is nothing to wait for.
+    ///
+    /// **Every mutation that can enqueue persistence goes through here, not only the routed one.**
+    /// `performRestore` replaces the tab set whole, so a mutation made in front of the read it is
+    /// waiting on is a mutation the read throws away — in memory and, through the structural write
+    /// it enqueued, on disk as well. The user's `+` is as fast as a link (D57).
+    ///
+    /// *The controls are not disabled instead.* A disabled tab strip would flicker for the length
+    /// of one store read on every channel switch, and it would drop a keystroke rather than delay
+    /// it: deferring keeps the user's action, which is the honest half of the two.
+    private func gated(_ operation: @escaping @MainActor () -> Void) {
+        guard !isRestored else { return operation() }
+        // **A mutation nobody has restored for starts the restoration.** Joining one that has
+        // already been asked for is not enough: the first thing a mutation does is enqueue a
+        // structural write, so a set mutated in front of the read has already replaced the
+        // document the read was about to return — the saved tabs are gone from disk before
+        // anything in memory could put them back (measured; wave A found the same shape on the
+        // routed path). Restoration is therefore the first thing that happens to this set, from
+        // whichever door the mutation came through.
+        let restoration = restoring()
+        let previous = gateChain
+        gateChain = Task { @MainActor in
+            if let previous {
+                await previous.value
+            } else {
+                await restoration.value
+            }
+            operation()
+        }
     }
 
     /// Opens `url` on behalf of a `LinkTarget`, behind the restoration.
@@ -224,8 +284,14 @@ public final class BrowserModel {
     // MARK: The operations
 
     /// Opens a tab, selects it, and loads `url` if there is one. `nil` is the `+` control and Cmd-T.
+    public func openNewTab(url: URL?) {
+        gated { self.insertNewTab(url: url) }
+    }
+
+    /// `openNewTab` once the restoration has landed. It answers the tab it made, which the gated
+    /// entry point cannot: a deferred call has no tab to hand back yet.
     @discardableResult
-    public func openNewTab(url: URL?) -> BrowserLiveTab {
+    func insertNewTab(url: URL?) -> BrowserLiveTab {
         // The tab remembers only a destination the policy loads here (D48). `activate` navigates
         // to whatever it remembers, so anything else would be persisted and then dispatched again
         // at the next launch with the URL bar's authority behind it.
@@ -248,12 +314,16 @@ public final class BrowserModel {
     }
 
     public func open(_ url: URL, in destination: OpenDestination) {
+        gated { self.performOpen(url, in: destination) }
+    }
+
+    private func performOpen(_ url: URL, in destination: OpenDestination) {
         switch destination {
         case .newTab:
-            openNewTab(url: url)
+            insertNewTab(url: url)
         case .currentTab:
             guard let tab = selected else {
-                openNewTab(url: url)
+                insertNewTab(url: url)
                 return
             }
             clearNotices()
@@ -269,6 +339,10 @@ public final class BrowserModel {
     }
 
     public func select(_ id: UUID) {
+        gated { self.performSelect(id) }
+    }
+
+    private func performSelect(_ id: UUID) {
         guard let tab = tabs.first(where: { $0.id == id }) else { return }
         selectedID = id
         activate(tab)
@@ -276,6 +350,10 @@ public final class BrowserModel {
     }
 
     public func close(_ id: UUID) {
+        gated { self.performClose(id) }
+    }
+
+    private func performClose(_ id: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs.remove(at: index)
         if selectedID == id {
@@ -289,6 +367,10 @@ public final class BrowserModel {
 
     /// Moves the tab at `origin` so that it sits at `destination` in the resulting order.
     public func move(from origin: Int, to destination: Int) {
+        gated { self.performMove(from: origin, to: destination) }
+    }
+
+    private func performMove(from origin: Int, to destination: Int) {
         guard tabs.indices.contains(origin), tabs.indices.contains(destination), origin != destination
         else { return }
         let tab = tabs.remove(at: origin)
@@ -329,12 +411,19 @@ public final class BrowserModel {
     /// this; a test that must tell "the coalescer is holding this edit" from "the edit has not
     /// arrived yet" does, and a seam is cheaper than a sleep (D24's reasoning, one level up).
     func persistenceSettled() async {
+        // The gate first: a mutation waiting on the restoration has not made its commit yet, so a
+        // settle that looked only at the chain would answer about the commits before it.
+        await gateChain?.value
         await persistChain.value
     }
 
     /// Writes whatever the coalescer is holding, now. The panel calls this when it is going away,
     /// so a title that arrived in the last half-second is not the one thing a relaunch forgets.
     public func flush() async {
+        // The gate first: a mutation waiting on the restoration has not made its commit yet, so a
+        // flush that waited only on the chain would write the set from before the last thing the
+        // user did (D57).
+        await gateChain?.value
         await persistChain.value
         await store.flushPendingEdits()
     }
@@ -347,7 +436,7 @@ public final class BrowserModel {
                                 factory: factory,
                                 openExternally: openExternally,
                                 openInNewPanelTab: { [weak self] url in
-                                    MainActor.assumeIsolated { _ = self?.openNewTab(url: url) }
+                                    MainActor.assumeIsolated { self?.openNewTab(url: url) }
                                 },
                                 report: { [weak self] reason, _ in
                                     MainActor.assumeIsolated { self?.report(reason) }

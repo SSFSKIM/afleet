@@ -1,4 +1,5 @@
 import Foundation
+import FleetKit
 import WebKit
 import XCTest
 import PanelHostAPI
@@ -35,9 +36,15 @@ final class BrowserModelTests: XCTestCase {
     }
 
     /// A model over an in-memory store, with every seam injected.
+    ///
+    /// It is **restored by default**, because that is the state the panel is in by the time a
+    /// control can be used: every mutation joins the restoration (D57), so a model that had never
+    /// read its document would defer whatever a test did to it. A test that drives the restoration
+    /// itself — one that seeded a document, or that holds the read open — passes `restored: false`.
     private func makeModel(store backing: InMemoryScopedStore = InMemoryScopedStore(),
                            sleeper: ManualSleeper = ManualSleeper(),
-                           openExternally: (@Sendable (URL) -> Void)? = nil)
+                           restored: Bool = true,
+                           openExternally: (@Sendable (URL) -> Void)? = nil) async
         -> (BrowserModel, InMemoryScopedStore, ManualSleeper) {
         let tabStore = BrowserTabStore(store: backing, sleep: sleeper.sleep)
         let model = BrowserModel(store: tabStore,
@@ -45,7 +52,15 @@ final class BrowserModelTests: XCTestCase {
                                  openExternally: openExternally ?? { _ in
                                      XCTFail("no test in this file may reach the system opener")
                                  })
+        if restored { await model.restore() }
         return (model, backing, sleeper)
+    }
+
+    /// A popped-out Browser window for an invented channel. `PanelHost.popOut` keys windows by
+    /// (tab, channel), so this is what one window *is*.
+    private static func window(_ mark: String) -> PanelSurface {
+        .poppedOutWindow(tab: .browser, channel: ChannelKey(configHome: URL(filePath: "/invented/config-home"),
+                                                            session: SessionID(uuid: UUID())))
     }
 
     /// Waits for the model's next settled navigation, whichever tab it belongs to.
@@ -68,7 +83,7 @@ final class BrowserModelTests: XCTestCase {
     func testTwoChannelsShareOneModelAndOneWebViewInstance() async throws {
         let server = try await startServer()
         defer { server.stop() }
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
         let tab = BrowserTab(model: model)
 
         let channelA = makeChannelContext(mark: "a")
@@ -107,7 +122,7 @@ final class BrowserModelTests: XCTestCase {
     // MARK: The empty state
 
     func testClosingTheLastTabLeavesTheDefinedEmptyState() async throws {
-        let (model, backing, _) = makeModel()
+        let (model, backing, _) = await makeModel()
         model.openNewTab(url: nil)
         let only = try XCTUnwrap(model.tabs.first)
         await writeAttempts(backing, reach: 1)
@@ -123,7 +138,7 @@ final class BrowserModelTests: XCTestCase {
     }
 
     func testClosingANonSelectedTabKeepsTheSelection() async throws {
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
         model.openNewTab(url: URL(string: "https://one.example.invalid/")!)
         let first = try XCTUnwrap(model.tabs.first)
         model.openNewTab(url: URL(string: "https://two.example.invalid/")!)
@@ -136,8 +151,8 @@ final class BrowserModelTests: XCTestCase {
         XCTAssertEqual(model.selected?.id, second.id, "closing another tab moved the selection")
     }
 
-    func testClosingTheSelectedTabSelectsANeighbour() throws {
-        let (model, _, _) = makeModel()
+    func testClosingTheSelectedTabSelectsANeighbour() async throws {
+        let (model, _, _) = await makeModel()
         for name in ["one", "two", "three"] {
             model.openNewTab(url: URL(string: "https://\(name).example.invalid/")!)
         }
@@ -153,8 +168,8 @@ final class BrowserModelTests: XCTestCase {
 
     // MARK: Reordering
 
-    func testReorderingMovesATabAndKeepsTheSelection() throws {
-        let (model, _, _) = makeModel()
+    func testReorderingMovesATabAndKeepsTheSelection() async throws {
+        let (model, _, _) = await makeModel()
         for name in ["one", "two", "three"] {
             model.openNewTab(url: URL(string: "https://\(name).example.invalid/")!)
         }
@@ -179,7 +194,7 @@ final class BrowserModelTests: XCTestCase {
                    PersistedTab(url: server.url("/three"), title: "Third page")],
             selectedIndex: 1)
         try await backing.write(document, key: BrowserTabStore.storeKey)
-        let (model, _, _) = makeModel(store: backing)
+        let (model, _, _) = await makeModel(store: backing, restored: false)
 
         let settled = expectation(description: "the selected tab finishes loading")
         settled.assertForOverFulfill = false
@@ -205,7 +220,7 @@ final class BrowserModelTests: XCTestCase {
                                                              PersistedTab(url: server.url("/two"), title: "Second page")],
                                                       selectedIndex: 0),
                                 key: BrowserTabStore.storeKey)
-        let (model, _, _) = makeModel(store: backing)
+        let (model, _, _) = await makeModel(store: backing, restored: false)
 
         await settling(model, "the selected tab loads") { Task { await model.restore() } }
         XCTAssertEqual(server.requests, ["/one"])
@@ -223,7 +238,7 @@ final class BrowserModelTests: XCTestCase {
         try await backing.write(BrowserTabSetDocument(tabs: [PersistedTab(url: server.url("/one"), title: "First page")],
                                                       selectedIndex: 0),
                                 key: BrowserTabStore.storeKey)
-        let (model, _, _) = makeModel(store: backing)
+        let (model, _, _) = await makeModel(store: backing, restored: false)
 
         await settling(model, "the restore loads its one tab") { Task { await model.restore() } }
         let tab = try XCTUnwrap(model.tabs.first)
@@ -248,7 +263,7 @@ final class BrowserModelTests: XCTestCase {
         defer { server.stop() }
         let backing = InMemoryScopedStore()
         let sleeper = ManualSleeper()
-        let (model, _, _) = makeModel(store: backing, sleeper: sleeper)
+        let (model, _, _) = await makeModel(store: backing, sleeper: sleeper)
 
         await settling(model, "the first page loads") { model.openNewTab(url: server.url("/one")) }
         await writeAttempts(backing, reach: 1)
@@ -286,7 +301,7 @@ final class BrowserModelTests: XCTestCase {
     /// A tab the user has opened but not navigated has no page to restore, so it is not in the
     /// document — and the selection still has to point at something (D34).
     func testABlankTabIsNotPersistedAndTheSelectionStillLands() async throws {
-        let (model, backing, _) = makeModel()
+        let (model, backing, _) = await makeModel()
         model.openNewTab(url: URL(string: "https://one.example.invalid/")!)
         model.openNewTab(url: nil)
         await writeAttempts(backing, reach: 2)
@@ -300,7 +315,7 @@ final class BrowserModelTests: XCTestCase {
     // MARK: Q9 — the URL bar's entry path
 
     func testTheURLBarNormalisesBeforeItNavigates() async throws {
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
         model.openNewTab(url: nil)
 
         model.submitURLBar("  example.invalid/docs  ")
@@ -309,8 +324,8 @@ final class BrowserModelTests: XCTestCase {
         XCTAssertNil(model.urlBarMessage)
     }
 
-    func testTheURLBarReportsAStringThatIsNotAURLAndNavigatesNowhere() {
-        let (model, _, _) = makeModel()
+    func testTheURLBarReportsAStringThatIsNotAURLAndNavigatesNowhere() async {
+        let (model, _, _) = await makeModel()
         model.openNewTab(url: nil)
 
         model.submitURLBar("not a url at all")
@@ -319,8 +334,8 @@ final class BrowserModelTests: XCTestCase {
         XCTAssertNotNil(model.urlBarMessage, "a rejected entry has to say so; a silent bar looks broken")
     }
 
-    func testAnEmptyURLBarSubmissionDoesNothing() {
-        let (model, _, _) = makeModel()
+    func testAnEmptyURLBarSubmissionDoesNothing() async {
+        let (model, _, _) = await makeModel()
         model.openNewTab(url: nil)
 
         model.submitURLBar("   ")
@@ -331,8 +346,8 @@ final class BrowserModelTests: XCTestCase {
 
     /// Q9's row 6 is the panel's, not the policy's, but a refused *scheme* is the policy's and the
     /// panel has to show it (D29's `isDiagnosticOnly == false`).
-    func testARefusedSchemeTypedIntoTheBarIsReportedAndLoadsNothing() {
-        let (model, _, _) = makeModel()
+    func testARefusedSchemeTypedIntoTheBarIsReportedAndLoadsNothing() async {
+        let (model, _, _) = await makeModel()
         model.openNewTab(url: nil)
 
         model.submitURLBar("javascript:alert(1)")
@@ -341,8 +356,8 @@ final class BrowserModelTests: XCTestCase {
         XCTAssertNil(model.selected?.web?.webView.url)
     }
 
-    func testAURLBarEntryWithNoTabOpenOpensOne() {
-        let (model, _, _) = makeModel()
+    func testAURLBarEntryWithNoTabOpenOpensOne() async {
+        let (model, _, _) = await makeModel()
         XCTAssertTrue(model.tabs.isEmpty)
 
         model.submitURLBar("example.invalid")
@@ -361,7 +376,7 @@ final class BrowserModelTests: XCTestCase {
     /// authority in this design — so a persisted `mailto:` would launch an application at startup.
     func testAnExternallyOpenedDestinationIsNeitherTheTabsURLNorPersisted() async throws {
         let opened = URLSink()
-        let (model, backing, _) = makeModel(openExternally: { opened.opened($0) })
+        let (model, backing, _) = await makeModel(openExternally: { opened.opened($0) })
         let mail = URL(string: "mailto:someone@example.invalid")!
 
         model.openNewTab(url: mail)
@@ -378,8 +393,8 @@ final class BrowserModelTests: XCTestCase {
     /// Asserted with no `await` in the body on purpose: the tab is following a real navigation, and
     /// a suspension here would let the chrome write the page's own URL back over whatever `open`
     /// left behind — which is a correction, not the rule under test.
-    func testARefusedDestinationIsNotWhatTheDocumentWouldRemember() {
-        let (model, _, _) = makeModel()
+    func testARefusedDestinationIsNotWhatTheDocumentWouldRemember() async {
+        let (model, _, _) = await makeModel()
         let page = URL(string: "https://one.example.invalid/")!
         model.openNewTab(url: page)
 
@@ -400,7 +415,7 @@ final class BrowserModelTests: XCTestCase {
                                   selectedIndex: 0),
             key: BrowserTabStore.storeKey)
         let opened = URLSink()
-        let (model, _, _) = makeModel(store: backing, openExternally: { opened.opened($0) })
+        let (model, _, _) = await makeModel(store: backing, restored: false, openExternally: { opened.opened($0) })
 
         await model.restore()
 
@@ -417,7 +432,7 @@ final class BrowserModelTests: XCTestCase {
     /// store's row at the commit sampled it before the write — and the row the panel shows would
     /// say the last *structural* write's answer for ever.
     func testAFailedCoalescedWriteReachesThePanelsErrorRow() async throws {
-        let (model, backing, sleeper) = makeModel()
+        let (model, backing, sleeper) = await makeModel()
         await model.restore()
         model.openNewTab(url: URL(string: "https://one.example.invalid/")!)
         await model.persistenceSettled()
@@ -442,7 +457,7 @@ final class BrowserModelTests: XCTestCase {
         let backing = InMemoryScopedStore()
         await backing.seed(json: #"{"schemaVersion":2,"tabs":[],"selection":{"tabID":null}}"#,
                            key: BrowserTabStore.storeKey)
-        let (model, _, _) = makeModel(store: backing)
+        let (model, _, _) = await makeModel(store: backing, restored: false)
 
         await model.restore()
 
@@ -456,8 +471,8 @@ final class BrowserModelTests: XCTestCase {
 
     // MARK: Q8 — Enter and Cmd-Enter
 
-    func testEnterOpensInTheCurrentTabAndCommandEnterOpensANewOne() throws {
-        let (model, _, _) = makeModel()
+    func testEnterOpensInTheCurrentTabAndCommandEnterOpensANewOne() async throws {
+        let (model, _, _) = await makeModel()
         model.openNewTab(url: URL(string: "https://one.example.invalid/")!)
         let first = try XCTUnwrap(model.tabs.first)
 
@@ -477,21 +492,101 @@ final class BrowserModelTests: XCTestCase {
         XCTAssertEqual(model.selected?.url, URL(string: "https://three.example.invalid/")!)
     }
 
+    // MARK: The restoration gate (Q7, D49) — the user is as fast as a link
+
+    /// A tab the user opens while the restoration is still reading is not thrown away by it.
+    ///
+    /// `openRouted` orders a *link* behind the read; the panel's own controls called straight into
+    /// the set and enqueued a structural write, and `performRestore` then replaced `tabs` whole. So
+    /// the tab went, and the incomplete snapshot the write carried could land on the saved
+    /// document as well. Every mutation that can enqueue persistence joins the restoration.
+    func testATabOpenedDuringARestoreSurvivesIt() async throws {
+        let backing = InMemoryScopedStore()
+        let saved = URL(string: "https://saved.example.invalid/")!
+        try await backing.write(BrowserTabSetDocument(tabs: [PersistedTab(url: saved, title: "Saved")],
+                                                      selectedIndex: 0),
+                                key: BrowserTabStore.storeKey)
+        await backing.holdReads()
+        let (model, _, _) = await makeModel(store: backing, restored: false)
+
+        let restoring = Task { await model.restore() }
+        let reading = expectation(description: "the restore reached the store")
+        await backing.expectReadArrival(reading)
+        await fulfillment(of: [reading], timeout: Self.webDeadline)
+
+        // The `+` control, while the read is still held open.
+        let opened = URL(string: "https://opened-during-the-restore.example.invalid/")!
+        model.openNewTab(url: opened)
+
+        await backing.releaseReads()
+        await restoring.value
+        await model.persistenceSettled()
+
+        XCTAssertEqual(model.tabs.map(\.url), [saved, opened],
+                       "the tab the user opened during the restore was replaced by the saved set")
+        XCTAssertEqual(model.selected?.url, opened, "the panel is not on the tab the user opened")
+        let document = try await backing.document(BrowserTabSetDocument.self,
+                                                  key: BrowserTabStore.storeKey)
+        XCTAssertEqual(document?.tabs.map(\.url), [saved, opened],
+                       "an incomplete snapshot replaced the saved document")
+    }
+
+    /// The other ordering: the mutation is in front of the restoration rather than inside it. The
+    /// restored set is installed *beneath* what is already there, so no ordering loses either one.
+    func testATabOpenedBeforeARestoreIsNotReplacedByIt() async throws {
+        let backing = InMemoryScopedStore()
+        let saved = URL(string: "https://saved.example.invalid/")!
+        try await backing.write(BrowserTabSetDocument(tabs: [PersistedTab(url: saved, title: "Saved")],
+                                                      selectedIndex: 0),
+                                key: BrowserTabStore.storeKey)
+        let (model, _, _) = await makeModel(store: backing, restored: false)
+
+        let opened = URL(string: "https://opened-first.example.invalid/")!
+        model.openNewTab(url: opened)
+        await model.restore()
+        await model.persistenceSettled()
+
+        XCTAssertEqual(model.tabs.map(\.url), [saved, opened],
+                       "the restore replaced a tab set the user had already opened a tab in")
+        XCTAssertEqual(model.selected?.url, opened,
+                       "the restore moved the panel off the tab the user was on")
+    }
+
+    /// The quit flush drains what the gate is holding as well as what the store is.
+    ///
+    /// A mutation waiting on the restoration has not made its commit yet, so a flush that waited
+    /// only on the persistence chain would return having written the set *before* the last thing
+    /// the user did — which at quit is G3 losing it.
+    func testTheFlushDrainsAMutationStillWaitingOnTheRestoration() async throws {
+        let backing = InMemoryScopedStore()
+        let (model, _, _) = await makeModel(store: backing, restored: false)
+
+        let opened = URL(string: "https://opened-before-the-restore.example.invalid/")!
+        model.openNewTab(url: opened)
+        await model.flush()
+
+        let document = try await backing.document(BrowserTabSetDocument.self,
+                                                  key: BrowserTabStore.storeKey)
+        XCTAssertEqual(document?.tabs.map(\.url), [opened],
+                       "the flush returned in front of a mutation the gate was still holding")
+    }
+
     // MARK: Q5's pop-out consequence
 
     /// An `NSView` has one superview, so the web views follow the pop-out and the surface they left
     /// draws a short state instead. The model carries which surface holds them; the view renders it.
-    func testTheWebViewsFollowThePopOutAndComeBack() {
-        let (model, _, _) = makeModel()
+    func testTheWebViewsFollowThePopOutAndComeBack() async {
+        let (model, _, _) = await makeModel()
+        let window = Self.window("one")
         XCTAssertEqual(model.attachedTo, .panel)
         XCTAssertTrue(model.rendersWebViews(on: .panel))
-        XCTAssertFalse(model.rendersWebViews(on: .poppedOutWindow))
+        XCTAssertFalse(model.rendersWebViews(on: window))
 
-        model.attach(to: .poppedOutWindow)
+        model.attach(to: window)
 
         XCTAssertFalse(model.rendersWebViews(on: .panel),
                        "the panel cannot draw web views that moved to the pop-out")
-        XCTAssertTrue(model.rendersWebViews(on: .poppedOutWindow))
+        XCTAssertTrue(model.rendersWebViews(on: window))
 
         model.attach(to: .panel)
 
@@ -510,7 +605,7 @@ final class BrowserModelTests: XCTestCase {
         let server = try LoopbackHTTPServer(pages: [:], stalls: ["/slow"])
         try await server.start()
         defer { server.stop() }
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
 
         let asked = expectation(description: "the page is requested")
         server.expectRequest("/slow", asked)
@@ -533,7 +628,7 @@ final class BrowserModelTests: XCTestCase {
     func testTheSameControlReloadsAPageThatIsNotLoading() async throws {
         let server = try await startServer()
         defer { server.stop() }
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
 
         await settling(model, "the page loads") { model.openNewTab(url: server.url("/one")) }
         XCTAssertEqual(server.requestCount(for: "/one"), 1)
@@ -552,7 +647,7 @@ final class BrowserModelTests: XCTestCase {
         let server = try LoopbackHTTPServer(pages: [:], drops: ["/gone"])
         try await server.start()
         defer { server.stop() }
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
 
         await settling(model, "the load fails") { model.openNewTab(url: server.url("/gone")) }
 
@@ -567,7 +662,7 @@ final class BrowserModelTests: XCTestCase {
                                             drops: ["/gone"])
         try await server.start()
         defer { server.stop() }
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
 
         await settling(model, "the load fails") { model.openNewTab(url: server.url("/gone")) }
         XCTAssertNotNil(model.loadFailureMessage)
@@ -590,7 +685,7 @@ final class BrowserModelTests: XCTestCase {
         let server = try LoopbackHTTPServer(pages: ["/refused": refusing])
         try await server.start()
         defer { server.stop() }
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
 
         await settling(model, "the page loads") { model.openNewTab(url: server.url("/refused")) }
         // The refusal happens after the load settles, so the wait is on the consequence it has: a
@@ -609,62 +704,135 @@ final class BrowserModelTests: XCTestCase {
     ///
     /// "Exactly one" is asserted over every surface there is rather than over the two by name, so a
     /// third surface could not quietly draw a second browser.
-    func testAPoppedOutWindowTakesTheWebViewsAndClosingHandsThemBack() {
-        let (model, _, _) = makeModel()
-        XCTAssertEqual(Self.surfacesRendering(model), [.panel])
+    func testAPoppedOutWindowTakesTheWebViewsAndClosingHandsThemBack() async {
+        let (model, _, _) = await makeModel()
+        let window = Self.window("one")
+        let all = [PanelSurface.panel, window]
+        model.surfaceAppeared(.panel)
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [.panel])
 
-        model.surfaceAppeared(.poppedOutWindow)
+        model.surfaceAppeared(window)
 
-        XCTAssertEqual(Self.surfacesRendering(model), [.poppedOutWindow],
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [window],
                        "the pop-out did not take the web views, or did not take them exclusively")
 
-        model.surfaceDisappeared(.poppedOutWindow)
+        model.surfaceDisappeared(window)
 
-        XCTAssertEqual(Self.surfacesRendering(model), [.panel],
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [.panel],
                        "closing the pop-out did not hand the web views back")
+    }
+
+    /// **Two windows are two claimants, and only one of them can hold the pages.**
+    ///
+    /// `popOut` keys windows by (tab, channel), so a second channel's pop-out is a second window on
+    /// screen at the same time. A surface that named only "a popped-out window" made both of them
+    /// the same claimant: each drew the one `WKWebView` into its own hierarchy, and closing either
+    /// handed the pages back out of the one still open.
+    func testTwoPoppedOutWindowsAreTwoClaimantsAndOnlyOneHoldsThePages() async {
+        let (model, _, _) = await makeModel()
+        let first = Self.window("first")
+        let second = Self.window("second")
+        let all = [PanelSurface.panel, first, second]
+
+        model.surfaceAppeared(.panel)
+        model.surfaceAppeared(first)
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [first])
+
+        model.surfaceAppeared(second)
+
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [second],
+                       "two windows claimed the same pages")
+
+        // The second window closes. It is the one holding the pages, so they move; the first
+        // window is still on screen and is where they go.
+        model.surfaceDisappeared(second)
+
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [first],
+                       "closing one window took the pages away from the other one as well")
     }
 
     /// The main panel is on screen for as long as its window is, so it must not claim on
     /// appearance: a re-render of the column would otherwise take the pages out of a pop-out window
     /// that is still open.
-    func testTheMainPanelAppearingDoesNotTakeTheWebViewsFromAWindow() {
-        let (model, _, _) = makeModel()
-        model.surfaceAppeared(.poppedOutWindow)
+    func testTheMainPanelAppearingDoesNotTakeTheWebViewsFromAWindow() async {
+        let (model, _, _) = await makeModel()
+        let window = Self.window("one")
+        model.surfaceAppeared(window)
 
         model.surfaceAppeared(.panel)
 
-        XCTAssertEqual(Self.surfacesRendering(model), [.poppedOutWindow],
+        XCTAssertEqual(Self.surfacesRendering(model, among: [.panel, window]), [window],
                        "the panel took the web views back from a window that is still open")
     }
 
     /// A surface going away while it holds nothing changes nothing.
-    func testASurfaceThatHoldsNothingHandsNothingBack() {
-        let (model, _, _) = makeModel()
-        model.surfaceAppeared(.poppedOutWindow)
+    func testASurfaceThatHoldsNothingHandsNothingBack() async {
+        let (model, _, _) = await makeModel()
+        let window = Self.window("one")
+        model.surfaceAppeared(.panel)
+        model.surfaceAppeared(window)
 
         model.surfaceDisappeared(.panel)
 
-        XCTAssertEqual(Self.surfacesRendering(model), [.poppedOutWindow])
+        XCTAssertEqual(Self.surfacesRendering(model, among: [.panel, window]), [window])
+    }
+
+    /// **Pages are never stranded on a surface that is gone.**
+    ///
+    /// Switching the main panel to another tab removes the Browser view while its window stays
+    /// open, so the surface holding the pages disappears. Handing them back to `.panel` there is
+    /// handing them to nothing: a window that is plainly on screen sits drawing the "elsewhere"
+    /// placeholder until the user reclaims them by hand. They go to a surface that is drawing.
+    func testPagesLeaveASurfaceThatGoesAwayForOneThatIsOnScreen() async {
+        let (model, _, _) = await makeModel()
+        let window = Self.window("one")
+        let all = [PanelSurface.panel, window]
+        model.surfaceAppeared(.panel)
+        model.surfaceAppeared(window)
+        // The deliberate move back, which is what the "Bring them back here" control does.
+        model.attach(to: .panel)
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [.panel])
+
+        // The panel switches to another tab: the Browser view goes away while the window remains.
+        model.surfaceDisappeared(.panel)
+
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [window],
+                       "the pages were stranded on a surface that is no longer drawing")
+    }
+
+    /// With nothing left on screen the pages rest on the main panel, which is where the next
+    /// surface to draw this panel finds them.
+    func testPagesRestOnTheMainPanelWhenNoSurfaceIsLeft() async {
+        let (model, _, _) = await makeModel()
+        let window = Self.window("one")
+        model.surfaceAppeared(.panel)
+        model.surfaceAppeared(window)
+
+        model.surfaceDisappeared(window)
+        model.surfaceDisappeared(.panel)
+
+        XCTAssertEqual(model.attachedTo, .panel)
     }
 
     /// The other half of D52: the surface is a real input to the view the tab makes. Without this
     /// both surfaces render the same one, and whichever `NSView` hierarchy asked last holds the
     /// web views while the other draws a placeholder that will never come true.
-    func testTheViewTheTabMakesIsForTheSurfaceItWasAskedFor() {
-        let (model, _, _) = makeModel()
+    func testTheViewTheTabMakesIsForTheSurfaceItWasAskedFor() async {
+        let (model, _, _) = await makeModel()
         let tab = BrowserTab(model: model)
         let context = makeChannelContext(mark: "surface")
         let session = tab.makeSession(for: context)
 
+        let window = Self.window("one")
         XCTAssertEqual(tab.panelView(session: session, surface: .panel)?.surface, .panel)
-        XCTAssertEqual(tab.panelView(session: session, surface: .poppedOutWindow)?.surface,
-                       .poppedOutWindow,
+        XCTAssertEqual(tab.panelView(session: session, surface: window)?.surface, window,
                        "the popped-out window was handed a view that claims to be the panel")
     }
 
     /// Every surface that would draw the web views right now.
-    private static func surfacesRendering(_ model: BrowserModel) -> [PanelSurface] {
-        PanelSurface.allCases.filter { model.rendersWebViews(on: $0) }
+    private static func surfacesRendering(_ model: BrowserModel,
+                                          among surfaces: [PanelSurface]) -> [PanelSurface] {
+        surfaces.filter { model.rendersWebViews(on: $0) }
     }
 
     // MARK: Chrome delegation
@@ -672,7 +840,7 @@ final class BrowserModelTests: XCTestCase {
     func testBackAndForwardFollowTheSelectedTab() async throws {
         let server = try await startServer()
         defer { server.stop() }
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
 
         await settling(model, "the first page loads") { model.openNewTab(url: server.url("/one")) }
         await settling(model, "the second page loads") { model.open(server.url("/two"), in: .currentTab) }
@@ -687,7 +855,7 @@ final class BrowserModelTests: XCTestCase {
     func testReloadReRequestsTheSelectedTabsPage() async throws {
         let server = try await startServer()
         defer { server.stop() }
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
 
         await settling(model, "the page loads") { model.openNewTab(url: server.url("/one")) }
         XCTAssertEqual(server.requestCount(for: "/one"), 1)
@@ -711,7 +879,7 @@ final class BrowserModelTests: XCTestCase {
         ])
         try await opener.start()
         defer { opener.stop() }
-        let (model, _, _) = makeModel()
+        let (model, _, _) = await makeModel()
 
         let opened = observed(model, "a second tab appears") { $0.tabs.count == 2 }
         model.openNewTab(url: opener.url("/opens"))

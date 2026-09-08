@@ -60,14 +60,20 @@ public struct BrowserPanelView: View {
     private var elsewhere: some View {
         VStack(spacing: 10) {
             Image(systemName: "macwindow.on.rectangle").font(.largeTitle).foregroundStyle(.secondary)
-            Text(model.attachedTo == .poppedOutWindow ? "Showing in the Browser window"
-                                                      : "Showing in the main window").font(.headline)
+            Text(isPoppedOut ? "Showing in a Browser window"
+                             : "Showing in the main window").font(.headline)
             Text("The tabs are the same ones; a page can only be drawn in one place at a time.")
                 .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Button("Bring them back here") { model.attach(to: surface) }
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Whether the pages are in one of the popped-out windows rather than the main one.
+    private var isPoppedOut: Bool {
+        if case .poppedOutWindow = model.attachedTo { return true }
+        return false
     }
 
     /// The last tab closed, or the panel has never had one.
