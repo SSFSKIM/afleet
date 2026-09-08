@@ -87,6 +87,11 @@ public enum GhCommands {
                             runner: any ToolRunning, accepting: Set<Int32>) async throws -> ToolOutput {
         let output = try await runner.run(.gh, arguments: arguments, cwd: root,
                                           environment: environment, timeout: readTimeout)
+        // Before the exit code, never after (R7/1e). A `gh` that handled `SIGTERM` at the end of
+        // its budget can exit 0 with half a document behind it, and the exit code alone cannot
+        // tell that from a finished read — the panel would render the half as the whole. The check
+        // is `ToolOutput`'s own so that every reader in this module makes the same one.
+        try output.requireCompleted(tool: .gh, timeout: readTimeout)
         guard accepting.contains(output.exitCode) else {
             throw ToolError.commandFailed(tool: .gh, exitCode: output.exitCode,
                                           stderrTail: output.stderrTail)

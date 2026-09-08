@@ -70,16 +70,55 @@ struct TempTree {
 
     /// True when `base` is `home` or lies inside it.
     ///
-    /// The comparison is **case- and normalisation-insensitive**, deliberately rather than
-    /// incidentally: a macOS volume is case-insensitive by default, so `.CLAUDE` and `.claude` are
-    /// one directory, and a guard that is correct only on a case-sensitive volume is not correct
-    /// on the machines this runs on. Erring towards refusal costs a skipped test and never a write
-    /// under a config home, which is the only direction X9 allows this to be wrong in.
+    /// Two questions, asked in that order, because neither answers the other.
+    ///
+    /// **Identity first.** A path is not a name for a directory; it is one of the names. macOS
+    /// mounts the data volume twice, so `/System/Volumes/Data/private/var/…` and `/private/var/…`
+    /// are one directory with identical `(st_dev, st_ino)` — and `realpath(3)` *preserves* the
+    /// firmlink prefix rather than removing it, so canonicalising both sides leaves two spellings
+    /// that share no components at all. A comparison made over names is then satisfied by nothing
+    /// and the guard fails open, which is the one direction X9 does not allow. Measured on this
+    /// host (R7/1a). So each of `base`'s existing ancestors is compared with `home` by the identity
+    /// the kernel gives them, which no spelling can disagree about.
+    ///
+    /// **Components second**, for what identity cannot reach: a `base` — or a home — that does not
+    /// exist yet has no inode to compare, and this guard runs precisely to stop such a path from
+    /// being created. That comparison is **case- and normalisation-insensitive**, deliberately: a
+    /// macOS volume is case-insensitive by default, so `.CLAUDE` and `.claude` are one directory,
+    /// and a guard correct only on a case-sensitive volume is not correct on the machines this
+    /// runs on. Erring towards refusal costs a skipped test and never a write under a config home.
     static func contains(_ home: URL, _ base: URL) -> Bool {
+        if sharesIdentity(home, base) { return true }
         let inside = base.pathComponents, outside = home.pathComponents
         guard inside.count >= outside.count else { return false }
         for (mine, theirs) in zip(inside, outside) where !sameComponent(mine, theirs) { return false }
         return true
+    }
+
+    /// True when `home` exists and is `base` or one of `base`'s existing ancestors, by
+    /// `(st_dev, st_ino)`.
+    ///
+    /// The walk goes upward from `base` because `base` itself need not exist — the caller is about
+    /// to create it — while some ancestor of it always does, and it is the *first existing* one
+    /// that a spelling can disguise. `lstat` rather than `stat`: a symbolic link is compared as
+    /// itself, and the directory it points at is reached anyway through `canonical`'s resolution
+    /// of the existing prefix.
+    private static func sharesIdentity(_ home: URL, _ base: URL) -> Bool {
+        guard let target = identity(home) else { return false }
+        var candidate = base.standardized
+        while true {
+            if let found = identity(candidate), found == target { return true }
+            let parent = candidate.deletingLastPathComponent().standardized
+            guard parent.pathComponents.count < candidate.pathComponents.count else { return false }
+            candidate = parent
+        }
+    }
+
+    /// The filesystem identity of `url`, or nil when nothing is there.
+    private static func identity(_ url: URL) -> (dev_t, ino_t)? {
+        var status = stat()
+        guard lstat(url.path(percentEncoded: false), &status) == 0 else { return nil }
+        return (status.st_dev, status.st_ino)
     }
 
     private static func sameComponent(_ one: String, _ other: String) -> Bool {

@@ -13,12 +13,41 @@ public struct ToolOutput: Sendable, Equatable {
     public var exitCode: Int32
     /// True when the budget expired before the child exited on its own.
     public var timedOut: Bool
+    /// The retained-output cap, set **only** when the child reached it and was terminated for it;
+    /// nil on every ordinary read. A count, not a limit-was-configured flag: a reader that turns
+    /// this into a `ToolError` names the cap it hit rather than the bytes it lost, which are
+    /// unbounded by definition.
+    public var outputLimitBytes: Int?
 
-    public init(stdout: Data, stderr: Data, exitCode: Int32, timedOut: Bool) {
+    public init(stdout: Data, stderr: Data, exitCode: Int32, timedOut: Bool,
+                outputLimitBytes: Int? = nil) {
         self.stdout = stdout
         self.stderr = stderr
         self.exitCode = exitCode
         self.timedOut = timedOut
+        self.outputLimitBytes = outputLimitBytes
+    }
+
+    /// The one check every reader makes **before** it looks at `exitCode`.
+    ///
+    /// Why it has to be shared, and why it comes first (R7/1e). `exitCode` alone cannot tell a
+    /// finished command from an interrupted one: a child that handles `SIGTERM` and exits 0 after
+    /// its budget expired leaves a zero here with half of its output, and a child killed outright
+    /// leaves a signal number that reads as an ordinary failure. Both are the process layer's
+    /// facts rather than the command's, so they are recorded on this value (D3) and turned into a
+    /// typed error at exactly one place, which every wrapper calls.
+    ///
+    /// `timeout` is the budget the caller passed, carried into the error rather than measured:
+    /// `.timedOut(afterMs:)` names the budget, not the elapsed time.
+    public func requireCompleted(tool: Tool, timeout: Duration) throws {
+        if let limit = outputLimitBytes {
+            throw ToolError.outputLimitExceeded(tool: tool, limitBytes: limit)
+        }
+        if timedOut {
+            let milliseconds = Int(timeout.components.seconds) * 1_000
+                + Int(timeout.components.attoseconds / 1_000_000_000_000_000)
+            throw ToolError.timedOut(tool: tool, afterMs: milliseconds)
+        }
     }
 
     /// stdout as UTF-8 with invalid bytes replaced.
@@ -51,7 +80,24 @@ public protocol ToolRunning: Sendable {
 /// precautions gets a green suite and a defect that only appears under load.
 public struct ToolRunner: ToolRunning {
 
-    public init() {}
+    /// The most output one command may retain before it is terminated for it.
+    ///
+    /// Bounding the *drain* is not bounding the *buffer* (R7/1b): `PipeDrain.bytesPerPass` returns
+    /// the queue to the timer every mebibyte, which is what keeps the timeout live, but nothing in
+    /// that loop stops the accumulated `Data` from growing. `git cat-file blob` on a tracked file
+    /// of arbitrary size is the ordinary way to reach it, and a panel that exhausts the app's
+    /// memory has taken the whole conversation down over a source-control read (§10 says a git
+    /// failure is panel-local). 64 MiB is far above any listing or blob a panel renders and far
+    /// below what an app can afford to lose.
+    public static let defaultOutputLimitBytes = 64 * 1024 * 1024
+
+    /// The cap for this runner. Injectable so that a test can reach it with a producer that runs
+    /// in a moment rather than one that has to write 64 MiB.
+    public let outputLimitBytes: Int
+
+    public init(outputLimitBytes: Int = ToolRunner.defaultOutputLimitBytes) {
+        self.outputLimitBytes = outputLimitBytes
+    }
 
     /// The first executable named `tool` on `environment["PATH"]`, or nil.
     ///
@@ -111,7 +157,8 @@ public struct ToolRunner: ToolRunning {
     /// `tool` labels the thrown error and nothing else.
     func run(executable: URL, arguments: [String], cwd: URL, environment: [String: String],
              timeout: Duration, tool: Tool = .git) async throws -> ToolOutput {
-        let job = ToolJob(executable: executable, arguments: arguments, cwd: cwd, environment: environment)
+        let job = ToolJob(executable: executable, arguments: arguments, cwd: cwd,
+                          environment: environment, outputLimitBytes: outputLimitBytes)
         do {
             try job.start()
         } catch {
@@ -122,9 +169,20 @@ public struct ToolRunner: ToolRunning {
             let failure = error as NSError
             throw ToolError.spawnFailed(tool: tool, message: "\(failure.domain) \(failure.code)")
         }
-        return await withCheckedContinuation { continuation in
-            job.finish(timeout: timeout) { continuation.resume(returning: $0) }
+        // The cancellation handler is the only way out of a child that is not coming back (R7/1d).
+        // A checked continuation is not cancellation-aware by itself: without this, cancelling the
+        // task that awaits — a panel refresh the user scrolled past, a channel that closed — leaves
+        // the child, its two descriptors and everything it has written alive until it exits on its
+        // own or the whole budget expires. Cancellation takes exactly the path a timeout takes.
+        let output = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                job.finish(timeout: timeout) { continuation.resume(returning: $0) }
+            }
+        } onCancel: {
+            job.cancel()
         }
+        if job.wasCancelled { throw ToolError.cancelled(tool: tool) }
+        return output
     }
 }
 
@@ -183,86 +241,151 @@ enum PipeDrain {
     }
 }
 
-/// Single owner of a `Process`, its pipes and the accumulated output.
+
+/// Single owner of one spawned child, its pipes and the accumulated output.
 ///
-/// The invariant: every mutation of this object's state, and every `isRunning`, `terminate()` and
-/// `terminationStatus` access, happens on `queue`.
+/// The invariant: every mutation of this object's state, and every signal, reap and settlement,
+/// happens on `queue`.
 ///
-/// The exit is learned from `terminationHandler`, which Foundation calls on its own queue as soon
-/// as it reaps, and never from `waitUntilExit()`. `waitUntilExit()` spins the *calling thread's*
-/// run loop, and the exit is posted to the run loop of the thread that launched the process —
-/// which here is a `DispatchQueue` worker whose run loop nobody spins. The two threads never meet,
-/// so the wait can outlast the child by an unbounded margin: C2 measured a shell that exited in
-/// 30 ms reported as still running for 31 seconds. That is what produced settlement with the
-/// child already reaped and an exit code of `-1`.
+/// **Why `posix_spawn` rather than `Process`.** The child has to be the leader of a process group
+/// of its own, and Foundation offers no way to ask for one (R7/1c). It happens to spawn its child
+/// into a new group and to document `terminate()` as reaching "all of its subtasks" — measured
+/// here, that is true — but the `SIGKILL` that follows is addressed to a single pid, and worse,
+/// Foundation reaps the child the moment it exits, so a group whose leader has been reaped can no
+/// longer be signalled at all: the pid may already name someone else's group. `git` starts
+/// descendants — a pager, a credential helper, a hook that backgrounds something — and a
+/// descendant deaf to `SIGTERM` outlives the whole call. Owning the spawn is what lets this class
+/// own the group *and* the reap, which are one decision: the pid stays reserved until the
+/// escalation has finished with it. C7.1's PTY layer makes the same move for the same reason,
+/// there with `SETSID`.
+///
+/// The exit is learned from a `DispatchSourceProcess`, never from a blocking wait on this queue.
+/// A blocking read or wait here would stall the very timers meant to bound the call — the timeout,
+/// the escalation, the settlement and the pipe drains all run on this one serial queue.
 ///
 /// Settlement is keyed to the child's exit, never to end-of-file on its pipes. A grandchild that
-/// inherited stdout and outlives the child — and `git` starts them: a pager, a credential helper,
-/// a hook that backgrounds something — holds the write end open indefinitely, so waiting for EOF
-/// would burn the whole timeout on a child that exited in a second and report the SIGTERM that
-/// followed. Reads are event-driven, non-blocking `DispatchSourceRead`s for the same reason, and
-/// the exit path takes one last non-blocking pass over each pipe so that everything the child
-/// wrote before exiting is in the result. A blocking read on the same queue as the timers would
-/// stall the very timers meant to bound the call.
+/// inherited stdout and outlives the child holds the write end open indefinitely, so waiting for
+/// EOF would burn the whole timeout on a child that exited in a second and report the `SIGTERM`
+/// that followed. Reads are event-driven, non-blocking `DispatchSourceRead`s for the same reason,
+/// and the exit path takes one last non-blocking pass over each pipe so that everything the child
+/// wrote before exiting is in the result.
 private final class ToolJob: @unchecked Sendable {
 
-    /// After `terminate()`, how long the child gets to exit before `SIGKILL`, and then before we
-    /// settle anyway.
+    /// After the first signal, how long the tree gets before `SIGKILL`, and then before we settle
+    /// anyway.
     private static let grace = DispatchTimeInterval.milliseconds(500)
 
     private let queue = DispatchQueue(label: "afleet.source-control.tool-runner")
-    private let process = Process()
+    private let executable: URL
+    private let arguments: [String]
+    private let cwd: URL
+    private let environment: [String: String]
+    /// The most this job retains across both pipes before it ends the command for it.
+    private let outputLimitBytes: Int
+
     private let out = Pipe(), err = Pipe()
     private var stdoutData = Data(), stderrData = Data()
+    private var retained = 0
+    private var limitReached = false
     /// One entry per pipe still open, holding what is needed to make a final read of it.
     private var drains: [(fd: Int32, source: DispatchSourceRead, append: (Data) -> Void)] = []
+
+    private var pid: pid_t = -1
+    private var exitSource: DispatchSourceProcess?
+    private var exitStatus: Int32 = -1
     private var exited = false
+    private var reaped = false
+    private var terminating = false
     private var timedOut = false
+    private var cancelled = false
     private var settled = false
+    /// Set when a settlement was reached before there was anyone to hand the result to, so that
+    /// `finish` performs it the moment there is. Without it a job cancelled before the caller
+    /// awaited would settle into nothing and the call would hang to the end of its budget.
+    private var pendingSettle = false
     private var completion: (@Sendable (ToolOutput) -> Void)?
 
     /// True once `finish` has installed a completion. Until then an exit is recorded but not acted
-    /// on: the handler below can fire before the caller has asked for the result, and settling then
+    /// on: the child can be gone before the caller has asked for the result, and settling then
     /// would latch `settled` against a continuation that does not exist yet.
     private var accepting = false
 
-    init(executable: URL, arguments: [String], cwd: URL, environment: [String: String]) {
-        process.executableURL = executable
-        process.arguments = arguments
-        // Exactly the dictionary the caller passed, never merged with this process's own. The
-        // resolved environment is what X11 says every git and gh process afleet spawns runs with,
-        // and a merge would quietly hand the child whatever the app happened to be launched with.
-        process.environment = environment
-        // The cwd is set here rather than through `git -C` or `env -C`, so that it applies to `gh`
-        // and to any tool added later without each wrapper remembering a flag.
-        process.currentDirectoryURL = cwd
-        // Never a terminal and never this process's stdin: a `git` that decides to prompt for a
-        // credential must fail rather than block on an input nobody is watching.
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = out
-        process.standardError = err
-        // Installed before the child can possibly exist, so no exit can be missed.
-        process.terminationHandler = { [self] _ in queue.async { [self] in exited = true; settleIfComplete() } }
+    init(executable: URL, arguments: [String], cwd: URL, environment: [String: String],
+         outputLimitBytes: Int) {
+        self.executable = executable
+        self.arguments = arguments
+        self.cwd = cwd
+        self.environment = environment
+        self.outputLimitBytes = outputLimitBytes
     }
 
-    /// Starts the child, releasing everything this job holds if the spawn fails.
+    /// Spawns the child into a process group of its own, releasing everything this job holds if the
+    /// spawn fails.
     ///
-    /// Both halves are needed and both were measured. The termination handler is nilled because it
-    /// closes a `ToolJob → process → handler → ToolJob` cycle that nothing on the failure path
-    /// breaks; the four pipe handles are closed because Foundation's own failure path leaves the
-    /// descriptors it opened open, whatever happens to the objects. Without them, 20 failed spawns
-    /// leaked exactly 80 descriptors. This is not an exotic path: a panel polling `git` in a
-    /// directory the user has deleted takes it on every refresh.
+    /// Releasing matters and was measured: Foundation's own failure path left the descriptors it
+    /// opened open, and 20 failed spawns leaked exactly 80 of them. This path is not exotic — a
+    /// panel polling `git` in a directory the user has deleted takes it on every refresh — so the
+    /// four pipe handles are closed here whatever happens to the objects.
     func start() throws {
-        do {
-            try queue.sync { try process.run() }
-        } catch {
-            process.terminationHandler = nil
-            for handle in [out.fileHandleForReading, out.fileHandleForWriting,
-                           err.fileHandleForReading, err.fileHandleForWriting] {
-                try? handle.close()
+        try queue.sync {
+            var actions: posix_spawn_file_actions_t?
+            posix_spawn_file_actions_init(&actions)
+            defer { posix_spawn_file_actions_destroy(&actions) }
+            // Never a terminal and never this process's stdin: a `git` that decides to prompt for a
+            // credential must fail rather than block on an input nobody is watching.
+            posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+            posix_spawn_file_actions_adddup2(&actions, out.fileHandleForWriting.fileDescriptor, 1)
+            posix_spawn_file_actions_adddup2(&actions, err.fileHandleForWriting.fileDescriptor, 2)
+            // The cwd is set here rather than through `git -C` or `env -C`, so that it applies to
+            // `gh` and to any tool added later without each wrapper remembering a flag.
+            posix_spawn_file_actions_addchdir(&actions, cwd.path(percentEncoded: false))
+
+            var attributes: posix_spawnattr_t?
+            posix_spawnattr_init(&attributes)
+            defer { posix_spawnattr_destroy(&attributes) }
+            // `pgroup` 0 means "a new group led by the child itself", which is what makes the
+            // child's pid the name of the whole tree for signalling purposes.
+            posix_spawnattr_setpgroup(&attributes, 0)
+            var defaulted = sigset_t()
+            sigfillset(&defaulted)
+            posix_spawnattr_setsigdefault(&attributes, &defaulted)
+            var unblocked = sigset_t()
+            sigemptyset(&unblocked)
+            posix_spawnattr_setsigmask(&attributes, &unblocked)
+            // Dispositions and mask reset so the child does not inherit the app's; every descriptor
+            // but the three named above closed, so nothing of afleet's leaks into a user's `git`.
+            let flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
+                | POSIX_SPAWN_CLOEXEC_DEFAULT
+            posix_spawnattr_setflags(&attributes, Int16(flags))
+
+            var child: pid_t = 0
+            // Exactly the dictionary the caller passed, never merged with this process's own. The
+            // resolved environment is what X11 says every git and gh process afleet spawns runs
+            // with, and a merge would quietly hand the child whatever the app was launched with.
+            let code = Self.withVectors(executable: executable, arguments: arguments,
+                                        environment: environment) { argv, envp in
+                posix_spawn(&child, executable.path(percentEncoded: false), &actions, &attributes,
+                            argv, envp)
             }
-            throw error
+            guard code == 0 else {
+                closeAllHandles()
+                // `posix_spawn` returns the error number rather than setting `errno`. The domain
+                // and the code, not a localized description: the description spells out the
+                // executable path, and this message is carried by a `ToolError` that may be
+                // rendered in a panel or written to a log (root spec §6.3).
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            }
+            pid = child
+            // The parent's copies of the write ends, so that the pipes report end-of-file when the
+            // last writer in the child's tree is gone.
+            try? out.fileHandleForWriting.close()
+            try? err.fileHandleForWriting.close()
+
+            let source = DispatchSource.makeProcessSource(identifier: child, eventMask: .exit,
+                                                          queue: queue)
+            source.setEventHandler { [self] in childDidExit() }
+            exitSource = source
+            source.resume()
         }
     }
 
@@ -271,35 +394,120 @@ private final class ToolJob: @unchecked Sendable {
         // a continuation to resume.
         queue.sync { [self] in
             self.completion = completion
-            drain(out.fileHandleForReading) { [self] in stdoutData.append($0) }
-            drain(err.fileHandleForReading) { [self] in stderrData.append($0) }
+            drain(out.fileHandleForReading) { [self] chunk in accept(chunk) { stdoutData.append($0) } }
+            drain(err.fileHandleForReading) { [self] chunk in accept(chunk) { stderrData.append($0) } }
             accepting = true
-            // A child fast enough to have exited already: its handler has run and gone home, and
-            // this is the first moment there is anyone to tell.
-            settleIfComplete()
+            // A child fast enough to have exited already, or a call cancelled before it was
+            // awaited: this is the first moment there is anyone to tell.
+            if pendingSettle { settle() } else { settleIfComplete() }
         }
         let nanos = Int(timeout.components.seconds) * 1_000_000_000
             + Int(timeout.components.attoseconds / 1_000_000_000)
         // Scheduled on `queue`, so the body is already serialised with every other access. Weakly,
-        // all three: a settled job's timer still fires at the full budget, and a strong capture
+        // all of them: a settled job's timer still fires at the full budget, and a strong capture
         // would hold the job and everything it accumulated — the whole of stdout — alive until
         // then, thirty seconds after the call returned for a git read. `run` holds the job across
         // its `await`, so the job cannot go away before it settles and nothing here is missed.
         queue.asyncAfter(deadline: .now() + .nanoseconds(nanos)) { [weak self] in
             guard let self, !self.settled else { return }
             // The `exited` guard is what keeps a child that finished microseconds before this timer
-            // from being called an overrun.
-            if !self.exited {
+            // from being called an overrun; the `terminating` guard keeps a call already being torn
+            // down for another reason — a cancellation, the output cap — from being relabelled.
+            if self.exited {
+                self.settle()
+            } else if !self.terminating {
                 self.timedOut = true
-                if self.process.isRunning { self.process.terminate() }
-            }
-            self.queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in
-                guard let self, !self.settled else { return }
-                if self.process.isRunning { kill(self.process.processIdentifier, SIGKILL) }
-                self.queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in self?.settle() }
+                self.beginTermination()
             }
         }
     }
+
+    /// Ends the awaiting caller's interest in this child: the tree is signalled exactly as a
+    /// timeout signals it, and `run` reports `.cancelled` rather than a result.
+    func cancel() {
+        queue.async { [self] in
+            guard !settled, !cancelled else { return }
+            cancelled = true
+            if exited { settleIfComplete() } else { beginTermination() }
+        }
+    }
+
+    var wasCancelled: Bool { queue.sync { cancelled } }
+
+    // MARK: - the tree
+
+    /// `SIGTERM` to the whole group, then `SIGKILL` to it after a grace, then settle.
+    private func beginTermination() {
+        guard !terminating, !settled else { return }
+        terminating = true
+        signalTree(SIGTERM)
+        queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in
+            guard let self, !self.settled else { return }
+            self.signalTree(SIGKILL)
+            self.queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in self?.settle() }
+        }
+    }
+
+    /// Signals the child's process group, and the child alone only if the group has already gone.
+    ///
+    /// The negative pid is the whole point: the child leads a group of its own, so one call reaches
+    /// every descendant it started and nothing else on the machine. It is safe because the child is
+    /// not reaped until settlement — an unreaped pid cannot be reused, so this can never name a
+    /// stranger's group.
+    private func signalTree(_ signal: Int32) {
+        guard !reaped, pid > 0 else { return }
+        if kill(-pid, signal) != 0 && errno == ESRCH { _ = kill(pid, signal) }
+    }
+
+    /// The exit source fired. Outside a termination the child is reaped here and the call settles;
+    /// during one the reap is deliberately deferred, because the pid is what names the group the
+    /// escalation is still signalling.
+    private func childDidExit() {
+        guard !reaped, !terminating else { return }
+        if reapIfExited() { settleIfComplete() }
+    }
+
+    /// Collects the child's status if it is there to collect. Never blocks: this runs on the same
+    /// queue as the timers.
+    @discardableResult
+    private func reapIfExited() -> Bool {
+        guard !reaped, pid > 0 else { return false }
+        var status: Int32 = 0
+        var result = waitpid(pid, &status, WNOHANG)
+        while result < 0 && errno == EINTR { result = waitpid(pid, &status, WNOHANG) }
+        guard result == pid else { return false }
+        reaped = true
+        exited = true
+        exitStatus = Self.exitCode(from: status)
+        exitSource?.cancel()
+        exitSource = nil
+        return true
+    }
+
+    /// A child still alive at settlement — it outlived `SIGKILL`, or it is stopped — is killed once
+    /// more and waited for off this queue. A pid nobody waits for is a zombie for the life of the
+    /// app, and the wait cannot happen here because this queue owes the caller its answer now.
+    private func abandonUnreapedChild() {
+        guard !reaped, pid > 0 else { return }
+        let orphan = pid
+        reaped = true
+        exitSource?.cancel()
+        exitSource = nil
+        DispatchQueue.global(qos: .utility).async {
+            _ = kill(-orphan, SIGKILL)
+            var status: Int32 = 0
+            while waitpid(orphan, &status, 0) < 0 && errno == EINTR {}
+        }
+    }
+
+    /// A `wait(2)` status as the code this module reports: the exit status for a child that exited
+    /// and the signal number for one that was killed — the two values Foundation's
+    /// `terminationStatus` reports, so nothing above this layer changes shape.
+    private static func exitCode(from status: Int32) -> Int32 {
+        status & 0x7f == 0 ? (status >> 8) & 0xff : status & 0x7f
+    }
+
+    // MARK: - the pipes
 
     /// Accumulates one pipe as it fills. The cancel handler closes the handle, which releases the
     /// descriptor even when the writer never went away.
@@ -314,6 +522,32 @@ private final class ToolJob: @unchecked Sendable {
         }
         drains.append((fd: fd, source: source, append: append))
         source.resume()
+    }
+
+    /// Appends what one pass produced, up to the cap, and ends the command at it.
+    ///
+    /// Bounding the *pass* (`PipeDrain.bytesPerPass`) and bounding the *buffer* are different
+    /// properties, and only the first was held (R7/1b): the pass returns the queue to the timers
+    /// every mebibyte, which is what keeps a flooding child killable, while the accumulated `Data`
+    /// grew for as long as the child wrote. `git cat-file blob` on a large tracked file reaches
+    /// that in the ordinary course of drawing a diff, and exhausts the app's memory long before any
+    /// budget expires — so the timeout is not the bound, and this is.
+    ///
+    /// The bytes taken up to the cap are kept rather than dropped: they are what a rendered error
+    /// or a log line has to describe, and dropping them would make the failure indistinguishable
+    /// from a silent one.
+    private func accept(_ chunk: Data, into sink: (Data) -> Void) {
+        guard !limitReached else { return }
+        let room = outputLimitBytes - retained
+        if chunk.count < room {
+            sink(chunk)
+            retained += chunk.count
+            return
+        }
+        sink(chunk.prefix(room))
+        retained += max(room, 0)
+        limitReached = true
+        beginTermination()
     }
 
     /// One pass over a pipe, cancelling its source once the writer is gone or the descriptor is
@@ -332,24 +566,61 @@ private final class ToolJob: @unchecked Sendable {
     /// behind. What one pass cannot empty is a pipe a *surviving* grandchild is still filling, and
     /// looping until that one runs dry would hand the queue to a process the child no longer
     /// controls, at the moment the caller is owed its answer. Settlement is keyed to the child's
-    /// exit and not to end-of-file (see the type's note), and this is the same ruling applied to the
-    /// last read.
+    /// exit and not to end-of-file (see the type's note), and this is the same ruling applied to
+    /// the last read.
     private func drainRemaining() { for d in drains { readAvailable(d.fd, into: d.append, source: d.source) } }
+
+    /// Closes every pipe handle this job holds. The failure path's half of `start`.
+    private func closeAllHandles() {
+        for handle in [out.fileHandleForReading, out.fileHandleForWriting,
+                       err.fileHandleForReading, err.fileHandleForWriting] {
+            try? handle.close()
+        }
+    }
+
+    // MARK: - settlement
 
     /// The child's exit is the whole of the completion condition — see the type's note on EOF —
     /// once there is somebody to hand the result to.
     private func settleIfComplete() { if exited && accepting { settle() } }
 
     private func settle() {
-        guard !settled, accepting else { return }
+        guard !settled else { return }
+        guard accepting else { pendingSettle = true; return }
         settled = true
         drainRemaining()
         for d in drains where !d.source.isCancelled { d.source.cancel() }
+        // The reap a termination deferred: the status is still there to collect, and after this the
+        // pid is nobody's to signal.
+        reapIfExited()
+        abandonUnreapedChild()
         let output = ToolOutput(stdout: stdoutData, stderr: stderrData,
-                                exitCode: exited ? process.terminationStatus : -1,
-                                timedOut: timedOut)
+                                exitCode: exited ? exitStatus : -1,
+                                timedOut: timedOut,
+                                outputLimitBytes: limitReached ? outputLimitBytes : nil)
         let finish = completion
         completion = nil
         finish?(output)
+    }
+
+    // MARK: - the C vectors
+
+    /// Runs `body` with a null-terminated `argv` and `envp`, freed on the way out. `argv[0]` is the
+    /// executable's own path, as every exec convention expects.
+    private static func withVectors<R>(executable: URL, arguments: [String],
+                                       environment: [String: String],
+                                       body: (UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
+                                              UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> R) -> R {
+        var argv: [UnsafeMutablePointer<CChar>?] =
+            ([executable.path(percentEncoded: false)] + arguments).map { strdup($0) }
+        argv.append(nil)
+        var envp: [UnsafeMutablePointer<CChar>?] =
+            environment.map { strdup("\($0.key)=\($0.value)") }
+        envp.append(nil)
+        defer {
+            for entry in argv { free(entry) }
+            for entry in envp { free(entry) }
+        }
+        return body(&argv, &envp)
     }
 }

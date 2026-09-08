@@ -53,6 +53,29 @@ final class TempTreeGuardTests: XCTestCase {
         assertNothingWasCreated(inside: home)
     }
 
+    /// The spelling neither of the two above reaches, and the one that makes the guard fail open on
+    /// an ordinary macOS host: the data volume is mounted twice. `/System/Volumes/Data/private/var/…`
+    /// and `/private/var/…` are **one directory** — identical `(st_dev, st_ino)` — and `realpath(3)`
+    /// *preserves* the firmlink prefix rather than removing it, so canonicalising both sides leaves
+    /// two paths that share no components at all. A component comparison is then satisfied by
+    /// nothing, the tree is created, and X9's forbidden write happens under a home spelled the
+    /// other way. Measured on this host before it was written down.
+    ///
+    /// The stand-in home is an invented directory inside this test's own scratch tree, reached
+    /// through the alias exactly as a real one would be; no real config home is read or written.
+    func testATreeUnderAConfigHomeSpelledThroughTheDataVolumeAliasIsRefused() throws {
+        let home = try outer.directory("aliased/.claude")
+        let aliased = URL(filePath: "/System/Volumes/Data"
+                          + TempTree.canonical(home).path(percentEncoded: false))
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: aliased.path(percentEncoded: false)),
+                          "this host does not mount the data volume under its second spelling")
+        let requested = aliased.appending(path: "not-created-yet")
+
+        assertRefused(temporaryDirectory: requested, configHomes: [home],
+                      because: "a config home spelled through the data-volume alias")
+        assertNothingWasCreated(inside: home)
+    }
+
     /// A base that is nowhere near the stand-in home is still accepted, so that the two tests
     /// above are refusals of something rather than of everything.
     func testAnOrdinaryTemporaryDirectoryIsStillAccepted() throws {

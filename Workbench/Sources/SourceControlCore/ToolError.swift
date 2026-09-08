@@ -27,6 +27,13 @@ public enum ToolError: Error, Equatable, Sendable {
     /// The child outlived its budget and was terminated. `afterMs` is the budget, not the elapsed
     /// time.
     case timedOut(tool: Tool, afterMs: Int)
+    /// The awaiting task was cancelled, so the child was terminated and no result was produced.
+    /// A cancelled read is not a failure the panel reports; it is a read the panel asked to stop.
+    case cancelled(tool: Tool)
+    /// The child produced more output than the runner retains for one command, so it was
+    /// terminated exactly as a timeout terminates it. `limitBytes` is the cap, not the amount
+    /// produced: the amount is unbounded by definition, which is why the cap exists.
+    case outputLimitExceeded(tool: Tool, limitBytes: Int)
     /// The command ran and exited with a code its wrapper does not accept. The runner never
     /// produces this: exit codes are data at the process layer and only a command wrapper knows
     /// which of them mean failure — `gh pr checks` exits 8 while checks are pending, and that is

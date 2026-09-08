@@ -293,6 +293,83 @@ final class GitHubModelTests: XCTestCase {
         }
     }
 
+    // MARK: - R7/1e the process layer's facts are read before the exit code
+
+    /// A budget that expired is not visible in an exit code, and both shapes it takes are wrong to
+    /// accept. A `gh` that handles `SIGTERM` and exits 0 leaves a zero here with half a document
+    /// behind it, and one killed outright leaves a signal number that reads as an ordinary
+    /// failure. The first is the dangerous one: the panel would render a truncated list as the
+    /// whole truth. The wrapper therefore asks the output whether it completed *before* it looks
+    /// at the code.
+    func testAGhCallWhoseBudgetExpiredIsTimedOutRatherThanAccepted() async throws {
+        let runner = GhRecordingRunner(stdout: Data("[]".utf8), exitCode: 0, timedOut: true)
+        do {
+            _ = try await GhCommands.issues(root: Self.root, limit: 5, environment: [:], runner: runner)
+            XCTFail("a gh call whose budget expired was accepted because it exited zero")
+        } catch let error as ToolError {
+            guard case .timedOut(let tool, let afterMs) = error else {
+                return XCTFail("an expired budget produced an error other than .timedOut")
+            }
+            XCTAssertEqual(tool, .gh)
+            XCTAssertEqual(afterMs, 60_000, "the error named a budget other than the gh read timeout")
+        }
+    }
+
+    /// The same seam for the retained-output cap, which a `gh` document can reach on a repository
+    /// with a very large listing: the output is partial by construction and is never decoded.
+    func testAGhCallThatReachedTheOutputCapIsReportedRatherThanDecoded() async throws {
+        let runner = GhRecordingRunner(stdout: Data("[".utf8), exitCode: 0, outputLimitBytes: 1024)
+        do {
+            _ = try await GhCommands.pullRequests(root: Self.root, head: nil, state: "open",
+                                                  limit: 5, environment: [:], runner: runner)
+            XCTFail("a gh call that reached the output cap was decoded anyway")
+        } catch let error as ToolError {
+            guard case .outputLimitExceeded(let tool, let limitBytes) = error else {
+                return XCTFail("the cap produced an error other than .outputLimitExceeded")
+            }
+            XCTAssertEqual(tool, .gh)
+            XCTAssertEqual(limitBytes, 1024)
+        }
+    }
+
+    /// And an ordinary reply is still accepted, so the two above refuse something rather than
+    /// everything.
+    func testAnOrdinaryGhReplyIsStillAccepted() async throws {
+        let runner = GhRecordingRunner(stdout: Data("[]".utf8), exitCode: 0)
+        let issues = try await GhCommands.issues(root: Self.root, limit: 5, environment: [:],
+                                                 runner: runner)
+        XCTAssertEqual(issues.count, 0, "an empty listing did not decode to no issues")
+    }
+
+    // MARK: - R7/1f the nested label carries its colour
+
+    /// The module's invariant is that a field `gh` always emits is non-optional, so that a missing
+    /// key is a decode error rather than a default (D9) — and that is what makes gate G3
+    /// falsifiable. `color` is non-null in GitHub's schema and was the one field that escaped the
+    /// rule by being nested one level down, where the record-level key sweep above does not reach:
+    /// an omitted key and an explicit null both decoded to `nil`.
+    func testALabelMissingItsColourOrNamedNullDoesNotDecode() throws {
+        let labelMutations: [(String, (inout [String: Any]) -> Void)] = [
+            ("no color key", { $0.removeValue(forKey: "color") }),
+            ("a null color", { $0["color"] = NSNull() }),
+            ("no name key", { $0.removeValue(forKey: "name") }),
+        ]
+        for (description, edit) in labelMutations {
+            let mutated = try Sample.pullRequests { records in
+                var labels = records[0]["labels"] as? [[String: Any]] ?? []
+                edit(&labels[0])
+                records[0]["labels"] = labels
+            }
+            XCTAssertThrowsError(try GhCommands.decodePullRequests(mutated),
+                                 "a label with \(description) still decoded") { error in
+                guard case ToolError.decodeFailed(let subject, _) = error else {
+                    return XCTFail("a label with \(description) threw something other than .decodeFailed")
+                }
+                XCTAssertEqual(subject, "pull requests")
+            }
+        }
+    }
+
     /// The cwd every `gh` call runs in, invented rather than taken from this machine: the recording
     /// runner never spawns anything, and §6.3 keeps a real path out of an assertion's operands.
     private static let root = URL(filePath: "/invented/sample-repo")
@@ -352,11 +429,19 @@ private final class GhRecordingRunner: ToolRunning, @unchecked Sendable {
     private let stdout: Data
     private let stderr: Data
     private let exitCode: Int32
+    private let timedOut: Bool
+    private let outputLimitBytes: Int?
 
-    init(stdout: Data = Data(), stderr: Data = Data(), exitCode: Int32 = 0) {
+    /// `timedOut` and `outputLimitBytes` are the two process-layer facts a `ToolOutput` carries
+    /// besides its exit code, and a stub that could not produce them could not show that a wrapper
+    /// reads them at all.
+    init(stdout: Data = Data(), stderr: Data = Data(), exitCode: Int32 = 0,
+         timedOut: Bool = false, outputLimitBytes: Int? = nil) {
         self.stdout = stdout
         self.stderr = stderr
         self.exitCode = exitCode
+        self.timedOut = timedOut
+        self.outputLimitBytes = outputLimitBytes
     }
 
     var invocations: [Invocation] { lock.withLock { recorded } }
@@ -364,6 +449,7 @@ private final class GhRecordingRunner: ToolRunning, @unchecked Sendable {
     func run(_ tool: Tool, arguments: [String], cwd: URL,
              environment: [String: String], timeout: Duration) async throws -> ToolOutput {
         lock.withLock { recorded.append(Invocation(tool: tool, arguments: arguments)) }
-        return ToolOutput(stdout: stdout, stderr: stderr, exitCode: exitCode, timedOut: false)
+        return ToolOutput(stdout: stdout, stderr: stderr, exitCode: exitCode, timedOut: timedOut,
+                          outputLimitBytes: outputLimitBytes)
     }
 }

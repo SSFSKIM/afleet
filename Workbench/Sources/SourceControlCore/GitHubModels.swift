@@ -27,11 +27,17 @@ public struct GitHubUser: Hashable, Sendable, Decodable {
 }
 
 /// A label on a pull request or an issue. `color` is `gh`'s six-digit RGB with no leading `#`.
+///
+/// Both fields are non-optional, like every other field this module reads: GitHub's schema makes
+/// `name` and `color` non-null, and a synthesised optional would accept an omitted key *and* an
+/// explicit null as `nil`, which is the strict-decoding invariant of this file abandoned one level
+/// down from where it is stated (R7/1f). The nesting is why it lasted: the record-level key sweep
+/// in `GitHubModelTests` removes top-level keys and never reaches inside a label.
 public struct GitHubLabel: Hashable, Sendable, Decodable {
     public var name: String
-    public var color: String?
+    public var color: String
 
-    public init(name: String, color: String? = nil) {
+    public init(name: String, color: String) {
         self.name = name
         self.color = color
     }

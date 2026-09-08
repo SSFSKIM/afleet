@@ -216,8 +216,14 @@ final class ToolRunnerTests: XCTestCase {
         let elapsedMilliseconds = Int(elapsed.components.seconds * 1000)
             + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
 
-        XCTAssertTrue(output.timedOut,
-                      "a child that flooded its pipe past the budget was not reported as timed out")
+        // Either bound, and since R7/1b ordinarily the cap: 64 MiB arrives well inside a 50 ms
+        // budget on this machine, so the flood now reaches the retained-output cap before the
+        // timer fires and the runner ends it for that instead. The property under test is
+        // unchanged and is neither of the two names — it is that the queue was **not starved**, so
+        // that a bound could fire at all. The budget's own discriminator is the sleeping child
+        // above, which produces nothing and can only be ended by the timer.
+        XCTAssertTrue(output.timedOut || output.outputLimitBytes != nil,
+                      "a child that flooded its pipe past the budget was neither timed out nor ended at the cap")
         XCTAssertTrue(elapsedMilliseconds < 5_000,
                       "the call did not settle inside the budget plus grace; it took \(elapsedMilliseconds) ms")
         XCTAssertTrue(output.stdout.count < blockSize * blocks,
@@ -453,4 +459,157 @@ final class ToolRunnerTests: XCTestCase {
         XCTAssertTrue(ToolRunner.resolve(.gh, in: environment) != nil,
                       "resolve refused a symlink pointing at an executable regular file")
     }
+
+    // MARK: - R7/1b the retained output is bounded, not merely the drain
+
+    /// `PipeDrain.bytesPerPass` bounds one *pass*; it does not bound what the pass keeps. The two
+    /// are different properties and only the first was held: the pass returns the queue to the
+    /// timer every mebibyte — which is what keeps a flooding child killable — while the
+    /// accumulated `Data` grows for as long as the child writes. A `git cat-file blob` on a large
+    /// tracked file is the ordinary way there, and it exhausts memory long before the budget
+    /// matters, so the timeout is not the bound.
+    ///
+    /// The cap is injected here rather than met at its 64 MiB default, so the producer runs in a
+    /// moment. Byte counts, never bytes (§6.3, §11).
+    func testAChildThatOutrunsTheRetainedOutputCapIsEndedByIt() async throws {
+        let limit = 1024 * 1024
+        let offered = 64 * 1024 * 1024
+        let clock = ContinuousClock()
+        let started = clock.now
+        let output = try await ToolRunner(outputLimitBytes: limit)
+            .run(executable: URL(filePath: "/bin/dd"),
+                 arguments: ["if=/dev/zero", "bs=1048576", "count=64"],
+                 cwd: tree.root, environment: [:], timeout: .seconds(30))
+        let elapsed = clock.now - started
+        let elapsedMilliseconds = Int(elapsed.components.seconds * 1000)
+            + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+
+        XCTAssertEqual(output.outputLimitBytes, limit,
+                       "a child that offered \(offered) bytes against a cap of \(limit) did not report the cap")
+        XCTAssertTrue(output.stdout.count <= limit,
+                      "the runner retained \(output.stdout.count) bytes against a cap of \(limit)")
+        XCTAssertTrue(elapsedMilliseconds < 10_000,
+                      "the call took \(elapsedMilliseconds) ms, so the child was not ended at the cap")
+        XCTAssertThrowsError(try output.requireCompleted(tool: .git, timeout: .seconds(30)),
+                             "an output that reached the cap was reported as complete") { error in
+            guard case ToolError.outputLimitExceeded(let tool, let limitBytes) = error else {
+                return XCTFail("the cap produced an error other than .outputLimitExceeded")
+            }
+            XCTAssertEqual(tool, .git)
+            XCTAssertEqual(limitBytes, limit, "the error named a different cap than the runner's")
+        }
+    }
+
+    /// And the cap does not disturb an ordinary read: a child well under it is untouched, so the
+    /// test above is a refusal of something rather than of everything.
+    func testAChildWellUnderTheCapIsUnaffectedByIt() async throws {
+        let output = try await ToolRunner(outputLimitBytes: 1024 * 1024)
+            .run(executable: URL(filePath: "/bin/dd"),
+                 arguments: ["if=/dev/zero", "bs=65536", "count=4"],
+                 cwd: tree.root, environment: [:], timeout: .seconds(30))
+        XCTAssertNil(output.outputLimitBytes, "a child well under the cap reported reaching it")
+        XCTAssertEqual(output.stdout.count, 4 * 65_536, "the drain delivered a different count")
+        XCTAssertNoThrow(try output.requireCompleted(tool: .git, timeout: .seconds(30)))
+    }
+
+    // MARK: - R7/1c the timeout ends the process tree, not only the direct child
+
+    /// `git` starts descendants — a pager, a credential helper, a hook that backgrounds something —
+    /// and the escalation that follows a timeout reaches only the direct child's pid, so a
+    /// descendant that does not stop for `SIGTERM` outlives the whole call.
+    ///
+    /// The child is that shape in miniature: it backgrounds a shell that ignores `SIGTERM` and
+    /// sleeps, then `exec`s a sleeper of its own, so the direct child *is* the second sleeper and
+    /// the deaf one is a grandchild in the same process group. The discriminator is deliberately
+    /// the deaf grandchild and not merely a backgrounded one, because it is only there that the two
+    /// runners differ: measured here, `Process.terminate()` signals the whole group — NSTask puts
+    /// its child in a group of its own and documents `terminate()` as reaching "all of its
+    /// subtasks" — so a grandchild that stops for `SIGTERM` dies either way. What no version of
+    /// this reaches is the `SIGKILL` that follows, which is addressed to one pid and is skipped
+    /// entirely once the direct child has been reaped.
+    ///
+    /// The duration is an unusual number so that the survivor check names this test's processes and
+    /// nothing else on the machine.
+    func testATimedOutChildsDeafDescendantIsKilledWithIt() async throws {
+        let marker = "27.182818"
+        let deafGrandchild = "/bin/sh -c 'trap \"\" TERM; /bin/sleep \(marker)'"
+        let output = try await ToolRunner()
+            .run(executable: URL(filePath: "/bin/sh"),
+                 arguments: ["-c", "\(deafGrandchild) & exec /bin/sleep \(marker)"],
+                 cwd: tree.root, environment: [:], timeout: .milliseconds(300))
+        XCTAssertTrue(output.timedOut, "the child that blocked past its budget was not timed out")
+
+        let survivors = try await survivorCount(matching: "sleep \(marker)", within: .seconds(2))
+        XCTAssertEqual(survivors, 0,
+                       "\(survivors) process(es) of the timed-out child's tree were still running two seconds after the runner settled")
+    }
+
+    // MARK: - R7/1d cancelling the awaiting task ends the child
+
+    /// Without a cancellation handler the child, its descriptors and its accumulated output live
+    /// on until it exits or the whole budget expires, however long ago the panel stopped wanting
+    /// the answer — a refresh the user scrolled past, a channel that closed. Cancellation takes the
+    /// same path a timeout takes, and the call reports it as `.cancelled` rather than as a result.
+    func testCancellingTheAwaitingTaskEndsTheChildAndThrowsCancelled() async throws {
+        let marker = "16.180339"
+        // The cwd is lifted out of the test case before the task closes over it: `TempTree` is not
+        // `Sendable` and a closure capturing `self` here is a data race the compiler refuses.
+        let cwd = tree.root
+        let running = Task {
+            try await ToolRunner().run(executable: URL(filePath: "/bin/sleep"), arguments: [marker],
+                                       cwd: cwd, environment: [:], timeout: .seconds(120))
+        }
+        try await waitUntilRunning(matching: "sleep \(marker)")
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        running.cancel()
+        do {
+            _ = try await running.value
+            XCTFail("a cancelled run returned a result instead of reporting the cancellation")
+        } catch let error as ToolError {
+            XCTAssertEqual(error, .cancelled(tool: .git), "the wrong ToolError was thrown")
+        }
+        let elapsed = clock.now - started
+        let elapsedMilliseconds = Int(elapsed.components.seconds * 1000)
+            + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+        XCTAssertTrue(elapsedMilliseconds < 10_000,
+                      "the cancelled call took \(elapsedMilliseconds) ms to return; it waited out the child")
+
+        let survivors = try await survivorCount(matching: "sleep \(marker)", within: .seconds(2))
+        XCTAssertEqual(survivors, 0,
+                       "\(survivors) process(es) survived the cancelled call two seconds after it returned")
+    }
+
+    /// Blocks until `pattern` matches a running process, so that a cancellation lands on a child
+    /// that exists. `pgrep` exits 1 when nothing matched, which is its documented "no match".
+    private func waitUntilRunning(matching pattern: String,
+                                  within limit: Duration = .seconds(5)) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now + limit
+        while clock.now < deadline {
+            if try await pgrepExitCode(pattern) == 0 { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("the child never appeared; the test's premise did not hold")
+    }
+
+    /// 0 once nothing matches `pattern` any more, polled until `limit`; 1 while something still
+    /// does. A count and never a listing: a process line would carry a temporary path (§6.3, §11).
+    private func survivorCount(matching pattern: String, within limit: Duration) async throws -> Int {
+        let clock = ContinuousClock()
+        let deadline = clock.now + limit
+        while clock.now < deadline {
+            if try await pgrepExitCode(pattern) == 1 { return 0 }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return try await pgrepExitCode(pattern) == 1 ? 0 : 1
+    }
+
+    private func pgrepExitCode(_ pattern: String) async throws -> Int32 {
+        try await ToolRunner().run(executable: URL(filePath: "/usr/bin/pgrep"),
+                                   arguments: ["-f", pattern], cwd: tree.root,
+                                   environment: [:], timeout: .seconds(10)).exitCode
+    }
+
 }
