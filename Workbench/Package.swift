@@ -25,8 +25,20 @@ let package = Package(
     ],
     targets: [
         // MARK: - C7.1 terminal core (owner: C7.1; also owns this file)
-        .target(name: "TerminalCore", dependencies: [core, ghosttyTerminal, ghosttyKit], swiftSettings: v6),
+        .target(name: "CDarwinWaitStatus"),
+        .target(
+            name: "TerminalCore",
+            dependencies: [
+                "CDarwinWaitStatus",
+                core,
+                ghosttyTerminal,
+                ghosttyKit,
+                .product(name: "GhosttyTheme", package: "libghostty-spm"),
+            ],
+            swiftSettings: v6
+        ),
         .testTarget(name: "TerminalCoreTests", dependencies: ["TerminalCore"], swiftSettings: v6),
+        .executableTarget(name: "S1Harness", dependencies: ["TerminalCore"], path: "Spikes/S1Harness", swiftSettings: v6),
         // MARK: - end of C7.1
 
         // MARK: - C7.2 editor core and link routing (owner: C7.2)

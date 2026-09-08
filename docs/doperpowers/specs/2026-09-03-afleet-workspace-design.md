@@ -2517,7 +2517,11 @@ the user/result frame arms had left stale, so `ChannelState.presence` now shows 
   prefix scrub, then `CLAUDE_CONFIG_DIR` set to the resolved ConfigHome root when the home
   came from the environment or an override was chosen and withheld for a default home
   (2026-09-07; §6.1 has the engine facts), then the table's entries and the pass-through
-  set. Owner: C2. Binds C2, C5, C7.
+  set. Owner: C2. Binds C2, C5, C7. Amended 2026-09-08 at C7.1's merge: the Terminal panel's
+  PTY layer adds a TERM overlay to that composed environment — `TERM` and `TERMINFO_DIRS`,
+  set by name for the pane's child only, because a pane's child renders into libghostty and
+  needs its terminfo, while the claude child's environment (§6.1) is unchanged; the overlay is
+  asserted by variable names in C7.1's tests, never by dumping environments (§6.3).
 
 ### 17.6 Ordering and dependency map
 
