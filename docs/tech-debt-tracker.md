@@ -1798,6 +1798,137 @@ is renumbered.
      given the shape. Owner: C4. **Any child whose floor shows exactly this one red should re-run
      before treating it as their own.**
 
+## From C6.3 (`child/c6-decisions`)
+
+Entries **157 through 171** are C6.3's, as the C6 composite's leaf table allots them; 157–166 are
+used and 167–171 are left unspent. Nothing above is renumbered — the gap between 141 and 157 is
+C6.1's and C6.2's reservations and is expected.
+
+157. **Five deferred mounts wait on one carrier: C6.1's `TimelineRenderContext`.** Read rather than
+     assumed at this child's tip: no `EnvironmentValues`, `EnvironmentKey` or `@Entry` declaration
+     exists anywhere under `App/`, and `TimelineRenderContext` appears in the tree only as four
+     doc-comments naming its absence. C6.1's skeleton 2 (`9d6d320`) landed `TimelineRow.item` and
+     `ChannelTimelineModel.signal(_:)`; the per-row capability value lands in a later C6.1 task.
+     Everything this child could not mount is downstream of that one value, and filing them
+     separately would restate one closer five times:
+     - a permission card's paths render as **text, not links**, because the link capability travels
+       in that value and reaching `ChannelContext.links` another way would be the duplicate registry
+       C5's `HostLinkRouter` exists to prevent;
+     - the sent-file row's *Open in Files* (§14 item 29) is unbuilt for the same reason;
+     - the decision row's actions are absent, so the row renders and does not answer;
+     - `RetractionRegistry.retains(_:)` has **no production caller** and still carries its
+       `check-app-wiring.py` allowlist entry naming Task 8, and `TaskCardView` is not mounted on
+       C6.1's `taskRun` row — both allowlist entries were to be removed at that mount;
+     - **nothing assigns `DecisionAnswering.raise`**, so D2's loop is complete but not closed: a
+       successful `perform(.answer)` raises `HostSignal.decisionAnswered` where a test hands it the
+       fold, and raises nothing in the running app, because none of the three hosts that construct
+       an answering object (Activity, the Thread tab, the timeline row) owns a
+       `ChannelTimelineModel` — only the channel column does. So a card's state does not yet leave
+       `.pending` on screen. The spec never said who makes that assignment; that omission is the
+       architect's, not a worker's.
+     The mechanism in every case ships and is tested against a double; what is missing is the
+     construction site. Found at Tasks 2, 6 and 8a, re-verified by reading at this child's tip.
+     Closer: C6.1's merge lands `TimelineRenderContext` and constructs the answering object with the
+     channel's model; this child's rows then read the capability where every other row reads it. If
+     C6.1's merge does not make the `raise` assignment, this stays open on that clause alone.
+     Owner: C6.1, at its merge.
+
+158. **`annotations.preview` is produced by the question card's shape but never populated.** The
+     card writes only `notes`. Two readings of one field name, unresolved and not resolvable from
+     what is recorded: `Fixtures/ask-user-question` records an answer with **no `annotations` key at
+     all** even though its chosen option carries a preview, so deriving one from the option would
+     contradict the recording; and the engine's own TUI populates it only from a preview whose
+     `kind` is `"full"` (2.1.263 `cli.pretty.js:518286`), a shape the tool-input schema's
+     plain-string `preview` does not describe. The card therefore emits `annotations` only when it
+     produced one and omits it otherwise, which is what G1b asserts — correct against both readings
+     and informative under neither. Same class as the overage card's declared-but-unfed
+     `balanceCents` and `currency`. Found at Task 4. Closer: a recording that actually carries
+     `annotations`, or a bundle reading that reconciles the two preview shapes. Owner: C1 for the
+     recording, C6.3's successor for adopting it.
+
+159. **`ThreadModel.open(_:)` has no production caller, and `check-app-wiring.py` cannot see it.**
+     Nothing inside the Thread tab opens a thread; every affordance that would is in another leaf —
+     a timeline tool row (C6.1), a decision row (this child's deferred Task 8 mount, entry 157) and
+     *Ask on the side* on a message (C6.2). The checker keys on the bare name `open`, which is used
+     elsewhere under `App/`, so the member is invisible to it: the tool's letter is satisfied and
+     its substance is not, which is the shape tracker 72 exists to catch. Recorded here rather than
+     left to a name collision. Found at Task 6. Closer: C6.1's and C6.2's affordances land, and the
+     decision row's actions arrive with entry 157's carrier. Owner: C6.1 and C6.2, at their merges.
+
+160. **A pre-existing unused-binding warning outside this child's fence.** A clean
+     `build-for-testing` surfaces `App/Timeline/ChannelTimelineModel.swift:352: warning: immutable
+     value 'ingestion' was never used` — `transcriptMoved(to:)` binds the ingestion in its `guard`
+     and then raises `signal(.relocated:)` alone, which is correct behaviour (tracker 130's closer)
+     with a leftover binding. Committed code this child did not touch, and invisible to an
+     incremental `make build`/`make test`, which is why it survived: this child's own runs report
+     zero warnings. Verified still present at this tip by reading the source. Found at Task 6.
+     Closer: drop the binding to a plain `guard ingestion != nil` or use it. Owner: whoever owns
+     `App/Timeline/` — C6.1.
+
+161. **Two load-dependent flakes in `FleetTimelineTests` redden the shared floor.**
+     `IngestionTests.testTheWholeWireStreamThroughTheTapYieldsMirrorEffectsAndTheLiveHalf` failed
+     once in a full-suite run (7 effects against 15, 30 entries against 53) and passes in
+     isolation — 27 executed / 0 failures on a focused re-run. `TaskOutputTailerTests
+     .testASecondChunksCallSurvivesTheFirstStreamsTermination` has the same shape. Both are outside
+     this child's fence. This matters past tidiness: **two intermittents make a red full-suite run
+     ambiguous**, so every downstream child and every merge reconciliation has to distinguish noise
+     from regression by hand, which is exactly the reading a floor exists to make mechanical. Found
+     at Tasks 7 and 9. Closer: make each assertion wait on delivery rather than on elapsed work, the
+     way tracker 2's and tracker 131's instances were converted. Owner: C3.
+
+162. **afleet has no new-channel path, and a Settings toggle with no consumer.** `Fleet.register`
+     composes every launch as `.resume(key.session, fork: false)`; nothing under `App/` constructs
+     `.new(SessionID())`. `AfleetStore.isolatedSettingsForNewChannels`
+     (`App/Composition/AfleetStore.swift:49`) is written by a control in `SettingsView` and read by
+     nobody. Two consequences, both concrete: root acceptance item 3 (*New channel*) has no
+     implementation at all, and item 4's *Isolated settings for this channel* developer setting does
+     not reach a spawn — which is why this child's live gate has to impose isolation at the
+     process-factory seam rather than through the setting the parent names. Not this child's to fix;
+     channel creation belongs to the shell or to the composer/header leaf. Found at Task 9. Closer:
+     a `.new` composition at `Fleet.register`'s caller, with the developer setting read there.
+     Owner: the architect, to assign.
+
+163. **`claude auth status` is not a sufficient live-gate precondition, and `ScratchLiveGate` treats
+     it as one.** The scratch home reports `loggedIn: true` with an `oauth_token` on `firstParty`,
+     and a prompted turn still returns an API error before any tool call: the account's
+     organisation has subscription access to Claude Code disabled at the policy level. The engine
+     writes it as an `assistant` record carrying `isApiErrorMessage`, `apiErrorStatus`, `error` and
+     `requestId`, with `stop_reason: stop_sequence`, at **zero cost**. So a signed-in home can be an
+     unusable home and the gate's entry check cannot see the difference; the failure instead
+     surfaces four minutes later as the surface's own assertion about a missing card, and the
+     diagnosis took a transcript read because nothing in the run reported it. Found at Task 9, and
+     it has already cost a second leaf (C6.2's G6). Closer: `ScratchLiveGate` additionally skips —
+     loudly, naming the condition — when the first `result` of a probe run carries an error subtype
+     or the first assistant record carries `isApiErrorMessage`. Owner: C5, which owns the file.
+
+164. **`RowRegistry.shared` is process-wide and traps on a duplicate, while the suite builds many
+     `AppModel`s.** An unguarded pair of `register(kind:)` calls in `AppModel.init` crashes the
+     second construction, so this child's claim sits behind a MainActor-isolated
+     `hasClaimedRowKinds` flag: the trap stays live for the case Y1 wrote it for (two leaves owning
+     one kind) and is defeated for the case it never anticipated (one process, many models).
+     **C6.1 registers eleven kinds the same way and meets this the moment its leaf merges**, so the
+     guard belongs in Y1's skeleton rather than being rediscovered per leaf. Found at Task 8a.
+     Closer: the skeleton either states the one-claim-per-process rule and offers the guard, or
+     `RowRegistry` becomes idempotent for an identical re-registration. Owner: the architect, with
+     C6.1 at its merge.
+
+165. **The elicitation form implements a stated JSON-Schema subset, and anything outside it renders
+     raw** (spec D8): object properties of string (with `enum`), number, integer, boolean and
+     string-array; every other shape, a nested object included, renders as a raw JSON field and
+     still answers. The boundary is deliberate, not an oversight, and is filed so that the first
+     real MCP server whose schema exceeds it produces a widening rather than a bug report. No
+     fixture carries an elicitation at all, so the whole card is built on invented requests. Found
+     at Task 4. Closer: widen the subset when a real server's schema needs it. Owner: C6.3's
+     successor.
+
+166. **`ViewTree` reflection needs an explicit descent to reach a hosted card.** `ViewTree` reflects
+     stored properties, so a host's body holds the card *value* and not its buttons, and a blind
+     recursion into `body` reaches `Text`, whose `Body` is `Never`. Task 2 added a `CardTree` helper
+     that descends deliberately for the card's own type. Test-instrument debt, and it extends entry
+     81's finding that SwiftUI body inspection is tied to framework storage rather than to the view
+     tree a user sees. Found at Task 2. Closer: fold the deliberate descent into `ViewTree` itself
+     so each host does not add its own. Owner: C5, which owns the instrument.
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
