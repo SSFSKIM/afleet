@@ -102,6 +102,10 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// members, because the send path is `sendPrompt` and the reentrancy guard is the send's.
     private var isPerformHeld = false
     private var isSendHeld = false
+    /// The same hold, on `run`. A strategy is one await the composer keeps a field editable across,
+    /// so a test that types while one is in flight needs it suspended and not merely slow.
+    private var isRunHeld = false
+    private var heldRunners: [CheckedContinuation<Void, Never>] = []
     private var heldSenders: [CheckedContinuation<Void, Never>] = []
     private var heldCallers: [CheckedContinuation<Void, Never>] = []
     /// How many callers are suspended inside `perform` right now. A count, not a value (§11).
@@ -177,6 +181,23 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         heldSenders = []
         for caller in waiting { caller.resume() }
     }
+    /// Every `run` from here on records itself and then suspends, until `releaseRun()`.
+    func holdRun() { isRunHeld = true }
+    func releaseRun() {
+        isRunHeld = false
+        let waiting = heldRunners
+        heldRunners = []
+        for caller in waiting { caller.resume() }
+    }
+
+    /// What the channel's banner says after each `resolveSetting`, in order.
+    ///
+    /// The fleet advances its **own** unresolved settings as corrections arrive, and strictly in
+    /// order: a surface that must not release the field while the fleet still holds one can only be
+    /// asserted against a fleet that moves. A staged nil is the fleet holding nothing.
+    func stageBannersAfterResolve(_ banners: [ChannelBanner?]) { bannersAfterResolve = banners }
+    private var bannersAfterResolve: [ChannelBanner?] = []
+
     /// Every `perform` from here on records itself and then suspends, until `releasePerform()`.
     func holdPerform() { isPerformHeld = true }
     func releasePerform() {
@@ -318,6 +339,10 @@ actor ComposerLifecycleDouble: LifecycleAPI {
 
     func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
         calls.append(.resolveSetting(key, name: name))
+        if !bannersAfterResolve.isEmpty, var state = table[key] {
+            state.banner = bannersAfterResolve.removeFirst()
+            table[key] = state
+        }
         try resolveOutcome.get()
     }
 
@@ -347,6 +372,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
              ui: any StrategyUI) async throws -> StrategyOutcome {
         calls.append(.run(key, strategy, arguments: arguments))
+        if isRunHeld { await withCheckedContinuation { heldRunners.append($0) } }
         guard !runOutcomes.isEmpty else { return .notARequest }
         return try runOutcomes.removeFirst().get()
     }

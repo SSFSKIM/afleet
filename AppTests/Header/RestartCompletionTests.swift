@@ -35,6 +35,11 @@ final class RestartCompletionTests: XCTestCase {
         return InitializeResponse(raw: .object(body))
     }
 
+    /// The recorded handshake with one key replaced, as the event the fleet retains it from.
+    private func handshakeEvent(mode: PermissionMode) throws -> WireEvent {
+        .handshakeCompleted(Handshake(initialize: try initialize(mode: mode), pending: []), .first)
+    }
+
     /// A header whose channel is running a process, with both readbacks staged.
     private func header(_ double: ComposerLifecycleDouble, key: ChannelKey,
                         answering perform: ChannelState) async throws -> ChannelHeaderActionsModel {
@@ -134,6 +139,9 @@ final class RestartCompletionTests: XCTestCase {
         var held = HeaderRig.replaced(key)
         held.banner = .settingDidNotSurvive(SettingPickersModel.modelSetting)
         await double.setStates([held])
+        // The fleet clears its own banner when the correction resolves its last unresolved setting,
+        // which is what the surface reads before it re-opens the field.
+        await double.stageBannersAfterResolve([nil])
         await double.stageSend("get_settings", .success(try PickerReadbackTests.settings(model: expected.canonical)))
 
         await pickers.selectModel(expected.value)
@@ -174,6 +182,10 @@ final class RestartCompletionTests: XCTestCase {
                        "the snapshot carried a mode the relaunch does not pass")
 
         // The restart, and a new process reporting exactly what the runtime record relaunched with.
+        // The report is the **fleet's** retained handshake, which is where the mode readback is taken
+        // from: the subscription's copy is whatever last got through, and the replacement's is this.
+        await double.openEvents(of: key)
+        await double.stageEngineReport(handshake: try handshakeEvent(mode: clicked), systemInitFrom: nil)
         pickers.beginRestart(reason: "an invented restart")
         await pickers.noteHandshake(try initialize(mode: clicked))
 
@@ -211,5 +223,258 @@ final class RestartCompletionTests: XCTestCase {
         XCTAssertNotNil(header.pickers.restartBanner, "an unread readback raised no banner")
         XCTAssertFalse(header.composer.promptSuggestionsEnabled,
                        "the flag moved on a readback that was never taken")
+    }
+}
+
+// MARK: - The gate's remaining states
+
+/// §7.4's gate is a state machine, and these are the transitions six local patches would have left
+/// open: a readback that could not be taken, a mode read off the wrong process, a restart that threw
+/// after the replacement had spawned, a second change merging into a restart already running, and a
+/// correction made in an order the fleet does not resolve in.
+///
+/// Every value is invented or the `control-shapes` recording's own, and every assertion is on
+/// counts, member names and setting names (§11).
+@MainActor
+final class RestartGateStateTests: XCTestCase {
+
+    private func key() -> ChannelKey { HeaderRig.key() }
+
+    private func rows() throws -> [ModelOption] {
+        ModelOption.options(in: try PickerReadbackTests.recordedBody("list_models"))
+    }
+
+    private func makePickers(_ double: ComposerLifecycleDouble, key: ChannelKey,
+                             surface: ChannelSurfaceState) -> SettingPickersModel {
+        SettingPickersModel(key: key, lifecycle: double, surface: surface)
+    }
+
+    private func handshakeEvent(mode: PermissionMode) throws -> WireEvent {
+        guard case .object(var body) = try PickerReadbackTests.recordedInitializeBody() else {
+            throw XCTSkip("the recording carries no initialize body")
+        }
+        body["current_permission_mode"] = .string(mode.rawValue)
+        return .handshakeCompleted(Handshake(initialize: InitializeResponse(raw: .object(body)), pending: []), .first)
+    }
+
+    // MARK: - A readback that could not be taken
+
+    /// A `get_settings` the channel did not answer leaves the confirmation **owed**, and the next
+    /// handshake — the replacement reporting — settles it.
+    ///
+    /// Failed before the fix: the failure cleared the outstanding list without retaining what was
+    /// expected, so nothing repeated the confirmation and nothing could act on an empty list. The
+    /// recovered readback left the field disabled for the rest of the channel's life.
+    func testAReadbackTheChannelCouldNotAnswerIsConfirmedWhenTheReplacementReports() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        let expected = try XCTUnwrap(try rows().first, "the recording offers no model row")
+        await double.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
+        await double.stageSendSequence("get_settings", [
+            .failure(WireError.controlError("an invented refusal")),
+            .success(try PickerReadbackTests.settings(model: expected.canonical)),
+        ])
+        let surface = ChannelSurfaceState()
+        let pickers = makePickers(double, key: key, surface: surface)
+        pickers.beginRestart(reason: "an invented restart")
+
+        let survived = await pickers.confirmReadback(of: .init(model: expected.value))
+
+        XCTAssertFalse(survived, "a readback that was never taken was reported as surviving")
+        XCTAssertTrue(surface.isDisabled, "an unread readback left the field open")
+        XCTAssertTrue(pickers.restartFailures.isEmpty,
+                      "an unread readback named \(pickers.restartFailures.count) setting(s) as lost")
+        XCTAssertNotNil(pickers.awaitedRestart, "nothing was left to confirm the readback against")
+
+        await pickers.noteHandshake(InitializeResponse(raw: try PickerReadbackTests.recordedInitializeBody()))
+
+        XCTAssertFalse(surface.isDisabled, "the recovered readback left the field disabled")
+        XCTAssertNil(pickers.restartBanner, "the banner survived the readback that answered it")
+        XCTAssertNil(pickers.awaitedRestart, "the confirmation stayed owed after it was settled")
+    }
+
+    // MARK: - The mode is read off the replacement
+
+    /// The mode's only readback is a handshake, and the handshake this model holds is whatever the
+    /// composer's subscription last delivered. The comparison therefore asks the **fleet** what the
+    /// process it is running reported, and holds the gate when the fleet has nothing to report.
+    ///
+    /// Failed before the fix: the stale handshake matched the snapshot, every readback "agreed", and
+    /// the composer re-opened against a process whose mode nothing had confirmed.
+    func testTheModeIsConfirmedFromTheProcessTheFleetIsRunning() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        let stale = try XCTUnwrap(InitializeResponse(raw: try PickerReadbackTests.recordedInitializeBody())
+            .currentPermissionMode, "the recorded handshake carries no mode")
+        let running = try XCTUnwrap(PermissionMode.allCases.first { $0 != stale },
+                                    "there is no second mode for the replacement to report")
+        await double.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
+        await double.stageSend("get_settings", .success(try PickerReadbackTests.settings()))
+        await double.openEvents(of: key)
+        await double.stageEngineReport(handshake: try handshakeEvent(mode: running), systemInitFrom: nil)
+        let surface = ChannelSurfaceState()
+        let pickers = makePickers(double, key: key, surface: surface)
+        await pickers.noteHandshake(InitializeResponse(raw: try PickerReadbackTests.recordedInitializeBody()))
+        XCTAssertEqual(pickers.handshakeMode, stale, "the arm starts from a handshake that is not the replacement's")
+        pickers.beginRestart(reason: "an invented restart")
+
+        let survived = await pickers.confirmReadback(of: .init(permissionMode: stale))
+
+        XCTAssertFalse(survived, "the mode was confirmed against a handshake the replacement never sent")
+        XCTAssertTrue(surface.isDisabled, "the field re-opened over an unconfirmed mode")
+        let banner = try XCTUnwrap(pickers.restartBanner, "a mode that did not survive raised no banner")
+        XCTAssertTrue(banner.contains(SettingPickersModel.label(of: SettingPickersModel.modeSetting)),
+                      "the banner of \(banner.count) character(s) does not name the setting")
+        XCTAssertEqual(pickers.handshakeMode, running,
+                       "the picker kept displaying a mode the running process does not report")
+
+        // The fleet with no handshake to report: unresolved is not a match, and the gate stays shut.
+        let silent = ComposerLifecycleDouble()
+        await silent.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
+        await silent.stageSend("get_settings", .success(try PickerReadbackTests.settings()))
+        let silentSurface = ChannelSurfaceState()
+        let silentPickers = makePickers(silent, key: key, surface: silentSurface)
+        await silentPickers.noteHandshake(InitializeResponse(raw: try PickerReadbackTests.recordedInitializeBody()))
+        silentPickers.beginRestart(reason: "an invented restart")
+
+        let confirmed = await silentPickers.confirmReadback(of: .init(permissionMode: stale))
+
+        XCTAssertFalse(confirmed, "an unresolved mode was reported as surviving")
+        XCTAssertTrue(silentSurface.isDisabled, "an unresolved mode left the field open")
+        XCTAssertNotNil(silentPickers.awaitedRestart, "the unresolved mode left nothing owed")
+    }
+
+    // MARK: - A restart that threw after the replacement spawned
+
+    /// `quiescentRestart` spawns the replacement and **then** restores the flag settings and reads
+    /// them back; both of those throw. An error is therefore not a claim that nothing happened, and
+    /// the channel's own state is what says which it was.
+    ///
+    /// Failed before the fix: every error cancelled the gate, so the field re-opened while the
+    /// replacement was still connecting and a send could enter its queued input with no readiness
+    /// transition to flush it.
+    func testARestartThatThrewWithTheChannelConnectingKeepsTheFieldClosed() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        await double.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
+        await double.stageSend("get_settings", .success(try PickerReadbackTests.recordedBody("get_settings")))
+        await double.setStates([HeaderRig.replaced(key)])
+        let header = HeaderRig.header(double, key: key)
+        await header.pickers.refresh()
+        // The spawn happened; the restoration that follows it did not.
+        var connecting = SidebarFixtures.state(key, origin: .owned(.connecting))
+        connecting.epoch = ProcessEpoch.first.next()
+        await double.setStates([connecting])
+        await double.alwaysPerform(.failure(.notOwned))
+
+        let applied = await header.apply(.promptSuggestions, RestartRequest(promptSuggestions: true))
+
+        XCTAssertFalse(applied, "a restart that threw was reported as applied")
+        XCTAssertTrue(header.surface.isDisabled,
+                      "the field re-opened while the replacement was still connecting")
+        header.composer.draft = "an invented message typed at a connecting replacement"
+        await header.composer.send()
+        let members = await double.memberSequence
+        XCTAssertFalse(members.contains("sendPrompt"),
+                       "a send reached the wire across \(members.count) member(s) while the gate should have held")
+
+        // The other arm: a channel that is not connecting was not replaced, and the field re-opens.
+        let refused = ComposerLifecycleDouble()
+        await refused.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
+        await refused.stageSend("get_settings", .success(try PickerReadbackTests.recordedBody("get_settings")))
+        await refused.setStates([HeaderRig.replaced(key)])
+        let refusedHeader = HeaderRig.header(refused, key: key)
+        await refusedHeader.pickers.refresh()
+        await refused.alwaysPerform(.failure(.notOwned))
+
+        await refusedHeader.apply(.promptSuggestions, RestartRequest(promptSuggestions: true))
+
+        XCTAssertFalse(refusedHeader.surface.isDisabled,
+                       "the field stayed shut behind a restart that replaced nothing")
+    }
+
+    // MARK: - Two changes, one restart
+
+    /// Two restart-required changes are **one** restart on the fleet's side: the second merges into
+    /// the pending change and answers success at once, exactly as a queued one does. Its caller's
+    /// *queued* transition therefore must not release the gate the first one is still holding.
+    ///
+    /// Failed before the fix: the shared flags were cleared unconditionally, so the field re-opened
+    /// while the first change's replacement — or its confirmation — was still running.
+    func testASecondChangeMergingIntoARestartDoesNotReleaseTheFirstsGate() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        let expected = try XCTUnwrap(try rows().first, "the recording offers no model row")
+        await double.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
+        await double.stageSend("get_settings", .success(try PickerReadbackTests.settings(model: expected.canonical)))
+        let surface = ChannelSurfaceState()
+        let pickers = makePickers(double, key: key, surface: surface)
+
+        pickers.beginRestart(reason: "the first invented restart")
+        pickers.beginRestart(reason: "the second invented restart")
+        await pickers.noteQueuedRestart()
+
+        XCTAssertTrue(surface.isDisabled, "the merged change released the gate the first restart holds")
+        XCTAssertTrue(surface.isRestarting, "the merged change reported the channel as no longer restarting")
+
+        let survived = await pickers.confirmReadback(of: .init(model: expected.value))
+
+        XCTAssertTrue(survived, "the restart that did run was not confirmed")
+        XCTAssertFalse(surface.isDisabled, "the field stayed shut after the last operation finished")
+    }
+
+    // MARK: - Corrections in an order the fleet does not resolve in
+
+    /// The fleet resolves **its** unresolved settings in order, and the user picks in whichever order
+    /// they like. Answering the second setting first applies the value and leaves the fleet's list
+    /// where it was, so resolving the first afterwards advances the fleet's banner onto a setting this
+    /// surface has already answered — and nothing of the surface's own is left to hold the field.
+    ///
+    /// Failed before the fix: the field opened with the channel still connecting behind it, over a
+    /// setting the user had in fact already picked a value for.
+    func testACorrectionMadeOutOfTheFleetsOrderStillAnswersBothHalves() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        let rows = try rows()
+        let expected = try XCTUnwrap(rows.first, "the recording offers no model row")
+        let other = try XCTUnwrap(rows.first { $0.canonical != expected.canonical },
+                                  "every recorded row resolves to the same model")
+        let level = "low"
+        await double.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
+        await double.stageSend("get_settings", .success(try PickerReadbackTests.settings(model: other.canonical)))
+        let surface = ChannelSurfaceState()
+        let pickers = makePickers(double, key: key, surface: surface)
+        pickers.beginRestart(reason: "an invented restart")
+
+        let survived = await pickers.confirmReadback(of: .init(model: expected.value, effort: level))
+
+        XCTAssertFalse(survived, "a restart that lost two settings was reported as surviving")
+        XCTAssertEqual(pickers.restartFailures.count, 2,
+                       "\(pickers.restartFailures.count) setting(s) were named as lost")
+
+        // The fleet is holding the same channel, and its own list starts at the model.
+        var held = HeaderRig.replaced(key)
+        held.banner = .settingDidNotSurvive(SettingPickersModel.modelSetting)
+        await double.setStates([held])
+        await double.stageBannersAfterResolve([.settingDidNotSurvive(SettingPickersModel.effortSetting), nil])
+
+        // The user answers the effort first — the fleet cannot advance on it, and does not.
+        await double.stageSend("get_settings",
+                               .success(try PickerReadbackTests.settings(model: other.canonical, effort: level)))
+        await pickers.selectEffort(level)
+
+        XCTAssertTrue(surface.isDisabled, "the field opened with the model still unanswered")
+
+        // And then the model, which is the one the fleet was waiting for.
+        await double.stageSend("get_settings",
+                               .success(try PickerReadbackTests.settings(model: expected.canonical, effort: level)))
+        await pickers.selectModel(expected.value)
+
+        XCTAssertFalse(surface.isDisabled, "the field stayed shut after every setting the banner named was answered")
+        let banner = await double.state(of: key)?.banner
+        XCTAssertNil(banner, "the field opened while the fleet was still holding the channel connecting")
+        let resolved = await double.calls.filter { if case .resolveSetting = $0 { true } else { false } }
+        XCTAssertEqual(resolved.count, 2,
+                       "the corrections reached the fleet \(resolved.count) time(s) for two settings")
     }
 }

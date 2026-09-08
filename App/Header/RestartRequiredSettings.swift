@@ -63,9 +63,11 @@ extension ChannelHeaderActionsModel {
         do {
             after = try await lifecycle.perform(.quiescentRestart(request), on: key)
         } catch {
-            // Nothing was replaced, so the field re-opens rather than staying shut behind a process
-            // that is still the one it was.
-            pickers.cancelRestart()
+            // **An error is not a claim that nothing happened.** `quiescentRestart` spawns the
+            // replacement and only then restores the flag settings and reads them back, and both of
+            // those throw: a channel left connecting has a new process on the other end. The gate is
+            // kept for that one and re-opened for every other, where nothing was replaced.
+            await pickers.restartFailed(await lifecycle.state(of: key), expecting: expected)
             say(Self.refusal(error))
             return false
         }
@@ -76,7 +78,7 @@ extension ChannelHeaderActionsModel {
         // old process, and §8.6's mode switch would follow it onto a process that was never launched
         // with the flag it needs.
         guard SettingPickersModel.replacedTheProcess(after, from: before) else {
-            pickers.noteQueuedRestart()
+            await pickers.noteQueuedRestart()
             say(pickers.restartBanner)
             return false
         }

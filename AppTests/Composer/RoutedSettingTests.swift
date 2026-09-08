@@ -181,6 +181,94 @@ final class RoutedSettingTests: XCTestCase {
         XCTAssertEqual(members, ["route"], "a native row reached \(members.count) member(s)")
     }
 
+    /// **A slash rewind writes its prefill only over the words the command was issued with.**
+    ///
+    /// `/rewind` is an await — two, with the confirmation sheet between them — and the field stays
+    /// editable across it. *Edit* has kept the user's typing since Task 11; this path had no
+    /// comparison at all and assigned the prefill over whatever was in the field.
+    ///
+    /// The strategy is held open by the double, the field is typed into while it is suspended, and
+    /// the honoured outcome is then released.
+    func testASlashRewindKeepsWhatWasTypedWhileItWasInFlight() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        let prefill = "the message the engine handed back"
+        let preview = RewindPreview(canRewind: true, filesChanged: [], insertions: 0, deletions: 0)
+        await double.stageRun(.success(.rewind(preview,
+                                               RewindOutcome(rewound: true, prefillText: prefill, error: nil))))
+        await double.holdRun()
+        let model = composer(double, key: key)
+        model.draft = "/rewind invented-uuid"
+
+        let dispatching = Task { @MainActor in await model.send() }
+        var arrived = false
+        for _ in 0..<400 where !arrived {
+            arrived = await double.strategies.contains(.rewind)
+            if !arrived { try? await Task.sleep(for: .milliseconds(10)) }
+        }
+        XCTAssertTrue(arrived, "the strategy never reached the double, so nothing was typed across anything")
+        let typedSince = "a sentence typed while the rewind was in flight"
+        model.draft = typedSince
+        await double.releaseRun()
+        await dispatching.value
+
+        XCTAssertEqual(model.draft, typedSince,
+                       "the \(typedSince.count) character(s) typed while the rewind was in flight were overwritten")
+        XCTAssertEqual(model.editNote, ComposerModel.typedAheadNote,
+                       "nothing said why the rewound message was not put back into the field")
+
+        // The other arm: nothing was typed, so the prefill is written exactly as the engine sent it.
+        let quiet = ComposerLifecycleDouble()
+        await quiet.stageRun(.success(.rewind(preview,
+                                              RewindOutcome(rewound: true, prefillText: prefill, error: nil))))
+        let quietModel = composer(quiet, key: key)
+        quietModel.draft = "/rewind invented-uuid"
+
+        await quietModel.send()
+
+        XCTAssertEqual(quietModel.draft, prefill, "the honoured rewind did not prefill the field")
+    }
+
+    // MARK: - What the confirmations promise
+
+    /// *Background all* is **one `background_tasks` on this channel** (`Fleet`'s own `.backgroundAll`
+    /// arm, and the parent's `/background-all` row): every tool the current turn is running moves to
+    /// the background. No session is handed off, nothing is replaced by a background job, and nothing
+    /// is recorded that a restart could carry.
+    ///
+    /// Failed before the fix: the confirmation promised that every live channel afleet owns hands off
+    /// to a background job — the scope, the verb and the persistence all misstated.
+    func testTheBackgroundAllConfirmationDescribesWhatTheVerbDoes() async throws {
+        let message = ComposerConfirmation.backgroundAll.message.lowercased()
+        let title = ComposerConfirmation.backgroundAll.title.lowercased()
+
+        XCTAssertFalse(message.contains("hands off") || message.contains("handoff") || message.contains("hand off"),
+                       "the confirmation of \(message.count) character(s) promises a handoff the verb does not do")
+        XCTAssertFalse(message.contains("every channel") || title.contains("every channel"),
+                       "the confirmation claims a scope wider than the channel the action reaches")
+        XCTAssertTrue(message.contains("this channel") || title.contains("this channel"),
+                      "the confirmation of \(message.count) character(s) does not say which channel it is about")
+
+        // And the scope it now claims is the one the answered confirm actually reaches.
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        let model = composer(double, key: key)
+
+        await model.dispatch(action: .backgroundAll)
+        await model.confirmPending()
+
+        let actions = await double.actions
+        XCTAssertEqual(actions.count, 1, "the answered confirm performed \(actions.count) action(s)")
+        guard case .backgroundAll? = actions.first else {
+            return XCTFail("the answered confirm performed something other than the one action")
+        }
+        let keys = await double.calls.compactMap { call -> ChannelKey? in
+            if case .perform(let performed, _) = call { return performed } else { return nil }
+        }
+        XCTAssertEqual(Set(keys).count, 1, "the action reached \(Set(keys).count) channel(s)")
+    }
+
     // MARK: - Attachments
 
     /// A slash command that passes through to the engine is a message like any other, so it carries

@@ -220,6 +220,41 @@ final class BypassGateTests: XCTestCase {
         XCTAssertEqual(recorder.pathsUnderAConfigHome().count, 0, "the held restart wrote under a config home")
     }
 
+    /// **A second selection while one acceptance is in flight is refused, not taken.**
+    ///
+    /// §8.6's order writes the acceptance *first*, so a second selection arriving across the restart
+    /// finds it already recorded and takes item 4's path — the mode alone — to a process the
+    /// prerequisite restart has not replaced yet. The engine reads the mode's availability off the
+    /// launch line, so that request is one afleet must not make.
+    ///
+    /// Failed before the fix: with the restart held open, the second selection sent the mode.
+    func testASecondSelectionIsRefusedWhileAnAcceptanceIsInFlight() async throws {
+        let double = ComposerLifecycleDouble()
+        let recorder = AppWriteRecorder()
+        let header = try await makeHeader(double, recorder: recorder)
+        await header.selectBypassMode()
+        await double.holdPerform()
+
+        let accepting = Task { @MainActor in await header.acceptBypassMode() }
+        while await double.callersHeldInPerform == 0 { await Task.yield() }
+
+        await header.selectBypassMode()
+
+        let held = await steps(of: double)
+        XCTAssertEqual(held, ["store:fleetKit/\(FleetKitKeys.bypassAccepted)", "restart"],
+                       "a second selection across the restart left \(held.count) step(s): "
+                       + held.joined(separator: " → "))
+
+        await double.releasePerform()
+        await accepting.value
+
+        let complete = await steps(of: double)
+        XCTAssertEqual(complete, ["store:fleetKit/\(FleetKitKeys.bypassAccepted)", "restart", "mode"],
+                       "the acceptance and the refused selection left \(complete.count) step(s): "
+                       + complete.joined(separator: " → "))
+        XCTAssertEqual(recorder.pathsUnderAConfigHome().count, 0, "the refused selection wrote under a config home")
+    }
+
     /// A restart the lifecycle refused stops the sequence there: no mode switch is issued against a
     /// process that was never launched with the flag.
     func testARefusedRestartIssuesNoModeSwitch() async throws {
