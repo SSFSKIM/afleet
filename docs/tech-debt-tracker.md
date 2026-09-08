@@ -1232,6 +1232,10 @@ symlink-containment debt in entry 78 is unchanged.
      loop notices a handshake whose epoch differs from the one the queued restart was asked
      against and re-runs the readback, or X5 publishes per-channel state a surface may subscribe
      to. Owner: the C6 composite, with C4 if the second shape is chosen. Raised by C6.2's fix wave.
+     Round 5 (scalpel-1#1) restates the same gap from the gate's side: `noteQueuedRestart` marks the
+     operation done, so when the deferred restart later runs and its readiness is published, nothing
+     reconciles the composer's gate and the field can stay closed — the epoch watch this entry asks for
+     is the closer for both.
 
 206. **A strategy's answer is a one-line note where three of them are screens.** `StrategyOutcome`
      carries `permissions` (the whole `get_settings` body), `mcp` (the server list) and `memory`
@@ -1386,6 +1390,11 @@ symlink-containment debt in entry 78 is unchanged.
      that never resolves still fails rather than hanging — or have the registry migrate pending drafts
      and selection when a channel is re-keyed. Owner: C4 with C6.2. Filed 2026-09-09 (panel round 4,
      scalpel-4#1).
+     Round 5 adds two faces (scalpel-5#1, #2): a respawn refused by a precondition or the cap arms no
+     new deadline, so waiters admitted under `forkIdentityResolving` never resume; and the deadline's
+     expiry settles waiters with the unchanged provisional key, which `EditAndRewind` reports as success
+     and hands to the registry — the draft is then stranded under a key no row resolves. Closer: the
+     settle answers nil on refusal and on deadline, and the composer reports the fork as not opened.
 
 228. **The fleet still merges two restart-required changes; no surface exercises that any more.**
      The gate's redesign (Decision Log, 2026-09-09, the fourth fix wave) refuses a second
@@ -1410,6 +1419,22 @@ symlink-containment debt in entry 78 is unchanged.
      C4 does with a control request on a dormant channel and either widen the input or record why
      the narrow reading is right. Owner: C6.2 with C4. Filed by the fourth fix wave.
 
+230. **The restart gate's admission is not atomic across its own awaits.** `allows(_:)` reads the
+     operation's phase, then awaits `lifecycle.state(of:)` and the fleet's held setting, and answers
+     from the earlier reading; a `beginRestart` landing inside those awaits is not seen (round 5,
+     scalpel-1#2). Both restart entry points also await the channel's state after admission and then
+     `beginRestart` unconditionally, so two concurrent callers can supersede each other's generation
+     and the supervisor's merge-and-queue path is reached after all (scalpel-1#3; 228 is the untested
+     fleet side of that path). Bounded to concurrent restart-required changes on one channel from two
+     surfaces. Closer: the admission takes the operation slot first and validates after, or the whole
+     predicate runs on one actor-isolated read. Owner: C6.2. Filed 2026-09-09 at the fifth review round.
+
+231. **An accepted bypass cannot resolve a `permissionMode` restart mismatch.** `BypassGate` asks the
+     gate for `.bypassMode`, and while the channel is connecting over an unresolved setting the gate
+     admits only `.settingChange`, so the `resolveSetting` recovery that `issueMode` offers for the other
+     modes is unreachable for bypass (round 5, scalpel-2#1). The user can still recover by picking a
+     non-bypass mode. Closer: admit `.bypassMode` as a setting change when the unresolved setting is
+     `permissionMode` and the launch prerequisite is met. Owner: C6.2. Filed 2026-09-09.
 ## From C7.2 (`child/c7-editor-core`)
 
 97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state
