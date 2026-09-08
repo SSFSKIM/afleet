@@ -16,6 +16,15 @@ struct PermissionCardView: View {
     let tool: CanUseToolRequest
     let presentation: DecisionCardView.Presentation
     let channel: ChannelKey
+    /// Whether this card is the one the user is acting on.
+    ///
+    /// Both hosts draw **lists** of cards — Activity a compact card per waiting channel, the
+    /// timeline a full card per pending ask — and a keyboard default action is singular. A card
+    /// that claimed Return because nothing told it not to would let one Return answer whichever
+    /// competing channel's card registered first. So no card owns Return, or the initial focus,
+    /// unless its host says this one is active; `default_to_no` then unbinds the shortcut on top of
+    /// that (spec §8.4).
+    let isActive: Bool
     let answering: DecisionAnswering
 
     /// Which control opens focused.
@@ -36,11 +45,13 @@ struct PermissionCardView: View {
          tool: CanUseToolRequest,
          presentation: DecisionCardView.Presentation,
          channel: ChannelKey,
+         isActive: Bool = false,
          answering: DecisionAnswering) {
         self.card = card
         self.tool = tool
         self.presentation = presentation
         self.channel = channel
+        self.isActive = isActive
         self.answering = answering
         _destination = State(initialValue: card.alwaysAllow?.preselected)
     }
@@ -83,7 +94,13 @@ struct PermissionCardView: View {
     var initialFocus: Focus { tool.fields.defaultToNo == true ? .decline : .approve }
 
     /// …and approve binds no shortcut, so Return cannot approve by reflex.
-    var approveShortcut: KeyboardShortcut? { tool.fields.defaultToNo == true ? nil : .defaultAction }
+    ///
+    /// The flag is the second gate, not the first: an inactive card binds nothing whatever the
+    /// engine said, because Return belongs to the card the user is acting on and to no other.
+    var approveShortcut: KeyboardShortcut? {
+        guard isActive, tool.fields.defaultToNo != true else { return nil }
+        return .defaultAction
+    }
 
     /// The message a denial carries: what the user typed, or the standing sentence.
     var denialMessage: String {
@@ -120,6 +137,9 @@ struct PermissionCardView: View {
                 TextField("Why not", text: $denial)
                     .textFieldStyle(.roundedBorder)
             }
+            if let expansionReading {
+                Text(expansionReading).font(.caption).foregroundStyle(.secondary)
+            }
             HStack(spacing: 8) {
                 Button("Allow once") { answering.send(.allowOnce, on: card, in: channel) }
                     .keyboardShortcut(approveShortcut)
@@ -145,6 +165,80 @@ struct PermissionCardView: View {
             Text("This tool asks for the answer in its own card.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - What Always allow would do
+
+    /// What each suggestion behind *Always allow* would change, in one sentence each.
+    ///
+    /// The button persists something beyond this call, and what it persists is the engine's
+    /// suggestion rather than anything the card composes: a `setMode` switches the session's
+    /// permission mode, so later calls of that kind stop being asked about at all, and a rule is
+    /// written into a settings file. Neither is legible from the words *Always allow*. The card
+    /// therefore states the expansion **before** the user takes it, at the destination the card
+    /// would actually submit — which is also what makes the compact presentation honest, since it
+    /// shows no picker and submits the preselection (spec D5).
+    ///
+    /// Empty when there is no offer, and silent about a suggestion this build cannot describe: an
+    /// `.unknown` re-encodes verbatim and inventing a sentence for it would be a guess.
+    /// The expansions as one block of caption text, or nil where there is nothing to say.
+    var expansionReading: String? {
+        let lines = expansions
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    var expansions: [String] {
+        guard let offer = card.alwaysAllow else { return [] }
+        let target = destination ?? offer.preselected
+        return (tool.fields.permissionSuggestions ?? []).compactMap {
+            Self.expansion(of: target.map($0.filed(at:)) ?? $0)
+        }
+    }
+
+    static func expansion(of update: PermissionUpdate) -> String? {
+        switch update {
+        case .setMode(let mode, let scope, _):
+            let where_ = scope == .session ? "this session" : name(of: scope)
+            return "Always allow sets \(where_)'s permission mode to \(name(of: mode))."
+        case .addRules(let rules, let behavior, let destination, _):
+            return "Always allow adds \(reading(of: rules, behavior)) to \(name(of: destination))."
+        case .replaceRules(let rules, let behavior, let destination, _):
+            return "Always allow replaces the rules in \(name(of: destination)) with \(reading(of: rules, behavior))."
+        case .removeRules(let rules, let behavior, let destination, _):
+            return "Always allow removes \(reading(of: rules, behavior)) from \(name(of: destination))."
+        case .addDirectories(let directories, let destination, _):
+            return "Always allow adds \(reading(of: directories)) to \(name(of: destination))."
+        case .removeDirectories(let directories, let destination, _):
+            return "Always allow removes \(reading(of: directories)) from \(name(of: destination))."
+        case .unknown:
+            return nil
+        }
+    }
+
+    private static func reading(of rules: [PermissionRuleValue], _ behavior: PermissionBehavior) -> String {
+        let named = rules.map { rule in
+            guard let content = rule.ruleContent, !content.isEmpty else { return rule.toolName }
+            return "\(rule.toolName)(\(content))"
+        }.joined(separator: ", ")
+        let word = behavior == .allow ? "an allow rule" : "a \(behavior.rawValue) rule"
+        return rules.count == 1 ? "\(word) for \(named)" : "\(behavior.rawValue) rules for \(named)"
+    }
+
+    private static func reading(of directories: [String]) -> String {
+        directories.count == 1
+            ? "the directory \(directories[0])"
+            : "\(directories.count) directories"
+    }
+
+    private static func name(of mode: PermissionMode) -> String {
+        switch mode {
+        case .default: "Default"
+        case .acceptEdits: "Accept edits"
+        case .bypassPermissions: "Bypass permissions"
+        case .plan: "Plan"
+        case .dontAsk: "Don't ask"
+        case .auto: "Auto"
         }
     }
 
