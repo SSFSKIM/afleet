@@ -34,22 +34,37 @@ struct ChannelHeader: Hashable, Sendable {
     }
 }
 
-// MARK: - One line of the placeholder timeline
+// MARK: - One row of a channel's list
 
-/// One rendered line: the item's category, its timestamp and a one-line summary. Nothing else —
-/// §8's "no composer, no markdown, no cards", and C6 replaces the whole view.
+/// One row of a channel's list: **the item itself**, plus the three fields C5's placeholder row
+/// draws, each derived from it.
+///
+/// **Superseded 2026-09-08 (C6.1; contract Y1 amended by the architect's ruling).** What stood here
+/// said a row was "the item's category, its timestamp and a one-line summary. Nothing else", because
+/// that is all C5's placeholder needed. It is not what a row is. Y1 hands a leaf's builder one of
+/// these and nothing else, and no builder can draw an assistant message's blocks, a tool call's
+/// typed input, a cluster's members or an agent chip's status from a flattened 140-character string.
+/// So the row carries `item`, and `category`, `timestamp` and `summary` stay exactly what they were
+/// and stay derived from it: `PlaceholderRowView`, the closed switch below and every existing
+/// assertion are untouched, and C6.3's builders — written against this type in a parallel worktree —
+/// keep compiling. The amendment is one stored field, and the builder's arity is deliberately
+/// unchanged.
 ///
 /// **The switch below is closed and total on purpose.** The category test compares the set of
 /// categories this builder produced against the set the projection holds, in both directions, and
 /// that comparison only means something while every item yields exactly one row. A `default:` here
 /// that returned nil for a kind nobody thought about would drop that kind's items silently.
 struct TimelineRow: Identifiable, Hashable, Sendable {
+    /// What the row is of. `TimelineItem` is `Hashable` and `Sendable`, so this type's own
+    /// conformances are unaffected by carrying it.
+    let item: TimelineItem
     let id: ItemID
     let category: TimelineCategory
     let timestamp: Date?
     let summary: String
 
     init(_ item: TimelineItem) {
+        self.item = item
         id = item.id
         category = item.category
         timestamp = item.timestamp
@@ -233,7 +248,6 @@ final class ChannelTimelineModel {
             return
         }
         guard !hasOpened, let workspace, let lifecycle else { return }
-        hasOpened = true
         let task = Task { @MainActor [weak self] () -> Void in
             await self?.performOpen(workspace: workspace, lifecycle: lifecycle)
         }
@@ -244,15 +258,23 @@ final class ChannelTimelineModel {
 
     /// The read itself, run by `open`'s stored task.
     ///
-    /// A genuine failure here still latches: `hasOpened` stays set, so the channel keeps reporting
-    /// it for the life of the model. That is tracker 66, filed and deliberately not closed here —
-    /// this change is about the ingestion's *lifetime*, and closing a filed entry as a side effect
-    /// of a different fix would ship behaviour no test in this task covers.
+    /// **Tracker 66 closed here, 2026-09-08.** What stood above said a genuine failure latches
+    /// because `hasOpened` is set before the lookup, and that the entry was filed rather than closed.
+    /// It is closed now: `hasOpened` is set *after* the index lookup succeeds, so a channel whose
+    /// entry is momentarily absent — a transcript deleted between listing and opening, or written a
+    /// moment later — is retried on its next appearance instead of reporting a failure for the life
+    /// of the model, which the registry retains across every switch away and back. A second caller
+    /// arriving while the first is in flight is still serialised, by `open`'s `openingTask` await and
+    /// not by this flag.
     private func performOpen(workspace: Workspace, lifecycle: any LifecycleAPI) async {
         guard let entry = await workspace.index.entry(key.session) else {
             failure = "this channel has no transcript in the index"
             return
         }
+        // The other half of tracker 66: a retry that found the entry has to clear the failure the
+        // attempt before it recorded, or the channel keeps reporting a condition that is over.
+        failure = nil
+        hasOpened = true
         // Every `await` below is a point where `close()` can run — the registry releases a channel
         // that left the index, and the model it releases must not go on to build what the release
         // just took down. Cancellation alone is not the test: `close()` cancels the opening task,
@@ -329,7 +351,35 @@ final class ChannelTimelineModel {
     func transcriptMoved(to path: URL) async {
         guard let ingestion, transcriptPath != path else { return }
         transcriptPath = path
-        await ingestion.relocated(mainPath: path)
+        // **One call, not two.** C3's `signal(.relocated:)` performs the path rebind itself — it
+        // calls `relocated(mainPath:)` and says so at its own definition — so raising the signal is
+        // the whole of the move: the paths this actor holds, and the fold hearing about something no
+        // frame states. Calling both, as this did while the corrective was still in flight, ran the
+        // rebind twice (tracker 130, closed here).
+        await signal(.relocated(mainPath: path))
+    }
+
+    /// The app's raise site for the host signals no frame states: a prompt this host sent, a
+    /// decision this host answered, a rewind this host asked for, a transcript this host moved.
+    ///
+    /// **`HostSignal` is modelled by C3 and was constructed nowhere in the tree.** That is why no
+    /// decision card could leave `.pending` and why no turn summary could carry a `.prompted`
+    /// attribution: the fold has always known how to apply these, and nothing ever raised one. This
+    /// method is where they are raised, and it is a **forwarder** — the fold itself lives in
+    /// `StreamIngestion`, one per channel, and not on this side.
+    ///
+    /// **C6.1 drives exactly one of the four** — `relocated`, from `transcriptMoved(to:)`, because it
+    /// owns the path the index reports. The other three are called from the leaves that own the
+    /// host's side of them: C6.2 after a `.send` and after an honoured rewind, C6.3 after a
+    /// successful `perform(.answer)`. The name is theirs as much as this leaf's and is a cross-leaf
+    /// contract rather than a local choice.
+    func signal(_ signal: HostSignal) async {
+        guard let ingestion else { return }
+        let effect = await ingestion.signal(signal)
+        // The fold answers with what changed. Republishing on an empty effect would push an
+        // identical timeline at every subscriber for a signal that moved nothing.
+        guard !effect.changes.isEmpty else { return }
+        await publish()
     }
 
     /// Releases the ingestion and both loops. The registry calls it when a new launch replaces the
@@ -347,9 +397,21 @@ final class ChannelTimelineModel {
 
     // MARK: - Publishing
 
+    /// Republishes the channel's read model from the fold that owns it.
+    ///
+    /// **One read, not three.** `StreamIngestion.timeline` returns the durable projection, the
+    /// overlay and the streaming preview together; assembling them from `projection`, `overlay` and
+    /// `preview` would be three awaits on an actor, and a mutation landing between any two of them
+    /// would publish a timeline that never existed. C3 says so at the property's own definition and
+    /// this is the only place the app reads it.
+    ///
+    /// **Superseded 2026-09-08 (C6.1).** What stood here built `ChannelTimeline(durable:)` alone,
+    /// which is why every running channel had an empty overlay and no streaming preview: C3's wire
+    /// fold had no consumer anywhere in the app. The fold now lives in the ingestion — one fold, one
+    /// subscription, in the layer that already owns the tap — and this reads its result.
     private func publish() async {
         guard let ingestion else { return }
-        let next = ChannelTimeline(durable: await ingestion.projection)
+        let next = await ingestion.timeline
         timeline = next
         fanout.yield(next)
     }
