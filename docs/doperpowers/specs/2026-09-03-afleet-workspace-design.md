@@ -2397,7 +2397,11 @@ SwiftPM package or target that builds and tests without the children above it, p
   value, so the lifecycle accepts an exit only when its `request.id` is the one it is
   waiting on, and a late exit from an older pane is discarded. The panel never spawns `claude` for a session on its own
   initiative. `stop`, `respawn` and `rm` are actions here with no PTY; `attach` and `logs`
-  are panes. Amended 2026-09-06 at C4's merge: `LifecycleAction.answer(RequestID, InboundAnswer)`;
+  are panes. Amended 2026-09-06 at C4's merge: `LifecycleAction.answer(RequestID, InboundAnswer)`; Amended 2026-09-08 from C5's tracker entry 77 (corrective on `main`): `var jobUpdates:
+  AsyncStream<[JobEntry]> { get }` — the whole current roster, republished from the observer's
+  existing watch and poll cycle whenever its read of `jobs/` changes by value and never otherwise,
+  so an exec job or a job-state change that `updates` cannot express reaches a surface without a
+  second `agents --json`; a surface subscribes before it takes its initial `jobs()` snapshot;
   `LifecycleAPI.events(of:)` (per-subscriber fan-out; a stream is returned for any registered
   channel so a consumer may subscribe before `open`, and it finishes on archive);
   `LifecycleAPI.jobs()` and `performJob(_:_:)` (the job verbs sit off `perform(on:)` because an
@@ -4567,3 +4571,7 @@ Pending — written at finish.
   document; conditional edges to C7.2 (Monaco diffs) and C7.4 (item 47's terminal pane) carry
   fallbacks so no C6 leaf waits on a C7 leaf. Live-cost ceiling ten dollars across the unit,
   every replayable item a fixture. Leaves dispatch on the human's approval of the cut.
+- 2026-09-08 corrective on `main` (tracker 77, filed by C5's review): X5 gains `jobUpdates`, the
+  roster stream above; the sidebar's Background list subscribes and no longer re-reads the roster
+  after Adopt or Stop. The first paint still takes one `jobs()` snapshot, because a launch has to
+  start somewhere and the stream owes nothing until something moves.
