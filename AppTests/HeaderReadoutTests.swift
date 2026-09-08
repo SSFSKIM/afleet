@@ -59,6 +59,56 @@ final class HeaderReadoutTests: XCTestCase {
                        "\(sent.filter { $0 == "get_settings" }.count) settings readback(s) were taken, not 2")
     }
 
+    // MARK: - The meter, polled because nothing pushes it
+
+    /// One `get_context_usage` per `result` frame, plus the one the header takes when it opens, and
+    /// none on a timer.
+    ///
+    /// The quiet stretch at the end is the discriminating half: a poller on an interval keeps
+    /// counting while nothing happens, and this asserts the count does not move.
+    func testTheContextMeterPollsAfterAResult() async throws {
+        let rig = try await Rig()
+        let double = rig.double
+        let key = rig.key
+        await double.stageSend("get_settings", .success(try Self.answer("control-shapes", to: "get_settings")))
+        await double.stageSend("get_context_usage", .success(try Self.answer("zero-cost", to: "get_context_usage")))
+        await double.stageEngineReport(handshake: try Self.handshake("control-shapes"), systemInitFrom: nil)
+
+        rig.model.startReadbacks()
+        // Waited on the *subscription*, not on the readback alone: the frames below are pushed to
+        // whoever is listening at the time, so a test that enqueued them before the header attached
+        // would be asserting on frames nothing received.
+        let attached = await LaunchFixtures.waitAsync { await double.memberSequence.contains("events") }
+        XCTAssertTrue(attached, "the header never subscribed, so no turn could reach it")
+        let onOpen = await Self.polls(double, of: "get_context_usage")
+        XCTAssertEqual(onOpen, 1, "the header took \(onOpen) context reading(s) on open, not 1")
+
+        let results = try Self.results("plain-two-turn")
+        XCTAssertEqual(results.count, 2,
+                       "the fixture carried \(results.count) result frame(s), not the 2 this test polls on")
+        for result in results { double.enqueue(result, to: key) }
+
+        let polled = await LaunchFixtures.waitAsync { await Self.polls(double, of: "get_context_usage") == 3 }
+        let afterTurns = await Self.polls(double, of: "get_context_usage")
+        XCTAssertTrue(polled,
+                      "\(afterTurns) context reading(s) were taken, not the 3 that two turns and one open make")
+
+        // Nothing pushes this readback and no timer is armed: a full second of quiet moves nothing.
+        try await Task.sleep(for: .seconds(1))
+        let quiet = await Self.polls(double, of: "get_context_usage")
+        XCTAssertEqual(quiet, 3,
+                       "\(quiet) context reading(s) after a second of quiet, so something is polling on a timer")
+
+        let usage = try XCTUnwrap(rig.model.readout.context, "the replayed answer produced no context meter")
+        XCTAssertGreaterThan(usage.maxTokens, 0, "the meter's window came back as \(usage.maxTokens) tokens")
+        XCTAssertGreaterThan(usage.percentage, 0, "the meter reads \(usage.percentage) percent of a window that is not empty")
+        XCTAssertGreaterThan(usage.categories.count, 0,
+                             "the answer's breakdown produced \(usage.categories.count) categories")
+        XCTAssertTrue(usage.isAutoCompactEnabled, "the recorded answer has auto-compaction on and the meter lost it")
+
+        rig.model.close()
+    }
+
     // MARK: - Contract Y5, asserted mechanically
 
     /// No file under `App/Timeline/` constructs a ClaudeWire request spec.
@@ -81,6 +131,30 @@ final class HeaderReadoutTests: XCTestCase {
         }
         XCTAssertGreaterThan(scanned, 0, "the scan read no Swift files, so finding nothing proves nothing")
         XCTAssertTrue(offenders.isEmpty, "\(offenders.count) ClaudeWire spec construction(s) under App/Timeline: \(offenders)")
+    }
+
+    // MARK: - X5's refusal rule
+
+    /// A `LifecycleError.busy` refusal leaves the last readback on screen and is not retried.
+    func testABusyRefusalLeavesTheLastReadbackStanding() async throws {
+        let rig = try await Rig()
+        await rig.double.stageSend("get_settings", .success(try Self.answer("control-shapes", to: "get_settings")))
+        await rig.double.stageSend("get_context_usage", .success(try Self.answer("zero-cost", to: "get_context_usage")))
+        await rig.double.stageEngineReport(handshake: try Self.handshake("control-shapes"), systemInitFrom: nil)
+
+        await rig.model.refreshReadbacks()
+        XCTAssertFalse(rig.model.readout.isEngineSilent, "the first readback left the header with nothing on it")
+        let before = rig.model.readout
+
+        await rig.double.stageSendRefusal("get_settings", LifecycleError.busy(.restart))
+        await rig.double.stageSendRefusal("get_context_usage", LifecycleError.busy(.restart))
+        await rig.model.refreshReadbacks()
+
+        XCTAssertTrue(rig.model.readout == before, "the refusal changed the readout instead of leaving it standing")
+        let settings = await Self.polls(rig.double, of: "get_settings")
+        let context = await Self.polls(rig.double, of: "get_context_usage")
+        XCTAssertEqual(settings, 2, "\(settings) settings readback(s) were issued, so the refusal was retried")
+        XCTAssertEqual(context, 2, "\(context) context readback(s) were issued, so the refusal was retried")
     }
 
     // MARK: - The rig

@@ -25,8 +25,9 @@ struct ReadbackPoller {
     let key: ChannelKey
     let lifecycle: any LifecycleAPI
 
-    /// Y5's construction, once, so there is one spelling of the subtype in this leaf.
+    /// Y5's construction, once, so there is one spelling of each subtype in this leaf.
     static let settingsRequest = AnyControlRequest(subtype: "get_settings", payload: .object([:]))
+    static let contextRequest = AnyControlRequest(subtype: "get_context_usage", payload: .object([:]))
 
     /// One `get_settings`, plus the channel's retained handshake for the mode the answer does not
     /// carry. Nil when either the request was refused or the answer was not a settings body.
@@ -35,6 +36,12 @@ struct ReadbackPoller {
         guard answer["applied"] != nil else { return nil }
         let handshake = await lifecycle.engineReports(of: key)?.handshake
         return SettingsReadback(answer: answer, handshake: handshake)
+    }
+
+    /// One `get_context_usage`. Nil on a refusal and on a body with no totals in it.
+    func contextUsage() async -> ContextUsage? {
+        guard let answer = try? await lifecycle.send(Self.contextRequest, on: key) else { return nil }
+        return ContextUsage(answer: answer)
     }
 
     /// Whether this channel has a process of afleet's own to ask.
@@ -48,5 +55,11 @@ struct ReadbackPoller {
         case .owned(.connecting), .owned(.ready), .owned(.contended): true
         default: false
         }
+    }
+
+    /// The one moment a turn is known to have ended, which is when the context meter is polled.
+    static func isTurnEnd(_ event: WireEvent) -> Bool {
+        if case .frame(.result, _) = event { return true }
+        return false
     }
 }

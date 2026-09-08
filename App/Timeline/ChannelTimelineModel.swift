@@ -262,14 +262,15 @@ final class ChannelTimelineModel {
         beginReadbacks()
     }
 
-    /// One pass: `get_settings` for the model and the effort, and the channel's retained handshake
-    /// for the mode.
+    /// One pass: `get_settings` for the model and the effort, the channel's retained handshake for
+    /// the mode, and `get_context_usage` for the meter.
     ///
     /// **Only for a channel with a live process**, and a refusal leaves the last readback standing —
     /// each answer is folded in only when there is one, and nothing here retries (X5).
     func refreshReadbacks() async {
         guard let poller else { return }
         if let settings = await poller.settings() { readout.apply(settings) }
+        if let context = await poller.contextUsage() { readout.context = context }
     }
 
     /// The poller for a channel that has a process to ask, and nil for one that has not.
@@ -278,12 +279,25 @@ final class ChannelTimelineModel {
         return ReadbackPoller(key: key, lifecycle: lifecycle)
     }
 
-    /// Takes the readback the strip is drawn with. One pass, on the channel's own terms: nothing is
-    /// armed on a timer and nothing is re-issued.
+    /// Takes the opening readback and then one after each `result` frame — the one moment a turn is
+    /// known to have ended. **Not a timer**: nothing pushes the context meter (parity §41.15.4), and
+    /// an interval would ask a question of an idle channel over and over.
+    ///
+    /// The subscription is this model's own fan-out, which `events(of:)` documents as legal and is
+    /// how the ingestion and the Activity pump already share one channel. It ends when the channel
+    /// archives — the stream is finished then — and the task clears itself so a channel that comes
+    /// back up is asked again.
     private func beginReadbacks() {
-        guard readbacksWanted, readbackTask == nil, !isTerminated, poller != nil else { return }
+        guard readbacksWanted, readbackTask == nil, !isTerminated, poller != nil, let lifecycle else { return }
+        let key = key
         readbackTask = Task { @MainActor [weak self] in
             await self?.refreshReadbacks()
+            guard let stream = await lifecycle.events(of: key) else { self?.readbackTask = nil; return }
+            for await event in stream {
+                guard let self, !self.isTerminated else { return }
+                guard ReadbackPoller.isTurnEnd(event) else { continue }
+                await self.refreshReadbacks()
+            }
             self?.readbackTask = nil
         }
     }
