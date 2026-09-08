@@ -56,7 +56,12 @@ sum of its leaves:
    channel context; panes and open editors are per channel and survive switching away and
    back; browser tabs are shared window-wide and persist across launches (X6, X7).
 6. **The package stands alone**: `swift test --package-path Workbench` passes from a clean
-   checkout with no network, covering the PTY layer's spawn, resize and exit, `LinkRouter`
+   checkout with no network beyond SwiftPM's resolution of the package's declared
+   dependencies, which warm repository and artifact caches serve (amended 2026-09-08 at
+   C7.2's merge: the bound is two caches — repositories for `libghostty-spm` and its
+   transitive `MSDisplayLink`, artifacts for `GhosttyKit.xcframework.zip` — and `swift test`
+   takes `--disable-sandbox` inside `sandbox-exec`, which drops only SwiftPM's inner
+   sandbox; `Tools/verify-offline-build.sh` is the proof, with a positive control), covering the PTY layer's spawn, resize and exit, `LinkRouter`
    over every case, lane assignment for a merge, an octopus merge and a detached tag, the
    Monaco bridge's message codec, and the git and gh parsers; an import test proves that no
    Workbench module imports `ClaudeWire` (X1) — the package-wide walk over `Workbench/Sources`
@@ -125,11 +130,21 @@ Measured 2026-09-05 in the worktree at the pin.
   `SUPERVISOR_DETACH_CODE`, `TRANSIENT_ATTACH_CODE`, `parseDetachMsg`) lives inside the CLI
   and is never spoken by afleet. Whether Ctrl+Z ends the process or stops it with `SIGTSTP`
   is not determinable from the bundle text and is S1's to observe.
-- **Monaco** (`monaco-editor` on npm): latest `0.56.0`; the full package unpacks to 97.9 MB
-  in 1,909 files, which is why a tree-shaken bundle, not the package, ships. The ESM
+- **Monaco** (`monaco-editor` on npm): latest `0.56.0`, MIT; the full package unpacks to
+  97.9 MB in 1,909 files, which is why a tree-shaken bundle, not the package, ships. The ESM
   integration requires `MonacoEnvironment.getWorker` or `getWorkerUrl` for the editor and
   language workers; esbuild-class bundlers (bun included) are the documented route
-  (`microsoft/monaco-editor/docs/integrate-esm.md`, read 2026-09-05).
+  (`microsoft/monaco-editor/docs/integrate-esm.md`, read 2026-09-05). Corrected 2026-09-08
+  from C7.2's Grounding: the package's `exports` map is `"./*.js": "./esm/vs/*.js"`, so the
+  entry is spelled `monaco-editor/editor/editor.main.js`, not `monaco-editor/esm/vs/…`;
+  `esm/vs/editor/editor.all.js` no longer exists; and `editor.main.js` already is W4's set —
+  every basic-language `register.js` shim (grammars behind lazy `import()`), the `css`,
+  `html`, `json` and `typescript` language features, every editor and diff-editor
+  contribution, plus a new `monaco-lsp-client` re-exported as `lsp`. The service namespaces
+  sit at the top of `monaco` (`monaco.typescript`, not `monaco.languages.typescript`). The
+  built bundle (`bun build --splitting --format=esm --minify`, one document entry and five
+  worker entries) is 13,083,139 bytes across 111 tracked files, 2.90 MB compressed,
+  `ts.worker.js` 6.47 MB of it.
 - **WebKit and custom schemes.** `WKURLSchemeHandler` is per web view; WebKit bug 242871
   records that loads from workers could not be serviced by a custom scheme handler until
   special handling was added for extension service workers, bug 296698 records an iOS 26
@@ -200,7 +215,7 @@ import test over `Workbench/Sources` (amended 2026-09-08 at C7.3's merge):
 |---|---|---|---|
 | `TerminalCore` | C7.1 | AfleetCore, `GhosttyTerminal`, `GhosttyKit` | `TerminalSurface`, the PTY layer, the GhosttyKit adapter; SwiftTerm is added here only if S1 falls back |
 | `EditorCore` | C7.2 | AfleetCore | `MonacoEditorView` (an `NSView` over `WKWebView`), the bridge, the committed bundle as a resource |
-| `LinkRouting` | C7.2 | AfleetCore | `LinkRouter` and its target registry |
+| `LinkRouting` | C7.2 | AfleetCore, PanelHostAPI | `LinkRouter` and its target registry (row amended 2026-09-08 at C7.2's merge: the registry is over X7's `LinkTarget` and `PanelTabID`, which live in `PanelHostAPI`; the edge is acyclic) |
 | `SourceControlCore` | C7.3 | AfleetCore | `git log` and `git status` parsers, lane assignment, diff model, `gh` JSON models and runner |
 | `PanelHostAPI` | C5 (see the flow-back below) | AfleetCore, FleetKit | X7's tab-registration and channel-context protocol; declared here so both Workbench and the app can import it |
 | `TerminalPanel` | C7.4 | TerminalCore, LinkRouting, PanelHostAPI, FleetKit | panes, job attach, the hatch, `claude logs` |
@@ -277,7 +292,10 @@ stamp and Monaco's MIT licence text beside it. `swift test` never runs bun and n
 touches the network; upgrading Monaco is a deliberate commit that reruns the script. The
 bundle is loaded by `MonacoEditorView` (an `NSView` wrapping a `WKWebView`) through a
 `WKURLSchemeHandler` on the `afleet-editor` scheme, and the bridge is a
-`WKScriptMessageHandler` named `afleet` plus `evaluateJavaScript` for host-to-editor calls,
+`WKScriptMessageHandler` named `afleet` plus `callAsyncJavaScript(_:arguments:in:in:)` for
+host-to-editor calls, the command marshalled as an argument rather than escaped into source
+(amended 2026-09-08 at C7.2's merge: escaping a 5 MB buffer into JavaScript source cost
+23–31 ms on the main actor; marshalling costs none — the vocabulary and shapes are unchanged),
 carrying JSON messages with this vocabulary and no other: host to editor `open {path,
 language, text, line?}`, `setText`, `gotoLine {line, column?}`, `setTheme {name}`,
 `showDiff {path, original, modified, language}`, `save` (request the buffer); editor to
@@ -294,6 +312,24 @@ script, and if that also fails the bundle is loaded with `loadFileURL(_:allowing
 instead of the scheme, each recorded here. Promote when the three measurements hold;
 otherwise the fallback the parent names (the WebKit route with the measurements recorded)
 as a Revision Note. The measured bundle size is recorded in the Tracking Map.
+Amended 2026-09-08 at C7.2's merge (Parent revision 1 and the gate's ruling): S3 measures
+**three** load paths — the document, a dynamic-import chunk (the bundle is split, so a
+language grammar is a lazy chunk fetched from inside a worker context) and each of the five
+workers; the degraded no-worker resort (`getWorker` returning nothing, language services on
+the main thread) is a fourth member named so it cannot be reached silently, and reaching it
+is a stop for the architect, not a fallback. **Outcome:** route 1, the custom scheme, carries
+all three load paths and is promoted. `loadFileURL` turned out not to be a fallback at all: a
+`file:` document is its own opaque origin, so a split module bundle is cross-origin to its own
+document and never evaluates. The Blob-URL hazard did not fire because the worker shims
+import their chunks by absolute `afleet-editor://` URL, so `blob:` never enters resolution.
+Cold load median 556 ms (12 of 12 runs under the 1,000 ms budget); a 5 MB file 89–128 ms to
+first render, scripted scroll p50 17 ms / p95 24–33 ms; the 2,000-line diff computes 508
+line changes; all five workers proven by their answers, not their start. Re-measured after
+the three review waves (2026-09-08, three workers still building): process start → ready
+median 677 ms, 9 of 12 under budget, navigation → ready median 454 ms, 12 of 12; workers
+proven by message traffic on Monaco's own instances (json 12, html 12, typescript 10,
+css 6, editor 86–88), `mainThreadFallback: false`. A fully quiet re-measure and "no visible
+jank" remain the human's witnesses.
 
 ### `LinkRouter` (contract W5)
 
@@ -440,8 +476,12 @@ pane, C4 owns the transition.
   under the scheme, from Blob URLs, or under `loadFileURL`; the findings and the bundle
   size are recorded in this document. Promote-or-fallback per the Design. G3 (required):
   `git ls-files` shows the bundle, `VERSION` and licence and nothing else generated (no
-  `node_modules`, no lockfile-adjacent caches); a clean checkout builds and tests with the
-  network disabled.
+  `node_modules`, no lockfile-adjacent caches); a clean checkout builds and tests with no
+  network beyond SwiftPM's resolution of the package's declared dependencies, which warm
+  repository and artifact caches serve (re-worded 2026-09-08 at merge; see item 6).
+  **Outcome 2026-09-08:** G1 73 tests (from 8), three mutation-checked; G2 promoted route 1
+  with the numbers in the S3 delegated-unknown paragraph; G3 passed in a network-denied clean
+  clone with a positive control.
 - **Edges:** blocked-by: C2 (landed), the W1 skeleton; blocks: C7.5, C7.6, C7.7.
 - **Contracts:** W1, W4 (owner), W5 (owner).
 - **Design inheritance:** §9.1 (advisory), §9.6 (binding), W4, W5, the Grounding
@@ -604,7 +644,9 @@ path into C7 is the parent's C4 → C5.
 
 - **Workers under a custom scheme.** WebKit's history with custom-scheme loads makes
   worker start-up the first thing S3 measures; two fallbacks are named in order (Blob-URL
-  workers, then `loadFileURL`), so the leaf never stalls on it.
+  workers, then `loadFileURL`), so the leaf never stalls on it. Settled 2026-09-08: the
+  scheme carries everything, and `loadFileURL` was never a member of the list (opaque
+  origin; see the S3 paragraph).
 - **Weekly Ghostty tags.** An exact pin (`1.5.20260903`) and a bump only by a leaf with a
   Revision Note; the adapter is the only importer, so a breaking tag is one file.
 - **Ctrl+Z semantics in a pane with no shell parent.** `waitpid(WUNTRACED)` in the PTY
@@ -614,7 +656,10 @@ path into C7 is the parent's C4 → C5.
 - **The hatch's re-adoption race** (pane exits before the registry record disappears):
   C4's ten-second quiescent handoff (§7.2 rule 5) owns the wait; C7.4 only reports the exit.
 - **Bundle bloat in git.** The tree-shaken bundle's size is measured by S3 and reported to
-  the human gate before it is committed; the question below carries the decision.
+  the human gate before it is committed; the question below carries the decision. Measured
+  2026-09-08: 13,083,139 bytes, 111 tracked files, 2.90 MB compressed; committed. The lever
+  if a future bump breaks the budget is the TypeScript language service (`ts.worker.js`,
+  6.47 MB). Roughly 165 KB is a byte-identical duplicate stylesheet (C7.2 tracker 99).
 - **Tests that pass but cannot fail** (parent §17.7, binding): every fix's test is shown
   failing first; the PTY layer's environment assertions compare names, never dumps; a lane
   test asserts the lanes it expects, not that some lanes exist.
@@ -642,7 +687,7 @@ parent's decision); any write under `<configHome>` (X9); IDE registration.
 |---|---|---|
 | W1 skeleton | landed by the orchestrator on `main` before dispatch | pending |
 | C7.1 Terminal core | plan `plans/<date>-c7.1-terminal-core.md` on `child/c7-terminal-core` | not-dispatched, dispatchable after W1 |
-| C7.2 Editor core | plan `plans/<date>-c7.2-editor-core.md` on `child/c7-editor-core` | not-dispatched, dispatchable after W1 |
+| C7.2 Editor core | `2026-09-07-c7.2-editor-core.md`; plan `plans/2026-09-07-c7.2-editor-core.md`; Outcomes in the child spec | **merged** 2026-09-08 at `a47788a` from `child/c7-editor-core` `a6fb302` (37 commits); G1 73 → 110 package tests, G2 route 1 promoted (cold load median 556 ms at the gate, 677 ms re-measured after the waves), G3 offline-proven; bundle 13,083,139 bytes / 111 files / 2.90 MB compressed; tracker 97–107 (97, 98 closed on the branch); its own review (astra high, four fixed) then three whole-diff panel rounds at merge and three fix waves (routing epochs and host ownership, bridge visible mode and navigation fence, harness evidence by attribution); human still to witness "no visible jank" |
 | C7.3 Source Control core | ledger `ledgers/2026-09-07-c7.3-scm-core.md`; Outcomes in the ledger | **merged** 2026-09-08 at `aa5df80` from `child/c7-scm-core` `20cdbc1` (41 commits); G1–G3 met, G3 live; 128 (package 128, 0 skipped) tests; tracker 112–126 (115 closed on the branch by `--decorate=full`; 125 is a `main` corrective on C2's `ProcessRunner`); six review rounds, the last two one pinned class (tracker 123, owner C7.7) |
 | C7.4 Terminal panel | plan on `child/c7-terminal-panel` | blocked-by C7.1, C4, C5.G4 |
 | C7.5 Files panel | plan on `child/c7-files-panel` | blocked-by C7.2, C5.G4 |
@@ -764,7 +809,10 @@ when it lands.
 1. **Committing the Monaco bundle.** The recommendation is to commit the generated,
    tree-shaken bundle (likely 10–20 MB across a few dozen files; S3 measures it) so a clean
    checkout tests offline. The alternative is a release-asset download step on first build.
-   Decide after S3 reports the size, or now on the principle.
+   Decide after S3 reports the size, or now on the principle. **Answered 2026-09-08 by the
+   measurement:** 13 MB across 111 files, 2.90 MB compressed as git objects; committed at
+   the gate's ruling within the approved cut, and reversible (delete the directory, add the
+   download step) should the human decide otherwise.
 2. **Ghostty pin cadence.** Weekly tags. Recommendation: pin exactly, bump at each C7
    leaf's dispatch with a Revision Note; never track the latest implicitly.
 
@@ -833,3 +881,13 @@ retrospect.
   user-configuration class the fixtures were blind to (six settings pinned, an adverse-fixture
   suite and a tripwire); C2's `ProcessRunner` carrying the same unbounded pipe drain (tracker
   125, corrective on `main`). Tracker 112 (two runners, the price of X1) stands. 
+- 2026-09-08 reconciliation of C7.2 (merge `a47788a` from `child/c7-editor-core` `a6fb302`,
+  37 commits). Both `[parent-impact]` filings applied: W1's `LinkRouting` row gains
+  `PanelHostAPI`; item 6 and C7.2's G3 say what the network clause exists for, with the two-cache
+  bound and `--disable-sandbox`. The three Parent revisions applied: S3 measures three load paths
+  and the no-worker resort is a named stop; the Grounding Baseline carries 0.56.0's real layout;
+  the bundle size answers human-gate question 1. Settled by the spike: `loadFileURL` is not a
+  fallback (opaque origin), and the custom scheme is the only route the document has. C7.2's
+  tracker 97 (`PanelHostModel.unregister` releases host state before awaiting the router's
+  withdrawal) is a `main` corrective, owner C5's fence. C7.1 and C7.3 inherit the offline bound
+  and the flag. 
