@@ -16,7 +16,7 @@ extension PrecommitModel {
     }
 }
 
-/// The §6.12 consent sheet (acceptance G4).
+/// The §6.12 consent sheet and its fail-closed refusal (acceptance G4).
 ///
 /// **Every clause asserts the call that left the surface**, never that a sheet closed or a banner
 /// appeared: a sheet closes for many reasons and only one of them is the right consent having been
@@ -165,6 +165,30 @@ final class ConsentAndTrustTests: XCTestCase {
         XCTAssertEqual(counter.count, 0, "accepting the sheet spawned \(counter.count) process(es) itself")
         let opens = await lifecycle.actions.filter { if case .open = $0.action { true } else { false } }
         XCTAssertEqual(opens.count, 0, "the consent path performed \(opens.count) open action(s) of its own")
+    }
+
+    // MARK: - G4b: a refused decline
+
+    /// §6.12's fail-closed path — unparseable JSON, a symlink, a foreign uid, a write error — reads
+    /// as nothing written and nothing spawned, and points at the terminal's own `/mcp` flow. It is
+    /// not a retryable hiccup, so the banner must not read like one.
+    func testARefusedDeclineRendersTheBannerPointingAtTheTerminal() async throws {
+        let (lifecycle, model) = await evaluated([.consentNeeded(Self.servers)])
+        await lifecycle.refuseDecline(reason: "symlink")
+
+        model.decline(Self.servers.map(\.name))
+        await model.whenIdle()
+
+        let banner = try XCTUnwrap(model.banner, "a refused decline raised no banner")
+        XCTAssertTrue(banner.text.contains("/mcp"),
+                      "the refusal banner does not point at the terminal's /mcp flow")
+        XCTAssertTrue(banner.text.contains("Nothing was written"),
+                      "the refusal banner does not say that nothing was written")
+        XCTAssertTrue(banner.text.contains("nothing spawned"),
+                      "the refusal banner does not say that nothing spawned")
+        XCTAssertTrue(banner.text.contains("symlink"),
+                      "the refusal banner does not name the store's own reason")
+        XCTAssertNotNil(model.consentServers, "a refused decline let the consent sheet close")
     }
 
 }

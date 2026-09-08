@@ -86,7 +86,7 @@ final class PrecommitModel {
                 banner = nil
                 await reread()
             } catch let error as LifecycleError {
-                banner = RowBanner(error)
+                banner = Self.banner(for: error)
             } catch {
                 banner = RowBanner(text: "The project-server decline did not complete: \(type(of: error)).")
             }
@@ -94,6 +94,16 @@ final class PrecommitModel {
     }
 
     // MARK: - Refusals
+
+    /// §6.12's fail-closed banner. `declineRefused` is the unparseable-JSON, symlink, foreign-uid
+    /// and write-error path: nothing was written and nothing spawned, and the way forward is the
+    /// terminal's own `/mcp` flow rather than another click here. The reason is the store's own
+    /// kind word — never a path (§11).
+    private static func banner(for error: LifecycleError) -> RowBanner {
+        guard case .declineRefused(let reason) = error else { return RowBanner(error) }
+        return RowBanner(text: "Nothing was written and nothing spawned: the decline was refused (\(reason)). "
+                       + "Review this project's MCP servers in your terminal with /mcp.")
+    }
 
     /// Takes the in-flight slot, or refuses because one is already taken.
     private func claim() -> Bool {
