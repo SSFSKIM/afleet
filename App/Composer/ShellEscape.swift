@@ -162,15 +162,24 @@ enum HostPipeDrain {
 /// writes the command, so `sh -c` starting descendants is the ordinary case rather than the exotic
 /// one: `Process.terminate()` reaches the child, the `SIGKILL` that follows names a single pid, and
 /// Foundation reaps that pid the moment it exits — after which the group can no longer be signalled
-/// at all. Owning the spawn is what lets this class own the group *and* the reap, which are one
-/// decision: the pid stays reserved until the escalation has finished with it. C7.3's `ToolRunner`
+/// at all. Owning the spawn is what lets this class own the group *and* the reap, which are two
+/// decisions rather than one: the reap ends the leader, and the group id it named goes on naming the
+/// group for as long as anything is still in it. C7.3's `ToolRunner`
 /// makes the same move for the same reason, and this is a second copy of it rather than a shared
 /// dependency because the App may not import a panel core for its composer.
-private final class ShellChild: @unchecked Sendable {
+///
+/// **Internal rather than private, for the same reason `HostPipeDrain` is.** What this class owes the
+/// group is an *ordering* between four things that share one queue — the exit, the budget, the
+/// escalation and the final drain — and two of those orderings are reachable only in windows of tens
+/// of microseconds when the class is driven through `HostShellRunner.run`. Driven directly, a test
+/// chooses when `finish` is called and how long the grace is, and the ordering becomes the assertion
+/// rather than a race the machine wins or loses.
+final class ShellChild: @unchecked Sendable {
 
     /// After the first signal, how long the tree gets before `SIGKILL`, and then before the result is
-    /// handed over anyway.
-    private static let grace = DispatchTimeInterval.milliseconds(500)
+    /// handed over anyway. Per instance so a test can put the budget's expiry *inside* it.
+    static let defaultGrace = DispatchTimeInterval.milliseconds(500)
+    private let grace: DispatchTimeInterval
 
     private let queue = DispatchQueue(label: "afleet.composer.shell-escape")
     private let command: String
@@ -187,14 +196,26 @@ private final class ShellChild: @unchecked Sendable {
     private var drains: [(fd: Int32, source: DispatchSourceRead, append: (Data) -> Void)] = []
 
     private var pid: pid_t = -1
+    /// The group the child leads, kept apart from `pid` because it outlives the reap.
+    ///
+    /// A reaped pid may be handed to a stranger, so `pid` is unusable the moment `reaped` is set; a
+    /// **group** id is not, because the kernel will not reuse a pid that still names a group with
+    /// members. `kill(-group, …)` after the leader is reaped therefore either reaches this command's
+    /// surviving descendants or answers `ESRCH`, and can never reach anyone else.
+    private var group: pid_t = -1
     private var exitSource: DispatchSourceProcess?
     private var exited = false, reaped = false, terminating = false
+    /// Whether the `SIGKILL` a termination owes the group has been sent. Separate from `settled`: the
+    /// shell's exit and the group's quiescence are two facts, and the run can be over while the tree
+    /// is not.
+    private var escalated = false
     private var accepting = false, settled = false, pendingSettle = false
     private var timedOut = false, cancelled = false
     private var completion: (@Sendable (HostCommandOutput) -> Void)?
 
     init(command: String, shell: String, directory: URL, environment: [String: String],
-         outputLimitBytes: Int) {
+         outputLimitBytes: Int, grace: DispatchTimeInterval = ShellChild.defaultGrace) {
+        self.grace = grace
         self.command = command
         // The channel's own shell, as `ResolvedEnvironment` captured it (X11's single capture).
         self.shell = shell.isEmpty ? "/bin/sh" : shell
@@ -249,6 +270,10 @@ private final class ShellChild: @unchecked Sendable {
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
             }
             pid = child
+            // `POSIX_SPAWN_SETPGROUP` with a `pgroup` of 0 makes the child its own group leader, so
+            // the group's id *is* the child's pid — recorded separately because the pid stops being
+            // usable at the reap and the group id does not.
+            group = child
             // The parent's copies of the write ends, so the pipes report end-of-file when the last
             // writer in the child's tree is gone.
             try? out.fileHandleForWriting.close()
@@ -285,6 +310,9 @@ private final class ShellChild: @unchecked Sendable {
             // this block and would be reported as an overrun of a budget it met.
             self.reapIfExited()
             if self.exited {
+                // Answers the caller even when a termination is already under way — a shell that
+                // exited on the `SIGTERM` has nothing more to write. What it does *not* do is call
+                // that termination off: the escalation is owed to the group, not to the caller.
                 self.settle()
             } else if !self.terminating {
                 self.timedOut = true
@@ -308,14 +336,27 @@ private final class ShellChild: @unchecked Sendable {
     // MARK: - the tree
 
     /// `SIGTERM` to the whole group, then `SIGKILL` to it after a grace, then settle.
+    ///
+    /// **Not conditioned on `settled`, at either end.** A termination is a promise made to the
+    /// *group*, and the group can outlive the run: the shell exits on `SIGTERM` while a descendant
+    /// that ignores it does not, and the awaiting caller can be answered in between — by a budget
+    /// that expired inside the grace, or by a final drain that overran the cap after settlement had
+    /// begun. Skipping the `SIGKILL` because there is nobody left to tell leaves that descendant on
+    /// the machine, which is the one outcome this path exists to prevent. The escalation therefore
+    /// runs until it has run, and `escalated` — not `settled` — is what says it has.
+    ///
+    /// The two escalation blocks hold `self` **strongly**, unlike the budget's own timer: they are a
+    /// second apart rather than two minutes, and a weak capture would hand the group's fate to
+    /// whether `run` happened to return first.
     private func beginTermination() {
-        guard !terminating, !settled else { return }
+        guard !terminating else { return }
         terminating = true
         signalTree(SIGTERM)
-        queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in
-            guard let self, !self.settled else { return }
-            self.signalTree(SIGKILL)
-            self.queue.asyncAfter(deadline: .now() + Self.grace) { [weak self] in self?.settle() }
+        queue.asyncAfter(deadline: .now() + grace) { [self] in
+            guard !escalated else { return }
+            escalated = true
+            signalTree(SIGKILL)
+            queue.asyncAfter(deadline: .now() + grace) { [self] in settle() }
         }
     }
 
@@ -324,11 +365,16 @@ private final class ShellChild: @unchecked Sendable {
     /// The negative pid is the whole point: `sh -c 'sleep 30 & wait'` is a shell that exits on
     /// `SIGTERM` while the `sleep` it started survives, and a run reported as stopped that leaves a
     /// descendant on the machine is the defect. The child leads a group of its own, so one call
-    /// reaches every descendant and nothing else. It is safe because the child is not reaped until
-    /// settlement — an unreaped pid cannot be reused, so this can never name a stranger's group.
+    /// reaches every descendant and nothing else.
+    ///
+    /// The group is signalled **whether or not the leader has been reaped**, because those are two
+    /// different questions: `waitpid` collects one process, and the group is whatever is still in it.
+    /// A pid that names a group with members is not reused, so the negative form is safe here for as
+    /// long as there is anything for it to reach. The single-process fallback is not: `kill(pid, …)`
+    /// after the reap could name a stranger, so it is asked only while the pid is still reserved.
     private func signalTree(_ signal: Int32) {
-        guard !reaped, pid > 0 else { return }
-        if kill(-pid, signal) != 0 && errno == ESRCH { _ = kill(pid, signal) }
+        guard group > 0 else { return }
+        if kill(-group, signal) != 0 && errno == ESRCH && !reaped && pid > 0 { _ = kill(pid, signal) }
     }
 
     /// The exit source fired. Outside a termination the child is reaped here and the run settles;
@@ -447,9 +493,15 @@ private final class ShellChild: @unchecked Sendable {
         // by now, whoever else still holds the write end. Bounded like every other pass, and
         // deliberately *one* of them — looping until a surviving grandchild's pipe runs dry would
         // hand the queue to a process the child no longer controls.
+        //
+        // This pass can be the one that overruns the cap — a shell that exits leaving a descendant on
+        // its stdout is exactly the shape — and `accept` ends the tree for it like any other. That
+        // termination is begun *here*, after `settled` and possibly after the leader was reaped, and
+        // both are why neither is a condition on it.
         for d in drains { readAvailable(d.fd, into: d.append, source: d.source) }
         for d in drains where !d.source.isCancelled { d.source.cancel() }
-        // The reap a termination deferred: after this the pid is nobody's to signal.
+        // The reap a termination deferred: after this the pid is nobody's to signal, though the group
+        // it named still is.
         reapIfExited()
         abandonUnreapedChild()
         let output = HostCommandOutput(stdout: stdout, stderr: stderr,
@@ -527,19 +579,32 @@ extension ComposerModel {
             refusal = "afleet does not know this channel's working directory yet, so `!` cannot run here."
             return false
         }
-        // Asked **before** the spawn. A channel the fleet owns no supervisor for answers nil, and
-        // that is not a refusal: the send would build one and apply its own guards, and nothing is
-        // known here that would justify refusing ahead of it.
-        if let state = await lifecycle.state(of: key), !Self.sendWouldBeAccepted(on: state.origin) {
-            refusal = Self.explanation(of: .heldElsewhere(state.observed))
-            return false
+        // **The whole run, including the question that precedes it, is one cancellable task, and it is
+        // registered before the question goes out.** `stop()` ends whatever `hostShell` names, and the
+        // send that reaches here was launched from a `Task` the view does not retain, so a release can
+        // land at any suspension point in it. The first of those is the ownership question below: a
+        // handle registered only after it leaves a window in which `stop()` finds nothing to cancel
+        // and the far side of the await spawns a shell for a composer that is already gone, then posts
+        // through a lifecycle the user has moved on from.
+        let running = Task { [weak self] () -> HostCommandOutput? in
+            guard let self else { return nil }
+            // Asked **before** the spawn. A channel the fleet owns no supervisor for answers nil, and
+            // that is not a refusal: the send would build one and apply its own guards, and nothing is
+            // known here that would justify refusing ahead of it.
+            let state = await self.lifecycle.state(of: self.key)
+            // The release that arrived during that await lands here, and it is the *only* thing said
+            // about it: a run cancelled before it spawned starts nothing, explains nothing and posts
+            // nothing, because there is no longer a composer for any of it to appear in.
+            guard !Task.isCancelled else { return nil }
+            if let state, !Self.sendWouldBeAccepted(on: state.origin) {
+                self.refusal = Self.explanation(of: .heldElsewhere(state.observed))
+                return nil
+            }
+            return await HostShellRunner().run(command: command,
+                                               shell: context.environment.shell,
+                                               in: context.cwd,
+                                               environment: context.environment.variables)
         }
-        // Held so `stop()` can end it: a composer released while a command runs must not post into a
-        // channel the user has left, minutes later.
-        let running = Task { await HostShellRunner().run(command: command,
-                                                         shell: context.environment.shell,
-                                                         in: context.cwd,
-                                                         environment: context.environment.variables) }
         hostShell = running
         let output = await running.value
         if hostShell == running { hostShell = nil }

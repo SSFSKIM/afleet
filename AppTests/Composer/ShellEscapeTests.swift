@@ -649,6 +649,254 @@ final class ShellEscapeTests: XCTestCase {
         XCTAssertEqual(members.count, 0,
                        "a cancelled shell escape reached \(members.count) lifecycle member(s)")
     }
+
+    /// **A release that lands while the ownership question is in flight starts nothing.** The view
+    /// launches the send from a `Task` it does not retain, and the first suspension point in it is
+    /// `state(of:)`. A composer that registers its run handle only *after* that answer comes back
+    /// leaves the whole await with nothing for `stop()` to cancel, and the far side of it spawns a
+    /// shell and posts through a lifecycle the user has already left.
+    ///
+    /// The lifecycle here holds that one member open for a measured moment, so the release lands
+    /// inside the window rather than near it. The command leaves a mark under the temporary tree; the
+    /// mark is asserted by existence, never by path (§11).
+    func testAReleaseDuringTheOwnershipQuestionSpawnsNothing() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let mark = work.appending(path: "side-effect")
+        let double = ComposerLifecycleDouble()
+        await double.stageSendPrompt(.success(UUID()))
+        await double.setStates([Self.readyState(makeKey())])
+        let lifecycle = SlowStateLifecycle(double, delay: .milliseconds(600))
+        let model = ComposerModel(key: makeKey(), lifecycle: lifecycle, surface: ChannelSurfaceState())
+        model.context = context(cwd: work)
+        model.draft = "!printf 'x' > '\(mark.path)'"
+
+        let finished = Finished()
+        let send = Task { @MainActor in
+            await model.send()
+            await finished.mark()
+        }
+        defer { send.cancel() }
+        // Inside the held question: long enough that the send has certainly reached it, short enough
+        // that its answer has certainly not come back.
+        try await Task.sleep(for: .milliseconds(200))
+
+        model.stop()
+
+        var settled = false
+        for _ in 0..<60 where !settled {
+            if await finished.value { settled = true; break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertTrue(settled, "a shell escape released mid-question had not returned 6 second(s) later")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mark.path),
+                       "a shell escape released before it spawned ran its command anyway, and left its mark behind")
+        let members = await double.memberSequence
+        XCTAssertEqual(members.count, 0,
+                       "a shell escape released before it spawned reached \(members.count) lifecycle member(s)")
+    }
+
+    // MARK: - What the group is owed, once a termination has begun
+
+    /// **The budget expiring inside a termination's grace does not call the escalation off.** A
+    /// cancellation signals the group; the shell exits on the `SIGTERM` and a descendant that ignores
+    /// it does not. If the budget then expires — reaping the shell and answering the caller — a run
+    /// that treats "settled" as "done" skips the `SIGKILL`, and the descendant is still on the machine
+    /// when the test ends.
+    ///
+    /// The child is driven directly rather than through `run`, because the whole claim is an ordering
+    /// between three timers on one queue: the grace is widened so the budget falls inside it by
+    /// seconds rather than by whatever the machine allows. `timedOut` being false is the proof the
+    /// arrangement held — a budget that expired before the cancellation would have latched it.
+    ///
+    /// The descendant is identified by the pid it wrote down and probed with `kill(pid, 0)`; a pid is
+    /// a count of nothing and names no path, session or environment (§11).
+    func testABudgetExpiringInsideTheGraceStillKillsTheGroup() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let pidFile = work.appending(path: "descendant-pid")
+        // `trap "" TERM` sets the disposition to *ignore*, which survives the `exec` that follows it,
+        // so nothing short of `SIGKILL` ends this descendant. The leader keeps its own default
+        // disposition and dies on the first signal, which is what separates the two facts.
+        let child = ShellChild(command: "/bin/sh -c 'trap \"\" TERM; exec sleep 30' & "
+                               + "printf '%s' \"$!\" > '\(pidFile.path)'; wait",
+                               shell: "/bin/sh", directory: work,
+                               environment: ["PATH": "/usr/bin:/bin"],
+                               outputLimitBytes: HostShellRunner.defaultOutputLimitBytes,
+                               grace: .seconds(4))
+        try child.start()
+        let settlement = Settlement()
+        child.finish(timeout: .seconds(2)) { output in
+            Task { await settlement.mark(output) }
+        }
+        guard let descendant = try await recordedPID(in: pidFile, within: 20) else {
+            child.cancel()
+            return XCTFail("the command recorded no descendant to probe")
+        }
+        defer { _ = kill(descendant, SIGKILL) }
+
+        // The termination begins here; its escalation is due four seconds later, and the budget
+        // expires two seconds from now — inside it.
+        child.cancel()
+
+        guard let output = try await settled(settlement, within: 80) else {
+            return XCTFail("the cancelled command had not settled 8 second(s) later")
+        }
+        XCTAssertFalse(output.timedOut,
+                       "the budget expired before the cancellation, so this arm did not put the two in the order it tests")
+        let ended = try await died(descendant, within: 80)
+        XCTAssertTrue(ended, "the command's descendant outlived the escalation the cancellation owed its group")
+    }
+
+    /// **A final drain that overruns the cap still ends the group.** A shell that exits leaving a
+    /// descendant on its stdout is reaped by the exit handler, and the settlement that follows takes
+    /// one last pass over the pipe. When *that* pass is the one that fills the cap, the run reports an
+    /// output-limited stop — and a termination that refuses to begin because the run has settled, or
+    /// refuses to signal because the leader has been reaped, reports a stop that never happened.
+    ///
+    /// The ordering is arranged rather than raced: `finish` is called only after the leader has
+    /// exited and the descendant has written, so there is no drain in place before the last one and
+    /// the whole capture happens inside settlement. `outputLimited` being true is the proof the
+    /// arrangement held.
+    func testAFinalDrainOverrunStillEndsTheGroup() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let pidFile = work.appending(path: "descendant-pid")
+        let cap = 4096
+        let burst = 2 * cap
+        // The leader exits at once; the descendant writes twice the cap into the inherited pipe and
+        // then holds its write end open, ignoring `SIGTERM` throughout.
+        let child = ShellChild(command: "/bin/sh -c 'trap \"\" TERM; "
+                               + "dd if=/dev/zero bs=\(burst) count=1 2>/dev/null | tr \"\\0\" a; "
+                               + "exec sleep 30' & printf '%s' \"$!\" > '\(pidFile.path)'; exit 0",
+                               shell: "/bin/sh", directory: work,
+                               environment: ["PATH": "/usr/bin:/bin"],
+                               outputLimitBytes: cap)
+        try child.start()
+        guard let descendant = try await recordedPID(in: pidFile, within: 20) else {
+            child.cancel()
+            return XCTFail("the command recorded no descendant to probe")
+        }
+        defer { _ = kill(descendant, SIGKILL) }
+        // The leader has exited and been reaped, and the burst is sitting in the pipe with nobody
+        // draining it. Everything the run captures, it captures in the last pass.
+        try await Task.sleep(for: .milliseconds(500))
+
+        let settlement = Settlement()
+        child.finish(timeout: .seconds(30)) { output in
+            Task { await settlement.mark(output) }
+        }
+
+        guard let output = try await settled(settlement, within: 60) else {
+            return XCTFail("the command had not settled 6 second(s) after its last drain")
+        }
+        XCTAssertTrue(output.outputLimited,
+                      "the last pass did not overrun the cap, so this arm did not test the settlement it exists for")
+        XCTAssertEqual(output.stdout.count, cap,
+                       "the run retained \(output.stdout.count) byte(s) against a cap of \(cap)")
+        let ended = try await died(descendant, within: 80)
+        XCTAssertTrue(ended, "the run reported an output-limited stop and left the command's descendant on the machine")
+    }
+
+    // MARK: - Bounded probes
+
+    /// The pid the command wrote down, waited for a tenth of a second at a time.
+    private func recordedPID(in file: URL, within attempts: Int) async throws -> pid_t? {
+        for _ in 0..<attempts {
+            if let text = try? String(contentsOf: file, encoding: .utf8),
+               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return pid
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return nil
+    }
+
+    /// Whether `pid` is gone, polled a tenth of a second at a time. The pid itself is never printed.
+    private func died(_ pid: pid_t, within attempts: Int) async throws -> Bool {
+        for _ in 0..<attempts {
+            if kill(pid, 0) != 0 && errno == ESRCH { return true }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return kill(pid, 0) != 0 && errno == ESRCH
+    }
+
+    /// What the child settled with, polled a tenth of a second at a time.
+    private func settled(_ settlement: Settlement, within attempts: Int) async throws -> HostCommandOutput? {
+        for _ in 0..<attempts {
+            if let output = await settlement.output { return output }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return await settlement.output
+    }
+}
+
+/// What one `ShellChild` handed back, for a test that drives the child directly rather than through
+/// `HostShellRunner.run`.
+private actor Settlement {
+    private(set) var output: HostCommandOutput?
+    func mark(_ output: HostCommandOutput) { self.output = output }
+}
+
+/// A `LifecycleAPI` that holds `state(of:)` open for a measured moment and forwards everything else,
+/// unchanged, to the double the assertions read.
+///
+/// The delay is the whole point: the release this leaf must survive lands *inside* the ownership
+/// question, and a double that answers immediately closes the window before a test can reach it.
+private actor SlowStateLifecycle: LifecycleAPI {
+    private nonisolated let inner: ComposerLifecycleDouble
+    private let delay: Duration
+
+    init(_ inner: ComposerLifecycleDouble, delay: Duration) {
+        self.inner = inner
+        self.delay = delay
+    }
+
+    func state(of key: ChannelKey) async -> ChannelState? {
+        try? await Task.sleep(for: delay)
+        return await inner.state(of: key)
+    }
+
+    func states() async -> [ChannelState] { await inner.states() }
+    func preconditions(for key: ChannelKey) async -> SpawnPrecondition { await inner.preconditions(for: key) }
+    func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
+        try await inner.perform(action, on: key)
+    }
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        try await inner.sendPrompt(input, on: key)
+    }
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
+        try await inner.fork(at: point, on: key)
+    }
+    func route(_ text: String, on key: ChannelKey) async -> Routed { await inner.route(text, on: key) }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { await inner.engineReports(of: key) }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        try await inner.resolveSetting(name, to: value, on: key)
+    }
+    func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
+        try await inner.send(request, on: key)
+    }
+    func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
+             ui: any StrategyUI) async throws -> StrategyOutcome {
+        try await inner.run(strategy, arguments: arguments, on: key, ui: ui)
+    }
+    func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { try await inner.openInTerminal(key) }
+    func attach(_ job: JobShort) async throws -> PaneRequest { try await inner.attach(job) }
+    func logs(_ job: JobShort) async throws -> PaneRequest { try await inner.logs(job) }
+    func paneExited(_ exit: PaneExit) async { await inner.paneExited(exit) }
+    func jobs() async -> [JobEntry] { await inner.jobs() }
+    func performJob(_ verb: JobVerb, _ short: JobShort) async throws { try await inner.performJob(verb, short) }
+    func isDormantEligible(_ key: ChannelKey) async -> Bool { await inner.isDormantEligible(key) }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { await inner.liveTaskIDs(of: key) }
+    func declineProjectServers(_ names: [String], project: URL) async throws {
+        try await inner.declineProjectServers(names, project: project)
+    }
+    func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async {
+        await inner.acceptProjectServers(servers, project: project)
+    }
+    func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? { await inner.events(of: key) }
+    nonisolated var updates: AsyncStream<ChannelState> { inner.updates }
+    nonisolated var jobUpdates: AsyncStream<[JobEntry]> { inner.jobUpdates }
 }
 
 /// A flag one task sets and the test polls, so a bounded wait can tell "returned" from "still

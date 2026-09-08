@@ -1264,6 +1264,28 @@ symlink-containment debt in entry 78 is unchanged.
      readback waits for a handshake whose epoch is the new process's before comparing the mode —
      the same watch item 205 needs. Owner: C6.2. Raised by C6.2's fix wave.
 
+218. **`ToolRunner` carries both of the escalation defects the `!` escape just had.** C7.3's
+     `Workbench/Sources/SourceControlCore/ToolRunner.swift` is the arrangement C6.2's `ShellChild`
+     was copied from, and it still keys its `SIGKILL` on `settled` and its `signalTree` on `reaped`.
+     Both windows are the same: a budget expiring inside a termination's grace reaps the child and
+     settles, and the escalation then skips the kill; and a settlement-time drain that ends the call
+     can no longer signal a group whose leader has been reaped. A tool a panel runs writes the
+     command, so `git` starting descendants is likelier there than in a chat field, not less.
+     Closer: record the group separately from the pid, key the escalation on whether it has run, and
+     drop `settled` from `beginTermination` — the three edits `ShellEscape.swift` took, with the two
+     arms that arrange the orderings. Owner: C7.3. Found by C6.2's second fix wave (scalpel-3#1, #2)
+     while reading the house pattern.
+
+219. **A `!` whose group is still being escalated does not survive the app quitting.** The escalation
+     is now owed to the group past the caller's answer, which means up to two graces (one second)
+     during which the `SIGKILL` is a block on a dispatch queue and nothing else. If afleet exits in
+     that window — a quit, a crash, a test host tearing down — the block dies with the process and a
+     descendant that ignored the `SIGTERM` stays on the machine. The same is true of
+     `abandonUnreapedChild`'s off-queue reap. Bounded and rare, and unfixable inside the child alone:
+     the closer is that §7.4's quit path drains what the composers still owe their groups before it
+     terminates, in the same pass that ends the channels. Owner: C6.2 (the quit clause). Raised by
+     C6.2's second fix wave.
+
 ## From C7.2 (`child/c7-editor-core`)
 
 97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state
