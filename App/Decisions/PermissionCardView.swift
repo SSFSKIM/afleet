@@ -219,7 +219,9 @@ struct PermissionCardView: View {
 ///
 /// The path is drawn and not yet linked: the routing seam is the per-row capability environment
 /// value C6.1 lands (spec D1), and there is no `ChannelContext.links` reachable from a card until
-/// it does. `Edit` and `Write` become diffs in Task 3.
+/// it does. `Edit` and `Write` render their change through `DiffRendering` (spec D9) — the card
+/// names the seam and never the conformer, so C7.2's Monaco replaces the drawing and this file
+/// does not change.
 struct ToolInputView: View {
 
     let input: ToolInput
@@ -233,9 +235,15 @@ struct ToolInputView: View {
         case .read(let read):
             path(read.filePath)
         case .write(let write):
-            path(write.filePath)
+            VStack(alignment: .leading, spacing: 4) {
+                path(write.filePath)
+                DiffView(input: input)
+            }
         case .edit(let edit):
-            path(edit.filePath)
+            VStack(alignment: .leading, spacing: 4) {
+                path(edit.filePath)
+                DiffView(input: input)
+            }
         case .glob(let glob):
             Text(glob.pattern).font(.system(.callout, design: .monospaced))
         case .grep(let grep):
