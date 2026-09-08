@@ -35,6 +35,13 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     /// not a hang.
     private let pages: [String: String]
 
+    /// Path to the `Location:` a `302` answers with. A server redirect is the one navigation a page
+    /// cannot forge and the app cannot see coming, and WebKit reuses the *triggering* action for it
+    /// — so a clicked link or a submitted form can arrive at a non-web scheme still wearing the
+    /// gesture that started it. Proving that needs a real server hop, which is why the server
+    /// learned to redirect at the D38 fix wave.
+    private let redirects: [String: String]
+
     private let listener: NWListener
     private let queue = DispatchQueue(label: "afleet.browserpanel.tests.loopback")
     private let lock = NSLock()
@@ -45,8 +52,9 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     /// The base URL, once `start()` has returned. Loopback, so §11 holds: no test names a real host.
     private(set) var baseURL = URL(string: "http://127.0.0.1/")!
 
-    init(pages: [String: String]) throws {
+    init(pages: [String: String], redirects: [String: String] = [:]) throws {
         self.pages = pages
+        self.redirects = redirects
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
@@ -142,6 +150,22 @@ final class LoopbackHTTPServer: @unchecked Sendable {
         lock.lock()
         requestedPaths.append(path)
         lock.unlock()
+
+        if let location = redirects[path] {
+            let head = """
+                HTTP/1.1 302 Found\r
+                Location: \(location)\r
+                Content-Length: 0\r
+                Cache-Control: no-store\r
+                Connection: close\r
+                \r
+
+                """
+            connection.send(content: Data(head.utf8),
+                            isComplete: true,
+                            completion: .contentProcessed { _ in connection.cancel() })
+            return
+        }
 
         let body = Data((pages[path] ?? "<html><body>not here</body></html>").utf8)
         let status = pages[path] == nil ? "404 Not Found" : "200 OK"

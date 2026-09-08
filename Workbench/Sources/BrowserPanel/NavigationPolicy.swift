@@ -24,43 +24,65 @@ public struct BrowserModifierFlags: OptionSet, Sendable, Equatable {
     public static let control = BrowserModifierFlags(rawValue: 1 << 3)
 }
 
+/// Where a navigation came from — the only thing in this module that carries authority (D38).
+///
+/// The distinction is unforgeable, which is the whole point of it. `.urlBar` is a native action on
+/// afleet's own chrome; nothing a page can execute reaches it. Everything WebKit hands the
+/// navigation delegate is `.pageContent`, whatever WebKit calls it: a link activation, a form
+/// submission a script made with `requestSubmit()`, the same from a subframe, and a server redirect
+/// that reuses the action which triggered it.
+public enum NavigationOrigin: Sendable, Equatable {
+    /// Something inside a rendered page produced this. It authorises nothing.
+    case pageContent
+    /// The user typed this into afleet's URL bar and submitted it.
+    case urlBar
+}
+
 /// One navigation, reduced to what the decision depends on.
 public struct NavigationRequest: Sendable, Equatable {
 
     public var url: URL
+
+    /// How WebKit classified the navigation. **Diagnostic, plus the Cmd-click reading below, and
+    /// never an authorisation** (D38): WebKit's classification says what kind of navigation this is,
+    /// not that a person made it. A script's `requestSubmit()` is `.formSubmitted`; a redirect
+    /// arrives wearing the `.linkActivated` that triggered it.
     public var navigationType: BrowserNavigationType
+
+    /// The modifier keys WebKit reported. Real ones: a synthesised click produces none (probe 3),
+    /// so `.command` here means an `NSEvent` existed. They are read only for a URL the panel could
+    /// have rendered itself, so they can never carry a non-web scheme out of the app.
     public var modifierFlags: BrowserModifierFlags
 
     /// False when WebKit reports no target frame — `target="_blank"`, `window.open`. Q11 makes
     /// that a new panel tab rather than a new application window.
     public var hasTargetFrame: Bool
 
-    /// True only when a real user event produced this load: a click, or the URL bar. A redirect
-    /// and a script-initiated load are false, and that is the gate a non-web scheme has to pass
-    /// before the app will hand it to the system (Q10).
-    public var isUserInitiated: Bool
+    /// The one authorising input. Defaults to `.pageContent`, so a call site that forgets to say
+    /// grants nothing.
+    public var origin: NavigationOrigin
 
     public init(url: URL,
                 navigationType: BrowserNavigationType,
                 modifierFlags: BrowserModifierFlags,
                 hasTargetFrame: Bool,
-                isUserInitiated: Bool) {
+                origin: NavigationOrigin = .pageContent) {
         self.url = url
         self.navigationType = navigationType
         self.modifierFlags = modifierFlags
         self.hasTargetFrame = hasTargetFrame
-        self.isUserInitiated = isUserInitiated
+        self.origin = origin
     }
 
-    /// A URL the user typed and submitted. Q10 names the URL bar as a user gesture alongside
-    /// `.linkActivated`, so the bar's adapter goes through here rather than assembling the flags
-    /// itself at each call site.
+    /// A URL the user typed into afleet's own URL bar and submitted — the one native action page
+    /// content cannot reach, and therefore the one thing that still authorises handing a non-web
+    /// scheme to the system (D38).
     public static func urlBarEntry(_ url: URL) -> NavigationRequest {
         NavigationRequest(url: url,
                           navigationType: .other,
                           modifierFlags: [],
                           hasTargetFrame: true,
-                          isUserInitiated: true)
+                          origin: .urlBar)
     }
 }
 
@@ -80,26 +102,42 @@ public enum NavigationPolicy {
         /// asked for.
         case localFile
 
-        /// A scheme the panel cannot render, arriving without a user gesture. Dropped, so a page
-        /// cannot make afleet launch an application by navigating itself. The scheme is named
-        /// because a diagnostic that cannot say which scheme was refused is not one.
-        case schemeNeedsAUserGesture(String)
+        /// A scheme the panel cannot render, arriving from inside a rendered page. Refused, always
+        /// (D38): a page cannot make afleet launch an application, by link, by form, by subframe,
+        /// by redirect or by script. The scheme is named because a diagnostic that cannot say which
+        /// scheme was refused is not one.
+        ///
+        /// There is no gesture to check for here, which is why this is not called one. WebKit's
+        /// navigation type is a classification, not an authentication: a script's `requestSubmit()`
+        /// is reported as `.formSubmitted` exactly as a pressed button is, the classification is the
+        /// same in a subframe, and a server redirect reuses the action that triggered it — so a
+        /// clicked `https:` link can arrive here as `.linkActivated` at a `mailto:` nobody ever saw.
+        case externalSchemeFromPageContent(String)
 
         /// No scheme at all, or an `about:` URL that is not `about:blank`.
         case unsupportedURL
 
-        /// A `javascript:` or `data:` URL, from any source at all — the URL bar, a link, a redirect
-        /// or a script-initiated load. Refused, and never handed to the system opener (D29).
+        /// A `javascript:` or `data:` URL. Refused, and never handed to the system opener (D29).
         ///
-        /// A `javascript:` URL loaded into a tab executes **in the current page's origin**, which is
-        /// exactly how an address bar becomes a script injection: anything that can put a string in
-        /// front of the bar can then run code as the page the user is reading. A `data:` URL renders
-        /// attacker-controlled markup in an origin the user reads as the panel's own, which is the
-        /// same trick with the payload inlined instead of typed.
+        /// **What this enforces, exactly** (D39, narrowing D29's wording to what is true). The URL
+        /// bar refuses both, which is the case that matters: a `javascript:` URL typed or pasted
+        /// into an address bar executes in the origin of the page the user is *reading*, and that is
+        /// the classic self-XSS. Any navigation WebKit dispatches for policy is refused, which
+        /// covers the top-level `data:` case — measured: a page navigating itself to a `data:` URL
+        /// does reach the delegate and is refused here.
         ///
-        /// Handing either to `NSWorkspace.shared.open` is not safety, only someone else's problem —
-        /// so this case sits above the gesture gate rather than beside it, and the scheme is named
-        /// because a diagnostic that cannot say what was refused is not one.
+        /// **What it does not enforce, and why that is acceptable.** WebKit executes a
+        /// *page-originated* `javascript:` URL without dispatching the navigation-policy callback at
+        /// all, so this branch never sees it (measured on this runtime, pinned by
+        /// `BrowserNavigationAuthorityTests`). The page gains nothing by it: the code runs in that
+        /// page's own origin, which a `<script>` tag already granted it, and there is no bridge to
+        /// reach — no script message handler is registered, so `window.webkit` does not exist. The
+        /// remedy would be disabling content JavaScript, which would break every dev server and the
+        /// pull-request page this panel exists for; it is rejected.
+        ///
+        /// Handing either scheme to `NSWorkspace.shared.open` is not safety, only someone else's
+        /// problem — so this case sits above every other branch, and the scheme is named because a
+        /// diagnostic that cannot say what was refused is not one.
         case executableOrInlineContent(String)
 
         /// Whether this refusal is a log line rather than something the user is shown. The two
@@ -109,7 +147,7 @@ public enum NavigationPolicy {
         public var isDiagnosticOnly: Bool {
             switch self {
             case .localFile: false
-            case .schemeNeedsAUserGesture: true
+            case .externalSchemeFromPageContent: true
             case .unsupportedURL: true
             // Shown, for the same reason `file:` is: the common source is the user's own URL bar,
             // and a bar that swallows what was typed without a word is a bar that looks broken.
@@ -152,16 +190,28 @@ public enum NavigationPolicy {
         if scheme == "file" {
             return .refuse(.localFile)
         }
+        // D38. A scheme the panel cannot render leaves the app only when the URL bar sent it —
+        // a native action page content cannot reach. The navigation type is not consulted, because
+        // it authenticates nothing: WebKit reports a scripted `requestSubmit()` as `.formSubmitted`,
+        // reports a subframe's navigation the same way, and reuses the triggering action across a
+        // server redirect.
         guard renderableSchemes.contains(scheme) else {
-            return request.isUserInitiated
+            return request.origin == .urlBar
                 ? .openExternally(request.url)
-                : .refuse(.schemeNeedsAUserGesture(scheme))
+                : .refuse(.externalSchemeFromPageContent(scheme))
         }
         if scheme == "about", request.url.absoluteString.lowercased() != "about:blank" {
             return .refuse(.unsupportedURL)
         }
 
-        // Q11. Cmd is read only on a link activation: a page that redirects itself while the user
+        // Q11. Everything below this line is a URL the panel could have rendered itself — `http`,
+        // `https` or `about:blank` — so the worst a forged one can achieve is a web page in the
+        // user's own browser, which is not a privileged operation. That is why D38 leaves this
+        // branch reading the navigation type at all, and why it is safe that a synthesised click
+        // can reach it: the flags are real (probe 3 measured that a synthetic click carries none),
+        // and the scheme was settled above.
+        //
+        // Cmd is read only on a link activation: a page that redirects itself while the user
         // happens to be holding Cmd has not asked for anything.
         if request.navigationType == .linkActivated, request.modifierFlags.contains(.command) {
             return .openExternally(request.url)

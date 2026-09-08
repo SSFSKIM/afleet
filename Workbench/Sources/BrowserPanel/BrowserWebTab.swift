@@ -93,8 +93,8 @@ public final class BrowserWebTab: NSObject {
 
     // MARK: What the chrome can ask for
 
-    /// Loads `url` as a URL bar entry — a user gesture, and answered by the same policy a link is
-    /// (D29: one rule, in one place).
+    /// Loads `url` as a URL bar entry — the one origin that still authorises a non-web scheme
+    /// (D38) — answered by the same policy a link is (D29: one rule, in one place).
     public func navigate(to url: URL) {
         act(on: NavigationPolicy.decide(.urlBarEntry(url)), for: url) { [webView] in
             webView.load(URLRequest(url: url))
@@ -160,11 +160,17 @@ public final class BrowserWebTab: NSObject {
 
     /// WebKit's navigation action, as the value types the policy is written over.
     ///
-    /// `isUserInitiated` is the one judgement here. WebKit publishes no "a person did this" flag, so
-    /// it is read from the navigation type: a link activation and a form submission are things a
-    /// person did, and everything else — a redirect, a `location =`, an app-initiated load — is not.
+    /// **There is no judgement left here** (D38). Everything WebKit hands this delegate came from
+    /// inside a rendered page, so the origin is `.pageContent` unconditionally. The earlier version
+    /// of this function read the navigation type as proof of a user gesture, which WebKit's own
+    /// classification does not provide: a script's `requestSubmit()` arrives as `.formSubmitted`, a
+    /// subframe's navigation is classified the same as the main frame's, and a server redirect
+    /// reuses the action that triggered it, so a clicked `https:` link can arrive at a `mailto:`
+    /// still wearing `.linkActivated`. The type is carried on for the Cmd-click reading, which the
+    /// policy applies only to a URL it would render itself.
+    ///
     /// A URL bar entry does not come through here at all; it is built by
-    /// `NavigationRequest.urlBarEntry`.
+    /// `NavigationRequest.urlBarEntry`, and that is the only authority left.
     private static func request(from action: WKNavigationAction, url: URL) -> NavigationRequest {
         let type: BrowserNavigationType = switch action.navigationType {
         case .linkActivated: .linkActivated
@@ -180,12 +186,11 @@ public final class BrowserWebTab: NSObject {
         if action.modifierFlags.contains(.option) { modifiers.insert(.option) }
         if action.modifierFlags.contains(.control) { modifiers.insert(.control) }
 
-        let byHand = type == .linkActivated || type == .formSubmitted || type == .formResubmitted
         return NavigationRequest(url: url,
                                  navigationType: type,
                                  modifierFlags: modifiers,
                                  hasTargetFrame: action.targetFrame != nil,
-                                 isUserInitiated: byHand)
+                                 origin: .pageContent)
     }
 }
 

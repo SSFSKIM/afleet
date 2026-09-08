@@ -1886,3 +1886,31 @@ is renumbered.
      this is one prompted turn under the scratch home at C1's next re-pin, reading the transcript
      after exit. Owner: C1 (probe), C2 (`terminate()`) if it bites. Filed 2026-09-08 at the Quit
      ruling.
+
+## From C7.6 (`child/c7-browser-panel`)
+
+Reserved range 247–261.
+
+247. **M1's `waitForWriteAttempts` and `waitForSleep` seams carry no deadline.** They are
+     continuation-shaped: a condition that never holds is a wait that never returns. That cost this
+     leaf a 900-second suite kill at M4, when a mutation stopped the model committing edits at all
+     and the coalescing test waited for a window that was never going to open. M4 added
+     deadline-bearing twins (`expectWriteAttempts`, `expectSleep`, fulfilled through
+     `XCTestExpectation` with the suite's 20-second deadline) and used them everywhere, but M1's own
+     tests still use the continuation form, so the trap is closed for new tests and open for old
+     ones. Closer: convert M1's remaining call sites to the twins and delete the continuation
+     seams, so the deadline-free shape cannot be reached at all. Owner: C7.6 at closeout, or the
+     next leaf that touches `BrowserTabStoreTests`. Filed 2026-09-09 at the R2 fix wave.
+
+248. **No native affordance for opening a page-originated non-web scheme.** D38 refuses every
+     non-web scheme that arrives from inside a rendered page — by link, form, subframe, redirect or
+     script — because WebKit's navigation type authenticates no user gesture. R2 recommended
+     requiring an explicit native action instead; refusing outright is the safe end of that
+     recommendation, and it is what shipped. What is missing is the other end: a user who genuinely
+     clicked a `mailto:` on a page has no way to act on it, and the refusal is diagnostic-only, so
+     they are not even told. This is usability, not correctness — the URL bar remains a working
+     path, and nothing about the affordance is required for the security property to hold. Closer:
+     a panel-local row or context-menu item ("Open in the default application") that carries the
+     refused URL and is actuated by a real `NSEvent`, which is the same unforgeable authority the
+     URL bar has. Owner: C7.6 at M6 if the app wiring makes it cheap, otherwise C7.7. Filed
+     2026-09-09 at the R2 fix wave.

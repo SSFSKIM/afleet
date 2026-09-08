@@ -335,7 +335,7 @@ public final class BrowserModel {
             "Local files open in the Files tab."
         case .executableOrInlineContent(let scheme):
             "A \(scheme): URL cannot be opened here."
-        case .schemeNeedsAUserGesture(let scheme):
+        case .externalSchemeFromPageContent(let scheme):
             "A \(scheme): URL cannot be opened here."
         case .unsupportedURL:
             "That URL cannot be opened here."

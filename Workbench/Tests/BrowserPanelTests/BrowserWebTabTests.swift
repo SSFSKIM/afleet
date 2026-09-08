@@ -271,6 +271,8 @@ final class BrowserWebTabTests: XCTestCase {
         XCTAssertEqual(server.requests, ["/one"], "nothing refused reached the wire")
     }
 
+    /// The URL bar is the one authority left for a non-web scheme (D38), and `navigate(to:)` is
+    /// its adapter.
     func testAnExternalDecisionReachesTheInjectedOpener() async throws {
         let (tab, seams) = makeTab()
         let mail = URL(string: "mailto:someone@example.invalid")!
@@ -313,7 +315,7 @@ final class BrowserWebTabTests: XCTestCase {
         await navigating(tab, "the redirecting page loads") { tab.navigate(to: server.url("/to-app-scheme")) }
         await fulfillment(of: [refused], timeout: Self.webDeadline)
 
-        XCTAssertEqual(seams.refused, [.schemeNeedsAUserGesture("mailto")])
+        XCTAssertEqual(seams.refused, [.externalSchemeFromPageContent("mailto")])
         XCTAssertTrue(seams.opened.isEmpty, "no gesture, no application launched")
         XCTAssertEqual(tab.webView.url, server.url("/to-app-scheme"))
     }
