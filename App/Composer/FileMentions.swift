@@ -20,8 +20,12 @@ import FleetKit
 /// nothing else: no `limit`, no `cwd`.
 extension ComposerModel {
 
-    /// The subtype and its one key, spelled once.
-    static let fileSuggestionsSubtype = "file_suggestions"
+    /// The subtype, for the tests that assert what went to the wire. The *request* is built from
+    /// C2's typed `FileSuggestions` spec, not from this string: ClaudeWire types the subtype and its
+    /// one key, and a leaf spelling them itself is a second opinion about a shape C2 owns. The raw
+    /// form stays for the subtypes ClaudeWire does not type — `cancel_async_message` is the leaf's
+    /// only one (tracker 142).
+    static let fileSuggestionsSubtype = FileSuggestions.subtype
 
     /// The `@` token the cursor is in, or nil when the draft has none.
     ///
@@ -66,8 +70,7 @@ extension ComposerModel {
     /// opacity rule applied to an answer — and so does a refused request. There is nothing to show
     /// and nothing that can be inferred, and a popover is not worth a crash.
     func requestFileSuggestions(_ query: String) async {
-        let request = AnyControlRequest(subtype: Self.fileSuggestionsSubtype,
-                                        payload: .object(["query": .string(query)]))
+        let request = AnyControlRequest(FileSuggestions(query: query))
         let answer = try? await lifecycle.send(request, on: key)
         guard !Task.isCancelled else { return }
         fileSuggestions = answer.map(Self.suggestedPaths(in:)) ?? []

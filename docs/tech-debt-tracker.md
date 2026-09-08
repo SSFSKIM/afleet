@@ -1093,3 +1093,29 @@ is renumbered.
      Closer: teach the check about protocol witnesses — a member whose name and signature match a
      requirement of a protocol the type conforms to is called by whoever calls the protocol. Owner:
      C5's test tooling.
+
+149. **`ProcessRunner` cannot set a child's working directory.**
+     `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift`'s `run` takes an executable,
+     arguments, an environment and a timeout, and no directory. C6.2's `!` escape is defined by the
+     directory it runs in (§6.6: "in the channel's directory with the resolved environment"), so it
+     could not reuse the runner and spawns locally in `HostShellRunner`, copying `ProcessJob`'s
+     settlement rather than its code — exit-driven completion rather than EOF on the pipes, so a `!`
+     that backgrounds a daemon does not hang; non-blocking drains; a budget then SIGTERM/SIGKILL.
+     The rejected alternative was prefixing `cd <dir> &&` to the user's command, which puts a line
+     in front of what they typed and changes what the transcript shows them running.
+     Closer: a `directory:` parameter on `ProcessRunner`, after which `HostShellRunner` collapses
+     into `FoundationProcessRunner`. Owner: C2. Found by C6.2 Task 4.
+
+150. **`ShellEnvelope.neutralize` is idempotent, so double sanitisation is byte-invisible.** An
+     escaped `<` has no `<` left, an escaped turn marker no longer matches, a defused prefix no
+     longer starts its line. A host that neutralised a command or a stream before handing it to
+     `wrap` therefore produces byte-identical output, and C6.2's G2 equality assertion — written
+     believing it proved the composer sanitised nothing itself — passes. Demonstrated at Task 4 by
+     three mutations, one carrying a marker through the command; all passed. The same assertion does
+     catch a rule of the host's own: an appended element, a dropped byte, a merged or trimmed
+     stream, each demonstrated failing. This is not a defect in the envelope — idempotence is a
+     property worth having — but it means "called, never copied" (§6.6) is enforced by structure and
+     review, not by any test, and C6.2's gate has been corrected in place to say so.
+     Closer: if the property is ever worth testing, give `neutralize` a way to report whether it
+     changed anything, and assert the host's call is the first. Owner: C2 if it is worth it; filed
+     mainly so no later reader re-derives the false confidence. Found by C6.2 Task 4.
