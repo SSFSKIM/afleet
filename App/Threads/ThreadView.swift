@@ -29,7 +29,11 @@ struct ThreadView: View {
                 Divider()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
-                        content(anchor)
+                        // Keyed by what the thread is open on, not by its kind. `ThreadModel.open`
+                        // replaces the anchor in place and SwiftUI keeps the subtree's `@State`
+                        // across that — so a second task's thread went on holding the first task's
+                        // card model, and *Stop* would have stopped the task the user left.
+                        content(anchor).id(anchor.identity)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -75,8 +79,13 @@ struct ThreadView: View {
             // The fold's card, not the anchor's snapshot: what §8.4 draws is `DecisionItem.state`,
             // and a card answered anywhere would otherwise go on offering its buttons here.
             if let card = model.openDecision {
+                // **This tab is the first host to mark a card active** (tracker 168). A Thread tab
+                // shows exactly one card, and the user opened it: there is no list here for Return
+                // to answer the wrong member of. Activity's compact list and the timeline's rows
+                // stay inactive, because in a list the keyboard default action belongs to one row
+                // or to none.
                 DecisionCardView(card: card, presentation: .full, in: model.channel,
-                                 answering: model.answering)
+                                 isActive: true, answering: model.answering)
             }
         case .sideQuestion(let thread):
             sideQuestion(thread)

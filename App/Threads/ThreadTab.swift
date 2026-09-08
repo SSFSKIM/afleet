@@ -33,9 +33,15 @@ final class ThreadTab: PanelTab {
     /// How this tab reaches a channel's fold. See `ChannelFold`.
     private let fold: ChannelFold
 
-    init(lifecycle: any LifecycleAPI, fold: ChannelFold = ChannelFold()) {
+    /// The app's one set of in-flight answer reservations, shared with Activity. See
+    /// `DecisionReservations`.
+    private let reservations: DecisionReservations
+
+    init(lifecycle: any LifecycleAPI, fold: ChannelFold = ChannelFold(),
+         reservations: DecisionReservations = DecisionReservations()) {
         self.lifecycle = lifecycle
         self.fold = fold
+        self.reservations = reservations
     }
 
     /// Available for every channel: every channel has messages, tools and decisions to open a
@@ -43,7 +49,7 @@ final class ThreadTab: PanelTab {
     func isAvailable(in context: ChannelContext) -> Bool { true }
 
     func makeSession(for context: ChannelContext) -> any PanelTabSession {
-        ThreadModel(channel: context.key, lifecycle: lifecycle, fold: fold)
+        ThreadModel(channel: context.key, lifecycle: lifecycle, fold: fold, reservations: reservations)
     }
 
     func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {

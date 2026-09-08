@@ -67,9 +67,8 @@ final class ThreadTabTests: XCTestCase {
     }
 
     /// A pending card over a recorded request.
-    private func card(_ fixture: String) throws -> DecisionCard {
-        let request = try FixtureRunner.request(fixture, subtype: "can_use_tool",
-                                                id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    private func card(_ fixture: String, id: String = "cccccccc-cccc-4ccc-8ccc-cccccccccccc") throws -> DecisionCard {
+        let request = try FixtureRunner.request(fixture, subtype: "can_use_tool", id: id)
         let item = try XCTUnwrap(DecisionItem(surfacing: request, in: Self.channel),
                                  "the surfacing initialiser opened no item for a recorded ask")
         return DecisionCard(item)
@@ -563,7 +562,124 @@ final class ThreadTabTests: XCTestCase {
                       "the reply control scrolls away with the content it replies to")
         XCTAssertTrue(ViewTree.button("Send", in: body) != nil, "the thread offers no reply control at all")
     }
+
+    // MARK: - G2: what the thread hosts is the thread it is open on
+
+    /// The hosted content is keyed by **what the thread is open on**, not by its kind.
+    ///
+    /// `open(_:)` replaces the anchor in place, and SwiftUI keeps a subtree's `@State` across a body
+    /// evaluation whose structure did not change. A second thread of the same kind therefore
+    /// inherited the first one's view state: `TaskCardView` holds its `TaskCardModel` in `@State`,
+    /// so a Task thread opened on B went on holding A and *Stop* would have stopped A; a permission
+    /// card's denial text, a question's draft and an elicitation's form are the same shape.
+    ///
+    /// Two clauses, because either alone passes against the bug: the identity has to distinguish two
+    /// subjects of one kind, and the view has to pin it.
+    func testTheHostedContentIsKeyedByWhatTheThreadIsOpenOn() async throws {
+        let (lifecycle, model) = await hosted()
+        let first = ThreadAnchor.decision(try card("permission-allow", id: "dddddddd-dddd-4ddd-8ddd-ddddddddd001"))
+        let second = ThreadAnchor.decision(try card("permission-allow", id: "dddddddd-dddd-4ddd-8ddd-ddddddddd002"))
+        XCTAssertNotEqual(first.identity, second.identity,
+                          "two threads of one kind on different subjects share an identity")
+
+        model.open(first)
+        let drawn = ViewTree.identities(in: ThreadView(model: model).body)
+        XCTAssertTrue(drawn.contains(first.identity), "the thread pins no identity on the content it hosts")
+
+        model.open(second)
+        let replaced = ViewTree.identities(in: ThreadView(model: model).body)
+        XCTAssertTrue(replaced.contains(second.identity),
+                      "the replacement thread hosts content identified as the thread it replaced")
+
+        // And across the five kinds, so a same-kind identity cannot be the only thing that moves.
+        let (call, sent) = try postingAnchors()
+        let anchors: [ThreadAnchor] = [
+            .toolDetail(call),
+            .task(try taskAnchor(lifecycle)),
+            first,
+            .sideQuestion(SideQuestionThread(anchorText: "An invented message.")),
+            .sentFile(sent),
+        ]
+        XCTAssertEqual(Set(anchors.map(\.identity)).count, anchors.count,
+                       "\(anchors.count) anchors share \(Set(anchors.map(\.identity)).count) identities")
+    }
+
+    /// Tracker 168: **this tab is the first host to mark a card active**, so Return approves it.
+    ///
+    /// The shortcut is `isActive && !default_to_no`, default false, because both list hosts draw
+    /// many cards and the keyboard default action is singular. A Thread tab draws exactly one card
+    /// and the user opened it, so there is no other card for Return to reach.
+    func testTheOpenDecisionThreadsCardOwnsReturn() async throws {
+        let (_, model) = await hosted()
+        model.open(.decision(try card("permission-allow")))
+
+        let hostedCard = try XCTUnwrap(ViewTree.values(of: DecisionCardView.self,
+                                                       in: ThreadView(model: model).body).first,
+                                       "the decision thread hosts no card component")
+        let permission = try XCTUnwrap(ViewTree.values(of: PermissionCardView.self, in: hostedCard.body).first,
+                                       "the hosted card drew no permission card")
+        XCTAssertEqual(permission.approveShortcut, .defaultAction,
+                       "the one card the open thread draws does not own Return")
+    }
+
+    // MARK: - G2: one request, one answer, whichever surface sends it
+
+    /// A request already being answered **somewhere else** refuses the reply and keeps its draft.
+    ///
+    /// The same request is drawn by Activity's row and by the timeline's card at the same time as by
+    /// this tab, and each host holds its own `DecisionAnswering`. A per-host in-flight set disables
+    /// only the host that clicked: the second answer reaches the supervisor, which has already
+    /// dropped the pending id, and comes back `decisionGone` — while this tab has erased the reply
+    /// the user typed. Both clauses, because the refusal is only right if the text survives it.
+    func testARequestBeingAnsweredElsewhereRefusesTheReplyAndKeepsItsDraft() async throws {
+        let reservations = DecisionReservations()
+        let lifecycle = ThreadDouble()
+        await lifecycle.always(.success(ActivityFixtures.state(Self.channel)))
+        let model = ThreadModel(channel: Self.channel, lifecycle: lifecycle, reservations: reservations)
+        let card = try card("permission-allow")
+        model.open(.decision(card))
+
+        // Another surface answers first, in this same turn of the main actor: the claim is taken
+        // before `send` returns, which is what the second press has to find.
+        let elsewhere = DecisionAnswering(lifecycle: lifecycle, reservations: reservations)
+        elsewhere.send(.allowOnce, on: card, in: Self.channel)
+
+        model.draft = "An invented second thought."
+        try press("Send", in: ThreadView(model: model).body)
+        XCTAssertEqual(model.draft, "An invented second thought.",
+                       "the refused reply cleared the field and the text was lost")
+
+        await elsewhere.whenIdle()
+        await model.answering.whenIdle()
+        let actions = await lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "one request was answered \(actions.count) times")
+    }
+
+    /// An answer the wire refused **leaves the reply in the field**.
+    ///
+    /// The card is still pending — `perform` threw, so the engine was never told — and it is still
+    /// answerable. The model holds the only copy of what the user typed, and clearing the draft on
+    /// the way out loses it to the one failure it was written for. The draft is therefore cleared by
+    /// the answer succeeding rather than by it being sent.
+    func testAReplyTheWireRefusedKeepsItsDraft() async throws {
+        let lifecycle = ThreadDouble()
+        let card = try card("permission-allow")
+        await lifecycle.always(.failure(.decisionGone(card.requestID)))
+        let model = ThreadModel(channel: Self.channel, lifecycle: lifecycle)
+        model.open(.decision(card))
+
+        model.draft = "An invented reason not to."
+        try press("Send", in: ThreadView(model: model).body)
+        await model.answering.whenIdle()
+
+        let actions = await lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "the reply produced \(actions.count) actions")
+        XCTAssertEqual(model.draft, "An invented reason not to.",
+                       "a refused answer erased the reply the user typed")
+        XCTAssertNotNil(model.answering.banner, "a refused answer raised no banner")
+    }
 }
+
 
 // MARK: - Support
 

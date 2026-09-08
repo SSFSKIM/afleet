@@ -89,7 +89,8 @@ final class ConsentAndTrustTests: XCTestCase {
     /// both answers carrying that one value — which is exactly what `ChannelDecorations` does.
     private func sheet(for request: PrecommitModel.ConsentRequest, on model: PrecommitModel) -> ConsentSheet {
         ConsentSheet(servers: request.servers, isAnswering: model.isAnswering,
-                     accept: { model.accept(request) }, decline: { model.decline(request) })
+                     accept: { model.accept(request) }, decline: { model.decline(request) },
+                     notNow: { model.notNow(request) })
     }
 
     private func texts(in body: Any) -> [String] {
@@ -106,7 +107,7 @@ final class ConsentAndTrustTests: XCTestCase {
         let servers = try XCTUnwrap(model.consentRequest?.servers, "the consentNeeded verdict raised no sheet")
         XCTAssertEqual(servers.count, 2, "the sheet lists a different number of servers than the verdict named")
 
-        let sheet = ConsentSheet(servers: servers, isAnswering: false, accept: {}, decline: {})
+        let sheet = ConsentSheet(servers: servers, isAnswering: false, accept: {}, decline: {}, notNow: {})
         for server in servers {
             let drawn = texts(in: sheet.row(server))
             XCTAssertTrue(drawn.contains(server.name), "the sheet drew no row naming one of the servers")
@@ -345,7 +346,221 @@ final class ConsentAndTrustTests: XCTestCase {
                       "the refusal banner does not say what to run in your own terminal")
         XCTAssertTrue(model.isHistoryOnly, "the refused handoff left the channel out of history-only")
     }
+
+    // MARK: - G4a: what an acceptance actually grants
+
+    /// The sheet says **how long an acceptance lasts**, because it outlives the sheet.
+    ///
+    /// `SpawnPreconditions.accept` records project root, server name and entry hash in afleet's own
+    /// store and `evaluate` reads those records on every later spawn; the production store writes
+    /// them to disk, so the grant survives a restart. Copy that said *this session* described a
+    /// narrower permission than the one being taken — the one thing a consent dialog may not do.
+    /// Asserted as the words the sheet draws, in both directions: the disclosure has to be there and
+    /// the old, narrower sentence has to be gone.
+    func testTheSheetSaysAnAcceptanceIsRememberedAcrossSessions() async throws {
+        let (_, model) = await evaluated([.consentNeeded(Self.servers)])
+        let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
+        let drawn = texts(in: sheet(for: request, on: model).body).joined(separator: " ")
+
+        XCTAssertTrue(drawn.contains("across sessions"),
+                      "the sheet does not say the acceptance is remembered across sessions")
+        XCTAssertTrue(drawn.contains("configuration changes"),
+                      "the sheet does not say what ends the acceptance it is taking")
+        XCTAssertFalse(drawn.contains("this session start"),
+                       "the sheet still offers the acceptance as one session's")
+        XCTAssertFalse(drawn.contains("for this session"),
+                       "the sheet still scopes the acceptance to one session")
+        // The count clause the copy has always had, so the disclosure did not replace it (§6.3).
+        XCTAssertTrue(drawn.contains("2 MCP server(s)"), "the sheet no longer says how many servers it lists")
+    }
+
+    // MARK: - G4a: the third answer (tracker 170)
+
+    /// *Not now* dismisses the sheet and **writes nothing anywhere**.
+    ///
+    /// §6.12 has exactly one write in it and it is the decline; dismissal is not a decline and may
+    /// never be recorded as one. The clause is the X9 seam: the lifecycle received no acceptance, no
+    /// decline and no action of any kind. The precondition is asserted afterwards because that is
+    /// what makes the dismissal safe — the channel is still unspawned and still asking — and the
+    /// banner clause is what keeps the unanswered decision reachable once its modal is gone.
+    func testNotNowRecordsNothingAndLeavesTheChannelWaiting() async throws {
+        let (lifecycle, model) = await evaluated([.consentNeeded(Self.servers)])
+        let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
+
+        try press("Not now", in: sheet(for: request, on: model).body)
+
+        XCTAssertTrue(model.consentRequest == nil, "*Not now* left the sheet up")
+        let accepted = await lifecycle.accepted
+        let declined = await lifecycle.declined
+        let actions = await lifecycle.actions
+        XCTAssertEqual(accepted.count, 0, "*Not now* recorded \(accepted.count) acceptance(s)")
+        XCTAssertEqual(declined.count, 0, "*Not now* recorded \(declined.count) decline(s)")
+        XCTAssertEqual(actions.count, 0, "*Not now* performed \(actions.count) lifecycle action(s)")
+        guard case .consentNeeded = model.precondition else {
+            return XCTFail("*Not now* changed the verdict the channel is held by")
+        }
+        XCTAssertFalse(model.isHistoryOnly, "*Not now* made the channel history-only")
+
+        // The decision is still outstanding, so the column still has to offer it: the banner is the
+        // way back, and the sheet it brings back is the same one.
+        XCTAssertTrue(model.isConsentDeferred, "a dismissed sheet left the column with no way back to it")
+        let banner = ConsentBanner(isAnswering: model.isAnswering) { model.resumeConsent() }
+        try press("Review project servers", in: banner.body)
+        let resumed = try XCTUnwrap(model.consentRequest, "the banner did not bring the sheet back")
+        XCTAssertEqual(resumed.servers.map(\.name), Self.servers.map(\.name),
+                       "the sheet came back listing servers the verdict did not name")
+    }
+
+    // MARK: - Two evaluations, one surface (continued)
+
+    /// A read whose **task** was cancelled publishes nothing, even though nothing superseded it.
+    ///
+    /// The mount evaluates in a `.task(id:)`, and a selection that moves to a column with no channel
+    /// cancels that task without starting another: the generation never moves, so the generation
+    /// fence alone lets the old channel's verdict land on a surface that is showing nothing. The two
+    /// fences catch different things and both are needed.
+    func testACancelledEvaluationPublishesNothing() async throws {
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.consentNeeded(Self.servers)])
+        await lifecycle.gateNextPreconditions()
+        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+
+        let read = Task { await model.evaluate(channel: Self.channel, project: Self.project) }
+        while await lifecycle.gated == 0 { await Task.yield() }
+        read.cancel()
+        await lifecycle.releaseGate()
+        await read.value
+
+        XCTAssertTrue(model.consentRequest == nil, "a cancelled read raised its consent sheet anyway")
+        XCTAssertTrue(model.evaluation == nil, "a cancelled read published its evaluation")
+    }
+
+    /// The mount with no channel or no project **invalidates before it returns**.
+    ///
+    /// Nothing is evaluated for an empty column, so nothing may be left on screen for it either: the
+    /// previous verdict would draw one channel's banner above a column showing nothing, and a read
+    /// still suspended in `preconditions(for:)` would find its own generation unchanged and publish
+    /// into that emptiness. Both halves, and the second is the discriminating one.
+    func testInvalidatingDropsTheVerdictAndTheReadStillInFlight() async throws {
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.untrusted(root: Self.project), .consentNeeded(Self.servers)])
+        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+        await model.evaluate(channel: Self.channel, project: Self.project)
+        XCTAssertTrue(model.isHistoryOnly, "the first verdict never reached the surface")
+
+        await lifecycle.gateNextPreconditions()
+        let read = Task { await model.evaluate(channel: Self.otherChannel, project: Self.otherProject) }
+        while await lifecycle.gated == 0 { await Task.yield() }
+
+        model.invalidate()
+        XCTAssertFalse(model.isHistoryOnly, "the emptied column kept the last channel's trust banner")
+        XCTAssertTrue(model.evaluation == nil, "the emptied column kept an evaluation")
+
+        await lifecycle.releaseGate()
+        await read.value
+        XCTAssertTrue(model.consentRequest == nil, "a read in flight published into an emptied column")
+        XCTAssertTrue(model.evaluation == nil, "a read in flight published its evaluation into an emptied column")
+    }
+
+    /// The verdict is a function of the channel **and** the project **and** whether afleet is at the
+    /// front, so the mount's task is keyed by all three.
+    ///
+    /// A row's `cwd` arrives with an index update rather than with the row, so a channel evaluated
+    /// while it had none must be evaluated again when it has one — a decline is recorded against the
+    /// project, and a key that ignored it would leave the sheet unable to record anything. Coming
+    /// back to the front is the third, because *Review trust in terminal* hands the decision to
+    /// another application and nothing tells this side when it was made.
+    func testTheEvaluationKeyCarriesTheProjectAndTheFrontmostState() {
+        func key(channel: ChannelKey?, project: URL?, active: Bool) -> ChannelDecorations.EvaluationKey {
+            ChannelDecorations(channel: channel, project: project, isApplicationActive: active,
+                               lifecycle: ConsentDouble(), panels: PanelHostModel()).evaluationKey
+        }
+        let base = key(channel: Self.channel, project: Self.project, active: true)
+
+        XCTAssertEqual(base, key(channel: Self.channel, project: Self.project, active: true),
+                       "the same inputs produced two different evaluation keys")
+        XCTAssertNotEqual(base, key(channel: Self.channel, project: nil, active: true),
+                          "a channel whose project has not arrived yet shares its key with one that has")
+        XCTAssertNotEqual(base, key(channel: Self.channel, project: Self.otherProject, active: true),
+                          "a channel whose project changed shares its key with the old one")
+        XCTAssertNotEqual(base, key(channel: Self.otherChannel, project: Self.project, active: true),
+                          "two channels share one evaluation key")
+        XCTAssertNotEqual(base, key(channel: Self.channel, project: Self.project, active: false),
+                          "coming back to the front does not re-key the evaluation")
+    }
+
+    // MARK: - G4c: the trust action, fenced
+
+    /// The verdict is **re-read when the terminal handoff returns**.
+    ///
+    /// Trust is granted in Claude Code's own dialog, in the pane this just handed the project to,
+    /// and nothing about that reaches afleet: no frame, no state, no file this side watches. Without
+    /// the re-read the channel stays history-only on a project the user has since trusted, and the
+    /// banner they just acted on is still there.
+    func testTheVerdictIsRereadWhenTheTerminalHandoffReturns() async throws {
+        let panels = PanelHostModel()
+        panels.registerPaneRunner(ConsentPaneRunner(), for: .terminal)
+        let (_, model) = await evaluated([.untrusted(root: Self.project), .ready], panels: panels)
+        XCTAssertTrue(model.isHistoryOnly, "the untrusted verdict never reached the surface")
+
+        let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
+        try press("Review trust in terminal", in: banner.body)
+        await model.whenIdle()
+
+        XCTAssertFalse(model.isHistoryOnly,
+                       "the verdict was not re-read after the handoff, so the channel is still history-only")
+        XCTAssertNil(model.banner, "a successful handoff left a banner behind")
+    }
+
+    /// A trust action taken from a banner the surface has moved past **opens nothing**.
+    ///
+    /// The banner on screen was drawn for the evaluation that produced it; an evaluation already in
+    /// flight means that is no longer the one the model holds, so the press would hand the host a
+    /// channel the user is not looking at and open a pane on somebody else's project. The same fence
+    /// the sheet's two answers take, for the same reason.
+    func testATrustActionFromASupersededBannerOpensNothing() async throws {
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.untrusted(root: Self.project), .ready])
+        let panels = PanelHostModel()
+        panels.registerPaneRunner(ConsentPaneRunner(), for: .terminal)
+        let model = PrecommitModel(lifecycle: lifecycle, panels: panels)
+        await model.evaluate(channel: Self.channel, project: Self.project)
+        XCTAssertTrue(model.isHistoryOnly, "the untrusted verdict never reached the surface")
+
+        // The selection moves; its read is held, so the banner above is still the one on screen.
+        await lifecycle.gateNextPreconditions()
+        let read = Task { await model.evaluate(channel: Self.otherChannel, project: Self.otherProject) }
+        while await lifecycle.gated == 0 { await Task.yield() }
+
+        let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
+        try press("Review trust in terminal", in: banner.body)
+        await model.whenIdle()
+
+        let openings = await lifecycle.openings
+        XCTAssertEqual(openings, 0, "a superseded banner opened \(openings) terminal pane(s)")
+
+        await lifecycle.releaseGate()
+        await read.value
+    }
+
+    /// A refusal belongs to the evaluation it was raised under, and **a new evaluation clears it**.
+    ///
+    /// The three actions all fail asynchronously. A banner that outlived its evaluation would draw
+    /// one channel's failure above another channel's conversation — the same wrong pairing
+    /// `Evaluation` exists to prevent, one step further on — and nothing else ever cleared it.
+    func testANewEvaluationClearsTheOldContextsRefusalBanner() async throws {
+        let (_, model) = await evaluated([.untrusted(root: Self.project)], panels: PanelHostModel())
+
+        let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
+        try press("Review trust in terminal", in: banner.body)
+        await model.whenIdle()
+        XCTAssertNotNil(model.banner, "the refused handoff raised no banner, so this clause proves nothing")
+
+        await model.evaluate(channel: Self.otherChannel, project: Self.otherProject)
+        XCTAssertNil(model.banner, "a new evaluation kept the previous context's refusal on screen")
+    }
 }
+
 
 // MARK: - The doubles
 
@@ -426,7 +641,14 @@ actor ConsentDouble: LifecycleAPI {
         if let declineRefusal { throw declineRefusal }
     }
 
-    func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { paneRequest }
+    /// How many terminal handoffs were asked for. A count, so a superseded banner's press is
+    /// asserted as *nothing left the surface* rather than as a flag (§11).
+    private(set) var openings = 0
+
+    func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
+        openings += 1
+        return paneRequest
+    }
 
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         actions.append((key, action))

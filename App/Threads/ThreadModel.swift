@@ -29,6 +29,26 @@ enum ThreadAnchor {
         }
     }
 
+    /// What this thread is hosting, as a value the view can key its content by.
+    ///
+    /// **The kind is not the identity.** `open(_:)` replaces the anchor in place, and SwiftUI keeps
+    /// a subtree's `@State` across a body evaluation whose structure did not change — so a thread
+    /// re-opened on a *different* task of the same kind kept the first task's `TaskCardModel`, and
+    /// *Stop* stopped the task the user had navigated away from. The same holds for every kind that
+    /// hosts a stateful control: a permission card's denial text, a question's draft, an
+    /// elicitation's form. Keying the hosted content by this is what remounts it.
+    var identity: String {
+        switch self {
+        case .toolDetail(let call): "toolDetail:\(call.toolUseID)"
+        case .task(let model): "task:\(model.item.taskID)"
+        case .decision(let card): "decision:\(card.requestID.rawValue)"
+        // A side question has no id of its own: the thread object *is* the anchor, and two threads
+        // over the same message are two conversations.
+        case .sideQuestion(let thread): "sideQuestion:\(UInt(bitPattern: ObjectIdentifier(thread).hashValue))"
+        case .sentFile(let sent): "sentFile:\(sent.toolUseID)"
+        }
+    }
+
     /// The line the thread's header draws. It names the tool, the task or the decision — never a
     /// path and never a session (§11).
     var title: String {
@@ -118,11 +138,15 @@ final class ThreadModel: PanelTabSession {
     /// open decision thread reads its state from.
     @ObservationIgnored private let fold: ChannelFold
 
-    init(channel: ChannelKey, lifecycle: any LifecycleAPI, fold: ChannelFold = ChannelFold()) {
+    init(channel: ChannelKey, lifecycle: any LifecycleAPI, fold: ChannelFold = ChannelFold(),
+         reservations: DecisionReservations = DecisionReservations()) {
         self.channel = channel
         self.lifecycle = lifecycle
         self.fold = fold
-        self.answering = DecisionAnswering(lifecycle: lifecycle)
+        // The app's one reservation set, not this tab's: a request is answerable once, and Activity
+        // answers the same requests from a list beside this tab. It is also how the host holding the
+        // request's payload hears that this tab settled it — the engine sends no frame back.
+        self.answering = DecisionAnswering(lifecycle: lifecycle, reservations: reservations)
         // D2's loop, closed for this host: a successful `perform(.answer)` raises
         // `HostSignal.decisionAnswered` on the channel's fold, which is the only thing that moves
         // the item out of `.pending` — the engine sends no frame back for an answer. Assigned here
@@ -196,13 +220,17 @@ final class ThreadModel: PanelTabSession {
                 banner = RowBanner(text: "This decision cannot be answered with a reply.")
                 return
             }
-            // `DecisionAnswering.inFlight` is the one in-flight set this tab has; a second guard
-            // here would be a second copy of it. A press while an answer is on the wire keeps the
-            // draft, because `send` would drop the text and there is nowhere else it survives.
+            // `DecisionAnswering`'s reservation set is the one in-flight set — shared with every
+            // other surface that can answer this request — and a second guard here would be a second
+            // copy of it. A press while an answer is on the wire keeps the draft, because `send`
+            // would drop the text and there is nowhere else it survives.
             guard !answering.isAnswering(card.requestID) else { return }
             banner = nil
-            draft = ""
-            answering.send(action, on: card, in: channel)
+            // **The draft is cleared by the answer succeeding, not by it being sent.** A refusal —
+            // the supervisor rejecting an answer, a transport error — leaves the card pending and
+            // answerable, and the model holds the only copy of what the user typed. Clearing on the
+            // way out lost the reply to the one failure it was written for.
+            answering.send(action, on: card, in: channel, onSuccess: { [weak self] in self?.draft = "" })
         case .toolDetail(let call):
             post(ThreadReply.prefixed(tool: call.name, toolUseID: call.toolUseID, text: text))
         case .sentFile(let sent):

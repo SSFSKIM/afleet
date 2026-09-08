@@ -24,6 +24,23 @@ enum ViewTree {
         return nil
     }
 
+    /// Every identity a body pins with `.id(_:)`, read from the view value SwiftUI built.
+    ///
+    /// `.id(_:)` wraps its content in a generic whose stored `id` is the value passed. Reflecting
+    /// for it is how a test sees an identity that a rendered hierarchy would otherwise only show by
+    /// behaviour — and the identity is exactly what stops `@State` from being carried onto a
+    /// different subject.
+    static func identities(in value: Any) -> [String] {
+        let mirror = Mirror(reflecting: value)
+        var found: [String] = []
+        if String(describing: mirror.subjectType).hasPrefix("IDView<"),
+           let id = mirror.descendant("id") as? String {
+            found.append(id)
+        }
+        for child in mirror.children { found += identities(in: child.value) }
+        return found
+    }
+
     static func button(_ label: String, in body: Any) -> Button<Text>? {
         values(of: Button<Text>.self, in: body).first {
             values(of: String.self, in: $0).contains(label)

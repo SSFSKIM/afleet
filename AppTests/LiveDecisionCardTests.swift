@@ -91,7 +91,9 @@ final class LiveDecisionCardTests: XCTestCase {
         pump.start(stream)
 
         let answering = DecisionAnswering(lifecycle: lifecycle)
-        answering.settled = { id, _, _ in pump.forget(id) }
+        // The seam moved to the shared reservation set, because any surface's answer closes the
+        // request: this test has one surface, and registers on the set its answering object holds.
+        answering.reservations.observe(pump) { id, _, _ in pump.forget(id) }
 
         var reachedTurn = 0
         var stopped = false

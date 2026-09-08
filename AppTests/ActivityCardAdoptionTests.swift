@@ -27,6 +27,9 @@ final class ActivityCardAdoptionTests: XCTestCase {
         let poster = RecordingPoster()
         let router: NotificationRouter
         let model: ActivityModel
+        /// The app's one reservation set, as `AppModel` holds it: Activity and the Thread tab are
+        /// handed the same one.
+        let reservations = DecisionReservations()
 
         init() throws {
             tree = try TempTree()
@@ -41,7 +44,8 @@ final class ActivityCardAdoptionTests: XCTestCase {
                                   configHome: configHome,
                                   shell: shell,
                                   router: router,
-                                  store: nil)
+                                  store: nil,
+                                  reservations: reservations)
         }
 
         func key(_ nibble: String) -> ChannelKey { ActivityFixtures.key(nibble, configHome: configHome) }
@@ -204,26 +208,10 @@ final class ActivityCardAdoptionTests: XCTestCase {
         let row = ActivityRowView(item: second, title: "An invented channel",
                                   activity: harness.model, shell: harness.shell)
         let requestID = try XCTUnwrap(second.card?.requestID.rawValue, "the row drew no card to key")
-        XCTAssertTrue(Self.explicitIdentities(in: row.body).contains(requestID),
+        XCTAssertTrue(ViewTree.identities(in: row.body).contains(requestID),
                       "the row hosts a stateful card that is not keyed by the request it draws")
     }
 
-    /// Every identity a body pins with `.id(_:)`, read from the view value SwiftUI built.
-    ///
-    /// `.id(_:)` wraps its content in a generic whose stored `id` is the value passed. Reflecting
-    /// for it is how a test sees an identity that a rendered hierarchy would otherwise only show by
-    /// behaviour — and the identity is exactly what stops `@State` from being carried onto a
-    /// different request.
-    private static func explicitIdentities(in value: Any) -> [String] {
-        let mirror = Mirror(reflecting: value)
-        var found: [String] = []
-        if String(describing: mirror.subjectType).hasPrefix("IDView<"),
-           let id = mirror.descendant("id") as? String {
-            found.append(id)
-        }
-        for child in mirror.children { found += explicitIdentities(in: child.value) }
-        return found
-    }
 
     // MARK: - C5's ruling, after the adoption
 
@@ -274,5 +262,49 @@ final class ActivityCardAdoptionTests: XCTestCase {
         let card = try XCTUnwrap(CardTree.permissionBody(in: body), "the answerable row drew no card")
         XCTAssertNotNil(ViewTree.button("Allow once", in: card), "the answerable row lost Allow once")
         XCTAssertNotNil(ViewTree.button("Deny", in: card), "the answerable row lost Deny")
+    }
+
+    // MARK: - A request answered somewhere else
+
+    /// The pump releases a request's payload when **another host** answers it.
+    ///
+    /// Activity is the host that holds the live `InboundRequest` — its pump is what a card is built
+    /// from — and the same request is answerable from the Thread tab and from the timeline's card.
+    /// The engine sends no frame back for an answer, so nothing tells the pump the request is closed
+    /// except the answer itself; a settle notification held per answering object therefore leaked
+    /// every payload another surface settled, until the process exited.
+    ///
+    /// The wait is bounded and the assertion is a count (§11).
+    func testARequestAnsweredFromAnotherHostReleasesActivitysPayload() async throws {
+        let harness = try Harness()
+        let key = harness.key("1")
+        let request = try FixtureRunner.request("permission-allow", subtype: "can_use_tool",
+                                                id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaad01")
+        await harness.arm([(key, request)])
+        await harness.model.start()
+        await harness.lifecycle.push(.request(request), to: key)
+        for _ in 0..<400 where harness.model.pump(for: key)?.requests.isEmpty != false {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(harness.model.pump(for: key)?.requests.count, 1,
+                       "Activity never held the request's payload, so this clause proves nothing")
+        await harness.lifecycle.always(.success(ActivityFixtures.state(key)))
+
+        // The Thread tab answers it, over the app's one reservation set.
+        let item = try XCTUnwrap(DecisionItem(surfacing: request, in: key), "no item was opened")
+        let thread = ThreadModel(channel: key, lifecycle: harness.lifecycle,
+                                 reservations: harness.reservations)
+        thread.open(.decision(DecisionCard(item)))
+        thread.draft = "An invented reason not to."
+        thread.send()
+        await thread.answering.whenIdle()
+
+        for _ in 0..<400 where harness.model.pump(for: key)?.requests.isEmpty == false {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(harness.model.pump(for: key)?.requests.count, 0,
+                       "Activity still holds \(harness.model.pump(for: key)?.requests.count ?? 0) payload(s) "
+                     + "for a request another host answered")
+        harness.model.stop()
     }
 }
