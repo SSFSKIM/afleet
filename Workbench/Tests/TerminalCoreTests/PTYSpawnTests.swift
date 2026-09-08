@@ -58,6 +58,12 @@ final class PTYSpawnTests: XCTestCase {
         else
           printf 'AFLEET_REQUESTED_LAPIS=absent\\n'
         fi
+        printf 'TERM=%s\\n' "$TERM"
+        if [ "${TERMINFO_DIRS+x}" = x ]; then
+          printf 'TERMINFO_DIRS=present\\n'
+        else
+          printf 'TERMINFO_DIRS=absent\\n'
+        fi
         environment_count=$(/usr/bin/env | /usr/bin/wc -l | /usr/bin/tr -d ' ')
         printf 'environment-count=%s\\n' "$environment_count"
         printf 'g1b-ready\\n'
@@ -86,6 +92,14 @@ final class PTYSpawnTests: XCTestCase {
         XCTAssertTrue(
             tokens.contains("AFLEET_REQUESTED_LAPIS=present"),
             "AFLEET_REQUESTED_LAPIS should print present"
+        )
+        XCTAssertTrue(
+            tokens.contains("TERM=xterm-256color"),
+            "TERM should print xterm-256color"
+        )
+        XCTAssertTrue(
+            tokens.contains("TERMINFO_DIRS=absent"),
+            "TERMINFO_DIRS should print absent"
         )
         XCTAssertTrue(
             tokens.contains("environment-count=6"),

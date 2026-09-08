@@ -28,11 +28,37 @@ final class EnvironmentOverlayTests: XCTestCase {
         XCTAssertTrue(overlaid["TERM"] == terminal.term, "TERM=absent")
         XCTAssertTrue(
             overlaid["TERMINFO_DIRS"] == "/invented/renderer-database:request-database",
-            "TERMINFO_DIRS=absent"
+            "TERMINFO_DIRS did not prepend the renderer database to the request value"
         )
         XCTAssertTrue(
             overlaid[carriedName] == requestEnvironment[carriedName],
             "\(carriedName)=absent"
+        )
+    }
+
+    func testGhosttyOverlayChangesExactlyDeclaredNames() {
+        guard let terminfoDirectory = GhosttyRuntimeResources.terminfoDirectoryURL else {
+            XCTFail("TERMINFO_DIRS=absent")
+            return
+        }
+        let requestEnvironment = [
+            "TERM": "request-terminal",
+            "TERMINFO_DIRS": "request-database",
+            "AFLEET_REQUESTED_COPPER": "carried-value",
+        ]
+        let terminal = TerminalDescription(
+            term: "xterm-ghostty",
+            terminfoDirectory: terminfoDirectory
+        )
+
+        let overlaid = terminalEnvironment(overlaying: requestEnvironment, for: terminal)
+        let allNames = Set(requestEnvironment.keys).union(overlaid.keys)
+        let changedNames = Set(allNames.filter { requestEnvironment[$0] != overlaid[$0] })
+        let expectedNames: Set<String> = ["TERM", "TERMINFO_DIRS"]
+
+        XCTAssertTrue(
+            changedNames == expectedNames,
+            "changed-name-set=\(changedNames.sorted().joined(separator: ","))"
         )
     }
 
@@ -73,6 +99,8 @@ final class EnvironmentOverlayTests: XCTestCase {
         else
           printf 'TERMINFO_DIRS=absent\\n'
         fi
+        environment_count=$(/usr/bin/env | /usr/bin/wc -l | /usr/bin/tr -d ' ')
+        printf 'environment-count=%s\\n' "$environment_count"
         printf 'overlay-ready\\n'
         IFS= read -r hold
         """
@@ -92,6 +120,10 @@ final class EnvironmentOverlayTests: XCTestCase {
         let tokens = Set(output.split(separator: "\n").map(String.init))
         XCTAssertTrue(tokens.contains("TERM=\(terminal.term)"), "TERM=absent")
         XCTAssertTrue(tokens.contains("TERMINFO_DIRS=present"), "TERMINFO_DIRS=absent")
+        XCTAssertTrue(
+            tokens.contains("environment-count=5"),
+            "child environment entry count was not 5"
+        )
     }
 
     func testSpawnedChildResolvesOverlaidTerminalDescription() async throws {
@@ -106,7 +138,8 @@ final class EnvironmentOverlayTests: XCTestCase {
             terminfoDirectory: terminfoDirectory
         )
         let script = """
-        if /usr/bin/infocmp -1 "$TERM" >/dev/null 2>&1; then
+        if [ "$TERM" = "xterm-ghostty" ] &&
+           /usr/bin/infocmp -1 "$TERM" >/dev/null 2>&1; then
           printf 'TERM=resolved\\n'
         else
           printf 'TERM=unresolved\\n'
