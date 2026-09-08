@@ -61,6 +61,21 @@ public final class TerminalPane {
     /// copy of it. `nil` until a launch is attempted.
     public private(set) var spawn: PTYSpawnRequest?
 
+    /// Which mounted host holds this pane's view. One pane, one window: after a pop-out the host
+    /// renders the same session twice, and an `NSView` lives in one hierarchy at a time
+    /// (spec Design §8). The claim moves the view and touches nothing below it.
+    public let viewClaim = PaneViewClaim()
+
+    /// Whether there is still a child to lose, which is what decides that closing this pane asks
+    /// first. A pane already torn down, or whose child ended on its own, has nothing to ask about.
+    public var hasLiveChild: Bool {
+        guard !isClosed, pty != nil else { return false }
+        return switch state {
+        case .starting, .running, .stopped: true
+        case .exited, .failed: false
+        }
+    }
+
     /// Fired once, with the termination the pty layer observed. The session installs it; the pane
     /// itself performs no ownership work of any kind.
     public var onTerminated: ((PTYTermination) -> Void)?

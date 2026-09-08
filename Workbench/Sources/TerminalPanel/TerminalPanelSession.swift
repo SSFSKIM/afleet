@@ -5,6 +5,19 @@ import Foundation
 import Observation
 import PanelHostAPI
 
+/// The question a pane asks before it closes a child that is still alive (spec Design §2, gate
+/// G3.3).
+///
+/// It is state rather than an `NSAlert` so that both answers can be given headlessly, and it
+/// carries `namesChannelReturn` as a fact rather than as a phrase for a test to match: a hatch
+/// pane holds a channel X5 released, and closing it is what makes the channel owned again.
+public struct PaneCloseConfirmation: Hashable, Sendable {
+    /// Which pane is being closed. Identity, because a pane carries no id of its own.
+    public let paneID: ObjectIdentifier
+    public let question: String
+    public let namesChannelReturn: Bool
+}
+
 /// One channel's pane stack: the panes, the selection, the W6 document, and the single obligation
 /// the panel owes X5 — exactly one `PaneExit` per pane that came from a `PaneRequest`, and none at
 /// all for a pane the panel made itself.
@@ -21,6 +34,10 @@ public final class TerminalPanelSession: PanelTabSession {
 
     public private(set) var panes: [TerminalPane] = []
     public private(set) var selectedIndex: Int?
+
+    /// The standing question, if one has been asked. The view renders it; ``confirmPendingClose()``
+    /// and ``cancelPendingClose()`` are the two answers.
+    public private(set) var pendingClose: PaneCloseConfirmation?
 
     public var selectedPane: TerminalPane? {
         guard let selectedIndex, panes.indices.contains(selectedIndex) else { return nil }
@@ -39,12 +56,26 @@ public final class TerminalPanelSession: PanelTabSession {
     /// document has one writer, so serialising it here is the whole of the concurrency story.
     @ObservationIgnored private var persistence: Task<Void, Never>?
     @ObservationIgnored private var isRestoring = false
+    /// The one restore, kept so a re-render can be told it already happened and so a test can wait
+    /// for it. `nil` until the tab's first render asks (see ``restoreOnce()``).
+    @ObservationIgnored private var restoration: Task<Void, Never>?
+    /// The pane the standing question is about, held by reference because the confirmation value
+    /// carries only its identity.
+    @ObservationIgnored private var paneAwaitingClose: TerminalPane?
 
     public init(context: ChannelContext) {
         self.context = context
     }
 
     public var storeKey: String { TerminalPanelState.storeKey(for: context.key) }
+
+    /// Brings a pane to the front. The selection is part of the W6 document, so choosing a pane is
+    /// a write like opening one.
+    public func select(_ index: Int) {
+        guard panes.indices.contains(index), selectedIndex != index else { return }
+        selectedIndex = index
+        schedulePersist()
+    }
 
     // MARK: Opening
 
@@ -93,11 +124,82 @@ public final class TerminalPanelSession: PanelTabSession {
 
     // MARK: Closing
 
+    /// The close a person asks for. A pane whose child is still alive raises the question instead
+    /// of closing; a pane whose child has ended closes at once, because there is nothing to lose.
+    public func requestClose(_ pane: TerminalPane) async {
+        guard panes.contains(where: { $0 === pane }) else { return }
+        guard pane.hasLiveChild else {
+            await close(pane)
+            return
+        }
+        paneAwaitingClose = pane
+        pendingClose = confirmation(for: pane)
+    }
+
+    /// Yes. The pane closes, which hangs its child up and — for an X5-originated pane — reports
+    /// the one exit C4 is waiting on.
+    public func confirmPendingClose() async {
+        guard let pane = paneAwaitingClose else { return }
+        pendingClose = nil
+        paneAwaitingClose = nil
+        await close(pane)
+    }
+
+    /// No. The pane and its child are left exactly as they were.
+    public func cancelPendingClose() {
+        pendingClose = nil
+        paneAwaitingClose = nil
+    }
+
+    /// Reopens a shell pane in its own slot, in the directory it was running in.
+    ///
+    /// Only a pane the panel made itself: a `PaneRequest` pane is nobody's to re-run here (spec
+    /// Design §6), which is why this returns `nil` rather than restarting one.
+    @discardableResult
+    public func restart(_ pane: TerminalPane) async -> TerminalPane? {
+        guard pane.request == nil, let index = panes.firstIndex(where: { $0 === pane }) else {
+            return nil
+        }
+        let cwd = pane.spawn?.cwd
+        await pane.close()
+        panes.remove(at: index)
+        reportedPanes.remove(ObjectIdentifier(pane))
+        if paneAwaitingClose === pane { cancelPendingClose() }
+        let fresh = TerminalPane()
+        fresh.startShell(
+            executable: URL(fileURLWithPath: context.environment.shell),
+            arguments: ["-i"],
+            cwd: cwd ?? context.cwd,
+            environment: context.environment.variables
+        )
+        panes.insert(fresh, at: index)
+        selectedIndex = index
+        paneCountDidChange?(self)
+        schedulePersist()
+        return fresh
+    }
+
+    /// A hatch pane names what is waiting on it; every other pane says only that a process is
+    /// running, because that is all that is true of it.
+    private func confirmation(for pane: TerminalPane) -> PaneCloseConfirmation {
+        let isHatch: Bool = if case .hatch = pane.request?.purpose { true } else { false }
+        return PaneCloseConfirmation(
+            paneID: ObjectIdentifier(pane),
+            question: isHatch
+                ? "This channel is in the CLI's own client and is waiting to become owned again. "
+                    + "Closing this pane ends that client and returns the channel."
+                : "A process is still running in this pane. Closing it ends that process.",
+            namesChannelReturn: isHatch
+        )
+    }
+
     /// Ends the pane, drops it, moves the selection to a neighbour and rewrites the document.
     /// Closing the last pane leaves none: a Terminal tab with no pane is a state the view renders,
     /// not one this method papers over by opening another.
     public func close(_ pane: TerminalPane) async {
         guard let index = panes.firstIndex(where: { $0 === pane }) else { return }
+        // A question about a pane that is going away has nothing left to ask.
+        if paneAwaitingClose === pane { cancelPendingClose() }
         await pane.close()
         reportExitIfOwed(by: pane)
         let wasSelected = selectedIndex == index
@@ -141,6 +243,22 @@ public final class TerminalPanelSession: PanelTabSession {
         }
         isRestoring = false
         schedulePersist()
+    }
+
+    /// Reads the W6 document once for the life of this session, and never again.
+    ///
+    /// The tab calls it on every render because a session has no other moment it can be sure of:
+    /// it may have been made by the pane runner for a channel no window was showing, long before
+    /// anything rendered. Idempotent, so the second render is not a second restore — which would
+    /// otherwise double the channel's panes on every redraw.
+    public func restoreOnce() {
+        guard restoration == nil else { return }
+        restoration = Task { await self.restore() }
+    }
+
+    /// Returns once the one restore has landed. Tests await it; nothing in the app needs to.
+    public func settleRestore() async {
+        await restoration?.value
     }
 
     /// Returns once every scheduled write has landed. Tests await it; nothing in the app needs to.
