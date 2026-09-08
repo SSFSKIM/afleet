@@ -81,6 +81,26 @@ enum HeaderRig {
     }
 }
 
+/// The two phases the gate's suites assert on, read off the one operation.
+///
+/// They live here and not on `SettingPickersModel` because production reads the phase directly:
+/// *owed* and *failed* are how the machine is written, and a second spelling of each in `App/` would
+/// be a member the app itself never calls (`make check-wiring`).
+extension SettingPickersModel {
+
+    /// The snapshot a restart's readback is still owed, when one is — the *owed* phase.
+    var awaitedRestart: RestartSnapshot? {
+        guard case .owed? = operation?.phase else { return nil }
+        return operation?.expected
+    }
+
+    /// The settings a restart did not carry across — the *failed* phase, as the list it carries.
+    var restartFailures: [String] {
+        guard case .failed(let names)? = operation?.phase else { return [] }
+        return names
+    }
+}
+
 /// afleet's own store, recorded into the **same ordered log** as the lifecycle calls.
 ///
 /// It wraps a real `FileStateStore` rather than standing in for one, so G5's X9 arm watches the

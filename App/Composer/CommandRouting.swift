@@ -184,9 +184,15 @@ extension ComposerModel {
             // re-opens it only once every readback matches — a mismatch banners and keeps it closed.
             // The gate is `SettingPickersModel`'s, over the `ChannelSurfaceState` the header shares,
             // and the two readbacks it takes are why this row reaches four members rather than two.
+            // The same predicate every other entry point asks, and the same reason: a restart-required
+            // change replaces a process, and one may not begin over another or on a connecting channel.
+            if let refused = await pickers.refusal(of: .settingChange) {
+                refusal = refused
+                return false
+            }
             let before = await lifecycle.state(of: key)
-            let expected = pickers.currentSnapshot
-            pickers.beginRestart(reason: "This channel is restarting to apply the setting.")
+            let operation = pickers.beginRestart(reason: "This channel is restarting to apply the setting.",
+                                                 expecting: pickers.currentSnapshot)
             let after: ChannelState
             do {
                 after = try await lifecycle.perform(.quiescentRestart(request), on: key)
@@ -195,7 +201,7 @@ extension ComposerModel {
                 // replacement before it restores and re-reads the settings, so an error can arrive
                 // with a new process connecting on the other end. Re-opening the field there lets a
                 // send into that process's queued input with no readiness transition to flush it.
-                await pickers.restartFailed(await lifecycle.state(of: key), expecting: expected)
+                await pickers.restartFailed(await lifecycle.state(of: key), operation)
                 refuse(error)
                 return false
             }
@@ -203,10 +209,10 @@ extension ComposerModel {
             // old process still on the other end; a readback confirmed there would release the field
             // over a restart that has not happened.
             guard SettingPickersModel.replacedTheProcess(after, from: before) else {
-                await pickers.noteQueuedRestart()
+                await pickers.noteQueuedRestart(operation)
                 return true
             }
-            _ = await pickers.confirmReadback(of: expected)
+            _ = await pickers.confirmReadback(operation)
             return true
         case .text(let text):
             // A pass-through is a prompt like any other: the user typed a line and a turn runs for

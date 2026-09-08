@@ -272,6 +272,39 @@ final class BypassGateTests: XCTestCase {
         XCTAssertEqual(recorder.pathsUnderAConfigHome().count, 0, "a refused restart wrote under a config home")
     }
 
+    /// **Eligibility is re-read when the disclaimer is accepted, not taken from the reading that
+    /// raised it.** A disclaimer stands for as long as a human takes to answer it, and a
+    /// `permissions.disableBypassPermissionsMode` of `"disable"` arriving in that window makes the
+    /// mode one this account may not have. Nothing is persisted, nothing is restarted, and no mode
+    /// switch is issued.
+    ///
+    /// Failed before the fix: `bypassDisabled` was whatever the last readback said and acceptance
+    /// never asked again, so the log held all three of §8.6's steps.
+    func testAcceptingIsRefusedWhenTheSettingsDisabledTheModeWhileTheDisclaimerStood() async throws {
+        let double = ComposerLifecycleDouble()
+        let recorder = AppWriteRecorder()
+        let header = try await makeHeader(double, recorder: recorder)
+        await header.selectBypassMode()
+        XCTAssertTrue(header.isShowingBypassDisclaimer, "the first selection did not show the disclaimer")
+        // While the disclaimer stood, the settings that disable the mode arrived.
+        await double.stageSend("get_settings",
+                               .success(try PickerReadbackTests.settings(bypass: "disable", in: .effective)))
+
+        await header.acceptBypassMode()
+
+        let steps = await steps(of: double)
+        XCTAssertEqual(steps.count, 0,
+                       "an acceptance the settings had disabled took \(steps.count) step(s): "
+                       + steps.joined(separator: " → "))
+        XCTAssertFalse(header.bypassAccepted, "an acceptance was recorded for a mode this account may not have")
+        let keys = try await XCTUnwrap(header.store, "the arm has no store to read back").keys(in: .fleetKit)
+        XCTAssertFalse(keys.contains(FleetKitKeys.bypassAccepted),
+                       "the refused acceptance left one among the namespace's \(keys.count) key(s)")
+        XCTAssertNotNil(header.note, "the refused acceptance said nothing")
+        XCTAssertEqual(recorder.pathsUnderAConfigHome().count, 0,
+                       "the refused acceptance wrote under a config home")
+    }
+
     /// The engine's own refusal string reaches the surface. §8.6's validator has three arms and
     /// afleet renders whichever one fired rather than guessing.
     func testTheEnginesOwnRefusalStringIsWhatTheHeaderShows() async throws {
@@ -379,7 +412,8 @@ final class BypassGateTests: XCTestCase {
         let header = try await makeHeader(double, recorder: recorder, accepted: true)
 
         // Any restart at all — a flag setting's, and not this gate's.
-        header.pickers.beginRestart(reason: "an invented restart")
+        header.pickers.beginRestart(reason: "an invented restart",
+                                    expecting: header.pickers.currentSnapshot)
         await header.selectBypassMode()
 
         let subtypes = await double.sentSubtypes
@@ -413,7 +447,9 @@ final class BypassGateTests: XCTestCase {
         let header = HeaderRig.header(double, key: key, store: hooked)
         await header.pickers.refresh()
         // The restart lands inside the read the acceptance is fetched by, and only there.
-        hooked.onRead { [pickers = header.pickers] in pickers.beginRestart(reason: "an invented restart") }
+        hooked.onRead { [pickers = header.pickers] in
+            pickers.beginRestart(reason: "an invented restart", expecting: pickers.currentSnapshot)
+        }
 
         await header.selectBypassMode()
 
