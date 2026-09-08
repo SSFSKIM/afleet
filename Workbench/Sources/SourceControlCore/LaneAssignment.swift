@@ -81,6 +81,22 @@ public struct LaneAssignment: Hashable, Sendable {
         self.laneCount = laneCount
     }
 
+    /// What a lane is currently holding: the hash of a commit not yet read, and the claim's
+    /// provenance.
+    ///
+    /// Provenance is not decoration. Two lanes can be reserved for the same commit, and the one it
+    /// is read at decides which of its children's lines runs straight down and which bends
+    /// sideways. Without this flag the choice would be "leftmost", which is a fact about the order
+    /// tips happened to be read in rather than about the graph, and it can bend a first-parent line
+    /// — see rule 1 below.
+    private struct Reservation {
+        var hash: String
+        /// The reservation was made by rule 3 — a child naming this commit as its **first** parent,
+        /// or the working-tree row, which is `HEAD`'s child under the same rule (D44) — rather than
+        /// by rule 4, for a merge's further parent.
+        var isFirstParent: Bool
+    }
+
     /// Places `commits` — in the order `git log --topo-order` gave them, newest first — into lanes.
     ///
     /// The algorithm keeps one array, `lanes`, where `lanes[i]` is the hash that lane `i` is
@@ -89,21 +105,45 @@ public struct LaneAssignment: Hashable, Sendable {
     /// a commit not yet read".
     ///
     /// When `workingTreeIsDirty`, a `.workingTree` row is prepended **before** the loop, at lane 0,
-    /// and it reserves lane 0 for `HEAD`'s hash — it is a child of `HEAD` and takes the same rule 3
+    /// and it reserves lane 0 for `headOID` — it is a child of `HEAD` and takes the same rule 3
     /// every commit does (D44). That is what makes the connection reach: `HEAD` need not be the row
     /// below, because `--topo-order --all` orders the tips by date and a tag-only commit newer than
     /// `HEAD` is listed ahead of it (measured on `git` 2.55.0), and a reserved lane is carried down
     /// through every intervening row by the pass-through rule below while a single prepended edge
     /// would dangle one row down. `HEAD` is then read in lane 0 rather than wherever it fell, and
-    /// the tips read before it open lanes beside it. When no row carries `.head` — `HEAD` fell
-    /// outside the window — the first commit read is the only remaining approximation; when there
-    /// are no commits at all, the row is drawn alone.
+    /// the tips read before it open lanes beside it.
+    ///
+    /// `headOID` is `HEAD`'s object id — `WorkingTreeStatus.headOID`, which `git status
+    /// --porcelain=v2 --branch` prints as a header. It is matched by hash rather than by looking
+    /// for a row carrying a `.head` ref, so a configuration that suppresses the decoration
+    /// (`log.excludeDecoration`, tracker 122) cannot silently move the working tree's edge.
+    ///
+    /// Two cases have no row to reach, and neither invents one:
+    ///
+    /// - `headOID` is outside the window `commits` covers — the ordinary consequence of `skip`, or
+    ///   of a `limit` shorter than the distance to `HEAD`. The row's single edge is then
+    ///   `truncated`, pointing at a commit this assignment did not read, and **no lane is
+    ///   reserved**. Reserving would occupy lane 0 for a hash no row ever releases, pushing the
+    ///   whole graph one lane right and drawing a full-height line beside it; substituting the
+    ///   first commit read — as this did before — draws the user's uncommitted changes as belonging
+    ///   to an unrelated commit, which is a wrong answer rather than a missing one.
+    /// - `headOID` is `nil`: `HEAD` is unborn, so there is no commit the working tree sits above.
+    ///   The row is drawn alone, with no edge at all.
     ///
     /// For each commit, in order:
     ///
-    /// 1. Its lane is the leftmost lane reserved for its hash. If no lane is reserved for it — a
-    ///    branch tip, or a commit reachable only through a tag — it takes the leftmost free lane,
+    /// 1. Its lane is the leftmost lane holding a **first-parent** reservation for its hash; if no
+    ///    lane holds one, the leftmost lane reserved for it at all. If no lane is reserved for it —
+    ///    a branch tip, or a commit reachable only through a tag — it takes the leftmost free lane,
     ///    appending a new one when none is free.
+    ///
+    ///    Provenance decides the tie because W7's rule is about first parents, not about lane
+    ///    numbers: a commit takes the lane of the child that named it as its *first* parent. A
+    ///    topological order may reach a commit from a merge's further parent before any child names
+    ///    it first — `M(parents: [P, X])`, then an unrelated tip `C(parent: X)`, then `X` — and
+    ///    reading `X` at the merge's side lane would bend `C`'s first-parent line sideways, which is
+    ///    the one thing rule 3 exists to prevent. The further-parent lane is released at `X`'s row
+    ///    like any other duplicate, so the merge's line converges on `X` (step 2) instead.
     /// 2. That reservation is freed, and then every *other* lane also reserved for this hash is
     ///    released — and, on the row above, every edge that arrived in one of those released lanes
     ///    is redirected to end in the lane this commit was read at. A commit reached by two
@@ -133,40 +173,50 @@ public struct LaneAssignment: Hashable, Sendable {
     /// destination lane cannot represent that pair, and dropping the pass-through disconnects the
     /// older line at this row (D43). An edge whose target hash is not among `commits` is
     /// `truncated`.
-    public static func assign(commits: [GitCommit], workingTreeIsDirty: Bool) -> LaneAssignment {
+    public static func assign(commits: [GitCommit], headOID: String?,
+                              workingTreeIsDirty: Bool) -> LaneAssignment {
         // Membership of the window, for the `truncated` flag. A parent outside it is never read,
         // so its reservation is never released: the lane stays occupied to the bottom of the
         // window, emitting a truncated straight-down edge on every row below the one that named
         // it. That is the wanted rendering — a line leaving a viewport does continue.
         let inWindow = Set(commits.map(\.hash))
 
-        var lanes: [String?] = []
+        var lanes: [Reservation?] = []
         var laneCount = 0
         var rows: [GraphRow] = []
         rows.reserveCapacity(commits.count + (workingTreeIsDirty ? 1 : 0))
 
         if workingTreeIsDirty {
             // The row `HEAD` points at is the row the uncommitted changes sit above, and it is not
-            // necessarily the row below — see the note on the ordering above. `GitLog` emits
-            // `.head` for both the attached (`HEAD -> main`) and the detached (`HEAD`) decoration.
-            let head = commits.first { commit in
-                commit.refs.contains { $0.kind == .head }
-            } ?? commits.first
-            if let head {
-                lanes = [head.hash]
+            // necessarily the row below — see the note on the ordering above.
+            let edges: [GraphRow.Edge]
+            switch headOID {
+            case .some(let head) where inWindow.contains(head):
+                lanes = [Reservation(hash: head, isFirstParent: true)]
+                edges = [GraphRow.Edge(fromLane: 0, toLane: 0, truncated: false)]
+            case .some:
+                // `HEAD` is a real commit that this window does not cover: the line leaves the
+                // top of the graph rather than landing on a row, and reserves nothing.
+                edges = [GraphRow.Edge(fromLane: 0, toLane: 0, truncated: true)]
+            case .none:
+                // An unborn `HEAD`: there is no commit the uncommitted changes sit above.
+                edges = []
             }
             // A repository with no commits still draws its one dirty row somewhere.
             laneCount = 1
-            rows.append(GraphRow(content: .workingTree, lane: 0,
-                                 edges: head == nil ? []
-                                                    : [GraphRow.Edge(fromLane: 0, toLane: 0,
-                                                                     truncated: false)]))
+            rows.append(GraphRow(content: .workingTree, lane: 0, edges: edges))
         }
 
         for commit in commits {
-            // 1: find this commit's lane.
+            // 1: find this commit's lane. A first-parent reservation outranks a further-parent one
+            // wherever both name this commit, so that the child whose line runs straight down keeps
+            // it; among equals, the leftmost.
             let lane: Int
-            if let reserved = lanes.firstIndex(where: { $0 == commit.hash }) {
+            if let claimed = lanes.firstIndex(where: {
+                $0?.hash == commit.hash && $0?.isFirstParent == true
+            }) {
+                lane = claimed
+            } else if let reserved = lanes.firstIndex(where: { $0?.hash == commit.hash }) {
                 lane = reserved
             } else if let free = lanes.firstIndex(where: { $0 == nil }) {
                 lane = free
@@ -178,7 +228,7 @@ public struct LaneAssignment: Hashable, Sendable {
             // 2: release every reservation naming this commit, and bend the lines that were on
             // their way into the released lanes into the lane the commit was actually read at.
             var released: Set<Int> = []
-            for index in lanes.indices where lanes[index] == commit.hash {
+            for index in lanes.indices where lanes[index]?.hash == commit.hash {
                 if index != lane { released.insert(index) }
                 lanes[index] = nil
             }
@@ -201,15 +251,17 @@ public struct LaneAssignment: Hashable, Sendable {
             var parentLanes = Set<Int>()
             for (position, parent) in commit.parents.enumerated() {
                 if position == 0 {
-                    lanes[lane] = parent
+                    lanes[lane] = Reservation(hash: parent, isFirstParent: true)
                     parentLanes.insert(lane)
-                } else if let existing = lanes.firstIndex(where: { $0 == parent }) {
+                } else if let existing = lanes.firstIndex(where: { $0?.hash == parent }) {
+                    // The existing reservation keeps its own provenance: reaching sideways into a
+                    // lane does not make this row that parent's first child.
                     parentLanes.insert(existing)
                 } else if let free = lanes.firstIndex(where: { $0 == nil }) {
-                    lanes[free] = parent
+                    lanes[free] = Reservation(hash: parent, isFirstParent: false)
                     parentLanes.insert(free)
                 } else {
-                    lanes.append(parent)
+                    lanes.append(Reservation(hash: parent, isFirstParent: false))
                     parentLanes.insert(lanes.count - 1)
                 }
             }
@@ -218,11 +270,11 @@ public struct LaneAssignment: Hashable, Sendable {
             var edges: [GraphRow.Edge] = []
             for index in passingThrough {
                 edges.append(GraphRow.Edge(fromLane: index, toLane: index,
-                                           truncated: !inWindow.contains(lanes[index]!)))
+                                           truncated: !inWindow.contains(lanes[index]!.hash)))
             }
             for target in parentLanes {
                 edges.append(GraphRow.Edge(fromLane: lane, toLane: target,
-                                           truncated: !inWindow.contains(lanes[target]!)))
+                                           truncated: !inWindow.contains(lanes[target]!.hash)))
             }
             // No two edges of a row share both endpoints — `parentLanes` is a set, and a lane this
             // commit's parents occupy is either free before the row or the commit's own, so it is
