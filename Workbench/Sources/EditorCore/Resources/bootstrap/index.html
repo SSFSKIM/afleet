@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>afleet editor</title>
+
+<!--
+  The document MonacoEditorView navigates to. Hand-written, and kept out of ../monaco because
+  Tools/build-monaco.sh replaces that directory whole.
+
+  Every reference below is relative, so the same file works under all three of S3's routes: on
+  afleet-editor: it resolves against the served URL, under loadFileURL it resolves against the
+  file URL, and in both cases bridge.js derives the Monaco base from document.baseURI rather
+  than from anything the host had to guess right.
+
+  editor.css is linked by hand because the split build emits it referenced by nothing: no
+  JavaScript in the bundle imports a stylesheet. Two further stylesheets (tsMode-*.css and
+  freemarker2-*.css) are emitted with content-hashed names and are likewise unreferenced; they
+  are deliberately not linked here, since hard-coding a hash would break silently at the next
+  Monaco bump. Both are language-mode decoration, not editor chrome. Recorded for S3.
+-->
+
+<link rel="stylesheet" href="../monaco/editor.css">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; }
+  #editor, #diff { position: absolute; inset: 0; }
+  #diff { display: none; }
+</style>
+</head>
+<body>
+<div id="editor"></div>
+<div id="diff"></div>
+
+<!--
+  bridge.js is a classic script and runs first, so MonacoEnvironment.getWorker is installed
+  before the module below can ask for a worker. The module is deferred by definition, which is
+  the ordering guarantee this depends on.
+-->
+<script src="bridge.js"></script>
+<script type="module">
+  import "../monaco/editor.js";
+  // editor.js assigns globalThis.monaco on evaluation; boot builds the editor over it and
+  // posts `ready`.
+  window.afleetBridge.boot(globalThis.monaco, document.getElementById("editor"), document.getElementById("diff"));
+</script>
+</body>
+</html>
