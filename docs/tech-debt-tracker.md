@@ -934,3 +934,13 @@ leaf's reservation; 119 onward are unused.
      requests across four large public repositories had all settled at the time of the gate, so
      no live run produced it. One live confirmation against a repository with a check in flight
      would close this. Owner: C7.7 at its GitHub-tab gate.
+
+119. **`GraphRow.Edge.truncated` is easy to misread as "the line ends here".** It means only
+     that the edge's target commit is outside the window `GitLog` read: the parent is never
+     read, so its lane reservation is never released, and the lane repeats the same truncated
+     straight-down edge on every row below to the bottom of the window. That is the wanted
+     rendering — a line leaving a viewport does continue — but a consumer that read the flag as
+     a terminator would stop the line at the first row that named it and draw a graph that
+     disagrees with the lane state. Documented on the flag and pinned by a multi-row test;
+     what would close it is either a name that cannot be misread or a rendering contract the
+     panel and this type share. Owner: C7.7, the first consumer.
