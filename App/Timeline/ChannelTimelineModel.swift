@@ -241,7 +241,11 @@ final class ChannelTimelineModel {
     /// The header and the opening are separate concerns: origin, presence, banner and system item
     /// change under a channel that stays selected, and the read must not be restarted — or, worse,
     /// cancelled mid-flight — every time one of them does. The column calls this on every change to
-    /// those four fields and calls `open` once per channel.
+    /// those fields and calls `open` once per channel.
+    ///
+    /// **Superseded 2026-09-09 (C6.1 Task 5).** What stood here said "those four fields": the branch
+    /// is a fifth, and the column's `onChange` compares the whole `ChannelHeader`, so a rebase under
+    /// a selected channel arrives here like any other change.
     func adopt(_ header: ChannelHeader) {
         self.header = header
         readout.branch = header.branch
