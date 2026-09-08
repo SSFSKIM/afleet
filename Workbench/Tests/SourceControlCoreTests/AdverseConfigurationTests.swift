@@ -79,6 +79,14 @@ final class AdverseConfigurationTests: XCTestCase {
         "diff.renameLimit": "2",
         // The same, through the key `git status` prefers over `diff.renameLimit`.
         "status.renameLimit": "2",
+        // `git diff`, `git show` and `git status`: every submodule entry vanishes, so a
+        // submodule-only change lists nothing at all and a dirty submodule leaves the status
+        // clean — the working-tree row of the commit graph disappears with it (D6). A setting
+        // users hold on purpose, because a dirty submodule is noisy. Pinned by
+        // `--ignore-submodules=none` on both command lines. Only a fixture carrying an actual
+        // submodule can exhibit it, which is `testASubmoduleChangeSurvivesDiffIgnoreSubmodulesAll`
+        // below rather than either whole-configuration test above.
+        "diff.ignoreSubmodules": "all",
     ]
 
     /// Settings measured on `git` 2.55.0 to change nothing any reader here parses, kept as a test
@@ -579,5 +587,45 @@ final class AdverseConfigurationTests: XCTestCase {
         XCTAssertTrue(beforeStatus.entries.contains(.init(path: "untracked.txt", staged: nil,
                                                      worktree: .untracked)),
                       "the untracked path the fixture describes is missing")
+    }
+
+    // MARK: - the wave-2 wave: a fixture carrying a submodule
+
+    /// `diff.ignoreSubmodules=all` over a repository whose only change is **inside a submodule**.
+    ///
+    /// The R5 lesson applied to a new setting: a tripwire is worth its name only if the fixture
+    /// under it can exhibit the condition. Every other fixture in this file is submodule-free, so
+    /// this setting reads inert against all of them while removing the entry from both readers here.
+    /// Both directions of the defect are asserted, because they are different failures: the
+    /// changed-file list comes back **empty** — a silent wrong answer, a clean tree drawn over a
+    /// real change — and the working-tree status reports itself clean, which also removes the
+    /// commit graph's working-tree row (D6).
+    ///
+    /// What would have to be true for this to fail: `GitDiff`'s tail or `WorkingTreeStatus`'s
+    /// vector losing `--ignore-submodules=none`.
+    func testASubmoduleChangeSurvivesDiffIgnoreSubmodulesAll() async throws {
+        let fixture = try await GitFixture(tree)
+        let inner = try await GitFixture(tree, name: "inner")
+        _ = try await inner.commit(message: "the submodule's first commit", files: ["a.txt": "one\n"])
+        _ = try await fixture.commit(message: "the first commit", files: ["f.txt": "one\n"])
+        try await fixture.addSubmodule(inner, at: "s")
+        try await fixture.commitInsideSubmodule(at: "s", message: "the submodule's second commit",
+                                                files: ["a.txt": "one\ntwo\n"])
+        try await configure(fixture, ["diff.ignoreSubmodules": "all"])
+
+        let list = try await changes(fixture, .workingTreeAgainstHEAD)
+        XCTAssertEqual(list.count, 1,
+                       "under diff.ignoreSubmodules=all the submodule-only change listed "
+                       + "\(list.count) files instead of the one the fixture made")
+        XCTAssertEqual(list.first?.path, "s", "the listed change is not the submodule's path")
+        XCTAssertEqual(list.first?.kind, .gitlink,
+                       "the submodule entry was not classified as a gitlink")
+
+        let worktree = try await status(fixture)
+        XCTAssertFalse(worktree.isClean,
+                       "under diff.ignoreSubmodules=all a repository with a dirty submodule "
+                       + "reported itself clean, so the graph loses its working-tree row")
+        XCTAssertEqual(worktree.entries.map(\.path), ["s"],
+                       "the dirty submodule is missing from the working-tree status")
     }
 }

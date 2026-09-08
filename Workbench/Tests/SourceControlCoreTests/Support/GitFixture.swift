@@ -41,7 +41,7 @@ final class GitFixture {
     /// The hermetic environment every invocation in this fixture runs with.
     private(set) var environment: [String: String]
     private let runner = ToolRunner()
-    private var commitCount = 0
+    fileprivate var commitCount = 0
 
     /// Creates and initialises a repository at `tree.root/<name>`, on branch `main`.
     init(_ tree: TempTree, name: String = "repo") async throws {
@@ -325,5 +325,57 @@ extension GitFixture {
         try await run(["remote", "add", "origin", remote.path(percentEncoded: false)])
         try await run(["push", "origin", "\(local):refs/heads/\(branch)"])
         try await run(["fetch", "origin"])
+    }
+}
+
+// MARK: - added by the wave-2 fix wave, additively and without touching anything above
+
+extension GitFixture {
+
+    /// Adds `other` as a **submodule** at `relativePath` and commits the addition.
+    ///
+    /// A submodule is the one entry in a tree that is neither a file nor a link: git records it as
+    /// a *gitlink*, mode `160000`, whose object is a commit in another repository. Nothing else a
+    /// fixture can build exercises `FileChange.Kind.gitlink`, and no other shape makes
+    /// `diff.ignoreSubmodules` speak.
+    ///
+    /// `protocol.file.allow=always` is passed on this one command line because git refuses the
+    /// `file` transport for submodules by default (CVE-2022-39253). It is scoped to the
+    /// invocation, the source is another `TempTree` repository, and nothing here reaches the
+    /// network or the machine's configuration.
+    func addSubmodule(_ other: GitFixture, at relativePath: String) async throws {
+        commitCount += 1
+        let stamp = "\(Self.baseTimestamp + commitCount) +0000"
+        try await run(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet",
+                       other.root.path(percentEncoded: false), relativePath])
+        try await run(["commit", "-m", "add the submodule \(relativePath)"],
+                      extraEnvironment: ["GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp])
+    }
+
+    /// Commits inside the submodule checked out at `relativePath`, which leaves the superproject's
+    /// working tree carrying exactly one change: the gitlink now names a different commit.
+    func commitInsideSubmodule(at relativePath: String, message: String,
+                               files: [String: String]) async throws {
+        let inner = root.appending(path: relativePath)
+        for (path, contents) in files {
+            let url = inner.appending(path: path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try contents.write(to: url, atomically: true, encoding: .utf8)
+        }
+        commitCount += 1
+        let stamp = "\(Self.baseTimestamp + commitCount) +0000"
+        try await run(["add", "-A"], in: inner)
+        try await run(["commit", "-m", message], in: inner,
+                      extraEnvironment: ["GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp])
+    }
+
+    /// Creates `relativePath` as a directory, so that a test can point a path at something that is
+    /// not a repository.
+    @discardableResult
+    func directory(_ relativePath: String) throws -> URL {
+        let url = root.appending(path: relativePath)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 }

@@ -120,11 +120,19 @@ extension WorkingTreeStatus {
     /// the pin is a `-c` override ahead of the subcommand, carrying git's own documented default.
     /// R4 ruled `diff.renameLimit` out on a fixture whose only rename was **exact**, and exact
     /// renames are paired before the limit applies.
+    ///
+    /// **The wave-2 pin.** `diff.ignoreSubmodules=all` — a setting users hold precisely because a
+    /// dirty submodule is noisy — removes every submodule entry from the porcelain, so a
+    /// repository whose only change is inside a submodule reports itself clean and the commit
+    /// graph loses its working-tree row (D6), exactly as `status.showUntrackedFiles=no` does for
+    /// untracked paths. `--ignore-submodules=none` pins git's own default and is a no-op under it.
+    /// The same pin is on `GitDiff`'s command line, for the same setting.
     public static func arguments(includeIgnored: Bool = false) -> [String] {
         var arguments = ["-c", "diff.renameLimit=\(renameLimit)",
                          "-c", "status.renameLimit=\(renameLimit)",
                          "status", "--porcelain=v2", "--branch", "-z",
-                         "--untracked-files=normal", "--find-renames"]
+                         "--untracked-files=normal", "--find-renames",
+                         "--ignore-submodules=none"]
         if includeIgnored { arguments.append("--ignored") }
         return arguments
     }
@@ -134,13 +142,20 @@ extension WorkingTreeStatus {
     /// default answer, not a slower one no configuration would ever have produced.
     static let renameLimit = 1000
 
-    /// Runs `git status` at `root` and parses it.
+    /// Runs `git status` at the repository root and parses it.
+    ///
+    /// `root` is resolved through `GitCommands.repositoryRoot` first (D13): a channel's directory
+    /// is any directory the user opened, commonly a subdirectory, and the status a panel shows is
+    /// the whole repository's rather than one subtree's. A directory in no repository is
+    /// `.notARepository` — the panel's empty state — rather than a generic command failure.
     ///
     /// Only exit 0 is accepted; anything else becomes `.commandFailed`, a value the panel renders
     /// in its own area rather than an exception crossing into the conversation (§10, D3).
     public static func read(root: URL, environment: [String: String], runner: any ToolRunning,
                             includeIgnored: Bool = false,
                             timeout: Duration = readTimeout) async throws -> WorkingTreeStatus {
+        let root = try await GitCommands.repositoryRoot(cwd: root, environment: environment,
+                                                        runner: runner, timeout: timeout)
         let output = try await runner.run(.git, arguments: arguments(includeIgnored: includeIgnored),
                                           cwd: root, environment: environment, timeout: timeout)
         guard output.exitCode == 0 else {
