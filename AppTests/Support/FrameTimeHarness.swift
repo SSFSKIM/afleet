@@ -85,12 +85,7 @@ final class FrameTimeHarness: NSObject {
         dropped = 0
         updateCount = 0
 
-        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
-                            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        host.contentView = view
-        view.frame = host.contentLayoutRect
-        view.autoresizingMask = [.width, .height]
-        host.orderFrontRegardless()
+        let host = Self.makeHostWindow(view, size: NSSize(width: 900, height: 700))
         self.hostWindow = host
 
         startedAt = Date()
@@ -107,6 +102,34 @@ final class FrameTimeHarness: NSObject {
             self.finish = { result in continuation.resume(returning: result) }
         }
         return report
+    }
+
+    // MARK: - Hosting
+
+    /// Hosts `view` in a real on-screen window for the length of `body`.
+    ///
+    /// **The window is the point, not the ceremony.** An `NSScrollView` outside one has no clip-view
+    /// bounds and no laid-out document, so every question about the viewport answers zero and every
+    /// assertion about where a reader is looking passes without measuring anything. The same window
+    /// this harness times frames in is the one a scroll test asserts on, so there is one hosting
+    /// path in this suite and not a second that could differ from it.
+    @MainActor
+    static func hosted<T>(_ view: NSView, size: NSSize = NSSize(width: 900, height: 700),
+                          _ body: (NSWindow) throws -> T) rethrows -> T {
+        let hosting = makeHostWindow(view, size: size)
+        defer { hosting.orderOut(nil) }
+        return try body(hosting)
+    }
+
+    @MainActor
+    private static func makeHostWindow(_ view: NSView, size: NSSize) -> NSWindow {
+        let host = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        host.contentView = view
+        view.frame = host.contentLayoutRect
+        view.autoresizingMask = [.width, .height]
+        host.orderFrontRegardless()
+        return host
     }
 
     @objc private func tick(_ link: CADisplayLink) {

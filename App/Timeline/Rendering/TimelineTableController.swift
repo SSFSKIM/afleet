@@ -2,6 +2,22 @@ import AppKit
 import SwiftUI
 import FleetKit
 
+// MARK: - What the pill reads
+
+/// The two things the jump-to-bottom affordance draws, published to SwiftUI.
+///
+/// Separate from the controller because the controller is an `NSObject` the table delegates to and
+/// the pill is a SwiftUI view: an observable box is the whole of what crosses between them, and it
+/// keeps `@Observable` off a type that is also a data source.
+@MainActor
+@Observable
+final class TimelineScrollState {
+    /// Whether the viewport is at the bottom, and therefore whether new items follow.
+    var isPinnedToBottom = true
+    /// How many rows have arrived since the viewport left the bottom. Zero while pinned.
+    var unseenCount = 0
+}
+
 // MARK: - The table
 
 /// One channel's table: rows keyed by `ItemID`, heights cached per id and invalidated only for the
@@ -17,6 +33,9 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
 
     let scrollView = NSScrollView()
     let tableView = NSTableView()
+
+    /// What the jump-to-bottom pill reads.
+    let scroll = TimelineScrollState()
 
     /// The item rows, in the order the timeline holds them. The streaming preview is not one of them
     /// — it is not an item yet — and `rows` appends it.
@@ -45,6 +64,10 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     private let markdown = MarkdownText()
     private let highlighter = CodeHighlighter()
 
+    /// How close to the document's bottom still counts as the bottom. A tolerance and not an
+    /// equality, because a fractional row height leaves the viewport a hair short of the end.
+    static let bottomTolerance: CGFloat = 2
+
     /// The width a height is measured at before the table has one. A row measured at zero width is
     /// infinitely tall and would poison the cache for the row's whole life.
     static let measuringWidth: CGFloat = 320
@@ -65,15 +88,24 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
+        // The sticky-to-bottom rule reads the viewport, so the viewport has to say when it moved.
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(viewportMoved),
+                                               name: NSView.boundsDidChangeNotification,
+                                               object: scrollView.contentView)
     }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
 
     // MARK: - Applying a publish
 
-    /// One publish, applied: the items reconciled by key and the preview appended to.
+    /// One publish, applied: the items reconciled by key, the preview appended to, and the scroll
+    /// position either held on its anchor or followed to the bottom.
     func apply(_ input: TimelineRenderInput) {
         reloadedRows = []
-        applyItems(input)
-        applyPreview(input.preview)
+        let anchor = anchorAtViewportTop()
+        let appended = applyItems(input) + applyPreview(input.preview)
+        settleScroll(anchor: anchor, appended: appended)
     }
 
     /// The item half. Returns how many rows were appended.
@@ -187,6 +219,72 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         tableView.noteHeightOfRows(withIndexesChanged: indices)
         tableView.reloadData(forRowIndexes: indices, columnIndexes: IndexSet(integer: 0))
         reloadedRows.append(contentsOf: indices)
+    }
+
+    // MARK: - The scroll behaviours (§3, parity §41.8)
+
+    private struct ViewportAnchor {
+        let key: String
+        /// How far below the viewport's top edge the anchored row sits. Signed: the row nearest the
+        /// top is usually part-scrolled off it.
+        let offset: CGFloat
+    }
+
+    /// The item nearest the viewport top, remembered before a commit.
+    private func anchorAtViewportTop() -> ViewportAnchor? {
+        guard !scroll.isPinnedToBottom else { return nil }
+        let visible = scrollView.contentView.documentVisibleRect
+        let index = tableView.row(at: NSPoint(x: 1, y: visible.minY + 1))
+        let all = rows
+        guard index >= 0, all.indices.contains(index) else { return nil }
+        return ViewportAnchor(key: all[index].key, offset: tableView.rect(ofRow: index).minY - visible.minY)
+    }
+
+    /// Puts the viewport back where the reader left it — at the bottom if it was pinned there, and
+    /// otherwise on the anchor, corrected by however far the anchored row moved.
+    ///
+    /// Without the correction, content arriving above the viewport shoves the reader's place down by
+    /// exactly the height of what arrived, which is the third of parity §41.8's three behaviours and
+    /// the one a naive list gets wrong.
+    private func settleScroll(anchor: ViewportAnchor?, appended: Int) {
+        tableView.layoutSubtreeIfNeeded()
+        if scroll.isPinnedToBottom {
+            scrollToBottom()
+            return
+        }
+        if appended > 0 { scroll.unseenCount += appended }
+        guard let anchor, let index = rows.firstIndex(where: { $0.key == anchor.key }) else { return }
+        let target = tableView.rect(ofRow: index).minY - anchor.offset
+        scrollTo(y: target)
+    }
+
+    /// What the jump-to-bottom pill does, and what a pinned viewport does on every publish.
+    func scrollToBottom() {
+        tableView.layoutSubtreeIfNeeded()
+        scrollTo(y: max(0, tableView.bounds.height - scrollView.contentView.bounds.height))
+        scroll.unseenCount = 0
+        scroll.isPinnedToBottom = true
+    }
+
+    private func scrollTo(y: CGFloat) {
+        let clip = scrollView.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
+        scrollView.reflectScrolledClipView(clip)
+    }
+
+    /// True while the viewport is at the document's bottom.
+    var isAtBottom: Bool {
+        let visible = scrollView.contentView.documentVisibleRect
+        return visible.maxY >= tableView.bounds.height - Self.bottomTolerance
+    }
+
+    /// The **silent re-pin** (§3): scrolling back to the bottom re-arms the follow and clears the
+    /// unseen count. There is no affordance to press and no state for a caller to set — a reader who
+    /// returns to the bottom simply gets the stream back.
+    @objc private func viewportMoved() {
+        let atBottom = isAtBottom
+        scroll.isPinnedToBottom = atBottom
+        if atBottom { scroll.unseenCount = 0 }
     }
 
     // MARK: - The S7 path

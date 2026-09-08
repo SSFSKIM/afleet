@@ -42,9 +42,9 @@ protocol TimelineRendering {
 ///
 /// **Superseded 2026-09-08 (C6.1 Task 2).** What stood here said this was S7-minimal — a table and
 /// the text pipeline, with the scroll behaviours to come. They are here now, in
-/// `TimelineTableController`: one row per `ItemID`, heights cached per id, and a streaming delta that
-/// reloads one row. The scroll behaviours land next, and Task 3 still lifts `MarkdownText` and
-/// `CodeHighlighter` out of this file into their own.
+/// `TimelineTableController`: bottom anchoring, sticky-to-bottom with a silent re-pin, scroll
+/// anchoring on the item nearest the viewport top, and the jump-to-bottom affordance with its unseen
+/// count. Task 3 still lifts `MarkdownText` and `CodeHighlighter` out of this file into their own.
 ///
 /// One conformer, and one table per channel: the controller is held here, so the row heights and the
 /// scroll position survive every body evaluation of the view above.
@@ -54,7 +54,7 @@ final class NativeTimelineRenderer: TimelineRendering {
     private let controller = TimelineTableController()
 
     func view(for input: TimelineRenderInput) -> AnyView {
-        AnyView(TimelineTableRepresentable(controller: controller, input: input))
+        AnyView(TimelineListSurface(controller: controller, input: input))
     }
 }
 

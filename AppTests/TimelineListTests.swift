@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import XCTest
 import AfleetCore
 import ClaudeWire
@@ -8,9 +9,10 @@ import FleetKit
 
 /// C6.1 Task 2: the list, and the four properties that make it a table rather than a `List`.
 ///
-/// **What each of these would catch.** A whole-table reload on a streaming delta, and a height cache
-/// dropped wholesale on every publish. Each was run against a deliberately broken controller before
-/// it was accepted.
+/// **What each of these would catch.** A whole-table reload on a streaming delta; a height cache
+/// dropped wholesale on every publish; a viewport shoved down by content arriving above it; a
+/// sticky-to-bottom rule that needs an affordance pressed to re-arm. Each was run against a
+/// deliberately broken controller before it was accepted.
 ///
 /// Nothing here asserts over an `ItemID` or over anything holding one (§11): `ItemID.stream` carries
 /// the config home, so the answers are row counts, reload counts, measurement counts and offsets in
@@ -75,7 +77,85 @@ final class TimelineListTests: XCTestCase {
                        "a publish naming one id re-measured \(controller.heightMeasurements - baseline) row(s) of 30")
     }
 
+    // MARK: - The scroll behaviours
+
+    /// Away from the bottom, new items do not move the viewport; back at the bottom, they follow
+    /// again with nothing pressed.
+    ///
+    /// Hosted in a real window, because an `NSScrollView` outside one has no clip-view bounds and
+    /// every assertion here would pass against a viewport that never existed.
+    func testStickyBottomRepinsSilently() {
+        let controller = TimelineTableController()
+        FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { hosting in
+            Self.commit(Self.rows(60), to: controller, in: hosting)
+            XCTAssertGreaterThan(controller.tableView.bounds.height, Self.viewport.height,
+                                 "the table is no taller than its viewport, so nothing here could scroll")
+            XCTAssertTrue(controller.isAtBottom, "a first render did not land at the bottom")
+
+            Self.scroll(controller, to: controller.tableView.bounds.height / 2)
+            XCTAssertFalse(controller.scroll.isPinnedToBottom,
+                           "the viewport still reports itself pinned after scrolling into the middle")
+            let parked = controller.scrollView.contentView.documentVisibleRect.minY
+
+            Self.commit(Self.rows(65), to: controller, in: hosting)
+            let moved = abs(controller.scrollView.contentView.documentVisibleRect.minY - parked)
+            XCTAssertLessThan(moved, 1,
+                              "5 new item(s) moved a parked viewport by \(Int(moved)) point(s)")
+            XCTAssertEqual(controller.scroll.unseenCount, 5,
+                           "the unseen count reads \(controller.scroll.unseenCount) after 5 item(s) arrived away from the bottom")
+
+            // Back to the bottom by scrolling, which is the whole of the re-pin: nothing is pressed
+            // and no caller sets a flag.
+            Self.scroll(controller, to: controller.tableView.bounds.height)
+            XCTAssertTrue(controller.scroll.isPinnedToBottom, "scrolling back to the bottom did not re-pin")
+            XCTAssertEqual(controller.scroll.unseenCount, 0,
+                           "the unseen count survived the re-pin, at \(controller.scroll.unseenCount)")
+
+            Self.commit(Self.rows(70), to: controller, in: hosting)
+            XCTAssertTrue(controller.isAtBottom, "new items did not follow a re-pinned viewport")
+            XCTAssertEqual(controller.rows.count, 70,
+                           "the table holds \(controller.rows.count) row(s) after three commits of 60, 65 and 70")
+        }
+    }
+
+    /// Content arriving above the viewport leaves the item nearest its top edge exactly where it was.
+    ///
+    /// Fails against a list that shoves the view: without the correction the anchored row moves down
+    /// by the whole height of what arrived above it.
+    func testScrollAnchoringHoldsTheTopItem() throws {
+        let controller = TimelineTableController()
+        try FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { hosting in
+            Self.commit(Self.rows(60, from: 100), to: controller, in: hosting)
+            XCTAssertGreaterThan(controller.tableView.bounds.height, Self.viewport.height,
+                                 "the table is no taller than its viewport, so nothing here could scroll")
+
+            Self.scroll(controller, to: controller.tableView.bounds.height / 2)
+            XCTAssertFalse(controller.scroll.isPinnedToBottom,
+                           "the viewport still reports itself pinned after scrolling into the middle")
+
+            let anchor = try XCTUnwrap(Self.topRowKey(of: controller),
+                                       "no row was found at the viewport's top edge, so there is no anchor to hold")
+            let before = try XCTUnwrap(Self.offset(ofRowKeyed: anchor, in: controller),
+                                       "the anchored row has no rectangle before the commit")
+
+            // Ten items above the anchor, which is what a repair, a backfill or a late overlay item
+            // does to a channel a reader has scrolled back into.
+            Self.commit(Self.rows(10, from: 0) + Self.rows(60, from: 100), to: controller, in: hosting)
+            XCTAssertEqual(controller.rows.count, 70,
+                           "the table holds \(controller.rows.count) row(s) after 10 were inserted above 60")
+
+            let after = try XCTUnwrap(Self.offset(ofRowKeyed: anchor, in: controller),
+                                      "the anchored row is not in the table after the commit")
+            XCTAssertEqual(after, before, accuracy: 1,
+                           "the anchored row moved \(Int(abs(after - before))) point(s) after 10 item(s) arrived above it")
+        }
+    }
+
     // MARK: - Fixtures
+
+    /// The window every scroll assertion is made in. Short enough that sixty rows overflow it, which
+    /// is what makes "scrolled into the middle" a place and not a rounding error.
+    private static let viewport = NSSize(width: 520, height: 300)
 
     /// An invented stream: a repeated-nibble session id and a config home under the process's own
     /// temporary directory, so no committed byte and no real path is in this suite (§11).
@@ -109,5 +189,37 @@ final class TimelineListTests: XCTestCase {
         for index in controller.rows.indices {
             _ = controller.tableView(controller.tableView, heightOfRow: index)
         }
+    }
+
+    /// A publish, laid out. The layout is not decoration: `rect(ofRow:)` answers from the last
+    /// layout, so an assertion made before one reads the arrangement from before the commit.
+    private static func commit(_ rows: [TimelineRow], to controller: TimelineTableController,
+                               in hosting: NSWindow) {
+        controller.apply(TimelineRenderInput(rows: rows))
+        hosting.layoutIfNeeded()
+        controller.tableView.layoutSubtreeIfNeeded()
+    }
+
+    /// Scrolls the viewport, the way a reader's scroll wheel does: the clip view moves and says so,
+    /// which is the notification the sticky-bottom rule listens to.
+    private static func scroll(_ controller: TimelineTableController, to y: CGFloat) {
+        let clip = controller.scrollView.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
+        controller.scrollView.reflectScrolledClipView(clip)
+    }
+
+    /// The key of the row at the viewport's top edge.
+    private static func topRowKey(of controller: TimelineTableController) -> String? {
+        let visible = controller.scrollView.contentView.documentVisibleRect
+        let index = controller.tableView.row(at: NSPoint(x: 1, y: visible.minY + 1))
+        guard controller.rows.indices.contains(index) else { return nil }
+        return controller.rows[index].key
+    }
+
+    /// How far below the viewport's top edge a named row sits.
+    private static func offset(ofRowKeyed key: String, in controller: TimelineTableController) -> CGFloat? {
+        guard let index = controller.rows.firstIndex(where: { $0.key == key }) else { return nil }
+        let visible = controller.scrollView.contentView.documentVisibleRect
+        return controller.tableView.rect(ofRow: index).minY - visible.minY
     }
 }
