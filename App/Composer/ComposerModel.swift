@@ -110,6 +110,11 @@ final class ComposerModel {
     /// The `file_suggestions` query in flight, held so the next keystroke can cancel it.
     @ObservationIgnored var mentionTask: Task<Void, Never>?
 
+    /// The `!` host command in flight, held so `stop()` can end it (`ShellEscape`). A composer
+    /// released while a command ran would otherwise leave the child on the machine and post its
+    /// output into a channel the user has moved on from.
+    @ObservationIgnored var hostShell: Task<HostCommandOutput?, Never>?
+
     /// How long a keystroke waits before its query goes out. A stored value rather than a constant so
     /// a test can widen the window and assert the cancellation on a **count of requests** rather than
     /// on timing.
@@ -321,5 +326,6 @@ final class ComposerModel {
         events = nil
         mentionTask?.cancel()
         mentionTask = nil
+        cancelHostShell()
     }
 }

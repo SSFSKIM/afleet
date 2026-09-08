@@ -1169,6 +1169,17 @@ symlink-containment debt in entry 78 is unchanged.
      `bypassAccepted` when composing a spawn, or X5 publishes the launch flags the current process
      carries so a surface can branch without asking. Owner: C4, with the C6 composite ruling which.
      Raised by C6.2 Task 8.
+
+202. **Composer mounting asks nothing about the channel's origin.** `App/Composer/ComposerMount.swift`
+     mounts a composer for any key it is handed: it reads no `LifecycleAPI.state(of:)` and no listing
+     mode, so a channel the user's own terminal holds gets a live field whose every send is refused
+     one call later. The `!` half of this was closed in the C6.2 fix wave — the escape asks
+     `state(of:)` before it spawns anything, so no host-side effect precedes the refusal — and the
+     plain-send half is harmless in the same way every other refusal is: the words stay in the field
+     and the reason is shown. What is left is the affordance, not a correctness defect: the composer
+     offers a field where the answer is always no. Closer: the mount consults the origin and renders
+     the refusal (or the *Fork* the banner already offers) instead of the field. Owner: the C6.2 leaf
+     that owns `ComposerMount.swift`. Filed 2026-09-08 by the C6.2 fix wave.
 ## From C7.2 (`child/c7-editor-core`)
 
 97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state

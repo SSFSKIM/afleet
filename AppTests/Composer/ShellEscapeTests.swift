@@ -450,4 +450,210 @@ final class ShellEscapeTests: XCTestCase {
         XCTAssertEqual(members.count, 0, "a bare `!` reached \(members.count) lifecycle member(s)")
         XCTAssertNotNil(model.refusal, "a bare `!` showed no explanation")
     }
+
+    // MARK: - Ownership, asked before anything runs
+
+    /// **Nothing runs on a channel whose send would be refused.** With the channel held by the
+    /// user's own terminal, `sendPrompt` answers `heldElsewhere` — but the refusal arrives *after*
+    /// the command has already touched the filesystem, which is the one ordering that cannot be
+    /// undone. The command here leaves an observable mark under the temporary tree, and the mark
+    /// must not exist.
+    ///
+    /// The mark is asserted by existence, never by path (§11).
+    func testAForeignHeldChannelRunsNothingAtAll() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let mark = work.appending(path: "side-effect")
+        let double = ComposerLifecycleDouble()
+        await double.stageSendPrompt(.failure(.heldElsewhere(HolderSet(holders: [], observedAt: Date()))))
+        await double.setStates([Self.heldElsewhereState(makeKey())])
+        let model = makeModel(double, cwd: work)
+        model.draft = "!printf 'x' > '\(mark.path)'"
+
+        await model.send()
+
+        let members = await double.memberSequence
+        XCTAssertEqual(members.count, 0,
+                       "a shell escape on a foreign-held channel reached \(members.count) lifecycle member(s)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mark.path),
+                       "the command ran on a channel the send would have refused, and left its mark behind")
+        XCTAssertEqual(model.refusal, ComposerModel.explanation(of: .heldElsewhere(HolderSet(holders: [], observedAt: Date()))),
+                       "the refusal is not the one the send's own refusal would have carried")
+        XCTAssertGreaterThan(model.draft.count, 0,
+                             "a refused shell escape emptied the field")
+    }
+
+    /// An owned, ready channel is unchanged by the gate: the command runs and the frame is posted.
+    /// Without this arm the one above passes on a composer that refuses every `!`.
+    func testAnOwnedChannelStillRuns() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let double = ComposerLifecycleDouble()
+        await double.stageSendPrompt(.success(UUID()))
+        await double.setStates([Self.readyState(makeKey())])
+        let model = makeModel(double, cwd: work)
+        model.draft = "!printf '%s\\n' 'ran on an owned channel'"
+
+        await model.send()
+
+        guard let text = await postedText(double) else {
+            return XCTFail("an owned channel posted no frame")
+        }
+        XCTAssertTrue(text.contains("ran on an owned channel"), "the command did not run on an owned channel")
+    }
+
+    private static func heldElsewhereState(_ key: ChannelKey) -> ChannelState {
+        state(key, origin: .foreignLive(.usersTerminal))
+    }
+
+    private static func readyState(_ key: ChannelKey) -> ChannelState {
+        state(key, origin: .owned(.ready))
+    }
+
+    private static func state(_ key: ChannelKey, origin: ChannelOrigin) -> ChannelState {
+        ChannelState(key: key, origin: origin, desired: .owned,
+                     observed: HolderSet(holders: [], observedAt: Date(timeIntervalSince1970: 0)),
+                     epoch: .first, identity: .known(key.session), presence: .idle,
+                     lastActivity: Date(timeIntervalSince1970: 0))
+    }
+
+    // MARK: - The bound on one drain pass
+
+    /// One readable event takes a **bounded** amount of work. Asserted directly rather than through a
+    /// producer, because "the timeout happened to fire against this child on this machine" is not the
+    /// property: the timeout, the escalation, the settlement and the other pipe's passes all share
+    /// one serial queue, so what has to hold is that a single pass returns it.
+    ///
+    /// A regular file is the discriminating source: `read(2)` on one never answers `EAGAIN`, so an
+    /// unbounded loop reads the whole file in one pass and this fails on the first count.
+    func testOneDrainPassStopsAtItsByteBudget() throws {
+        let tree = try TempTree()
+        let size = HostPipeDrain.bytesPerPass + HostPipeDrain.chunk
+        let url = tree.root.appending(path: "drain-source")
+        try Data(repeating: 0x61, count: size).write(to: url)
+        let fd = open(url.path, O_RDONLY)
+        XCTAssertGreaterThanOrEqual(fd, 0, "the drain source could not be opened for reading")
+        defer { close(fd) }
+
+        var first = 0
+        let firstOutcome = HostPipeDrain.pass(fd) { first += $0.count }
+        XCTAssertEqual(first, HostPipeDrain.bytesPerPass,
+                       "one pass took \(first) byte(s) against a budget of \(HostPipeDrain.bytesPerPass)")
+        XCTAssertEqual(firstOutcome, .open, "a pass that stopped at its budget reported the descriptor closed")
+
+        var second = 0
+        let secondOutcome = HostPipeDrain.pass(fd) { second += $0.count }
+        XCTAssertEqual(second, size - HostPipeDrain.bytesPerPass,
+                       "the second pass took \(second) byte(s) of the \(size - HostPipeDrain.bytesPerPass) left")
+        XCTAssertEqual(secondOutcome, .closed, "the pass that reached end of file left the source armed")
+    }
+
+    // MARK: - The bound on what is retained
+
+    /// A command that writes without stopping is bounded **while it runs**, not when `run` returns.
+    /// `yes` fills its pipe for the whole budget, and an unbounded capture grows a `Data` with it;
+    /// the cap ends the command instead. The cap is injected so the arm costs a moment rather than
+    /// the 72 KiB the default would need.
+    ///
+    /// The budget here is far longer than the run may take, so "it returned" is itself the assertion
+    /// that the cap and not the timeout ended it.
+    func testAFloodingCommandIsBoundedWhileItRuns() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let cap = 128 * 1024
+        let runner = HostShellRunner(outputLimitBytes: cap)
+        let started = Date()
+
+        let output = await runner.run(command: "yes", shell: "/bin/sh", in: work,
+                                      environment: ["PATH": "/usr/bin:/bin"],
+                                      timeout: .seconds(60))
+
+        let elapsed = Date().timeIntervalSince(started)
+        guard let output else { return XCTFail("the flooding command answered nothing") }
+        XCTAssertLessThanOrEqual(output.stdout.count, cap,
+                                 "the run retained \(output.stdout.count) byte(s) against a cap of \(cap)")
+        XCTAssertTrue(output.outputLimited, "a command stopped at the retention cap was not reported as limited")
+        XCTAssertFalse(output.timedOut, "the flooding command was ended by its budget rather than by the cap")
+        XCTAssertLessThan(elapsed, 30, "the flooding command ran for \(Int(elapsed)) second(s) of its 60-second budget")
+    }
+
+    // MARK: - The descendants of a command that outlives its budget
+
+    /// A timeout ends the **tree**, not the shell alone. `sh -c 'sleep 30 & wait'` is the ordinary
+    /// shape of it: the shell exits on `SIGTERM` while the `sleep` it started survives, and a run
+    /// reported to the user as stopped that leaves a process on the machine is the defect.
+    ///
+    /// The descendant is identified by the pid it wrote down and probed with `kill(pid, 0)`; the pid
+    /// is a count of nothing and names no path, session or environment (§11).
+    func testATimeoutEndsTheCommandsDescendants() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let pidFile = work.appending(path: "descendant-pid")
+        let runner = HostShellRunner()
+
+        let output = await runner.run(command: "sleep 30 & printf '%s' \"$!\" > '\(pidFile.path)'; wait",
+                                      shell: "/bin/sh", in: work,
+                                      environment: ["PATH": "/usr/bin:/bin"],
+                                      timeout: .milliseconds(500))
+
+        guard let output else { return XCTFail("the command that outlived its budget answered nothing") }
+        XCTAssertTrue(output.timedOut, "a command stopped at its budget was not reported as timed out")
+        let recorded = try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let descendant = pid_t(recorded) else {
+            return XCTFail("the command recorded no descendant to probe")
+        }
+        var alive = true
+        for _ in 0..<50 where alive {
+            if kill(descendant, 0) != 0 && errno == ESRCH { alive = false; break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertFalse(alive, "the command's descendant outlived the run by more than 5 second(s)")
+    }
+
+    // MARK: - Stop
+
+    /// **`stop()` ends a running `!`.** A composer released while a command runs must not keep the
+    /// child alive and must not post its output into a channel the user has left. Nothing is staged
+    /// on the double for `sendPrompt`, so a post would fail the member count below either way — the
+    /// arm that discriminates is that the send returns at all rather than after the full budget.
+    func testStopEndsARunningCommandAndPostsNothing() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let started = work.appending(path: "started")
+        let double = ComposerLifecycleDouble()
+        let model = makeModel(double, cwd: work)
+        model.draft = "!printf 'x' > '\(started.path)'; sleep 30"
+
+        let finished = Finished()
+        let send = Task { @MainActor in
+            await model.send()
+            await finished.mark()
+        }
+        defer { send.cancel() }
+        var running = false
+        for _ in 0..<50 where !running {
+            if FileManager.default.fileExists(atPath: started.path) { running = true; break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertTrue(running, "the command never started, so this arm could not cancel one")
+
+        model.stop()
+
+        var settled = false
+        for _ in 0..<50 where !settled {
+            if await finished.value { settled = true; break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertTrue(settled, "a cancelled shell escape had not returned 5 second(s) after `stop()`")
+        let members = await double.memberSequence
+        XCTAssertEqual(members.count, 0,
+                       "a cancelled shell escape reached \(members.count) lifecycle member(s)")
+    }
+}
+
+/// A flag one task sets and the test polls, so a bounded wait can tell "returned" from "still
+/// running" without a second continuation.
+private actor Finished {
+    private(set) var value = false
+    func mark() { value = true }
 }
