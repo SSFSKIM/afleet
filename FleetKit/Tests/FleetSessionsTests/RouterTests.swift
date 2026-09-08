@@ -543,7 +543,10 @@ final class RouterTests: XCTestCase {
         let bare = "/vim isn't available in this environment."
         let hit = await interceptor.intercept(bare)
         XCTAssertEqual(hit?.command, "/vim")
-        XCTAssertEqual(hit?.replacement, RouterTable.explanation(forTerminalOnly: "/vim"))
+        XCTAssertEqual(hit?.shape, .bare)
+        // The replacement is the drift copy, not the terminal-only copy: this command fell through as text because
+        // afleet does not route it, which is a different thing from the engine tagging it terminal-only (§7.7).
+        XCTAssertEqual(hit?.replacement, RouterTable.explanation(forDrift: "/vim", shape: .bare))
         var counted = await interceptor.driftCount
         XCTAssertEqual(counted, 1)
 
@@ -554,6 +557,71 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(counted, 1)
     }
 
+
+    /// Parent §7.7: afleet's own explanation says what the command does or why it is absent and **never** tells the
+    /// user to go back to the terminal. The scan is over every text the table can produce — every local row, the
+    /// terminal-only copy for every name the corpus records plus one the table has never seen, both drift shapes and
+    /// the unknown-mode copy — because the forbidden sentence is forbidden everywhere, not only where it was found.
+    ///
+    /// Deliberate break: restore "Open this session in your terminal to use it." to any of them → this fails naming
+    /// the offending text.
+    func testNoExplanationTellsTheUserToGoBackToTheTerminal() {
+        let forbidden = ["in your terminal", "from the Claude Code terminal", "go back to", "open a terminal",
+                         "in the terminal instead", "use your terminal"]
+        var texts: [String] = RouterTable.local.map(\.explanation)
+        // The three the recorded `system/init.terminal_slash_commands` lists, plus two the table has no row for:
+        // the fallback has to be as clean as the specific copy.
+        for name in ["/doctor", "/color", "/reload-plugins", "/vim", "/statusline"] {
+            texts.append(RouterTable.explanation(forTerminalOnly: name))
+        }
+        for shape in RefusalShape.allCases {
+            for name in ["/doctor", "/vim", "/statusline", "/model", "/logout"] {
+                texts.append(RouterTable.explanation(forDrift: name, shape: shape))
+            }
+        }
+        texts.append(RouterTable.explanation(forUnknownMode: "srtict"))
+        for text in texts {
+            let lowered = text.lowercased()
+            for phrase in forbidden {
+                XCTAssertFalse(lowered.contains(phrase),
+                               "an explanation tells the user to leave the app: \"\(text)\" carries \"\(phrase)\"")
+            }
+        }
+    }
+
+    /// The engine has **two** refusal sentences, and the second carries exactly the instruction §7.7 forbids:
+    /// 2.1.263 `cli.pretty.js:540254` builds `/<name> isn't available in this environment.` and
+    /// `cli.pretty.js:540305` builds `/<name> opens an interactive panel and isn't available in this environment.
+    /// Run it from the Claude Code terminal instead.` Both are intercepted, replaced and counted, and the drift log
+    /// distinguishes the two classes.
+    func testTheInteractivePanelRefusalIsInterceptedReplacedAndCounted() async {
+        let interceptor = RefusalInterceptor()
+        let panel = "/statusline opens an interactive panel and isn't available in this environment. "
+            + "Run it from the Claude Code terminal instead."
+        let hit = await interceptor.intercept(panel)
+        XCTAssertEqual(hit?.command, "/statusline", "the second refusal shape reached the channel unintercepted")
+        XCTAssertFalse((hit?.replacement ?? "").lowercased().contains("from the claude code terminal"),
+                       "the replacement repeated the engine's instruction to leave the app")
+        XCTAssertEqual(hit?.shape, .interactivePanel)
+        XCTAssertEqual(hit?.replacement, RouterTable.explanation(forDrift: "/statusline", shape: .interactivePanel))
+        var counted = await interceptor.driftCount
+        XCTAssertEqual(counted, 1, "the second refusal shape went uncounted")
+
+        // The two classes are counted apart, so the drift log says which of the engine's sentences moved.
+        _ = await interceptor.intercept("/vim isn't available in this environment.")
+        counted = await interceptor.driftCount
+        XCTAssertEqual(counted, 2)
+        let panels = await interceptor.driftCount(of: .interactivePanel)
+        let bares = await interceptor.driftCount(of: .bare)
+        XCTAssertEqual(panels, 1)
+        XCTAssertEqual(bares, 1)
+
+        // And the same sentence inside a longer answer is still the model talking, for the second shape too.
+        let embedded = await interceptor.intercept("You asked why: \(panel) That is the engine's own wording.")
+        XCTAssertNil(embedded)
+        counted = await interceptor.driftCount
+        XCTAssertEqual(counted, 2)
+    }
     /// `/add-dir` is a restart, not a runtime change, and the matrix says which settings are which.
     func testAddDirBuildsARestartRequestAndTheMatrixClassifiesEverySetting() {
         guard case .restart(let request) = CommandRouter.route("/add-dir /tmp") else {

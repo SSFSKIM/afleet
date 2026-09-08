@@ -56,7 +56,10 @@ final class StoreTests: XCTestCase {
             let seen = try await makeStore(dir).read([String].self, namespace: .fleetKit, key: "k")
             // Every fault before the rename leaves the old document readable; only a fault after it (the directory fsync) shows the new one.
             XCTAssertEqual(seen, point == .fsyncDirectory ? new : ["old"], "\(point): partial or missing document")
-            XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: dir.path)), ["state.fleetKit.json"], "\(point): the staging file was not removed")
+            // The listing is read off the assertion line: `dir` is under the temporary directory, and the names
+            // it yields are relative, but the assertion itself must not mention a path (tracker 75).
+            let names = Set(try FileManager.default.contentsOfDirectory(atPath: dir.path))
+            XCTAssertEqual(names, ["state.fleetKit.json"], "\(point): the staging file was not removed")
             XCTAssertEqual(ops.removed.count, point == .fsyncDirectory ? 0 : 1, "\(point): the staging file was not removed through the seam")
             // Deliberate break: write the document in place with `Data.write(to:)` -> the `.write` fault leaves a truncated file and the read throws.
         }

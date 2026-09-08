@@ -1,0 +1,35 @@
+[
+  {
+    "bucket": "pass",
+    "completedAt": "2026-04-03T10:58:41Z",
+    "description": "",
+    "event": "pull_request",
+    "link": "https://github.com/octo-invented/sample-repo/actions/runs/1001/job/2001",
+    "name": "build (macos-26)",
+    "startedAt": "2026-04-03T10:51:03Z",
+    "state": "SUCCESS",
+    "workflow": "CI"
+  },
+  {
+    "bucket": "pass",
+    "completedAt": "2026-04-03T10:52:19Z",
+    "description": "All contributors have signed the agreement",
+    "event": "",
+    "link": "https://github.com/octo-invented/sample-repo/runs/3003",
+    "name": "license/cla",
+    "startedAt": "2026-04-03T10:52:11Z",
+    "state": "SUCCESS",
+    "workflow": ""
+  },
+  {
+    "bucket": "pending",
+    "completedAt": "0001-01-01T00:00:00Z",
+    "description": "",
+    "event": "pull_request",
+    "link": "",
+    "name": "integration (fixtures)",
+    "startedAt": "2026-04-03T11:00:00Z",
+    "state": "IN_PROGRESS",
+    "workflow": "CI"
+  }
+]

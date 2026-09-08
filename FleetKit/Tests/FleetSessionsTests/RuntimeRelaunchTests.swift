@@ -69,8 +69,9 @@ final class RuntimeRelaunchTests: XCTestCase {
         XCTAssertEqual(rig.launches[1].model, "opus", "the resume runs the model the user chose")
         XCTAssertEqual(rig.launches[1].permissionMode, .plan)
         XCTAssertEqual(rig.launches[1].effort, "high")
-        XCTAssertEqual(rig.launches[1].cwd.standardizedFileURL, moved.standardizedFileURL,
-                       "and in the directory the channel was moved to")
+        // A boolean: both operands are under the rig's temporary scratch root (tracker entry 75, §6.3).
+        XCTAssertTrue(rig.launches[1].cwd.standardizedFileURL == moved.standardizedFileURL,
+                      "and in the directory the channel was moved to")
         XCTAssertEqual(rig.launches[0].model, "sonnet",
                        "the template still reads what the channel was opened with")
     }
@@ -97,8 +98,8 @@ final class RuntimeRelaunchTests: XCTestCase {
 
             if hatch {
                 let request = try await rig.steppingClock { try await supervisor.openInTerminal() }
-                XCTAssertEqual(request.cwd.standardizedFileURL, moved.standardizedFileURL,
-                               "the hatch opens where the channel is")
+                XCTAssertTrue(request.cwd.standardizedFileURL == moved.standardizedFileURL,
+                              "the hatch opens where the channel is")
             } else {
                 _ = try await rig.steppingClock { try await supervisor.sendToBackground() }
                 let directories = rig.runnerCalls.directoriesUsed.compactMap { $0 }

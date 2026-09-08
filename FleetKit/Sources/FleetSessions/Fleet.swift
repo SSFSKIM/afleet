@@ -51,14 +51,29 @@ public actor Fleet: LifecycleAPI {
     /// Every supervisor's transitions, merged. A supervisor built later joins the same stream.
     public nonisolated let updates: AsyncStream<ChannelState>
 
+    private let jobUpdatesContinuation: AsyncStream<[JobEntry]>.Continuation
+    /// The roster, republished in full whenever the observer's read of it changes. Derived from the read the
+    /// observer had already taken, so a surface that listens here costs no `agents --json` run of its own.
+    public nonisolated let jobUpdates: AsyncStream<[JobEntry]>
+    /// The task carrying the observer's roster reads onto `jobUpdates`. Held apart from `tasks` because `shutdown`
+    /// awaits it rather than cancelling it: the observer finishes its stream first, so awaiting drains whatever it
+    /// published last instead of dropping it.
+    private var rosterForwarding: Task<Void, Never>?
+
     // MARK: - Construction
 
     /// `factory` nil is production: a real `ClaudeProcess` per spawn, with the `CapturingDiagnostics` every factory
     /// must install so the wedged row has its escalation steps. `runner` is the CLI seam; `clock` drives every timer
     /// in the package.
+    ///
+    /// `capture` is parent §11's opt-in raw frame capture, asked once per spawn rather than read once here: the
+    /// setting behind it is a live toggle, so a channel opened after it is switched on captures and one opened
+    /// before it does not. It defaults to off, and an explicit `factory` wins outright — a caller that builds its
+    /// own processes decides their capture too.
     public init(configHome: ConfigHome, environment: ResolvedEnvironment, binary: URL, store: any StateStore,
                 diagnosticsDirectory: URL, clock: any Clock<Duration> = ContinuousClock(),
                 factory: ProcessFactory? = nil,
+                capture: @escaping @Sendable () -> RawCapture? = { nil },
                 runner: any DirectoryProcessRunner = FoundationDirectoryRunner()) {
         self.configHome = configHome
         self.environment = environment
@@ -88,17 +103,33 @@ public actor Fleet: LifecycleAPI {
                                       ownPIDs: { await pids.value() })
         self.ownership = OwnershipCheck(observer: observer, clock: clock, diagnostics: sink)
 
-        self.factory = factory ?? { epoch, launch in
+        self.factory = factory ?? Self.liveFactory(environment: environment, configHome: configHome,
+                                                   wireSink: wireSink, capture: capture)
+        (updates, updatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (jobUpdates, jobUpdatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        pids.fleet = self
+    }
+
+    /// Production's `ProcessFactory`: one real `ClaudeProcess` per spawn, under this fleet's environment and config
+    /// home, with the in-process MCP server and the `CapturingDiagnostics` that holds the wedged row's escalation
+    /// steps.
+    ///
+    /// It is a member rather than a closure inside `init` because it is the only thing that decides what a spawned
+    /// process is given, `FleetVersion` and the tool list it names are internal to this package, and a caller outside
+    /// it — the app's composition root — therefore cannot rebuild it to change one argument. Naming it here is also
+    /// what lets a test watch that argument arrive without spawning anything.
+    static func liveFactory(environment: ResolvedEnvironment, configHome: ConfigHome,
+                            wireSink: any DiagnosticsSink,
+                            capture: @escaping @Sendable () -> RawCapture?) -> ProcessFactory {
+        { epoch, launch in
             let capturing = CapturingDiagnostics(forwardingTo: wireSink)
             let process = ClaudeProcess(epoch: epoch, launch: launch, environment: environment,
                                         configHome: configHome,
                                         mcpServer: AfleetMCPServer(serverVersion: FleetVersion.server,
                                                                    cwd: launch.cwd, tools: [SendUserFileTool()]),
-                                        diagnostics: capturing, capture: nil)
+                                        diagnostics: capturing, capture: capture())
             return LiveProcessHandle(process, epoch: epoch, diagnostics: capturing)
         }
-        (updates, updatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
-        pids.fleet = self
     }
 
     /// The live child pids of every supervisor, for `Holder.isOwnChild`. A box because the observer needs the
@@ -129,6 +160,11 @@ public actor Fleet: LifecycleAPI {
                 await self.fanOut(set)
             }
         })
+        let rosters = observer.jobUpdates
+        let continuation = jobUpdatesContinuation
+        rosterForwarding = Task {
+            for await snapshot in rosters { continuation.yield(snapshot.roster) }
+        }
         await observer.start()
     }
 
@@ -140,9 +176,15 @@ public actor Fleet: LifecycleAPI {
     public func shutdown() async {
         for supervisor in supervisors.values { await supervisor.shutdown() }
         await observer.stop()
+        // `observer.stop()` finished the roster stream, so this ends of its own accord once it has forwarded
+        // everything the last read published. Awaiting it is what makes "the roster the fleet published" the whole
+        // roster and not whatever happened to arrive before the cancel.
+        await rosterForwarding?.value
+        rosterForwarding = nil
         for task in tasks { task.cancel() }
         tasks = []
         updatesContinuation.finish()
+        jobUpdatesContinuation.finish()
         diagnostics.flush()
     }
 
@@ -358,6 +400,22 @@ public actor Fleet: LifecycleAPI {
         return await supervisor.state
     }
 
+    /// `perform(.send(input), on:)`'s path, answering the uuid the supervisor minted instead of the state.
+    ///
+    /// The supervisor mints the uuid the engine will echo for the user message and `perform` throws it away, so a
+    /// host had no way to know it before the echo arrived — and reaching below the facade for it is contract Y5's
+    /// refusal. With it in hand the composer raises `HostSignal.promptSent(uuid:at:)` the moment the send returns,
+    /// which is the pre-echo preview C3's `StreamIngestion.signal(_:)` exists to receive.
+    ///
+    /// Same preconditions, same refusals: the barrier is checked because a send may spawn, and everything else is
+    /// the supervisor's own — `busy` behind a lifecycle operation, `heldElsewhere` on a channel held elsewhere.
+    @discardableResult
+    public func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        let supervisor = supervisor(for: key)
+        try spawnBarrier.check()
+        return try await supervisor.send(input)
+    }
+
     public func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
         try spawnBarrier.check()
         return try await supervisor(for: key).openInTerminal()
@@ -380,16 +438,7 @@ public actor Fleet: LifecycleAPI {
     /// job carries its session; an exec job carries none and is a `JobEntry` only.
     public func jobs() async -> [JobEntry] {
         _ = await observer.reconcileNow(label: OwnershipLabel.poll)
-        let snapshot = await observer.detailedSnapshot()
-        var entries: [JobEntry] = []
-        for (short, record) in snapshot.jobs where !record.isTerminal {
-            let holder = snapshot.holders.holders.first { $0.jobShort == short.rawValue }
-            entries.append(JobEntry(short: short, state: record.state, kind: holder?.kind ?? "bg",
-                                    sessionID: record.sessionId.flatMap(SessionID.init),
-                                    cwd: record.cwd.map { URL(filePath: $0) },
-                                    name: holder?.presence?.name))
-        }
-        return entries.sorted { $0.short.rawValue < $1.short.rawValue }
+        return await observer.detailedSnapshot().roster
     }
 
     /// `claude stop|respawn|rm <short>` through the runner; no PTY. A job is keyed by its short and not by a

@@ -1,0 +1,94 @@
+[
+  {
+    "additions": 128,
+    "author": {
+      "id": "MDQ6VXNlcjAwMDAwMDAx",
+      "is_bot": false,
+      "login": "willow-mint",
+      "name": "Willow Mint"
+    },
+    "baseRefName": "main",
+    "changedFiles": 6,
+    "createdAt": "2026-04-02T09:15:00Z",
+    "deletions": 42,
+    "headRefName": "feature/redraw-on-focus",
+    "isDraft": false,
+    "labels": [
+      {
+        "id": "LA_kwDOsample0001",
+        "name": "enhancement",
+        "description": "A new behaviour rather than a fix",
+        "color": "a2eeef"
+      }
+    ],
+    "mergeStateStatus": "CLEAN",
+    "mergeable": "MERGEABLE",
+    "number": 12,
+    "reviewDecision": "APPROVED",
+    "state": "OPEN",
+    "title": "Redraw the source control tab when the window regains focus",
+    "updatedAt": "2026-04-03T11:02:31Z",
+    "url": "https://github.com/octo-invented/sample-repo/pull/12"
+  },
+  {
+    "additions": 3,
+    "author": {
+      "id": "MDQ6VXNlcjAwMDAwMDAy",
+      "is_bot": false,
+      "login": "birch-quill",
+      "name": "Birch Quill"
+    },
+    "baseRefName": "main",
+    "changedFiles": 1,
+    "createdAt": "2026-04-04T08:00:12Z",
+    "deletions": 0,
+    "headRefName": "spike/lane-colours",
+    "isDraft": true,
+    "labels": [],
+    "mergeStateStatus": "BLOCKED",
+    "mergeable": "UNKNOWN",
+    "number": 13,
+    "reviewDecision": "",
+    "state": "OPEN",
+    "title": "Spike: colour the lanes by branch age",
+    "updatedAt": "2026-04-04T08:00:12Z",
+    "url": "https://github.com/octo-invented/sample-repo/pull/13"
+  },
+  {
+    "additions": 51,
+    "author": {
+      "id": "MDQ6VXNlcjAwMDAwMDAz",
+      "is_bot": true,
+      "login": "sample-bot",
+      "name": ""
+    },
+    "baseRefName": "release/2.4",
+    "changedFiles": 3,
+    "createdAt": "2026-03-19T22:41:07Z",
+    "deletions": 51,
+    "headRefName": "chore/bump-fixtures",
+    "isDraft": false,
+    "labels": [
+      {
+        "id": "LA_kwDOsample0002",
+        "name": "chore",
+        "description": "",
+        "color": "cfd3d7"
+      },
+      {
+        "id": "LA_kwDOsample0003",
+        "name": "needs-rebase",
+        "description": "The base branch moved under it",
+        "color": "d93f0b"
+      }
+    ],
+    "mergeStateStatus": "DIRTY",
+    "mergeable": "CONFLICTING",
+    "number": 9,
+    "reviewDecision": "CHANGES_REQUESTED",
+    "state": "MERGED",
+    "title": "Bump the recorded fixtures to the 2.4 shape",
+    "updatedAt": "2026-03-21T06:12:44Z",
+    "url": "https://github.com/octo-invented/sample-repo/pull/9"
+  }
+]

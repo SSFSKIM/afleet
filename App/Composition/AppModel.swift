@@ -81,6 +81,15 @@ final class AppModel {
     /// feed in its context would watch a timeline nothing updates.
     let panels: PanelHostModel
 
+    /// Contract Y4's seam: where an `Agent` chip in the timeline navigates to.
+    ///
+    /// A settable property with a default rather than a construction, the shape `HostLinkRouter`
+    /// takes on `PanelHostModel`: one instance, app-scoped, reachable from every surface that needs
+    /// it. `NoAgentNavigation` is installed here and does nothing; C6.4 replaces it with the
+    /// implementation that selects the Agents tab and its node, and nothing else about the chip's
+    /// call site changes when it does.
+    var agentNavigation: any AgentNavigating = NoAgentNavigation()
+
     /// Activity, the badges and the notification router (spec §5, §6). Nil until a launch reaches a
     /// workspace, and rebuilt by each one — *Check again* is the same call as the first launch, and
     /// a second Activity following the first fleet's channels would notify twice.

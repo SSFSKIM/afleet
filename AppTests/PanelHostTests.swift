@@ -1011,7 +1011,8 @@ private struct PanelRig {
                               fleet: StubFleet(),
                               watcher: watcher,
                               changes: feed,
-                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)))
+                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)),
+                              rawCapture: nil)
 
         timelines = ChannelTimelineRegistry()
         timelines.attach(to: workspace, lifecycle: lifecycle)

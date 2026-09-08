@@ -656,7 +656,12 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     view and may attach earlier or on a different trigger. Found at C5 Task 7. Closer: either
     make `attach` imply the first `open`, or assert in the model that a `nil` projection with
     `hasOpened` false is unreachable so a future caller trips it.
-66. **`hasOpened` is set before the index lookup, so a missing entry pins `failure` for the
+66. **Closed 2026-09-08 by C6.1 (`child/c6-timeline-renderer`).** `hasOpened` now moves to after
+    the index lookup succeeds, and a retry that finds the entry clears the failure the attempt
+    before it recorded; `testAMissingIndexEntryIsRetried` holds both halves and was demonstrated
+    failing against the pre-fix shape. The entry's original text follows.
+
+    **`hasOpened` is set before the index lookup, so a missing entry pins `failure` for the
     model's life.** A channel whose index entry is absent at open time — a transcript deleted
     between listing and opening — records the failure and never retries, because the guard that
     prevents re-opening has already fired. No C5 path produces it: the sidebar lists from the
@@ -784,7 +789,20 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     defects. Closer: the context menu C6 adds reads `offersOwnedActions` for what it offers and
     `readOnlyReason` for the sentence it shows instead, and a test asserts a read-only row offers
     no owned action. Owner: C6, which owns the surface where a channel action first appears.
-75. **The assertion-leak class is unfixed in three package test targets, and it is the one class
+75. **Closed 2026-09-07 (`f36c496`, `9dda131`, `440f525`).** The class is swept out of all three
+    targets and each now carries an `AssertionLeakGuardTests` that scans its own sources for the two
+    mechanical shapes, with an empty allowlist. The counts the sweep actually found, against the
+    candidate counts below: `FleetSessionsTests` 47 sites (11 path, 26 aggregate, 10 invented-value
+    but same-shape), `FleetTimelineTests` 15, `ClaudeWireTests` 5 — all messages, because every
+    equality candidate there turned out to be over an invented constant. The aggregate shape
+    dominated: `ChannelKey` carries the rig's config home, so every equality over a key, a census, a
+    logout outcome or a pane request's environment printed a temporary path without naming one.
+    Filed follow-up: nothing stops the *next* aggregate leak, because the guard is line-based and
+    cannot see through a struct; a `CustomStringConvertible` on `ChannelKey` that prints the session
+    id and a digest of the config home would close the shape rather than the instances, and is a
+    product-side decision C4 owns. Original statement:
+
+    **The assertion-leak class is unfixed in three package test targets, and it is the one class
     the app's own suite was swept for.** C5 Task 10 swept every test target in the tree for
     assertions whose failure message would print a path derived from `FileManager.temporaryDirectory`
     — which carries the account hash of the machine that ran the suite. `AppTests` had ten and they
@@ -807,21 +825,20 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     the rule these two would quietly break. Closer: delete both. Owner: the next task that opens
     `LaunchDoubles.swift`.
 
-77. **Background roster changes outside afleet have no complete app-consumable signal (C5 review F6).**
-    `SidebarView` loads the roster once; afleet's Adopt and Stop refresh it, but external exec
-    jobs and job-state changes can remain invisible until relaunch. The existing
-    `LifecycleAPI.updates` carries channel states, not roster changes: `HolderReader` omits
-    exec jobs from channel holders, and `FleetObserver.perform` publishes only when holders
-    change, ignoring changes in `HolderSnapshot.jobs`. Session jobs with registered supervisors
-    can produce channel-origin transitions, but those cannot cover exec jobs, job-state text,
-    or sessions without supervisors. Refreshing on every channel state would also call
-    `Fleet.jobs()` → `reconcileNow` → `agents --json`, booting the CLI on the state stream's
-    registration burst. C5 therefore adds neither a polling timer nor a partial channel-only
-    refresh and does not claim this finding fixed. Closer: C4 publishes roster changes from
-    the observer's existing watch/reconcile cycle through X5, carrying the current `[JobEntry]`
-    (including exec jobs and state changes), so C5 can update its Background list without an
-    extra CLI reconciliation. Owner: C4 for `FleetObserver`/`LifecycleAPI` and its X5 amendment;
-    C5's fleet browser for the consumer once that signal exists.
+77. **Closed 2026-09-08 (`248ac93`, `6c3ead2`).** Background roster changes outside afleet had no
+    complete app-consumable signal (C5 review F6): `SidebarView` loaded the roster once and only
+    afleet's own Adopt and Stop refreshed it, while `LifecycleAPI.updates` carries channel states,
+    which cannot represent an exec job (no session, so no channel) or a job's own state text. X5
+    now has `jobUpdates`. `FleetObserver` publishes its read whenever `HolderSnapshot.jobs` differs
+    by value from the last published one — `f9da990`'s rule over the roster, and separately from
+    the holders — and `Fleet` forwards each as the full current `[JobEntry]`, derived by
+    `HolderSnapshot.roster`, which `jobs()` reads too. The publication rides the watch and the
+    five-second poll the observer already ran, so no `agents --json` is added; the Background list
+    subscribes before it takes its initial snapshot and patches by row, and Adopt and Stop no
+    longer refresh. `RosterSignalTests` and `BackgroundRosterTests` pin both halves.
+    Remaining: the sidebar still takes one `jobs()` snapshot at launch, so the roster's first paint
+    costs the CLI boot `reconcileNow` has always cost — the stream cannot replace it, because a
+    launch has to start from somewhere and the first publication is not owed until something moves.
 
 **R3 correction, 2026-09-07:** entry 78's two-guard statement excludes the filesystem-root
 case: C5 now handles it by path components; the C4 guard still misses it (entry 80). The
@@ -871,6 +888,336 @@ symlink-containment debt in entry 78 is unchanged.
     the missing-control and press assertions fail closed if the framework shape changes.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
+
+## From C7.3
+
+Filed at the close of C7.3 (Source Control core; ledger
+`docs/doperpowers/ledgers/2026-09-07-c7.3-scm-core.md`). Numbers 112 through 126 are this
+leaf's reservation; 125 onward are unused.
+
+112. **`SourceControlCore.ToolRunner` duplicates C2's process mechanics.** Termination-handler
+     exit observation, non-blocking pipe drains, timeout with grace and `SIGKILL` are written
+     twice: once in `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift` and once in
+     `Workbench/Sources/SourceControlCore/ToolRunner.swift`. The duplication is forced, not
+     careless: contract X1 forbids Workbench from importing `ClaudeWire`, and X2 keeps
+     `AfleetCore` to value types, so neither existing home was available. Two copies is
+     tolerable; a third is the signal to extract a process package below both. Owner: whichever
+     child needs the third copy, or C2 if it revisits the package split.
+
+113. **Workbench has no §11 diagnostics domain.** §11's table names four log files
+     (`diagnostics.log`, `fleet.log`, `timeline.log`, `app.log`) and none belongs to the panel
+     layer, so C7.3 logs nothing and returns typed errors for the panel to render (§10). When a
+     panel wants a durable record of a failing `git` or `gh` invocation, the domain has to be
+     opened in §11's table with a writer that owns the file — one writer per file, per the
+     2026-09-07 amendment. Owner: C7.7, or C5 if it opens it first.
+
+114. **The commit graph is read in a fixed window with no paging above it.** `GitLog.commits`
+     defaults to 2,000 commits (`-n`/`--skip`); lane assignment marks an edge to a parent
+     outside the window `truncated`, but nothing fetches the next page. Correct for a viewport,
+     incomplete for a scroll. Owner: C7.7 when the panel's scroll needs it.
+
+115. **Closed 2026-09-08 (`3c0ec27`).** The architect amended contract W7 to `--decorate=full`,
+     so `%D` arrives as full ref paths and `GitLog.refs(from:)` strips `refs/heads/`,
+     `refs/remotes/` and `refs/tags/` instead of guessing at the first slash; the pin stays
+     explicit because `log.decorate=short` is now the adverse setting. **`%D`'s shortened
+     decorations cannot distinguish a remote-tracking branch from a local branch whose name
+     contains a slash.** Measured on `git` 2.55.0: `feature/x` is reported as
+     `.remoteBranch(remote: "feature")` named `x`, and a local branch literally named
+     `origin/feature` is indistinguishable from the remote-tracking one. The arrow form
+     (`HEAD -> feature/x`) is exempt because it names a local branch by construction. No parser
+     of `%D` can resolve this; the remedy is `--decorate=full`, which prints `refs/heads/…` and
+     `refs/remotes/…` unambiguously and would simplify the parser rather than complicate it —
+     but it amends contract W7's command line, which this leaf does not own. Raised to the
+     architect as a parent revision at merge. Owner: whoever revises W7, most likely C7.7 when
+     the panel draws ref badges and the distinction becomes visible.
+
+116. **`ToolRunner` has no `timeoutState`.** C2's `ProcessRunner` sampled a
+     `describeAtTimeout()` before signalling the child, which is what separated a hung child
+     from one that exited without the runner observing it. That sampling was not carried across;
+     the residual tell is the pair `exitCode == -1 && timedOut`, which is enough for a panel to
+     render "the tool did not answer" and not enough to say which of the two happened. Filed
+     rather than fixed because the state is only worth its cost once something consumes it, and
+     nothing does yet (entry 113). Owner: whoever opens the Workbench diagnostics domain.
+
+117. **`ToolJob.drainRemaining` is not falsifiable by any black-box test on macOS.** The final
+     non-blocking pass over each pipe on the exit path always finds the pipe empty, because the
+     readable event reaches the runner's queue ahead of the exit in every construction tried, so
+     deleting it changes no observable behaviour. It is kept as defence for the ordering a loaded
+     queue or another platform could produce, and the review that found this was explicit that
+     an earlier apparent demonstration was an artifact of the assertion, not of the drain.
+     Closing this means a seam that lets a test hold the queue busy across the child's last
+     write. Owner: whoever next revises the process layer, or the extraction entry 112
+     anticipates.
+
+118. **`gh pr checks`' documented exit code 8 has no live confirmation.** C7.3 accepts 0 and 8
+     from that verb because `gh`'s own help and its `cmdutil.PendingError` say 8 means "checks
+     are still pending", and the behaviour is asserted with a stub runner. Twenty-six open pull
+     requests across four large public repositories had all settled at the time of the gate, so
+     no live run produced it. One live confirmation against a repository with a check in flight
+     would close this. Owner: C7.7 at its GitHub-tab gate.
+
+119. **`GraphRow.Edge.truncated` is easy to misread as "the line ends here".** It means only
+     that the edge's target commit is outside the window `GitLog` read: the parent is never
+     read, so its lane reservation is never released, and the lane repeats the same truncated
+     straight-down edge on every row below to the bottom of the window. That is the wanted
+     rendering — a line leaving a viewport does continue — but a consumer that read the flag as
+     a terminator would stop the line at the first row that named it and draw a graph that
+     disagrees with the lane state. Documented on the flag and pinned by a multi-row test;
+     what would close it is either a name that cannot be misread or a rendering contract the
+     panel and this type share. Owner: C7.7, the first consumer.
+
+120. **One mutation of the first-parent rule survives C7.3's suite and may be equivalent.**
+     Writing rule 3 as "the first parent takes the leftmost *free* lane" rather than the
+     commit's own lane passes every test, because a commit's own lane is released immediately
+     before that rule runs and is the leftmost free one in every fixture. Distinguishing the two
+     needs a row read at a *reserved* lane while a lane to its left is free; a lane is freed only
+     by a parentless commit or by a released duplicate, and three probed shapes — two roots with
+     interleaved dates, and an unrelated-history merge in each direction — all had
+     `git log --topo-order --all` follow one chain to its end before starting another, which
+     frees lanes right to left. So the mutant may be equivalent under git's ordering rather than
+     merely uncovered. Filed rather than chased: closing it means either a shape that orders the
+     other way, or an argument that none exists. Owner: whoever next revises lane assignment.
+
+121. **`GraphRow.edges` may contain several edges arriving in the same `toLane`.** A consumer
+     that indexes a row's edges by destination lane silently drops one of each pair and
+     disconnects a line at that row. It happens two ways: a merge reaching into a lane another
+     child already reserved, where the lane carries both the merge's edge and the pass-through
+     of the line already running down it; and two lanes converging on one parent, where both
+     bend into the lane the parent was read at. This was three of the five findings at C7.3's
+     whole-branch review, and the model was changed once to allow it (ledger D43). Documented on
+     `GraphRow.Edge` and pinned by a connectivity assertion over every lane fixture; what would
+     close it is a rendering contract the panel and this type share. Owner: C7.7, the first
+     consumer.
+
+122. **`log.excludeDecoration` silently removes decorations from `%D` and no command-line option
+     overrides it.** Measured on `git` 2.55.0: a user who sets `log.excludeDecoration=refs/tags/*`
+     — a reasonable thing to hold for one's own `git log` — gets a commit graph with no tags on it,
+     and the same for any pattern they chose. Every other configuration this module is sensitive to
+     is pinned on the command line (D45); this one is not pinnable. `--decorate-refs=<pattern>`
+     does override the setting but replaces the whole decoration set, and was measured to drop
+     `HEAD` while restoring tags, which is a worse answer than the one it fixes; `-c
+     log.excludeDecoration=` adds an empty pattern that matches everything and removes all
+     decorations. The blast radius is bounded — decorations missing from the graph, never a wrong
+     edge or a wrong commit — and `AdverseConfigurationTests` documents it as unpinned rather than
+     ruled out. What would close it: read decorations from `git for-each-ref` and join them to the
+     window by object name, instead of from `%D`. Owner: whoever next revises `GitLog`, and a
+     natural companion to the `--decorate=full` swap entry 115 records as taken.
+
+123. **Nothing enforces that a setting `AdverseConfigurationTests.ruledOut` names can be exhibited
+     by the fixture that measures it.** The suite carries two dictionaries: `hostile`, the settings
+     the command-line pins defend against, and `ruledOut`, the settings measured to reach no byte
+     any parser here reads. `ruledOut` is a tripwire, and a tripwire is only worth its name if the
+     repository under it can make the setting speak. Two of C7.3's eighteen could not be:
+     `log.showSignature` acts only over a *signed* commit and every fixture was unsigned, and
+     `diff.renameLimit` acts only on the *inexact* half of rename detection and the only rename in
+     the fixture was exact. Both measured inert, both went into the tripwire, both were live
+     silent-wrong-answer defects, and both were found by an external reviewer rather than by the
+     tripwire. R5 fixed the fixture — the repository the tripwire runs against is now signed and
+     carries a `.mailmap`, a note, an upstream, a subdirectory, an inexact rename and a modified
+     file — and wrote floor assertions saying each of those shapes is present. It did not fix the
+     *mechanism*: the enrichment and the floor are hand-written, and the next entry added to
+     `ruledOut` can be inert for the wrong reason again with nothing to say so. Bounded, because a
+     wrong verdict costs a missing pin, which is the class the suite already treats. What would
+     close it: a per-entry note of the property the fixture must have for that setting to speak,
+     checked by the test, so that adding an entry without the property fails. Owner: whoever next
+     extends `AdverseConfigurationTests`.
+
+124. **The rename-limit pin hard-codes git's default in two modules.** `GitDiff` passes `-l1000`
+     and `WorkingTreeStatus` passes `-c diff.renameLimit=1000 -c status.renameLimit=1000`, where
+     `1000` is git's documented default for `diff.renameLimit` — pinned rather than lifted to `0`
+     (unlimited) on purpose, because a user who lowered the limit lowered it for speed on a large
+     repository and the panel's answer should be git's default answer, not a slower one no
+     configuration would ever have produced. If a future git changes that default, the panel
+     freezes the old one silently, in the direction of doing more work rather than less, so nothing
+     fails and no test notices. Trivial and stable in practice; filed because the number is a copy
+     of another program's documentation with nothing linking it back. Owner: whoever next revises
+     the configuration pins.
+
+125. **Closed 2026-09-08 (`d0e32b6` on `main`): one drain pass in C2's `ProcessRunner` is bounded
+     (`PipeDrain.bytesPerPass`, one mebibyte, 64 KiB chunks); a spent budget re-arms the read source
+     and the queue turns; ClaudeWire 251/6/0. Original:** C2's `ProcessRunner` carries the same unbounded pipe drain C7.3's `ToolRunner` had.**
+     `ClaudeWire/Sources/WireEnvironment/ProcessRunner.swift` reads while data keeps arriving and
+     returns only on `EAGAIN`, on the same serial queue that runs its timeout, its `SIGKILL`
+     escalation and its settlement — the shape C7.3's R6 review found and bounded in its own copy
+     (`PipeDrain.bytesPerPass`, one mebibyte per readable event). C7.3 could not fix it: contract
+     X1 forbids Workbench from importing `ClaudeWire`, the two runners are deliberately separate
+     copies (entry 112), and the file belongs to C2. The exposure there is larger, not smaller: that
+     runner drives the engine's own long-lived processes rather than short `git` reads. What would
+     close it: the same bound applied in C2's copy, or the extraction entry 112 anticipates, which
+     would leave one copy to bound. Owner: C2, or whichever child needs the third copy.
+
+126. **The bound on one drain pass has no end-to-end tripwire.** `PipeDrain.bytesPerPass` exists so
+     that a producer cannot own the runner's queue; deleting it leaves every black-box test in the
+     suite green. Measured over five producer shapes — one `dd` at 64 KiB, 1 MiB and 4 MiB blocks,
+     and four and eight of them at once — this machine's drain consumes about 3 GB/s and no
+     user-space producer keeps a 64 KiB pipe fed at that rate, so the loop reaches `EAGAIN` between
+     events and the timeout fires within 13 ms of its deadline either way. The bound is therefore
+     pinned at the seam (`PipeDrain.pass` against a descriptor that never says `EAGAIN`) and the
+     flooding-child test is a floor rather than a discriminator. The same testability limit as
+     entry 117, one layer up, and it is what let the defect live: a review found it by reading.
+     What would close it: a seam that lets a test hold the queue busy across a producer's writes,
+     or a fake descriptor whose readability the test controls. Owner: whoever next revises the
+     process layer, or the extraction entry 112 anticipates.
+
+## From C6.1 (`child/c6-timeline-renderer`)
+
+Entries **127 through 141** are C6.1's, as the C6 composite's leaf table allots them. Nothing above
+is renumbered.
+
+127. **The live thinking-token estimate has no home in C3's model.** `system/thinking_tokens`
+     carries `estimated_tokens`, `estimated_tokens_delta` and a `uuid` naming the *user* message the
+     turn answers (2.1.263 `cli.pretty.js:811445`; emitted at `:523066` and `:289222`). ClaudeWire
+     models the frame as `SystemFrame.thinkingTokens`, but `Overlay` has no field for the estimate
+     and `WireReducer.route(_ system:)` sends the frame to its `default:` arm, where it becomes an
+     opaque item — an "unrecognized event" row for every one of the nine `nested-depth-2` carries.
+     §8.3 wants the estimate live under a thinking disclosure while a message streams. It is a
+     scalar with a lifetime shorter than an item's and §7.3's differential invariant is about items,
+     so it is not obviously an item; `Overlay` already holds non-item state (`queue`, `banners`,
+     `sessionState`) and is the natural home. Found at C6.1's grill. Closer: an
+     `Overlay.thinkingEstimate` set from the frame and cleared when the message settles, so the
+     renderer reads it where it reads everything else. Owner: C3, at its next corrective; until then
+     the disclosure has no number.
+
+128. **No fixture carries a `tool_use_summary` frame, so cluster labelling has no recorded
+     witness.** §8.3 labels a cluster from the engine's own `tool_use_summary`
+     (`summary`, `preceding_tool_use_ids`), falling back to counts and elapsed time. Across all
+     twenty committed fixtures the frame appears zero times, and
+     `FleetKit/Tests/FleetTimelineTests/Invariant/ProjectionEqualityTests.swift` asserts that as an
+     invariant with a comment telling whoever adds one to *read* it rather than construct one.
+     `WireReducerTests` constructs one by hand for the same reason. So the labelled arm of every
+     cluster test — C6.1's G2 included — injects a frame it invented, and the fallback arm is the
+     only one any recording exercises. Found at C6.1's grill. Closer: C1 records a scenario whose
+     turn produces consecutive tool calls the engine summarises, at the next fixture re-pin; the
+     tests then read it. Owner: C1 for the recording, C6.1 for adopting it.
+
+129. **Closed 2026-09-08**, in the same change that took C3's one-fold corrective (`01eb7a7`).
+     `StreamIngestion.signal(_:)` exists now, so the seam property it describes is deleted rather
+     than wired: `ChannelTimelineModel.signal(_:)` calls the ingestion directly, and there is no
+     longer a property that could be left unassigned. `ChannelTimelineSeamTests`'
+     `testAnAnsweredDecisionLeavesPending` asserts the behaviour the seam existed to enable — a
+     `DecisionItem` leaving `.pending` — instead of counting calls on a double, and it was shown
+     failing against a `signal(_:)` that returns without calling the ingestion. The entry stands
+     below as filed, because what it describes was true of the tree for the hours between the seam
+     commit and the corrective.
+
+     **`ChannelTimelineModel.ingestionSignal` is never set in production, so `signal(_:)` is a
+     no-op in the running app.** The forwarder landed with C6.1's seam commit and is exercised by
+     `ChannelTimelineSeamTests`, but the only writers of the property are those tests: nothing at
+     the composition root assigns it, because the C3 corrective that gives `StreamIngestion` a
+     `signal(_:)` of its own was not on `main` when the seam was written. `check-app-wiring` does
+     not flag it — the check keys on a bare name and `signal(_:)` *reads* the property in
+     production — so the tool's substance is unmet while its letter is satisfied, which is
+     precisely the shape tracker 72 exists to catch. The consequence is worse than a missing seam:
+     C6.2 and C6.3 call `signal(_:)` by a name the architect gave them, and until the property is
+     assigned their calls succeed and do nothing, so a decision stays `.pending` with no error
+     anywhere. Found at C6.1's review of its own seam commit. Closer: assign it at the composition
+     root in the same change that lands the C3 corrective, and add a wiring assertion that the
+     app — not a test — set it. Owner: the architect, at the corrective's reconciliation.
+
+130. **Closed 2026-09-08**, by the first of the two closers it named. C3's
+     `StreamIngestion.signal(_:)` performs the path rebind itself — `if case .relocated(let mainPath)
+     = signal { await relocated(mainPath: mainPath) }`, at its own definition — so
+     `transcriptMoved(to:)` now raises the signal and nothing else, and one move travels one route.
+     `testARelocationReachesTheFold` holds it, with the idempotence clause the coordinator's
+     path-on-every-update behaviour needs. The entry stands below as filed.
+
+     **`.relocated` will reach the ingestion twice once the seam is wired.**
+     `ChannelTimelineModel.transcriptMoved(to:)` calls `ingestion.relocated(mainPath:)` and then
+     raises `signal(.relocated(mainPath:))`. Today the second reaches a nil seam and costs nothing.
+     When `ingestionSignal` is pointed at `StreamIngestion.signal(_:)` the same move arrives by two
+     routes, and whether that is idempotent is a property of the corrective, not of this side —
+     C6.1's test can only pin the idempotence of its own double. Both calls are deliberate: the
+     first is the path rebind the ingestion already needed, the second is the fold hearing about a
+     move no frame states. Found at C6.1's review. Closer: at the corrective's landing, either make
+     `StreamIngestion.signal(.relocated:)` subsume the rebind so the app raises only the signal, or
+     assert the double delivery is idempotent against the real ingestion. Owner: the architect,
+     with C3.
+
+131. **Closed 2026-09-08 (`37d8f0a` on `main`): the rig's `startObserver()` returned before the
+     observer's poll and reconciliation timers were parked, so a `TestClock.advance` could pass a
+     timer not yet armed, and the in-place roster rewrite fires no vnode event, so the poll was
+     the only re-read route. Test support only; bundle 8/8 after, 2/5 failed before. Original:**
+     `LifecycleRowTests.testABackgroundJobWhoseRosterWorkerGoesArchivesTheChannel` is flaky, and
+     it reddens every child's floor.** It fails with "timed out waiting for the archived outcome;
+     state was backgroundJob" after the rig's 30-second guard. Measured at C6.1's Task 0 floor:
+     one failure in a full `make test`, then **two passes and one failure in three isolated runs**
+     of that test alone (`swift test --package-path FleetKit --filter …`). The failing run costs
+     30 seconds; the passing runs take 0.03. Nothing in C6.1 can reach it — the diff touches
+     `App/Timeline/` and `AppTests/`, and `FleetSessionsTests` does not import the app target — and
+     it arrived with `main`'s roster-signal work, which is also what the test exercises: it waits
+     for a channel to archive when its roster worker disappears, and the signal it waits on is the
+     `jobUpdates` stream X5 gained at the tracker 77 corrective. A 30-second guard that trips on a
+     third of runs is a race, not a slow machine. Found at C6.1 Task 0's floor. Closer: make the
+     archival wait delivery-fulfilled rather than deadline-bounded, the way tracker 2's instance was
+     converted; or find the roster-signal race it is reporting, which is the more likely reading
+     given the shape. Owner: C4. **Any child whose floor shows exactly this one red should re-run
+     before treating it as their own.**
+
+## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
+
+187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
+     `AgentRunTree.apply(agentMetadata:for:)` and `apply(metaFile:)` are called only from tests;
+     in production the tree is built from the wire alone and only the two-step join ever answers
+     the parent question. The ingestion's file-side `agentMetadata` handling is item-shaped
+     (`StreamState.metadata` → `StreamProjection.metadata` → `RecordReducer`'s `taskRun` items and
+     thread attachment) and never reaches a tree. Consequences: a foreign or archived channel
+     opened from its files has no agent-run tree at all, so C6.4's Agents tab is empty for it; a
+     live channel's tree loses the parent evidence the `agent_metadata` mirror entry and the
+     `.meta.json` sidecar would give. Found by the `2dc57ba` corrective (which routed the tree to
+     the app, X4 amended) and left standing on purpose. Closer: the ingestion feeds its file-side
+     metadata into the reducer's tree (or a file-only tree the ingestion owns when there is no
+     wire) through the two existing, tested entry points; then C6.4 reads one tree for every
+     channel kind. Owner: C3, before C6.4's Agents tab is judged on foreign channels.
+
+188. **`make test` rewrites `Workbench/Package.resolved` with the app's own dependency pins.**
+     Since C6.1's seam range added HighlightKit to `project.yml` (`exactVersion: 0.2.0`), the
+     app scheme's xcodebuild resolution writes HighlightKit's pin and a new `originHash` into
+     `Workbench/Package.resolved` — the local package's committed lockfile, which C7.2's offline
+     proof relies on — leaving the tree dirty after every floor run; C6.1 and two `main`
+     correctives each reverted it by hand. Nothing is lost (the app's pin is derivable from
+     `project.yml`), but a child that commits the churn by accident changes Workbench's lockfile
+     for a dependency Workbench does not declare. Closer: find why the project's resolution
+     targets the local package's file (xcodegen's package layout, or the package being both a
+     local dependency and a workspace member) and point it at the project's own
+     `xcshareddata/swiftpm/Package.resolved`; until then the floor's Makefile target restores the
+     file after the run. Owner: C5 (`project.yml`), noted 2026-09-08.
+
+189. **`SourceControlCore` decodes pathnames lossily.** Both git parsers convert path bytes with
+     `String(decoding:as: UTF8.self)`, which replaces invalid sequences, so a non-UTF-8 path reaches a
+     panel as a path that does not exist and two distinct byte names can collapse to one key during
+     the diff join. APFS enforces UTF-8 for new names, so the exposure is history and foreign
+     checkouts, not the live working tree. Found by C7.3's merge panel. Closer: keep the raw bytes on
+     the model beside the display string, or fail the record with a typed error. Owner: C7.7, when
+     it first meets such a repository.
+
+190. **An unborn `HEAD` and a broken `HEAD` are the same to `GitDiff`.** `resolvingAnUnbornHead`
+     treats every non-zero `rev-parse --verify HEAD^{commit}` as unborn (a timed-out probe is now
+     `.timedOut`, corrective on the branch), so a corrupt or dangling `HEAD` is compared against the
+     empty tree and drawn as a repository whose whole tree is new. Found by C7.3's merge panel.
+     Closer: distinguish exit 128 with a missing ref from a resolvable symbolic `HEAD` naming a
+     missing object, and surface the latter as a repository error. Owner: C7.7.
+
+191. **Working-tree containment is not atomic across ancestors.** `workingTreeFile` refuses `..`,
+     absolute paths and `realpath` ancestors outside the root, and opens the final component with
+     `O_NOFOLLOW` + `fstat`; an ancestor swapped for a symlink between the `realpath` and the open is
+     still followed. The threat is a racing local writer on the user's own machine. Found by C7.3's
+     merge panel, ruled out of scope twice. Closer: descriptor-relative traversal (`openat` with
+     `O_NOFOLLOW` per component) from a descriptor on the root. Owner: C7.7 if the panel ever reads
+     files it did not list itself.
+
+192. **A type change from a gitlink carries no source-side kind.** `FileChange.kind` is
+     destination-biased; for mode 160000 → file or symlink the caller cannot tell that the source
+     side is a gitlink and that `GitDiff.blob` is invalid for it. Found by C7.3's merge panel.
+     Closer: carry both modes (the raw record has them) or a `sourceKind`. Owner: C7.7 when it
+     renders type changes.
+
+193. **A truncated `HEAD` lane does not continue below a limit-truncated window.** When `HEAD` lies
+     below the window (skip zero, limit reached) the working-tree row emits one truncated edge and
+     reserves nothing, so the first unrelated tip takes lane 0 and no reservation carries the edge
+     through the rows — against `GraphRow.Edge`'s rule that an unread target's lane continues to the
+     bottom. Found by C7.3's merge panel. Closer: reserve a lane for the out-of-window `HEAD` and
+     release it at the window's end, or draw the truncated edge to the row's edge. Owner: C7.7 with
+     pagination (tracker 114).
 
 ## From C7.1 (Terminal core), in progress
 

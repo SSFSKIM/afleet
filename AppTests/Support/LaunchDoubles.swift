@@ -36,16 +36,19 @@ final class SeamLog: @unchecked Sendable {
 actor StubFleet: AppFleet {
     nonisolated let updates: AsyncStream<ChannelState>
     private let continuation: AsyncStream<ChannelState>.Continuation
+    nonisolated let jobUpdates: AsyncStream<[JobEntry]>
+    private let jobContinuation: AsyncStream<[JobEntry]>.Continuation
     private(set) var started = false
     private(set) var registrations: [ChannelKey] = []
 
     init() {
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (jobUpdates, jobContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
     func start() async { started = true }
     func register(_ key: ChannelKey, cwd: URL, recent: Bool) async { registrations.append(key) }
-    func shutdown() async { continuation.finish() }
+    func shutdown() async { continuation.finish(); jobContinuation.finish() }
 
     func state(of key: ChannelKey) async -> ChannelState? { nil }
     func states() async -> [ChannelState] { [] }
@@ -61,6 +64,7 @@ actor StubFleet: AppFleet {
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState { unreachable("perform") }
     func route(_ text: String, on key: ChannelKey) async -> Routed { unreachable("route") }
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue { unreachable("send") }
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID { unreachable("sendPrompt") }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey, ui: any StrategyUI) async throws -> StrategyOutcome { unreachable("run") }
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
     func attach(_ job: JobShort) async throws -> PaneRequest { unreachable("attach") }

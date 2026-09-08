@@ -66,7 +66,7 @@ final class LaunchSequenceTests: XCTestCase {
             },
             makeDiagnostics: { directory in log.note("makeDiagnostics"); return DiagnosticsComposer(directory: directory) },
             makeIndex: { _, _, _ in log.note("makeIndex"); return index },
-            fleetFactory: { _, _, _, _, _ in log.note("fleetFactory"); return fleet },
+            fleetFactory: { _, _, _, _, _, _ in log.note("fleetFactory"); return fleet },
             makeWatcher: { _ in log.note("makeWatcher"); return watcher },
             readClaudeJSON: { _ in log.note("readClaudeJSON"); return signedIn })
 

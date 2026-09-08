@@ -887,7 +887,8 @@ final class IngestionTests: XCTestCase {
         let onDisk = await ingestion.projection
         XCTAssertEqual(Set(onDisk.items.map(\.provenance.origin)), [.file],
                        "once the file exists the same records are the file's")
-        XCTAssertEqual(Set(onDisk.items.compactMap(\.provenance.sourceFile)), [mainPath.standardizedFileURL])
+        XCTAssertTrue(Set(onDisk.items.compactMap(\.provenance.sourceFile)) == [mainPath.standardizedFileURL],
+                      "the items name a source file other than the one main transcript")
         await ingestion.close()
     }
 
@@ -1531,7 +1532,11 @@ final class IngestionTests: XCTestCase {
 
     // MARK: - The whole wire stream
 
-    func testTheWholeWireStreamThroughTheTapYieldsOnlyMirrorEffects() async throws {
+    /// The whole fan-out through one tap. The actor applies the mirror frames itself and folds every other event into
+    /// the channel's one wire reducer, so the stream carries two kinds of effect and nothing else: the mirror's, with
+    /// the record bookkeeping on it, and the live half's, which carry changes and no records. An event that moved
+    /// neither half is not on the stream at all.
+    func testTheWholeWireStreamThroughTheTapYieldsMirrorEffectsAndTheLiveHalf() async throws {
         let fx = try FixtureCorpus.named("session-mirror-relocation")
         let source = try XCTUnwrap(try fx.transcriptFiles().first?.2)
         let complete = try Data(contentsOf: source)
@@ -1567,30 +1572,30 @@ final class IngestionTests: XCTestCase {
         tap.finish()
         XCTAssertEqual(expectedEffects, 15, "the recording's transcript_mirror frames, counted from its own frames")
 
-        var duplicates = 0, routed = 0, applied = 0
-        for index in 0..<expectedEffects {
-            let effect = try await next(log, "mirror effect \(index + 1) of \(expectedEffects)")
-            duplicates += effect.duplicates
-            routed += effect.routedElsewhere
-            applied += effect.applied.count
-        }
-        XCTAssertEqual(duplicates, 53, "every mirrored entry was claimed against the read")
-        XCTAssertEqual(routed, 0, "the new-slug path resolves to the same session")
-        XCTAssertEqual(applied, 0, "the file already held every record")
+        try await Task.sleep(for: .milliseconds(500))               // every event folded and every effect logged
+        let effects = log.all
+        let fromMirror = effects.filter { $0.duplicates + $0.routedElsewhere + $0.applied.count > 0 }
+        XCTAssertEqual(fromMirror.count, expectedEffects,
+                       "one effect per mirror frame: fewer means a dropped frame, more means a second apply path")
+        XCTAssertEqual(fromMirror.reduce(0) { $0 + $1.duplicates }, 53, "every mirrored entry was claimed against the read")
+        XCTAssertEqual(fromMirror.reduce(0) { $0 + $1.routedElsewhere }, 0, "the new-slug path resolves to the same session")
+        XCTAssertEqual(fromMirror.reduce(0) { $0 + $1.applied.count }, 0, "the file already held every record")
 
-        try await Task.sleep(for: .milliseconds(200))
-        XCTAssertEqual(log.count, expectedEffects,
-                       "a `receive` that reacted to any other event would yield more, one that dropped mirror frames fewer")
+        let fromLive = effects.filter { $0.duplicates + $0.routedElsewhere + $0.applied.count == 0 }
+        XCTAssertFalse(fromLive.isEmpty, "the recording's assistant, result and system frames move the live half")
+        XCTAssertTrue(fromLive.allSatisfy { !$0.changes.isEmpty },
+                      "every live-half effect reports what moved; an event that moved nothing publishes nothing")
 
         let expected = RecordReducer.merge(
             [RecordReducer.reduce(try TranscriptReader(url: mainPath).readAll().records, stream: main,
                                   sourceFile: mainPath)], main: main)
         await expectEqual(ProjectionComparison.compare(wire: await ingestion.projection, file: expected), [])
 
+        let published = log.count
         await ingestion.close()
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertTrue(log.finished, "close() finishes effects")
-        XCTAssertEqual(log.count, expectedEffects, "and nothing arrives after it")
+        XCTAssertEqual(log.count, published, "and nothing arrives after it")
     }
 
     // MARK: - A main path that does not exist yet

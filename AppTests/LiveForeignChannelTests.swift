@@ -46,8 +46,9 @@ final class LiveForeignChannelTests: XCTestCase {
             storeRoot: try tree.directory("store"),
             diagnosticsRoot: try tree.directory("logs"),
             resolveEnvironment: { environment },
-            fleetFactory: { configHome, resolved, binary, store, diagnostics in
-                RecordingAppFleet(inner: LaunchSequence.makeFleet(configHome, resolved, binary, store, diagnostics),
+            fleetFactory: { configHome, resolved, binary, store, diagnostics, capture in
+                RecordingAppFleet(inner: LaunchSequence.makeFleet(configHome, resolved, binary, store, diagnostics,
+                                                                 capture),
                                   log: recorder)
             })
         let box = ModelBox()
@@ -319,6 +320,7 @@ final class RecordingAppFleet: AppFleet {
     func adoptTrace() {}
 
     nonisolated var updates: AsyncStream<ChannelState> { inner.updates }
+    nonisolated var jobUpdates: AsyncStream<[JobEntry]> { inner.jobUpdates }
 
     func state(of key: ChannelKey) async -> ChannelState? { await inner.state(of: key) }
     func states() async -> [ChannelState] { await inner.states() }
@@ -326,6 +328,10 @@ final class RecordingAppFleet: AppFleet {
     func route(_ text: String, on key: ChannelKey) async -> Routed { await inner.route(text, on: key) }
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         try await inner.send(request, on: key)
+    }
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        log.note("send")
+        return try await inner.sendPrompt(input, on: key)
     }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
              ui: any StrategyUI) async throws -> StrategyOutcome {

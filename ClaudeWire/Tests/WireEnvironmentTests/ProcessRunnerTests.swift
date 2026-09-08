@@ -1,5 +1,6 @@
+import Foundation
 import XCTest
-import WireEnvironment
+@testable import WireEnvironment
 
 /// Covers `FoundationProcessRunner` itself. These spawn `/bin/sh` and write nothing anywhere.
 final class ProcessRunnerTests: XCTestCase {
@@ -140,5 +141,130 @@ final class ProcessRunnerTests: XCTestCase {
             environment: [:], timeout: .milliseconds(500))
         XCTAssertLessThan(ContinuousClock.now - start, .seconds(5))
         XCTAssertTrue(out.timedOut)
+    }
+
+    // MARK: - one drain pass is bounded (tracker entry 125)
+
+    /// The property the runner depends on: **one readable event does a bounded amount of work**.
+    /// The timeout, the `SIGKILL` escalation and the settlement all run on the same serial queue as
+    /// the pipe drains, so a pass that reads while data keeps arriving is time in which none of the
+    /// three can run — the budget passes unobserved and nothing signals the child.
+    ///
+    /// Demonstrated against a descriptor that *always* has more to give rather than against a
+    /// flooding child, and that is the point: a regular file never says `EAGAIN`, so an unbounded
+    /// loop's only exit is end-of-file. No producer and no scheduling race, and the same read loop
+    /// the runner installs on its pipes.
+    func testOneDrainPassStopsAtItsBoundOnADescriptorThatAlwaysHasMore() throws {
+        let available = 8 * 1024 * 1024
+        let fd = try openScratchFile(ofSize: available)
+        defer { close(fd) }
+
+        var taken = 0
+        let outcome = PipeDrain.pass(fd) { taken += $0.count }
+
+        XCTAssertEqual(outcome, .open, "a pass that stopped at its bound reported the descriptor closed")
+        XCTAssertGreaterThan(taken, 0, "the pass read nothing at all")
+        XCTAssertLessThanOrEqual(taken, PipeDrain.bytesPerPass,
+                                 "one pass took \(taken) bytes from a descriptor holding \(available); it does not yield the queue between passes")
+    }
+
+    /// And the bound loses nothing. Passes repeated until the descriptor reports itself closed
+    /// deliver every byte, in the order it was written: a bound that dropped or reordered the tail
+    /// would be a runner that hands the transport a truncated or scrambled stream under load, which
+    /// is worse than the defect it fixes. The scratch bytes are a generated pattern, so a swap of
+    /// two passes is visible and not merely a count that still adds up.
+    func testRepeatedDrainPassesPreserveEveryByteAndTheirOrderThenReportTheDescriptorClosed() throws {
+        let available = 8 * 1024 * 1024
+        let pattern = Self.scratchPattern(ofSize: available)
+        let fd = try openScratchFile(ofSize: available)
+        defer { close(fd) }
+
+        var collected = Data(), passes = 0
+        var outcome = PipeDrain.Outcome.open
+        while outcome == .open, passes < 1_000 {
+            outcome = PipeDrain.pass(fd) { collected.append($0) }
+            passes += 1
+        }
+
+        XCTAssertEqual(outcome, .closed, "the descriptor was never reported closed")
+        XCTAssertEqual(collected.count, available,
+                       "the passes together delivered a different number of bytes than the descriptor held")
+        XCTAssertEqual(collected, pattern, "the bytes came back in a different order than they were written")
+        XCTAssertGreaterThanOrEqual(passes, available / PipeDrain.bytesPerPass,
+                                    "\(passes) pass(es) covered the whole descriptor, so a pass is not bounded")
+    }
+
+    /// The two other outcomes, which the bound must not disturb: a pipe with nothing in it right now
+    /// is *open* — the reader comes back when the source fires again — while a pipe whose only
+    /// writer is gone is *closed*, which is what cancels the source and closes the descriptor.
+    func testADrainPassReadsAnEmptyPipeAsOpenAndAWriterlessOneAsClosed() throws {
+        let pipe = Pipe()
+        let fd = pipe.fileHandleForReading.fileDescriptor
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        defer { try? pipe.fileHandleForReading.close() }
+
+        var taken = 0
+        XCTAssertEqual(PipeDrain.pass(fd) { taken += $0.count }, .open, "a pipe that is merely empty was reported closed")
+        XCTAssertEqual(taken, 0, "a pass over an empty pipe appended bytes")
+
+        try pipe.fileHandleForWriting.write(contentsOf: Data("done\n".utf8))
+        try pipe.fileHandleForWriting.close()
+        XCTAssertEqual(PipeDrain.pass(fd) { taken += $0.count }, .closed,
+                       "a pipe whose only writer has gone was not reported closed")
+        XCTAssertEqual(taken, 5, "the writer's last bytes did not arrive with the end of the pipe")
+    }
+
+    /// A child that streams continuously past its budget is still signalled and still settles. This
+    /// is a floor rather than the discriminator for the bound — it passes with the drain unbounded
+    /// too, because no user-space producer keeps a 64 KiB pipe fed faster than the drain empties it
+    /// — but it is the property a reader would expect to be pinned, and a bound that broke the
+    /// re-arm would fail it by hanging.
+    ///
+    /// Byte counts, never bytes: nothing here prints a payload.
+    func testAChildStreamingContinuouslyIsStillTimedOutAndSettles() async throws {
+        let start = ContinuousClock.now
+        let out = try await FoundationProcessRunner().run(
+            URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "yes abcdefghijklmnopqrstuvwxyz"],
+            environment: [:], timeout: .milliseconds(500))
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(5))
+        XCTAssertTrue(out.timedOut, "a child that streamed past its budget was not reported as timed out")
+    }
+
+    /// The integration half of the bound, and the property a bounded drain could plausibly break: a
+    /// child whose output is many passes long still arrives whole and in order. The re-arm carries
+    /// it — the readable event fires again while the pipe still holds data — and if it did not, this
+    /// is where the stream would come back truncated.
+    func testAChildsOutputArrivesWholeAndInOrderWhenItIsManyPassesLong() async throws {
+        let expected = 8 * 1024 * 1024
+        let out = try await FoundationProcessRunner().run(
+            URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "yes abcdefghijklmnopqrstuvwxyz | head -c \(expected)"],
+            environment: [:], timeout: .seconds(60))
+        XCTAssertFalse(out.timedOut, "a producer well inside its budget was reported as timed out")
+        XCTAssertEqual(out.stdout.count, expected,
+                       "the drain delivered a different number of bytes than the child wrote")
+        let line = Data("abcdefghijklmnopqrstuvwxyz\n".utf8)
+        var offset = 0, mismatches = 0
+        while offset + line.count <= expected {
+            if out.stdout[offset ..< offset + line.count] != line { mismatches += 1 }
+            offset += line.count
+        }
+        XCTAssertEqual(mismatches, 0, "\(mismatches) block(s) came back out of order across drain passes")
+    }
+
+    /// `size` bytes of a generated, position-dependent pattern.
+    private static func scratchPattern(ofSize size: Int) -> Data {
+        Data((0 ..< size).map { UInt8($0 % 251) })
+    }
+
+    /// A scratch file of `size` bytes opened for reading. The descriptor is returned rather than the
+    /// path: nothing in this suite prints one.
+    private func openScratchFile(ofSize size: Int) throws -> Int32 {
+        let url = FileManager.default.temporaryDirectory.appending(path: "wire-drain-\(UUID().uuidString)")
+        try Self.scratchPattern(ofSize: size).write(to: url, options: .atomic)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        let fd = open(url.path(percentEncoded: false), O_RDONLY)
+        XCTAssertGreaterThanOrEqual(fd, 0, "the scratch file could not be opened for reading")
+        return fd
     }
 }

@@ -846,7 +846,8 @@ final class LifecycleRowTests: XCTestCase {
         guard case .evict(let pick, let reservation) = await rig.fleet.acquire(for: ninth) else {
             return XCTFail("the counter named no victim while one was eligible")
         }
-        XCTAssertEqual(pick, sups[1].key, "the wedged channel was less recent and was still not the pick")
+        // A boolean: `ChannelKey` carries the rig's config home, under the temporary directory (tracker 75).
+        XCTAssertTrue(pick == sups[1].key, "the wedged channel was less recent and was still not the pick")
         await rig.fleet.rollback(reservation)
 
         rig.assertObserved(try XCTUnwrap(Self.coverage[Self.testID()]))
@@ -1215,13 +1216,17 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertEqual(request.purpose, .hatch(session))
         XCTAssertEqual(request.arguments, ["--resume", session.description])
         XCTAssertEqual(request.executable, FakeClaudeLaunch.binary)
-        XCTAssertEqual(request.cwd, readyRig.cwd)
+        // Booleans from here: the pane request carries the rig's working directory and its whole child
+        // environment, both rooted in the temporary directory (tracker entry 75, §6.3).
+        XCTAssertTrue(request.cwd == readyRig.cwd, "the hatch opens in a directory other than the rig's")
         let composed = readyRig.launches[0].childEnvironment(
             over: readyRig.environment(fixture: Self.idleFixture), configHome: readyRig.home.configHome)
         XCTAssertEqual(Set(request.environment.keys), Set(composed.keys),
                        "the key set is exactly what LaunchConfiguration.childEnvironment produces")
-        XCTAssertEqual(request.environment, composed)
-        XCTAssertEqual(request.environment["CLAUDE_CONFIG_DIR"], readyRig.home.url.path)
+        XCTAssertTrue(request.environment == composed,
+                      "the hatch environment differs from the one LaunchConfiguration.childEnvironment produces")
+        XCTAssertTrue(request.environment["CLAUDE_CONFIG_DIR"] == readyRig.home.url.path,
+                      "the hatch names a config home other than the rig's")
         let hatched = await fromReady.state
         XCTAssertEqual(hatched.origin, .foreignLive(.ownTerminalTab))
         let pending = await fromReady.pendingPaneRequest
@@ -1234,8 +1239,9 @@ final class LifecycleRowTests: XCTestCase {
         XCTAssertNotEqual(second.id, request.id, "two requests with identical fields are two requests")
         XCTAssertEqual(second.executable, request.executable)
         XCTAssertEqual(second.arguments, request.arguments)
-        XCTAssertEqual(second.cwd, request.cwd)
-        XCTAssertEqual(second.environment, request.environment)
+        XCTAssertTrue(second.cwd == request.cwd, "the re-adopted hatch opens in a different directory")
+        XCTAssertTrue(second.environment == request.environment,
+                      "the re-adopted hatch carries a different environment")
         XCTAssertEqual(second.purpose, request.purpose)
 
         let dormantRequest = try await dormantRig.steppingClock { try await fromDormant.openInTerminal() }
@@ -1261,10 +1267,11 @@ final class LifecycleRowTests: XCTestCase {
 
         XCTAssertEqual(attach.arguments, ["attach", "j00001"])
         XCTAssertEqual(logs.arguments, ["logs", "j00001"])
-        XCTAssertEqual(attach.cwd, jobCwd)
+        XCTAssertTrue(attach.cwd == jobCwd, "attach does not open in the job's own working directory")
         XCTAssertEqual(attach.purpose, .attach(job.short))
         XCTAssertEqual(logs.purpose, .logs(job.short))
-        XCTAssertEqual(attach.environment, logs.environment)
+        XCTAssertTrue(attach.environment == logs.environment,
+                      "attach and logs run under different environments")
         let unchanged = await supervisor.state
         XCTAssertEqual(unchanged.origin, .owned(.ready))
         let pending = await supervisor.pendingPaneRequest
@@ -1436,15 +1443,19 @@ final class LifecycleRowTests: XCTestCase {
         try await supervisor.spawn(reason: .open)
         let request = try await rig.steppingClock { try await supervisor.openInTerminal() }
 
-        // The "terminal" is a real process this test started, so its pid can genuinely stop being alive.
-        let tab = try rig.startHelper()
+        // Both holders are real processes this test started, so their pids can genuinely stop being alive, and the
+        // roles are assigned from the two observed pids rather than assumed: the decoy has to sort ahead of the
+        // tab, and the test runner's own pid could not promise that, because macOS wraps pids near 100000 and a
+        // runner that started before a wrap gets a helper below it. Both are killed in the rig's teardown.
+        let helpers = try [rig.startHelper(), rig.startHelper()].sorted()
+        let decoy = helpers[0], tab = helpers[1]
         try rig.files.writeRegistry(pid: tab, sessionID: session, kind: "interactive", entrypoint: "cli")
         // A background job on the same session, sorted ahead of the tab by pid. The re-adoption must wait for the
         // record *the tab wrote*: waiting out whichever holder came first would be waiting for a process that was
-        // never the tab's, and this one's pid is the test runner's and never dies.
+        // never the tab's, and this one's process outlives the tab's — it dies only in teardown.
         try rig.files.writeJob(short: "j00001", state: "working", sessionID: session, resumeSessionID: session,
-                               pid: ScriptedHolderFiles.livePID)
-        XCTAssertLessThan(ScriptedHolderFiles.livePID, tab, "the decoy holder sorts first")
+                               pid: decoy)
+        XCTAssertLessThan(decoy, tab, "the decoy holder sorts first")
         _ = await rig.observer.reconcileNow()
         rig.forgetTransitions()
         let labelsBefore = rig.reader.checkLabels.count
@@ -1488,7 +1499,8 @@ final class LifecycleRowTests: XCTestCase {
             let second = try await rig.steppingClock { try await supervisor.openInTerminal() }
             XCTAssertNotEqual(first.id, second.id)
             XCTAssertEqual(first.arguments, second.arguments)
-            XCTAssertEqual(first.environment, second.environment)
+            XCTAssertTrue(first.environment == second.environment,
+                          "two requests for the same channel carry different environments")
             XCTAssertEqual(first.purpose, second.purpose)
             return (rig, supervisor, first, second)
         }

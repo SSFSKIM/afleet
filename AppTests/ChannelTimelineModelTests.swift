@@ -107,8 +107,40 @@ final class ChannelTimelineModelTests: XCTestCase {
         // What `rendered` reaches, exactly: `ChannelTimelineModel.rows`, the row builder the column
         // draws — not the column. `TimelineRow.init` copies `item.category`, so the two sets are
         // equal by construction unless the builder drops a kind, which is the regression this
-        // discriminates. A filter added inside `ChannelTimelineColumn` or `TimelineRowView` would
-        // not be seen here; today the view is an unfiltered `List(model.rows)`.
+        // discriminates. A filter added inside `ChannelTimelineColumn` or a row builder registered
+        // with `RowRegistry` would not be seen here; today the view is an unfiltered
+        // `List(model.rows)` whose every row resolves through that registry.
+    }
+
+    /// Every row carries the item it was built from, and the three derived fields agree with it.
+    ///
+    /// Contract Y1's builder receives a `TimelineRow` and nothing else, so this is the assertion
+    /// that the row is a *view of the item* rather than a summary of it (C6.1's amendment). Both
+    /// directions and a floor: a corpus that failed to ingest leaves nothing to disagree, and the
+    /// item count is checked against the model's own before anything is compared.
+    func testARowCarriesTheItemItWasBuiltFrom() async throws {
+        let names = try Corpus.namesWithAMainTranscript()
+        let rig = try await Rig(fixtures: names)
+        var rows = 0
+        var mismatched = 0
+
+        for (index, _) in names.enumerated() {
+            let model = rig.registry.model(for: rig.keys[index])
+            await model.open(rig.row(index))
+            XCTAssertEqual(model.rows.count, model.items.count,
+                           "\(model.items.count) items rendered \(model.rows.count) rows")
+            for (row, item) in zip(model.rows, model.items) {
+                rows += 1
+                // `.key` and not the whole `ItemID`: the id carries the config-home path (§11).
+                if row.item.id.key != row.id.key { mismatched += 1 }
+                if row.item.category != row.category { mismatched += 1 }
+                if row.item.id.key != item.id.key { mismatched += 1 }
+            }
+        }
+
+        XCTAssertGreaterThan(rows, Corpus.rowFloor,
+                             "the corpus rendered \(rows) rows, below the floor of \(Corpus.rowFloor)")
+        XCTAssertEqual(mismatched, 0, "\(mismatched) row/item disagreement(s) across \(rows) rows")
     }
 
     // MARK: - C3's tap contract
@@ -680,6 +712,10 @@ private enum Corpus {
     /// The distinct categories the corpus is known to project. A floor, not an expectation: it
     /// fails a run that ingested a fraction of the corpus and still compared two equal sets.
     static let categoryFloor = 3
+    /// A floor on how many rows the whole corpus renders, so a run that ingested almost nothing
+    /// cannot pass a comparison that had nothing to compare. Well under what the corpus actually
+    /// produces; it fails an empty or near-empty ingestion, not a corpus that grew or shrank by one.
+    static let rowFloor = 50
 
     static func namesWithAMainTranscript() throws -> [String] {
         let names = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])
@@ -803,7 +839,8 @@ private struct Rig {
                               fleet: StubFleet(),
                               watcher: watcher,
                               changes: feed,
-                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)))
+                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)),
+                              rawCapture: nil)
 
         registry = ChannelTimelineRegistry()
         registry.attach(to: workspace, lifecycle: lifecycle)

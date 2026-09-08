@@ -75,12 +75,14 @@ final class DiagnosticsComposer: @unchecked Sendable {
         app.flush()
     }
 
-    /// Settings' *Delete diagnostics*: the log files go and the four sinks keep working.
+    /// Settings' *Delete diagnostics*: the log files and the capture tree go, and the four sinks keep working.
     ///
     /// The app-owned sinks reopen in place because their consumers retain them. The package
     /// sinks open per append, including the independent instances owned by Fleet.
     /// Only the four known logs and their single rotations are ours to delete. Never recurse:
     /// an unrelated directory (even one named like a log) is not a diagnostics artefact.
+    /// `capture/` is the one exception §11 names, and it is swept by the same ownership rule
+    /// `RawCapture` prunes by rather than deleted as a tree.
     func deleteLogs() {
         lock.lock()
         wireSink.flush()
@@ -99,11 +101,52 @@ final class DiagnosticsComposer: @unchecked Sendable {
             }
         }
 
+        sweepCaptureTree(manager)
+
         wireSink = FileDiagnostics(directory: directory)
         fleetSink = FileFleetDiagnostics(directory: directory)
         lock.unlock()
         timeline.reopen()
         app.reopen()
+    }
+
+    /// §11's `capture/<configHomeHash>/<session-id>.ndjson`, which *Delete diagnostics* removes along with the
+    /// logs — every config home's, not only the one this launch resolved.
+    ///
+    /// Ownership is proven the way `RawCapture` proves it: a **regular file** whose name is a session id with the
+    /// `.ndjson` suffix, inside a directory directly under `capture/`. Anything else in there belongs to somebody
+    /// else and is left where it is, and a directory that empties out is removed only because it is then empty.
+    /// Deleting the tree wholesale would be the one recursion this type refuses to make.
+    private func sweepCaptureTree(_ manager: FileManager) {
+        let root = RawCaptureSwitch.captureRoot(under: directory)
+        guard isDirectory(root, manager) else { return }
+        for name in (try? manager.contentsOfDirectory(atPath: root.path)) ?? [] {
+            let home = root.appending(path: name, directoryHint: .isDirectory)
+            guard isDirectory(home, manager) else { continue }
+            for entry in (try? manager.contentsOfDirectory(atPath: home.path)) ?? [] {
+                guard entry.hasSuffix(".ndjson"), SessionID(String(entry.dropLast(7))) != nil else { continue }
+                let file = home.appending(path: entry)
+                guard let attributes = try? manager.attributesOfItem(atPath: file.path),
+                      attributes[.type] as? FileAttributeType == .typeRegular else { continue }
+                writes.willWrite(file)
+                try? manager.removeItem(at: file)
+            }
+            if (try? manager.contentsOfDirectory(atPath: home.path))?.isEmpty == true {
+                writes.willWrite(home)
+                try? manager.removeItem(at: home)
+            }
+        }
+        if (try? manager.contentsOfDirectory(atPath: root.path))?.isEmpty == true {
+            writes.willWrite(root)
+            try? manager.removeItem(at: root)
+        }
+    }
+
+    /// A real directory, not a symlink to one: `attributesOfItem` does not follow a symlink, so a planted link
+    /// reports `.typeSymbolicLink` here and is neither descended into nor removed.
+    private func isDirectory(_ url: URL, _ manager: FileManager) -> Bool {
+        guard let attributes = try? manager.attributesOfItem(atPath: url.path) else { return false }
+        return attributes[.type] as? FileAttributeType == .typeDirectory
     }
 }
 

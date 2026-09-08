@@ -8,6 +8,10 @@ public protocol LifecycleAPI: Sendable {
     func states() async -> [ChannelState]
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState
+    /// Sends a prompt on an owned channel and returns the uuid the engine will echo for it, so the host can raise
+    /// `HostSignal.promptSent` before the echo arrives. Every precondition and every refusal is
+    /// `perform(.send(input), on:)`'s; only the answer differs.
+    @discardableResult func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID
     /// The composer's line, routed against the channel's own handshake, `system/init` and runtime record. A key the
     /// fleet owns no supervisor for routes against the local table alone.
     func route(_ text: String, on key: ChannelKey) async -> Routed
@@ -41,4 +45,9 @@ public protocol LifecycleAPI: Sendable {
     func events(of key: ChannelKey) async -> AsyncStream<WireEvent>?
     /// Every transition, coalesced per channel.
     var updates: AsyncStream<ChannelState> { get }
+    /// The roster, republished in full whenever it changes. `updates` cannot carry this: it is keyed by channel and
+    /// an exec job has no channel, so a surface listening to it alone never learns that a job appeared outside
+    /// afleet or that one changed state. Published from the observer's own watch and poll cycle, so a consumer that
+    /// listens rather than polls costs no extra `agents --json` run.
+    var jobUpdates: AsyncStream<[JobEntry]> { get }
 }

@@ -276,14 +276,18 @@ final class RecordModelTests: XCTestCase {
         XCTAssertEqual(resolvedAgent.0, LogicalStream(configHome: home, sessionID: sessionID, name: .agent(taskID: "a0invented1")))
         XCTAssertEqual(resolvedAgent.1, .agentTranscript(slug: "-invented-slug", taskID: "a0invented1"))
         XCTAssertEqual(resolvedAgent.0.name.label, "agent-a0invented1")
-        XCTAssertEqual(TranscriptPath.path(of: resolvedAgent.0, slug: "-invented-slug").standardizedFileURL, agent.standardizedFileURL)
+        XCTAssertTrue(TranscriptPath.path(of: resolvedAgent.0, slug: "-invented-slug").standardizedFileURL
+                          == agent.standardizedFileURL,
+                      "the round trip did not land back on the agent transcript it resolved")
 
         let meta = agentDir.appendingPathComponent("agent-a0invented1.meta.json")
         let resolvedMeta = try XCTUnwrap(TranscriptPath.resolve(meta, under: home))
         XCTAssertEqual(resolvedMeta.0, resolvedAgent.0)
         XCTAssertEqual(resolvedMeta.1, .agentMetadata(slug: "-invented-slug", taskID: "a0invented1"))
 
-        XCTAssertEqual(TranscriptPath.path(of: resolvedMain.0, slug: "-invented-slug").standardizedFileURL, main.standardizedFileURL)
+        XCTAssertTrue(TranscriptPath.path(of: resolvedMain.0, slug: "-invented-slug").standardizedFileURL
+                          == main.standardizedFileURL,
+                      "the round trip did not land back on the main transcript it resolved")
 
         // Everything else under projects/ is not a transcript stream.
         for other in [projects.appendingPathComponent("-invented-slug").appendingPathComponent("memory").appendingPathComponent("MEMORY.md"),
