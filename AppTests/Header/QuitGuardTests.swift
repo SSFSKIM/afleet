@@ -447,6 +447,105 @@ final class QuitGuardTests: XCTestCase {
                        "\(atShutdown ?? -1) terminate(s) had landed when the shutdown ran; 2 were owed first")
     }
 
+    // MARK: - The `!` commands the quit ends
+
+    /// **The host commands are cancelled before the shutdown, and only on a quit that is going through.**
+    ///
+    /// A `!` is not a channel: it is afleet's own child, in a process group of its own, and `Fleet` has no
+    /// member that names one. So the clause has to end them itself, on the same log the rest of its order is
+    /// asserted on.
+    ///
+    /// Deliberate break: leave the cancel out, or move it after `shutdownForQuit()`.
+    func testTheRunningHostCommandsAreCancelledBeforeTheShutdown() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: false)])
+        let guardModel = QuitGuard(fleet: fleet, hostCommands: fleet, confirm: { _ in true })
+
+        let mayExit = await guardModel.quit()
+        XCTAssertTrue(mayExit, "the confirmed arm lets the app exit")
+
+        XCTAssertEqual(fleet.memberSequence, ["listed", "terminated", "listed", "cancelled", "shutdown"],
+                       "the owned process is terminated, then the host commands are cancelled, then the fleet "
+                       + "shuts down")
+    }
+
+    /// The other arm: a declined quit leaves every `!` running, because the app is not exiting.
+    func testADeclinedQuitCancelsNoHostCommand() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: true)])
+        let guardModel = QuitGuard(fleet: fleet, hostCommands: fleet, confirm: { _ in false })
+
+        let mayExit = await guardModel.quit()
+        XCTAssertFalse(mayExit, "a cancelled quit does not let the app exit")
+
+        XCTAssertEqual(fleet.cancelCount, 0,
+                       "\(fleet.cancelCount) host-command cancellation(s) ran for a quit the user declined")
+    }
+
+    /// **A real `!` does not survive the quit.** The composer runs a command whose shell starts a `sleep` and
+    /// waits for it, so there is a descendant in the child's own process group — the shape that outlives
+    /// every ending short of a signal to the group. The whole thing is driven through the guard's seam, over
+    /// the app's own registry, which is where a running host command is actually held.
+    ///
+    /// Failed before the fix: the quit shut the fleet down and returned with the `sleep` still on the
+    /// machine, its budget and its escalation about to leave with the process that held them.
+    ///
+    /// The descendant is identified by the pid it wrote down and probed with `kill(pid, 0)`, exactly as
+    /// `ShellEscapeTests` does; a pid is a count of nothing and names no path, session or environment (§11).
+    /// The command's environment is the channel's own two variables and nothing of this runner's (X11).
+    func testAQuitEndsARunningHostCommandAndItsDescendant() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let pidFile = work.appending(path: "descendant-pid")
+        let double = ComposerLifecycleDouble()
+        let registry = ComposerRegistry()
+        registry.lifecycle = double
+        registry.contextProvider = { key, cwd in
+            ComposerContextFixtures.context(key, cwd: cwd, shell: "/bin/sh",
+                                            variables: ["PATH": "/usr/bin:/bin"])
+        }
+        let channel = QuitRig.key("a")
+        let model = try XCTUnwrap(registry.model(for: channel, cwd: work), "the registry built no composer")
+        model.draft = "!sleep 30 & printf '%s' \"$!\" > '\(pidFile.path)'; wait"
+
+        let send = Task { @MainActor in await model.send() }
+        defer { send.cancel() }
+        guard let descendant = try await recordedPID(in: pidFile, within: 100) else {
+            return XCTFail("the command recorded no descendant to probe")
+        }
+        defer { _ = kill(descendant, SIGKILL) }
+
+        let fleet = QuitFleetDouble(channels: [])
+        let guardModel = QuitGuard(fleet: fleet, hostCommands: registry, confirm: { _ in true })
+        let mayExit = await guardModel.quit()
+
+        XCTAssertTrue(mayExit, "the quit did not reach the exit")
+        XCTAssertEqual(fleet.memberSequence.last, "shutdown", "the fleet was not shut down")
+        let ended = try await died(descendant, within: 20)
+        XCTAssertTrue(ended, "a host command's descendant outlived the quit by more than 2 second(s)")
+    }
+
+    // MARK: - Bounded probes
+
+    /// The pid the command wrote down, waited for a tenth of a second at a time.
+    private func recordedPID(in file: URL, within attempts: Int) async throws -> pid_t? {
+        for _ in 0..<attempts {
+            if let text = try? String(contentsOf: file, encoding: .utf8),
+               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return pid
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return nil
+    }
+
+    /// Whether `pid` is gone, polled a tenth of a second at a time. The pid itself is never printed.
+    private func died(_ pid: pid_t, within attempts: Int) async throws -> Bool {
+        for _ in 0..<attempts {
+            if kill(pid, 0) != 0 && errno == ESRCH { return true }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return kill(pid, 0) != 0 && errno == ESRCH
+    }
+
     // MARK: - The hook
 
     /// `applicationShouldTerminate` itself, run headlessly: it hands the answer to the injected
@@ -521,13 +620,15 @@ final class QuitGuardTests: XCTestCase {
 
 // MARK: - Support
 
-/// The `QuitFleet` the clause's order is asserted on: one ordered log for all three members.
+/// The `QuitFleet` the clause's order is asserted on: one ordered log for all three members, and for the
+/// host-command cancellation that has to land between the last of them and the shutdown.
 @MainActor
-final class QuitFleetDouble: QuitFleet, @unchecked Sendable {
+final class QuitFleetDouble: QuitFleet, QuitHostCommands, @unchecked Sendable {
 
     enum Call: Hashable {
         case listed
         case terminated(ChannelKey)
+        case cancelledHostCommands
         case shutdown
     }
 
@@ -549,10 +650,14 @@ final class QuitFleetDouble: QuitFleet, @unchecked Sendable {
             switch call {
             case .listed: "listed"
             case .terminated: "terminated"
+            case .cancelledHostCommands: "cancelled"
             case .shutdown: "shutdown"
             }
         }
     }
+
+    /// How many times the quit asked for the host commands to be ended. A count (§11).
+    var cancelCount: Int { log.filter { $0 == .cancelledHostCommands }.count }
 
     init(channels: [QuitChannel]) { self.channels = channels }
 
@@ -582,6 +687,8 @@ final class QuitFleetDouble: QuitFleet, @unchecked Sendable {
     nonisolated func shutdownForQuit() async {
         await MainActor.run { log.append(.shutdown) }
     }
+
+    func cancelHostCommands() async { log.append(.cancelledHostCommands) }
 }
 
 @MainActor

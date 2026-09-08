@@ -125,6 +125,81 @@ final class RoutedSettingTests: XCTestCase {
         XCTAssertTrue(model.draft.isEmpty, "the answered line stayed in the field")
     }
 
+    // MARK: - The directory the shell escape runs in
+
+    /// A registry whose `contextProvider` answers for the directory it is asked about, which is what the
+    /// panel host does. It is the only way a re-resolved context can be told from a kept one.
+    private func registry(_ double: ComposerLifecycleDouble) -> ComposerRegistry {
+        let registry = ComposerRegistry()
+        registry.lifecycle = double
+        registry.contextProvider = { key, cwd in ComposerContextFixtures.context(key, cwd: cwd) }
+        return registry
+    }
+
+    /// **A `/cd` the engine accepted moves the composer's context at once.**
+    ///
+    /// `!` runs in `context.cwd`, and the context is otherwise re-resolved only when the browser row's own
+    /// `cwd` catches up from a later fleet update. A shell command submitted in that window ran in the
+    /// directory the channel had just left — the one mistake in this leaf that cannot be undone afterwards.
+    ///
+    /// The second half is the part a naive fix fails: the mount asks `model(for:cwd:)` on every body
+    /// evaluation, and the row goes on reporting the old directory for as long as the update takes.
+    ///
+    /// Failed before the fix: the successful answer was read for its note and discarded, and the context
+    /// stayed in the previous directory.
+    func testAnAcceptedDirectoryChangeMovesTheContextTheShellEscapeRunsIn() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        let before = URL(fileURLWithPath: "/invented/project")
+        let moved = URL(fileURLWithPath: "/invented/project-moved")
+        await double.stageSend(SetCwd.subtype,
+                               .success(.object(["status": .string("ok"), "cwd": .string(moved.path)])))
+        let registry = registry(double)
+        let model = try XCTUnwrap(registry.model(for: key, cwd: before), "the registry built no composer")
+        model.draft = "/cd \(moved.path)"
+
+        await model.send()
+
+        XCTAssertEqual(model.context?.cwd, moved,
+                       "the accepted directory change left `!` running in the directory the channel had left")
+        // The row has not caught up yet, and the redraw that follows the change must not undo it.
+        _ = registry.model(for: key, cwd: before)
+        XCTAssertEqual(model.context?.cwd, moved,
+                       "a redraw over the stale row put the composer back in the previous directory")
+        // Once the row speaks about a directory of its own again, the composer follows it.
+        let again = URL(fileURLWithPath: "/invented/project-third")
+        _ = registry.model(for: key, cwd: again)
+        XCTAssertEqual(model.context?.cwd, again,
+                       "the composer stopped following the row after one directory change of its own")
+    }
+
+    /// The same, through the trust handshake: it is `continueCD`'s answer that carries the resolved
+    /// directory, and `grantTrust` read it for its note alone.
+    ///
+    /// Failed before the fix: the trusted change moved the channel and left the context behind.
+    func testADirectoryChangeThatNeededTrustAlsoMovesTheContext() async throws {
+        let double = ComposerLifecycleDouble()
+        let key = key()
+        let before = URL(fileURLWithPath: "/invented/project")
+        let resolved = "/invented/project-resolved"
+        await double.stageSendSequence(SetCwd.subtype, [
+            .success(.object(["status": .string("needs_trust"), "directory": .string(resolved)])),
+            .success(.object(["status": .string("ok"), "cwd": .string(resolved)])),
+        ])
+        let registry = registry(double)
+        let model = try XCTUnwrap(registry.model(for: key, cwd: before), "the registry built no composer")
+        model.draft = "/cd \(resolved)"
+
+        await model.send()
+        XCTAssertEqual(model.context?.cwd, before,
+                       "a `needs_trust` answer changed nothing and must move no context")
+
+        await model.confirmPending()
+
+        XCTAssertEqual(model.context?.cwd, URL(fileURLWithPath: resolved),
+                       "the trusted directory change left `!` running in the directory the channel had left")
+    }
+
     // MARK: - What a strategy hands back
 
     /// `StrategyOutcome` carries everything the multi-step rows read off the engine, and a dispatch

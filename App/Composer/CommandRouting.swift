@@ -316,6 +316,7 @@ extension ComposerModel {
         do {
             let answer = try await lifecycle.send(request, on: key)
             editNote = Self.directoryNote(answer)
+            adoptDirectory(answer)
             return true
         } catch {
             refuse(error)
@@ -335,6 +336,22 @@ extension ComposerModel {
             : "The channel's directory changed."
     }
 
+    /// **A directory change is taken the moment the engine confirms it**, from either half of §7.7's `/cd`
+    /// row: the plain `set_cwd` and the `trust_accepted` one that follows a `needs_trust`.
+    ///
+    /// The `!` escape runs in `context.cwd`, and the context is otherwise refreshed from a **later** browser-row
+    /// update — so a shell command submitted between the confirmation and that update ran in the directory the
+    /// channel had just left, which is the one thing in this leaf that cannot be undone afterwards. The registry
+    /// re-resolves the context; nothing here builds one.
+    ///
+    /// `{status: "ok", cwd: <resolved>}` is the accepted answer and a `needs_trust` one carries no `cwd`
+    /// (`RuntimeState`, from the `control-shapes` recording), so the presence of `cwd` is the whole test — and it
+    /// is the engine's own resolved directory rather than the path the host asked for.
+    private func adoptDirectory(_ answer: JSONValue) {
+        guard let resolved = answer["cwd"]?.stringValue else { return }
+        didChangeDirectory?(URL(fileURLWithPath: resolved))
+    }
+
     /// One routed control request, with its **answer read**.
     ///
     /// The only answer this leaf reads anything out of is `set_cwd`'s: `{status: "needs_trust",
@@ -344,9 +361,13 @@ extension ComposerModel {
     private func sendRouted(_ request: AnyControlRequest) async -> Bool {
         do {
             let answer = try await lifecycle.send(request, on: key)
-            guard request.subtype == SetCwd.subtype, answer["status"]?.stringValue == "needs_trust",
+            guard request.subtype == SetCwd.subtype else { return true }
+            guard answer["status"]?.stringValue == "needs_trust",
                   let directory = answer["directory"]?.stringValue
-            else { return true }
+            else {
+                adoptDirectory(answer)
+                return true
+            }
             // Nothing has changed yet, so the line stays in the field until the question is answered.
             pendingConfirmation = .trustDirectory(directory: directory,
                                                   path: request.payload["path"]?.stringValue ?? directory)
