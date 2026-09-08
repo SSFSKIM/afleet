@@ -108,6 +108,9 @@ final class FileKindTests: XCTestCase {
 
     func testEveryMappedLanguageIsRegisteredByTheCommittedBundle() throws {
         let registrations = try Self.bundleRegistrations()
+        // Named unconditionally, not only on failure: a parse that found nothing has to be
+        // visible in the log rather than passing every check below vacuously.
+        print("[G2] parsed \(registrations.count) language registrations from the committed Monaco bundle")
         XCTAssertGreaterThanOrEqual(registrations.count, 80,
                                     "parsed \(registrations.count) language registrations from the committed bundle")
         for expected in ["markdown", "swift", "typescript", "json"] {
