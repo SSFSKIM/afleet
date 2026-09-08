@@ -42,7 +42,7 @@ struct ChannelHeaderMenus: View {
     private var channelMenu: some View {
         Menu("Channel") {
             Button("Fork") { Task { await model.fork() } }
-            Button("Send to Background…") { model.sendToBackground() }
+            Button("Send to Background…") { Task { await model.sendToBackground() } }
             Button("Open in Terminal") { Task { await model.openInTerminal() } }
             Divider()
             Button("Rename…") { model.isRenaming = true }
