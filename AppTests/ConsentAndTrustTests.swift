@@ -16,7 +16,7 @@ extension PrecommitModel {
     }
 }
 
-/// The §6.12 consent sheet and its fail-closed refusal (acceptance G4).
+/// The §6.12 consent sheet and the §6.11 trust banner (acceptance G4).
 ///
 /// **Every clause asserts the call that left the surface**, never that a sheet closed or a banner
 /// appeared: a sheet closes for many reasons and only one of them is the right consent having been
@@ -26,7 +26,8 @@ extension PrecommitModel {
 /// **X9 and §11.** Nothing here writes anywhere: the decline goes through `LifecycleAPI`, which the
 /// double answers in memory, and no test builds a real project or a real config home. Every
 /// identifier is invented — servers named after nobody, a project under `/invented`, a config home
-/// under the temporary directory that is never created.
+/// under the temporary directory that is never created. The untrusted clause asserts the *absence*
+/// of the root's path component in the banner, so a banner that leaked the path fails.
 @MainActor
 final class ConsentAndTrustTests: XCTestCase {
 
@@ -53,10 +54,12 @@ final class ConsentAndTrustTests: XCTestCase {
     ]
 
     /// A model over a double staged with one verdict, already evaluated.
-    private func evaluated(_ verdicts: [SpawnPrecondition]) async -> (ConsentDouble, PrecommitModel) {
+    private func evaluated(_ verdicts: [SpawnPrecondition],
+                           panels: any PanelHost = PanelHostModel())
+        async -> (ConsentDouble, PrecommitModel) {
         let lifecycle = ConsentDouble()
         await lifecycle.stage(verdicts)
-        let model = PrecommitModel(lifecycle: lifecycle)
+        let model = PrecommitModel(lifecycle: lifecycle, panels: panels)
         await model.evaluate(channel: Self.channel, project: Self.project)
         return (lifecycle, model)
     }
@@ -151,7 +154,7 @@ final class ConsentAndTrustTests: XCTestCase {
         let lifecycle = ConsentDouble()
         await lifecycle.stage([.consentNeeded(Self.servers), .ready])
         await lifecycle.setSpawn(counter.factory)
-        let model = PrecommitModel(lifecycle: lifecycle)
+        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
         await model.evaluate(channel: Self.channel, project: Self.project)
 
         let servers = try XCTUnwrap(model.consentServers, "the consentNeeded verdict raised no sheet")
@@ -191,14 +194,78 @@ final class ConsentAndTrustTests: XCTestCase {
         XCTAssertNotNil(model.consentServers, "a refused decline let the consent sheet close")
     }
 
+    // MARK: - G4c: the trust banner
+
+    /// §6.11: an untrusted project opens history-only, and the banner names the project in words.
+    /// The path clause is the discriminating one — `untrusted` carries a root, and a banner built
+    /// from it would read the project's directory name out loud (§11).
+    func testAnUntrustedChannelIsHistoryOnlyAndItsBannerNamesNoPath() async throws {
+        let (_, model) = await evaluated([.untrusted(root: Self.project)])
+        XCTAssertTrue(model.isHistoryOnly, "an untrusted verdict did not make the channel history-only")
+
+        let banner = TrustBanner(isAnswering: false, review: {})
+        let drawn = texts(in: banner.body)
+        XCTAssertTrue(drawn.contains(PrecommitModel.untrustedSentence),
+                      "the trust banner does not say the project has not been trusted in Claude Code")
+        for line in drawn {
+            XCTAssertFalse(line.contains(Self.project.lastPathComponent),
+                           "the trust banner leaked the project's own directory name")
+            XCTAssertFalse(line.contains(Self.project.path),
+                           "the trust banner leaked the project's path")
+        }
+        // The floor: a banner that drew nothing at all would pass every clause above.
+        XCTAssertGreaterThanOrEqual(drawn.count, 2, "the trust banner drew \(drawn.count) line(s)")
+
+        // A trusted channel draws neither: the negative half, so the assertions above discriminate.
+        let (_, ready) = await evaluated([.ready])
+        XCTAssertFalse(ready.isHistoryOnly, "a ready channel was made history-only")
+    }
+
+    /// *Review trust in terminal* hands the host the `PaneRequest` C4 built, **unchanged, `id`
+    /// included**: C4 accepts a `PaneExit` only when `exit.request.id` is the id it is waiting on,
+    /// so a host handed a freshly minted request would have every exit discarded in silence.
+    func testReviewTrustHandsTheHostTheSamePaneRequest() async throws {
+        let panels = PanelHostModel()
+        let runner = ConsentPaneRunner()
+        panels.registerPaneRunner(runner, for: .terminal)
+        let (lifecycle, model) = await evaluated([.untrusted(root: Self.project)], panels: panels)
+        let expected = lifecycle.paneRequest
+
+        let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
+        try press("Review trust in terminal", in: banner.body)
+        await model.whenIdle()
+
+        let received = await runner.received
+        XCTAssertEqual(received.count, 1, "the registered runner received \(received.count) pane request(s)")
+        XCTAssertEqual(received.first?.id, expected.id,
+                       "the host was handed a different pane request id than the lifecycle minted")
+        XCTAssertTrue(received.first == expected, "the pane request reached the runner edited")
+        XCTAssertNil(model.banner, "a successful handoff raised a banner")
+    }
+
+    /// Item 47 degraded exactly as far as C7.4's absence forces: with no pane runner registered the
+    /// host refuses, and the refusal is a banner naming the terminal rather than silence.
+    func testWithNoRunnerRegisteredTheRefusalBecomesABannerNamingTheTerminal() async throws {
+        let (_, model) = await evaluated([.untrusted(root: Self.project)], panels: PanelHostModel())
+
+        let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
+        try press("Review trust in terminal", in: banner.body)
+        await model.whenIdle()
+
+        let raised = try XCTUnwrap(model.banner, "the host's refusal was swallowed and raised no banner")
+        XCTAssertTrue(raised.text.contains("Terminal"), "the refusal banner does not name the terminal")
+        XCTAssertTrue(raised.text.contains("claude"),
+                      "the refusal banner does not say what to run in your own terminal")
+        XCTAssertTrue(model.isHistoryOnly, "the refused handoff left the channel out of history-only")
+    }
 }
 
 // MARK: - The doubles
 
-/// A lifecycle that answers the three members this surface calls — `preconditions`, `accept` and
-/// `decline` — and records every one of them.
+/// A lifecycle that answers the four members this surface calls — `preconditions`, `accept`,
+/// `decline` and `openInTerminal` — and records every one of them.
 ///
-/// `LifecycleDouble` traps on all three, which is right for the surfaces it was built for and wrong
+/// `LifecycleDouble` traps on all four, which is right for the surfaces it was built for and wrong
 /// here. This one also carries the spawn seam, wired where `Fleet` wires it, so a test can assert
 /// that consent was taken before any child existed.
 actor ConsentDouble: LifecycleAPI {
@@ -216,6 +283,14 @@ actor ConsentDouble: LifecycleAPI {
     private(set) var declined: [(names: [String], project: URL)] = []
     private(set) var actions: [(key: ChannelKey, action: LifecycleAction)] = []
     private var spawn: ProcessFactory?
+
+    /// The request `openInTerminal` answers with. Built once, so a test can compare the id the host
+    /// was handed against the id C4 minted.
+    let paneRequest = PaneRequest(executable: URL(fileURLWithPath: "/invented/bin/claude"),
+                                  arguments: ["--resume"],
+                                  cwd: URL(fileURLWithPath: "/invented/consent-project-e7"),
+                                  environment: [:],
+                                  purpose: .hatch(SidebarFixtures.session("e")))
 
     init() {
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
@@ -241,7 +316,7 @@ actor ConsentDouble: LifecycleAPI {
         if let declineRefusal { throw declineRefusal }
     }
 
-    func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
+    func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { paneRequest }
 
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         actions.append((key, action))
@@ -270,4 +345,11 @@ actor ConsentDouble: LifecycleAPI {
     private nonisolated func unreachable(_ member: String) -> Never {
         fatalError("ConsentDouble.\(member) is not part of the consent and trust surface")
     }
+}
+
+/// A `PaneRunning` that records the requests it was handed, unedited.
+private actor ConsentPaneRunner: PaneRunning {
+    private(set) var received: [PaneRequest] = []
+    func bind(_ report: @escaping @Sendable (PaneExit) async -> Void) {}
+    func run(_ request: PaneRequest) async { received.append(request) }
 }
