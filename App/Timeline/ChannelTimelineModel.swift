@@ -305,7 +305,12 @@ final class ChannelTimelineModel {
             for await effect in ingestion.effects {
                 guard let self else { return }
                 guard !effect.changes.isEmpty else { continue }
-                await self.publish()
+                // Requested, not performed (§4). Deltas arrive as fast as the engine writes them and
+                // the read model is republished whole for each one; the coalescer turns a burst into
+                // one publish on a thirty-hertz trailing edge, and a lone delta after quiet into one
+                // publish 33 ms later. Everything downstream — the table, its diff, the row heights
+                // — costs what a publish costs, so this is the one place the rate is set.
+                self.coalescer.request()
             }
         }
 
@@ -390,6 +395,7 @@ final class ChannelTimelineModel {
     /// workspace this model was built over.
     func close() {
         isTerminated = true
+        coalescer.cancel()
         openingTask?.cancel(); openingTask = nil
         effectsTask?.cancel(); effectsTask = nil
         changesTask?.cancel(); changesTask = nil
@@ -420,9 +426,70 @@ final class ChannelTimelineModel {
         fanout.yield(next)
     }
 
+    /// The publish path's rate limiter, built here so its lifetime is this model's.
+    ///
+    /// It is `lazy` because it captures `self`: the closure is what a publish *is*, and a coalescer
+    /// that published something else would be measuring nothing.
+    @ObservationIgnored private lazy var coalescer = PublishCoalescer { [weak self] in
+        await self?.publish()
+    }
+
     /// The archived channel's tap: a sequence that is over before anybody reads it.
     private static func finishedEvents() -> AsyncStream<WireEvent> {
         AsyncStream { $0.finish() }
+    }
+}
+
+// MARK: - The thirty-hertz trailing edge
+
+/// One publish per thirty-hertz window, on the trailing edge (child spec §4).
+///
+/// **Why the model and not the renderer.** The renderer is handed a timeline and draws it; how often
+/// it is handed one is the model's to decide, and a burst of deltas that each republish the whole
+/// read model costs the table a diff and a reload apiece however cheap the row is.
+///
+/// **Trailing edge, and what that buys.** The first request of a quiet stream arms the window and
+/// the publish happens at its end, so every delta that arrived inside it is already in the read
+/// model the publish reads — the coalescer buffers nothing and can drop nothing. A hundred deltas
+/// inside one window are one publish; a single delta after quiet is one publish within the window's
+/// length. A leading edge would publish the first delta of a burst and then the state at the end of
+/// it, which is one publish more for no reader.
+@MainActor
+final class PublishCoalescer {
+
+    /// Thirty hertz, as §4 states it.
+    static let window = Duration.milliseconds(33)
+
+    private let window: Duration
+    private let publish: @Sendable () async -> Void
+    private var armed: Task<Void, Never>?
+
+    /// How many publishes this coalescer has performed. What a rate is asserted in.
+    private(set) var publishCount = 0
+
+    init(window: Duration = PublishCoalescer.window, publish: @escaping @Sendable () async -> Void) {
+        self.window = window
+        self.publish = publish
+    }
+
+    /// Asks for a publish. Cheap, synchronous and idempotent inside one window.
+    func request() {
+        guard armed == nil else { return }
+        armed = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: self.window)
+            guard !Task.isCancelled else { return }
+            self.armed = nil
+            self.publishCount += 1
+            await self.publish()
+        }
+    }
+
+    /// Drops a window that is still armed. The model's `close()` calls it: a publish landing after
+    /// the release would push a timeline at subscribers the release just finished.
+    func cancel() {
+        armed?.cancel()
+        armed = nil
     }
 }
 
