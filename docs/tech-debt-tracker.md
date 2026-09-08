@@ -1929,6 +1929,32 @@ C6.1's and C6.2's reservations and is expected.
      tree a user sees. Found at Task 2. Closer: fold the deliberate descent into `ViewTree` itself
      so each host does not add its own. Owner: C5, which owns the instrument.
 
+171. **A question answered with only a note carries an empty `answers` entry.** The question card
+     now builds a response for a question the user annotated and did not otherwise answer, because
+     that is the only way its annotation reaches the reply at all; `DecisionCard.echo(_:answering:)`
+     then writes `answers[<the question>] = ""` beside the annotation, so the engine reads an empty
+     answer where the user gave none. Nothing is lost and nothing is invented — the alternative
+     spelling, an `answers` map that skips a response with no selections, lives in the mapping and
+     not in the card. Found by the review wave on C6.3. Closer: `echo` omits an entry whose
+     selections are empty. Owner: whoever next owns `DecisionAnswerMapping`.
+
+296. **A form-mode elicitation whose schema is not an object draws no form and no Accept.**
+     `ElicitationForm.init?` now builds a form for an object with no properties (its answer is
+     `{}`), but a `requested_schema` of some other type — a bare `{"type": "string"}`, or a schema
+     given as a `$ref` — still produces no form, so the card offers only *Decline* and *Cancel*.
+     That is the same shape §6.4 forbids, one level up from the properties this wave fixed; it is
+     left standing because no server has been seen to send one and the raw-JSON fallback for a
+     whole schema is a design question, not a repair. Found by the review wave on C6.3. Closer:
+     a whole-schema raw field for a form-mode request the subset cannot open. Owner: C6.3's
+     successor, with entry 165.
+
+297. **An integer control truncates a fractional entry rather than refusing it.** Typing `2.7`
+     into a property of `type: "integer"` sends `2`, silently, and this wave's numeric guard did
+     not change that — it only stopped the out-of-range and non-finite cases from trapping. Small,
+     and the field would have to say why it refused. Found by the review wave on C6.3. Closer:
+     refuse a value with a fractional part in an integer control, the way an out-of-range one is
+     refused. Owner: C6.3's successor.
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
