@@ -61,15 +61,23 @@ public enum RouterTable {
         .init(name: "/cost", strategy: .text, readback: .none, explanation: "Sent to the engine as text."),
         .init(name: "/usage", strategy: .text, readback: .none, explanation: "Sent to the engine as text."),
     ]
+    /// The engine's refusal of a slash command it will not run headless, of which there are **two** shapes, both
+    /// anchored at both ends because the match is against the whole assistant text (`RefusalInterceptor`).
+    ///
+    /// `bareRefusalPattern` is the plain one, built at 2.1.263 `cli.pretty.js:540254` for any command missing from
+    /// the headless dispatcher (*A-28*). `interactivePanelRefusalPattern` is the second, built at 2.1.263
+    /// `cli.pretty.js:540305` for a command whose UX is a full-screen panel; it is a *different* sentence, and it
+    /// ends by telling the user to run the command from the Claude Code terminal — the one thing §7.7 says afleet
+    /// never shows. Matching only the first left that instruction reaching the channel and the drift log reading
+    /// zero for the whole class (C6.2's `[parent-impact]` against X10).
     public static let bareRefusalPattern = #"^/([A-Za-z0-9:_-]+) isn't available in this environment\.$"#
+    public static let interactivePanelRefusalPattern =
+        #"^/([A-Za-z0-9:_-]+) opens an interactive panel and isn't available in this environment\. Run it from the Claude Code terminal instead\.$"#
 
     /// The one row of that name, or nil. The composer looks a typed command up here and renders its explanation;
     /// it re-implements no mapping (contract X10).
     public static func command(named name: String) -> LocalCommand? { local.first { $0.name == name } }
 
-    /// afleet's copy for a command the engine reports in `terminal_slash_commands`: the router refuses it here
-    /// rather than sending it for the engine to refuse, and `RefusalInterceptor` puts the same sentence in place of
-    /// the engine's bare refusal when one gets through anyway.
     /// afleet's copy for `/permissions <something that is not a mode>`. The modes are named so the user can see
     /// what they meant to type; they are `PermissionMode`'s own cases, so this list cannot drift from the engine's.
     public static func explanation(forUnknownMode mode: String) -> String {
@@ -77,9 +85,49 @@ public enum RouterTable {
             + ". Send /permissions on its own to see the current settings."
     }
 
+    /// What each terminal-only command does on the terminal's own screen, and why afleet carries no equivalent.
+    ///
+    /// The three keys are the names the recorded `system/init.terminal_slash_commands` actually lists (fixtures
+    /// `control-shapes`, `zero-cost`); anything else the engine tags takes the fallback below. §7.7 asks for what
+    /// the command does or why it is absent, so a name whose reason is known says the reason rather than the
+    /// generic sentence — and no line here sends the user out of the app.
+    private static let terminalOnlyReasons: [String: String] = [
+        "/doctor": "/doctor draws the CLI's installation and health report on the terminal's own screen, which afleet has no equivalent of yet.",
+        "/color": "/color repaints the CLI's terminal theme, and afleet's channels are drawn by the app rather than by that screen.",
+        "/reload-plugins": "/reload-plugins reloads plugins into a running terminal screen; afleet picks a plugin change up when the channel next restarts.",
+    ]
+
+    /// afleet's copy for a command the engine reports in `terminal_slash_commands`: the router refuses it here
+    /// rather than sending it for the engine to refuse.
     public static func explanation(forTerminalOnly name: String) -> String {
-        "\(name) belongs to Claude Code's terminal interface and has no effect here. Open this session in your terminal to use it."
+        terminalOnlyReasons[name]
+            ?? "\(name) drives a screen Claude Code draws in the terminal itself, and afleet has no equivalent of that screen."
     }
+
+    /// afleet's copy for a refusal the engine got to send anyway — the drift path, where a command afleet does not
+    /// route locally was passed through as text and refused (§7.7).
+    ///
+    /// It is *not* the terminal-only sentence: this command may be one afleet is expected to run here, so the row's
+    /// own explanation is preferred when the table carries one, then a known terminal-only reason, and only then a
+    /// sentence per refusal shape saying why it is absent.
+    public static func explanation(forDrift name: String, shape: RefusalShape) -> String {
+        if let command = command(named: name) { return command.explanation }
+        if let reason = terminalOnlyReasons[name] { return reason }
+        switch shape {
+        case .bare:
+            return "\(name) is not one of the commands afleet runs here, and this engine offers no headless form of it."
+        case .interactivePanel:
+            return "\(name) opens one of Claude Code's full-screen panels, which afleet has no equivalent of here."
+        }
+    }
+}
+
+/// Which of the engine's two refusal sentences was replaced, so the drift log counts the two classes apart.
+public enum RefusalShape: String, Hashable, Sendable, CaseIterable {
+    /// 2.1.263 `cli.pretty.js:540254`, parent *A-28*.
+    case bare
+    /// 2.1.263 `cli.pretty.js:540305`.
+    case interactivePanel = "interactive_panel"
 }
 public enum LaunchSettingMatrix {
     public static let runtimeMutable: Set<String> = ["model", "permissionMode", "effort", "agent", "sessionName", "thinkingTokens", "fastMode", "cwd"]

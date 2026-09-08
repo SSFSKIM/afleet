@@ -387,27 +387,38 @@ public enum StrategyExecutor {
     }
 }
 
-/// One replaced drift refusal.
+/// One replaced drift refusal, with the shape of the engine sentence it replaced.
 public struct Intercepted: Hashable, Sendable {
     public let command: String
     public let replacement: String
-    public init(command: String, replacement: String) { self.command = command; self.replacement = replacement }
+    public let shape: RefusalShape
+    public init(command: String, replacement: String, shape: RefusalShape) {
+        self.command = command; self.replacement = replacement; self.shape = shape
+    }
 }
 
-/// Catches the engine's bare refusal of a command afleet routes locally, replaces it with afleet's own explanation
-/// and counts it for the drift log.
+/// Catches the engine's refusal of a command afleet routes locally, replaces it with afleet's own explanation and
+/// counts it for the drift log.
+///
+/// Both of the engine's refusal sentences are caught, not one: the interactive-panel refusal ends by telling the
+/// user to run the command from the Claude Code terminal, which §7.7 says afleet never shows, so a shape that is
+/// not matched is a shape whose forbidden instruction reaches the channel. Each is counted under its own shape so
+/// the drift log says which of the two moved.
 ///
 /// The match is against the *whole* assistant text and nothing less. The same sentence inside a longer answer is the
 /// model talking about the command, and replacing that would rewrite an answer the engine meant.
 public actor RefusalInterceptor {
-    /// `bareRefusalPattern` is a literal in this package, so its compiling is a fact about the source and not about
+    /// Both patterns are literals in this package, so their compiling is a fact about the source and not about
     /// anything at run time. A `try?` here would turn a broken pattern into an interceptor that silently never
     /// intercepts and a drift counter that reads zero for ever, which is the failure this whole mechanism exists to
     /// notice.
-    private static let expression = try! NSRegularExpression(pattern: RouterTable.bareRefusalPattern)
+    private static let expressions: [(RefusalShape, NSRegularExpression)] = [
+        (.bare, try! NSRegularExpression(pattern: RouterTable.bareRefusalPattern)),
+        (.interactivePanel, try! NSRegularExpression(pattern: RouterTable.interactivePanelRefusalPattern)),
+    ]
 
     private let diagnostics: any FleetDiagnosticsSink
-    private var drift = 0
+    private var drift: [RefusalShape: Int] = [:]
 
     public init(diagnostics: any FleetDiagnosticsSink = NullFleetDiagnostics()) {
         self.diagnostics = diagnostics
@@ -415,16 +426,24 @@ public actor RefusalInterceptor {
 
     /// How many refusals have been intercepted since the fleet started: the drift signal that says the engine and
     /// the local table have moved apart.
-    public var driftCount: Int { drift }
+    public var driftCount: Int { drift.values.reduce(0, +) }
+
+    /// The same count for one of the two shapes.
+    public func driftCount(of shape: RefusalShape) -> Int { drift[shape] ?? 0 }
 
     public func intercept(_ text: String) -> Intercepted? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let range = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
-        guard let match = Self.expression.firstMatch(in: trimmed, range: range), match.numberOfRanges == 2,
-              let nameRange = Range(match.range(at: 1), in: trimmed) else { return nil }
-        let command = "/" + String(trimmed[nameRange])
-        drift += 1
-        diagnostics.record(.driftRefusalIntercepted(command: command))
-        return Intercepted(command: command, replacement: RouterTable.explanation(forTerminalOnly: command))
+        for (shape, expression) in Self.expressions {
+            guard let match = expression.firstMatch(in: trimmed, range: range), match.numberOfRanges == 2,
+                  let nameRange = Range(match.range(at: 1), in: trimmed) else { continue }
+            let command = "/" + String(trimmed[nameRange])
+            drift[shape, default: 0] += 1
+            diagnostics.record(.driftRefusalIntercepted(command: command, shape: shape.rawValue))
+            return Intercepted(command: command,
+                               replacement: RouterTable.explanation(forDrift: command, shape: shape),
+                               shape: shape)
+        }
+        return nil
     }
 }

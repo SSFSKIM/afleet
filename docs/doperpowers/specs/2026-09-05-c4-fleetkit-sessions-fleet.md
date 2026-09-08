@@ -1858,6 +1858,24 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-08: `RouterTable`'s terminal-only copy ended with "Open this session in your
+  terminal to use it." — the one sentence parent §7.7 says the router never shows — and
+  `RefusalInterceptor` reused it verbatim on the drift path, where §7.7 asks instead for what
+  the command does here or why it is absent. Worse, the engine has **two** refusal sentences,
+  not one: 2.1.263 `cli.pretty.js:540254` builds the bare `/<name> isn't available in this
+  environment.` that `bareRefusalPattern` matches (*A-28*), while `cli.pretty.js:540305` builds
+  `/<name> opens an interactive panel and isn't available in this environment. Run it from the
+  Claude Code terminal instead.` for a command whose UX is a full-screen panel — anchored at
+  both ends, the pattern missed it, so that whole class reached the channel unintercepted,
+  uncounted, and carrying the forbidden instruction (C6.2's `[parent-impact]` filing against
+  X10). The table now carries a per-command reason for each name the recorded
+  `terminal_slash_commands` lists and a clean fallback for the rest, a separate
+  `explanation(forDrift:shape:)` that prefers the local row's own explanation, and
+  `interactivePanelRefusalPattern` beside the bare one; the interceptor matches both, replaces
+  both and counts them apart under a `RefusalShape` the drift log records as `refusal_shape`.
+  `RouterTests` scans every text the table can produce for the forbidden shapes and pins both
+  interceptions — the panel half failed first, returning nil with the drift count at zero.
+
 - 2026-09-07: `Fleet.fanOut` hands every published `HolderSet` to every supervisor, and
   `ChannelSupervisor.holdersChanged` narrowed the set to its own session, wrote `state.observed`
   and then published on every path where no transition applied. One holder change anywhere

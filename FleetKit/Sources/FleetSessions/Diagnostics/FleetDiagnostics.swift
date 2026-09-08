@@ -36,7 +36,9 @@ public enum FleetDiagnosticEvent: Sendable {
     case capDecision(decision: String, live: Int, reserved: Int, pendingEvictions: Int)
     case evictionOutcome(outcome: String, victim: String)
     case logout(step: String, count: Int)
-    case driftRefusalIntercepted(command: String)
+    /// `shape` is which of the engine's two refusal sentences was replaced (`RefusalShape`), so the log
+    /// counts the bare refusal and the interactive-panel one apart.
+    case driftRefusalIntercepted(command: String, shape: String)
     /// The engine write behind an answer failed; the id is consumed.
     case answerWriteFailed(id: RequestID, reason: String)
 
@@ -93,8 +95,9 @@ public enum FleetDiagnosticEvent: Sendable {
             return .object(["event": .string("eviction_outcome"), "outcome": .string(outcome), "victim": .string(victim)])
         case let .logout(step, count):
             return .object(["event": .string("logout"), "step": .string(step), "count": .integer(Int64(count))])
-        case let .driftRefusalIntercepted(command):
-            return .object(["event": .string("drift_refusal_intercepted"), "command": .string(command)])
+        case let .driftRefusalIntercepted(command, shape):
+            return .object(["event": .string("drift_refusal_intercepted"), "command": .string(command),
+                            "refusal_shape": .string(shape)])
         case let .answerWriteFailed(id, reason):
             return .object(["event": .string("answer_write_failed"), "id": .string(id.rawValue), "reason": .string(reason)])
         }
