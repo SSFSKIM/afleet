@@ -71,12 +71,17 @@ final class DecisionAnswering {
     /// run loop turn finds the id already in flight and sends nothing. An action the mapping
     /// produces no answer for — the overage card's billing route — sends nothing and claims
     /// nothing.
-    func send(_ action: DecisionAction, on card: DecisionCard, in channel: ChannelKey) {
+    /// `onSuccess` runs on the same branch as the raise: after `perform` returned, and never after
+    /// one that threw. It is for the consequences an answer has on this side of the wire that
+    /// cannot be undone — the refusal dialog's retraction is the one this child has — so that a
+    /// refused answer leaves the surface exactly as it found it.
+    func send(_ action: DecisionAction, on card: DecisionCard, in channel: ChannelKey,
+              onSuccess: (@MainActor () -> Void)? = nil) {
         guard let answer = card.answer(action) else { return }
         let id = card.requestID
         guard inFlight.insert(id).inserted else { return }
         let outcome = Self.outcome(of: answer, for: card.kind)
-        Task { await self.deliver(answer, to: id, in: channel, as: outcome) }
+        Task { await self.deliver(answer, to: id, in: channel, as: outcome, then: onSuccess) }
     }
 
     /// How a decision ended, from the answer that ended it and the kind of card it was.
@@ -121,7 +126,7 @@ final class DecisionAnswering {
     }
 
     private func deliver(_ answer: InboundAnswer, to id: RequestID, in channel: ChannelKey,
-                         as outcome: DecisionOutcome) async {
+                         as outcome: DecisionOutcome, then onSuccess: (@MainActor () -> Void)? = nil) async {
         defer { inFlight.remove(id) }
         do {
             let state = try await lifecycle.perform(.answer(id, answer), on: channel)
@@ -130,6 +135,7 @@ final class DecisionAnswering {
             // the truth: the engine was never told. Raising outside this branch would mark a failed
             // answer as answered, and the card would go quiet on a request still waiting.
             await raise(channel, .decisionAnswered(id, outcome: outcome))
+            onSuccess?()
             settled(id, channel, state)
         } catch let error as LifecycleError {
             banner = RowBanner(error)
