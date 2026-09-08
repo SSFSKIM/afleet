@@ -44,6 +44,10 @@ final class LiveComposerTests: XCTestCase {
         let markerURL = directory.appending(path: marker)
         try "an invented file, for one `@` completion\n".write(to: markerURL, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: markerURL) }
+        let sub = directory.appending(path: "invented-sub")
+        try? FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try "second\n".write(to: sub.appending(path: "inner-invented.txt"), atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: sub) }
 
         // 1. The app, launched over the scratch home exactly as it launches over any other.
         let tree = try TempTree()
@@ -92,16 +96,38 @@ final class LiveComposerTests: XCTestCase {
         let childPID = readyState.observed.holders.first(where: \.isOwnChild)?.pid
 
         // 4. The gate: the composer's own `@` path, through X5, against a real engine.
+        //
+        //    Two queries, because the engine answers them from two different places (2.1.263
+        //    `cli.pretty.js:116569-116596`). An **empty** query — and `.` and `./` — is a `readdir`
+        //    of the working directory, answered immediately, with a directory marked by a trailing
+        //    separator. Anything else is a fuzzy search over the engine's *file index*, which is
+        //    built asynchronously from `git ls-files` or ripgrep on first ask, so the first such
+        //    query legitimately answers empty while the index is still being built. The second arm
+        //    is therefore polled rather than asked once, and it is the arm that matches what a user
+        //    types after `@`.
         let composer = await MainActor.run {
             ComposerModel(key: key, lifecycle: workspace.fleet, surface: ChannelSurfaceState())
         }
+
+        await composer.requestFileSuggestions("")
+        let listed = await MainActor.run { composer.fileSuggestions }
+        XCTAssertGreaterThan(listed.count, 1,
+                             "the engine listed \(listed.count) entry(ies) for the empty query; the directory holds two")
+        XCTAssertTrue(listed.contains(marker),
+                      "none of the \(listed.count) listed entry(ies) is the file this test created")
+        XCTAssertTrue(listed.contains { $0.hasSuffix("/") },
+                      "none of the \(listed.count) listed entry(ies) is marked as a directory")
+
         let stem = String(marker.prefix(marker.count - 4))
         await MainActor.run { composer.draft = "look at @\(stem)" }
-        await composer.requestFileSuggestions(stem)
-        let suggestions = await MainActor.run { composer.fileSuggestions }
-
+        let matched = try await Self.poll(upTo: .seconds(20)) { () -> [String]? in
+            await composer.requestFileSuggestions(stem)
+            let got = await MainActor.run { composer.fileSuggestions }
+            return got.isEmpty ? nil : got
+        }
+        let suggestions = matched ?? []
         XCTAssertGreaterThan(suggestions.count, 0,
-                             "the engine answered file_suggestions with \(suggestions.count) path(s) for a "
+                             "the engine's file index answered \(suggestions.count) path(s) within 20 s for a "
                              + "\(stem.count)-character query naming a file in its own working directory")
         XCTAssertTrue(suggestions.contains { $0.contains(stem) },
                       "none of the \(suggestions.count) suggestion(s) names the file the query asked for")
@@ -126,7 +152,8 @@ final class LiveComposerTests: XCTestCase {
 
         print("""
         G6 the zero-turn half
-          file suggestions ............. \(suggestions.count) path(s) for a \(stem.count)-character query
+          directory listing ............ \(listed.count) entry(ies) for the empty query
+          file index ................... \(suggestions.count) path(s) for a \(stem.count)-character query
           config home .................. \(difference.summary), unattributed \(unattributed.count)
           model turns .................. 0 (items 2, 8 and 12's turns blocked by account policy)
         """)

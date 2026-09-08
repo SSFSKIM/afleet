@@ -113,9 +113,6 @@ final class ChannelHeaderActionsModel {
     /// read-only while the channel is on screen closes the menu with it.
     func adopt(row: ChannelRow?) { self.row = row }
 
-    /// Clears whatever the last action said. The next one says its own thing.
-    func clearNote() { note = nil }
-
     // MARK: - The menu
 
     /// The MCP popover: `run(.mcpPopover, …)`, rendering the servers the strategy answered with.

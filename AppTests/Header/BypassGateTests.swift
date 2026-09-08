@@ -130,8 +130,15 @@ final class BypassGateTests: XCTestCase {
         XCTAssertEqual(after.count, atDisclaimer,
                        "declining reached \(after.count - atDisclaimer) lifecycle member(s): "
                        + after.suffix(from: min(atDisclaimer, after.count)).joined(separator: ", "))
+        // Drained first. A decline that deferred its write to a detached task is still a decline
+        // that writes, and a log read on the next line would not have seen it — the first version of
+        // this test read the log immediately and a mutation that wrote from a `Task` passed it.
+        for _ in 0..<200 { await Task.yield() }
         let writes = await double.calls.filter { if case .storeWrite = $0 { true } else { false } }
         XCTAssertEqual(writes.count, 0, "declining wrote \(writes.count) value(s) into afleet's store")
+        let keys = try await XCTUnwrap(header.store, "the arm has no store to read back").keys(in: .fleetKit)
+        XCTAssertFalse(keys.contains(FleetKitKeys.bypassAccepted),
+                       "declining left an acceptance among the namespace's \(keys.count) key(s)")
         XCTAssertFalse(header.isShowingBypassDisclaimer, "the disclaimer stayed up after it was declined")
         XCTAssertFalse(header.bypassAccepted, "declining recorded an acceptance")
         XCTAssertEqual(recorder.pathsUnderAConfigHome().count, 0, "declining wrote under a config home")
