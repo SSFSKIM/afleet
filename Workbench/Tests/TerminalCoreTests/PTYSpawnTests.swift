@@ -129,18 +129,28 @@ final class PTYSpawnTests: XCTestCase {
 
         let directory = try PTYTestChild.temporaryDirectory()
         defer { PTYTestChild.remove(directory) }
+        // The child asks the kernel for its *controlling* terminal by name and then proves the
+        // answer is this pty, by writing a marker into it: /dev/tty resolves to whatever tty the
+        // child's session is attached to, so a marker that arrives on our master could only have
+        // been written to our own pty. This needs no external tool — `ps` is denied under the
+        // offline proof's sandbox, and an identity comparison built on its output silently
+        // resolved to nothing there. Identity via `stat` on /dev/fd/N is not a substitute either:
+        // on Darwin that re-opens the path and yields the clone node, never the pty.
+        //
+        // The marker is written only here, in the shipped path, where /dev/tty is by construction
+        // our own pty. Drop POSIX_SPAWN_SETSID and the child inherits the launcher's session
+        // instead: on a detached runner /dev/tty then fails to open outright and neither token
+        // appears (measured), and on a runner attached to a real terminal the marker would land
+        // on *that* terminal rather than on this master — so it is missing from the pty stream
+        // either way, and the assertion below still fails.
+        let marker = "ctty-marker-sable-quill-4417"
         let script = """
-        # On Darwin /dev/tty is a clone device, so resolve the session's controlling tty to
-        # its underlying node before comparing that node's device and inode with fstat(0).
-        if tty_name=$(/bin/ps -o tty= -p $$ | /usr/bin/tr -d ' ') &&
-           [ -n "$tty_name" ] &&
-           tty_identity=$(/usr/bin/stat -f '%d:%i' "/dev/$tty_name" 2>/dev/null) &&
-           input_identity=$(/usr/bin/stat -f '%d:%i' 2>/dev/null) &&
-           [ "$tty_identity" = "$input_identity" ]; then
-          printf 'own-tty=present\\n'
+        if exec 3</dev/tty 2>/dev/null; then
+          printf 'ctty-open=present\\n'
         else
-          printf 'own-tty=absent\\n'
+          printf 'ctty-open=absent\\n'
         fi
+        exec 3>/dev/tty 2>/dev/null && printf '\(marker)\\n' >&3
         if /bin/stty size <&0 >/dev/null 2>&1; then
           printf 'stty=present\\n'
         else
@@ -159,8 +169,12 @@ final class PTYSpawnTests: XCTestCase {
         let foregroundGroup = try await process.foregroundProcessGroup()
 
         XCTAssertTrue(
-            tokens.contains("own-tty=present"),
-            "the child's controlling terminal was not its own descriptor 0"
+            tokens.contains("ctty-open=present"),
+            "the child could not open its controlling terminal"
+        )
+        XCTAssertTrue(
+            tokens.contains(marker),
+            "the marker the child wrote to its controlling terminal did not arrive on this pty"
         )
         XCTAssertTrue(tokens.contains("stty=present"), "stty could not read descriptor 0")
         XCTAssertTrue(
