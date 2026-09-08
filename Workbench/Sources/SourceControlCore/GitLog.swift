@@ -28,13 +28,32 @@ public enum GitLog {
     /// The window of the repository's commit graph reachable from any ref, newest first in
     /// topological order.
     ///
-    /// The command is contract W7's plus the window. `--parents` is redundant with `%P` in the
-    /// format and is kept because W7 names it and it costs nothing.
+    /// The command is contract W7's plus the window and two configuration pins. `--parents` is
+    /// redundant with `%P` in the format and is kept because W7 names it and it costs nothing.
+    ///
+    /// **The pins (D45).** Production runs the user's own `git` with the user's own configuration
+    /// — contract X11's whole point, so that hooks, credential helpers and worktrees behave — while
+    /// the fixtures run with it disabled (D14). Anything the user can set that changes these bytes
+    /// is therefore invisible to the suite unless it is pinned here or attacked in
+    /// `AdverseConfigurationTests`. Two settings measured on `git` 2.55.0 do change them:
+    ///
+    /// - `log.decorate=full` makes `%D` print `refs/heads/main` and `refs/remotes/origin/main`, so
+    ///   `refs(from:)` keeps the prefix on an attached branch and reads every other local branch as
+    ///   a remote branch of a remote named `refs`. `--decorate=short` pins the shortened form the
+    ///   parser already assumes, and is a no-op under the default (`auto`).
+    /// - `i18n.logOutputEncoding` re-encodes the whole of the output, so a user whose terminal is
+    ///   not UTF-8 would hand `parse` bytes that are not the format's — measured as a
+    ///   `decodeFailed` on the timestamp field under `UTF-16`. `--encoding=UTF-8` pins what
+    ///   `stdoutText` decodes, and is a no-op under the default, which already converts to UTF-8.
+    ///
+    /// Should W7 move to `--decorate=full` with a prefix-stripping parser (the ledger's
+    /// Parent-revisions item 3), the pin is the one token that changes.
     public static func commits(root: URL, environment: [String: String],
                                runner: any ToolRunning, limit: Int = defaultLimit,
                                skip: Int = 0) async throws -> [GitCommit] {
         let output = try await runner.run(.git,
                                           arguments: ["log", "--topo-order", "--all", "--parents",
+                                                      "--decorate=short", "--encoding=UTF-8",
                                                       "--format=\(format)",
                                                       "-n", "\(limit)", "--skip", "\(skip)"],
                                           cwd: root, environment: environment,
@@ -91,7 +110,9 @@ public enum GitLog {
     /// branch with a slash in its name — `feature/x` — is therefore reported as a remote-tracking
     /// branch of a remote named `feature`. The fix is `--decorate=full`, which prints
     /// `refs/heads/…` and `refs/remotes/…` unambiguously, but that is a change to W7's command
-    /// line, so it is filed as tech debt rather than taken here. The arrow form is exempt:
+    /// line, so it is filed as tech debt rather than taken here — and `commits` now pins
+    /// `--decorate=short` explicitly (D45), so taking it is a one-token swap on the command line
+    /// plus a prefix-stripping branch in this function. The arrow form is exempt:
     /// `HEAD -> feature/x` names a local branch by construction and is read as one.
     static func refs(from decoration: some StringProtocol) -> [GitRef] {
         decoration.components(separatedBy: ", ").flatMap { component -> [GitRef] in

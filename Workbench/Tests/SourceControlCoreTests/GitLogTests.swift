@@ -200,6 +200,11 @@ final class GitLogTests: XCTestCase {
 
     /// W7 is binding, and the argument vector is the only place it can be checked. `--parents` is
     /// redundant with `%P` and is kept because W7 names it.
+    ///
+    /// `--decorate=short` and `--encoding=UTF-8` are the R4 wave's configuration pins (D45): they
+    /// change nothing under a default configuration and are what makes the parser's assumptions
+    /// true under the user's own, which is what production runs with (X11). The behaviour each one
+    /// pins is asserted in `AdverseConfigurationTests`; this test pins that they are still passed.
     func testTheCommandLineIsW7sPlusTheWindow() async throws {
         let runner = RecordingRunner()
         _ = try await GitLog.commits(root: URL(filePath: "/"), environment: ["PATH": "/usr/bin"],
@@ -208,6 +213,7 @@ final class GitLogTests: XCTestCase {
         XCTAssertEqual(runner.invocations.first?.tool, .git, "commits() ran a tool that is not git")
         XCTAssertEqual(runner.invocations.first?.arguments,
                        ["log", "--topo-order", "--all", "--parents",
+                        "--decorate=short", "--encoding=UTF-8",
                         "--format=%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1e",
                         "-n", "7", "--skip", "3"],
                        "the git log argument vector is not W7's plus the window")

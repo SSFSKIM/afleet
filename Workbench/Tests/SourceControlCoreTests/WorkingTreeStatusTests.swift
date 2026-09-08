@@ -299,6 +299,27 @@ final class WorkingTreeStatusTests: XCTestCase {
         }
     }
 
+    // MARK: - the command line
+
+    /// The exact invocation, asserted as a vector because the options on it are load-bearing in
+    /// four different ways and three of them leave no trace in a parse that happens to be right.
+    ///
+    /// `--porcelain=v2 --branch` is the format and the headers; `-z` is D7; `--untracked-files=normal`
+    /// and `--find-renames` are the R4 wave's configuration pins (D45), which change nothing under
+    /// a default configuration and everything under a user configuration that turns either off.
+    /// What each pin buys is asserted against a hostile repository in `AdverseConfigurationTests`;
+    /// this test pins that they are still passed at all.
+    func testTheCommandLineCarriesTheFormatTheSeparatorAndBothConfigurationPins() {
+        XCTAssertEqual(WorkingTreeStatus.arguments(),
+                       ["status", "--porcelain=v2", "--branch", "-z",
+                        "--untracked-files=normal", "--find-renames"],
+                       "the git status argument vector is not the documented one")
+        XCTAssertEqual(WorkingTreeStatus.arguments(includeIgnored: true),
+                       ["status", "--porcelain=v2", "--branch", "-z",
+                        "--untracked-files=normal", "--find-renames", "--ignored"],
+                       "asking for ignored files did not append --ignored to the same vector")
+    }
+
     private static func isDecodeFailure(_ error: any Error) -> Bool {
         guard let toolError = error as? ToolError, case .decodeFailed = toolError else { return false }
         return true

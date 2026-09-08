@@ -97,8 +97,22 @@ extension WorkingTreeStatus {
     /// `-z` because without it git C-quotes any path containing a space, a quote, a backslash or
     /// a non-ASCII byte and this parser would have to reimplement git's quoting rules to be
     /// correct on an ordinary macOS path (ledger D7).
+    ///
+    /// **The two configuration pins (D45).** Production runs the user's own configuration (X11)
+    /// while the fixtures disable it (D14), so a setting that changes these bytes is invisible to
+    /// the suite unless it is pinned here. Measured on `git` 2.55.0:
+    ///
+    /// - `status.showUntrackedFiles=no` removes every untracked path from the porcelain, so a
+    ///   dirty tree reports itself clean and the commit graph loses its working-tree row (D6).
+    ///   `--untracked-files=normal` pins the default, and also normalises the `all` value, which
+    ///   would otherwise expand an untracked directory into one entry per file.
+    /// - `status.renames=false` (and `diff.renames=false`, which porcelain v2 also reads) reports a
+    ///   staged rename as a delete and an add, so `Entry.Change.renamed(from:)` never occurs and a
+    ///   panel draws two rows for one change. `--find-renames` pins detection at git's own default
+    ///   threshold and changes nothing under the default configuration.
     public static func arguments(includeIgnored: Bool = false) -> [String] {
-        var arguments = ["status", "--porcelain=v2", "--branch", "-z"]
+        var arguments = ["status", "--porcelain=v2", "--branch", "-z",
+                         "--untracked-files=normal", "--find-renames"]
         if includeIgnored { arguments.append("--ignored") }
         return arguments
     }

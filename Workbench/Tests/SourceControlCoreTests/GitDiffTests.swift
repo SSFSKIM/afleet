@@ -532,7 +532,7 @@ final class GitDiffTests: XCTestCase {
         // `--first-parent` is the R3 wave's F1 fix (D41): without it a merge commit's two
         // listings disagree and its status codes are combined ones the parser rejects.
         XCTAssertEqual(GitDiff.arguments(for: .commitAgainstParent("f00d"), listing: "--name-status"),
-                       ["show", "--format=", "--first-parent", "--name-status", "-z",
+                       ["show", "--format=", "--first-parent", "--root", "--name-status", "-z",
                         "--find-renames", "f00d"])
     }
 }

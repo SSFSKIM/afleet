@@ -92,6 +92,12 @@ public enum GitDiff {
     ///   status code, and answers the question a panel is asking: what the branch this merge
     ///   landed on gained by it.
     ///
+    ///   `--root` is required for the same class of reason and is the R4 wave's pin (D45).
+    ///   `log.showRoot=false` — a setting a user may hold for their own `git log -p` — makes this
+    ///   `git show` print *nothing* for a root commit in **both** listings. The two agree, the join
+    ///   succeeds, and `changes` returns "no changed files" for a non-empty initial tree: a silent
+    ///   wrong answer rather than a failure. `--root` pins the default and changes nothing under it.
+    ///
     /// `-z` because without it git C-quotes any path containing a space, a quote, a backslash or
     /// a non-ASCII byte, and this parser would have to reimplement git's quoting rules to be
     /// correct on an ordinary macOS path (D7). `--find-renames` explicitly, because the fixture
@@ -105,7 +111,7 @@ public enum GitDiff {
         case .commit(let hash):
             return ["diff"] + tail + [hash]
         case .commitAgainstParent(let hash):
-            return ["show", "--format=", "--first-parent"] + tail + [hash]
+            return ["show", "--format=", "--first-parent", "--root"] + tail + [hash]
         }
     }
 
