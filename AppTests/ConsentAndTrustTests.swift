@@ -342,6 +342,15 @@ actor ConsentDouble: LifecycleAPI {
     func performJob(_ verb: JobVerb, _ short: JobShort) async throws { unreachable("performJob") }
     func isDormantEligible(_ key: ChannelKey) async -> Bool { unreachable("isDormantEligible") }
 
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID { unreachable("sendPrompt") }
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey { unreachable("fork") }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { unreachable("resolvedForkKey") }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { unreachable("engineReports") }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        unreachable("resolveSetting")
+    }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { unreachable("liveTaskIDs") }
+
     private nonisolated func unreachable(_ member: String) -> Never {
         fatalError("ConsentDouble.\(member) is not part of the consent and trust surface")
     }

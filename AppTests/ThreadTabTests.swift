@@ -512,6 +512,15 @@ actor ThreadDouble: LifecycleAPI {
     func declineProjectServers(_ names: [String], project: URL) async throws { unreachable("declineProjectServers") }
     func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async { unreachable("acceptProjectServers") }
 
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID { unreachable("sendPrompt") }
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey { unreachable("fork") }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { unreachable("resolvedForkKey") }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { unreachable("engineReports") }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        unreachable("resolveSetting")
+    }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { unreachable("liveTaskIDs") }
+
     private nonisolated func unreachable(_ member: String) -> Never {
         fatalError("ThreadDouble.\(member) is not part of the Thread tab's surface")
     }

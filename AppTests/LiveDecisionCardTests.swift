@@ -545,6 +545,22 @@ private final class RecordingLifecycle: LifecycleAPI, @unchecked Sendable {   //
         await inner.acceptProjectServers(servers, project: project)
     }
     func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? { await inner.events(of: key) }
+    @discardableResult
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        try await inner.sendPrompt(input, on: key)
+    }
+    @discardableResult
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
+        try await inner.fork(at: point, on: key)
+    }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey {
+        await inner.resolvedForkKey(of: provisional)
+    }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { await inner.engineReports(of: key) }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        try await inner.resolveSetting(name, to: value, on: key)
+    }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { await inner.liveTaskIDs(of: key) }
     nonisolated var updates: AsyncStream<ChannelState> { inner.updates }
     nonisolated var jobUpdates: AsyncStream<[JobEntry]> { inner.jobUpdates }
 }

@@ -652,6 +652,15 @@ actor ControlDouble: LifecycleAPI {
     func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async { unreachable("acceptProjectServers") }
     func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? { nil }
 
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID { unreachable("sendPrompt") }
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey { unreachable("fork") }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { unreachable("resolvedForkKey") }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { unreachable("engineReports") }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        unreachable("resolveSetting")
+    }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { unreachable("liveTaskIDs") }
+
     private nonisolated func unreachable(_ member: String) -> Never {
         fatalError("ControlDouble.\(member) is not part of the task card's surface")
     }
