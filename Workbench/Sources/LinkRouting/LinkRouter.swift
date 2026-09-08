@@ -29,15 +29,38 @@ public actor LinkRouter {
     /// the kind and never the link, so no path, no commit hash and no PR number reaches a log (§11).
     private let diagnostic: @Sendable (String) -> Void
 
+    /// What a withdrawal found when its drain finished, and the only thing a host may act on.
+    ///
+    /// The host releases the tab's sessions and pane runners after `unregister(tab:)` returns, and
+    /// by then the tab may belong to someone else: a second withdrawal of the same tab, or the
+    /// replacement X7's handover registers *during* the drain. Both cases are `superseded`, and a
+    /// host that released state on them would delete the successor's (spec §3, 2026-09-08).
+    public enum Withdrawal: Sendable, Equatable {
+        /// The tab is still on the epoch this withdrawal opened and nothing has registered for it
+        /// since. The caller owns the tab's state and may release it.
+        case complete
+        /// A later withdrawal, or a registration made during the drain, owns the tab's state now.
+        case superseded
+    }
+
     /// A registered target plus the identity the router gives it. `LinkTarget` is not `Equatable`
     /// and carries closures, so "the target I resolved" is only expressible as a token the router
     /// mints: monotonic, never reused, and dropped with the registration.
+    ///
+    /// `epoch` is the tab's withdrawal epoch at the moment of registration, which is what makes
+    /// "registered before this teardown" and "registered during it" two different things.
     private struct Registration {
         let token: Int
+        let epoch: Int
         let target: LinkTarget
     }
 
     private var registrations: [Registration] = []
+
+    /// How many times each tab has been withdrawn. Incremented at the *start* of every
+    /// `unregister(tab:)`, so everything registered before that line belongs to the previous epoch
+    /// and everything registered during the drain belongs to the new one.
+    private var epochs: [PanelTabID: Int] = [:]
 
     /// Next token to hand out. Monotonic, so a withdrawn token can never be resurrected by a
     /// later registration — which is what makes the post-suspension re-check below sound.
@@ -51,9 +74,15 @@ public actor LinkRouter {
     /// it and releases the tab's sessions the moment it does.
     private var deliveriesInFlight: [Int: Int] = [:]
 
-    /// Withdrawals parked until the deliveries they found in flight have finished, by token. An
-    /// array because two withdrawals of one tab may overlap.
-    private var drainWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    /// The tokens a tab's withdrawals took away while a delivery was still running for them. A
+    /// tab's drain is over when none of them is in flight any more, which is what makes two
+    /// overlapping withdrawals of one tab join *one* drain rather than each waiting on its own
+    /// tokens: the second finds the first's tokens here and waits for them too.
+    private var withdrawnInFlight: [PanelTabID: Set<Int>] = [:]
+
+    /// Withdrawals parked until their tab's drain is over, by tab. An array because two
+    /// withdrawals of one tab may overlap.
+    private var drainWaiters: [PanelTabID: [CheckedContinuation<Void, Never>]] = [:]
 
     /// How many times one `open` may re-resolve after a withdrawal landed during `prepare`.
     ///
@@ -63,6 +92,16 @@ public actor LinkRouter {
     /// its replacement — and the third exists so the bound is a bound and not the exact shape of
     /// one scenario.
     private static let maxResolutionAttempts = 3
+
+    /// How many preparations one `open` may run.
+    ///
+    /// One per *live* preparation, and a preparation stops being live when its tab is torn down
+    /// under it: the teardown may have taken the window that preparation opened with it, so the
+    /// replacement registered in the new epoch is prepared for once more rather than delivered
+    /// into a window that is no longer there. The second is the last: the bound is what stops a
+    /// tab that hands itself over on every attempt from presenting windows for ever, and the
+    /// attempt that follows it delivers into the most recent preparation.
+    private static let maxPreparationsPerOpen = 2
 
     private static let log = Logger(subsystem: "com.afleet.app", category: "panel-links")
 
@@ -88,9 +127,13 @@ public actor LinkRouter {
     // MARK: - The registry
 
     public func register(_ target: LinkTarget) {
-        registrations.append(Registration(token: nextToken, target: target))
+        registrations.append(Registration(token: nextToken, epoch: epoch(of: target.tab),
+                                          target: target))
         nextToken += 1
     }
+
+    /// The tab's current withdrawal epoch. Zero for a tab nothing has ever withdrawn.
+    private func epoch(of tab: PanelTabID) -> Int { epochs[tab] ?? 0 }
 
     /// Drops every target this tab registered, so a target never outlives the tab that registered
     /// it, and **returns only once every delivery already in flight for those targets has
@@ -106,14 +149,29 @@ public actor LinkRouter {
     /// A handler that awaited a withdrawal of its *own* tab from inside its own delivery would
     /// wait on itself. Nothing does — withdrawal is the host's teardown path, not a panel's — and
     /// making it safe would mean a delivery could outlive the guarantee this method exists to give.
-    public func unregister(tab: PanelTabID) async {
-        let withdrawn = registrations.filter { $0.target.tab == tab }.map(\.token)
+    ///
+    /// **It opens a new epoch for the tab**, and that is what the returned `Withdrawal` reports on.
+    /// Two withdrawals of one tab overlap whenever the second begins while the first is draining;
+    /// they join one drain, and only the last of them may release the tab's state. A registration
+    /// made during a drain belongs to the new epoch, survives the withdrawal that is draining —
+    /// X7's handover — and takes the tab's state with it, so that withdrawal is `superseded` too.
+    @discardableResult
+    public func unregister(tab: PanelTabID) async -> Withdrawal {
+        let epoch = self.epoch(of: tab) + 1
+        epochs[tab] = epoch
+        for registration in registrations
+        where registration.target.tab == tab && deliveriesInFlight[registration.token] != nil {
+            withdrawnInFlight[tab, default: []].insert(registration.token)
+        }
         registrations.removeAll { $0.target.tab == tab }
-        for token in withdrawn where deliveriesInFlight[token] != nil {
+        while (withdrawnInFlight[tab] ?? []).contains(where: { deliveriesInFlight[$0] != nil }) {
             await withCheckedContinuation { continuation in
-                drainWaiters[token, default: []].append(continuation)
+                drainWaiters[tab, default: []].append(continuation)
             }
         }
+        let superseded = self.epoch(of: tab) != epoch
+            || registrations.contains { $0.target.tab == tab }
+        return superseded ? .superseded : .complete
     }
 
     /// Resolves the most specific registered target, runs `prepare` for it, and only then delivers
@@ -134,30 +192,43 @@ public actor LinkRouter {
     ///   began. The handover X7 was amended for withdraws a tab and registers its replacement under
     ///   the same id, both inside this suspension; a replacement excluded because it is younger
     ///   than the call is a live target losing to a stale one or to the fallback.
-    /// - **At most one `prepare` runs per call.** `prepare` presents a window, which is not
-    ///   undoable, so preparing a second target would leave two windows or one window with nothing
-    ///   in it. A replacement for the *same tab* delivers into the window already prepared for that
-    ///   tab; anything else takes W5's fallback (tracker 98).
+    /// - **One `prepare` per live preparation.** `prepare` presents a window, which is not
+    ///   undoable, so preparing a second *target* would leave two windows or one window with
+    ///   nothing in it: a resolution that names any other tab takes W5's fallback (tracker 98). A
+    ///   preparation is live while its tab is still on the epoch it was prepared under; a teardown
+    ///   that landed since may have taken the window with it, so the replacement registered in the
+    ///   new epoch is prepared for once more — the host's pop-out is idempotent per (tab, channel),
+    ///   so that second preparation brings the window back rather than opening another one.
     public func open(_ link: WorkspaceLink, from destination: LinkDestination,
                      prepare: (@MainActor @Sendable (LinkTarget, LinkDestination) async -> Void)? = nil) async {
-        var preparedTab: PanelTabID?
+        var prepared: (tab: PanelTabID, epoch: Int)?
+        var preparations = 0
         for _ in 0..<Self.maxResolutionAttempts {
             guard let chosen = mostSpecific(for: link) else { break }
-            if let preparedTab {
-                // A window is already open for `preparedTab`. Only that tab's own replacement may
-                // deliver into it; a different target would need a second, irreversible preparation.
-                guard chosen.target.tab == preparedTab else { break }
-                await deliver(chosen, link, destination)
-                return
+            if let prepared {
+                // A window was opened for `prepared.tab`. Only that tab's own replacement may
+                // deliver into it; a different target would need a second, irreversible
+                // preparation for a window this call has no way to take back.
+                guard chosen.target.tab == prepared.tab else { break }
+                let stillLive = prepared.epoch == epoch(of: chosen.target.tab)
+                if stillLive || preparations >= Self.maxPreparationsPerOpen {
+                    await deliver(chosen, link, destination)
+                    return
+                }
             }
             guard let prepare else {
                 // Nothing suspends between the resolution above and this commit.
                 await deliver(chosen, link, destination)
                 return
             }
+            let epochAtPreparation = epoch(of: chosen.target.tab)
             await prepare(chosen.target, destination)
-            preparedTab = chosen.target.tab
-            if registrations.contains(where: { $0.token == chosen.token }) {
+            preparations += 1
+            prepared = (chosen.target.tab, epochAtPreparation)
+            // Valid only if the tab was not torn down while `prepare` was suspended *and* the
+            // registration this call resolved is still the one holding the tab.
+            if epoch(of: chosen.target.tab) == epochAtPreparation,
+               registrations.contains(where: { $0.token == chosen.token }) {
                 await deliver(chosen, link, destination)
                 return
             }
@@ -177,7 +248,12 @@ public actor LinkRouter {
             return
         }
         deliveriesInFlight[registration.token] = nil
-        for waiter in drainWaiters.removeValue(forKey: registration.token) ?? [] {
+        let tab = registration.target.tab
+        withdrawnInFlight[tab]?.remove(registration.token)
+        if withdrawnInFlight[tab]?.isEmpty ?? false { withdrawnInFlight[tab] = nil }
+        // Every withdrawal parked for this tab re-checks the drain and parks again if another of
+        // its tokens is still running, so the wake-up needs no bookkeeping of its own.
+        for waiter in drainWaiters.removeValue(forKey: tab) ?? [] {
             waiter.resume()
         }
     }

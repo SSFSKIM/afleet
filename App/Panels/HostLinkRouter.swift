@@ -54,8 +54,15 @@ final class HostLinkRouter: LinkRouterCapability {
     }
 
     /// Drops every target this tab registered, so a target never outlives the tab that registered
-    /// it. `PanelHost.unregister(_:)` awaits this.
+    /// it. `PanelHost.unregister(_:)` awaits `withdraw(tab:)` instead, because it has state of its
+    /// own to release and needs to know whose it is by the time the drain is over.
     func unregister(tab: PanelTabID) async {
+        await router.unregister(tab: tab)
+    }
+
+    /// The withdrawal a teardown drives: the same drop and the same drain, plus the epoch verdict
+    /// that says whether the tab's state is still this teardown's to release.
+    func withdraw(tab: PanelTabID) async -> LinkRouter.Withdrawal {
         await router.unregister(tab: tab)
     }
 
@@ -70,11 +77,32 @@ final class HostLinkRouter: LinkRouterCapability {
     /// that read the host's current channel when it finally ran would open the target in a channel
     /// the action did not come from, or report "no channel" for a link that had one. The channel an
     /// action originated in is a property of the action, so it is captured with the action.
+    ///
+    /// **`.currentPanel` is routed with no `prepare` at all.** There is nothing to pop out for it,
+    /// and a `prepare` that is a no-op is not free: it is what makes the router suspend between
+    /// resolving a target and delivering to it, and a withdrawal landing in a suspension that
+    /// exists for nothing makes the router refuse an unrelated surviving target for a preparation
+    /// no window came of. With no hook the router validates and delivers without suspending.
+    ///
+    /// **What was captured is revalidated immediately before the pop-out.** The capture is a
+    /// property of the action, but a window is presented in the present: between the two, the
+    /// channel can leave the index or the host can be re-attached to a fresh workspace — both of
+    /// which erase the channel's context and its pop-outs — and the tab itself can be torn down.
+    /// A pop-out re-added after any of those draws the missing-channel placeholder, so it is
+    /// reported rather than presented.
     func open(_ link: WorkspaceLink, from destination: LinkDestination) async {
+        guard destination == .newWindow else {
+            await router.open(link, from: destination)
+            return
+        }
         let origin = self.host?.selectedChannel
-        await router.open(link, from: destination) { target, destination in
-            guard destination == .newWindow else { return }
+        await router.open(link, from: destination) { target, _ in
             if let host = self.host, let channel = origin {
+                guard host.canResolveChannel(channel), host.isRegistered(target.tab) else {
+                    // Named without the channel, the session or the path (§11).
+                    self.diagnostic("a new-window link lost its channel before its tab was popped out")
+                    return
+                }
                 host.popOut(target.tab, channel: channel)
             } else {
                 // The handler is still told `.newWindow` afterwards, so it would render for a

@@ -148,8 +148,14 @@ final class PanelHostModel: PanelHost {
     /// tab and its sessions first and awaiting afterwards freed the main actor in between, and a
     /// delivery the registry had already committed would then read a tab and sessions this method
     /// had torn down (contract X7's 2026-09-06 amendment; tracker 97).
+    ///
+    /// **And it releases nothing when the withdrawal comes back `superseded`.** The registry
+    /// answers for the epoch this teardown opened: a second teardown of the same tab, or the
+    /// replacement the handover registers *during* the drain, owns the tab's state by the time
+    /// this line runs, and releasing it here would delete the successor's sessions and its pane
+    /// runner (spec §3, 2026-09-08).
     func unregister(_ id: PanelTabID) async {
-        await links.unregister(tab: id)
+        guard await links.withdraw(tab: id) == .complete else { return }
         tabs[id] = nil
         runners[id] = nil
         for slot in sessions.keys where slot.tab == id { sessions[slot] = nil }
@@ -182,6 +188,10 @@ final class PanelHostModel: PanelHost {
     func systemImage(for id: PanelTabID) -> String {
         tabs[id]?.systemImage ?? id.defaultSystemImage
     }
+
+    /// Whether anything holds this id right now. A pop-out for a tab nobody holds draws an empty
+    /// window, so the routing pop-out asks before it presents one.
+    func isRegistered(_ id: PanelTabID) -> Bool { tabs[id] != nil }
 
     func select(_ id: PanelTabID) {
         guard tabs[id] != nil, selected != id else { return }
@@ -221,6 +231,14 @@ final class PanelHostModel: PanelHost {
     /// value — a second call for a window already on screen brings it forward rather than opening a
     /// second one. So the same tab in the same channel can never become two windows, which is what
     /// the routing rule above it depends on when a link is prepared and then delivered.
+    /// Whether the host can still resolve this channel, which is exactly what a popped-out
+    /// window's scene asks it for. `releaseChannel(_:)` and `attach(to:…)` take it away, and a
+    /// window presented for a channel this answers no for draws the missing-channel placeholder —
+    /// so the routing pop-out asks before it presents one.
+    func canResolveChannel(_ key: ChannelKey) -> Bool {
+        contexts[key] != nil || cwds[key] != nil
+    }
+
     func popOut(_ id: PanelTabID, channel: ChannelKey) {
         let entry = PoppedOutPanel(tab: id, channel: channel)
         if !poppedOut.contains(entry) { poppedOut.append(entry) }
