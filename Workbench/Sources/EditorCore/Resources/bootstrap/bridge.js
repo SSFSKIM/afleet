@@ -144,6 +144,10 @@
         path: "",
         savedVersionId: 0,
         wasDirty: false,
+        // Which surface is on screen. The diff editor is read-only and holds a pair of models
+        // that are not the open buffer, so `save` cannot be answered from `state.model` while
+        // it is up: the host would be handed a file it is not showing.
+        mode: "editor",
       };
 
       state.editor = monaco.editor.create(editorContainer, {
@@ -165,12 +169,14 @@
     var monaco = state.monaco;
 
     function showEditor() {
+      state.mode = "editor";
       state.diffContainer.style.display = "none";
       state.editorContainer.style.display = "block";
       state.editor.layout();
     }
 
     function showDiffPane() {
+      state.mode = "diff";
       state.editorContainer.style.display = "none";
       state.diffContainer.style.display = "block";
       if (!state.diffEditor) {
@@ -202,6 +208,11 @@
 
     function replaceModel(path, language, text) {
       var previous = state.model;
+      // `dirty` is a transition and the host holds the last one it was told. The baseline below
+      // is reset with the content listener detached, so a buffer that was dirty when the host
+      // replaced it has to be reported clean explicitly, under the path it was dirty as —
+      // otherwise the host keeps an unsaved marker on a file nobody is editing any more.
+      var replacedDirtyPath = state.wasDirty ? state.path : null;
       var uri = modelURI(path);
       // Opening the path that is already on screen is a normal command, not a mistake: a file
       // watcher refreshing the buffer the agent just edited sends exactly this. Monaco would
@@ -233,6 +244,7 @@
       state.editor.setModel(model);
       state.contentSubscription = model.onDidChangeContent(reportDirty);
       if (previous && previous !== model) previous.dispose();
+      if (replacedDirtyPath !== null) events.dirty(replacedDirtyPath, false);
     }
 
     function reveal(line, column) {
@@ -298,6 +310,12 @@
       },
 
       readBuffer: function () {
+        if (state.mode === "diff") {
+          // W4's `error` is the whole vocabulary for a refusal, so the message carries the
+          // reason and never the path: a file name in a host log is what §11 forbids.
+          events.error("save while a diff is on screen: the diff is read-only");
+          return null;
+        }
         if (!state.model) {
           events.error("save before open: there is no buffer");
           return null;

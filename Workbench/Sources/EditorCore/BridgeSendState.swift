@@ -16,9 +16,11 @@ struct BridgeSendState {
     /// normal case, not an edge one, so they queue rather than erroring.
     private var pending: [EditorCommand] = []
 
-    /// Set once the host sends its own `setTheme`. Until then the view follows the system
-    /// appearance; after it, the host owns the theme and appearance changes are left alone.
-    private var hasExplicitTheme = false
+    /// The theme the host set, held by **name** and not merely as a flag. Until the host sets
+    /// one the view follows the system appearance; after it, the host owns the theme and
+    /// appearance changes are left alone. The name is what a reload needs: the fresh Monaco
+    /// instance starts at its own default `vs` and has never heard of the host's choice.
+    private var explicitTheme: String?
 
     /// The document is loading: whatever the previous Monaco instance knew is gone.
     mutating func loading() {
@@ -27,7 +29,7 @@ struct BridgeSendState {
 
     /// A command the host sent. Returns it to be evaluated, or `nil` when it was queued.
     mutating func send(_ command: EditorCommand) -> EditorCommand? {
-        if case .setTheme = command { hasExplicitTheme = true }
+        if case let .setTheme(name) = command { explicitTheme = name }
         return deliver(command)
     }
 
@@ -47,13 +49,16 @@ struct BridgeSendState {
         let queued = pending
         pending.removeAll()
         var commands: [EditorCommand] = []
-        if !hasExplicitTheme { commands.append(.setTheme(name: defaultTheme)) }
+        // A theme already in the queue is the same command this would send, so the queue is
+        // left to say it once rather than the theme arriving twice.
+        let queuedSetsTheme = queued.contains { if case .setTheme = $0 { true } else { false } }
+        if !queuedSetsTheme { commands.append(.setTheme(name: explicitTheme ?? defaultTheme)) }
         commands.append(contentsOf: queued)
         return commands
     }
 
     /// The system appearance changed: the theme to send, or `nil` while the host owns the theme.
     func appearanceChanged(defaultTheme: String) -> EditorCommand? {
-        hasExplicitTheme ? nil : .setTheme(name: defaultTheme)
+        explicitTheme == nil ? .setTheme(name: defaultTheme) : nil
     }
 }
