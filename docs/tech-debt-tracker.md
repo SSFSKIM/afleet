@@ -891,3 +891,19 @@ symlink-containment debt in entry 78 is unchanged.
     as a product defect rather than a starved test — the same shape as tracker entry 2.
     Closer: make the deadline a parameter with a generous default. Found by the Task 2
     independent review.
+
+85. **One dispatch thread is blocked in `waitpid` for the lifetime of every live
+    `PTYProcess`, plus a `DispatchSemaphore` wait on that thread per status.** libdispatch's
+    per-QoS worker pool is 64. A fleet of panes — this project's premise — each holding a
+    read queue, a write queue and a permanently blocked wait queue can exhaust it and stall
+    unrelated dispatch work elsewhere in the app. **Decided rather than left silent, at the
+    reviewer's request:** not fixed in C7.1. The realistic v1 ceiling is small (C4 caps live
+    processes at six and C5's panel-session LRU holds sixteen channels), the blocking waiter
+    is what makes the one-report invariant and the ordered stop/terminate delivery
+    straightforward, and both were measured and tested at length; swapping the mechanism now
+    would put the child's most expensive semantics back in play for a limit no v1
+    configuration reaches. Closer: `DispatchSource.makeProcessSource` or a single SIGCHLD
+    reaper, keeping the same serialisation — note that `makeProcessSource(.exit)` alone does
+    **not** report stops, which `WUNTRACED` does and the detach path needs, so the
+    replacement is not a drop-in. Owner: C7.4 if a pane count that matters appears, else the
+    child that first runs many panes at once. Found by the Task 3 independent review.
