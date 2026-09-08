@@ -1926,3 +1926,24 @@ is renumbered.
      scope at this leaf's gate (Parent revision 3) rather than forgotten. Closer: one FSEvents
      stream over the channel's cwd, coalesced, with the `node_modules` class of directory
      excluded. Owner: a v1.1 Files follow-up.
+
+237. **A tab's link targets accumulate for the life of the tab.** `LinkRouterCapability` withdraws
+     by `PanelTabID`, so a panel cannot retract one channel's registration without retracting every
+     channel's. C7.5 registers a `.file` and a `.diff` target per channel and makes them hold the
+     session **weakly**, so a session the host evicted leaves an inert pair that stops claiming and
+     lets the router take W5's fallback — correct, but the registrations themselves stay on the
+     router until the tab is unregistered. A user who visits three thousand channels leaves six
+     thousand dead targets, each consulted on every `open`. Closer: a per-registration withdrawal
+     token on `LinkRouterCapability`, which is an X7 change no gate needed here. Owner: C7.6 and
+     C7.7 register per channel too; the first one that measures the resolution cost.
+
+238. **Nothing in X7 tells a panel session it is being released.** `PanelTabSession` has no
+     teardown member and `PanelHostModel` releases a session by dropping the reference — under LRU
+     pressure, on `unregister`, and when a channel leaves the index. C7.5 answers it with a `deinit`
+     that spawns a flush of whatever its store still holds pending, which covers the persisted
+     document but cannot call a main-actor method: an edit recorded in the session and not yet
+     handed to the store is still lost, and watchers are stopped only because they were made inert
+     when released rather than because anything asked them to stop. Every later panel with a
+     process, a socket or a buffer behind it has the same gap and a worse consequence. Closer:
+     `func willRelease() async` on `PanelTabSession`, awaited by the host before it drops the slot.
+     Owner: C5's fence, raised by C7.5; C7.4's panes are the case that will force it.
