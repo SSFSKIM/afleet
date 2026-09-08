@@ -243,7 +243,7 @@ final class PrecommitModel {
             defer { isAnswering = false }
             do {
                 let request = try await lifecycle.openInTerminal(evaluation.channel)
-                try await panels.run(request)
+                try await panels.run(request, for: evaluation.channel)
                 clear(evaluation)
                 // Trust is granted in Claude Code's own dialog, in the pane this just handed over,
                 // and no state afleet holds changes when it is. Without this read the channel stays
@@ -272,13 +272,21 @@ final class PrecommitModel {
                        + "Review this project's MCP servers in your terminal with /mcp.")
     }
 
-    /// Item 47 degraded exactly as far as C7.4's absence forces: with no pane runner registered
-    /// there is no Terminal pane to run `claude` in, and the banner says which one is missing.
+    /// Item 47's refusals, each naming what did not happen rather than what went wrong.
+    ///
+    /// `noPaneRunner` was written when C7.4 had not landed and the Terminal tab did not exist; the
+    /// app now registers one at launch, so it is a defence rather than a path, and the sentence
+    /// still tells a user of a build without the panel what to do instead. `noChannelContext` is
+    /// C7.4's addition: the host resolves the channel **the caller named** — this model names its
+    /// evaluation's — and a channel the host has never rendered has no context to run a pane in.
     private static func banner(for error: PanelHostError) -> RowBanner {
         switch error {
         case .noPaneRunner:
             RowBanner(text: "afleet has no Terminal pane yet, so it could not open one. "
                     + "Run `claude` in your own terminal, in this project, to review its trust.")
+        case .noChannelContext:
+            RowBanner(text: "This channel is not open in a window, so there was nowhere to put the "
+                    + "pane. Select the channel and try again.")
         case .duplicateTab:
             RowBanner(text: "The Terminal pane is registered twice; the handoff was refused.")
         }

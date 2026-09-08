@@ -49,8 +49,6 @@ TESTS = ROOT / "AppTests"
 # Members that are legitimately declared here and called from somewhere this check cannot
 # see. Each entry carries its reason; an entry with no reason is not an allowlist entry.
 ALLOWLIST: dict[str, str] = {
-    # Seams whose caller is a later child.
-    "registerPaneRunner": "X7's seam for C7's Terminal leaf, which is the caller and has not landed",
     # Contract Y1 and Y4's skeleton: the two members a C6 leaf fills, landed ahead of the leaves
     # so four worktrees build one target (`docs/doperpowers/specs/2026-09-07-c6-conversation-surface.md`).
     "register": "filled by C6.1 and C6.3 — RowRegistry.register(kind:builder:) is the row slot each "

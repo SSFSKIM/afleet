@@ -71,7 +71,7 @@ final class ConsentAndTrustTests: XCTestCase {
 
     /// A model over a double staged with one verdict, already evaluated.
     private func evaluated(_ verdicts: [SpawnPrecondition],
-                           panels: any PanelHost = PanelHostModel())
+                           panels: any PanelHost = ConsentPanelHost())
         async -> (ConsentDouble, PrecommitModel) {
         let lifecycle = ConsentDouble()
         await lifecycle.stage(verdicts)
@@ -173,7 +173,7 @@ final class ConsentAndTrustTests: XCTestCase {
         let lifecycle = ConsentDouble()
         await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers), .ready])
         await lifecycle.setSpawn(counter.factory)
-        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+        let model = PrecommitModel(lifecycle: lifecycle, panels: ConsentPanelHost())
         await model.evaluate(channel: Self.channel, project: Self.project)
 
         let request = try XCTUnwrap(model.consentRequest, "the consentNeeded verdict raised no sheet")
@@ -204,7 +204,7 @@ final class ConsentAndTrustTests: XCTestCase {
         // A reads `consentNeeded`; B reads `ready`. A is held, so it returns second.
         await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers), .ready])
         await lifecycle.gateNextPreconditions()
-        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+        let model = PrecommitModel(lifecycle: lifecycle, panels: ConsentPanelHost())
 
         let first = Task { await model.evaluate(channel: Self.channel, project: Self.project) }
         while await lifecycle.gated == 0 { await Task.yield() }
@@ -234,7 +234,7 @@ final class ConsentAndTrustTests: XCTestCase {
         let lifecycle = ConsentDouble()
         await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers),
                                .consentNeeded(project: Self.otherProject, servers: Self.otherServers)])
-        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+        let model = PrecommitModel(lifecycle: lifecycle, panels: ConsentPanelHost())
 
         await model.evaluate(channel: Self.channel, project: Self.project)
         let stale = try XCTUnwrap(model.consentRequest, "the first channel raised no sheet")
@@ -271,7 +271,7 @@ final class ConsentAndTrustTests: XCTestCase {
     func testTheAnswersNameTheEvaluatedProjectAfterTheRowsDirectoryMoves() async throws {
         let lifecycle = ConsentDouble()
         await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers)])
-        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+        let model = PrecommitModel(lifecycle: lifecycle, panels: ConsentPanelHost())
         await model.evaluate(channel: Self.channel, project: Self.project)
 
         // The row moves. The fleet still evaluates the launch it holds, so the verdict is the same
@@ -349,9 +349,7 @@ final class ConsentAndTrustTests: XCTestCase {
     /// included**: C4 accepts a `PaneExit` only when `exit.request.id` is the id it is waiting on,
     /// so a host handed a freshly minted request would have every exit discarded in silence.
     func testReviewTrustHandsTheHostTheSamePaneRequest() async throws {
-        let panels = PanelHostModel()
-        let runner = ConsentPaneRunner()
-        panels.registerPaneRunner(runner, for: .terminal)
+        let panels = ConsentPanelHost()
         let (lifecycle, model) = await evaluated([.untrusted(root: Self.project)], panels: panels)
         let expected = lifecycle.paneRequest
 
@@ -359,18 +357,30 @@ final class ConsentAndTrustTests: XCTestCase {
         try press("Review trust in terminal", in: banner.body)
         await model.whenIdle()
 
-        let received = await runner.received
+        let received = panels.runs.map(\.request)
         XCTAssertEqual(received.count, 1, "the registered runner received \(received.count) pane request(s)")
         XCTAssertEqual(received.first?.id, expected.id,
                        "the host was handed a different pane request id than the lifecycle minted")
         XCTAssertTrue(received.first == expected, "the pane request reached the runner edited")
+        // The channel the action named, not the one the window happens to be showing (X7 as amended
+        // 2026-09-09): the pane belongs to the evaluation this banner was drawn for, and opening it
+        // anywhere else would put somebody else's project on screen under this project's trust.
+        XCTAssertTrue(panels.runs.first?.channel == Self.channel,
+                      "the action named a different channel than the evaluation it was drawn for")
         XCTAssertNil(model.banner, "a successful handoff raised a banner")
     }
 
-    /// Item 47 degraded exactly as far as C7.4's absence forces: with no pane runner registered the
-    /// host refuses, and the refusal is a banner naming the terminal rather than silence.
+    /// Item 47 degraded as far as a build with no Terminal pane forces: the host refuses, and the
+    /// refusal is a banner naming the terminal rather than silence.
+    ///
+    /// The refusal is asked for rather than arranged by omission, since C7.4 landed: the app now
+    /// registers a pane runner at launch, so `noPaneRunner` is a defence rather than a state a real
+    /// host falls into, and a test that produced it by leaving a runner unregistered would be
+    /// asserting on a configuration the app no longer has.
     func testWithNoRunnerRegisteredTheRefusalBecomesABannerNamingTheTerminal() async throws {
-        let (_, model) = await evaluated([.untrusted(root: Self.project)], panels: PanelHostModel())
+        let panels = ConsentPanelHost()
+        panels.refusal = .noPaneRunner(.terminal)
+        let (_, model) = await evaluated([.untrusted(root: Self.project)], panels: panels)
 
         let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
         try press("Review trust in terminal", in: banner.body)
@@ -459,7 +469,7 @@ final class ConsentAndTrustTests: XCTestCase {
         let lifecycle = ConsentDouble()
         await lifecycle.stage([.consentNeeded(project: Self.project, servers: Self.servers)])
         await lifecycle.gateNextPreconditions()
-        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+        let model = PrecommitModel(lifecycle: lifecycle, panels: ConsentPanelHost())
 
         let read = Task { await model.evaluate(channel: Self.channel, project: Self.project) }
         while await lifecycle.gated == 0 { await Task.yield() }
@@ -481,7 +491,7 @@ final class ConsentAndTrustTests: XCTestCase {
         let lifecycle = ConsentDouble()
         await lifecycle.stage([.untrusted(root: Self.project),
                                .consentNeeded(project: Self.project, servers: Self.servers)])
-        let model = PrecommitModel(lifecycle: lifecycle, panels: PanelHostModel())
+        let model = PrecommitModel(lifecycle: lifecycle, panels: ConsentPanelHost())
         await model.evaluate(channel: Self.channel, project: Self.project)
         XCTAssertTrue(model.isHistoryOnly, "the first verdict never reached the surface")
 
@@ -510,7 +520,7 @@ final class ConsentAndTrustTests: XCTestCase {
     func testTheEvaluationKeyCarriesTheProjectAndTheFrontmostState() {
         func key(channel: ChannelKey?, project: URL?, active: Bool) -> ChannelDecorations.EvaluationKey {
             ChannelDecorations(channel: channel, project: project, isApplicationActive: active,
-                               lifecycle: ConsentDouble(), panels: PanelHostModel()).evaluationKey
+                               lifecycle: ConsentDouble(), panels: ConsentPanelHost()).evaluationKey
         }
         let base = key(channel: Self.channel, project: Self.project, active: true)
 
@@ -535,8 +545,7 @@ final class ConsentAndTrustTests: XCTestCase {
     /// the re-read the channel stays history-only on a project the user has since trusted, and the
     /// banner they just acted on is still there.
     func testTheVerdictIsRereadWhenTheTerminalHandoffReturns() async throws {
-        let panels = PanelHostModel()
-        panels.registerPaneRunner(ConsentPaneRunner(), for: .terminal)
+        let panels = ConsentPanelHost()
         let (_, model) = await evaluated([.untrusted(root: Self.project), .ready], panels: panels)
         XCTAssertTrue(model.isHistoryOnly, "the untrusted verdict never reached the surface")
 
@@ -558,8 +567,7 @@ final class ConsentAndTrustTests: XCTestCase {
     func testATrustActionFromASupersededBannerOpensNothing() async throws {
         let lifecycle = ConsentDouble()
         await lifecycle.stage([.untrusted(root: Self.project), .ready])
-        let panels = PanelHostModel()
-        panels.registerPaneRunner(ConsentPaneRunner(), for: .terminal)
+        let panels = ConsentPanelHost()
         let model = PrecommitModel(lifecycle: lifecycle, panels: panels)
         await model.evaluate(channel: Self.channel, project: Self.project)
         XCTAssertTrue(model.isHistoryOnly, "the untrusted verdict never reached the surface")
@@ -586,7 +594,9 @@ final class ConsentAndTrustTests: XCTestCase {
     /// one channel's failure above another channel's conversation — the same wrong pairing
     /// `Evaluation` exists to prevent, one step further on — and nothing else ever cleared it.
     func testANewEvaluationClearsTheOldContextsRefusalBanner() async throws {
-        let (_, model) = await evaluated([.untrusted(root: Self.project)], panels: PanelHostModel())
+        let panels = ConsentPanelHost()
+        panels.refusal = .noPaneRunner(.terminal)
+        let (_, model) = await evaluated([.untrusted(root: Self.project)], panels: panels)
 
         let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
         try press("Review trust in terminal", in: banner.body)
@@ -725,9 +735,43 @@ actor ConsentDouble: LifecycleAPI {
     }
 }
 
-/// A `PaneRunning` that records the requests it was handed, unedited.
-private actor ConsentPaneRunner: PaneRunning {
-    private(set) var received: [PaneRequest] = []
-    func bind(_ report: @escaping @Sendable (PaneExit) async -> Void) {}
-    func run(_ request: PaneRequest) async { received.append(request) }
+/// The host these tests hand `PrecommitModel`, recording what item 47's action asked of it.
+///
+/// A **double and not `PanelHostModel`**, since X7's amendment of 2026-09-09 (C7.4): the real host
+/// resolves the named channel's `ChannelContext` and refuses with `noChannelContext` when it has
+/// never rendered that channel, which a bare host in a unit test never has. Standing one up would
+/// mean a config home, a store, a transcript index and a workspace — the whole `PanelRig` — to
+/// assert something about `PrecommitModel`. That the real host hands the runner the caller's
+/// channel unchanged is asserted where it belongs, in `PanelHostTests` and the Terminal panel's
+/// own wiring suite.
+@MainActor
+private final class ConsentPanelHost: PanelHost {
+
+    /// Every request item 47's action handed over, with the channel it named for each.
+    private(set) var runs: [(request: PaneRequest, channel: ChannelKey)] = []
+
+    /// What `run(_:for:)` throws instead of recording, so the refusal banners can be exercised.
+    var refusal: PanelHostError?
+
+    func run(_ request: PaneRequest, for channel: ChannelKey) async throws {
+        if let refusal { throw refusal }
+        runs.append((request, channel))
+    }
+
+    // The rest of X7. A trust action reaches none of it, and a double that quietly answered
+    // would let a test pass on a path it never took.
+    var selected: PanelTabID? { nil }
+    func register(_ tab: any PanelTab) throws { unreachable("register") }
+    func unregister(_ id: PanelTabID) async { unreachable("unregister") }
+    func registerPaneRunner(_ runner: any PaneRunning, for tab: PanelTabID) { unreachable("registerPaneRunner") }
+    func available(for context: ChannelContext) -> [PanelTabID] { unreachable("available") }
+    func select(_ id: PanelTabID) { unreachable("select") }
+    func selectIndex(_ index: Int, in context: ChannelContext) { unreachable("selectIndex") }
+    func popOut(_ id: PanelTabID, channel: ChannelKey) { unreachable("popOut") }
+    func session(for id: PanelTabID, context: ChannelContext) -> any PanelTabSession { unreachable("session") }
+    func view(for id: PanelTabID, context: ChannelContext) -> AnyView { unreachable("view") }
+
+    private nonisolated func unreachable(_ member: String) -> Never {
+        fatalError("ConsentPanelHost.\(member) is not part of the consent and trust surface")
+    }
 }
