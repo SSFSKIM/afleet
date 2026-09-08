@@ -86,7 +86,10 @@ public actor FileWatch {
 
     private func arm() -> Bool {
         guard source == nil else { return true }
-        let descriptor = open(url.path, O_EVTONLY)
+        // `O_CLOEXEC` for the reason C7.3 gives for its own reads: this leaf spawns `git`
+        // through C7.3's runner while watches are live, and a descriptor without it is inherited
+        // by every one of those children.
+        let descriptor = open(url.path, O_EVTONLY | O_CLOEXEC)
         guard descriptor >= 0 else { return false }
         let armed = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: descriptor,

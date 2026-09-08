@@ -211,9 +211,9 @@ final class FileWatchTests: XCTestCase {
     func testTheSaveEchoIsIgnored() {
         let loaded = Self.snapshot("loaded", size: 6)
         let written = Self.snapshot("written", size: 7)
-        XCTAssertEqual(outcome(observed: written, lastLoaded: loaded, lastWritten: written, isDirty: false),
+        XCTAssertEqual(WatchPolicy.outcome(observed: written, lastLoaded: loaded, lastWritten: written, isDirty: false),
                        .ignore, "a clean save echo was not ignored")
-        XCTAssertEqual(outcome(observed: written, lastLoaded: loaded, lastWritten: written, isDirty: true),
+        XCTAssertEqual(WatchPolicy.outcome(observed: written, lastLoaded: loaded, lastWritten: written, isDirty: true),
                        .ignore, "a save echo under a dirty buffer was not ignored")
     }
 
@@ -224,7 +224,7 @@ final class FileWatchTests: XCTestCase {
         let written = Self.snapshot("written", size: 7)
         let echo = FileSnapshot(size: written.size, modified: written.modified.addingTimeInterval(3),
                                 digest: written.digest)
-        XCTAssertEqual(outcome(observed: echo, lastLoaded: loaded, lastWritten: written, isDirty: true),
+        XCTAssertEqual(WatchPolicy.outcome(observed: echo, lastLoaded: loaded, lastWritten: written, isDirty: true),
                        .ignore, "an echo with a later timestamp was not ignored")
     }
 
@@ -232,18 +232,18 @@ final class FileWatchTests: XCTestCase {
         let loaded = Self.snapshot("loaded", size: 6)
         let touched = FileSnapshot(size: loaded.size, modified: loaded.modified.addingTimeInterval(9),
                                    digest: loaded.digest)
-        XCTAssertEqual(outcome(observed: touched, lastLoaded: loaded, lastWritten: nil, isDirty: false),
+        XCTAssertEqual(WatchPolicy.outcome(observed: touched, lastLoaded: loaded, lastWritten: nil, isDirty: false),
                        .ignore, "a touch of identical bytes was not ignored")
-        XCTAssertEqual(outcome(observed: touched, lastLoaded: loaded, lastWritten: nil, isDirty: true),
+        XCTAssertEqual(WatchPolicy.outcome(observed: touched, lastLoaded: loaded, lastWritten: nil, isDirty: true),
                        .ignore, "a touch of identical bytes under a dirty buffer was not ignored")
     }
 
     func testChangedAndCleanRefreshes() {
         let loaded = Self.snapshot("loaded", size: 6)
         let changed = Self.snapshot("changed", size: 7)
-        XCTAssertEqual(outcome(observed: changed, lastLoaded: loaded, lastWritten: nil, isDirty: false),
+        XCTAssertEqual(WatchPolicy.outcome(observed: changed, lastLoaded: loaded, lastWritten: nil, isDirty: false),
                        .refresh, "a changed file over a clean buffer did not refresh")
-        XCTAssertEqual(outcome(observed: changed, lastLoaded: loaded,
+        XCTAssertEqual(WatchPolicy.outcome(observed: changed, lastLoaded: loaded,
                                lastWritten: Self.snapshot("written", size: 7), isDirty: false),
                        .refresh, "a change that is neither the echo nor the loaded bytes did not refresh")
     }
@@ -251,9 +251,9 @@ final class FileWatchTests: XCTestCase {
     func testChangedAndDirtyConflicts() {
         let loaded = Self.snapshot("loaded", size: 6)
         let changed = Self.snapshot("changed", size: 7)
-        XCTAssertEqual(outcome(observed: changed, lastLoaded: loaded, lastWritten: nil, isDirty: true),
+        XCTAssertEqual(WatchPolicy.outcome(observed: changed, lastLoaded: loaded, lastWritten: nil, isDirty: true),
                        .conflict, "a changed file over a dirty buffer did not conflict")
-        XCTAssertEqual(outcome(observed: changed, lastLoaded: loaded,
+        XCTAssertEqual(WatchPolicy.outcome(observed: changed, lastLoaded: loaded,
                                lastWritten: Self.snapshot("written", size: 7), isDirty: true),
                        .conflict, "a change that is neither the echo nor the loaded bytes did not conflict")
     }
@@ -261,9 +261,9 @@ final class FileWatchTests: XCTestCase {
     /// A vanished file is not the echo and not the loaded bytes, so it follows the same last rule.
     func testAVanishedFileFollowsTheDirtyRule() {
         let loaded = Self.snapshot("loaded", size: 6)
-        XCTAssertEqual(outcome(observed: nil, lastLoaded: loaded, lastWritten: nil, isDirty: false), .refresh,
+        XCTAssertEqual(WatchPolicy.outcome(observed: nil, lastLoaded: loaded, lastWritten: nil, isDirty: false), .refresh,
                        "a vanished file over a clean buffer did not refresh")
-        XCTAssertEqual(outcome(observed: nil, lastLoaded: loaded,
+        XCTAssertEqual(WatchPolicy.outcome(observed: nil, lastLoaded: loaded,
                                lastWritten: Self.snapshot("written", size: 7), isDirty: true), .conflict,
                        "a vanished file over a dirty buffer did not conflict")
     }

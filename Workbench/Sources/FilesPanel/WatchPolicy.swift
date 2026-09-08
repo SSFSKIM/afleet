@@ -26,13 +26,15 @@ public enum WatchOutcome: Sendable, Equatable {
 ///
 /// A vanished file (`observed == nil`) carries no bytes, so it matches neither of the first two
 /// rules and follows the third.
-public func outcome(observed: FileSnapshot?,
-                    lastLoaded: FileSnapshot,
-                    lastWritten: FileSnapshot?,
-                    isDirty: Bool) -> WatchOutcome {
-    if let observed {
-        if let lastWritten, observed.hasSameContents(as: lastWritten) { return .ignore }
-        if observed.hasSameContents(as: lastLoaded) { return .ignore }
+public enum WatchPolicy {
+    public static func outcome(observed: FileSnapshot?,
+                               lastLoaded: FileSnapshot,
+                               lastWritten: FileSnapshot?,
+                               isDirty: Bool) -> WatchOutcome {
+        if let observed {
+            if let lastWritten, observed.hasSameContents(as: lastWritten) { return .ignore }
+            if observed.hasSameContents(as: lastLoaded) { return .ignore }
+        }
+        return isDirty ? .conflict : .refresh
     }
-    return isDirty ? .conflict : .refresh
 }
