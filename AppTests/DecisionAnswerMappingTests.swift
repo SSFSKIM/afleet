@@ -236,18 +236,28 @@ final class DecisionAnswerMappingTests: XCTestCase {
                        "a question answer carrying an annotation")
     }
 
-    /// Anchor 8: the plan's update is `{type:"setMode", destination:"session", mode:<chosen>}`.
+    /// Anchor 8: the plan's update is `{type:"setMode", destination:"session", mode:<chosen>}`, and
+    /// spec D16: both approvals carry `user_temporary`.
+    ///
+    /// Task 1 shipped the two approvals with no classification at all, on a literal reading of §8.4,
+    /// which names one for the three permission actions and none here. D16 corrected that at Task 4:
+    /// the obligation is on the host that prompts a person, and an unset classification is not a
+    /// constant — the engine derives it from the destinations of whatever updates the answer carries
+    /// (`cli.pretty.js:735273`), which is a field chosen for another purpose. These two vectors are
+    /// the correction, and they failed against Task 1's mapping.
     func testThePlanActionsCarrySetModeAtTheSession() throws {
         let card = try card("exit-plan-mode", id: "aaaa-plan-1", overrides: ["input": ["plan": "an invented plan"]])
         try assertBody(card.answer(.approvePlan(autoAcceptEdits: false)),
                        is: """
-                       {"behavior":"allow","updatedInput":{"plan":"an invented plan"},
+                       {"behavior":"allow","decisionClassification":"user_temporary",
+                        "updatedInput":{"plan":"an invented plan"},
                         "updatedPermissions":[{"type":"setMode","mode":"default","destination":"session"}]}
                        """,
                        "approve a plan")
         try assertBody(card.answer(.approvePlan(autoAcceptEdits: true)),
                        is: """
-                       {"behavior":"allow","updatedInput":{"plan":"an invented plan"},
+                       {"behavior":"allow","decisionClassification":"user_temporary",
+                        "updatedInput":{"plan":"an invented plan"},
                         "updatedPermissions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}]}
                        """,
                        "approve a plan and auto-accept edits")

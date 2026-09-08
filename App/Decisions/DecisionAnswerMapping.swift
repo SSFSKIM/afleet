@@ -94,9 +94,13 @@ extension DecisionCard {
         case .approvePlan(let autoAcceptEdits):
             guard case .plan(let tool) = payload else { return nil }
             let mode: PermissionMode = autoAcceptEdits ? .acceptEdits : .default
+            // Spec D16: the plan approval is a decision a person made, so it carries its own
+            // classification rather than leaving the engine to infer one from the destination of
+            // whatever updates the answer happens to carry (`cli.pretty.js:735273`). Neither arm
+            // persists a rule, so both are `.userTemporary`.
             return .permission(.allow(updatedInput: tool.fields.input,
                                       updatedPermissions: [.setMode(mode: mode, destination: .session)],
-                                      classification: nil))
+                                      classification: .userTemporary))
 
         case .rejectPlan(let feedback):
             guard case .plan = payload else { return nil }

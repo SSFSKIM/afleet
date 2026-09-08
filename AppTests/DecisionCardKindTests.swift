@@ -250,4 +250,68 @@ final class DecisionCardKindTests: XCTestCase {
         return QuestionCardView(card: card, tool: tool, presentation: .full,
                                 channel: Self.channel, answering: answering, draft: draft)
     }
+
+    // MARK: - G1c, the plan card
+
+    /// The three actions, each asserted as the body that left the host. Anchor 8 for the update, and
+    /// spec D16 for the classification Task 1 shipped without: both approvals are `user_temporary`
+    /// and the rejection is `user_reject`.
+    func testThePlanCardsThreeActionsEmitTheirAnswers() async throws {
+        let expected: [(label: String, body: String)] = [
+            ("Approve", """
+             {"behavior":"allow","decisionClassification":"user_temporary",
+              "updatedInput":{"plan":"an invented plan"},
+              "updatedPermissions":[{"type":"setMode","mode":"default","destination":"session"}]}
+             """),
+            ("Approve and auto-accept edits", """
+             {"behavior":"allow","decisionClassification":"user_temporary",
+              "updatedInput":{"plan":"an invented plan"},
+              "updatedPermissions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}]}
+             """),
+            ("Reject with feedback", """
+             {"behavior":"deny","message":"The user rejected this plan.","interrupt":false,
+              "decisionClassification":"user_reject"}
+             """)
+        ]
+        for (index, arm) in expected.enumerated() {
+            let (lifecycle, answering) = await hosted()
+            let card = try ask("exit-plan-mode", id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbc\(index)",
+                                overrides: ["input": ["plan": "an invented plan"]])
+            let view = try planView(card, answering)
+            try press(arm.label, in: view.body)
+            await answering.whenIdle()
+            let body = try await sentBody(lifecycle, arm.label)
+            XCTAssertTrue(body == (try json(arm.body)), "the body for \(arm.label) is not the one §8.4 states")
+        }
+    }
+
+    /// The rejection carries what the user typed, and the standing sentence when they typed nothing.
+    /// The discriminating half is the first: a card that sent the constant either way would pass the
+    /// second alone.
+    func testThePlanRejectionCarriesTheTypedFeedback() async throws {
+        let (lifecycle, answering) = await hosted()
+        let card = try ask("exit-plan-mode", id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbc9",
+                            overrides: ["input": ["plan": "an invented plan"]])
+        let draft = PlanCardView.Draft()
+        draft.feedback = "an invented objection"
+        let view = try planView(card, answering, draft: draft)
+        XCTAssertEqual(view.rejectionMessage, "an invented objection", "the typed feedback is not the message")
+        try press("Reject with feedback", in: view.body)
+        await answering.whenIdle()
+        let body = try await sentBody(lifecycle, "Reject with feedback")
+        XCTAssertTrue(body["message"] == .string("an invented objection"),
+                      "the rejection did not carry the typed feedback")
+
+        let (_, second) = await hosted()
+        let empty = try planView(card, second)
+        XCTAssertEqual(empty.rejectionMessage, PlanCardView.unstatedRejection,
+                       "an unstated rejection is not the standing sentence")
+    }
+
+    private func planView(_ card: DecisionCard, _ answering: DecisionAnswering,
+                          draft: PlanCardView.Draft = PlanCardView.Draft()) throws -> PlanCardView {
+        guard case .plan(let tool) = card.payload else { throw XCTSkip("the ask is no longer a plan card") }
+        return PlanCardView(card: card, tool: tool, presentation: .full,
+                            channel: Self.channel, answering: answering, draft: draft)
+    }
 }
