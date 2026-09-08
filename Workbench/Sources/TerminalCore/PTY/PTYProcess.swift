@@ -105,11 +105,312 @@ func terminalEnvironment(
     return environment
 }
 
+/// A bounded producer between the pty's serial read queue and the event stream.
+///
+/// Mutable state and the dispatch-source suspend count are confined to `queue`. Methods entered
+/// from another executor enqueue there or use `withQueueConfinedState`; that helper runs inline
+/// when a read-handler-held owner deinitializes on `queue`, rather than synchronously redispatching
+/// onto the queue itself. The class is `@unchecked Sendable` solely because Dispatch does not
+/// express this confinement to Swift's checker.
+private final class PTYEventDelivery: @unchecked Sendable {
+    private enum PendingItem {
+        case output(Data)
+        case control(PTYEvent)
+    }
+
+    private struct InFlight {
+        let event: PTYEvent
+        let outputByteCount: Int
+    }
+
+    private let queue: DispatchQueue
+    private let queueIdentity = DispatchSpecificKey<UInt8>()
+    private let continuation: AsyncStream<PTYEvent>.Continuation
+    private let privateOutputByteLimit: Int
+    private let deliveryByteLimit: Int
+    private let coalescingDelay: DispatchTimeInterval
+    private var pending: [PendingItem] = []
+    private var bufferedOutputByteCount = 0
+    private var inFlight: InFlight?
+    private var deliverySubmissionIsOutstanding = false
+    private var deliveryIsScheduled = false
+    private var retryDelayMilliseconds = 1
+    private var finishWasRequested = false
+    private var terminalDrainLifetimeAnchor: PTYEventDelivery?
+    private var isFinished = false
+    private var readSource: DispatchSourceRead?
+    private var readSourceIsSuspended = false
+    private var readingHasEnded = false
+
+    init(
+        queue: DispatchQueue,
+        continuation: AsyncStream<PTYEvent>.Continuation,
+        privateOutputByteLimit: Int,
+        deliveryByteLimit: Int,
+        coalescingDelay: DispatchTimeInterval
+    ) {
+        precondition(privateOutputByteLimit > 0)
+        precondition(deliveryByteLimit > 0)
+        self.queue = queue
+        self.continuation = continuation
+        self.privateOutputByteLimit = privateOutputByteLimit
+        self.deliveryByteLimit = deliveryByteLimit
+        self.coalescingDelay = coalescingDelay
+        queue.setSpecific(key: queueIdentity, value: 1)
+    }
+
+    func start(readSource: DispatchSourceRead) {
+        withQueueConfinedState {
+            precondition(self.readSource == nil)
+            self.readSource = readSource
+            readSource.resume()
+        }
+    }
+
+    /// Called only by the read source's handler, already on `queue`.
+    func readOnce(from descriptor: Int32, onEnd: @escaping @Sendable () -> Void) {
+        guard !readingHasEnded, !isFinished else { return }
+        let available = privateOutputByteLimit - bufferedOutputByteCount
+        guard available > 0 else {
+            suspendReadSourceIfNeeded()
+            return
+        }
+
+        var bytes = [UInt8](repeating: 0, count: min(deliveryByteLimit, available))
+        var failure: Int32 = 0
+        let count: Int = bytes.withUnsafeMutableBytes { buffer in
+            while true {
+                let result = Darwin.read(descriptor, buffer.baseAddress, buffer.count)
+                if result == -1, errno == EINTR { continue }
+                if result == -1 { failure = errno }
+                return result
+            }
+        }
+        if count > 0 {
+            pending.append(.output(Data(bytes.prefix(count))))
+            bufferedOutputByteCount += count
+            if bufferedOutputByteCount == privateOutputByteLimit {
+                suspendReadSourceIfNeeded()
+            }
+            scheduleDelivery(coalescing: true)
+        } else if count == 0 || (failure != EAGAIN && failure != EWOULDBLOCK) {
+            readingHasEnded = true
+            onEnd()
+        }
+    }
+
+    func enqueue(_ event: PTYEvent) {
+        queue.async { [weak self] in
+            guard let self, !isFinished else { return }
+            pending.append(.control(event))
+            scheduleDelivery(coalescing: false)
+        }
+    }
+
+    func finishWhenDrained() {
+        // Teardown must not wait for a full stream slot, but its queued output and `.ended` must
+        // outlive the actor. The submitted closure closes the owner-release window, then this
+        // anchor lasts until a later consumer drains the stream or cancels it.
+        queue.async { [self] in
+            guard !isFinished else { return }
+            terminalDrainLifetimeAnchor = self
+            finishWasRequested = true
+            finishIfDrained()
+        }
+    }
+
+    /// Balances a suspended dispatch source before cancellation. This may be entered from the
+    /// actor executor or reentrantly from `queue` while its read handler releases the last owner.
+    func stopReading() {
+        withQueueConfinedState { stopReadingOnQueue() }
+    }
+
+    func abort() {
+        withQueueConfinedState {
+            isFinished = true
+            stopReadingOnQueue()
+            pending.removeAll()
+            inFlight = nil
+            deliverySubmissionIsOutstanding = false
+            bufferedOutputByteCount = 0
+            terminalDrainLifetimeAnchor = nil
+            continuation.finish()
+        }
+    }
+
+    private func withQueueConfinedState(_ operation: () -> Void) {
+        if DispatchQueue.getSpecific(key: queueIdentity) != nil {
+            operation()
+        } else {
+            queue.sync(execute: operation)
+        }
+    }
+
+    private func scheduleDelivery(coalescing: Bool) {
+        guard !deliveryIsScheduled, !deliverySubmissionIsOutstanding, !isFinished else { return }
+        guard inFlight != nil || !pending.isEmpty else {
+            finishIfDrained()
+            return
+        }
+        deliveryIsScheduled = true
+        let delay: DispatchTimeInterval
+        if inFlight != nil {
+            delay = .milliseconds(retryDelayMilliseconds)
+        } else if coalescing, firstPendingItemIsOutput, bufferedOutputByteCount < deliveryByteLimit {
+            delay = coalescingDelay
+        } else {
+            delay = .nanoseconds(0)
+        }
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.beginDelivery()
+        }
+    }
+
+    private var firstPendingItemIsOutput: Bool {
+        guard let first = pending.first else { return false }
+        if case .output = first { return true }
+        return false
+    }
+
+    private func beginDelivery() {
+        deliveryIsScheduled = false
+        guard !deliverySubmissionIsOutstanding, !isFinished else { return }
+        if inFlight == nil {
+            inFlight = takeNextDelivery()
+        }
+        guard let delivery = inFlight else {
+            finishIfDrained()
+            return
+        }
+
+        deliverySubmissionIsOutstanding = true
+        let continuation = continuation
+        Task { @MainActor [weak self] in
+            let result = continuation.yield(delivery.event)
+            self?.queue.async { [weak self] in
+                self?.deliveryCompleted(result)
+            }
+        }
+    }
+
+    private func takeNextDelivery() -> InFlight? {
+        guard !pending.isEmpty else { return nil }
+        switch pending[0] {
+        case let .control(event):
+            pending.removeFirst()
+            return InFlight(event: event, outputByteCount: 0)
+        case .output:
+            var output = Data()
+            output.reserveCapacity(deliveryByteLimit)
+            while output.count < deliveryByteLimit, !pending.isEmpty {
+                guard case let .output(bytes) = pending[0] else { break }
+                let available = deliveryByteLimit - output.count
+                if bytes.count <= available {
+                    output.append(bytes)
+                    pending.removeFirst()
+                } else {
+                    output.append(bytes.prefix(available))
+                    pending[0] = .output(Data(bytes.dropFirst(available)))
+                }
+            }
+            return InFlight(event: .output(output), outputByteCount: output.count)
+        }
+    }
+
+    private func deliveryCompleted(
+        _ result: AsyncStream<PTYEvent>.Continuation.YieldResult
+    ) {
+        guard deliverySubmissionIsOutstanding else { return }
+        deliverySubmissionIsOutstanding = false
+        guard !isFinished, let delivery = inFlight else { return }
+        switch result {
+        case .enqueued:
+            bufferedOutputByteCount -= delivery.outputByteCount
+            inFlight = nil
+            retryDelayMilliseconds = 1
+            resumeReadSourceIfNeeded()
+            if pending.isEmpty {
+                finishIfDrained()
+            } else {
+                scheduleDelivery(coalescing: firstPendingItemIsOutput)
+            }
+        case .dropped:
+            // `.bufferingOldest` rejects the offered event. Keep this exact in-flight value and
+            // stop reading once the private byte bound fills; retrying after the consumer advances
+            // preserves every byte while the kernel's pty queue applies the durable backpressure.
+            retryDelayMilliseconds = min(retryDelayMilliseconds * 2, 50)
+            scheduleDelivery(coalescing: false)
+        case .terminated:
+            consumerTerminated()
+        @unknown default:
+            consumerTerminated()
+        }
+    }
+
+    private func consumerTerminated() {
+        // Iterator cancellation terminates only the event stream. The actor still owns a live pty,
+        // so leave its descriptor open and stop pulling bytes until explicit teardown balances and
+        // cancels the source. Closing here would give the child an unrequested hangup while
+        // `PTYProcess.masterIsOpen` still says writes and resizes are valid.
+        isFinished = true
+        suspendReadSourceIfNeeded()
+        pending.removeAll()
+        inFlight = nil
+        bufferedOutputByteCount = 0
+        terminalDrainLifetimeAnchor = nil
+    }
+
+    private func finishIfDrained() {
+        guard finishWasRequested, inFlight == nil, pending.isEmpty, !isFinished else { return }
+        isFinished = true
+        continuation.finish()
+        terminalDrainLifetimeAnchor = nil
+    }
+
+    private func suspendReadSourceIfNeeded() {
+        guard !readSourceIsSuspended, let readSource, !readingHasEnded else { return }
+        readSource.suspend()
+        readSourceIsSuspended = true
+    }
+
+    private func resumeReadSourceIfNeeded() {
+        guard readSourceIsSuspended, bufferedOutputByteCount < privateOutputByteLimit,
+              let readSource, !readingHasEnded else { return }
+        readSourceIsSuspended = false
+        readSource.resume()
+    }
+
+    private func stopReadingOnQueue() {
+        guard let readSource else { return }
+        readingHasEnded = true
+        if readSourceIsSuspended {
+            readSourceIsSuspended = false
+            readSource.resume()
+        }
+        readSource.cancel()
+        self.readSource = nil
+    }
+}
+
 public actor PTYProcess {
-    // Task 6 replaces this single policy with bounded, coalesced delivery. Keeping the current
-    // behavior named here avoids threading an implicit AsyncStream default through the actor.
+    /// At most 64 KiB is handed to the main actor in one turn: large enough to amortize pty read
+    /// and actor-hop overhead, but small enough to bound one renderer parse/invalidation pass.
+    static let outputDeliveryByteLimit = 64 * 1024
+
+    /// One MiB bounds output retained between the private queue and the stream. It absorbs sixteen
+    /// capped deliveries during ordinary scheduler jitter without turning a stalled renderer into
+    /// process-wide memory growth; once full, the pty's kernel queue blocks the child naturally.
+    static let outputBufferByteLimit = 1 * 1024 * 1024
+
+    private static let eventSlotLimit = 1
+    private static let privateOutputByteLimit = outputBufferByteLimit - outputDeliveryByteLimit
+
+    // A one-millisecond collection window combines the pty's character-sized Darwin reads without
+    // adding perceptible terminal latency. A full delivery bypasses the window immediately.
+    private static let outputCoalescingDelay = DispatchTimeInterval.milliseconds(1)
+
     private static let eventBufferingPolicy: AsyncStream<PTYEvent>.Continuation.BufferingPolicy =
-        .unbounded
+        .bufferingOldest(eventSlotLimit)
 
     // A local pane child normally reports a signal within one scheduler turn. A quarter-second
     // gives SIGHUP handlers time to detach cleanly; SIGTERM gets twice that to run orderly cleanup,
@@ -123,8 +424,7 @@ public actor PTYProcess {
     private let master: PTYMasterDescriptor
     private let writeQueue: DispatchQueue
     private let waitQueue: DispatchQueue
-    private let eventContinuation: AsyncStream<PTYEvent>.Continuation
-    private let readSource: DispatchSourceRead
+    private let eventDelivery: PTYEventDelivery
     private let stopPolicy: PTYStopPolicy
     private let processGroup: PTYChildProcessGroup
     private var masterIsOpen = true
@@ -178,11 +478,18 @@ public actor PTYProcess {
             queue: queue
         )
 
+        let delivery = PTYEventDelivery(
+            queue: queue,
+            continuation: eventChannel.continuation,
+            privateOutputByteLimit: Self.privateOutputByteLimit,
+            deliveryByteLimit: Self.outputDeliveryByteLimit,
+            coalescingDelay: Self.outputCoalescingDelay
+        )
+
         events = eventChannel.stream
-        eventContinuation = eventChannel.continuation
+        eventDelivery = delivery
         processIdentifier = spawned.processIdentifier
         master = descriptor
-        readSource = source
         processGroup = PTYChildProcessGroup(processIdentifier: spawned.processIdentifier)
         // Writability waits get their own queue: a write source stays armed until the actor can
         // take it down, and on the read queue that window would delay the child's output.
@@ -191,26 +498,14 @@ public actor PTYProcess {
         stopPolicy = request.stopPolicy
 
         let readDescriptor = spawned.masterDescriptor
-        let continuation = eventChannel.continuation
-        source.setEventHandler { [weak self] in
-            var bytes = [UInt8](repeating: 0, count: 64 * 1024)
-            let count: Int = bytes.withUnsafeMutableBytes { buffer in
-                while true {
-                    let result = Darwin.read(readDescriptor, buffer.baseAddress, buffer.count)
-                    if result == -1, errno == EINTR {
-                        continue
-                    }
-                    return result
-                }
-            }
-            if count > 0 {
-                continuation.yield(.output(Data(bytes.prefix(count))))
-            } else if count == 0 || errno != EAGAIN {
-                Task { await self?.readEnded() }
+        source.setEventHandler { [weak self, weak delivery] in
+            let owner = self
+            delivery?.readOnce(from: readDescriptor) {
+                Task { await owner?.readEnded() }
             }
         }
         source.setCancelHandler { descriptor.release() }
-        source.resume()
+        delivery.start(readSource: source)
 
         let processIdentifier = spawned.processIdentifier
         let processGroup = processGroup
@@ -333,13 +628,18 @@ public actor PTYProcess {
     /// so abandoning this actor with a live child is a programming error this type mitigates but
     /// cannot repair contractually.
     deinit {
-        readSource.cancel()
+        // A reconciled stream owns its bounded terminal drain independently; aborting it here
+        // would discard output or `.ended` that a separately retained stream has not read yet.
+        if !streamWasFinished {
+            eventDelivery.abort()
+        }
         guard termination == nil, !childIsTerminal, !childStatusUnavailable else { return }
         Self.bestEffortTerminate(processGroup)
     }
 
     /// Closes the pty and terminates the process group, returning only after the waiter has
-    /// observed the child's terminal status and emitted the single `.ended` event.
+    /// observed the child's terminal status and made the single `.ended` durable for `events`.
+    /// A retained stream may drain its bounded output and that event after teardown returns.
     ///
     /// Teardown first continues a stopped child and sends SIGHUP, then escalates through SIGTERM
     /// and SIGKILL after bounded grace periods. Call this before releasing the last owner.
@@ -593,7 +893,7 @@ public actor PTYProcess {
         finishStatusConsumption()
         switch status {
         case let .stopped(signal):
-            eventContinuation.yield(.stopped(signal: signal))
+            eventDelivery.enqueue(.stopped(signal: signal))
             if stopPolicy == .detach {
                 // No useful output follows a detached stop. Closing now both performs the terminal
                 // hangup and makes `.ended` independent of a surviving slave descriptor.
@@ -628,7 +928,7 @@ public actor PTYProcess {
         for identifier in Array(writabilityWaits.keys) {
             finishWritabilityWait(identifier, with: .failure(PTYError.closed))
         }
-        readSource.cancel()
+        eventDelivery.stopReading()
         finishIfChildAndMasterEnded()
     }
 
@@ -641,11 +941,11 @@ public actor PTYProcess {
         guard !masterIsOpen, !streamWasFinished else { return }
         if let termination {
             streamWasFinished = true
-            eventContinuation.yield(.ended(termination))
-            eventContinuation.finish()
+            eventDelivery.enqueue(.ended(termination))
+            eventDelivery.finishWhenDrained()
         } else if childStatusUnavailable {
             streamWasFinished = true
-            eventContinuation.finish()
+            eventDelivery.finishWhenDrained()
         }
     }
 }

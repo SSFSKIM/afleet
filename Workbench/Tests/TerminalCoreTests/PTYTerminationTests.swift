@@ -251,6 +251,88 @@ final class PTYTerminationTests: XCTestCase {
         )
     }
 
+    func testRetainedStreamDrainsEndedAfterTeardownOwnerRelease() async throws {
+        let directory = try PTYTestChild.temporaryDirectory()
+        defer { PTYTestChild.remove(directory) }
+        let completionMarker = directory.appending(path: "output-completed")
+        let outputByteCount = PTYProcess.outputDeliveryByteLimit * 2
+        var process: PTYProcess? = try PTYProcess(
+            spawning: PTYTestChild.request(
+                cwd: directory,
+                script: """
+                /bin/stty raw -echo
+                /usr/bin/head -c \(outputByteCount) /dev/zero
+                /usr/bin/touch "$AFLEET_COMPLETION_MARKER"
+                exec /bin/sleep 30
+                """,
+                environment: ["AFLEET_COMPLETION_MARKER": completionMarker.path]
+            )
+        )
+        let processIdentifier = process!.processIdentifier
+        var needsCleanup = true
+        defer {
+            if needsCleanup { PTYTestChild.terminateAndReap(pid: processIdentifier) }
+        }
+        let retainedEvents = process!.events
+
+        try await PTYTestChild.waitUntil(seconds: 3) {
+            FileManager.default.fileExists(atPath: completionMarker.path)
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        try await PTYTestChild.withDeadline(seconds: 3) { [process] in
+            await process!.teardown()
+        }
+        needsCleanup = false
+        process = nil
+
+        let observed = try await collectToCompletion(retainedEvents)
+        let outputByteTotal = observed.reduce(into: 0) { total, event in
+            guard case let .output(bytes) = event else { return }
+            total += bytes.count
+        }
+        XCTAssertEqual(
+            outputByteTotal,
+            outputByteCount,
+            "releasing the torn-down owner discarded queued output"
+        )
+        XCTAssertEqual(
+            terminations(in: observed).count,
+            1,
+            "releasing the torn-down owner discarded or duplicated its ended event"
+        )
+        XCTAssertEqual(eventKinds(in: observed).last, .ended, "ended overtook queued output")
+    }
+
+    func testCancellingEventConsumerDoesNotCloseLivePTY() async throws {
+        let directory = try PTYTestChild.temporaryDirectory()
+        defer { PTYTestChild.remove(directory) }
+        let process = try PTYProcess(
+            spawning: PTYTestChild.request(
+                cwd: directory,
+                script: "/bin/stty raw -echo; printf 'ready'; exec /bin/cat"
+            )
+        )
+        defer { PTYTestChild.terminateAndReap(process) }
+        let (recorder, reader) = record(process.events)
+        try await waitForOutput("ready", in: recorder)
+
+        reader.cancel()
+        await reader.value
+        try await process.write(Data("first-after-cancel".utf8))
+        try await Task.sleep(for: .milliseconds(100))
+
+        do {
+            try await process.write(Data("second-after-cancel".utf8))
+            try await process.resize(
+                to: TerminalSize(rows: 25, columns: 81, pixelWidth: 648, pixelHeight: 500)
+            )
+        } catch {
+            XCTFail("consumer cancellation closed the actor's live pty: \(error)")
+        }
+
+        await process.teardown()
+    }
+
     func testDroppingOwnerBestEffortKillsHangupIgnoringProcessGroup() async throws {
         let directory = try PTYTestChild.temporaryDirectory()
         defer { PTYTestChild.remove(directory) }
