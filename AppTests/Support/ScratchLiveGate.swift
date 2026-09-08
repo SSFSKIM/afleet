@@ -21,7 +21,13 @@ enum ScratchLiveGate {
 
     static func skipUnlessLive() throws {
         guard ProcessInfo.processInfo.environment["AFLEET_LIVE_CLI"] == "1" else {
-            throw XCTSkip("set AFLEET_LIVE_CLI=1 to run against the installed CLI")
+            throw XCTSkip("""
+                set AFLEET_LIVE_CLI=1 to run against the installed CLI, under the scratch config \
+                home at /tmp/afleet-fixtures/config-home and no other. Under xcodebuild the \
+                working spelling is TEST_RUNNER_AFLEET_LIVE_CLI=1: the runner re-exports it with \
+                the prefix stripped, and an unprefixed switch never reaches the test host at all. \
+                `make live` sets both
+                """)
         }
         // The scratch home lives under `/tmp` and dies with every reboot, and `claude auth login`
         // stores credentials **without** setting `hasCompletedOnboarding` (C4's finding), so a home
