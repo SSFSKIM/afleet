@@ -1307,12 +1307,19 @@ router; `@` completes files via `file_suggestions`; `!` runs the command host-si
 posts the hardened, wrapped user frame of §6.6; image paste and file drop attach. Pickers for permission mode, model and effort on the right. Sending
 while a turn runs queues; `command_lifecycle` drives a "queued" chip with cancel via
 `cancel_async_message`. Editing a past user message calls `rewind_conversation` and
-prefills the returned `prefillText`. The engine honours the rewind only for a message the
-running process itself sent; any older target, which after a reopen is every earlier message,
-is refused with `rewound: false` and `error: "stale target"` inside a `success` envelope
-(fixture `rewind-turn`, 2026-09-05), so the host reads the body, not the envelope, and on
-refusal falls back to *Fork from here* (item 13); no file is reverted ahead of that answer (§7.7
-`/rewind`, 2026-09-06). When *Prompt suggestions* is on, the `prompt_suggestion`
+prefills the returned `prefillText`. The request always carries `last_seen_user_message_uuid`, the newest user message the host
+has rendered: with it the engine honours a rewind to a message from before the running
+process (measured 2026-09-08 on 2.1.263, probe `spike_rewind_last_seen`, zero turns), and the
+honoured answer is a different shape — `rewound: true`, `targetMessageUuid`, `prefillText`,
+`precedingAssistantUuid`, no `error` key. Without the field every older target is refused
+with `rewound: false` and `error: "stale target"` inside a `success` envelope (fixture
+`rewind-turn`, recorded 2026-09-05 without the field); with it, a host that has not caught
+up is refused with `"unseen later turn"` — the same later-turn scan under two names
+(2.1.263 `cli.pretty.js:452145-452153`, the scan starting at the later of the target and the
+last-seen index). The host reads the body, not the envelope; on either refusal it falls back
+to *Fork from here* (item 13), now the rare path; the turn-running, prompt-pending, queued-
+command and poll-event refusals are untouched by the field; no file is reverted ahead of the
+answer (§7.7 `/rewind`, 2026-09-06). When *Prompt suggestions* is on, the `prompt_suggestion`
 frame after each turn renders as ghost text in the composer that Tab accepts; it is off by
 default.
 
@@ -4575,3 +4582,9 @@ Pending — written at finish.
   roster stream above; the sidebar's Background list subscribes and no longer re-reads the roster
   after Adopt or Stop. The first paint still takes one `jobs()` snapshot, because a launch has to
   start somewhere and the stream owes nothing until something moves.
+- 2026-09-08 engine fact (C6.2's tracker 145, settled by a zero-turn probe committed as
+  `Tools/probe/scenarios/spike_rewind_last_seen.py`, `77a0d62`): `rewind_conversation` honours a
+  target from before the running process when `last_seen_user_message_uuid` names the newest
+  user message; `"stale target"` is what a host gets for omitting the field. §8.5 corrected; item
+  13's fork fallback is the rare path; the `rewind-turn` fixture stays valid as the without-field
+  recording and is re-recorded with the field at C1's next re-pin.

@@ -228,10 +228,12 @@ handshake's `commands` with X10's local table layered on top, resolved through `
 resolved environment and posts the `ShellEnvelope` frame — the sanitiser is C2's, called, not
 copied. Image paste and drop attach blocks. Sending while a turn runs queues; the queue chip
 reads `Overlay.queue` and cancels through `cancel_async_message`. **Edit** on a past user
-message: `rewind_conversation` first, prefill from `prefillText`; a `stale target` refusal
-read from the body, not the envelope, falls back to *Fork from here* with the composer
-prefilled from the transcript and says so; files are rewound only after an honoured
-conversation rewind and only when asked (§8.5, item 13, 2026-09-06). Ghost text from
+message: `rewind_conversation` first, always carrying `last_seen_user_message_uuid` (the newest
+user message the composer has rendered), prefill from the honoured body's `prefillText`; a
+refusal read from the body, not the envelope — `"unseen later turn"` when the host has not
+caught up, `"stale target"` only if the field was somehow omitted — falls back to *Fork from
+here* with the composer prefilled from the transcript and says so; files are rewound only after
+an honoured conversation rewind and only when asked (§8.5 as corrected 2026-09-08, item 13). Ghost text from
 `prompt_suggestion` when the setting is on; turning it on is a quiescent restart. The mode
 picker shows `bypassPermissions` only when `get_settings` allows it and follows §8.6's gate
 exactly (disclaimer once, acceptance stored in afleet's store, quiescent restart with the
@@ -334,10 +336,13 @@ leaves in one target could settle them.
   (required): `!` posts the `ShellEnvelope` frame for a scripted command and item 60's
   fixture script renders every tag literally (fixture, not live). G3 (required): the queue
   chip follows `Overlay.queue` from a replayed `command_lifecycle` sequence and cancels
-  through `cancel_async_message`. G4 (required): item 13 through `rewind-turn` — an honoured
-  rewind prefills; a `stale target` refusal read from the body falls back to *Fork from here*
-  (`perform(.fork(at:))`) with the composer prefilled and a visible note; no `rewind_files`
-  call precedes the honoured answer. G5 (required): §8.6's bypass gate on a lifecycle double —
+  through `cancel_async_message`. G4
+  (required): item 13 — every `rewind_conversation` the composer sends carries
+  `last_seen_user_message_uuid`; an honoured body (`rewound: true`, `targetMessageUuid`,
+  `prefillText`, no `error`) prefills; a refusal read from the body (`"unseen later turn"`
+  injected through the double; `"stale target"` from `rewind-turn`, which was recorded without
+  the field) falls back to *Fork from here* (`perform(.fork(at:))`) with the composer prefilled
+  and a visible note; no `rewind_files` call precedes the honoured answer. G5 (required): §8.6's bypass gate on a lifecycle double —
   declining restarts nothing; accepting stores the acceptance, performs one quiescent restart
   with the flag, then sends `set_permission_mode`; `settings.json` is never touched (the
   X9 seam records no write). G6 (required, live, at most four turns): items 2, 8 and 12 under
@@ -533,3 +538,6 @@ Parent-Level Acceptance as written, then the retrospective.
   deviation from the Design: XcodeGen treats a `README.md` under `App/**` as a bundle resource, so
   `project.yml` excludes `**/README.md` rather than the directories going without an owner file.
   C6.1, C6.2 and C6.3 dispatched from `5e24f1a` in their worktrees.
+- 2026-09-08: item 13 corrected from the probe (parent Revision Note of the same date) — the
+  composer always supplies `last_seen_user_message_uuid`; the fork fallback is the rare path;
+  C6.2's G4 re-worded.
