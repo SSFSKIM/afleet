@@ -1914,3 +1914,18 @@ Reserved range 247–261.
      refused URL and is actuated by a real `NSEvent`, which is the same unforgeable authority the
      URL bar has. Owner: C7.6 at M6 if the app wiring makes it cheap, otherwise C7.7. Filed
      2026-09-09 at the R2 fix wave.
+
+249. **`AfleetSettings` and `NotificationPreferences` still decode through the synthesised
+     `Decodable`.** Q15 found the trap on `DeveloperSettings` — a new non-optional field makes every
+     document an earlier build wrote fail to decode, and `AfleetSettingsStore.read` answers a decode
+     failure with the defaults, so the whole settings document silently reverts. M6 closed it there
+     with a hand-written `init(from:)` using `decodeIfPresent` for every field. The other two types
+     in the same document have the identical shape and the identical exposure: the next field added
+     to either resets the user's settings on first launch of the new build, silently. Not fixed
+     here, by the architect's ruling at this leaf's gate ("if the shape recurs elsewhere in
+     `AfleetSettings`, it is filed, not fixed"). Closer: the same hand-written initialiser on both,
+     or one shared decoding helper, plus a test per type that decodes a document written before its
+     newest field. A stronger closer, if the next owner wants one: make
+     `AfleetSettingsStore.read` distinguish "absent" from "unreadable" so a decode failure is
+     reported rather than answered with defaults. Owner: C5's fence — the next child that adds a
+     settings field. Filed 2026-09-09 at C7.6's M6.

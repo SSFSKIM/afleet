@@ -56,6 +56,20 @@ targets:
         NSPrincipalClass: NSApplication
         NSHighResolutionCapable: true
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        # C7.6's Q14. The reasoning lives here because `App/Info.plist` is *generated* from this
+        # block: XcodeGen rewrites that file whole on every `make generate`, so a comment written
+        # into the plist does not survive one build.
+        #
+        # Both keys are scoped to the Browser panel's web views. `NSAllowsLocalNetworking` permits
+        # plain HTTP to loopback and `.local`, which is what root item 26's `http://localhost:8123`
+        # is and what ATS otherwise blocks for a host it cannot evaluate.
+        # `NSAllowsArbitraryLoadsInWebContent` is the key Apple provides for exactly this shape — a
+        # browser panel navigates where the user points it — and it relaxes ATS for `WKWebView`
+        # content only, so afleet's own `URLSession` traffic stays under ATS unchanged. Neither key
+        # is `NSAllowsArbitraryLoads`, which would relax both.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoadsInWebContent: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.afleet.app

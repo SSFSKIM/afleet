@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import FleetKit
+import Workbench
 
 /// The one state machine over the four routes, and the only thing the window observes.
 ///
@@ -81,6 +82,25 @@ final class AppModel {
     /// feed in its context would watch a timeline nothing updates.
     let panels: PanelHostModel
 
+    /// C7.6's Browser tab, and through it the one window-wide `BrowserModel` (spec §9.4, Q5).
+    ///
+    /// **One instance, app-scoped**, like the three owners above it: the tab set is shared across
+    /// channels and across the main and popped-out windows, and a second `BrowserTab` would be a
+    /// second set of web views for the same pages.
+    let browserTab: BrowserTab
+
+    /// Where the Browser's tab-set document goes. Bound to the workspace a launch reached, because
+    /// the tab is registered before any launch has run.
+    private let browserStore: DeferredWorkbenchStore
+
+    /// Q15's inspection policy, mirrored out of the settings document by each launch.
+    private let webInspector: WebInspectorSwitch
+
+    /// Whether the Browser's two link targets are in the registry. `launch()` runs again on *Check
+    /// again*, and a second pass that registered them again would leave two indistinguishable
+    /// targets per link kind, tying on specificity.
+    private var browserLinkTargetsRegistered = false
+
     /// The per-channel composers (spec §8.5), one `ComposerModel` and one shared
     /// `ChannelSurfaceState` per channel.
     ///
@@ -125,6 +145,11 @@ final class AppModel {
         self.panels = panels
         self.shell = ShellModel(panels: panels)
         self.sequence = sequence
+        let browserStore = DeferredWorkbenchStore()
+        let webInspector = WebInspectorSwitch()
+        self.browserStore = browserStore
+        self.webInspector = webInspector
+        self.browserTab = BrowserWiring.makeTab(store: browserStore, inspector: webInspector)
         self.coordinatorFactory = coordinatorFactory ?? { [timelines, composers] workspace in
             FleetCoordinator(workspace: workspace, panels: panels, timelines: timelines, composers: composers)
         }
@@ -141,6 +166,35 @@ final class AppModel {
         } catch {
             assertionFailure("the placeholder is the first registration on a freshly built host")
         }
+        // C7.6's Browser tab, under `.browser`, registered once (Q4). Not `try?` for the reason
+        // above it: nothing else can hold `.browser` on a host built two lines ago, and a Browser
+        // that vanished silently would leave every `.url` link falling through to W5's fallback and
+        // opening in the system browser with no sign that a panel was meant to have it.
+        //
+        // **The tab is registered here and its two link targets are not**, which is the one place
+        // this milestone had to choose. `PanelHost.register` is X7's synchronous member and
+        // `LinkRouterCapability.register` is `async` — the registry is an actor — so the pair
+        // cannot both happen in an initialiser. A detached `Task` would leave the window of exactly
+        // the shape the targets exist to close: a link arriving before its target reaches W5's
+        // fallback and leaves the app. So target registration is awaited at the top of
+        // `performLaunch` instead, which is strictly earlier than the first link that can exist:
+        // a `WorkspaceLink` is opened through a `ChannelContext`, and no context exists until
+        // `bindWorkspace`, later in that same call.
+        do {
+            try panels.register(browserTab)
+        } catch {
+            assertionFailure("the Browser is registered on a freshly built host and nothing else holds .browser")
+        }
+    }
+
+    /// Registers the Browser's `.url` and `.pullRequest` targets on the app's one link registry
+    /// (Q4, D41), once for the life of the process.
+    func registerBrowserLinkTargets() async {
+        guard !browserLinkTargetsRegistered else { return }
+        browserLinkTargetsRegistered = true
+        for target in BrowserWiring.makeLinkTargets(model: browserTab.model, panels: panels) {
+            await panels.links.register(target)
+        }
     }
 
     /// Binds the two app-scoped, workspace-dependent owners to the workspace a launch reached.
@@ -151,6 +205,10 @@ final class AppModel {
     /// prevent. `lifecycle` is the seam pane exits leave through; production passes nil and gets
     /// `workspace.fleet`.
     func bindWorkspace(_ workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
+        // The Browser's tab-set document (W6's `browser` key in the `workbench` namespace). It is
+        // bound here rather than at construction because the tab is registered before any launch
+        // has run, and this is the call that also builds the first `ChannelContext`.
+        browserStore.bind(workspace.store)
         timelines.attach(to: workspace, lifecycle: lifecycle)
         panels.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
         composers.attach(to: workspace,
@@ -181,6 +239,9 @@ final class AppModel {
     }
 
     private func performLaunch() async {
+        // Before anything else, and before any `ChannelContext` exists: a link opened with no
+        // Browser target registered falls through to W5's fallback and leaves the app.
+        await registerBrowserLinkTargets()
         route = .launching
         launchStore = nil
         canResetBinaryOverride = false
@@ -189,6 +250,10 @@ final class AppModel {
         configured.settingsLoaded = { [weak self] store, settings in
             self?.launchStore = store
             self?.canResetBinaryOverride = settings.developer.binaryPathOverride != nil
+            // Q15: mirrored for the panel's web-view factory, which reads it synchronously at every
+            // `makeWebView` and cannot await the store. Release builds ask it; Debug builds are
+            // inspectable regardless and never do.
+            self?.webInspector.isOn = settings.developer.webInspector
         }
         let factory = coordinatorFactory
         configured.makeCoordinator = { [weak self] workspace in

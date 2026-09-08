@@ -160,6 +160,14 @@ struct SettingsView: View {
                        isOn: $readout.settings.developer.transcriptWatcherStopped)
                 Toggle("Isolated settings for new channels",
                        isOn: $readout.settings.developer.isolatedSettingsForNewChannels)
+                // C7.6's G4. `isInspectable` alone puts *Inspect Element* in the Browser panel's
+                // context menu, which is the whole of how the inspector is reached — no menu item
+                // and no shortcut. Debug builds are inspectable regardless and never read this.
+                Toggle("Web inspector in the Browser panel",
+                       isOn: $readout.settings.developer.webInspector)
+                Text("Takes effect on the next launch.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Button("Reveal the diagnostics log") { readout.revealDiagnostics() }
             }
         }
