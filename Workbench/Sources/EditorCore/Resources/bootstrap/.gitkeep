@@ -1,0 +1,2 @@
+Hand-written: the HTML document and the bridge script MonacoEditorView loads.
+Kept out of ../monaco because Tools/build-monaco.sh replaces that directory whole.

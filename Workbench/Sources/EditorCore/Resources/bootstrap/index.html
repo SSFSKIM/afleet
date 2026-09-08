@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>afleet editor</title>
+
+<!--
+  The document MonacoEditorView navigates to. Hand-written, and kept out of ../monaco because
+  Tools/build-monaco.sh replaces that directory whole.
+
+  Every reference below is relative, so the same file works under all three of S3's routes: on
+  afleet-editor: it resolves against the served URL, under loadFileURL it resolves against the
+  file URL, and in both cases bridge.js derives the Monaco base from document.baseURI rather
+  than from anything the host had to guess right.
+
+  No stylesheet is named by hand here. The split build references none of its own stylesheets —
+  no emitted JavaScript names a .css specifier at all — and two of the three it emits carry
+  content-hashed names, so a name spelled into this file would be right today and silently wrong
+  at the next Monaco bump. Instead Tools/build-monaco.sh generates ../monaco/styles.css from what
+  the build actually emitted, as @import rules; ../monaco/styles.json is the same list in
+  machine-readable form, and the EditorCore tests hold it against a listing of the directory.
+
+  A stylesheet of @import rules is the loader, rather than a script that reads the manifest,
+  because an @import resolves against the importing sheet's own URL and so needs no base handed
+  in — the same principle bridge.js follows — while fetching a sibling file: URL is refused
+  outright under the file-URL route.
+-->
+
+<link rel="stylesheet" href="../monaco/styles.css">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; }
+  #editor, #diff { position: absolute; inset: 0; }
+  #diff { display: none; }
+</style>
+</head>
+<body>
+<div id="editor"></div>
+<div id="diff"></div>
+
+<!--
+  bridge.js is a classic script and runs first, so MonacoEnvironment.getWorker is installed
+  before the module below can ask for a worker. The module is deferred by definition, which is
+  the ordering guarantee this depends on.
+-->
+<script src="bridge.js"></script>
+<script type="module">
+  import "../monaco/editor.js";
+  // editor.js assigns globalThis.monaco on evaluation; boot builds the editor over it and
+  // posts `ready`.
+  window.afleetBridge.boot(globalThis.monaco, document.getElementById("editor"), document.getElementById("diff"));
+</script>
+</body>
+</html>
