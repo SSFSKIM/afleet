@@ -1320,3 +1320,16 @@ is renumbered.
      a guard of a minute or more that only turns a hang into a failure) rather than a fixed window;
      and the floor's operator rule is one xcodebuild floor at a time. Owner: C3. Filed 2026-09-08
      at C7.2's merge.
+
+195. **What the transcript records for a turn in flight at `end_session` is unprobed.** The
+     §7.4 Quit ruling (corrective `b86a73a`) rests on `end_session` being a recorded teardown:
+     the engine writes `task_updated {status:"killed"}` and `task_notification
+     {status:"stopped"}` for its shells and the trailing `last-prompt` during shutdown (parent
+     Surprises, C1's compact-boundary second reading). Whether a *turn* still streaming at that
+     moment leaves an interruption record, a truncated assistant record, or nothing is not in any
+     fixture. If it leaves a truncated record that `--resume` then shows, the fix belongs in
+     `terminate()` itself for every terminating action (an `interrupt` before `end_session`),
+     not in one caller. Closer: a zero-turn-cost probe is impossible (a turn must be running), so
+     this is one prompted turn under the scratch home at C1's next re-pin, reading the transcript
+     after exit. Owner: C1 (probe), C2 (`terminate()`) if it bites. Filed 2026-09-08 at the Quit
+     ruling.

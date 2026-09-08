@@ -1072,7 +1072,13 @@ per channel for `end_session`; on confirmation, or when nothing is busy, it runs
 each owned channel that has a process, then `Fleet.shutdown()` (which itself terminates nothing:
 streams, timers, diagnostics), then exits. Foreign and background-job channels are never touched.
 Owner: C6, which owns the surface where busy is visible (ruled 2026-09-07 at C5's merge from
-C5's tracker entry 71).
+C5's tracker entry 71). Amended 2026-09-08 from C6.2's `[parent-impact]` (corrective
+`b86a73a`): the `terminate()` here is X5's `quit` — the unconditional teardown, named
+(`TerminatingAction.quit`) so a ghost a quit leaves is recorded as one, and ungated because the
+warning is what licenses ending busy work. It is not `reap`, whose eligibility gate refuses
+exactly the channels the dialog has just named; implemented through `reap` the confirmed arm
+ends nothing. Busy is the fleet's own fact — `presence` and `liveTaskIDs(of:)` — never a
+surface's local count, so a channel spawned but never viewed is judged like one on screen.
 
 ### 7.5 Threads
 
@@ -2441,7 +2447,13 @@ SwiftPM package or target that builds and tests without the children above it, p
   (corrective `d802792`): `sendPrompt(_ input: UserInput, on: ChannelKey) async throws -> UUID` —
   `perform(.send)`'s path verbatim, returning the uuid the supervisor mints and the engine echoes
   instead of the state, so the composer raises `HostSignal.promptSent(uuid:at:)` before the echo
-  arrives; `perform(.send)` stays for callers that want the state.
+  arrives; `perform(.send)` stays for callers that want the state. Amended 2026-09-08 from C6.2's
+second `[parent-impact]` (corrective `b86a73a`): `LifecycleAction.quit` — §7.4's Quit
+`terminate()`, unconditional, no spawn barrier, no in-flight guard, `TerminatingAction.quit`
+from ready and from connecting — and `liveTaskIDs(of: ChannelKey) async -> [String]`, the
+channel's running-or-armed background tasks by id, so a surface reads busy from the fleet. The
+Quit clause reached §7.4 at C5's merge, a day after C4 had merged, which is how X5 came to lack
+the verb; every other terminating action was already one named `terminateOrWedge`.
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
   types; FleetKit never models upper-layer state — and state its own listing and unread
@@ -4615,3 +4627,13 @@ Pending — written at finish.
   `StreamIngestion` owns the channel's single `WireReducer`, publishes the live half on `effects`
   and exposes `timeline`; `HostSignal` reaches it through `signal(_:)`. C6.1 consumes the fold;
   its own reducer and second subscription were withdrawn before they landed.
+- 2026-09-08 §7.4 Quit ruling (C6.2's `[parent-impact]`, corrective `b86a73a` on `main`). The
+  clause's `terminate()` is the bare form; X5 gains `quit` and `liveTaskIDs(of:)` as above. C6.2's
+  first build escalated a refused `reap` through `.stopEverything` and reaped again — only X5
+  verbs, and argued as the clause's intent. Ruled otherwise: `/logout`'s *Stop* is a user choice
+  paired with *Wait*, and Quit's "asks once" is the deliberate contrast; the escalation's failure
+  path (a reap still refused) exits with no SIGTERM, no SIGKILL and no wedge record, against
+  §6.7; and the engine's `end_session` already records `task_updated {status:"killed"}` and
+  `task_notification {status:"stopped"}` for its shells and writes the trailing `last-prompt`
+  during shutdown, so the bare form is a recorded teardown. What the transcript records for a
+  *turn* in flight at `end_session` is unprobed (tracker 195).
