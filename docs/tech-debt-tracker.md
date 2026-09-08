@@ -889,6 +889,98 @@ symlink-containment debt in entry 78 is unchanged.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
 
+## From C7.2 (`child/c7-editor-core`)
+
+97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state
+    before awaiting the link-target withdrawal (C7.2 fix-wave finding, outside its fence).** `App/Panels/PanelHostModel.swift`
+    drops `tabs[id]`, the pane runners and every session, and only then awaits
+    `links.unregister(tab:)`. While it is suspended on that await the main actor is free, so a
+    delivery already committed inside `LinkRouter` can reach a target whose tab and sessions the
+    host has torn down. `LinkRouter` now refuses to deliver to a token withdrawn during its own
+    suspension, so the registry is consistent; this is the same guarantee one layer up, and it is
+    exactly what X7's 2026-09-06 amendment made `unregister` `async` to obtain. Closer: await the
+    router's withdrawal *first*, then release host state — a reordering within
+    `PanelHostModel.unregister`. Not done here because C7.2's app fence is `HostLinkRouter.swift`
+    alone and C6's leaves are opening in the same target. Owner: C5/C6 (X7).
+
+98. **Closed 2026-09-08 (`b9ef4f8`).** **`LinkRouter.open` may run `prepare` more than once
+    for one call.** When the resolved target
+    is withdrawn during `prepare`, the router re-resolves and runs `prepare` again for the
+    successor — deliberately, because a pop-out prepared for a tab that then left is not one
+    prepared for its replacement. The host's pop-out is idempotent enough today that this is
+    harmless, but it is a behavioural fact any `prepare` implementation must tolerate rather than
+    an accident. Closer: none needed unless a `prepare` with non-idempotent side effects appears;
+    then the retry needs a way to undo the first preparation.
+
+99. **The split Monaco build emits a byte-identical duplicate stylesheet.** `tsMode-<hash>.css`
+    and `editor.css` are the same 164.76 KB content, and `freemarker2-<hash>.css` is a third
+    language-mode sheet; all three are loaded through the generated `styles.css`. Roughly 165 KB
+    of the 13 MB bundle is redundant. Closer: a bun build option or a post-pass in
+    `Tools/build-monaco.sh` that de-duplicates emitted assets by content hash. Owner: C7.2's
+    build script, whoever next bumps Monaco.
+
+100. **`HostLinkRouter.targetCount` is `async` and its only caller is a test.** Tracker entry 73's
+     class, unchanged by C7.2 except that the delegation made it `async`. It stays because a
+     registry with no observable size is hard to diagnose. Closer: a diagnostics line that reads
+     it in the running app, or deletion.
+
+101. **Resource Timing reports nothing for the `afleet-editor` scheme.** A `WKURLSchemeHandler`
+     serves every document, chunk and worker request, and `performance.getEntriesByType("resource")`
+     returns zero entries for them. So S3 proves dynamic-import chunk loading by its *effect*
+     (grammar scopes present in the tokens) rather than by the network timeline, and any future
+     per-asset timing needs instrumenting inside the scheme handler in Swift. Owner: C7.5 if it
+     ever needs per-asset load timings.
+
+102. **`requestAnimationFrame` stops in an occluded window, and a locked screen occludes
+     everything.** Every frame-based measurement then hangs rather than fails. The S3 harness
+     measures frame liveness first and overrides the window's reported occlusion when it finds
+     none, recording `occlusionOverridden`; the committed numbers were taken with the override
+     off. Closer: none — this is AppKit behaviour. Worth knowing before anyone writes another
+     frame-timing harness.
+
+103. **`xcodebuild` intermittently aborts at the package-bundle transition.** Two of four full
+     `make test` runs during C7.2 died with `DVTAssertions: Message sent to invalidated object:
+     IDESwiftPackageTestBundleProductBuildable` and `Abort trap: 6`, *after* every app test had
+     passed, at the hand-over from the last FleetKit bundle to the first Workbench one. Xcode
+     26.6, 13 test bundles in one scheme. Not caused by any diff; the same bundles pass under
+     `-only-testing` and under `swift test`. It will read as a failure in CI and is not one.
+     Closer: split the scheme, or retry the transition.
+
+104. **`readBuffer` does not clear the editor's dirty flag.** Only the host knows whether its
+     write succeeded, so `bridge.js` leaves the flag set until the next `open` or `setText`.
+     C7.5 will meet this the first time it wires *Save*. Closer: a host-to-editor acknowledgement,
+     which is a W4 vocabulary addition and therefore a contract change, not a local fix.
+
+105. **W4's `error` has no discriminator, so a host cannot tell a refusal from a failure.** The
+     bridge refuses `save` while a diff is on screen (C7.2 fix-wave finding B1) with
+     `error {message}`, because that is the whole editor-to-host vocabulary for "no". A host
+     that wants to re-issue the save against the editor, rather than surface a failure to the
+     user, has only prose to branch on, and prose is not a contract. Closer: a `kind` or `code`
+     field on `error`, or a distinct refusal message — either is a W4 vocabulary addition and
+     therefore a contract change, of the same class as entry 104's acknowledgement. Owner: C7.5
+     the first time it wires *Save* beside C7.7's diff.
+
+106. **The bun executable that generates the Monaco bundle is recorded, not enforced.**
+     `Tools/build-monaco.sh` refuses to run without `bun` on PATH and writes `bun --version` into
+     the bundle's `VERSION`, but nothing checks *which* version that is. `Tools/monaco/bun.lock`
+     pins Monaco's dependency graph; it does not pin the bundler that reads it, and the script
+     emits minified, code-split, content-hashed output — so the committed inputs do not by
+     themselves determine the committed bytes, and a rebuild under a different bun can produce a
+     different tree from an unchanged repository. That is only a latent nuisance today (nothing
+     rebuilds the bundle in CI, and `VERSION` carries no date so an unchanged rebuild is a no-op),
+     but it is exactly the property the committed bundle is supposed to have. Closer: pin the
+     version in the script and refuse to build under another, or — the weaker half, already
+     present — keep recording it in `VERSION` beside Monaco's and treat a mismatch as a rebuild
+     hazard. Owner: C7.2's build script, whoever next bumps Monaco.
+
+107. **A tab popped out by `prepare` that withdraws with no successor leaves a presented window
+     whose tab no longer exists.** The router's one-preparation rule and the host's per-tab
+     generation stop a second window and a stale re-add (C7.2 waves A, D and G), but nothing undoes
+     a pop-out already presented when the target then withdraws and the open falls back. Closer: an
+     undo path on `prepare` (the router hands the host the preparation to retract on fallback), or
+     the pop-out scene dismissing itself when its tab is gone. Owner: C7.5, which owns the first
+     panel that pops out under load. Filed 2026-09-08 at C7.2's merge from wave A's report.
+
 ## From C7.3
 
 Filed at the close of C7.3 (Source Control core; ledger

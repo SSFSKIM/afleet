@@ -380,7 +380,13 @@ final class LiveCLITests: XCTestCase {
 
     override func setUpWithError() throws {
         guard ProcessInfo.processInfo.environment["AFLEET_LIVE_CLI"] == "1" else {
-            throw XCTSkip("set AFLEET_LIVE_CLI=1 to run against the installed CLI")
+            throw XCTSkip("""
+                set AFLEET_LIVE_CLI=1 to run against the installed CLI, under the scratch config \
+                home at /tmp/afleet-fixtures/config-home and no other. That spelling works for \
+                `swift test`; reached through the app scheme under xcodebuild the working spelling \
+                is TEST_RUNNER_AFLEET_LIVE_CLI=1, which the runner re-exports with the prefix \
+                stripped — an unprefixed switch never reaches the test host at all
+                """)
         }
     }
 

@@ -54,10 +54,32 @@ sign:
 # --- The app ---------------------------------------------------------------
 # `afleet.xcodeproj` is generated, so every target that needs it regenerates it first.
 
-.PHONY: generate build test check-imports
+.PHONY: generate build test check-imports live
 
 SCHEME ?= afleet
 DESTINATION ?= platform=macOS
+ONLY ?=
+
+# --- Getting a switch to the test host -------------------------------------
+#
+# `xcodebuild` hands the test host **none** of the invoking shell's environment. A variable
+# reaches it only when it is spelled `TEST_RUNNER_<NAME>`; the runner re-exports it with the
+# prefix stripped. Measured on Xcode 26.6: with `AFLEET_LIVE_CLI=1` in the shell the host sees
+# nothing, with `TEST_RUNNER_AFLEET_LIVE_CLI=1` it sees `AFLEET_LIVE_CLI=1`. An unprefixed
+# switch therefore does not fail — the gated test *skips*, and a skip reads as a pass, which is
+# the failure mode this forwarding exists to close.
+#
+# So every switch a suite in this tree reads is translated here when it is set in make's
+# environment, and an operator who asks for live gets live. `swift test` and the Python suites
+# inherit the environment as usual and need no translation.
+TEST_SWITCHES := AFLEET_LIVE_CLI AFLEET_LIVE_CLI_TURNS AFLEET_LOCAL_INDEX AFLEET_SPIKE_C5_2 \
+                 CLAUDE_CONFIG_DIR
+TEST_RUNNER_ENV = $(foreach v,$(TEST_SWITCHES),$(if $($(v)),TEST_RUNNER_$(v)="$($(v))"))
+
+# The one config home the live legs run under (spec §7.8, X9): never the user's.
+SCRATCH_HOME ?= $(or $(CLAUDE_CONFIG_DIR),/tmp/afleet-fixtures/config-home)
+# What `make live` runs. C5's G1e by default: one unprompted `claude`, zero model turns.
+LIVE_ONLY ?= AfleetTests/LiveForeignChannelTests
 
 generate:
 	xcodegen generate
@@ -74,9 +96,30 @@ build: generate
 # suite at 100 percent of one core for eleven minutes with no output. The allowance turns that into
 # a reported failure. It bounds the harness; it decides no assertion.
 test: generate
-	xcodebuild test -scheme $(SCHEME) -destination '$(DESTINATION)' \
+	env $(TEST_RUNNER_ENV) xcodebuild test -scheme $(SCHEME) -destination '$(DESTINATION)' \
+		$(if $(ONLY),-only-testing:$(ONLY)) \
 		-test-timeouts-enabled YES -default-test-execution-time-allowance 120
 	$(MAKE) test-tools
+
+# The live legs, run deliberately and never silently.
+#
+# Every precondition the gate would otherwise *skip* on is checked here first and fails loudly,
+# because a skipped live gate that exits zero is indistinguishable from a live gate that passed —
+# which is exactly how a gate gets signed on evidence nobody produced. Nothing here writes under a
+# config home: the scratch home is read, and only the `claude` the test spawns writes into it.
+live: generate
+	@test -d "$(SCRATCH_HOME)" || { \
+		echo "make live: no scratch config home at $(SCRATCH_HOME); the live legs run under that home and nowhere else"; \
+		exit 2; }
+	@command -v $(CLAUDE) >/dev/null 2>&1 || { \
+		echo "make live: no '$(CLAUDE)' on PATH; the live legs spawn the installed engine"; exit 2; }
+	@$(PYTHON) -c "import json,sys; d=json.load(open('$(SCRATCH_HOME)/.claude.json')); sys.exit(0 if d.get('hasCompletedOnboarding') else 1)" 2>/dev/null || { \
+		echo "make live: the scratch config home reports no completed onboarding; recover with one interactive run by hand under CLAUDE_CONFIG_DIR pointed at it"; \
+		exit 2; }
+	env TEST_RUNNER_AFLEET_LIVE_CLI=1 TEST_RUNNER_CLAUDE_CONFIG_DIR="$(SCRATCH_HOME)" \
+		$(foreach v,AFLEET_LIVE_CLI_TURNS AFLEET_LOCAL_INDEX,$(if $($(v)),TEST_RUNNER_$(v)="$($(v))")) \
+		xcodebuild test -scheme $(SCHEME) -destination '$(DESTINATION)' -only-testing:$(LIVE_ONLY) \
+		-test-timeouts-enabled YES -default-test-execution-time-allowance 300
 
 # Contract X1 over the app target, alone.
 check-imports: generate

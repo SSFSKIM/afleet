@@ -42,10 +42,33 @@ let package = Package(
         // MARK: - end of C7.1
 
         // MARK: - C7.2 editor core and link routing (owner: C7.2)
-        .target(name: "EditorCore", dependencies: [core], swiftSettings: v6),
-        .testTarget(name: "EditorCoreTests", dependencies: ["EditorCore"], swiftSettings: v6),
-        .target(name: "LinkRouting", dependencies: [core], swiftSettings: v6),
-        .testTarget(name: "LinkRoutingTests", dependencies: ["LinkRouting"], swiftSettings: v6),
+        // Two resource directories, both `.copy` and never `.process`: a web bundle's directory
+        // layout *is* its URL space, and `.process` reserves the right to rewrite it.
+        // `Resources/monaco` is generated — Tools/build-monaco.sh replaces it whole — and
+        // `Resources/bootstrap` is hand-written, which is why they are not one directory.
+        .target(name: "EditorCore", dependencies: [core],
+                resources: [.copy("Resources/monaco"), .copy("Resources/bootstrap")],
+                swiftSettings: v6),
+        .testTarget(name: "EditorCoreTests", dependencies: ["EditorCore", core], swiftSettings: v6),
+        // `PanelHostAPI` is required, not decorative: C7.2's registry is built over X7's own
+        // `LinkTarget`, its `(WorkspaceLink, LinkDestination)` handler and `PanelTabID`-keyed
+        // withdrawal, and a registry over those types cannot avoid the target that defines them.
+        // W1's table row predates that seam and is amended at C7.2's merge; X1 forbids only
+        // ClaudeWire, and this edge is acyclic (PanelHostAPI depends on AfleetCore and FleetKit).
+        .target(name: "LinkRouting", dependencies: [core, "PanelHostAPI"], swiftSettings: v6),
+        // `core` and `PanelHostAPI` for the member-import-visibility reason C5 recorded for
+        // PanelHostAPITests: LinkRouting does not re-export them, so a test constructing a
+        // `WorkspaceLink` or a `LinkTarget` must import the module that defines it.
+        .testTarget(name: "LinkRoutingTests", dependencies: ["LinkRouting", "PanelHostAPI", core], swiftSettings: v6),
+        // The S3 spike (spec Design §8). An executable and not a test: it opens a real NSWindow
+        // and measures frame times, neither of which a `swift test` process can do honestly. It
+        // is in no product and not in the `Workbench` umbrella, so nothing the app links reaches
+        // it; `swift run --package-path Workbench S3Harness` is its only entry point.
+        // `measure-cold-load.sh` is excluded because the target treats its whole directory as
+        // sources; it is the shell instrument for G2's cold-load clause, which needs a
+        // distribution rather than the single sample one harness run produces.
+        .executableTarget(name: "S3Harness", dependencies: ["EditorCore"], path: "Spikes/S3Harness",
+                          exclude: ["measure-cold-load.sh"], swiftSettings: v6),
         // MARK: - end of C7.2
 
         // MARK: - C7.3 source control core (owner: C7.3)
