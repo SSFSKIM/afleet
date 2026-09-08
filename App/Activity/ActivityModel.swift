@@ -175,9 +175,10 @@ final class ActivityModel {
          shell: ShellModel,
          router: NotificationRouter,
          store: (any StateStore)? = nil,
+         reservations: DecisionReservations = DecisionReservations(),
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.lifecycle = lifecycle
-        self.answering = DecisionAnswering(lifecycle: lifecycle)
+        self.answering = DecisionAnswering(lifecycle: lifecycle, reservations: reservations)
         self.configHome = configHome
         self.shell = shell
         self.router = router
@@ -198,7 +199,13 @@ final class ActivityModel {
             guard let model = self?.timeline?(key) else { return }
             await model.signal(signal)
         }
-        answering.settled = { [weak self] id, key, state in
+        // **Registered on the shared set, not on this model's own answering object.** Activity is
+        // the host that holds the live `InboundRequest` — its pump is what a card is built from —
+        // and the request is answerable from surfaces this model knows nothing about: the Thread
+        // tab, the timeline's card. An answer sent from any of them closes the request, so the
+        // payload has to be released whoever sent it, or it sits in `requests` until the process
+        // exits.
+        reservations.observe(self) { [weak self] id, key, state in
             guard let self else { return }
             self.pumps[key]?.forget(id)
             self.apply(state)

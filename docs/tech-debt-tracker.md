@@ -1970,6 +1970,13 @@ C6.1's and C6.2's reservations and is expected.
      knowledge is the host's, not the card's. Found in the second review round. Closer: the timeline
      list marks the focused row's card active (C6.1), and the Thread tab marks the open thread's
      (C6.3's Thread half). Owner: C6.1 and the Thread host.
+
+     **Half closed 2026-09-09 (second fix wave, architect's ruling).** The Thread tab is the first
+     production host to set it: a tab draws exactly one card and the user opened it, so it owns
+     Return with no list for the shortcut to reach the wrong member of. `ThreadView` passes
+     `isActive: true`, asserted through the existing shortcut clause. Activity's compact list and
+     the timeline's rows still pass the default, and the entry stays open for the timeline row —
+     which is where a focused-row notion has to come from.
 169. **Four of the five thread anchors are still snapshots.** `ThreadAnchor.decision` now resolves
      through the `DecisionItem` the channel's fold holds, so a card settled by any surface reads as
      settled in the open thread. The other four carry values taken at the moment the thread was
@@ -1982,7 +1989,17 @@ C6.1's and C6.2's reservations and is expected.
      Found while closing the decision anchor, 2026-09-09. Closer: the anchor holds the key rather
      than the value for every kind, and reads the fold for all five. Owner: C6.3's successor.
 
-170. **The consent sheet cannot be dismissed by the user.** `ChannelDecorations` presents §6.12's
+170. **Closed 2026-09-09** (second fix wave, architect's ruling): §6.12 gains a third answer, *Not
+     now*. It dismisses the sheet, writes nothing anywhere and leaves the channel in
+     `consentNeeded` — unspawned, still asking — and the column draws a banner that brings the
+     sheet back, so an outstanding decision does not lose its affordance with its modal. Closing
+     the sheet by its own gesture *is* *Not now*: the binding is real now, and declining stays the
+     only path that writes `settings.local.json` (§6.12's one exception), reachable only by
+     pressing *Decline*. `testNotNowRecordsNothingAndLeavesTheChannelWaiting` holds it on the X9
+     seam — no acceptance, no decline, no lifecycle action — with the precondition re-asserted
+     afterwards. The entry stands below as filed.
+
+     **The consent sheet cannot be dismissed by the user.** `ChannelDecorations` presents §6.12's
      sheet from the verdict — `.constant(model.consentRequest)` — so the sheet's own dismissal
      gesture writes into a binding that drops it and the sheet returns. That is deliberate as far
      as it goes: consent is taken before the child exists, the sheet closes because the fleet
@@ -2017,6 +2034,35 @@ C6.1's and C6.2's reservations and is expected.
      and the field would have to say why it refused. Found by the review wave on C6.3. Closer:
      refuse a value with a fractional part in an integer control, the way an out-of-range one is
      refused. Owner: C6.3's successor.
+
+300. **The timeline's own card host does not share the app's reservation set yet.** The second fix
+     wave gave `DecisionAnswering` an app-scoped `DecisionReservations` — one in-flight set and one
+     settle announcement for every surface — and wired the two hosts that exist on this branch,
+     Activity and the Thread tab, from `AppModel.decisions`. The third host is C6.1's timeline card,
+     which builds its answering object inside `TimelineRenderContext` and is not on `main`. Until it
+     is handed the same set, a card answered from the timeline while Activity's answer is in flight
+     reopens exactly the window this wave closed: two answers on the wire and the second refused as
+     `decisionGone`, and Activity's pump keeps a payload the timeline settled. Found while closing
+     scalpel-1#2 and #4. Closer: C6.1's render context carries the app's `DecisionReservations` and
+     passes it to the answering object it builds. Owner: C6.1, at its merge.
+301. **A host registered on `DecisionReservations` cannot withdraw.** `observe(_:_:)` is keyed by the
+     host's `ObjectIdentifier`, which is what stops one model re-registering twice, but there is no
+     removal: `startActivity` builds a **new** `ActivityModel` on every launch that reaches a
+     workspace, so the previous model's entry stays in the map for the app's life. Nothing leaks the
+     model — the closure holds it weakly and a dead entry does nothing — and the bound is the number
+     of relaunches in one process, which is small. Filed rather than fixed because the withdrawal
+     wants an owner (a token, or `stop()`), and choosing one is a design question about who holds the
+     registration. Found in the same change. Closer: `observe` returns a registration the host
+     releases, or `ActivityModel.stop()` withdraws. Owner: C6.3's successor.
+302. **The trust re-read fires when the pane is handed over, not when the user finishes with it.**
+     `reviewTrustInTerminal` re-reads the verdict once `PanelHost.run(_:)` returns, and that is the
+     handover rather than the grant: the user trusts the project in Claude Code's own dialog some
+     seconds later. The second half of sweep#5 is what actually catches it — the mount re-evaluates
+     when afleet comes back to the front — so the case left standing is a Terminal pane that never
+     takes the front away from afleet, where the banner can stay up until the selection moves. Small,
+     and no wrong write follows from it: the channel is history-only, which is the safe direction.
+     Found in the second fix wave. Closer: the pane's `PaneExit` is already reported to C4; route it
+     to a re-read as well. Owner: C6.3's successor, with C7.4.
 
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 

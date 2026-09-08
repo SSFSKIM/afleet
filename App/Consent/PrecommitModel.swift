@@ -17,7 +17,8 @@ import PanelHostAPI
 /// writes — and C4 is what writes it. No path under a config home is opened here, and trust is
 /// never written at all (§6.11).
 ///
-/// The three actions are synchronous and claim `isAnswering` before they return, for the reason
+/// The three actions that reach the fleet — accept, decline and the terminal handoff — are
+/// synchronous and claim `isAnswering` before they return, for the reason
 /// `DecisionAnswering.send(_:on:in:)` claims its request id before it returns: the second of two
 /// clicks in one run-loop turn must find the first already on the wire.
 @MainActor
@@ -46,7 +47,7 @@ final class PrecommitModel {
     }
 
     /// What the sheet was shown with: an evaluation and the servers §6.12 is asking about, as one
-    /// value. The sheet's two answers carry it back, so neither can be paired with a project the
+    /// value. The sheet's three answers carry it back, so none can be paired with a project the
     /// user never saw. `id` is the evaluation's, which is what makes a superseded sheet a different
     /// item to SwiftUI and gets it taken down.
     struct ConsentRequest: Identifiable, Sendable {
@@ -71,8 +72,31 @@ final class PrecommitModel {
     /// precondition looks like and is what draws nothing.
     private(set) var precondition: SpawnPrecondition = .ready
 
-    /// Why the last action did not happen, or nil. Cleared by the next action that succeeds.
-    private(set) var banner: RowBanner?
+    /// Why the last action did not happen, and the evaluation it did not happen under.
+    ///
+    /// **A banner belongs to one evaluation.** The actions that reach the fleet all fail
+    /// asynchronously, and a
+    /// refusal that arrived after the selection moved would draw one channel's failure above another
+    /// channel's conversation — the same pairing `Evaluation` exists to prevent one step further on.
+    /// Storing the number the refusal was raised under is what makes the fence a property of the
+    /// value rather than of whoever remembered to clear it.
+    private var raised: (evaluation: Int, banner: RowBanner)?
+
+    /// Why the last action did not happen, or nil — and nil for every banner an earlier evaluation
+    /// raised, so a new evaluation clears the old one's refusal by arriving.
+    var banner: RowBanner? {
+        guard let raised, raised.evaluation == started else { return nil }
+        return raised.banner
+    }
+
+    /// The channel whose consent sheet the user waved away with *Not now* (tracker 170).
+    ///
+    /// Per channel and not per evaluation: the verdict is re-read whenever the selection moves or
+    /// the app comes back to the front, and a dismissal that a re-read undid would put the sheet
+    /// back up in front of a user who had just declined to answer it. Nothing is written and the
+    /// verdict is untouched — the channel stays in `consentNeeded`, unspawned — so the only thing
+    /// this suppresses is the modal.
+    private var deferredChannel: ChannelKey?
 
     /// True while an accept, a decline or a terminal handoff is on the wire. Every affordance
     /// disables on it, so nothing is sent twice.
@@ -86,9 +110,10 @@ final class PrecommitModel {
     // MARK: - The verdict
 
     /// The sheet, or nil when no sheet is up: the pending servers and the evaluation they were read
-    /// for, which the sheet's two answers hand back.
+    /// for, which the sheet's three answers hand back.
     var consentRequest: ConsentRequest? {
-        guard let evaluation, case .consentNeeded(let servers) = precondition else { return nil }
+        guard let evaluation, deferredChannel != evaluation.channel,
+              case .consentNeeded(let servers) = precondition else { return nil }
         return ConsentRequest(evaluation: evaluation, servers: servers)
     }
 
@@ -96,6 +121,15 @@ final class PrecommitModel {
     var isHistoryOnly: Bool {
         if case .untrusted = precondition { return true }
         return false
+    }
+
+    /// The channel still needs consent and the sheet is not up, because the user answered *Not now*.
+    /// The banner this draws is the way back to the sheet: §6.12's decision is still unanswered and
+    /// the channel still cannot spawn, so the affordance may not disappear with the modal.
+    var isConsentDeferred: Bool {
+        guard let evaluation, deferredChannel == evaluation.channel,
+              case .consentNeeded = precondition else { return false }
+        return true
     }
 
     /// Reads the precondition for a channel. The only call that asks the fleet anything before a
@@ -110,12 +144,31 @@ final class PrecommitModel {
         started += 1
         let id = started
         let verdict = await lifecycle.preconditions(for: channel)
-        guard id == started else { return }
+        // **Two fences, because they catch different things.** The generation catches a read the
+        // model itself superseded; cancellation catches the one it did not — a mount whose channel
+        // went away starts no new evaluation, so `started` never moves and the generation alone
+        // would let A's consent publish over a column that has no channel at all.
+        guard id == started, !Task.isCancelled else { return }
         evaluation = Evaluation(id: id, channel: channel, project: project)
         precondition = verdict
+        raised = nil
     }
 
-    // MARK: - §6.12, the consent sheet's two answers
+    /// Drops the verdict on screen, because the context it was read for is gone.
+    ///
+    /// The mount calls this when it has no channel or no project to evaluate: leaving the last
+    /// verdict up would draw one channel's trust banner above a column showing nothing, and — since
+    /// the generation is what tells a late result it is late — would let a read still in flight
+    /// publish into that same emptiness. Bumping the generation is what makes both impossible.
+    func invalidate() {
+        started += 1
+        evaluation = nil
+        precondition = .ready
+        raised = nil
+        deferredChannel = nil
+    }
+
+    // MARK: - §6.12, the consent sheet's three answers
 
     /// *Accept*: the store remembers the acceptance per project and server hash, and nothing is
     /// written to disk. The verdict is re-read afterwards, so the sheet closes because the fleet
@@ -125,7 +178,7 @@ final class PrecommitModel {
         Task {
             defer { isAnswering = false }
             await lifecycle.acceptProjectServers(request.servers, project: request.evaluation.project)
-            banner = nil
+            clear(request.evaluation)
             await reread(request.evaluation)
         }
     }
@@ -139,14 +192,32 @@ final class PrecommitModel {
             do {
                 try await lifecycle.declineProjectServers(request.servers.map(\.name),
                                                           project: request.evaluation.project)
-                banner = nil
+                clear(request.evaluation)
                 await reread(request.evaluation)
             } catch let error as LifecycleError {
-                banner = Self.banner(for: error)
+                raise(Self.banner(for: error), for: request.evaluation)
             } catch {
-                banner = RowBanner(text: "The project-server decline did not complete: \(type(of: error)).")
+                raise(RowBanner(text: "The project-server decline did not complete: \(type(of: error))."),
+                      for: request.evaluation)
             }
         }
+    }
+
+    /// *Not now*: the sheet goes away and **nothing is recorded anywhere** (tracker 170, ruled).
+    ///
+    /// §6.12 has exactly one write in it and it is the decline. Dismissal is not a decline: the
+    /// channel keeps its `consentNeeded` verdict, no acceptance is remembered, nothing is written
+    /// under the project's `.claude/`, and no child is spawned. What the user gets back is the
+    /// column, with the banner that re-opens this sheet — because a decision that is still
+    /// outstanding may not lose its affordance along with its modal.
+    func notNow(_ request: ConsentRequest) {
+        guard isCurrent(request.evaluation) else { return }
+        deferredChannel = request.evaluation.channel
+    }
+
+    /// The banner's way back into the sheet a *Not now* dismissed.
+    func resumeConsent() {
+        deferredChannel = nil
     }
 
     // MARK: - §6.11, the trust action
@@ -155,20 +226,28 @@ final class PrecommitModel {
     /// included**. C4 accepts a `PaneExit` only for the id it is waiting on, so a request rebuilt
     /// here would have its exit discarded and the re-read of trust would never happen.
     func reviewTrustInTerminal() {
-        guard let evaluation, claim() else { return }
-        let channel = evaluation.channel
+        // The same fence the sheet's two answers take. The banner this was pressed on was drawn for
+        // the evaluation on screen, and an evaluation already in flight means that is no longer the
+        // one the model holds: the press would then hand the host a channel the user is not looking
+        // at, and the pane would open on somebody else's project.
+        guard let evaluation, isCurrent(evaluation), claim() else { return }
         Task {
             defer { isAnswering = false }
             do {
-                let request = try await lifecycle.openInTerminal(channel)
+                let request = try await lifecycle.openInTerminal(evaluation.channel)
                 try await panels.run(request)
-                banner = nil
+                clear(evaluation)
+                // Trust is granted in Claude Code's own dialog, in the pane this just handed over,
+                // and no state afleet holds changes when it is. Without this read the channel stays
+                // history-only on a project the user has since trusted, until the selection moves.
+                await reread(evaluation)
             } catch let error as PanelHostError {
-                banner = Self.banner(for: error)
+                raise(Self.banner(for: error), for: evaluation)
             } catch let error as LifecycleError {
-                banner = RowBanner(error)
+                raise(RowBanner(error), for: evaluation)
             } catch {
-                banner = RowBanner(text: "The terminal handoff did not complete: \(type(of: error)).")
+                raise(RowBanner(text: "The terminal handoff did not complete: \(type(of: error))."),
+                      for: evaluation)
             }
         }
     }
@@ -195,6 +274,20 @@ final class PrecommitModel {
         case .duplicateTab:
             RowBanner(text: "The Terminal pane is registered twice; the handoff was refused.")
         }
+    }
+
+    /// Publishes a refusal under the evaluation it belongs to, or drops it because the surface has
+    /// moved on and there is nothing left for it to be about.
+    private func raise(_ banner: RowBanner, for evaluation: Evaluation) {
+        guard isCurrent(evaluation) else { return }
+        raised = (evaluation.id, banner)
+    }
+
+    /// Clears a refusal this evaluation had raised. Under the same fence, so an action that
+    /// succeeded after the selection moved does not clear the new context's banner.
+    private func clear(_ evaluation: Evaluation) {
+        guard isCurrent(evaluation) else { return }
+        raised = nil
     }
 
     /// Takes the in-flight slot, or refuses because one is already taken.

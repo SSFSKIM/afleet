@@ -73,6 +73,16 @@ final class AppModel {
     /// releases every model built over the previous one.
     let timelines = ChannelTimelineRegistry()
 
+    /// The one set of in-flight decision reservations, and the one place a settled answer is
+    /// announced (contract Y2).
+    ///
+    /// **One instance, app-scoped**, for a reason the registry above shares: a request the engine is
+    /// waiting on is answerable exactly once, and the surfaces that can answer it — Activity's row,
+    /// the Thread tab, the timeline's card — each hold their own `DecisionAnswering`. A set per host
+    /// disables only the host that clicked, so two of them reach the wire and the second is refused;
+    /// and the host holding the request's payload never hears about an answer another surface sent.
+    let decisions = DecisionReservations()
+
     /// Contract X7's host (spec §7), the app's only conformance to `PanelHost`.
     ///
     /// **One instance, app-scoped**, for the same reason the registry above is: the panel column
@@ -242,7 +252,8 @@ final class AppModel {
                 // open thread has to read the item's state from that same fold. This is the one
                 // construction site where the app-scoped registry and a lifecycle both exist.
                 try panels.register(ThreadTab(lifecycle: workspace.fleet,
-                                              fold: ChannelFold(timelines: timelines)))
+                                              fold: ChannelFold(timelines: timelines),
+                                              reservations: decisions))
             } catch {
                 assertionFailure("the handover unregistered .thread before registering over it")
             }
@@ -287,7 +298,8 @@ final class AppModel {
                                   configHome: workspace.configHome.root,
                                   shell: shell,
                                   router: router,
-                                  store: workspace.store)
+                                  store: workspace.store,
+                                  reservations: decisions)
         sink.model = model
         // Contract X4 and spec D2: a card answered from Activity raises `decisionAnswered` on the
         // channel's own fold. Activity holds no timeline model — it answers for channels the user

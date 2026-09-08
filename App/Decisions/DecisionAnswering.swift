@@ -4,6 +4,60 @@ import AfleetCore
 import ClaudeWire
 import FleetKit
 
+/// The app's one reservation set for decision answers, and the one place a settled answer is
+/// announced (contract Y2, spec §8.4).
+///
+/// **Why it is not per host.** Every surface that can answer a request builds its own
+/// `DecisionAnswering`: Activity's row, the Thread tab, the timeline's card. A request id is
+/// answerable exactly once — the supervisor drops the pending entry with the first answer and
+/// refuses the second — so an in-flight set held per host disables the buttons of the host that
+/// clicked and leaves the same request live on every other surface. The two clicks then both reach
+/// the wire and the second comes back `decisionGone`, which is an error about afleet's own
+/// bookkeeping dressed as an error about the engine.
+///
+/// **And why the settle notification lives here too.** The engine sends no frame back for an answer,
+/// so a host holding the request's payload — `ChannelEventPump.requests` — learns it is closed only
+/// by being told, and *any* surface's answer closes it. One announcement point means the host that
+/// holds the payload hears about an answer it did not make, which is the case that leaked before.
+/// `@Observable` because the cards disable on it: the in-flight set moved out of the answering
+/// object, and a view that observed the old property has to observe this one instead.
+@MainActor
+@Observable
+final class DecisionReservations {
+
+    /// What a host does with a successful answer: forget the request its pump is still holding —
+    /// `ChannelEventPump.forget(_:)`, the seam C5 installed — and adopt the state `perform`
+    /// returned.
+    typealias Settled = @MainActor (RequestID, ChannelKey, ChannelState) -> Void
+
+    /// The answers on the wire, from every host at once. Request ids, and nothing else: this is
+    /// bookkeeping about a network call in progress and never a copy of `DecisionItem.state`.
+    private(set) var inFlight: Set<RequestID> = []
+
+    /// Keyed by the host, so a model rebuilt over the same set replaces its own registration rather
+    /// than adding a second one.
+    private var observers: [ObjectIdentifier: Settled] = [:]
+
+    init() {}
+
+    func isAnswering(_ id: RequestID) -> Bool { inFlight.contains(id) }
+
+    /// Takes the one slot this request has, or refuses because some surface already has it.
+    func claim(_ id: RequestID) -> Bool { inFlight.insert(id).inserted }
+
+    func release(_ id: RequestID) { inFlight.remove(id) }
+
+    /// Registers a host to hear about every answer that succeeded, whoever sent it.
+    func observe(_ host: AnyObject, _ settled: @escaping Settled) {
+        observers[ObjectIdentifier(host)] = settled
+    }
+
+    /// Announces an answer the engine accepted.
+    func settled(_ id: RequestID, in channel: ChannelKey, as state: ChannelState) {
+        for observer in observers.values { observer(id, channel, state) }
+    }
+}
+
 /// The one object a decision card's answer leaves by, held by both hosts (contract Y2, spec §8.4).
 ///
 /// It performs `LifecycleAction.answer` through X5 and nothing else: the body it sends is whatever
@@ -11,18 +65,13 @@ import FleetKit
 /// different ways. A refusal renders through C5's `RowBanner`, and a successful answer tells the
 /// host to forget the request, because the engine sends no frame back for one.
 ///
-/// **The only state it holds is `inFlight`, a set of request ids.** That is bookkeeping about a
-/// network call in progress — it disables the buttons between the click and `perform` returning, so
-/// a double click cannot send twice. It holds no outcome and is not a second copy of
-/// `DecisionItem.state`: a card's state is C3's, read from the item the host hands in.
+/// **It holds no state of its own.** The in-flight ids live in `DecisionReservations`, which every
+/// host shares, because the request they reserve is answerable once and not once per surface. This
+/// object holds no outcome and no copy of `DecisionItem.state`: a card's state is C3's, read from
+/// the item the host hands in.
 @MainActor
 @Observable
 final class DecisionAnswering {
-
-    /// What a host does with a successful answer: forget the request the pump is still holding —
-    /// `ChannelEventPump.forget(_:)`, the seam C5 installed — and adopt the state `perform`
-    /// returned. The default does neither, which is what a host with no pump wants.
-    typealias Settled = @MainActor (RequestID, ChannelKey, ChannelState) -> Void
 
     /// Where a successful answer's host signal goes (spec D2, contract X4).
     ///
@@ -46,24 +95,27 @@ final class DecisionAnswering {
 
     private let lifecycle: any LifecycleAPI
 
-    /// Assigned by the host after construction, because the host is what the closure captures.
-    var settled: Settled = { _, _, _ in }
+    /// The shared set, and the shared announcement. Handed in rather than made here: a host that
+    /// makes its own is a host whose answers nobody else hears about.
+    let reservations: DecisionReservations
 
     /// See `Raising`. Assigned by a host that owns the channel's `ChannelTimelineModel`.
     var raise: Raising = { _, _ in }
 
-    /// The answers this object has sent and not yet had a reply to. Request ids, and nothing else.
-    private(set) var inFlight: Set<RequestID> = []
+    /// Every answer on the wire, from any host. Read by the cards, which disable on it.
+    var inFlight: Set<RequestID> { reservations.inFlight }
 
     /// Why the last answer did not happen, or nil. Cleared by the next answer that does.
     private(set) var banner: RowBanner?
 
-    init(lifecycle: any LifecycleAPI) {
+    init(lifecycle: any LifecycleAPI, reservations: DecisionReservations = DecisionReservations()) {
         self.lifecycle = lifecycle
+        self.reservations = reservations
     }
 
-    /// True while this request has an answer on the wire. The card disables its actions on it.
-    func isAnswering(_ id: RequestID) -> Bool { inFlight.contains(id) }
+    /// True while this request has an answer on the wire — sent from **any** surface, which is what
+    /// makes the second of two hosts refuse rather than send a duplicate. The card disables on it.
+    func isAnswering(_ id: RequestID) -> Bool { reservations.isAnswering(id) }
 
     /// A card's action, on its way to the engine.
     ///
@@ -79,7 +131,7 @@ final class DecisionAnswering {
               onSuccess: (@MainActor () -> Void)? = nil) {
         guard let answer = card.answer(action) else { return }
         let id = card.requestID
-        guard inFlight.insert(id).inserted else { return }
+        guard reservations.claim(id) else { return }
         let outcome = Self.outcome(of: answer, for: card.kind)
         Task { await self.deliver(answer, to: id, in: channel, as: outcome, then: onSuccess) }
     }
@@ -127,7 +179,7 @@ final class DecisionAnswering {
 
     private func deliver(_ answer: InboundAnswer, to id: RequestID, in channel: ChannelKey,
                          as outcome: DecisionOutcome, then onSuccess: (@MainActor () -> Void)? = nil) async {
-        defer { inFlight.remove(id) }
+        defer { reservations.release(id) }
         do {
             let state = try await lifecycle.perform(.answer(id, answer), on: channel)
             banner = nil
@@ -136,7 +188,7 @@ final class DecisionAnswering {
             // answer as answered, and the card would go quiet on a request still waiting.
             await raise(channel, .decisionAnswered(id, outcome: outcome))
             onSuccess?()
-            settled(id, channel, state)
+            reservations.settled(id, in: channel, as: state)
         } catch let error as LifecycleError {
             banner = RowBanner(error)
         } catch {
