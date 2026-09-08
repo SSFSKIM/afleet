@@ -4,30 +4,39 @@ import GhosttyTerminal
 import TerminalCore
 import XCTest
 
-@MainActor
-private final class CollisionSurfaceStub: TerminalCore.TerminalSurface {
-    let view = NSView()
-    var onInput: (@Sendable (Data) -> Void)?
-    var onResize: (@Sendable (TerminalSize) -> Void)?
-    let terminalDescription = TerminalDescription(term: "stub-terminal")
-
-    func feed(_ output: Data) {}
-    func processDidExit(code: Int32) {}
-    func setAppearance(_ appearance: TerminalAppearance) {}
-}
-
 final class NameCollisionTests: XCTestCase {
+    /// `TerminalCore` and `GhosttyTerminal` both ship a type called `TerminalSurface`, and the
+    /// adapter is the one place where the two names meet. What has to hold is not that the names
+    /// differ — the compiler settles that — but that the *shipped* adapter is unambiguously the
+    /// core protocol's conformer and not the dependency's type.
+    ///
+    /// The subject is bound as `AnyObject` on purpose: through that binding the casts are runtime
+    /// questions, so an adapter that stopped conforming, or a `TerminalSurface` that resolved to
+    /// the dependency, fails here instead of merely changing what compiles.
     @MainActor
-    func testCoreProtocolAndDependencyClassCanBothBeNamedAndUsed() {
-        let coreSurface: any TerminalCore.TerminalSurface = CollisionSurfaceStub()
-        let dependencyType: GhosttyTerminal.TerminalSurface.Type =
-            GhosttyTerminal.TerminalSurface.self
+    func testShippedAdapterIsTheCoreProtocolAndNotTheDependencyType() {
+        let shipped: AnyObject = GhosttyTerminalSurface()
 
-        XCTAssertTrue(coreSurface.view === coreSurface.view, "TerminalCore.TerminalSurface=absent")
         XCTAssertTrue(
-            ObjectIdentifier(type(of: coreSurface)) != ObjectIdentifier(dependencyType),
-            "GhosttyTerminal.TerminalSurface=absent"
+            shipped is any TerminalCore.TerminalSurface,
+            "shipped-adapter-core-conformance=absent"
         )
+        XCTAssertFalse(
+            shipped is GhosttyTerminal.TerminalSurface,
+            "shipped-adapter=dependency-type"
+        )
+
+        guard let surface = shipped as? any TerminalCore.TerminalSurface,
+              let adapter = shipped as? GhosttyTerminalSurface
+        else {
+            XCTFail("shipped-adapter-core-conformance=absent")
+            return
+        }
+        // Dispatch through the existential has to reach the shipped adapter's own storage, which
+        // is what makes the conformance load-bearing rather than merely declared.
+        surface.onInput = { _ in }
+        XCTAssertTrue(adapter.onInput != nil, "core-protocol-witness=not-the-shipped-adapter")
+        XCTAssertTrue(surface.view === adapter.view, "core-protocol-view=not-the-shipped-view")
     }
 
     func testDefaultAppearanceFollowsSystemAndLeavesFontUnspecified() {

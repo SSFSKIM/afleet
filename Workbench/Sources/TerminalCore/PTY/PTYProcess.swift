@@ -36,6 +36,18 @@ final class PTYMasterDescriptor: Sendable {
     }
 }
 
+/// What ``PTYProcess/signalProcessGroupWhileOwned(_:)`` did with a signal.
+enum PTYSignalDisposition: Sendable, Equatable {
+    /// The signal went to the process group this actor spawned.
+    case sent
+    /// A status is being consumed right now: the pid is still ours, but signalling is briefly
+    /// closed. The state resolves on its own, so a caller that cares retries.
+    case statusPending
+    /// The child's terminal status has been consumed. The pid may already name someone else, so
+    /// nothing was signalled.
+    case notOwned
+}
+
 /// The signalling right for one spawned process group, shared with the waiter so reaping and
 /// signalling have one synchronization point even though they run on different executors.
 private final class PTYChildProcessGroup: Sendable {
@@ -84,6 +96,23 @@ private final class PTYChildProcessGroup: Sendable {
             // or to `.consumingStatus` across a reap whose preview was nonterminal. Both states
             // suppress this syscall, so no path can signal after ownership of the pid ends.
             return Darwin.kill(-processIdentifier, signal) == 0
+        }
+    }
+
+    /// Signals only while the pid is still ours to name, reporting what the gate decided rather
+    /// than what the syscall returned: a caller cleaning up has to tell "no longer ours" apart
+    /// from "the kill failed", and those mean opposite things.
+    func signalWhileOwned(_ signal: Int32) -> PTYSignalDisposition {
+        state.withLock { state in
+            switch state {
+            case .signalable:
+                _ = Darwin.kill(-processIdentifier, signal)
+                return .sent
+            case .consumingStatus:
+                return .statusPending
+            case .terminal:
+                return .notOwned
+            }
         }
     }
 }
@@ -392,6 +421,53 @@ private final class PTYEventDelivery: @unchecked Sendable {
     }
 }
 
+/// A serialised handoff from a synchronous producer into the actor.
+///
+/// A renderer reports keystrokes and grid changes through synchronous callbacks that run off the
+/// main actor and cannot await. One unstructured `Task` per callback would let N callbacks race
+/// to enter the actor, so the child could receive them in an order the producer never chose —
+/// the write gate only promises the order callers *entered* the actor. This queue fixes the order
+/// at the moment the callback runs, and at most one drain is ever in flight.
+///
+/// The state lives in a `Mutex` because callbacks arrive on whatever thread the renderer uses
+/// while the drain runs on the actor; that lock is the single point serialising the two.
+private final class PTYIngressQueue: Sendable {
+    enum Item: Sendable {
+        case input(Data)
+        case resize(TerminalSize)
+    }
+
+    private struct State {
+        var pending: [Item] = []
+        var isDraining = false
+    }
+
+    private let state = Mutex(State())
+
+    /// Appends `item`, reporting whether this caller has to start the drain. Exactly the enqueue
+    /// that finds no drain in flight is told to start one, so two drains never run at once.
+    func enqueue(_ item: Item) -> Bool {
+        state.withLock { state in
+            state.pending.append(item)
+            guard !state.isDraining else { return false }
+            state.isDraining = true
+            return true
+        }
+    }
+
+    /// The next item, or `nil` once the queue is empty — which also ends the drain, under the same
+    /// lock that an enqueue takes, so the enqueue that follows an empty queue starts a fresh one.
+    func takeNext() -> Item? {
+        state.withLock { state in
+            guard !state.pending.isEmpty else {
+                state.isDraining = false
+                return nil
+            }
+            return state.pending.removeFirst()
+        }
+    }
+}
+
 public actor PTYProcess {
     /// At most 64 KiB is handed to the main actor in one turn: large enough to amortize pty read
     /// and actor-hop overhead, but small enough to bound one renderer parse/invalidation pass.
@@ -427,6 +503,7 @@ public actor PTYProcess {
     private let eventDelivery: PTYEventDelivery
     private let stopPolicy: PTYStopPolicy
     private let processGroup: PTYChildProcessGroup
+    private let ingress = PTYIngressQueue()
     private var masterIsOpen = true
     private var termination: PTYTermination?
     private var childIsTerminal = false
@@ -710,6 +787,54 @@ public actor PTYProcess {
             throw PTYError.systemCall(operation: .readForegroundProcessGroup, code: errno)
         }
         return group
+    }
+
+    /// Hands input to the child from a synchronous, off-actor producer, in the order the producer
+    /// produced it. This is the seam a renderer's `onInput` callback writes through: that callback
+    /// cannot await, and one `Task` per callback would leave the bytes racing into the actor, so a
+    /// fast typist could see `ba` for `ab`. Enqueueing is synchronous; one drain writes the queue
+    /// out in order.
+    ///
+    /// Fire and forget: a synchronous callback has nowhere to return an error to, and a write that
+    /// fails here means the pty is closed and the pane is already gone. A caller that needs the
+    /// error, or needs to know the bytes landed, calls ``write(_:)`` instead.
+    ///
+    /// nonisolated because the ordering is established before the actor is reached: `PTYIngressQueue`
+    /// serialises every producer under its own `Mutex`.
+    public nonisolated func sendInput(_ data: Data) {
+        enqueueIngress(.input(data))
+    }
+
+    /// The resize counterpart of ``sendInput(_:)``, ordered against it and against itself, so the
+    /// last grid the producer reported is the last one the child is told about.
+    public nonisolated func sendResize(to size: TerminalSize) {
+        enqueueIngress(.resize(size))
+    }
+
+    private nonisolated func enqueueIngress(_ item: PTYIngressQueue.Item) {
+        guard ingress.enqueue(item) else { return }
+        Task { await self.drainIngress() }
+    }
+
+    private func drainIngress() async {
+        while let item = ingress.takeNext() {
+            switch item {
+            case let .input(data):
+                try? await write(data)
+            case let .resize(size):
+                try? resize(to: size)
+            }
+        }
+    }
+
+    /// Signals the process group this actor spawned, but only while this actor still owns the pid.
+    ///
+    /// nonisolated because the signalling right is held by the same `Mutex` the waiter closes
+    /// around a reap; that lock, not this actor's executor, is what serialises the two. Once a
+    /// terminal status has been consumed the pid can be recycled, so the gate refuses and this
+    /// reports `.notOwned` rather than naming a group that may no longer be ours.
+    nonisolated func signalProcessGroupWhileOwned(_ signal: Int32) -> PTYSignalDisposition {
+        processGroup.signalWhileOwned(signal)
     }
 
     private func enterWriteGate() async throws {

@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import Synchronization
-import TerminalCore
+@testable import TerminalCore
 import XCTest
 
 /// Everything the pty has produced so far. A test that has to write while it reads cannot take
@@ -217,15 +217,46 @@ enum PTYTestChild {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func terminateAndReap(_ process: PTYProcess) {
-        terminateAndReap(pid: process.processIdentifier)
+    /// Cleanup for a child whose actor is still alive. Every signal goes through the actor's own
+    /// ownership gate, which closes as the child's terminal status is consumed, so this can never
+    /// name a group that some later process has come to own. A group signal carries exactly the
+    /// same exposure as a bare-pid one: the child is the session and process-group leader, so its
+    /// pgid is its pid and is recycled with it.
+    ///
+    /// Reaping is left to the actor's waiter, which is the one reaper of this child. A `waitpid`
+    /// here would be a second claim on the same pid, and after the waiter has reaped it that call
+    /// would block on whichever of this process's children next holds that number.
+    @discardableResult
+    static func terminateAndReap(_ process: PTYProcess) -> PTYSignalDisposition {
+        let disposition = signalWhileOwned(process, SIGCONT)
+        guard disposition == .sent else { return disposition }
+        _ = signalWhileOwned(process, SIGKILL)
+        return .sent
     }
 
+    /// A status being consumed is a state that resolves within a scheduler turn or two, so a
+    /// bounded retry is what tells "still ours, briefly closed" apart from "no longer ours".
+    private static func signalWhileOwned(
+        _ process: PTYProcess,
+        _ signal: Int32
+    ) -> PTYSignalDisposition {
+        for _ in 0..<statusSettlingAttempts {
+            let disposition = process.signalProcessGroupWhileOwned(signal)
+            guard disposition == .statusPending else { return disposition }
+            usleep(statusSettlingMicroseconds)
+        }
+        return .statusPending
+    }
+
+    private static let statusSettlingAttempts = 1_000
+    private static let statusSettlingMicroseconds: UInt32 = 1_000
+
+    /// Cleanup for a pid whose `PTYProcess` is gone, which is the one case with no gate to ask and
+    /// no other reaper: nothing else in this process can have consumed the status, so the pid is
+    /// still this process's child and still ours to name. Callers clear their own cleanup flag
+    /// once something else has provably reaped it.
     static func terminateAndReap(pid: pid_t) {
         guard pid > 1 else { return }
-        // The child is the session and process-group leader, so these group signals include the
-        // leader and every process its script started. Never signal the bare pid after waiting:
-        // the actor may already have reaped it, at which point that pid no longer belongs to us.
         _ = Darwin.kill(-pid, SIGCONT)
         _ = Darwin.kill(-pid, SIGKILL)
         var status: Int32 = 0

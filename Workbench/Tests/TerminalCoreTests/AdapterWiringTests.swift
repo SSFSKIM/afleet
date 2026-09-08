@@ -190,6 +190,36 @@ final class AdapterWiringTests: XCTestCase {
         )
     }
 
+    /// A theme name the catalog does not know renders exactly like asking for no theme at all, so
+    /// a typo and "follow the system" are the same picture. This headless test asserts that the
+    /// caller can still tell them apart; which colours appear belongs to G2.
+    func testUnknownThemeNameKeepsTheSystemFallbackAndIsReportedAsUnknown() {
+        let surface = makeSurface()
+        let systemDefault = makeSurface()
+        systemDefault.setAppearance(TerminalAppearance())
+
+        surface.setAppearance(TerminalAppearance(themeName: "Invented Theme Name"))
+        let unknownResolution = surface.themeResolution
+        let unknownRendered = surface.terminalController.theme.light.rendered
+
+        surface.setAppearance(TerminalAppearance(themeName: "Dracula"))
+        let namedResolution = surface.themeResolution
+
+        surface.setAppearance(TerminalAppearance())
+        let systemResolution = surface.themeResolution
+
+        XCTAssertTrue(
+            unknownResolution == .unknownName("Invented Theme Name"),
+            "unknown-theme-report=absent"
+        )
+        XCTAssertTrue(
+            unknownRendered == systemDefault.terminalController.theme.light.rendered,
+            "unknown-theme-fallback=changed"
+        )
+        XCTAssertTrue(namedResolution == .named("Dracula"), "named-theme-report=absent")
+        XCTAssertTrue(systemResolution == .systemAppearance, "system-theme-report=absent")
+    }
+
     /// This headless test asserts that appearance state is per-surface, not rendering;
     /// visual appearance belongs to G2.
     func testAppearanceOnOneSurfaceLeavesAnotherSurfaceUntouched() {

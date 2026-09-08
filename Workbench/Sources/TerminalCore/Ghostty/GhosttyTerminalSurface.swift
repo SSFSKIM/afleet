@@ -97,6 +97,11 @@ public final class GhosttyTerminalSurface: TerminalSurface {
 
     public let terminalDescription: TerminalDescription
 
+    /// What the last ``setAppearance(_:)`` made of its theme name. `.unknownName` says the pane is
+    /// rendering the system-appearance default because the name was not in the catalog, which is
+    /// the one thing the rendered pane itself cannot say.
+    public private(set) var themeResolution: TerminalThemeResolution = .systemAppearance
+
     public var view: NSView { terminalView }
 
     public var onInput: (@Sendable (Data) -> Void)? {
@@ -180,6 +185,7 @@ public final class GhosttyTerminalSurface: TerminalSurface {
 
     public func setAppearance(_ appearance: TerminalAppearance) {
         let ghosttyAppearance = GhosttyAppearance(appearance)
+        themeResolution = ghosttyAppearance.themeResolution
         terminalController.setTheme(ghosttyAppearance.theme)
         terminalController.setTerminalConfiguration(ghosttyAppearance.configuration)
     }

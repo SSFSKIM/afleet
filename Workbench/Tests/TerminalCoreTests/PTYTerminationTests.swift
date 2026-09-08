@@ -502,6 +502,39 @@ final class PTYTerminationTests: XCTestCase {
         }
     }
 
+    /// A trace assertion, and deliberately so: pid recycling cannot be provoked from inside a
+    /// test process. What is pinned instead is the gate every cleanup signal passes through — it
+    /// must refuse once the child's status has been consumed, because from that moment `-pid`
+    /// names whatever group next takes that number rather than this child's.
+    func testCleanupSignalsAreRefusedOnceTheChildHasBeenReaped() async throws {
+        let directory = try PTYTestChild.temporaryDirectory()
+        defer { PTYTestChild.remove(directory) }
+        let living = try PTYProcess(
+            spawning: PTYTestChild.request(
+                cwd: directory,
+                script: PTYTestChild.selfTerminating(after: 30, "exec /bin/cat")
+            )
+        )
+        let reaped = try PTYProcess(
+            spawning: PTYTestChild.request(
+                cwd: directory,
+                script: PTYTestChild.selfTerminating(after: 30, "exec /bin/cat")
+            )
+        )
+        var livingNeedsCleanup = true
+        defer {
+            if livingNeedsCleanup { PTYTestChild.terminateAndReap(living) }
+        }
+
+        let livingDisposition = PTYTestChild.terminateAndReap(living)
+        livingNeedsCleanup = false
+        await reaped.teardown()
+        let reapedDisposition = PTYTestChild.terminateAndReap(reaped)
+
+        XCTAssertTrue(livingDisposition == .sent, "living-child-cleanup=refused")
+        XCTAssertTrue(reapedDisposition == .notOwned, "reaped-child-cleanup=signalled")
+    }
+
     private func record(
         _ events: AsyncStream<PTYEvent>
     ) -> (PTYEventRecorder, Task<Void, Never>) {

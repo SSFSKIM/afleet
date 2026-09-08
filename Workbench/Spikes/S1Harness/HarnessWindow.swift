@@ -221,13 +221,16 @@ final class Harness {
 
     private func wire(to pty: PTYProcess) {
         self.pty = pty
+        // These callbacks are synchronous and run off the main actor. They hand the child bytes
+        // and grids through the pty layer's ordered ingress rather than starting a task each:
+        // N tasks would race to enter the actor and the child could see them out of order.
         surface.onInput = { [weak self] data in
+            pty.sendInput(data)
             Task { @MainActor in self?.didReceiveInput(data) }
-            Task { try? await pty.write(data) }
         }
         surface.onResize = { [weak self] size in
+            pty.sendResize(to: size)
             Task { @MainActor in self?.didReceiveGrid(size) }
-            Task { try? await pty.resize(to: size) }
         }
         Task { @MainActor in
             for await event in pty.events {
