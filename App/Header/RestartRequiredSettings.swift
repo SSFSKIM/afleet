@@ -54,15 +54,32 @@ extension ChannelHeaderActionsModel {
             say("That setting changes without a restart; the header does not replace the process for it.")
             return false
         }
+        // The process this channel is running *now*: the epoch is what separates a restart that ran
+        // from one that was only recorded.
+        let before = await lifecycle.state(of: key)
         let expected = pickers.currentSnapshot
         pickers.beginRestart(reason: setting.restartReason)
-        guard await perform(.quiescentRestart(request)) else {
+        let after: ChannelState
+        do {
+            after = try await lifecycle.perform(.quiescentRestart(request), on: key)
+        } catch {
             // Nothing was replaced, so the field re-opens rather than staying shut behind a process
             // that is still the one it was.
             pickers.cancelRestart()
+            say(Self.refusal(error))
             return false
         }
         countRestart()
+        // **The restart has to have happened before anything is confirmed.** A busy channel keeps the
+        // request for the dormant timer and answers success straight away, and so does a change that
+        // merged into a restart already in flight: confirming there releases the field against the
+        // old process, and §8.6's mode switch would follow it onto a process that was never launched
+        // with the flag it needs.
+        guard SettingPickersModel.replacedTheProcess(after, from: before) else {
+            pickers.noteQueuedRestart()
+            say(pickers.restartBanner)
+            return false
+        }
         // §7.4: the composer stays disabled until **every** readback matches; a mismatch banners,
         // names the setting that did not survive, and keeps it disabled until the user picks a value.
         let survived = await pickers.confirmReadback(of: expected)

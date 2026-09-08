@@ -327,6 +327,10 @@ final class RecordingAppFleet: AppFleet {
     func states() async -> [ChannelState] { await inner.states() }
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition { await inner.preconditions(for: key) }
     func route(_ text: String, on key: ChannelKey) async -> Routed { await inner.route(text, on: key) }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { await inner.engineReports(of: key) }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        try await inner.resolveSetting(name, to: value, on: key)
+    }
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         try await inner.send(request, on: key)
     }

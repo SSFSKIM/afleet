@@ -26,11 +26,20 @@ import FleetKit
 /// `.lifecycle` row the composer issues directly and G1 asserts exactly that member sequence. The
 /// menu item is the one that has to show the cost first, because it is the one that names the live
 /// background tasks whose shells the handoff closes.
-enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
+/// Task 11 added `trustDirectory`, which is not a lifecycle action at all: §7.7's `/cd` row answers an
+/// untrusted directory with a **success envelope that changed nothing**, and the trust is granted only
+/// by a second `set_cwd`. It shares this gate because it is the same kind of thing — something afleet
+/// does not do until the user has answered for it — and the dialog that draws the other four draws it
+/// with no change of its own.
+enum ComposerConfirmation: Hashable, Sendable {
     case stopEverything
     case backgroundAll
     case logout
     case sendToBackground
+    /// The directory the engine's `needs_trust` answer named, and the path the line asked for. Both,
+    /// because the second call carries both and they are not interchangeable: `trusted_directory`
+    /// must echo the **answer's** directory, which is the resolved one.
+    case trustDirectory(directory: String, path: String)
 
     /// Nil for every action the **router** issues directly — a plain fork and a typed `/background`
     /// are the channel's own business. The header raises `.sendToBackground` itself.
@@ -43,12 +52,28 @@ enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
         }
     }
 
-    var action: LifecycleAction {
+    /// The lifecycle action this confirm issues, and **nil for the one that issues none**: trusting a
+    /// directory is a control request, so `confirmPending()` reads the case rather than every case
+    /// being made to name an action it does not have.
+    var action: LifecycleAction? {
         switch self {
         case .stopEverything: .stopEverything
         case .backgroundAll: .backgroundAll
         case .logout: .logout
         case .sendToBackground: .sendToBackground
+        case .trustDirectory: nil
+        }
+    }
+
+    /// The case's name, for a note or an assertion that must carry no value (§11). Computed rather
+    /// than a raw value, because one case carries the directory it is about.
+    var rawValue: String {
+        switch self {
+        case .stopEverything: "stopEverything"
+        case .backgroundAll: "backgroundAll"
+        case .logout: "logout"
+        case .sendToBackground: "sendToBackground"
+        case .trustDirectory: "trustDirectory"
         }
     }
 
@@ -58,6 +83,7 @@ enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
         case .backgroundAll: "Send every live channel to the background?"
         case .logout: "Sign out of every channel on this machine?"
         case .sendToBackground: "Send this channel to the background?"
+        case .trustDirectory: "Trust this directory?"
         }
     }
 
@@ -67,6 +93,10 @@ enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
         case .backgroundAll: "Every channel afleet owns hands off to a background job and its window goes quiet."
         case .logout: "Every owned channel and every afleet-launched job on this machine signs out."
         case .sendToBackground: "This channel's process is replaced by a background job; its local shells close."
+        // The directory is what the user is being asked about, so it is named: a trust dialog that
+        // hid it would be asking about nothing.
+        case .trustDirectory(let directory, _):
+            "This channel has not run in \(directory) before. Trusting it lets the engine work there."
         }
     }
 
@@ -76,6 +106,7 @@ enum ComposerConfirmation: String, Hashable, Sendable, CaseIterable {
         case .backgroundAll: "Send to Background"
         case .logout: "Sign Out"
         case .sendToBackground: "Send to Background"
+        case .trustDirectory: "Trust and Change"
         }
     }
 }
@@ -104,10 +135,21 @@ extension ComposerModel {
     func dispatch(_ routed: Routed) async -> Bool {
         switch routed {
         case .controlRequest(let request):
-            return await issue { _ = try await self.lifecycle.send(request, on: self.key) }
+            // §7.4 and §8.6 bind the three settings the pickers own to **one path each**, whichever
+            // surface asked for the change: the same request, the same readback, and for
+            // `bypassPermissions` the same disclaimer, acceptance write and prerequisite restart. A
+            // typed line that sent the request itself skipped all three and left the header showing a
+            // value the engine had already moved past.
+            if let handled = await pickers.apply(routed: request) { return handled }
+            return await sendRouted(request)
         case .strategy(let strategy, let arguments):
-            return await issue {
-                _ = try await self.lifecycle.run(strategy, arguments: arguments, on: self.key, ui: self)
+            do {
+                let outcome = try await lifecycle.run(strategy, arguments: arguments, on: key, ui: self)
+                present(outcome)
+                return true
+            } catch {
+                refuse(error)
+                return false
             }
         case .lifecycle(let action):
             return await dispatch(action: action)
@@ -116,12 +158,23 @@ extension ComposerModel {
             // re-opens it only once every readback matches — a mismatch banners and keeps it closed.
             // The gate is `SettingPickersModel`'s, over the `ChannelSurfaceState` the header shares,
             // and the two readbacks it takes are why this row reaches four members rather than two.
+            let before = await lifecycle.state(of: key)
             let expected = pickers.currentSnapshot
             pickers.beginRestart(reason: "This channel is restarting to apply the setting.")
-            guard await issue({ _ = try await self.lifecycle.perform(.quiescentRestart(request), on: self.key) })
-            else {
+            let after: ChannelState
+            do {
+                after = try await lifecycle.perform(.quiescentRestart(request), on: key)
+            } catch {
                 pickers.cancelRestart()
+                refuse(error)
                 return false
+            }
+            // A busy channel records the change for the dormant timer and answers success with the
+            // old process still on the other end; a readback confirmed there would release the field
+            // over a restart that has not happened.
+            guard SettingPickersModel.replacedTheProcess(after, from: before) else {
+                pickers.noteQueuedRestart()
+                return true
             }
             _ = await pickers.confirmReadback(of: expected)
             return true
@@ -130,10 +183,25 @@ extension ComposerModel {
             // it. So it goes through `post(_:)` — `sendPrompt`, and the `HostSignal.promptSent` raise
             // that attributes the turn it causes. While it was issued as `perform(.send)` with no
             // raise — as it was until Task 7 — the turn reduced as `.unprompted`.
-            return await post(UserInput(text: text))
+            //
+            // **With whatever is attached**, on exactly the terms a plain send carries them: an
+            // engine command is still a message, and images left behind here would ride the next one
+            // instead — a picture answering a question the user has already moved on from.
+            let images = attachments
+            guard await post(UserInput(text: text, images: images)) else { return false }
+            dropAttachments(images.count)
+            ghostText = nil
+            return true
         case .native(let surface):
             // Nothing reaches the lifecycle: a picker, a list or the switcher is afleet's own screen.
             openSurface = surface
+            // The two picker surfaces are the header's own and open here. Every other destination is
+            // another leaf's screen, and the app's one way to ask for one by name is the workspace's
+            // link router — which today answers a `.command` nothing has claimed with a diagnostic
+            // rather than with silence (tracker 207).
+            if !pickers.present(surface) {
+                await context?.links.open(.command(surface), from: .currentPanel)
+            }
             return true
         case .refusedLocally(let explanation):
             // Verbatim from `RouterTable`. The composer does not paraphrase it and does not add to it.
@@ -152,16 +220,123 @@ extension ComposerModel {
         return await issue { _ = try await self.lifecycle.perform(action, on: self.key) }
     }
 
-    /// The waiting confirm, answered yes. The only place the three destructive actions are issued.
+    /// The waiting confirm, answered yes. The only place the three destructive actions are issued —
+    /// and the only place trust is granted for a directory.
     @discardableResult
     func confirmPending() async -> Bool {
         guard let pending = pendingConfirmation else { return false }
         pendingConfirmation = nil
         confirmationDetail = nil
-        let issued = await issue { _ = try await self.lifecycle.perform(pending.action, on: self.key) }
+        let issued: Bool
+        if let action = pending.action {
+            issued = await issue { _ = try await self.lifecycle.perform(action, on: self.key) }
+        } else if case .trustDirectory(let directory, let path) = pending {
+            issued = await grantTrust(directory: directory, path: path)
+        } else {
+            issued = false
+        }
         if issued, let line = confirmedLine, draft.hasPrefix(line) { draft = String(draft.dropFirst(line.count)) }
         confirmedLine = nil
         return issued
+    }
+
+    /// §7.7's `/cd` row, second half: the same `set_cwd` again, carrying `trust_accepted` **and**
+    /// `trusted_directory` echoing the directory the engine's own answer named.
+    ///
+    /// The echo is the whole point — `trust_accepted` alone is refused, and echoing the path the host
+    /// asked for rather than the one the engine resolved would grant trust to a different directory.
+    /// `CommandRouter.continueCD` builds it, so this file builds no request of its own (X10).
+    private func grantTrust(directory: String, path: String) async -> Bool {
+        let request = AnyControlRequest(CommandRouter.continueCD(afterNeedsTrust: directory, path: path))
+        do {
+            let answer = try await lifecycle.send(request, on: key)
+            editNote = Self.directoryNote(answer)
+            return true
+        } catch {
+            refuse(error)
+            return false
+        }
+    }
+
+    /// What the second `set_cwd` did, without naming the directory a second time: the user has just
+    /// been asked about it and the answer's own `cwd` is a path (§11). `transcript_relocated` is
+    /// worth saying because the conversation's records moved with it (§7.3).
+    static func directoryNote(_ answer: JSONValue) -> String {
+        guard answer["status"]?.stringValue == "ok" else {
+            return "The channel's directory did not change."
+        }
+        return answer["transcript_relocated"]?.boolValue == true
+            ? "The channel's directory changed, and its transcript moved with it."
+            : "The channel's directory changed."
+    }
+
+    /// One routed control request, with its **answer read**.
+    ///
+    /// The only answer this leaf reads anything out of is `set_cwd`'s: `{status: "needs_trust",
+    /// directory}` is a success envelope that changed nothing (§7.7's `/cd` row), so a dispatch that
+    /// looked only at "it did not throw" reported a directory change that never happened and dropped
+    /// the line. Everything else answers with a body the pickers or a strategy read, or with nothing.
+    private func sendRouted(_ request: AnyControlRequest) async -> Bool {
+        do {
+            let answer = try await lifecycle.send(request, on: key)
+            guard request.subtype == SetCwd.subtype, answer["status"]?.stringValue == "needs_trust",
+                  let directory = answer["directory"]?.stringValue
+            else { return true }
+            // Nothing has changed yet, so the line stays in the field until the question is answered.
+            pendingConfirmation = .trustDirectory(directory: directory,
+                                                  path: request.payload["path"]?.stringValue ?? directory)
+            return false
+        } catch {
+            refuse(error)
+            return false
+        }
+    }
+
+    /// What a strategy answered, in front of the user.
+    ///
+    /// Every case carries a value the strategy read off the engine, and a dispatch that dropped it
+    /// left a cleared line and nothing to show for it. The surface is the composer's own note, the one
+    /// *Edit* already writes to: a permissions view, an MCP popover and a memory list are panels of
+    /// their own, which this leaf does not draw (tracker 206). Counts and the engine's own sentences
+    /// only — a memory file is a path and a signed-in account is an address, and neither is named
+    /// here (§11).
+    func present(_ outcome: StrategyOutcome) {
+        switch outcome {
+        case .rewind(let preview, let done):
+            editNote = Self.rewindNote(preview, done)
+            // The prompt the engine handed back for an honoured rewind, exactly as it sent it — the
+            // same prefill *Edit* puts in the field.
+            if done?.rewound == true, let prefill = done?.prefillText { draft = prefill }
+        case .login(_, let done):
+            switch done {
+            case .signedIn: editNote = "Signed in."
+            case .noActiveFlow(let reason): editNote = reason
+            }
+        case .permissions(let view):
+            editNote = "\(view.applied.count) applied setting(s): "
+                + view.applied.keys.sorted().joined(separator: ", ") + "."
+        case .mcp(let popover):
+            editNote = "\(popover.servers.count) MCP server(s)."
+        case .memory(let files):
+            editNote = "\(files.count) memory file(s)."
+        case .answered, .notARequest:
+            break
+        }
+    }
+
+    /// `/rewind`'s outcome as a sentence: what a revert would have changed, or what it did, or that it
+    /// was refused and what is offered instead (parent §8.5 item 13). Counts and the engine's own
+    /// reason; never a file name.
+    static func rewindNote(_ preview: RewindPreview, _ done: RewindOutcome?) -> String {
+        guard let done else {
+            return "Nothing was rewound. A revert would have changed \(preview.filesChanged.count) file(s)."
+        }
+        guard done.rewound else {
+            let reason = done.error.map { ": \($0)" } ?? "."
+            return "The conversation was not rewound\(reason) Fork from here is offered on that message."
+        }
+        guard let files = done.files else { return "The conversation was rewound." }
+        return "The conversation was rewound; \(files.skippedLinks) file(s) were left as they were."
     }
 
     /// Answered no. Nothing has reached the lifecycle and the typed line stays where it was.
@@ -177,12 +352,19 @@ extension ComposerModel {
         do {
             try await call()
             return true
-        } catch let error as LifecycleError {
-            refusal = Self.explanation(of: error)
-            return false
         } catch {
-            refusal = "The channel did not answer; your line is still in the field."
+            refuse(error)
             return false
+        }
+    }
+
+    /// The same two arms, for the branches that read their own answer and so cannot hand the call to
+    /// `issue(_:)`. One spelling of the refusal, in one place.
+    func refuse(_ error: any Error) {
+        if let lifecycle = error as? LifecycleError {
+            refusal = Self.explanation(of: lifecycle)
+        } else {
+            refusal = "The channel did not answer; your line is still in the field."
         }
     }
 }
@@ -229,7 +411,9 @@ extension ComposerModel {
             // the only one that exists for permission mode (§7.4). Recorded, never queried — noting
             // a handshake reaches no lifecycle member, so a channel that has just connected does not
             // spend two control requests before anything has asked for a picker.
-            pickers.noteHandshake(handshake.initialize)
+            // A handshake is also the first moment a channel that was archived when its picker was
+            // drawn has a process to answer to, so this is where an unanswered refresh is retaken.
+            await pickers.noteHandshake(handshake.initialize)
         case .frame(let frame, _):
             await observe(frame)
         case .sessionIdentityResolved, .request, .requestCancelled, .policyAnswered, .unansweredDialog,

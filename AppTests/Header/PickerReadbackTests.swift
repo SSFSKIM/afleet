@@ -96,7 +96,7 @@ final class PickerReadbackTests: XCTestCase {
         let recorded = try XCTUnwrap(initialize.currentPermissionMode,
                                      "the recorded handshake carries no current_permission_mode")
 
-        model.noteHandshake(initialize)
+        await model.noteHandshake(initialize)
 
         XCTAssertEqual(model.displayedMode, recorded, "the mode picker displays something other than the handshake's mode")
         let subtypes = await double.sentSubtypes
@@ -112,7 +112,7 @@ final class PickerReadbackTests: XCTestCase {
         let reported = try XCTUnwrap(recorded.currentPermissionMode, "the recorded handshake carries no mode")
         let clicked = try XCTUnwrap(PermissionMode.allCases.first { $0 != reported && $0 != .bypassPermissions },
                                     "there is no second mode to click")
-        model.noteHandshake(recorded)
+        await model.noteHandshake(recorded)
 
         await model.selectMode(clicked)
 
@@ -122,7 +122,7 @@ final class PickerReadbackTests: XCTestCase {
         XCTAssertEqual(subtypes, ["set_permission_mode"],
                        "the click sent \(subtypes.count) request(s): " + subtypes.joined(separator: ", "))
 
-        model.noteHandshake(recorded)
+        await model.noteHandshake(recorded)
 
         XCTAssertEqual(model.displayedMode, reported, "the disagreeing handshake did not stay on screen")
         XCTAssertNotNil(model.disagreement, "a handshake disagreeing with the click raised nothing")

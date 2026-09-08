@@ -307,6 +307,9 @@ final class ComposerModel {
         guard events == nil else { return }
         events = Task { @MainActor [weak self] in
             guard let self, let stream = await self.lifecycle.events(of: self.key) else { return }
+            // After the subscription and before the first frame: what the engine already reported
+            // and will not report again (`LateMountMetadata`).
+            await self.seedEngineReports()
             for await event in stream {
                 if Task.isCancelled { return }
                 self.onEvent?(event)

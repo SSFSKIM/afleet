@@ -36,7 +36,7 @@ final class BypassGateTests: XCTestCase {
         }
         trees.append(tree)
         let key = HeaderRig.key()
-        await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.alwaysPerform(.success(HeaderRig.replaced(key)))
         await double.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
         await double.stageSend("get_settings", .success(try settings ?? PickerReadbackTests.recordedBody("get_settings")))
         let header = HeaderRig.header(double, key: key,

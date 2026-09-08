@@ -102,6 +102,28 @@ final class SettingPickersModel {
     /// handshake settles the question.
     @ObservationIgnored private var requestedMode: PermissionMode?
 
+    /// Whether a picker has ever asked the engine for its options, and whether the last attempt came
+    /// back complete. Both are needed and neither alone is: a channel with no process refuses the two
+    /// requests, so an empty menu is either "nobody asked yet" or "asked and the process was not
+    /// there", and only the second is worth re-asking on the next handshake.
+    private(set) var hasAskedTheEngine = false
+    private(set) var lastRefreshSucceeded = false
+
+    /// The settings a restart did not carry across, by the fleet's own `Readback.verify` names.
+    ///
+    /// A list rather than a flag, because recovery is per setting: the banner promises that picking a
+    /// value continues, and a gate that reopened on the first pick would release the field with the
+    /// second setting still unanswered.
+    private(set) var restartFailures: [String] = []
+
+    /// The picker a routed command with no argument asked for, by `RouterTable`'s own surface name.
+    /// Nil whenever nothing was asked for; the menu clears it when it closes.
+    var presentedPicker: String?
+
+    /// The two surface names that name a picker this model draws. The router's strings, compared and
+    /// never re-spelled: `CommandRouter.picker(for:)` builds them from the command's own name.
+    static let pickerSurfaces = ["modelPicker", "effortPicker"]
+
     init(key: ChannelKey, lifecycle: any LifecycleAPI, surface: ChannelSurfaceState) {
         self.key = key
         self.lifecycle = lifecycle
@@ -157,7 +179,12 @@ final class SettingPickersModel {
     /// No lifecycle call is made here. A handshake arrives on every connect and every quiescent
     /// restart, and querying two control requests off it would spend them on channels no picker has
     /// been opened for.
-    func noteHandshake(_ initialize: InitializeResponse) {
+    /// A handshake that follows a refresh the channel could not answer reloads the pickers, because
+    /// that handshake is the first moment there is a process to answer them: an archived channel the
+    /// user opened has a menu that was drawn and populated with nothing, and nothing else ever asks
+    /// again. A refresh that already came back complete is not repeated — that is the case this
+    /// method's silence was written for, and it is still silent for it.
+    func noteHandshake(_ initialize: InitializeResponse) async {
         handshakeMode = initialize.currentPermissionMode
         if let requested = requestedMode {
             requestedMode = nil
@@ -165,17 +192,30 @@ final class SettingPickersModel {
                 disagreement = Self.disagreementNote(setting: "permission mode")
             }
         }
+        if hasAskedTheEngine, !lastRefreshSucceeded { await refresh() }
     }
 
     /// Both readbacks: the options from `list_models` and the applied values from `get_settings`.
     ///
     /// Typed specs through `AnyControlRequest`, because ClaudeWire types both (contract Y5); the raw
     /// form is reserved for a subtype it does not type.
-    func refresh() async {
+    ///
+    /// Answers whether **both** came back. A caller that is deciding something — §7.4's readback gate
+    /// is the one that does — needs the difference between a value that was read and a value that was
+    /// merely kept: `readSettings` leaves the last readback in place when the channel does not answer,
+    /// which is right for a display and wrong for a comparison.
+    @discardableResult
+    func refresh() async -> Bool {
+        hasAskedTheEngine = true
+        var complete = true
         if let models = await answer(to: AnyControlRequest(ListModels())) {
             modelOptions = ModelOption.options(in: models)
+        } else {
+            complete = false
         }
-        await readSettings()
+        if await readSettings() == nil { complete = false }
+        lastRefreshSucceeded = complete
+        return complete
     }
 
     /// One `get_settings`, folded into the applied values and the bypass gate. Answers the body so a
@@ -216,12 +256,16 @@ final class SettingPickersModel {
     /// The comparison resolves both sides through `models[].resolvedModel` before it decides, so
     /// clicking the alias `default` and reading back the canonical id it stands for is agreement and
     /// not a mismatch.
-    func selectModel(_ value: String) async {
-        guard await issue(AnyControlRequest(SetModel(model: value))) else { return }
+    @discardableResult
+    func selectModel(_ value: String) async -> Bool {
+        guard await apply(Self.modelSetting, .string(value),
+                          otherwise: AnyControlRequest(SetModel(model: value))) else { return false }
         await readSettings()
         let clicked = modelOptions.first { $0.value == value }?.canonical ?? value
         let shown = displayedModel?.canonical ?? appliedModel
         note(agrees: shown == clicked, setting: "model")
+        clearRestartGate(for: Self.modelSetting)
+        return true
     }
 
     /// The effort picker clicked: `apply_flag_settings {settings: {effortLevel}}`, then a fresh
@@ -233,11 +277,16 @@ final class SettingPickersModel {
     ///
     /// `nil` asks for the default, which the engine spells as a null flag value and reports back as
     /// `applied.effort: null`.
-    func selectEffort(_ level: String?) async {
-        let setting = JSONValue.object(["effortLevel": level.map(JSONValue.string) ?? .null])
-        guard await issue(AnyControlRequest(ApplyFlagSettings(settings: setting))) else { return }
+    @discardableResult
+    func selectEffort(_ level: String?) async -> Bool {
+        let value = level.map(JSONValue.string) ?? .null
+        let setting = JSONValue.object(["effortLevel": value])
+        guard await apply(Self.effortSetting, value,
+                          otherwise: AnyControlRequest(ApplyFlagSettings(settings: setting))) else { return false }
         await readSettings()
         note(agrees: appliedEffort == level, setting: "effort")
+        clearRestartGate(for: Self.effortSetting)
+        return true
     }
 
     /// The mode picker clicked: `set_permission_mode`.
@@ -271,14 +320,90 @@ final class SettingPickersModel {
     @discardableResult
     func issueMode(_ mode: PermissionMode) async -> String? {
         do {
-            _ = try await lifecycle.send(AnyControlRequest(SetPermissionMode(mode: mode)), on: key)
+            if await fleetIsHolding(Self.modeSetting) {
+                try await lifecycle.resolveSetting(Self.modeSetting, to: .string(mode.rawValue), on: key)
+            } else {
+                _ = try await lifecycle.send(AnyControlRequest(SetPermissionMode(mode: mode)), on: key)
+            }
         } catch {
             let reason = Self.reason(of: error)
             disagreement = reason
             return reason
         }
         requestedMode = mode
+        clearRestartGate(for: Self.modeSetting)
         return nil
+    }
+
+    /// A routed `/model`, `/effort` or `/permissions <mode>`, taken through the click path the menu
+    /// takes rather than sent straight out (§8.6 binds every path to the bypass gate, and §7.4 binds
+    /// every change to a readback).
+    ///
+    /// Answers nil for every other subtype — including an `apply_flag_settings` that is not the effort
+    /// picker's one key — which the composer sends itself. The three the pickers own are matched on
+    /// the subtype and the payload the router already built, so nothing here re-parses a line.
+    func apply(routed request: AnyControlRequest) async -> Bool? {
+        switch request.subtype {
+        case SetModel.subtype:
+            guard let model = request.payload["model"]?.stringValue else { return nil }
+            return await selectModel(model)
+        case ApplyFlagSettings.subtype:
+            guard let settings = request.payload["settings"]?.objectValue, settings.count == 1,
+                  let level = settings["effortLevel"] else { return nil }
+            return await selectEffort(level.stringValue)
+        case SetPermissionMode.subtype:
+            guard let mode = request.payload["mode"]?.stringValue.flatMap(PermissionMode.init(rawValue:))
+            else { return nil }
+            return await selectMode(mode) == nil
+        default:
+            return nil
+        }
+    }
+
+    /// Whether this picker is the one a routed command asked to open, as a binding a popover reads.
+    /// Dismissing it clears the request rather than leaving a surface the router would not re-open.
+    func presenting(_ surface: String) -> Binding<Bool> {
+        Binding(get: { self.presentedPicker == surface },
+                set: { if !$0, self.presentedPicker == surface { self.presentedPicker = nil } })
+    }
+
+    /// A `.native` destination that names one of these pickers, opened. Answers whether it was one:
+    /// `tasks`, `agents` and `switcher` are other surfaces' and this model says so rather than
+    /// swallowing them.
+    @discardableResult
+    func present(_ surface: String) -> Bool {
+        guard Self.pickerSurfaces.contains(surface) else { return false }
+        presentedPicker = surface
+        return true
+    }
+
+    /// One picker click, as either an ordinary request or the answer to a mismatch the **fleet** is
+    /// holding the channel over.
+    ///
+    /// Both apply the value; only the second advances the fleet's own banner, and only the fleet may
+    /// advance it — `resolveSetting` applies the value first and moves the banner on afterwards, so a
+    /// channel is never released over a setting the engine did not receive. Sending the request and
+    /// then advancing separately would be two decisions about one click, and the banner would move on
+    /// a request the channel refused.
+    private func apply(_ name: String, _ value: JSONValue, otherwise request: AnyControlRequest) async -> Bool {
+        guard await fleetIsHolding(name) else { return await issue(request) }
+        do {
+            try await lifecycle.resolveSetting(name, to: value, on: key)
+            return true
+        } catch {
+            disagreement = Self.reason(of: error)
+            return false
+        }
+    }
+
+    /// Whether the fleet is holding this channel connecting over exactly this setting.
+    ///
+    /// Read from the channel's own state and never inferred from this model's banner: the two gates
+    /// are separate — `unresolvedSettings` keeps the channel connecting, `surface.isDisabled` closes
+    /// the field — and a click that answered only the one it can see leaves the other one shut.
+    private func fleetIsHolding(_ name: String) async -> Bool {
+        guard case .settingDidNotSurvive(let held)? = await lifecycle.state(of: key)?.banner else { return false }
+        return held == name
     }
 
     /// The engine's sentence, when the error carries one. `WireError.controlError` holds the wire's
@@ -307,9 +432,26 @@ final class SettingPickersModel {
     /// snapshots the runtime values itself, so what this leaf can verify is that the new process
     /// reports the same model, effort and mode the old one did — which is exactly what §7.4 asks it
     /// to verify. A field nothing has read yet is nil and is not compared.
+    /// The mode is the one the channel is **running**, which after a click is the one that was asked
+    /// for and not the one the last handshake reported: permission mode has no readback except a
+    /// handshake, `RuntimeStateUpdater` records the accepted mode the moment the request goes out, and
+    /// the relaunch carries that record. Snapshotting the old handshake here made a correctly restored
+    /// mode read as a mismatch and closed the composer over it.
     var currentSnapshot: RestartSnapshot {
-        RestartSnapshot(model: displayedModel?.value, effort: appliedEffort, permissionMode: handshakeMode)
+        RestartSnapshot(model: displayedModel?.value, effort: appliedEffort,
+                        permissionMode: requestedMode ?? handshakeMode)
     }
+
+    /// The three settings this model can both verify and put back, by the fleet's own
+    /// `Readback.verify` names. Spelled once, because they are also the names `resolveSetting` takes
+    /// and the names the channel's banner carries.
+    static let modelSetting = "model"
+    static let effortSetting = "effort"
+    static let modeSetting = "permissionMode"
+
+    /// The same name as the banner says it. Only the mode's differs, because `permissionMode` is a
+    /// key and *permission mode* is a sentence.
+    static func label(of name: String) -> String { name == modeSetting ? "permission mode" : name }
 
     /// Closes the composer while a restart-required setting is being confirmed. Called before the
     /// restart is issued, so no keystroke reaches a process that is going away.
@@ -318,6 +460,31 @@ final class SettingPickersModel {
         surface.isDisabled = true
         surface.disabledReason = reason
         restartBanner = nil
+        restartFailures = []
+    }
+
+    /// Whether the state a `quiescentRestart` answered with is a process that was really replaced.
+    ///
+    /// **`perform` answers as soon as the change is recorded, not once it has run.** A channel that is
+    /// not eligible — a turn running, a local shell still working — keeps the request as
+    /// `pendingChange` for the dormant timer, and a change asked for while a restart is in flight
+    /// merges into that pending one; both return success with the old process still on the other end.
+    /// Confirming a readback there releases the field over settings nothing re-applied, and §8.6's
+    /// mode switch would reach a process launched without the flag it needs.
+    static func replacedTheProcess(_ after: ChannelState, from before: ChannelState?) -> Bool {
+        guard after.pendingChange == nil, after.wedged == nil else { return false }
+        return after.epoch != before?.epoch
+    }
+
+    /// A restart that was recorded rather than run. The process is still the one it was, so the field
+    /// re-opens — nothing is being replaced and a closed field would be closed for as long as the
+    /// channel stays busy — and the change is named as pending (§7.4's *applies when the current work
+    /// finishes*).
+    func noteQueuedRestart() {
+        surface.isRestarting = false
+        surface.isDisabled = false
+        surface.disabledReason = nil
+        restartBanner = "This channel is busy; the setting applies when the current work finishes."
     }
 
     /// A restart that never happened: the field re-opens rather than staying shut behind a process
@@ -340,25 +507,66 @@ final class SettingPickersModel {
     @discardableResult
     func confirmReadback(of expected: RestartSnapshot) async -> Bool {
         surface.isRestarting = false
-        await refresh()
-        var failed: [String] = []
-        if let model = expected.model {
-            let wanted = modelOptions.first { $0.value == model }?.canonical ?? model
-            if (displayedModel?.canonical ?? appliedModel) != wanted { failed.append("model") }
-        }
-        if expected.effort != appliedEffort { failed.append("effort") }
-        if let mode = expected.permissionMode, handshakeMode != mode { failed.append("permission mode") }
-        guard failed.isEmpty else {
-            restartBanner = "\(failed.count) setting(s) did not survive the restart: "
-                + failed.joined(separator: ", ") + ". Pick a value to continue."
+        // **A comparison needs values that were read, not values that were kept.** `readSettings`
+        // leaves the last readback in place when the channel does not answer — right for a display,
+        // and wrong here: comparing the retained values against a snapshot taken from those same
+        // values agrees with itself and releases the field without the new process having reported
+        // anything at all.
+        guard await refresh() else {
+            restartFailures = []
+            restartBanner = "The channel did not report its settings after the restart; "
+                + "the field stays closed until it does."
             surface.isDisabled = true
             surface.disabledReason = restartBanner
             return false
         }
+        var failed: [String] = []
+        if let model = expected.model {
+            let wanted = modelOptions.first { $0.value == model }?.canonical ?? model
+            if (displayedModel?.canonical ?? appliedModel) != wanted { failed.append(Self.modelSetting) }
+        }
+        if expected.effort != appliedEffort { failed.append(Self.effortSetting) }
+        if let mode = expected.permissionMode, handshakeMode != mode { failed.append(Self.modeSetting) }
+        guard failed.isEmpty else {
+            restartFailures = failed
+            restartBanner = Self.banner(for: failed)
+            surface.isDisabled = true
+            surface.disabledReason = restartBanner
+            return false
+        }
+        restartFailures = []
         restartBanner = nil
         surface.isDisabled = false
         surface.disabledReason = nil
         return true
+    }
+
+    /// The banner, over the settings that did not survive. Names, never the values on either side: a
+    /// model id or an effort level is a value read off a process, and what the reader needs is which
+    /// setting to look at (§11).
+    static func banner(for failed: [String]) -> String {
+        "\(failed.count) setting(s) did not survive the restart: "
+            + failed.map(label(of:)).joined(separator: ", ") + ". Pick a value to continue."
+    }
+
+    /// The recovery the banner promises, for one setting the user has just picked a value for.
+    ///
+    /// The field re-opens only when the **last** one has been answered; until then the banner names
+    /// what is left. The fleet's own half of the gate is answered where the click goes out, through
+    /// `resolveSetting` — this is the surface's half, and a picker that moved one without the other
+    /// would leave the channel connecting behind an open field or the field shut behind a ready
+    /// channel.
+    private func clearRestartGate(for name: String) {
+        guard let index = restartFailures.firstIndex(of: name) else { return }
+        restartFailures.remove(at: index)
+        guard restartFailures.isEmpty else {
+            restartBanner = Self.banner(for: restartFailures)
+            surface.disabledReason = restartBanner
+            return
+        }
+        restartBanner = nil
+        surface.isDisabled = false
+        surface.disabledReason = nil
     }
 
     // MARK: - Plumbing
@@ -411,10 +619,37 @@ struct SettingPickersView: View {
                     Button(option.displayName) { Task { await model.selectModel(option.value) } }
                 }
             }
+            // A bare `/model` routes to the `modelPicker` surface, and this is that surface: the same
+            // options as the menu, in a popover the router can open. Without it the row cleared the
+            // line and nothing appeared (`CommandRouting`, `.native`).
+            .popover(isPresented: model.presenting("modelPicker")) {
+                PickerOptionsView(title: "Model") {
+                    ForEach(model.modelOptions) { option in
+                        Button(option.displayName) {
+                            model.presentedPicker = nil
+                            Task { await model.selectModel(option.value) }
+                        }
+                    }
+                }
+            }
             Menu(model.isEffortDefault ? "Default effort" : (model.displayedEffort ?? "Effort")) {
                 Button("Default") { Task { await model.selectEffort(nil) } }
                 ForEach(model.effortOptions, id: \.self) { level in
                     Button(level) { Task { await model.selectEffort(level) } }
+                }
+            }
+            .popover(isPresented: model.presenting("effortPicker")) {
+                PickerOptionsView(title: "Effort") {
+                    Button("Default") {
+                        model.presentedPicker = nil
+                        Task { await model.selectEffort(nil) }
+                    }
+                    ForEach(model.effortOptions, id: \.self) { level in
+                        Button(level) {
+                            model.presentedPicker = nil
+                            Task { await model.selectEffort(level) }
+                        }
+                    }
                 }
             }
             Menu(model.displayedMode?.rawValue ?? "Permission mode") {
@@ -430,5 +665,25 @@ struct SettingPickersView: View {
             }
         }
         .task { await model.refresh() }
+    }
+}
+
+/// The options of one picker, as the popover a routed `/model` or `/effort` opens draws them.
+///
+/// A container and nothing else: every row it shows is passed in by the picker that owns the options,
+/// so the popover and the menu offer one list and not two.
+struct PickerOptionsView<Options: View>: View {
+
+    let title: String
+    @ViewBuilder let options: Options
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            options
+        }
+        .buttonStyle(.plain)
+        .padding(8)
+        .frame(minWidth: 180)
     }
 }

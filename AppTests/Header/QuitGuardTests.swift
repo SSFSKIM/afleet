@@ -468,7 +468,7 @@ enum QuitRig {
         switch call {
         case .perform(let key, _), .sendPrompt(let key, _), .route(let key, _), .send(let key, _, _),
              .run(let key, _, _), .openInTerminal(let key), .events(let key), .preconditions(let key),
-             .liveTaskIDs(let key):
+             .liveTaskIDs(let key), .engineReports(let key), .resolveSetting(let key, _):
             key
         case .storeWrite:
             nil
