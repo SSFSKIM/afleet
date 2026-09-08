@@ -121,6 +121,10 @@ final class ComposerRegistry {
     /// for the same model.
     private func followTimeline(_ model: ComposerModel) {
         guard let timelines = timelineProvider?(model.key) else { return }
+        // The composer holds the same model the chip follows: *Edit* reads the rendered user
+        // messages and the preceding assistant item out of it, and raises the honoured rewind's
+        // host signal through it (`EditAndRewind`). Weakly, so the reference here is not a lifetime.
+        model.timelines = timelines
         model.queue.follow(timelines)
     }
 

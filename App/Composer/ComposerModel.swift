@@ -66,6 +66,27 @@ final class ComposerModel {
     /// whether or not a timeline row has asked for the replacement yet.
     var lastInterception: Intercepted?
 
+    /// What *Edit* has to say about a rewind that did not happen (`EditAndRewind`): the fork it
+    /// opened instead, or why it could offer none. Nil whenever nothing is being said.
+    var editNote: String?
+
+    /// How many `HostSignal.rewound` raises this composer has made. A **count**, never a uuid (§11),
+    /// and the arm that separates an honoured rewind from a refused one: a refusal that raised the
+    /// signal would leave the timeline disagreeing with the engine about what the conversation holds.
+    private(set) var rewindSignalsRaised = 0
+
+    /// Counts one raise. `edit(_:)` lives in `EditAndRewind.swift`, and `private(set)` is file-scoped
+    /// in Swift, so the increment is spelled here rather than the property being left open to write.
+    func recordRewindSignal() { rewindSignalsRaised += 1 }
+
+    /// The channel's timeline — C6.1's model, read only, pointed here by `ComposerRegistry`.
+    ///
+    /// *Edit* reads three things out of it and derives none of them: which user messages have been
+    /// rendered, which assistant item precedes the edited one, and where to raise the host signal an
+    /// honoured rewind produces. Weak, because the composer must not keep a released channel's fold
+    /// alive.
+    @ObservationIgnored weak var timelines: ChannelTimelineModel?
+
     /// The channel's context, for the Browser route `StrategyUI.open(url:)` takes and, from Task 4,
     /// the `!` escape's directory and environment. Set when the composer appears; nil for a channel
     /// the panel host has never drawn, where there is no Browser tab to hand a URL to.
