@@ -153,7 +153,9 @@ final class AppModel {
     func bindWorkspace(_ workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
         timelines.attach(to: workspace, lifecycle: lifecycle)
         panels.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
-        composers.attach(to: workspace, lifecycle: lifecycle)
+        composers.attach(to: workspace,
+                         context: { [panels] key, cwd in panels.context(for: key, cwd: cwd) },
+                         lifecycle: lifecycle)
     }
 
     /// Runs the launch and routes on its outcome. Concurrent windows await the same task;

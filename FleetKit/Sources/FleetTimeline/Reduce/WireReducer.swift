@@ -656,6 +656,7 @@ public struct WireReducer: Sendable {
         let sessionState: SessionStateChanged?
         let session: SessionState
         let overlayDigest: Overlay
+        let agents: AgentRunTree
 
         init(_ reducer: WireReducer) {
             let all = reducer.durable.items + reducer.overlay.items
@@ -665,6 +666,7 @@ public struct WireReducer: Sendable {
             sessionState = reducer.overlay.sessionState
             session = reducer.durable.session
             overlayDigest = reducer.overlay
+            agents = reducer.agents
         }
 
         func difference(to after: Snapshot) -> [TimelineChange] {
@@ -677,6 +679,9 @@ public struct WireReducer: Sendable {
             if preview != after.preview { out.append(.previewChanged) }
             if overlayDigest != after.overlayDigest { out.append(.overlayChanged) }
             if sessionState != after.sessionState || session != after.session { out.append(.sessionStateChanged) }
+            // Once per apply, however many observations moved the tree: the report is a comparison of the whole tree,
+            // not a count of the calls that touched it.
+            if agents != after.agents { out.append(.agentsChanged) }
             return out
         }
     }

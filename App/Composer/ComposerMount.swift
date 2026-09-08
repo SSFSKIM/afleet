@@ -1,5 +1,6 @@
 import SwiftUI
 import AfleetCore
+import PanelHostAPI
 import FleetKit
 
 /// One `ComposerModel` per channel, and the `ChannelSurfaceState` that model shares with the
@@ -24,6 +25,25 @@ final class ComposerRegistry {
     /// `model(for:)`.
     var lifecycle: (any LifecycleAPI)?
 
+    /// How a channel's `ChannelContext` is obtained — the one thing the composer needs from X7: the
+    /// `LinkRouterCapability` the Browser route uses, and the cwd and `ResolvedEnvironment` the `!`
+    /// escape runs in.
+    ///
+    /// Resolved here, where the model is built, rather than read from `@Environment` in the view.
+    /// For the Browser route an absent context loses a URL; for `!` it would mean running a command
+    /// in the wrong directory or not at all, and a shell escape that silently does nothing is worse
+    /// than one that says it cannot run.
+    ///
+    /// **A closure and not the `PanelHostModel` itself, and that is load-bearing.** The mount is
+    /// asserted by walking the view body with `Mirror`, and holding the host would put the whole
+    /// panel graph — every channel's context, each one's captured lifecycle and link router — on
+    /// that walk. Storing the host crashed `ComposerMountTests` outright: the walk ran away into the
+    /// graph and took the bundle with it, and because `xcodebuild` retries a crashed bundle the
+    /// suite then reported "Executed 0" rather than a failure. `Mirror` does not descend into a
+    /// closure's captures, so this reference is where the walk stops. It is also the better
+    /// layering: the registry depends on the *question*, not on X7's concrete host.
+    var contextProvider: (@MainActor (ChannelKey, URL) -> ChannelContext?)?
+
     /// Where each composer's `RefusalInterceptor` records a replaced drift refusal: FleetKit's own
     /// `fleet.log`, which is where C5's diagnostics already carry the drift count. Null until a launch
     /// reaches a workspace, so a composer built before one still counts and writes nowhere.
@@ -39,10 +59,12 @@ final class ComposerRegistry {
     /// reason: *Check again* runs the whole launch again, and a composer still holding the previous
     /// fleet would send into a workspace nothing else refers to. Task 2 shipped this registry as a
     /// static with no rebind, which had exactly that defect; its worker flagged it.
-    func attach(to workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
+    func attach(to workspace: Workspace, context: (@MainActor (ChannelKey, URL) -> ChannelContext?)? = nil,
+                lifecycle: (any LifecycleAPI)? = nil) {
         releaseAll()
         self.lifecycle = lifecycle ?? workspace.fleet
         self.diagnostics = workspace.diagnostics.fleet
+        self.contextProvider = context
     }
 
     /// This channel's composer, built on first ask and retained afterwards.
@@ -54,12 +76,23 @@ final class ComposerRegistry {
     /// writes it, and two registries — or a surface built per view — would hand Task 8's header a
     /// different object from the field it is disabling, which is the one thing this seam exists to
     /// prevent.
-    func model(for key: ChannelKey) -> ComposerModel? {
-        if let existing = models[key] { return existing }
+    /// `cwd` is the channel's working directory, which the panel host needs to build the
+    /// `ChannelContext` the Browser route and the `!` escape read. Resolved here, where the model is
+    /// built, rather than in the view: for `!` an absent context means running a command in the
+    /// wrong directory or not at all, and a shell escape that silently does nothing is worse than
+    /// one that says it cannot run.
+    func model(for key: ChannelKey, cwd: URL? = nil) -> ComposerModel? {
+        if let existing = models[key] {
+            // A row that gained a cwd after its composer was built — an archived channel since
+            // registered — gets its context now rather than never.
+            if existing.context == nil, let cwd { existing.context = contextProvider?(key, cwd) }
+            return existing
+        }
         guard let lifecycle else { return nil }
         let surface = surfaces[key] ?? ChannelSurfaceState()
         surfaces[key] = surface
         let model = ComposerModel(key: key, lifecycle: lifecycle, surface: surface, diagnostics: diagnostics)
+        if let cwd { model.context = contextProvider?(key, cwd) }
         models[key] = model
         return model
     }
@@ -94,20 +127,25 @@ final class ComposerRegistry {
 /// The composer, mounted below the channel's list — one of C6.2's two call sites in
 /// `ChannelColumnView` (spec *The fence*).
 ///
-/// It resolves everything itself, rather than taking the model as an argument, because the fence
-/// allows two added lines in that file and nothing else: a parameter would mean threading the
-/// registry through `ChannelColumnView` and the private column view it builds, which is four more
-/// edits to a file C5 owns.
+/// It takes the registry and the row's cwd rather than reading `@Environment(AppModel.self)`, and
+/// resolves the model itself. The environment version was drawable only in a running app: the
+/// reflection-based view test that is the only way this view is asserted sees an empty environment
+/// and would find no composer, so the one place the mount could be wrong was the one place no test
+/// could look.
 struct ChannelComposerMount: View {
 
     let key: ChannelKey
+    /// The channel's working directory, from the row the column already resolved. It is what the
+    /// panel host needs to build the `ChannelContext` the composer's Browser route and `!` escape
+    /// use, and it is nil only for a row that carries none — which is a row that is never registered.
+    let cwd: URL?
     /// The app's one registry, handed down by the column. Not `@Environment`: the column already
     /// holds `AppModel`, and an environment read would make the mount undrawable in a test that
     /// walks the body by reflection, which is how this view is asserted at all.
     let composers: ComposerRegistry
 
     var body: some View {
-        if let model = composers.model(for: key) {
+        if let model = composers.model(for: key, cwd: cwd) {
             ComposerView(model: model)
         }
     }

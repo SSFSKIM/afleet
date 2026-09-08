@@ -68,7 +68,7 @@ private struct ChannelTimelineColumn: View {
                 List(model.rows) { TimelineRowSlot(row: $0) }
                     .listStyle(.inset)
             }
-            ChannelComposerMount(key: row.key, composers: composers)
+            ChannelComposerMount(key: row.key, cwd: row.cwd, composers: composers)
         }
         // The header and the opening are two concerns, and keying one task on both was a defect.
         // The header has to follow a channel that goes busy, raises a banner or crashes while it

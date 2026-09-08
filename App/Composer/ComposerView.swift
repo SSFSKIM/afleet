@@ -14,7 +14,6 @@ struct ComposerView: View {
     /// URL to. Read on appearance rather than in the body, and optional, so this view stays drawable
     /// outside a rendered scene — the mount test walks this body by reflection, where no environment
     /// has been installed.
-    @Environment(AppModel.self) private var app: AppModel?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -39,10 +38,6 @@ struct ComposerView: View {
         .padding(8)
         .onAppear {
             model.start()
-            // The host builds a context for a channel it has drawn; nil for one it has not, and then
-            // there is no Browser tab to route a URL to. Nothing is constructed here — the panel host
-            // owns the context and this reads the one it already has.
-            if model.context == nil { model.context = app?.panels.context(for: model.key) }
         }
         .onDisappear { model.stop() }
     }

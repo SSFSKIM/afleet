@@ -1584,6 +1584,21 @@ one; entry 23 is worth more to C1 than a guessed fix would have been to C6.
 
 ## Revision Notes
 
+- 2026-09-08: **the agent-run tree's route to the app.** `WireReducer.agents` has always been
+  folded from the task frames and the parent-tool-use observations, but nothing exposed it past
+  the ingestion, so C6.4's Agents tab and the timeline's own agent rows had no reader.
+  `StreamIngestion` now exposes `agents: AgentRunTree?` — nil before `open` builds the reducer,
+  as `preview` is — and `TimelineChange` gains `.agentsChanged`, which the reducer appends once
+  per apply whenever the tree it holds differs before and after, so a fold that moved the tree
+  through several observations still reports it once and one that never touched it never reports
+  it. `StreamIngestion` admits the case as live and `ChannelTimeline` carries the tree in the
+  same read as the items its nodes point at, so a node's `toolUseID` and a `taskRun` item from
+  one snapshot cannot disagree about existence. The limitation this leaves standing: the tree is
+  the wire fold's, so a channel with no wire — a foreign or archived session opened from its
+  files alone — has none, and the ingestion's file-side `agentMetadata` records feed
+  `StreamProjection.metadata` and the record reducer's items only, never anything tree-shaped
+  (`AgentRunTree.apply(agentMetadata:for:)` and `apply(metaFile:)` have no production caller).
+
 - 2026-09-08: **the host-signal seam, a corrective on `main`.** C6.3 filed a `[parent-impact]`
   against X4 and X5 while planning its decision cards: `HostSignal` is modelled here and reduced
   by `WireReducer.apply(_:at:)`, but nothing in the tree ever constructed one and the actor the
