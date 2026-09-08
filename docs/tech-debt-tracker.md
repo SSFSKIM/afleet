@@ -1886,3 +1886,126 @@ is renumbered.
      this is one prompted turn under the scratch home at C1's next re-pin, reading the transcript
      after exit. Owner: C1 (probe), C2 (`terminate()`) if it bites. Filed 2026-09-08 at the Quit
      ruling.
+
+## From C7.1 (Terminal core), in progress
+
+82. **`openpty(3)` sets `FD_CLOEXEC` on the master one call too late.** `Darwin+PTY.swift`
+    opens the pty and then sets the flag, so a concurrent spawner elsewhere in the process
+    that does not use `POSIX_SPAWN_CLOEXEC_DEFAULT` can inherit the master in that window.
+    The window is small and nothing in afleet spawns that way today. Closer:
+    `posix_openpt(O_RDWR | O_CLOEXEC)` with `grantpt`/`unlockpt`/`ptsname` instead of
+    `openpty`, which never has the flag off. Found by the Task 2 independent review.
+    Owner: C7.1 if a second spawner appears, else whichever child adds one.
+83. **The child descriptor surveys scan fds 3 through 20 only.** The two isolation tests in
+    `PTYSpawnTests.swift` enumerate a fixed range rather than the child's whole `/dev/fd`.
+    A leak above 20 would pass. Closer: enumerate the directory and subtract the three
+    standard descriptors. Found by the Task 2 independent review.
+84. **`PTYTestChild.output(from:until:)` carries one fixed three-second marker deadline.**
+    The four spawn tests sit on it while the two write tests raise their own to twenty.
+    On a loaded machine the three-second cases are the first to flake, and the failure reads
+    as a product defect rather than a starved test — the same shape as tracker entry 2.
+    Closer: make the deadline a parameter with a generous default. Found by the Task 2
+    independent review.
+
+85. **One dispatch thread is blocked in `waitpid` for the lifetime of every live
+    `PTYProcess`, plus a `DispatchSemaphore` wait on that thread per status.** libdispatch's
+    per-QoS worker pool is 64. A fleet of panes — this project's premise — each holding a
+    read queue, a write queue and a permanently blocked wait queue can exhaust it and stall
+    unrelated dispatch work elsewhere in the app. **Decided rather than left silent, at the
+    reviewer's request:** not fixed in C7.1. The realistic v1 ceiling is small (C4 caps live
+    processes at six and C5's panel-session LRU holds sixteen channels), the blocking waiter
+    is what makes the one-report invariant and the ordered stop/terminate delivery
+    straightforward, and both were measured and tested at length; swapping the mechanism now
+    would put the child's most expensive semantics back in play for a limit no v1
+    configuration reaches. Closer: `DispatchSource.makeProcessSource` or a single SIGCHLD
+    reaper, keeping the same serialisation — note that `makeProcessSource(.exit)` alone does
+    **not** report stops, which `WUNTRACED` does and the detach path needs, so the
+    replacement is not a drop-in. Owner: C7.4 if a pane count that matters appears, else the
+    child that first runs many panes at once. Found by the Task 3 independent review.
+
+86. **A full-rate flood costs the pane up to a quarter-second of input latency, and the cost
+    is the renderer's, not the host's.** Measured in the S1 harness over four ten-second `yes`
+    runs: run-loop heartbeat median 17.3–23.6 ms with maxima of 117–262 ms, 16–24% of 50 ms
+    ticks lost, and a real `NSEvent` keystroke round-tripping in 24.9–587.1 ms. The same ten
+    seconds headless through the identical PTY layer reads median 2.025 ms, max 10.115 ms,
+    199/200 ticks and roughly 15x the throughput, and only 251–347 ms of the ten seconds is
+    spent inside `feed` — so host delivery is not the cost and no amount of coalescing on our
+    side addresses it. The window stays responsive, not smooth: a drag during a full-rate
+    flood hitches. Not fixed here because the remedy is the renderer's (frame pacing, or
+    dropping intermediate frames when the grid is being overwritten faster than it is drawn),
+    and because a pane flooding at full rate is not the ordinary case. Closer: revisit if a
+    user reports hitching, or when a `libghostty-vt` Swift renderer makes frame pacing ours.
+    Owner: C7.4 if it ships pane throttling, else whoever owns the renderer swap.
+87. **The S1 harness's grid claims rest on `GhosttyTerminalSurface.renderedViewportText()`,
+    added so a separate module could read the grid.** It waits for pending output and returns
+    `readViewportText()`, and one test pins its headless contract (`nil` with no surface
+    attached, which is what keeps the harness's "it rendered" claim falsifiable). It exists
+    for the spike, and C7.4 has no need of it; if the panel never adopts it, it should be
+    withdrawn rather than left as public surface area nobody calls. Owner: C7.4 at its close.
+
+88. **Harness teardown is inconsistent, and one path cannot execute.** `S1Harness`'s
+    `HarnessWindow.swift:379` is `defer { Task { await child.teardown() } }` while
+    `main.swift:55-57` calls `exit(status)` on the same main-actor turn, so the escalation ladder
+    never runs; the `shell` leg calls `teardown()` on no path, and the attach leg's write-failure
+    return skips its own. Harmless in practice — `exit()` closes the master and the kernel's
+    revoke hangs up the group — but the harness is what C7.4 will read. Closer: one teardown path
+    per leg, awaited before `exit`. Owner: C7.1 if the harness outlives the spike, else C7.4.
+89. **`AdapterWiringTests` carries one assertion that cannot fail as named, and several that pin
+    the dependency rather than this child.** The `feed`-returns-promptly assertion targets a
+    blocking `feed`, which would hang the test rather than fail it, so every non-blocking
+    implementation passes trivially; the `readViewportText() == nil` assertions pin libghostty's
+    inertness with no surface attached, not our code. Both are cheap and honest, neither is
+    evidence. Closer: express the blocking case as a timeout that reports, and label the
+    dependency-pinning assertions as such. Owner: C7.1 tests.
+90. **`openpty` returning a descriptor in 0, 1 or 2 would make the child close its own
+    standard streams.** `Darwin+PTY.swift:106-125` opens the slave as 0, dups to 1 and 2, then
+    closes the inherited master and slave by number; if the host had stdin closed and `master`
+    came back as fd 0, the close would take the child's own stdout or stdin with it — a pane that
+    renders nothing, with no error anywhere. Unreachable from the app and under XCTest today,
+    which is why it is logged rather than fixed. Closer: refuse or `dup` any pty descriptor below
+    3 before building the file actions. Owner: C7.1 if a host ever spawns with closed standard
+    streams. Found by the whole-branch review.
+91. **`write()` after the child exits returns two different errors depending on timing.** Before
+    the read source observes EOF it surfaces `PTYError.systemCall(.write, EIO)`; afterwards,
+    `PTYError.closed`. C7.4 would have to match on both to mean one thing. Closer: map `EIO` on a
+    master whose child has ended to `.closed`. Owner: C7.4 when it handles pane write failures.
+92. **The X1 import test proves half of what its comment claims.** Its header says "the manifest
+    is one half of that boundary", but neither test parses `Package.swift`: adding a dependency to
+    a target with no source-level import passes. Closer: parse the manifest's target
+    dependencies, or narrow the comment to what the walk actually checks. Owner: C7.1 with the
+    manifest.
+93. **A host waiting on `awaitFeedCapacity()` cannot be cancelled out of the wait.** The
+    continuation is resumed only when the adapter's backlog falls below the low-water mark, so a
+    renderer that wedges permanently leaves the waiting host suspended with no way out; today the
+    only such host is the S1 harness, whose process ends anyway. Closer: register the waiter under
+    `withTaskCancellationHandler` and resume it on cancellation, the way the PTY layer's write
+    gate already does. Owner: C7.4 when a pane's read loop has a lifetime of its own.
+94. **Back-pressure is on the concrete adapter, not on `TerminalSurface`.** `feed` is the
+    protocol's only delivery seam and returns `Void`, so `outstandingFeedByteCount` and
+    `awaitFeedCapacity()` live on `GhosttyTerminalSurface`; a host that holds panes only through
+    W2 has no way to stop reading a flooding child. C7.4 holds the concrete type, which is why
+    this is a hand-off rather than a defect, and it is the same reasoning `themeResolution`
+    already records. Closer: a one-line W2 amendment, on evidence, if a second surface or a
+    protocol-only host appears. Owner: C7.4 with the parent.
+95. **`renderedViewportText()` waits on the adapter's backlog by polling.** It calls the
+    session's own drain barrier in a bounded loop (1,000 attempts) because the dependency offers
+    no completion signal, so a diagnostic read behind a large backlog spins on the main thread
+    rather than suspending. Diagnostic-only — no pane path calls it — and the bound keeps it from
+    hanging. Closer: a completion callback on the adapter's drain that the read can await, or
+    upstream support. Owner: C7.1 if G2's self-test leg ever reads behind a flood.
+
+96. **The owner-release cleanup helper is called `terminateAndReap` and no longer reaps.**
+    `PTYTestChild.terminateAndReap(_ identity:)` signals the child's group and then watches it
+    die; the status belongs to the production waiter, which is the whole point of the review fix
+    that removed its `waitpid`. The sibling overload taking a `PTYProcess` has always had the
+    same shape and the same name. A reader who trusts the name will think a status is claimed
+    here. Closer: rename both to say what they do — `terminate(_:)` — in one mechanical pass over
+    the nine call sites. Owner: C7.1 tests, or whoever next touches the helper.
+298. **The adapter learns that the renderer has a surface by polling a viewport read.** The
+    backlog is held until the session is attached, because the dependency drops unattached output
+    past 1 MiB, but `libghostty-spm` publishes no attachment event and keeps `currentSurface`
+    internal, so `GhosttyTerminalSurface` probes `readViewportText() != nil` every 10 ms while it
+    has something undelivered and no surface. Cheap (an unattached read returns immediately) and
+    latched after the first attach, so it costs one poll cycle of first-paint latency and nothing
+    afterwards. Closer: an attachment callback upstream, or `currentSurface` made public, either
+    of which turns the poll into a wait. Owner: C7.1 if the dependency is bumped, else C7.4.

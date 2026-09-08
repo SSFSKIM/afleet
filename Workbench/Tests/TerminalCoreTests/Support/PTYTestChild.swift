@@ -1,0 +1,397 @@
+import Darwin
+import Foundation
+import Synchronization
+@testable import TerminalCore
+import XCTest
+
+/// Everything the pty has produced so far. A test that has to write while it reads cannot take
+/// the stream twice — `AsyncStream` admits one consumer — so one task drains it into here and
+/// the test reads snapshots.
+final class PTYOutputRecorder: Sendable {
+    private let bytes = Mutex(Data())
+
+    func append(_ data: Data) {
+        bytes.withLock { $0.append(data) }
+    }
+
+    var snapshot: Data {
+        bytes.withLock { $0 }
+    }
+}
+
+enum PTYTestChild {
+    enum Failure: Error {
+        case outputEnded
+        case timedOut
+        case spawnRefused
+    }
+
+    /// Every config home the engine may be using, derived from the values handed in. Pure: it
+    /// reads no global state and writes nothing, so the rule it encodes can be tested without a
+    /// test ever creating a directory to find out (spec §7.8, contract X9).
+    ///
+    /// `CLAUDE_CONFIG_DIR` is the one that moves. When it is set it *is* the config home, and a
+    /// root derived only from the home directory would miss it entirely.
+    static func configHomeRoots(homeDirectory: URL, environment: [String: String]) -> [URL] {
+        var roots = [
+            homeDirectory.appending(path: ".claude"),
+            URL(filePath: "/tmp/afleet-fixtures/config-home"),
+        ]
+        if let configured = environment["CLAUDE_CONFIG_DIR"], !configured.isEmpty {
+            roots.append(URL(filePath: configured))
+        }
+        return roots.map { $0.standardizedFileURL.resolvingSymlinksInPath() }
+    }
+
+    /// Pure: whether `candidate` is at or under any of `roots`. A sibling whose name merely begins
+    /// with a root's name is not inside it.
+    static func isForbidden(_ candidate: URL, roots: [URL]) -> Bool {
+        let resolved = candidate.standardizedFileURL.resolvingSymlinksInPath()
+        return roots.contains { contains(resolved, within: $0) }
+    }
+
+    static func temporaryDirectory() throws -> URL {
+        let fileManager = FileManager.default
+        let temporaryRoot = try canonicalURL(fileManager.temporaryDirectory)
+        let root = temporaryRoot
+            .appending(path: "terminal-core-tests")
+            .appending(path: UUID().uuidString)
+        // Checked before anything is created, so a rule that is wrong cannot leave a directory
+        // behind in a config home while it is being found out.
+        let forbiddenRoots = configHomeRoots(
+            homeDirectory: fileManager.homeDirectoryForCurrentUser,
+            environment: ProcessInfo.processInfo.environment
+        )
+        guard !isForbidden(root, roots: forbiddenRoots) else {
+            throw XCTSkip("temporary test root resolved inside a config home")
+        }
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    static func request(
+        cwd: URL,
+        script: String,
+        environment: [String: String] = [:]
+    ) -> PTYSpawnRequest {
+        PTYSpawnRequest(
+            executable: URL(filePath: "/bin/sh"),
+            arguments: ["-c", script],
+            cwd: cwd,
+            environment: environment,
+            size: TerminalSize(rows: 24, columns: 80, pixelWidth: 640, pixelHeight: 480),
+            terminal: TerminalDescription(term: "xterm-256color"),
+            stopPolicy: .report
+        )
+    }
+
+    static func output(
+        from events: AsyncStream<PTYEvent>,
+        until marker: String
+    ) async throws -> String {
+        try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask {
+                var output = Data()
+                for await event in events {
+                    guard case let .output(bytes) = event else { continue }
+                    output.append(bytes)
+                    if output.range(of: Data(marker.utf8)) != nil {
+                        return output
+                    }
+                }
+                throw Failure.outputEnded
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(3))
+                throw Failure.timedOut
+            }
+            guard let first = try await group.next() else {
+                throw Failure.outputEnded
+            }
+            group.cancelAll()
+            return String(decoding: first, as: UTF8.self).replacingOccurrences(of: "\r", with: "")
+        }
+    }
+
+    /// A deadline that returns at the deadline, whatever the operation is doing.
+    ///
+    /// The operation races the timer as an unstructured task, not as a child of a task group: a
+    /// throwing group's scope waits for every child even after the timeout cancels them, so a
+    /// body that does not observe cancellation — `teardown`, which awaits its waiter's value —
+    /// kept the call open for as long as it liked and the seconds in it were not a bound at all.
+    ///
+    /// The operation that loses the race is abandoned rather than cancelled: its cleanup is the
+    /// reason it is running, and what this call gives up is waiting for it, not the work it still
+    /// has to do.
+    static func withDeadline<Value: Sendable>(
+        seconds: Double,
+        _ body: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        let isDelivered = Mutex(false)
+        return try await withCheckedThrowingContinuation { continuation in
+            let deliver: @Sendable (Result<Value, Error>) -> Void = { result in
+                let isFirst = isDelivered.withLock { delivered -> Bool in
+                    guard !delivered else { return false }
+                    delivered = true
+                    return true
+                }
+                guard isFirst else { return }
+                continuation.resume(with: result)
+            }
+            Task.detached {
+                do {
+                    deliver(.success(try await body()))
+                } catch {
+                    deliver(.failure(error))
+                }
+            }
+            Task.detached {
+                try? await Task.sleep(for: .seconds(seconds))
+                deliver(.failure(Failure.timedOut))
+            }
+        }
+    }
+
+    /// A guard clause for a script that is meant to sit idle: the session outlives this test
+    /// process, so a child that is never reaped would otherwise stay on the machine.
+    static func selfTerminating(after seconds: Int, _ script: String) -> String {
+        "( sleep \(seconds); kill -KILL $$ ) &\n" + script
+    }
+
+    static func record(_ events: AsyncStream<PTYEvent>) -> (PTYOutputRecorder, Task<Void, Never>) {
+        let recorder = PTYOutputRecorder()
+        let task = Task {
+            for await event in events {
+                guard case let .output(data) = event else { continue }
+                recorder.append(data)
+            }
+        }
+        return (recorder, task)
+    }
+
+    static func waitUntil(
+        seconds: Double,
+        _ condition: @escaping @Sendable () -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
+        while ContinuousClock.now < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard condition() else { throw Failure.timedOut }
+    }
+
+    /// Runs a script through a bare `posix_spawn` — no descriptor policy of any kind — and
+    /// returns its trimmed standard output. This stands in for the spawners this layer does not
+    /// own, which is where a descriptor flag, and only a descriptor flag, is what protects.
+    static func plainlySpawnedOutput(script: String) throws -> String {
+        var channel: [Int32] = [-1, -1]
+        guard pipe(&channel) == 0 else { throw Failure.spawnRefused }
+        let readEnd = channel[0]
+        var writeEnd = channel[1]
+        defer {
+            _ = Darwin.close(readEnd)
+            if writeEnd != -1 { _ = Darwin.close(writeEnd) }
+        }
+
+        var actions: posix_spawn_file_actions_t?
+        guard posix_spawn_file_actions_init(&actions) == 0 else { throw Failure.spawnRefused }
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_adddup2(&actions, writeEnd, 1)
+        posix_spawn_file_actions_adddup2(&actions, writeEnd, 2)
+        posix_spawn_file_actions_addclose(&actions, readEnd)
+        posix_spawn_file_actions_addclose(&actions, writeEnd)
+
+        var pid: pid_t = 0
+        let spawned = "/bin/sh".withCString { path in
+            script.withCString { scriptArgument -> Int32 in
+                var argv: [UnsafeMutablePointer<CChar>?] = [
+                    strdup(path), strdup("-c"), strdup(scriptArgument), nil,
+                ]
+                defer { argv.forEach { free($0) } }
+                return posix_spawn(&pid, path, &actions, nil, &argv, environ)
+            }
+        }
+        guard spawned == 0 else { throw Failure.spawnRefused }
+
+        _ = Darwin.close(writeEnd)
+        writeEnd = -1
+        var collected = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = buffer.withUnsafeMutableBytes {
+                Darwin.read(readEnd, $0.baseAddress, $0.count)
+            }
+            if count > 0 {
+                collected.append(contentsOf: buffer.prefix(count))
+            } else if count == -1, errno == EINTR {
+                continue
+            } else {
+                break
+            }
+        }
+        var status: Int32 = 0
+        while Darwin.waitpid(pid, &status, 0) == -1, errno == EINTR {}
+        return String(decoding: collected, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Cleanup for a child whose actor is still alive. Every signal goes through the actor's own
+    /// ownership gate, which closes as the child's terminal status is consumed, so this can never
+    /// name a group that some later process has come to own. A group signal carries exactly the
+    /// same exposure as a bare-pid one: the child is the session and process-group leader, so its
+    /// pgid is its pid and is recycled with it.
+    ///
+    /// Reaping is left to the actor's waiter, which is the one reaper of this child. A `waitpid`
+    /// here would be a second claim on the same pid, and after the waiter has reaped it that call
+    /// would block on whichever of this process's children next holds that number.
+    @discardableResult
+    static func terminateAndReap(_ process: PTYProcess) -> PTYSignalDisposition {
+        let disposition = signalWhileOwned(process, SIGCONT)
+        guard disposition == .sent else { return disposition }
+        _ = signalWhileOwned(process, SIGKILL)
+        return .sent
+    }
+
+    /// A status being consumed is a state that resolves within a scheduler turn or two, so a
+    /// bounded retry is what tells "still ours, briefly closed" apart from "no longer ours".
+    private static func signalWhileOwned(
+        _ process: PTYProcess,
+        _ signal: Int32
+    ) -> PTYSignalDisposition {
+        for _ in 0..<statusSettlingAttempts {
+            let disposition = process.signalProcessGroupWhileOwned(signal)
+            guard disposition == .statusPending else { return disposition }
+            usleep(statusSettlingMicroseconds)
+        }
+        return .statusPending
+    }
+
+    private static let statusSettlingAttempts = 1_000
+    private static let statusSettlingMicroseconds: UInt32 = 1_000
+
+    /// A pid together with what tells that pid apart from whatever process comes to hold the
+    /// number next: the kernel's own start time for it, and the fact that it is this process's
+    /// child and its own group leader.
+    ///
+    /// A released `PTYProcess` does not take its reaper with it — the waiter holds the pid and the
+    /// process group independently of the actor and goes on to `waitpid`. Once it has reaped, the
+    /// number is free, so a bare pid is not a safe thing for cleanup to signal.
+    struct ChildIdentity: Sendable, Equatable {
+        let pid: pid_t
+        let startedAtSeconds: Int64
+        let startedAtMicroseconds: Int32
+    }
+
+    /// The identity of a pid that is alive now. Taken while the child is provably ours, and
+    /// compared again before cleanup signals anything.
+    static func identity(ofChild pid: pid_t) -> ChildIdentity? {
+        guard pid > 1, let information = processInformation(pid: pid) else { return nil }
+        let startedAt = information.kp_proc.p_un.__p_starttime
+        return ChildIdentity(
+            pid: pid,
+            startedAtSeconds: Int64(startedAt.tv_sec),
+            startedAtMicroseconds: Int32(startedAt.tv_usec)
+        )
+    }
+
+    /// Whether the pid still names the same process, still this process's unreaped child, and
+    /// still its own process group leader. All three have to hold before a group signal: a reaped
+    /// pid can be reused within a scheduler turn, and its group with it. A zombie counts — it has
+    /// not been reaped, so the number is still ours and signalling it reaches nobody else.
+    static func stillNamesTheSameChild(_ identity: ChildIdentity) -> Bool {
+        guard let information = processInformation(pid: identity.pid) else { return false }
+        let startedAt = information.kp_proc.p_un.__p_starttime
+        return Int64(startedAt.tv_sec) == identity.startedAtSeconds
+            && Int32(startedAt.tv_usec) == identity.startedAtMicroseconds
+            && information.kp_eproc.e_ppid == Darwin.getpid()
+            && information.kp_eproc.e_pgid == identity.pid
+    }
+
+    /// The same child, and not yet a zombie: what a test means when it asks whether a process it
+    /// did not intend to signal is still running.
+    static func isRunning(_ identity: ChildIdentity) -> Bool {
+        guard stillNamesTheSameChild(identity),
+              let state = processState(pid: identity.pid) else { return false }
+        return state != Int8(SZOMB)
+    }
+
+    /// The kernel calls owner-release cleanup makes, behind a seam. Production binds them to the
+    /// kernel; a test binds them to a proof it can invalidate between two signals, which is the
+    /// race this gate exists for and the one nothing can arrange against the real scheduler.
+    struct ChildCleanupProbes: Sendable {
+        var stillNamesTheSameChild: @Sendable (ChildIdentity) -> Bool
+        var signalProcessGroup: @Sendable (ChildIdentity, Int32) -> Void
+        var isRunning: @Sendable (ChildIdentity) -> Bool
+        var settle: @Sendable () -> Void
+
+        static let kernel = ChildCleanupProbes(
+            stillNamesTheSameChild: { PTYTestChild.stillNamesTheSameChild($0) },
+            signalProcessGroup: { identity, signal in
+                _ = Darwin.kill(-identity.pid, signal)
+            },
+            isRunning: { PTYTestChild.isRunning($0) },
+            settle: { usleep(statusSettlingMicroseconds) }
+        )
+    }
+
+    /// Cleanup for a child whose `PTYProcess` is gone. The actor's waiter outlives the actor and
+    /// goes on reaping, so this is neither the only reaper nor the owner of the child's status,
+    /// and it holds itself to both facts.
+    ///
+    /// The identity is re-proved immediately before *each* signal rather than once for the pair.
+    /// The waiter can reap between one signal and the next, and a reaped pid — with the process
+    /// group that shares its number — is reusable the instant it does; a proof taken before the
+    /// first signal says nothing about the second.
+    ///
+    /// It never calls `waitpid`. That would be a second claim on a status the production waiter
+    /// owns, and winning it would take the child's termination away from the one reaper that
+    /// reports it. It watches instead, under the same proof, and stops as soon as the pid stops
+    /// naming a running child of ours — gone, or a zombie whose status is the waiter's to take.
+    static func terminateAndReap(
+        _ identity: ChildIdentity,
+        probes: ChildCleanupProbes = .kernel
+    ) {
+        for signal in [SIGCONT, SIGKILL] {
+            guard probes.stillNamesTheSameChild(identity) else { return }
+            probes.signalProcessGroup(identity, signal)
+        }
+        for _ in 0..<statusSettlingAttempts {
+            guard probes.isRunning(identity) else { return }
+            probes.settle()
+        }
+    }
+
+    static func processState(pid: pid_t) -> Int8? {
+        processInformation(pid: pid)?.kp_proc.p_stat
+    }
+
+    private static func processInformation(pid: pid_t) -> kinfo_proc? {
+        var information = kinfo_proc()
+        var byteCount = MemoryLayout<kinfo_proc>.stride
+        var name = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        let result = name.withUnsafeMutableBufferPointer { buffer in
+            sysctl(buffer.baseAddress, u_int(buffer.count), &information, &byteCount, nil, 0)
+        }
+        guard result == 0, byteCount != 0 else { return nil }
+        return information
+    }
+
+    static func remove(_ directory: URL) {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private static func contains(_ candidate: URL, within root: URL) -> Bool {
+        candidate.path == root.path || candidate.path.hasPrefix(root.path + "/")
+    }
+
+    private static func canonicalURL(_ url: URL) throws -> URL {
+        var resolved = [CChar](repeating: 0, count: Int(PATH_MAX))
+        guard url.path.withCString({ realpath($0, &resolved) }) != nil else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        let end = resolved.firstIndex(of: 0) ?? resolved.endIndex
+        let bytes = resolved[..<end].map { UInt8(bitPattern: $0) }
+        return URL(filePath: String(decoding: bytes, as: UTF8.self))
+    }
+}
