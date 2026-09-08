@@ -1,0 +1,375 @@
+import Foundation
+import XCTest
+import AppKit
+import CoreGraphics
+@testable import FilesPanel
+import AfleetCore
+import EditorCore
+import FleetKit
+import LinkRouting
+import PanelHostAPI
+import SourceControlCore
+
+/// Spec Design §1, §4 and §10; the rendered halves of G1 and G2, as far as a headless run reaches.
+///
+/// Everything below is asserted through `FilesPanelReadout` — the same device C5's
+/// `PlaceholderReadout` is — because `FilesPanelView` reads that value and formats nothing else.
+/// A rendered `Text` is not an assertion; a readout is, and what a test asserts here is what the
+/// panel draws.
+///
+/// §6.3 and §11: every assertion names a file's own invented **name**, a count or a case, never a
+/// path and never a buffer. TCC: every tree is built under the process's temporary directory and
+/// no test reads a path it did not create.
+@MainActor
+final class FilesTabTests: XCTestCase {
+
+    private var tree: ScratchTree!
+
+    override func setUp() async throws {
+        tree = try ScratchTree()
+    }
+
+    override func tearDown() async throws {
+        tree?.remove()
+        tree = nil
+    }
+
+    // MARK: - 1. the tab itself (Design §10)
+
+    func testTheTabCarriesTheFilesIdAndThatIdsOwnTitleAndSymbol() throws {
+        let tab = FilesTab()
+
+        XCTAssertEqual(tab.id, .files)
+        XCTAssertEqual(tab.title, PanelTabID.files.defaultTitle,
+                       "the title is the id's own, not a second spelling of it")
+        XCTAssertEqual(tab.systemImage, PanelTabID.files.defaultSystemImage)
+    }
+
+    func testTheTabIsAvailableForEveryChannel() throws {
+        let tab = FilesTab()
+        let one = try makeContext(store: try makeStore())
+        let other = try makeContext(store: try makeStore(), cwd: try tree.directory("second"))
+
+        XCTAssertTrue(tab.isAvailable(in: one))
+        XCTAssertTrue(tab.isAvailable(in: other), "a tab that can render a context can render any")
+    }
+
+    func testMakeSessionBuildsAFilesPanelSessionForThatChannelsDirectory() throws {
+        let tab = FilesTab()
+        let cwd = try tree.directory("workspace")
+        let context = try makeContext(store: try makeStore(), cwd: cwd)
+
+        let session = tab.makeSession(for: context)
+
+        let files = try XCTUnwrap(session as? FilesPanelSession)
+        XCTAssertEqual(files.tree.root, cwd, "the tree is rooted at the channel's own directory")
+        XCTAssertEqual(FilesPanelReadout(session: files).openFileCount, 0)
+    }
+
+    func testEachChannelGetsItsOwnSession() throws {
+        let tab = FilesTab()
+        let one = try makeContext(store: try makeStore())
+        let other = try makeContext(store: try makeStore(), cwd: try tree.directory("second"))
+
+        let first = tab.makeSession(for: one) as? FilesPanelSession
+        let second = tab.makeSession(for: other) as? FilesPanelSession
+
+        XCTAssertFalse(first === second, "the host retains one session per (tab, channel)")
+    }
+
+    /// `makeSession` is where §9's "when the session is created" lands: the tab is the one caller
+    /// that knows a session has just been built, and `activate()` is `async` while `makeSession`
+    /// is not. A tab that left this to the view would register a second pair of targets on every
+    /// remount.
+    func testMakeSessionActivatesTheSessionSoItsTwoLinkTargetsRegisterOnce() async throws {
+        let tab = FilesTab()
+        let links = CountingLinks()
+        let context = try makeContext(store: try makeStore(), links: links)
+
+        _ = tab.makeSession(for: context)
+
+        try await waitUntil("the two link targets to register") { links.count == 2 }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(links.count, 2, "two targets, registered once")
+    }
+
+    // MARK: - 2. the readout over a session driven through its own API
+
+    func testAnEmptyPanelDrawsNothingAndSaysNothing() throws {
+        let session = try makeSession()
+
+        let readout = FilesPanelReadout(session: session)
+
+        XCTAssertNil(readout.selectedName)
+        XCTAssertEqual(readout.viewer, .nothing)
+        XCTAssertEqual(readout.openFileCount, 0)
+        XCTAssertFalse(readout.showsConflictBanner)
+        XCTAssertFalse(readout.isFilterActive)
+        XCTAssertNil(readout.issue)
+        XCTAssertNil(readout.notice, "the panel-local area is empty until something goes wrong")
+    }
+
+    func testAnOpenedSourceFileDrawsTheEditorUnderItsOwnName() async throws {
+        let file = try tree.file("workspace/notes.swift", "let a = 1\n")
+        let session = try makeSession()
+
+        await session.openFile(at: file, line: nil)
+
+        let readout = FilesPanelReadout(session: session)
+        XCTAssertEqual(readout.selectedName, "notes.swift", "the name, never the path")
+        XCTAssertEqual(readout.viewer, .editor)
+        XCTAssertEqual(readout.openFileCount, 1)
+        XCTAssertFalse(readout.isDirty)
+    }
+
+    func testAMarkdownFileDrawsItsNativeViewerUntilTheSourceToggle() async throws {
+        let file = try tree.file("workspace/notes.md", "# a heading\n")
+        let session = try makeSession()
+
+        await session.openFile(at: file, line: nil)
+        XCTAssertEqual(FilesPanelReadout(session: session).viewer, .markdown,
+                       "markdown is rendered by default (Design §4)")
+
+        await session.setRendersMarkdown(false, for: file)
+        XCTAssertEqual(FilesPanelReadout(session: session).viewer, .editor,
+                       "the toggle opens the same file's source in Monaco")
+    }
+
+    func testADirtyBufferIsMarkedInTheHeader() async throws {
+        let file = try tree.file("workspace/notes.swift", "let a = 1\n")
+        let surface = RecordingSurface()
+        let session = try makeSession(surface: surface)
+
+        await session.openFile(at: file, line: nil)
+        surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+
+        XCTAssertTrue(FilesPanelReadout(session: session).isDirty)
+    }
+
+    /// The banner is raised the way a user raises it: the buffer is dirty, another writer has the
+    /// file, and the save is refused into the conflict rather than overwriting it (Design §8).
+    func testAConflictRaisesTheBanner() async throws {
+        let file = try tree.file("workspace/notes.swift", "one\n")
+        let surface = RecordingSurface()
+        let session = try makeSession(surface: surface)
+        await session.openFile(at: file, line: nil)
+        let path = file.path(percentEncoded: false)
+        surface.deliver(.dirty(path: path, isDirty: true))
+
+        try "another writer\n".write(to: file, atomically: true, encoding: .utf8)
+        session.save()
+        surface.deliver(.saveRequested(path: path, text: "mine\n"))
+
+        let readout = FilesPanelReadout(session: session)
+        XCTAssertTrue(readout.showsConflictBanner, "the panel offers Reload and Keep mine")
+
+        session.keepMine(file)
+        XCTAssertFalse(FilesPanelReadout(session: session).showsConflictBanner,
+                       "Keep mine takes the banner down")
+    }
+
+    func testADiffOnScreenDrawsTheDiffViewerRatherThanTheSelectedFile() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("first", files: ["sample.swift": "let a = 1\n"])
+        try repository.write("sample.swift", "let a = 2\n")
+        let session = try makeSession(environment: repository.environment)
+
+        await session.showDiff(DiffRef(repository: repository.root, path: "sample.swift",
+                                       base: .workingTreeAgainstHEAD))
+
+        let readout = FilesPanelReadout(session: session)
+        XCTAssertEqual(readout.viewer, .diff)
+        XCTAssertNil(readout.issue, "a resolved pair is not a panel-local state")
+    }
+
+    func testAPathThatCannotBeReadDrawsThePanelLocalNoticeAndNoViewer() async throws {
+        let session = try makeSession()
+
+        await session.openFile(at: tree.root.appending(path: "workspace/absent.swift"), line: nil)
+
+        let readout = FilesPanelReadout(session: session)
+        XCTAssertEqual(readout.issue, .unreadableFile)
+        XCTAssertNotNil(readout.notice, "the panel draws its own errors and never the channel's")
+        XCTAssertEqual(readout.viewer, .nothing)
+        XCTAssertEqual(readout.openFileCount, 0)
+    }
+
+    func testADiffWithNoTextSideDrawsThePanelLocalNoticeRatherThanTheDiffViewer() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("first", files: ["sample.swift": "let a = 1\n"])
+        let session = try makeSession(environment: repository.environment)
+
+        await session.showDiff(DiffRef(repository: repository.root, path: "sample.swift",
+                                       base: .workingTreeAgainstHEAD))
+
+        let readout = FilesPanelReadout(session: session)
+        XCTAssertEqual(readout.issue, .noTextDiff(.pathUnchangedByBase))
+        XCTAssertNotNil(readout.notice)
+        XCTAssertEqual(readout.viewer, .nothing)
+    }
+
+    func testAFilterOverTheTreeIsReportedAsActive() throws {
+        let session = try makeSession()
+
+        XCTAssertFalse(FilesPanelReadout(session: session).isFilterActive)
+        session.tree.filter = "no"
+        XCTAssertTrue(FilesPanelReadout(session: session).isFilterActive)
+    }
+
+    // MARK: - 3. the viewer the item-25 corpus draws (Design §4, G2's rendered half)
+
+    func testTheItem25CorpusDrawsItsOwnViewer() async throws {
+        let corpus: [(name: String, bytes: Data, viewer: FilesPanelReadout.Viewer)] = [
+            ("notes.md", Data("# a heading\n".utf8), .markdown),
+            ("pixel.png", Self.pngBytes(), .image),
+            ("page.pdf", Self.singlePagePDFBytes(), .pdf),
+            ("clip.mp4", Self.mp4ContainerBytes(), .media),
+            ("tone.wav", Self.wavBytes(), .media),
+            ("sample.swift", Data("struct Sample {}\n".utf8), .editor),
+            ("LICENCE", Data("Permission is granted.\n".utf8), .editor),
+            ("blob", Data([0x00, 0x01, 0x02, 0x00, 0x7f]), .unsupported),
+            ("card.rtf", Data("{\\rtf1\\ansi hello}".utf8), .quickLook),
+            // The veto: bytes that contradict the name are `.binary`, and a panel-local surface
+            // draws them rather than an `NSImage` that would fail inside a view (Design §4).
+            ("claimed.png", Data("this is not a PNG at all\n".utf8), .unsupported),
+        ]
+        let session = try makeSession()
+
+        for item in corpus {
+            let url = try tree.file("corpus/\(item.name)")
+            try item.bytes.write(to: url)
+            await session.openFile(at: url, line: nil)
+            XCTAssertEqual(FilesPanelReadout(session: session).viewer, item.viewer,
+                           "\(item.name) names its own viewer")
+            XCTAssertEqual(FilesPanelReadout(session: session).selectedName, item.name)
+        }
+        XCTAssertEqual(FilesPanelReadout(session: session).openFileCount, corpus.count,
+                       "every file of the corpus is open at once")
+    }
+
+    // MARK: - the corpus, encoded rather than typed out
+
+    /// A genuine 1×1 PNG, encoded by the system.
+    private static func pngBytes() -> Data {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1,
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                   isPlanar: false, colorSpaceName: .deviceRGB,
+                                   bytesPerRow: 4, bitsPerPixel: 32)!
+        rep.setColor(.white, atX: 0, y: 0)
+        return rep.representation(using: .png, properties: [:])!
+    }
+
+    /// A genuine single-page PDF, drawn by Core Graphics.
+    private static func singlePagePDFBytes() -> Data {
+        let data = NSMutableData()
+        var box = CGRect(x: 0, y: 0, width: 72, height: 72)
+        let consumer = CGDataConsumer(data: data as CFMutableData)!
+        let context = CGContext(consumer: consumer, mediaBox: &box, nil)!
+        context.beginPDFPage(nil)
+        context.setFillColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1)
+        context.fill(box)
+        context.endPDFPage()
+        context.closePDF()
+        return data as Data
+    }
+
+    /// An `ftyp` box: the first box of every ISO base media container.
+    private static func mp4ContainerBytes() -> Data {
+        var data = Data([0x00, 0x00, 0x00, 0x18])
+        data.append(contentsOf: Array("ftypisom".utf8))
+        data.append(contentsOf: [0x00, 0x00, 0x02, 0x00])
+        data.append(contentsOf: Array("isomiso2".utf8))
+        data.append(Data(repeating: 0, count: 16))
+        return data
+    }
+
+    /// A valid RIFF/WAVE header over a few samples of silence.
+    private static func wavBytes() -> Data {
+        let samples = Data(repeating: 0, count: 64)
+        var data = Data(Array("RIFF".utf8))
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(36 + samples.count).littleEndian) { Array($0) })
+        data.append(contentsOf: Array("WAVEfmt ".utf8))
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(44100).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(88200).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: UInt16(2).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: UInt16(16).littleEndian) { Array($0) })
+        data.append(contentsOf: Array("data".utf8))
+        data.append(contentsOf: withUnsafeBytes(of: UInt32(samples.count).littleEndian) { Array($0) })
+        data.append(samples)
+        return data
+    }
+
+    // MARK: - the harness
+
+    private func makeSession(surface: (any EditorSurface)? = nil,
+                             environment: [String: String] = [:],
+                             links: any LinkRouterCapability = UnusedLinks()) throws
+        -> FilesPanelSession {
+        let context = try makeContext(store: try makeStore(), environment: environment, links: links)
+        return FilesPanelSession(context: context, surface: surface,
+                                 coalescingInterval: .milliseconds(10),
+                                 watchCoalescingDelay: .milliseconds(20),
+                                 watchPollInterval: .milliseconds(50))
+    }
+
+    private func makeContext(store: any ScopedStore, cwd: URL? = nil,
+                             environment: [String: String] = [:],
+                             links: any LinkRouterCapability = UnusedLinks()) throws
+        -> ChannelContext {
+        let session = SessionID()
+        let home = tree.root.appending(path: "config-home-\(session.description)")
+        return ChannelContext(
+            key: ChannelKey(configHome: home, session: session),
+            session: session,
+            cwd: try cwd ?? tree.directory("workspace"),
+            environment: ResolvedEnvironment(variables: environment.isEmpty
+                                                ? ["PATH": ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"]
+                                                : environment,
+                                             shell: "/bin/zsh", capturedAt: Date(),
+                                             mode: .processFallback),
+            store: store,
+            links: links,
+            recentURLs: StubFeed(),
+            reportPaneExit: { _ in })
+    }
+
+    private func makeStore() throws -> some ScopedStore {
+        let base = tree.root.appending(path: "state-\(UUID().uuidString)")
+        return TabScoped(store: try FileStateStore(baseDirectory: base, configHomes: []))
+    }
+
+    private struct TabScoped: ScopedStore {
+        let store: any StateStore
+        func read<T: Codable & Sendable>(_ type: T.Type, key: String) async throws -> T? {
+            try await store.read(type, namespace: .workbench, key: key)
+        }
+        func write<T: Codable & Sendable>(_ value: T, key: String) async throws {
+            try await store.write(value, namespace: .workbench, key: key)
+        }
+        func remove(key: String) async throws { try await store.remove(namespace: .workbench, key: key) }
+        func keys() async throws -> [String] { try await store.keys(in: .workbench) }
+    }
+
+    private func waitUntil(_ what: String, within: Duration = .seconds(5),
+                           _ condition: @MainActor () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("timed out waiting for: \(what)")
+    }
+}
+
+/// Counts registrations and nothing else: the count is the whole assertion (§11).
+final class CountingLinks: LinkRouterCapability, @unchecked Sendable {
+    private let lock = NSLock()
+    private var registered = 0
+    var count: Int { lock.withLock { registered } }
+    func register(_ target: LinkTarget) async { lock.withLock { registered += 1 } }
+    func unregister(tab: PanelTabID) async { lock.withLock { registered = 0 } }
+    func open(_ link: WorkspaceLink, from destination: LinkDestination) async {}
+}
