@@ -68,7 +68,12 @@ enum WorkerEvidence {
 
         var unprovenBecause: String?
         if !proven {
-            if !allFive {
+            if let failure = instrumented["error"] as? String {
+                // Distinguished from a fallback: a probe that did not run has said nothing
+                // about the workers, and reading its silence as "they ran on the main thread"
+                // would be the same mistake one layer along.
+                unprovenBecause = "the worker instrumentation did not report: \(failure)"
+            } else if !allFive {
                 unprovenBecause = "a worker entry did not instantiate"
             } else if let silent = languageServices.sorted().first(where: { !(answered[$0] ?? false) }) {
                 unprovenBecause = "the \(silent) language service did not answer"

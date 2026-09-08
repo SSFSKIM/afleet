@@ -397,7 +397,18 @@ enum ProbeScripts {
     /// assigns. Without it the harness cannot tell a working worker from Monaco's silent
     /// main-thread fallback, which answers exactly the same and logs only a console warning.
     static let workerInstrumentation = """
-    window.__s3workers = { records: [] };
+    window.__s3workers = { records: [], warnings: [] };
+    // Monaco announces the fallback with `console.warn`, not `console.error` — and in this
+    // build the announcement sits behind a guard that is false in a browser, so it may never
+    // be printed at all. The capture is kept because a warning that does arrive is worth
+    // having, and is never relied on: the message counts below are the evidence.
+    (function () {
+      var originalWarn = console.warn;
+      console.warn = function () {
+        window.__s3workers.warnings.push(Array.prototype.map.call(arguments, String).join(" "));
+        originalWarn.apply(console, arguments);
+      };
+    })();
     (function () {
       var Native = window.Worker;
       if (!Native || Native.__s3wrapped) { return; }
@@ -446,12 +457,15 @@ enum ProbeScripts {
       if (bucket.labels.indexOf(record.label) < 0) { bucket.labels.push(record.label); }
       bucket.errors = bucket.errors.concat(record.errors);
     });
-    // Monaco says so itself when it gives up on workers, and says it only to the console:
-    // "Could not create web worker(s). Falling back to loading web worker code in main thread".
-    // The boot capture already wraps console.error, so the sentence survives.
-    var boot = window.__s3boot || [];
-    var fallbackWarnings = boot.map(function (entry) { return String(entry.message || ""); })
-      .filter(function (message) { return message.toLowerCase().indexOf("web worker") >= 0; });
+    // "Could not create web worker(s). Falling back to loading web worker code in main thread"
+    // is what Monaco says when it gives up, through `console.warn` and behind a guard that may
+    // suppress it entirely in a browser. Corroboration, never proof: the counts above are what
+    // separates a working worker from the fallback.
+    var spoken = (window.__s3workers && window.__s3workers.warnings || [])
+      .concat((window.__s3boot || []).map(function (entry) { return String(entry.message || ""); }));
+    var fallbackWarnings = spoken.filter(function (message) {
+      return message.toLowerCase().indexOf("web worker") >= 0;
+    });
     return { byService: byService, workerCount: records.length, fallbackWarnings: fallbackWarnings,
              labels: records.map(function (record) { return record.label; }) };
     """
