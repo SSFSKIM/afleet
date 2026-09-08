@@ -314,4 +314,118 @@ final class DecisionCardKindTests: XCTestCase {
         return PlanCardView(card: card, tool: tool, presentation: .full,
                             channel: Self.channel, answering: answering, draft: draft)
     }
+
+    // MARK: - G1d, the elicitation card, both modes
+
+    /// Form mode over the stated subset (spec D8): a required string, an enum, an integer, a boolean
+    /// and an array of strings, and `content` as a **sibling of `action`** (anchor 10). The request
+    /// is invented — **no fixture carries an elicitation**.
+    func testFormModeRendersTheSubsetAndAcceptsContentBesideAction() async throws {
+        let (lifecycle, answering) = await hosted()
+        let card = try elicitationCard(id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbd1", [
+            "mcp_server_name": "invented-server",
+            "message": "An invented server asks for five invented values.",
+            "requested_schema": ["type": "object",
+                                 "required": ["name"],
+                                 "properties": [
+                                    "name": ["type": "string", "title": "A name", "default": "an invented name"],
+                                    "colour": ["type": "string", "enum": ["red", "blue"], "default": "blue"],
+                                    "count": ["type": "integer", "default": 2],
+                                    "loud": ["type": "boolean", "default": true],
+                                    "tags": ["type": "array", "items": ["type": "string", "enum": ["one", "two"]],
+                                             "default": ["one"]]]]
+        ])
+        let view = try elicitationView(card, answering)
+        let form = try XCTUnwrap(view.form, "the invented form-mode request produced no form")
+        XCTAssertEqual(form.fields.count, 5, "the subset drew \(form.fields.count) controls for five properties")
+        XCTAssertFalse(form.isPartial, "a schema inside the subset was reported as partial")
+        XCTAssertTrue(form.fields.contains { $0.name == "name" && $0.isRequired },
+                      "the required property was not marked required")
+
+        try press("Accept", in: view.body)
+        await answering.whenIdle()
+        let body = try await sentBody(lifecycle, "Accept")
+        XCTAssertTrue(body == (try json("""
+            {"action":"accept","content":{"name":"an invented name","colour":"blue","count":2,
+                                          "loud":true,"tags":["one"]}}
+            """)),
+                      "the accept body is not `content` beside `action` over the five values")
+    }
+
+    /// Url mode (spec D8): no form at all, the address rendered, and `decline`/`cancel` still
+    /// available. The discriminating clause — a form-only implementation renders an empty card and
+    /// drops the URL, and would pass no part of this.
+    func testUrlModeRendersNoFormAndStillDeclinesAndCancels() async throws {
+        let (lifecycle, answering) = await hosted()
+        let card = try elicitationCard(id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbd2", [
+            "mcp_server_name": "invented-server",
+            "message": "An invented server asks you to finish this in a browser.",
+            "mode": "url",
+            "url": "https://invented.example/finish",
+            "elicitation_id": "elic-bbbb-1"
+        ])
+        let view = try elicitationView(card, answering)
+        XCTAssertTrue(view.isURLMode, "a url-mode request was not read as one")
+        XCTAssertNil(view.form, "url mode drew a form")
+        XCTAssertFalse(offers("Accept", in: view.body), "url mode offered an accept with nothing to accept")
+        XCTAssertTrue(CardTree.texts(in: view.body).contains("https://invented.example/finish"),
+                      "url mode did not render the address it was given")
+
+        try press("Decline", in: view.body)
+        await answering.whenIdle()
+        let declined = try await sentBody(lifecycle, "Decline")
+        XCTAssertTrue(declined == (try json(#"{"action":"decline"}"#)),
+                      "url mode's decline is not the engine's decline")
+
+        let (second, secondAnswering) = await hosted()
+        let cancelView = try elicitationView(card, secondAnswering)
+        try press("Cancel", in: cancelView.body)
+        await secondAnswering.whenIdle()
+        let cancelled = try await sentBody(second, "Cancel")
+        XCTAssertTrue(cancelled == (try json(#"{"action":"cancel"}"#)),
+                      "url mode's cancel is not the engine's cancel")
+    }
+
+    /// A schema outside the subset — a nested object and an array of numbers — renders as raw JSON
+    /// fields, says the form is partial, and **still answers** (§6.4). The request is invented.
+    func testASchemaOutsideTheSubsetRendersRawAndStillAnswers() async throws {
+        let (lifecycle, answering) = await hosted()
+        let card = try elicitationCard(id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbd3", [
+            "mcp_server_name": "invented-server",
+            "message": "An invented server asks for a shape afleet does not draw.",
+            "requested_schema": ["type": "object",
+                                 "properties": [
+                                    "nested": ["type": "object", "properties": ["inner": ["type": "string"]]],
+                                    "sizes": ["type": "array", "items": ["type": "number"]]]]
+        ])
+        let draft = ElicitationCardView.Draft()
+        let view = try elicitationView(card, answering, draft: draft)
+        let form = try XCTUnwrap(view.form, "the invented request produced no form")
+        XCTAssertTrue(form.isPartial, "a schema outside the subset was not reported as partial")
+        for field in form.fields {
+            guard case .raw = field.control else {
+                return XCTFail("a property outside the subset was drawn as a typed control")
+            }
+            XCTAssertFalse(ViewTree.values(of: TextField<Text>.self, in: view.control(field)).isEmpty,
+                           "a raw property drew no field to answer it with")
+        }
+
+        draft.values["nested"] = try json(#"{"inner":"an invented value"}"#)
+        draft.values["sizes"] = try json("[1,2]")
+        try press("Accept", in: view.body)
+        await answering.whenIdle()
+        let accepted = try await sentBody(lifecycle, "Accept")
+        XCTAssertTrue(accepted
+                        == (try json(#"{"action":"accept","content":{"nested":{"inner":"an invented value"},"sizes":[1,2]}}"#)),
+                      "a form outside the subset could not be answered")
+    }
+
+    private func elicitationView(_ card: DecisionCard, _ answering: DecisionAnswering,
+                                 draft: ElicitationCardView.Draft = ElicitationCardView.Draft()) throws -> ElicitationCardView {
+        guard case .elicitation(let request) = card.payload else {
+            throw XCTSkip("the invented request is no longer an elicitation card")
+        }
+        return ElicitationCardView(card: card, request: request, presentation: .full,
+                                   channel: Self.channel, answering: answering, draft: draft)
+    }
 }

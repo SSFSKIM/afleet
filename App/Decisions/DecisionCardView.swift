@@ -50,9 +50,9 @@ struct DecisionCardView: View {
         }
     }
 
-    /// A card the engine is still waiting on. The permission, question and plan cards draw their
-    /// own; the elicitation and dialog cards are later deliverables and until then their kinds
-    /// render their summary and offer nothing, which an unmodelled payload does for good (§6.3).
+    /// A card the engine is still waiting on. Four of the five payloads draw their own card; the
+    /// dialog card is Task 5, and until then its kind renders its summary and offers nothing, which
+    /// is what an unmodelled payload does for good (§6.3).
     @ViewBuilder
     private var live: some View {
         switch card.payload {
@@ -68,6 +68,9 @@ struct DecisionCardView: View {
         case .plan(let tool):
             PlanCardView(card: card, tool: tool, presentation: presentation,
                          channel: channel, answering: answering)
+        case .elicitation(let request):
+            ElicitationCardView(card: card, request: request, presentation: presentation,
+                                channel: channel, answering: answering)
         default:
             Text(card.summaryLine)
                 .font(presentation == .full ? .body : .callout)
