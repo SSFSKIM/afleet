@@ -40,13 +40,14 @@ protocol TimelineRendering {
 /// The native path: an `NSTableView` in an `NSScrollView`, one row per item, SwiftUI hosted per
 /// visible row (child spec §3).
 ///
-/// **S7-minimal on this commit.** Task 1 is the spike, and what it has to measure is the shape of
-/// the real thing rather than the whole of it: a table, one row reloaded per streaming update, and
-/// the text pipeline of §4 through §6 with its caches in place, because measuring an uncached
-/// parse or a main-thread highlight would measure a design nobody proposed. Task 2 adds the scroll
-/// behaviours — bottom anchoring, sticky-to-bottom with silent re-pin, scroll anchoring, the
-/// jump-to-bottom pill — and Task 3 lifts `MarkdownText` and `CodeHighlighter` out of this file
-/// into their own. Nothing here is load-bearing for those; it is load-bearing for the number.
+/// **Superseded 2026-09-08 (C6.1 Task 2).** What stood here said this was S7-minimal — a table and
+/// the text pipeline, with the scroll behaviours to come. They are here now, in
+/// `TimelineTableController`: one row per `ItemID`, heights cached per id, and a streaming delta that
+/// reloads one row. The scroll behaviours land next, and Task 3 still lifts `MarkdownText` and
+/// `CodeHighlighter` out of this file into their own.
+///
+/// One conformer, and one table per channel: the controller is held here, so the row heights and the
+/// scroll position survive every body evaluation of the view above.
 @MainActor
 final class NativeTimelineRenderer: TimelineRendering {
 
@@ -54,183 +55,6 @@ final class NativeTimelineRenderer: TimelineRendering {
 
     func view(for input: TimelineRenderInput) -> AnyView {
         AnyView(TimelineTableRepresentable(controller: controller, input: input))
-    }
-}
-
-/// The `NSViewRepresentable` half. Deliberately thin: it hands the input to the controller and the
-/// controller owns the table, because a SwiftUI view *value* preserves nothing across a subtree
-/// unmount and the row heights and the scroll position have to survive one.
-struct TimelineTableRepresentable: NSViewRepresentable {
-
-    let controller: TimelineTableController
-    let input: TimelineRenderInput
-
-    func makeNSView(context: Context) -> NSScrollView {
-        controller.apply(input)
-        return controller.scrollView
-    }
-
-    func updateNSView(_ nsView: NSScrollView, context: Context) {
-        controller.apply(input)
-    }
-}
-
-// MARK: - The table
-
-/// One channel's table: rows keyed by `ItemID`, heights cached per id, and a streaming path that
-/// reloads exactly one row.
-@MainActor
-final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-
-    let scrollView = NSScrollView()
-    let tableView = NSTableView()
-
-    /// What each row draws. Held here rather than derived in a cell, so a reload is a lookup.
-    private(set) var rows: [RenderedRow] = []
-
-    /// Row heights by the row's own key. `ItemID` carries a config-home path and is never logged;
-    /// it is a dictionary key here and nothing else.
-    private var heights: [String: CGFloat] = [:]
-
-    private let markdown = MarkdownText()
-    private let highlighter = CodeHighlighter()
-
-    override init() {
-        super.init()
-        let column = NSTableColumn(identifier: .init("timeline"))
-        column.resizingMask = .autoresizingMask
-        tableView.addTableColumn(column)
-        tableView.headerView = nil
-        tableView.rowSizeStyle = .custom
-        tableView.usesAutomaticRowHeights = false
-        tableView.backgroundColor = .textBackgroundColor
-        tableView.dataSource = self
-        tableView.delegate = self
-        scrollView.documentView = tableView
-        scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false
-    }
-
-    // MARK: Applying input
-
-    /// Routes a publish by what actually changed, which is what makes `changes` load-bearing rather
-    /// than decoration: an appended row is an insert, a streaming delta is one row reloaded, and
-    /// only a change set that names nothing falls back to rebuilding the table.
-    func apply(_ input: TimelineRenderInput) {
-        let inserted = input.changes.compactMap { change -> ItemID? in
-            if case .inserted(let id) = change { return id } else { return nil }
-        }
-        let isPreview = input.changes.contains(.previewChanged)
-
-        // A first render, or a change set naming nothing this table can act on.
-        guard !rows.isEmpty, !input.changes.isEmpty, inserted.count + (isPreview ? 1 : 0) == input.changes.count else {
-            setRows(input.rows.map { RenderedRow(key: $0.id.key, source: $0.summary) })
-            return
-        }
-
-        for id in inserted {
-            guard let row = input.rows.first(where: { $0.id == id }) else { continue }
-            var built = RenderedRow(key: row.id.key, source: row.summary)
-            built.settle(markdown: markdown, highlighter: highlighter)
-            appendRow(built)
-        }
-        if isPreview, let preview = input.preview {
-            // The streaming tail: whatever the preview holds beyond what this row already shows.
-            let shown = rows.last.map { $0.tail } ?? ""
-            let text = preview.text
-            if text.count > shown.count {
-                appendToLastRow(String(text.dropFirst(shown.count)))
-            }
-        }
-    }
-
-    /// The harness's entry point, and the shape the real list will use: whole documents in, parsed
-    /// once, cached by content.
-    func setRows(_ rows: [RenderedRow]) {
-        self.rows = rows
-        for index in self.rows.indices { self.rows[index].settle(markdown: markdown, highlighter: highlighter) }
-        heights.removeAll()
-        tableView.reloadData()
-
-        // §6's "never on the main thread": a fenced block missed the cache above and rendered
-        // unhighlighted, which is the correct thing to draw and the wrong thing to leave. The fill
-        // runs off-main and the next reload of that row picks it up.
-        let sources = rows.map(\.pendingSource)
-        let markdown = self.markdown
-        let highlighter = self.highlighter
-        Task.detached(priority: .utility) {
-            await highlighter.warm(Self.fences(in: sources))
-            await markdown.warm(sources, highlighter: highlighter)
-        }
-    }
-
-    /// Every fenced block in a set of documents, for the warm-up.
-    static func fences(in documents: [String]) -> [(code: String, language: String?)] {
-        var out: [(code: String, language: String?)] = []
-        for document in documents {
-            var lines = document.split(separator: "\n", omittingEmptySubsequences: false)[...]
-            while let open = lines.firstIndex(where: { $0.hasPrefix("```") }) {
-                let language = String(lines[open].dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                let rest = lines[lines.index(after: open)...]
-                guard let close = rest.firstIndex(where: { $0.hasPrefix("```") }) else { break }
-                out.append((rest[rest.startIndex..<close].joined(separator: "\n"), language.isEmpty ? nil : language))
-                lines = rest[rest.index(after: close)...]
-            }
-        }
-        return out
-    }
-
-    /// Adds a row and reloads only the rows that changed — the new one, and the one that was last
-    /// before it, whose separator changes. Not a whole-table reload: an assistant message arriving
-    /// in a channel with a thousand rows must not re-measure the thousand.
-    func appendRow(_ row: RenderedRow) {
-        rows.append(row)
-        tableView.insertRows(at: IndexSet(integer: rows.count - 1), withAnimation: [])
-    }
-
-    /// The streaming path (§4): append to the last row's tail and reload **one row**.
-    ///
-    /// Returns the phase costs of this one update, which is what S7 attributes a slow frame to.
-    @discardableResult
-    func appendToLastRow(_ fragment: String) -> RenderPhases {
-        guard !rows.isEmpty else { return RenderPhases() }
-        let index = rows.count - 1
-        var phases = RenderPhases()
-
-        let parse = RenderClock.start()
-        rows[index].append(fragment, markdown: markdown, highlighter: highlighter, phases: &phases)
-        phases.markdown += RenderClock.since(parse) - phases.highlight
-
-        let host = RenderClock.start()
-        heights[rows[index].key] = nil
-        tableView.reloadData(forRowIndexes: IndexSet(integer: index),
-                             columnIndexes: IndexSet(integer: 0))
-        phases.hosting += RenderClock.since(host)
-        return phases
-    }
-
-    // MARK: NSTableView
-
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
-
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        guard rows.indices.contains(row) else { return 18 }
-        let key = rows[row].key
-        if let cached = heights[key] { return cached }
-        let width = max(tableView.bounds.width, 320)
-        let measured = rows[row].height(forWidth: width)
-        heights[key] = measured
-        return measured
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard rows.indices.contains(row) else { return nil }
-        // SwiftUI hosted per visible row, which is what contract Y1's `AnyView` builder requires and
-        // what S7's `hosting` signpost measures.
-        let hosting = NSHostingView(rootView: TimelineMarkdownRow(row: rows[row]))
-        hosting.translatesAutoresizingMaskIntoConstraints = true
-        hosting.autoresizingMask = [.width, .height]
-        return hosting
     }
 }
 
@@ -246,22 +70,45 @@ struct RenderedRow: Identifiable {
     let key: String
     var id: String { key }
 
+    /// The item this row draws, when the row came from a channel's timeline.
+    ///
+    /// Non-nil rows draw through contract Y1's registry, which is the whole of what the app shows;
+    /// nil rows are the two that are not items — S7's corpus documents, and the message still
+    /// streaming — and draw the markdown pipeline below directly.
+    let item: TimelineRow?
+
     private(set) var settled: [NSAttributedString] = []
     private(set) var tail: String = ""
     private var pending: String
     /// What this row was built from, kept for the off-main warm-up `setRows` kicks off.
     let pendingSource: String
 
+    /// How many characters of source this row has consumed. The streaming path appends only the
+    /// fragment beyond it, so a publish carrying a whole message's text costs the delta and not the
+    /// message.
+    private(set) var consumedCharacters = 0
+
     init(key: String, source: String) {
         self.key = key
+        self.item = nil
         self.pending = source
         self.pendingSource = source
+    }
+
+    /// A row of the channel's timeline. It carries no source text of its own: what it draws is
+    /// whichever builder owns the item's kind, and that builder owns the item's own content.
+    init(_ item: TimelineRow) {
+        self.key = item.id.key
+        self.item = item
+        self.pending = ""
+        self.pendingSource = ""
     }
 
     /// Parses everything this row arrived with. Called once, off the streaming path.
     mutating func settle(markdown: MarkdownText, highlighter: CodeHighlighter) {
         var phases = RenderPhases()
         consumeClosedBlocks(from: pending, markdown: markdown, highlighter: highlighter, phases: &phases)
+        consumedCharacters = pending.count
         pending = ""
     }
 
@@ -269,6 +116,7 @@ struct RenderedRow: Identifiable {
     mutating func append(_ fragment: String, markdown: MarkdownText, highlighter: CodeHighlighter,
                          phases: inout RenderPhases) {
         consumeClosedBlocks(from: tail + fragment, markdown: markdown, highlighter: highlighter, phases: &phases)
+        consumedCharacters += fragment.count
     }
 
     /// Splits at the last block boundary, parses what closed, keeps the rest as the tail.
