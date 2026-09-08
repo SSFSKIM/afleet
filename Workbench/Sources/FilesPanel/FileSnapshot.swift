@@ -35,10 +35,23 @@ public struct FileSnapshot: Sendable, Equatable, Hashable {
         if let previous, previous.size == seen.size, previous.modified == seen.modified {
             return previous
         }
-        guard seen.size <= maximumBytes, let data = contents(of: url, upTo: maximumBytes) else {
-            return nil
-        }
-        return FileSnapshot(size: data.count, modified: seen.modified, digest: digest(of: data))
+        return readWithContents(url, maximumBytes: maximumBytes)?.snapshot
+    }
+
+    /// The same read, keeping the bytes it was taken from.
+    ///
+    /// A caller that needs both — the text a buffer is filled with and the baseline the watcher
+    /// compares that buffer against — must take them from **one** observation. Two reads of one
+    /// path are two observations, and a file replaced between them leaves the buffer holding
+    /// bytes the baseline does not describe: the next external change is then invisible to §8's
+    /// rule and the next save overwrites it.
+    public static func readWithContents(_ url: URL,
+                                        maximumBytes: Int = FileKind.maximumReadableBytes)
+        -> (snapshot: FileSnapshot, contents: Data)? {
+        guard let seen = observe(url), seen.size <= maximumBytes,
+              let data = contents(of: url, upTo: maximumBytes) else { return nil }
+        return (FileSnapshot(size: data.count, modified: seen.modified, digest: digest(of: data)),
+                data)
     }
 
     /// A regular file's size and modification time, or `nil` for anything else — the same

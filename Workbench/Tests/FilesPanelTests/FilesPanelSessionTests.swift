@@ -1245,20 +1245,26 @@ final class FilesPanelSessionTests: XCTestCase {
         let second = try tree.file("second.swift", "two\n")
         let harness = try makeHarness(stashTimeout: .milliseconds(50))
         await harness.session.openFile(at: first, line: nil)
+        await harness.session.openFile(at: second, line: nil)
+        await harness.session.select(first)
         harness.surface.type("edited one\n")
         harness.surface.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
         harness.surface.reset()
 
-        let opening = Task { await harness.session.openFile(at: second, line: nil) }
+        let opening = Task { await harness.session.select(second) }
         // One turn puts the presentation inside its stash wait, which is where the reply arrives.
         await Task.yield()
         harness.surface.deliver(.saveRequested(path: second.path(percentEncoded: false),
                                                text: "not this file's bytes\n"))
         await opening.value
 
-        XCTAssertEqual(harness.surface.shapes.last,
-                       .open(name: "second.swift", language: "swift", text: "two\n", line: nil),
+        XCTAssertEqual(harness.session.openFiles.first { $0.name == "second.swift" }?.text,
+                       "two\n",
                        "a reply naming another file was recorded as that file's buffer")
+        // And the reply answered nothing, so the buffer was never captured: the presentation is
+        // refused rather than completed over text only the editor has (§7).
+        XCTAssertEqual(harness.session.selected?.name, "first.swift")
+        XCTAssertEqual(harness.session.issue, .editorDidNotAnswer)
     }
 
     // MARK: - 27. a presentation superseded while it waits for a stash
@@ -1271,17 +1277,25 @@ final class FilesPanelSessionTests: XCTestCase {
         let waited = try tree.file("waited.swift", "two\n")
         let overtaking = try tree.file("overtaking.swift", "three\n")
         let harness = try makeHarness(stashTimeout: .seconds(5))
+        // All three opened first, so every presentation below is a `select` with no suspension of
+        // its own before the stash: what is being timed here is the stash, not the watcher.
         await harness.session.openFile(at: dirty, line: nil)
+        await harness.session.openFile(at: waited, line: nil)
+        await harness.session.openFile(at: overtaking, line: nil)
+        await harness.session.select(dirty)
         harness.surface.type("edited one\n")
         harness.surface.deliver(.dirty(path: dirty.path(percentEncoded: false), isDirty: true))
 
-        let waiting = Task { await harness.session.openFile(at: waited, line: nil) }
+        let waiting = Task { await harness.session.select(waited) }
         await Task.yield()
-        await harness.session.openFile(at: overtaking, line: nil)
-        // The stashed buffer comes back now, which resumes the presentation that was overtaken.
+        let overtook = Task { await harness.session.select(overtaking) }
+        await Task.yield()
+        // The stashed buffer comes back now, which resumes both presentations: the one that was
+        // overtaken has lost its generation, and the newer one draws.
         harness.surface.deliver(.saveRequested(path: dirty.path(percentEncoded: false),
                                                text: "edited one\n"))
         await waiting.value
+        await overtook.value
 
         XCTAssertEqual(harness.session.selected?.name, "overtaking.swift")
         XCTAssertEqual(harness.surface.shapes.last,
@@ -1546,6 +1560,246 @@ final class FilesPanelSessionTests: XCTestCase {
                                    isPlanar: false, colorSpaceName: .deviceRGB,
                                    bytesPerRow: 4 * side, bitsPerPixel: 32)!
         return rep.representation(using: .png, properties: [:])!
+    }
+
+    // MARK: - 30. the buffer belongs to the window that holds the unsaved text
+
+    /// `cursor` and `dirty` are both taken as evidence of the window the user is in, but only one
+    /// of them says anything about the *text*. A window that reports a cursor holds whatever the
+    /// session last broadcast to it; if the other window is holding unsaved text, handing it the
+    /// `save` reads a stale buffer, writes it, and then broadcasts `setText` over the edits.
+    func testACursorInAnotherWindowDoesNotTakeTheBufferFromTheWindowHoldingUnsavedText() async throws {
+        let file = try tree.file("owned-buffer.swift", "one\n")
+        let path = file.path(percentEncoded: false)
+        let harness = try makeHarness()
+        let poppedOut = RecordingSurface()
+        harness.session.attach(poppedOut)
+        harness.surface.answersSave = true
+        poppedOut.answersSave = true
+
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.type("the text the user typed\n")
+        harness.surface.deliver(.dirty(path: path, isDirty: true))
+        // The other window reports a position nobody commanded — a click, a scroll, a remount.
+        poppedOut.deliver(.cursor(line: 3, column: 1))
+
+        harness.session.save()
+
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "the text the user typed\n",
+                       "a cursor in another window answered for a buffer it does not hold")
+    }
+
+    // MARK: - 31. a second presentation while a stash is already in flight
+
+    /// A-to-B navigation puts a stash for A in flight; selecting A again before it comes back has
+    /// to *wait* for it. Skipping the wait re-opens A with the text the session cached before the
+    /// user typed, and the reply that would have repaired it arrives for a presentation that has
+    /// already lost its generation check.
+    func testAPresentationWaitsForTheStashAlreadyInFlightRatherThanSkippingIt() async throws {
+        let first = try tree.file("in-flight-first.swift", "one\n")
+        let second = try tree.file("in-flight-second.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .seconds(5))
+        await harness.session.openFile(at: first, line: nil)
+        await harness.session.openFile(at: second, line: nil)
+        await harness.session.select(first)
+        harness.surface.type("edited one\n")
+        harness.surface.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
+        harness.surface.reset()
+
+        let leaving = Task { await harness.session.select(second) }
+        await Task.yield()
+        let returning = Task { await harness.session.select(first) }
+        await Task.yield()
+        // The editor answers the one request that went out.
+        harness.surface.deliver(.saveRequested(path: first.path(percentEncoded: false),
+                                               text: "edited one\n"))
+        await leaving.value
+        await returning.value
+
+        XCTAssertEqual(harness.surface.shapes.last,
+                       .open(name: "in-flight-first.swift", language: "swift",
+                             text: "edited one\n", line: nil),
+                       "the second presentation opened the text the stash had not captured yet")
+    }
+
+    // MARK: - 32. a reply is matched to the request it answers
+
+    /// `saveRequested` carries no identity, so the session holds one: each `save` it sends is a
+    /// request, and the editor answers each of them once, in order. Without that correlation a
+    /// late reply to a stash nobody is waiting for any more is read as the answer to whatever
+    /// request came after it — and writes text the user never asked to save.
+    func testALateReplyToAnExpiredStashIsNotReadAsTheAnswerToTheNextSave() async throws {
+        let first = try tree.file("late-reply.swift", "one\n")
+        let second = try tree.file("late-reply-other.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        await harness.session.openFile(at: first, line: nil)
+        harness.surface.type("edited one\n")
+        harness.surface.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
+
+        // The stash for the first file goes out with this presentation and is never answered, so
+        // the presentation is refused and the first file is still the one on the surface.
+        await harness.session.openFile(at: second, line: nil)
+        XCTAssertEqual(harness.session.selected?.name, "late-reply.swift")
+        harness.session.save()
+
+        // The editor's answer to the *stash*, arriving long after it expired.
+        harness.surface.deliver(.saveRequested(path: first.path(percentEncoded: false),
+                                               text: "the expired request's text\n"))
+
+        XCTAssertEqual(try String(contentsOf: first, encoding: .utf8), "one\n",
+                       "a reply to an expired stash was written as the answer to a later save")
+
+        // And the real answer to the save still lands.
+        harness.surface.deliver(.saveRequested(path: first.path(percentEncoded: false),
+                                               text: "edited one\n"))
+        XCTAssertEqual(try String(contentsOf: first, encoding: .utf8), "edited one\n",
+                       "the save's own reply was dropped with the late one")
+    }
+
+    // MARK: - 33. a stash that expires is a failure, not a capture
+
+    /// The bound on the wait exists so a presentation cannot hang on an editor that never answers.
+    /// It is not an answer: the text the session holds is what it cached before the user typed, so
+    /// replacing the buffer with it is the discard the stash exists to prevent.
+    func testAStashThatExpiresRefusesThePresentationRatherThanReplacingTheBuffer() async throws {
+        let dirty = try tree.file("expired-stash.swift", "one\n")
+        let other = try tree.file("expired-stash-other.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        await harness.session.openFile(at: dirty, line: nil)
+        harness.surface.type("edited one\n")
+        harness.surface.deliver(.dirty(path: dirty.path(percentEncoded: false), isDirty: true))
+        harness.surface.reset()
+
+        await harness.session.openFile(at: other, line: nil)
+
+        XCTAssertEqual(harness.surface.shapes, [.save],
+                       "the buffer was replaced with text the editor never gave back")
+        XCTAssertEqual(harness.session.selected?.name, "expired-stash.swift",
+                       "the selection left the file the editor is still showing")
+        XCTAssertEqual(harness.session.selected?.isDirty, true)
+        XCTAssertNotNil(harness.session.issue, "the user was not told the presentation was refused")
+    }
+
+    // MARK: - 34. dirty is relative to the file on disk
+
+    /// C7.2's `replaceModel` establishes whatever text it is given as the editor's own
+    /// `savedVersionId`, so re-opening a stashed *dirty* buffer makes the unsaved text the
+    /// editor's baseline. An edit and an undo then report the buffer clean while the file on disk
+    /// still differs: *Save* goes away and the next external change refreshes over the edits.
+    func testUndoingAnEditInAReopenedDirtyBufferIsStillDirtyAgainstTheFileOnDisk() async throws {
+        let first = try tree.file("reopened.swift", "one\n")
+        let second = try tree.file("reopened-other.swift", "two\n")
+        let path = first.path(percentEncoded: false)
+        let harness = try makeHarness()
+        harness.surface.answersSave = true
+        await harness.session.openFile(at: first, line: nil)
+        harness.surface.type("edited one\n")
+        harness.surface.deliver(.dirty(path: path, isDirty: true))
+
+        await harness.session.openFile(at: second, line: nil)
+        await harness.session.select(first)
+        XCTAssertEqual(harness.session.selected?.isDirty, true, "the stashed text was not restored")
+
+        // The user types and undoes it: the editor is back at *its* baseline, which is the text
+        // that was never written.
+        harness.surface.deliver(.dirty(path: path, isDirty: true))
+        harness.surface.deliver(.dirty(path: path, isDirty: false))
+
+        XCTAssertEqual(harness.session.selected?.isDirty, true,
+                       "unsaved text was called clean against the editor's own baseline")
+    }
+
+    // MARK: - 35. one read behind the buffer and its baseline
+
+    /// The buffer the editor is handed and the baseline the watcher compares against have to be
+    /// the same bytes. Two reads of one path are two observations, and a file replaced between
+    /// them leaves the panel drawing text no baseline describes.
+    func testASnapshotAndTheBytesBehindItComeFromOneRead() throws {
+        let file = try tree.file("read-once.swift", "let a = 1\n")
+
+        let read = try XCTUnwrap(FileSnapshot.readWithContents(file))
+
+        XCTAssertEqual(read.snapshot.digest, FileSnapshot.digest(of: read.contents))
+        XCTAssertEqual(read.snapshot.size, read.contents.count)
+    }
+
+    // MARK: - 36. a save never replaces a symbolic link
+
+    /// The panel saves the file the user opened, which for a link is its target — and `realpath`
+    /// gives up on a link whose target is gone. *Keep mine* skips the preflight that would have
+    /// caught the missing destination, so the rename landed on the link's own name and replaced
+    /// it with a regular file, leaving the target it named still missing.
+    func testASaveThroughADanglingLinkWritesTheTargetRatherThanReplacingTheLink() async throws {
+        let target = try tree.file("link-target.swift", "one\n")
+        try tree.symlink("link.swift", to: target.path(percentEncoded: false))
+        let link = tree.root.appending(path: "link.swift")
+        let path = link.path(percentEncoded: false)
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .seconds(30))
+        await harness.session.openFile(at: link, line: nil)
+        harness.surface.deliver(.dirty(path: path, isDirty: true))
+
+        // Another writer removes the target; the user keeps their own text.
+        try FileManager.default.removeItem(at: target)
+        harness.session.keepMine(link)
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: path, text: "mine\n"))
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        XCTAssertEqual(attributes[.type] as? FileAttributeType, .typeSymbolicLink,
+                       "the save replaced the symbolic link with a regular file")
+        // Read through `Data` and not `String(contentsOf:)`: the error the latter throws for a
+        // file that is not there carries its absolute path into the failure message (§6.3, §11).
+        let restored = (try? Data(contentsOf: target)).map { String(decoding: $0, as: UTF8.self) }
+        XCTAssertEqual(restored, "mine\n", "the save did not reach the file the link names")
+    }
+
+    // MARK: - 37. a refresh that changes what a file is
+
+    /// A file with a native viewer leaves `presentedPath` nil, so a refresh that turns it into a
+    /// textual file had nothing to compare against and sent nothing. The readout, which follows
+    /// the kind, then drew Monaco over a buffer that had never been loaded.
+    func testARefreshThatMakesTheSelectedFileTextualPutsItOnTheEditor() async throws {
+        let file = tree.root.appending(path: "payload")
+        try Data([0x00, 0x01, 0x02, 0x03]).write(to: file)
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .milliseconds(50))
+        await harness.session.openFile(at: file, line: nil)
+        XCTAssertTrue(harness.surface.commands.isEmpty, "opaque bytes reached the editor")
+
+        try "let a = 1\n".write(to: file, atomically: true, encoding: .utf8)
+
+        try await waitUntil("the refresh reaches the editor") { !harness.surface.commands.isEmpty }
+        XCTAssertEqual(harness.surface.shapes.first,
+                       .open(name: "payload", language: "plaintext", text: "let a = 1\n",
+                             line: nil),
+                       "the file became textual and the editor was never given it")
+    }
+
+    // MARK: - 38. a restore that finds a diff on screen
+
+    /// `showDiff` claims the surface without claiming the selection, so a restore checking only
+    /// `selectedPath` walks straight over a diff the user asked for while the store was loading.
+    /// The presentation generation is what the check has to be made on.
+    func testADiffRequestedWhileTheRestoreIsSuspendedIsNotClosedByIt() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        let store = try makeStore()
+        let context = try makeContext(store: store, cwd: repository.root,
+                                      environment: repository.environment)
+        let first = try makeHarness(context: context)
+        await first.session.openFile(at: repository.root.appending(path: "notes.swift"), line: nil)
+        await first.session.teardown()
+
+        let second = try makeHarness(context: context)
+        let restoring = Task { await second.session.restore() }
+        // One turn puts the restore inside the store's load, which is where the diff arrives.
+        await Task.yield()
+        await second.session.showDiff(DiffRef(repository: repository.root, path: "notes.swift",
+                                              base: .workingTreeAgainstHEAD))
+        await restoring.value
+
+        XCTAssertTrue(second.session.isShowingDiff, "the restore closed a diff the user asked for")
+        XCTAssertEqual(FilesPanelReadout(session: second.session).viewer, .diff)
     }
 
     // MARK: - Harness
