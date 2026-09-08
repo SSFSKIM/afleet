@@ -60,9 +60,14 @@ public final class FilesPanelSession: PanelTabSession {
         public var keepsMine: Bool
         /// The file was there when it was opened and is not there now.
         public var isMissing: Bool
-        /// The text the editor was handed, for the surfaces that draw it themselves.
+        /// The text the editor was handed, for the surfaces that draw it themselves, kept current
+        /// with the buffer: every presentation that replaces the buffer stashes it here first
+        /// (Design §7), so nothing the user typed is discarded by the panel showing something else.
         public var text: String
-        var lastLoaded: FileSnapshot
+        /// The bytes the buffer was loaded from, and `nil` for a file that was never read: one
+        /// above the cap draws its size and offers *Reveal in Finder* (Design §4), and is neither
+        /// watched nor editable, so it has no baseline to compare against.
+        var lastLoaded: FileSnapshot?
         var lastWritten: FileSnapshot?
 
         public var id: URL { url }
@@ -127,15 +132,24 @@ public final class FilesPanelSession: PanelTabSession {
 
     private let store: FilesPanelStore
     private let resolver: DiffPairResolver
-    private let links: any LinkRouterCapability
-    private let anchor: SessionAnchor
     private let watchMode: FileWatch.Mode
     private let watchCoalescingDelay: Duration
     private let watchPollInterval: Duration
     /// The config homes no save may land in, resolved once (CLAUDE.md rule 1, root spec X9).
     private let protectedHomes: [URL]
 
-    private var surface: (any EditorSurface)?
+    /// Every attached editor, held **weakly** and one per window (Design §1).
+    ///
+    /// X7's host returns the same session to the main window and to a popped-out one, and each
+    /// builds its own `MonacoEditorView`: a single destination meant the second attachment silently
+    /// replaced the first, and *Save* then wrote whichever window happened to have attached last.
+    /// Commands are broadcast so both windows show the same file; `save` is not, because there is
+    /// one buffer per surface and only the one the user is in may answer for it. Weakly, because a
+    /// web view whose window went away must not be kept alive by this list.
+    private var surfaces: [SurfaceBox] = []
+    /// The surface the user is in: the one that most recently reported a `cursor` or a `dirty`
+    /// event. `save` and the stash below go to it.
+    private weak var focused: (any EditorSurface)?
     /// Commands emitted before a surface was attached. The view is built after the session, and a
     /// restore runs before either; the bridge queues before `ready`, but there is nothing to queue
     /// into until `attach(_:)`.
@@ -143,6 +157,32 @@ public final class FilesPanelSession: PanelTabSession {
     private var watches: [URL: FileWatch] = [:]
     /// The path whose text is in the editor's buffer right now.
     private var presentedPath: String?
+    /// The path the editor's **model** holds, which outlives the presentation: a native viewer
+    /// draws over Monaco without replacing its buffer. Nil until the first `open` reaches a
+    /// surface, which is what makes `gotoLine` — the vocabulary's way out of the diff pane —
+    /// safe to send.
+    private var bufferPath: String?
+    /// Which surface the *bridge* is showing, which is not `isShowingDiff`: the panel can move to
+    /// a native viewer, which sends no command, while Monaco is still in its diff pane and
+    /// refusing `save` (Design §5, §7).
+    private var bridgeShowsDiff = false
+    /// The `showDiff` the panel is showing, kept so a surface attaching under it can be shown the
+    /// same pair. Nothing else describes a diff: one of its two sides is a repository object.
+    private var presentedDiff: EditorCommand?
+    /// Bumped by every presentation, so a diff resolved over several `git` calls cannot land on
+    /// top of a newer one — or of the file the user opened while it was resolving.
+    private var presentation = 0
+    /// What the `save` in flight is for. The vocabulary's only way to obtain the buffer is
+    /// `save` → `saveRequested`, so a presentation that is about to replace the buffer asks for
+    /// it with `.stash`: the text is recorded on the open file and **nothing is written**.
+    private enum SaveIntent { case write, stash }
+    private var saveIntent: SaveIntent = .write
+    /// The presentation waiting for a stash to come back, resumed by `saveRequested`, by the
+    /// editor's `error`, or by the bound below — never twice, and never not at all.
+    private var stashWaiter: CheckedContinuation<Void, Never>?
+    private let stashTimeout: Duration
+    /// Whether a restore is between its first suspension and its last.
+    private var isRestoring = false
 
     public init(context: ChannelContext,
                 runner: any ToolRunning = ToolRunner(),
@@ -150,8 +190,9 @@ public final class FilesPanelSession: PanelTabSession {
                 coalescingInterval: Duration = .milliseconds(250),
                 watchMode: FileWatch.Mode = .vnode,
                 watchCoalescingDelay: Duration = .milliseconds(120),
-                watchPollInterval: Duration = .milliseconds(500)) {
-        self.links = context.links
+                watchPollInterval: Duration = .milliseconds(500),
+                stashTimeout: Duration = .seconds(2)) {
+        self.stashTimeout = stashTimeout
         self.store = FilesPanelStore(store: context.store, configHome: context.key.configHome,
                                      session: context.session,
                                      coalescingInterval: coalescingInterval)
@@ -160,30 +201,72 @@ public final class FilesPanelSession: PanelTabSession {
         // its diff are never highlighted two different ways (Design §2).
         self.resolver = DiffPairResolver(runner: runner, environment: context.environment,
                                          language: { MonacoLanguage.id(for: URL(filePath: $0)) })
-        self.anchor = SessionAnchor()
         self.watchMode = watchMode
         self.watchCoalescingDelay = watchCoalescingDelay
         self.watchPollInterval = watchPollInterval
         self.protectedHomes = Self.protectedConfigHomes(channel: context.key.configHome,
                                                         variables: context.environment.variables)
-        self.anchor.bind(self)
         if let surface { attach(surface) }
     }
 
-    /// Registers the link targets and restores the channel's document, in that order.
+    /// Restores the channel's document. The link targets are the **tab's** (Design §9, Parent
+    /// revision 4): one pair for `.files` rather than one pair per channel.
     public func activate() async {
-        await registerLinkTargets()
         await restore()
     }
 
-    /// Hands the session the editor it draws into. Anything emitted before this arrives now, in
-    /// the order it was emitted.
+    /// Hands the session another editor to draw into.
+    ///
+    /// Every attached surface is kept, because the main window and a popped-out one are two views
+    /// of one session. Anything emitted before any surface existed arrives here in the order it was
+    /// emitted, and a surface attaching later is **brought up to date with what the session is
+    /// presenting** — a SwiftUI remount rebuilds the panel subtree under a session the host keeps,
+    /// and a fresh editor that was told nothing draws a blank page.
     public func attach(_ surface: any EditorSurface) {
-        self.surface = surface
-        surface.onEvent = { [weak self] event in self?.handle(event) }
+        prune()
+        guard !surfaces.contains(where: { $0.surface === surface }) else { return }
+        surfaces.append(SurfaceBox(surface))
+        surface.onEvent = { [weak self, weak surface] event in self?.handle(event, from: surface) }
         let queued = pending
         pending = []
         for command in queued { surface.send(command) }
+        // A queue only accumulates while *no* surface is attached, so a surface that drained one
+        // has already been told the whole of the presentation; one attaching beside an existing
+        // surface has been told nothing.
+        if queued.isEmpty { bringUpToDate(surface) }
+    }
+
+    /// Drops a surface whose window is going away. Nothing here may keep a dead web view alive,
+    /// and a detached surface stops answering for the session's buffer.
+    public func detach(_ surface: any EditorSurface) {
+        surfaces.removeAll { $0.surface === surface || $0.surface == nil }
+        surface.onEvent = nil
+        if focused === surface { focused = nil }
+    }
+
+    /// What a newly attached surface has to be told to show what the session is already showing:
+    /// the presented file's text and the cursor, or the diff pane it is in.
+    private func bringUpToDate(_ surface: any EditorSurface) {
+        // A diff is a presentation like any other, and the pair is the only thing that describes
+        // it: nothing on disk does, because one side is a git object.
+        if isShowingDiff, let presentedDiff {
+            surface.send(presentedDiff)
+            return
+        }
+        guard let path = presentedPath,
+              let file = openFiles.first(where: { $0.path == path }) else { return }
+        surface.send(.open(path: file.path, language: file.language, text: file.text, line: nil))
+        surface.send(.gotoLine(line: file.line, column: file.column))
+    }
+
+    /// Drops the boxes whose surface has been released.
+    private func prune() {
+        surfaces.removeAll { $0.surface == nil }
+    }
+
+    /// How many editors this session is drawing into. A count, never a surface (§11).
+    public var attachedSurfaceCount: Int {
+        surfaces.reduce(0) { $0 + ($1.surface == nil ? 0 : 1) }
     }
 
     /// Stops every watcher and writes the document. **The store coalesces**, so a session torn
@@ -219,44 +302,6 @@ public final class FilesPanelSession: PanelTabSession {
     /// The specificity both targets carry. Above W5's fallback and equal to each other; nothing
     /// else claims either case today, and the tie-break is C7.2's canonical order.
     public static let linkSpecificity = 100
-
-    /// Registers `.file` and `.diff` for `tab: .files`.
-    ///
-    /// **The target holds the session weakly.** `LinkRouterCapability` has no per-registration
-    /// withdrawal and `unregister(tab:)` withdraws every channel's targets at once, which is right
-    /// at teardown and wrong at eviction: a session released by the host's LRU must leave an inert
-    /// target rather than resurrect itself. `handles` consults the anchor as well, so a released
-    /// session's target stops claiming links and the router takes W5's fallback instead of
-    /// delivering into nothing.
-    public func registerLinkTargets() async {
-        for target in linkTargets() { await links.register(target) }
-    }
-
-    func linkTargets() -> [LinkTarget] {
-        let anchor = self.anchor
-        let handler: @MainActor @Sendable (WorkspaceLink, LinkDestination) async -> Void = {
-            link, destination in
-            // The destination is received and deliberately not branched on: the host has already
-            // popped the tab out for `.newWindow` before the handler runs, and a popped-out window
-            // draws *this* session, because the host retains one per (tab, channel). Recorded here
-            // so a later reader does not read the absence of a branch as a dropped case (§9).
-            await anchor.session()?.open(link, from: destination)
-        }
-        return [
-            LinkTarget(tab: .files, specificity: Self.linkSpecificity,
-                       handles: { link in
-                           guard case .file = link else { return false }
-                           return anchor.isAlive
-                       },
-                       open: handler),
-            LinkTarget(tab: .files, specificity: Self.linkSpecificity,
-                       handles: { link in
-                           guard case .diff = link else { return false }
-                           return anchor.isAlive
-                       },
-                       open: handler),
-        ]
-    }
 
     /// What a delivered link does. `.file` opens the file at the line; `.diff` resolves the pair
     /// and shows it. Every other kind is not this panel's and is ignored.
@@ -296,11 +341,13 @@ public final class FilesPanelSession: PanelTabSession {
                                       rendersMarkdown: true, hasConflict: false, keepsMine: false,
                                       isMissing: false, text: loaded.text,
                                       lastLoaded: loaded.snapshot, lastWritten: nil))
-            await beginWatching(url, baseline: loaded.snapshot)
+            // A file above the cap has no snapshot and is not watched: it is drawn from disk by
+            // `UnsupportedFileViewer` and never loaded (Design §4).
+            if let snapshot = loaded.snapshot { await beginWatching(url, baseline: snapshot) }
         }
         issue = nil
         selectedPath = url.path(percentEncoded: false)
-        present(url, revealing: line)
+        await present(url, revealing: line)
         await persist()
     }
 
@@ -309,7 +356,7 @@ public final class FilesPanelSession: PanelTabSession {
         guard openFiles.contains(where: { $0.url == url }) else { return }
         selectedPath = url.path(percentEncoded: false)
         issue = nil
-        present(url, revealing: nil)
+        await present(url, revealing: nil)
         await persist()
     }
 
@@ -322,7 +369,7 @@ public final class FilesPanelSession: PanelTabSession {
         if presentedPath == path { presentedPath = nil }
         if selectedPath == path {
             selectedPath = openFiles.first?.path
-            if let next = openFiles.first { present(next.url, revealing: nil) }
+            if let next = openFiles.first { await present(next.url, revealing: nil) }
         }
         await persist()
     }
@@ -349,44 +396,84 @@ public final class FilesPanelSession: PanelTabSession {
         guard let index = openFiles.firstIndex(where: { $0.url == url }),
               openFiles[index].rendersMarkdown != renders else { return }
         openFiles[index].rendersMarkdown = renders
-        if selectedPath == openFiles[index].path { present(url, revealing: nil) }
+        if selectedPath == openFiles[index].path { await present(url, revealing: nil) }
         await persist()
     }
 
     /// Puts a file on the editor's surface, or takes the editor off screen for a file that has a
     /// native viewer. `line` is the link's, and it rides on the `open` rather than following it,
     /// because that is the one command that reveals a line while building the buffer.
-    private func present(_ url: URL, revealing line: Int?) {
+    ///
+    /// **The buffer is stashed first.** `open` replaces the model, and the bridge reports the
+    /// buffer clean afterwards, so a presentation that did not ask for the text first would
+    /// discard whatever the user had typed — on a switch to another file, on the Markdown source
+    /// toggle, and on leaving a diff (Design §7).
+    ///
+    /// **`isShowingDiff` is cleared before the native-viewer return**, not after it: the readout
+    /// prioritises that flag, so a file with a native viewer opened out of a diff would otherwise
+    /// draw the diff it just left (Design §4).
+    private func present(_ url: URL, revealing line: Int?) async {
+        await stashPresentedBuffer()
+        presentation += 1
         guard let file = openFiles.first(where: { $0.url == url }) else { return }
+        isShowingDiff = false
+        presentedDiff = nil
         guard file.usesEditor else {
             presentedPath = nil
+            leaveDiffPane()
             return
         }
-        isShowingDiff = false
         presentedPath = file.path
         send(.open(path: file.path, language: file.language, text: file.text, line: line))
     }
 
+    /// Takes Monaco out of its diff pane when the panel has moved to a surface that sends no
+    /// command of its own.
+    ///
+    /// W4's vocabulary is closed and none of its six commands says "leave the diff" — but `open`,
+    /// `setText` and `gotoLine` all show the editor pane before they do their own work, and
+    /// `gotoLine` is the one of the three that changes no text. Without it the bridge stays in
+    /// diff mode behind a rendered Markdown file and refuses that file's next `save` (Design §5).
+    /// It is sent only once a buffer exists, because `gotoLine` before the first `open` is an
+    /// `error` rather than a no-op.
+    private func leaveDiffPane() {
+        guard bridgeShowsDiff, let path = bufferPath else { return }
+        let file = openFiles.first { $0.path == path }
+        send(.gotoLine(line: file?.line ?? 1, column: file?.column ?? 1))
+    }
+
     /// What one read of a file yielded, or nothing when it could not be read.
+    ///
+    /// The snapshot is optional because a file **above the cap** has none: `FileSnapshot.read`
+    /// refuses to digest one, and Design §4 says such a file still opens — it draws its size and
+    /// offers *Reveal in Finder* through `UnsupportedFileViewer`, unwatched and uneditable.
+    /// `.unreadableFile` is kept for the file that genuinely could not be read: a path that is not
+    /// a regular file, and a text file whose bytes would not come back.
     private func read(_ url: URL) -> (kind: FileKind, language: String, text: String,
-                                      snapshot: FileSnapshot)? {
+                                      snapshot: FileSnapshot?)? {
         let kind = FileKind.of(url: url)
-        guard let snapshot = FileSnapshot.read(url) else { return nil }
         let language = switch kind {
         case .code(let language): language
         default: MonacoLanguage.id(for: url)
         }
         // Only the surfaces that take a string read the bytes here; an image, a PDF, a media file
         // and anything above the cap are drawn from the file by their own viewer.
-        var text = ""
         switch kind {
         case .code, .markdown:
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            text = String(decoding: data, as: UTF8.self)
+            guard let snapshot = FileSnapshot.read(url),
+                  let data = try? Data(contentsOf: url) else { return nil }
+            return (kind, language, String(decoding: data, as: UTF8.self), snapshot)
         default:
-            break
+            guard Self.isRegularFile(url) else { return nil }
+            return (kind, language, "", FileSnapshot.read(url))
         }
-        return (kind, language, text, snapshot)
+    }
+
+    /// Whether `url` names a regular file, which is the same `stat(2)` question `FileKind` and
+    /// `FileSnapshot` both ask, so the three agree about what a path is.
+    private static func isRegularFile(_ url: URL) -> Bool {
+        var info = stat()
+        return stat(url.path(percentEncoded: false), &info) == 0 && info.st_mode & S_IFMT == S_IFREG
     }
 
     // MARK: - Where a save may not land (CLAUDE.md rule 1, root spec X9)
@@ -487,7 +574,56 @@ public final class FilesPanelSession: PanelTabSession {
     /// *Save*. W4's vocabulary is closed, so the editor cannot report a key press: the button and
     /// the menu item both land here, and the `saveRequested` that comes back is written.
     public func save() {
-        send(.save)
+        saveIntent = .write
+        sendToFocused(.save)
+    }
+
+    /// Asks the editor for the buffer and records it on the open file **without writing it**.
+    ///
+    /// The vocabulary's only way to obtain the buffer is `save` → `saveRequested`, so the two
+    /// reasons to ask for it are told apart by the intent this sets rather than by a seventh
+    /// command. Everything that replaces the buffer awaits this first; a clean buffer is already
+    /// what the record holds, so only a dirty one costs a round trip.
+    ///
+    /// The wait is bounded, and the continuation is resumed by exactly one of three things: the
+    /// buffer coming back, the editor reporting an `error` instead, or the bound expiring. A
+    /// presentation that hung on an editor that never answered would be worse than a stale one.
+    private func stashPresentedBuffer() async {
+        guard stashWaiter == nil, !isShowingDiff, focusedSurface != nil,
+              let path = presentedPath,
+              let index = openFiles.firstIndex(where: { $0.path == path }),
+              openFiles[index].isDirty else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            // The waiter is in place **before** the request goes out: an editor that answers
+            // synchronously — which is what a recorder does, and what a same-actor bridge could —
+            // would otherwise find nothing to resume and leave this suspended for ever.
+            stashWaiter = continuation
+            Task { [weak self, stashTimeout] in
+                try? await Task.sleep(for: stashTimeout)
+                self?.finishStash()
+            }
+            saveIntent = .stash
+            sendToFocused(.save)
+        }
+    }
+
+    /// Records the buffer the editor answered a stash with. Dirtiness is re-derived from the text
+    /// against the bytes on disk, because the editor's own flag is about to be reset by the model
+    /// replacement this stash is making way for.
+    private func stash(path: String, text: String) {
+        guard let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
+        openFiles[index].text = text
+        let buffer = FileSnapshot.predicted(contents: Data(text.utf8))
+        openFiles[index].isDirty = openFiles[index].lastLoaded
+            .map { !buffer.hasSameContents(as: $0) } ?? false
+    }
+
+    /// Resumes whatever is waiting for a stash, once.
+    private func finishStash() {
+        guard let waiter = stashWaiter else { return }
+        stashWaiter = nil
+        saveIntent = .write
+        waiter.resume()
     }
 
     /// Writes the buffer the editor answered with.
@@ -519,7 +655,7 @@ public final class FilesPanelSession: PanelTabSession {
         var expected: FileSnapshot?
         if !file.keepsMine {
             guard let observed = FileSnapshot.read(destination),
-                  observed.hasSameContents(as: file.lastLoaded)
+                  (file.lastLoaded.map(observed.hasSameContents(as:)) ?? false)
                     || (file.lastWritten.map(observed.hasSameContents(as:)) ?? false)
             else {
                 openFiles[index].hasConflict = true
@@ -675,7 +811,10 @@ public final class FilesPanelSession: PanelTabSession {
             if file.isDirty { openFiles[index].hasConflict = true }
         case .changed(let snapshot):
             openFiles[index].isMissing = false
-            switch WatchPolicy.outcome(observed: snapshot, lastLoaded: file.lastLoaded,
+            // A file with no baseline is not watched, so this cannot be one; the guard is what
+            // says so rather than a force-unwrap.
+            guard let lastLoaded = file.lastLoaded else { return }
+            switch WatchPolicy.outcome(observed: snapshot, lastLoaded: lastLoaded,
                                        lastWritten: file.lastWritten, isDirty: file.isDirty) {
             case .ignore:
                 break
@@ -711,6 +850,7 @@ public final class FilesPanelSession: PanelTabSession {
     /// *Reload*: discard the buffer, refresh, clear the banner.
     public func reload(_ url: URL) async {
         guard let index = openFiles.firstIndex(where: { $0.url == url }) else { return }
+        presentation += 1
         openFiles[index].isDirty = false
         openFiles[index].keepsMine = false
         refresh(url)
@@ -728,18 +868,31 @@ public final class FilesPanelSession: PanelTabSession {
 
     /// Resolves a `.diff` link and shows the pair. `.noTextDiff` is a panel-local state and not an
     /// error: a binary change, a submodule and a path this base did not touch are ordinary answers.
+    /// **The pair is resolved over several `git` calls**, and the panel does not stand still while
+    /// they run: the user may open a file, dismiss this diff, or ask for another one. The
+    /// presentation this call belongs to is captured before the first suspension and re-checked
+    /// after the last, so neither an older pair nor an older failure can replace a newer surface.
     public func showDiff(_ reference: DiffRef) async {
+        // The buffer goes first: the diff pane replaces the editor's surface, and what the user
+        // typed is only recoverable while the editor is still showing it (§7).
+        await stashPresentedBuffer()
+        presentation += 1
+        let generation = presentation
         do {
-            switch try await resolver.resolve(reference) {
+            let resolution = try await resolver.resolve(reference)
+            guard generation == presentation else { return }
+            switch resolution {
             case .pair(let command):
                 issue = nil
                 isShowingDiff = true
+                presentedDiff = command
                 presentedPath = nil
                 send(command)
             case .noTextDiff(let reason):
                 issue = .noTextDiff(reason)
             }
         } catch {
+            guard generation == presentation else { return }
             issue = .diffUnavailable
         }
     }
@@ -752,16 +905,19 @@ public final class FilesPanelSession: PanelTabSession {
     /// as the diff is the surface (§7), so a user who arrived here from a link was stuck. The
     /// refusal notice goes with the diff that caused it; any other panel-local state is somebody
     /// else's and stays.
-    public func dismissDiff() {
+    public func dismissDiff() async {
         guard isShowingDiff else { return }
         isShowingDiff = false
+        presentedDiff = nil
         if issue == .saveRefusedWhileDiffShown { issue = nil }
-        // `present` clears the flag itself for an editor-backed file, but returns early for one
-        // with a native viewer, so the line above is what makes both branches leave the diff.
+        // `present` clears the flag itself, and takes the bridge out of its diff pane for a file
+        // with a native viewer; the empty state has neither, so it says so here.
         if let url = selected?.url {
-            present(url, revealing: nil)
+            await present(url, revealing: nil)
         } else {
             presentedPath = nil
+            presentation += 1
+            leaveDiffPane()
         }
     }
 
@@ -776,31 +932,86 @@ public final class FilesPanelSession: PanelTabSession {
 
     // MARK: - Events
 
-    private func handle(_ event: EditorEvent) {
+    /// One event, and which surface it came from.
+    ///
+    /// `cursor` and `dirty` are the only things the editor says on its own initiative, so between
+    /// them they are what "the window the user is in" means: the surface that reported one becomes
+    /// the one `save` is addressed to.
+    private func handle(_ event: EditorEvent, from surface: (any EditorSurface)?) {
         switch event {
         case .ready:
             break
         case .dirty(let path, let isDirty):
-            guard let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
+            if let surface { focused = surface }
+            // Only the presented buffer may report its dirtiness. The bridge also reports the
+            // buffer it *replaced* clean — that is the model replacement's own echo, and taking it
+            // would drop the unsaved marker from a file whose text the session has just stashed.
+            guard path == presentedPath,
+                  let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
             openFiles[index].isDirty = isDirty
         case .cursor(let line, let column):
+            if let surface { focused = surface }
             guard let path = presentedPath,
                   let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
             openFiles[index].line = line
             openFiles[index].column = column
             Task { await self.persist() }
         case .saveRequested(let path, let text):
-            write(path: path, text: text)
+            switch saveIntent {
+            case .write:
+                write(path: path, text: text)
+            case .stash:
+                stash(path: path, text: text)
+                finishStash()
+            }
         case .error:
             // The bridge refuses `save` while a diff is on screen, and `error` is the whole
             // vocabulary for a refusal. It becomes a panel-local state and is not logged: the
             // message is the editor's and a host log naming a file is what §11 forbids.
             issue = isShowingDiff ? .saveRefusedWhileDiffShown : .editorReported
+            // A refusal is also the answer to a stash: the presentation waiting on one is owed a
+            // resumption whichever way the editor replied.
+            finishStash()
         }
     }
 
+    /// Broadcasts to every attached editor, so the main window and a popped-out one show the same
+    /// file. With nothing attached the command is queued for the first surface that arrives.
     private func send(_ command: EditorCommand) {
-        guard let surface else {
+        // Which pane the bridge is showing follows from the command, exactly as it does inside the
+        // bridge: `open`, `setText` and `gotoLine` all show the editor first, `showDiff` shows the
+        // diff. Deriving it here is what stops the two from drifting.
+        switch command {
+        case .open(let path, _, _, _):
+            bridgeShowsDiff = false
+            bufferPath = path
+        case .setText, .gotoLine:
+            bridgeShowsDiff = false
+        case .showDiff:
+            bridgeShowsDiff = true
+        case .setTheme, .save:
+            break
+        }
+        prune()
+        let live = surfaces.compactMap(\.surface)
+        guard !live.isEmpty else {
+            pending.append(command)
+            return
+        }
+        for surface in live { surface.send(command) }
+    }
+
+    /// The surface a `save` is addressed to: the one the user is in, or the only one there is.
+    /// Broadcasting `save` would have every window answer for its own buffer, and the last answer
+    /// would win.
+    private var focusedSurface: (any EditorSurface)? {
+        if let focused { return focused }
+        return surfaces.compactMap(\.surface).last
+    }
+
+    private func sendToFocused(_ command: EditorCommand) {
+        prune()
+        guard let surface = focusedSurface else {
             pending.append(command)
             return
         }
@@ -815,27 +1026,37 @@ public final class FilesPanelSession: PanelTabSession {
     /// A recorded file that is no longer on disk is **dropped** rather than opened as an error,
     /// and a document from a future schema arrives here as the empty state because the store
     /// refuses it before decoding.
+    /// **Nothing restored may overwrite something newer.** `activate()` starts this in a task, and
+    /// it suspends on the store and on every watcher it arms; a link delivered inside one of those
+    /// suspensions has already opened the file the user asked for. So the emptiness is re-checked
+    /// after the load rather than only before it, each record is admitted only if nothing already
+    /// holds that file, and the recorded selection is applied only when nothing else has selected
+    /// one. A restore that finds the panel busy leaves it alone.
     public func restore() async {
-        guard openFiles.isEmpty else { return }
+        guard !isRestoring, openFiles.isEmpty else { return }
+        isRestoring = true
+        defer { isRestoring = false }
         let state = await store.load()
         tree.showsHiddenFiles = state.showsHiddenFiles
         await tree.setHidesIgnoredFiles(!state.showsGitIgnored)
+        guard openFiles.isEmpty else { return }
         for record in state.openFiles {
             let url = URL(filePath: record.path)
-            guard let loaded = read(url) else { continue }
+            guard !openFiles.contains(where: { $0.url == url }), let loaded = read(url) else {
+                continue
+            }
             openFiles.append(OpenFile(url: url, kind: loaded.kind, language: loaded.language,
                                       line: max(1, record.line), column: max(1, record.column),
                                       isDirty: false, rendersMarkdown: record.rendersMarkdown,
                                       hasConflict: false, keepsMine: false, isMissing: false,
                                       text: loaded.text, lastLoaded: loaded.snapshot,
                                       lastWritten: nil))
-            await beginWatching(url, baseline: loaded.snapshot)
+            if let snapshot = loaded.snapshot { await beginWatching(url, baseline: snapshot) }
         }
-        if let recorded = state.selectedPath,
-           let file = openFiles.first(where: { $0.path == recorded }) {
-            selectedPath = file.path
-            present(file.url, revealing: file.line)
-        }
+        guard selectedPath == nil, let recorded = state.selectedPath,
+              let file = openFiles.first(where: { $0.path == recorded }) else { return }
+        selectedPath = file.path
+        await present(file.url, revealing: file.line)
     }
 
     /// The document as it stands.
@@ -859,13 +1080,24 @@ public final class FilesPanelSession: PanelTabSession {
     public nonisolated var storeKey: String { store.key }
 }
 
+/// One attached editor, held weakly.
+///
+/// A class rather than a `weak var` in an array element, because an array cannot hold weak
+/// references directly. Boxing is what lets the session keep a list of every window's editor
+/// without any of them outliving its window.
+@MainActor final class SurfaceBox {
+    weak var surface: (any EditorSurface)?
+    init(_ surface: any EditorSurface) { self.surface = surface }
+}
+
 /// The weak half of Design §9's registration rule.
 ///
-/// A `LinkTarget`'s `handles` is `@Sendable` and not main-actor, so "is my session still alive?"
-/// cannot be answered by touching the session. This box answers it: the session is held weakly
-/// behind a lock, `handles` asks only whether it is still there, and the delivery itself hops to
-/// the main actor to reach it. A session released by the host's LRU therefore leaves a target that
-/// claims nothing, and the router takes W5's fallback rather than resurrecting it.
+/// A `LinkTarget`'s `handles` is `@Sendable` and not main-actor, so "is the session this target
+/// routes to still alive?" cannot be answered by touching the session. This box answers it: the
+/// session is held weakly behind a lock, `handles` asks only whether it is still there, and the
+/// delivery itself hops to the main actor to reach it. A session released by the host's LRU
+/// therefore leaves a target that claims nothing, and the router takes W5's fallback rather than
+/// resurrecting it.
 final class SessionAnchor: Sendable {
     private nonisolated(unsafe) weak var held: FilesPanelSession?
     private let lock = NSLock()

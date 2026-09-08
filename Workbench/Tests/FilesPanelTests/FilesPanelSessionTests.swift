@@ -78,7 +78,9 @@ final class FilesPanelSessionTests: XCTestCase {
         let file = try tree.file("routed.swift", "let routed = true\n")
         let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
         let harness = try makeHarness(links: RouterCapability(router: router))
-        await harness.session.registerLinkTargets()
+        let tab = FilesTab()
+        await tab.registerLinkTargets(through: RouterCapability(router: router),
+                                      presenting: harness.session)
 
         await router.open(.file(file, line: 7), from: .currentPanel)
 
@@ -94,7 +96,9 @@ final class FilesPanelSessionTests: XCTestCase {
         let file = try tree.file("routed.swift", "let routed = true\n")
         let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
         let harness = try makeHarness(links: RouterCapability(router: router))
-        await harness.session.registerLinkTargets()
+        let tab = FilesTab()
+        await tab.registerLinkTargets(through: RouterCapability(router: router),
+                                      presenting: harness.session)
 
         await router.open(.file(file, line: 7), from: .newWindow)
 
@@ -125,7 +129,9 @@ final class FilesPanelSessionTests: XCTestCase {
     /// own frame keeps it alive.
     private func withSessionReleased(router: LinkRouter) async throws {
         let harness = try makeHarness(links: RouterCapability(router: router))
-        await harness.session.registerLinkTargets()
+        let tab = FilesTab()
+        await tab.registerLinkTargets(through: RouterCapability(router: router),
+                                      presenting: harness.session)
     }
 
     // MARK: - 3. the save round trip
@@ -371,7 +377,7 @@ final class FilesPanelSessionTests: XCTestCase {
         XCTAssertEqual(harness.session.issue, .saveRefusedWhileDiffShown)
         harness.surface.reset()
 
-        harness.session.dismissDiff()
+        await harness.session.dismissDiff()
 
         XCTAssertEqual(harness.surface.shapes,
                        [.open(name: "notes.swift", language: "swift", text: "working\n", line: nil)],
@@ -393,7 +399,7 @@ final class FilesPanelSessionTests: XCTestCase {
                                    from: .currentPanel)
         harness.surface.reset()
 
-        harness.session.dismissDiff()
+        await harness.session.dismissDiff()
 
         XCTAssertTrue(harness.surface.commands.isEmpty, "the empty state sent a command")
         XCTAssertFalse(harness.session.isShowingDiff)
@@ -705,11 +711,9 @@ final class FilesPanelSessionTests: XCTestCase {
     /// on A is what makes an external writer restoring A invisible to §8's rule 2 and to the save
     /// preflight. Asserted as the two digests, which name no path and print no buffer.
     ///
-    /// The end-to-end version — a watcher refresh after such a restore — cannot be driven from a
-    /// test today: `FileSnapshot.read` takes its modification time from the long-lived `URL` the
-    /// watch holds, and `URL` caches resource values, so a restore of identical bytes reaches
-    /// `FileWatch.evaluate` as a snapshot equal to the last one and is filtered before the policy
-    /// sees it. That is a `FileSnapshot` matter and outside this change.
+    /// The end-to-end version — a watcher refresh after such a restore — is §25 below, drivable
+    /// now that `FileSnapshot` reads through `stat(2)` rather than through a long-lived `URL`'s
+    /// cached resource values.
     func testASaveRetiresTheLoadedBaselineAlongWithTheWrittenOne() async throws {
         let file = try tree.file("retired.swift", "loaded\n")
         let harness = try makeHarness(watchMode: .poll, pollInterval: .seconds(30))
@@ -723,7 +727,7 @@ final class FilesPanelSessionTests: XCTestCase {
         let written = FileSnapshot.predicted(contents: Data("saved\n".utf8))
         XCTAssertNotEqual(opened.digest, written.digest, "the two baselines are distinguishable")
         XCTAssertEqual(saved.lastWritten?.digest, written.digest)
-        XCTAssertEqual(saved.lastLoaded.digest, written.digest,
+        XCTAssertEqual(saved.lastLoaded?.digest, written.digest,
                        "the buffer's loaded baseline is still the bytes the file was opened from")
     }
 
@@ -872,6 +876,342 @@ final class FilesPanelSessionTests: XCTestCase {
         XCTAssertFalse(second.session.tree.hidesIgnoredFiles)
     }
 
+    // MARK: - 19. the buffer belongs to the session, not to the surface it is on
+
+    /// The panel's only way to obtain the buffer is `save` → `saveRequested`, so a presentation
+    /// that replaces the buffer has to ask for it first — with the intent to *stash* rather than
+    /// to write. Without that, switching files discards whatever the user typed: `open` replaces
+    /// the model with the session's cached text and the bridge reports the buffer clean.
+    func testSwitchingToAnotherFileAndBackKeepsWhatTheUserTyped() async throws {
+        let first = try tree.file("first.swift", "one\n")
+        let second = try tree.file("second.swift", "two\n")
+        let harness = try makeHarness()
+        harness.surface.answersSave = true
+        await harness.session.openFile(at: first, line: nil)
+
+        harness.surface.type("edited one\n")
+        harness.surface.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
+        await harness.session.openFile(at: second, line: nil)
+        harness.surface.reset()
+
+        await harness.session.select(first)
+
+        XCTAssertEqual(harness.surface.shapes,
+                       [.open(name: "first.swift", language: "swift", text: "edited one\n",
+                              line: nil)],
+                       "the file came back as it was on disk, not as the user left it")
+        XCTAssertEqual(harness.session.selected?.isDirty, true, "the unsaved marker was dropped")
+        XCTAssertEqual(try String(contentsOf: first, encoding: .utf8), "one\n",
+                       "a stash wrote the file")
+    }
+
+    /// The same rule across the markdown toggle, which moves one file between two surfaces.
+    func testTheMarkdownSourceToggleKeepsWhatTheUserTyped() async throws {
+        let file = try tree.file("notes.md", "# heading\n")
+        let harness = try makeHarness()
+        harness.surface.answersSave = true
+        await harness.session.openFile(at: file, line: nil)
+        await harness.session.setRendersMarkdown(false, for: file)
+
+        harness.surface.type("# edited\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+        await harness.session.setRendersMarkdown(true, for: file)
+        harness.surface.reset()
+
+        await harness.session.setRendersMarkdown(false, for: file)
+
+        XCTAssertEqual(harness.surface.shapes,
+                       [.open(name: "notes.md", language: "markdown", text: "# edited\n",
+                              line: nil)])
+        XCTAssertEqual(FilesPanelReadout(session: harness.session).isDirty, true)
+    }
+
+    /// And across a diff, which is the case with no way back: the diff editor is read-only and the
+    /// bridge refuses `save` while it is up, so the buffer has to be stashed before it goes on.
+    func testDismissingADiffPutsBackWhatTheUserTypedRatherThanWhatIsOnDisk() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        let harness = try makeHarness(cwd: repository.root, environment: repository.environment)
+        harness.surface.answersSave = true
+        let file = repository.root.appending(path: "notes.swift")
+        await harness.session.openFile(at: file, line: nil)
+
+        harness.surface.type("half-finished\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+        await harness.session.open(.diff(DiffRef(repository: repository.root, path: "notes.swift",
+                                                 base: .workingTreeAgainstHEAD)),
+                                   from: .currentPanel)
+        harness.surface.reset()
+
+        await harness.session.dismissDiff()
+
+        XCTAssertEqual(harness.surface.shapes,
+                       [.open(name: "notes.swift", language: "swift", text: "half-finished\n",
+                              line: nil)])
+        XCTAssertEqual(harness.session.selected?.isDirty, true)
+    }
+
+    // MARK: - 20. two windows, one session (Design §1)
+
+    /// X7's host hands the same session to the main window and to a popped-out one, and each
+    /// builds its own editor. Both are driven, so both show the same file; `save` is not
+    /// broadcast, because each window has its own buffer and only the one the user is in may
+    /// answer for the file.
+    func testBothWindowsAreDrivenAndTheSaveWritesTheWindowTheUserIsIn() async throws {
+        let file = try tree.file("shared.swift", "one\n")
+        let harness = try makeHarness()
+        let poppedOut = RecordingSurface()
+        harness.session.attach(poppedOut)
+        harness.surface.answersSave = true
+        poppedOut.answersSave = true
+
+        await harness.session.openFile(at: file, line: nil)
+        XCTAssertEqual(poppedOut.shapes, harness.surface.shapes,
+                       "the two windows were not shown the same file")
+
+        // The user is typing in the main window, which is what reports the dirty buffer.
+        harness.surface.type("from the window the user is in\n")
+        poppedOut.type("from the other window\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+
+        harness.session.save()
+
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8),
+                       "from the window the user is in\n",
+                       "the save wrote the buffer of a window the user was not in")
+    }
+
+    /// A window that closed must be let go: nothing here may keep a dead web view alive, and a
+    /// detached editor stops answering for the session's buffer.
+    func testADetachedSurfaceIsDroppedAndStopsBeingDriven() async throws {
+        let file = try tree.file("dropped.swift", "one\n")
+        let harness = try makeHarness()
+        let closing = RecordingSurface()
+        harness.session.attach(closing)
+        XCTAssertEqual(harness.session.attachedSurfaceCount, 2)
+        closing.reset()
+
+        harness.session.detach(closing)
+        await harness.session.openFile(at: file, line: nil)
+
+        XCTAssertEqual(harness.session.attachedSurfaceCount, 1)
+        XCTAssertTrue(closing.commands.isEmpty, "a detached editor was still being driven")
+    }
+
+    /// The weak half: a surface nobody detached, released with its window, leaves no entry behind.
+    func testASurfaceReleasedWithItsWindowIsNotHeldBySession() async throws {
+        let file = try tree.file("released.swift", "one\n")
+        let harness = try makeHarness()
+        attachAndRelease(harness.session)
+
+        await harness.session.openFile(at: file, line: nil)
+
+        XCTAssertEqual(harness.session.attachedSurfaceCount, 1,
+                       "the session is holding an editor whose window is gone")
+    }
+
+    /// Attaches a surface and lets it go inside this frame, so the test's own stack does not keep
+    /// it alive.
+    private func attachAndRelease(_ session: FilesPanelSession) {
+        session.attach(RecordingSurface())
+    }
+
+    /// SwiftUI may rebuild the panel's subtree while the host keeps the session: `makeNSView`
+    /// builds a fresh editor and attaches it to a queue that was drained on the first attachment.
+    /// An editor that was told nothing draws a blank page, so attaching brings it up to date.
+    func testASurfaceAttachedAfterAPresentationIsBroughtUpToDate() async throws {
+        let file = try tree.file("remounted.swift", "one\n")
+        let harness = try makeHarness()
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.deliver(.cursor(line: 6, column: 3))
+
+        harness.session.detach(harness.surface)
+        let remounted = RecordingSurface()
+        harness.session.attach(remounted)
+
+        XCTAssertEqual(remounted.shapes,
+                       [.open(name: "remounted.swift", language: "swift", text: "one\n", line: nil),
+                        .gotoLine(line: 6, column: 3)],
+                       "a remounted editor was left blank")
+    }
+
+    /// The same rule under a diff, which is a presentation nothing on disk describes: one of its
+    /// two sides is a repository object, so a remounted editor can only be shown the pair again.
+    func testASurfaceAttachedUnderADiffIsShownThatDiff() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        let harness = try makeHarness(cwd: repository.root, environment: repository.environment)
+        await harness.session.open(.diff(DiffRef(repository: repository.root, path: "notes.swift",
+                                                 base: .workingTreeAgainstHEAD)),
+                                   from: .currentPanel)
+
+        harness.session.detach(harness.surface)
+        let remounted = RecordingSurface()
+        harness.session.attach(remounted)
+
+        XCTAssertEqual(remounted.shapes,
+                       [.showDiff(path: "notes.swift", original: "committed\n",
+                                  modified: "working\n", language: "swift")],
+                       "a remount under a diff drew an empty editor")
+    }
+
+    // MARK: - 21. leaving the diff (Design §4, §5)
+
+    /// The readout prioritises `isShowingDiff`, so clearing it *after* the native-viewer return
+    /// left the diff drawn over the file that had just been opened.
+    func testAFileWithANativeViewerOpenedOutOfADiffLeavesTheDiffBehind() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        try repository.write("readme.md", "# heading\n")
+        let harness = try makeHarness(cwd: repository.root, environment: repository.environment)
+        await harness.session.open(.diff(DiffRef(repository: repository.root, path: "notes.swift",
+                                                 base: .workingTreeAgainstHEAD)),
+                                   from: .currentPanel)
+        XCTAssertTrue(harness.session.isShowingDiff)
+
+        await harness.session.openFile(at: repository.root.appending(path: "readme.md"), line: nil)
+
+        XCTAssertFalse(harness.session.isShowingDiff)
+        XCTAssertEqual(FilesPanelReadout(session: harness.session).viewer, .markdown)
+    }
+
+    /// The other half of the same move: the panel left the diff, but *Monaco* did not, and the
+    /// bridge refuses `save` for as long as its diff pane is up. `gotoLine` is the command in W4's
+    /// closed vocabulary that shows the editor pane and changes no text.
+    func testAMarkdownFileOpenedOutOfADiffTakesMonacoOutOfItsDiffPane() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        try repository.write("readme.md", "# heading\n")
+        let harness = try makeHarness(cwd: repository.root, environment: repository.environment)
+        await harness.session.openFile(at: repository.root.appending(path: "notes.swift"), line: nil)
+        harness.surface.deliver(.cursor(line: 5, column: 2))
+        await harness.session.open(.diff(DiffRef(repository: repository.root, path: "notes.swift",
+                                                 base: .workingTreeAgainstHEAD)),
+                                   from: .currentPanel)
+        harness.surface.reset()
+
+        await harness.session.openFile(at: repository.root.appending(path: "readme.md"), line: nil)
+
+        XCTAssertEqual(harness.surface.shapes, [.gotoLine(line: 5, column: 2)],
+                       "Monaco was left in its diff pane behind a rendered file")
+    }
+
+    // MARK: - 22. a restore that finds the panel busy
+
+    /// `restore()` suspends on the store and on every watcher it arms, and `activate()` starts it
+    /// in a task. A link delivered inside one of those suspensions has already opened the file the
+    /// user asked for, and the restore must not append over it or select away from it.
+    func testALinkDeliveredWhileTheRestoreIsSuspendedIsNotOverwritten() async throws {
+        let recorded = try tree.file("recorded.swift", "recorded\n")
+        let linked = try tree.file("linked.swift", "linked\n")
+        let store = try makeStore()
+        let context = try makeContext(store: store)
+        let first = try makeHarness(context: context)
+        await first.session.openFile(at: recorded, line: nil)
+        await first.session.teardown()
+
+        let second = try makeHarness(context: context)
+        let restoring = Task { await second.session.restore() }
+        // One turn is all it takes to put the restore inside its first suspension — the store's
+        // load — which is where the link below arrives.
+        await Task.yield()
+        await second.session.openFile(at: linked, line: nil)
+        await restoring.value
+
+        XCTAssertEqual(second.session.openFiles.count, 1,
+                       "the restore appended over a file the user was already looking at")
+        XCTAssertEqual(second.session.selected?.name, "linked.swift",
+                       "the restore selected away from the link that arrived")
+    }
+
+    // MARK: - 23. a diff that was superseded while it resolved
+
+    /// `showDiff` runs several `git` commands, and the panel does not stand still while they do.
+    func testADiffSupersededByAFileTheUserOpenedIsNotApplied() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        try repository.write("other.swift", "other\n")
+        let harness = try makeHarness(cwd: repository.root, environment: repository.environment)
+
+        let diffing = Task {
+            await harness.session.showDiff(DiffRef(repository: repository.root,
+                                                   path: "notes.swift",
+                                                   base: .workingTreeAgainstHEAD))
+        }
+        await harness.session.openFile(at: repository.root.appending(path: "other.swift"), line: nil)
+        await diffing.value
+
+        XCTAssertFalse(harness.session.isShowingDiff,
+                       "a diff resolved after the user opened a file replaced it")
+        XCTAssertEqual(FilesPanelReadout(session: harness.session).viewer, .editor)
+        XCTAssertEqual(harness.session.selected?.name, "other.swift")
+    }
+
+    // MARK: - 24. a file above the cap (Design §4)
+
+    /// Above the cap the file is not read at all — `FileSnapshot.read` refuses it too — but Design
+    /// §4 says it still opens: it draws its size and offers *Reveal in Finder*. `.unreadableFile`
+    /// is for the file that genuinely could not be read.
+    func testAFileAboveTheCapOpensIntoTheUnsupportedViewerRatherThanAnError() async throws {
+        let file = try tree.file("enormous.bin", "")
+        let handle = try FileHandle(forWritingTo: file)
+        // Sparse: the size is what the cap is about, and no test needs the bytes on disk.
+        try handle.truncate(atOffset: UInt64(FileKind.maximumReadableBytes + 1))
+        try handle.close()
+        let harness = try makeHarness()
+
+        await harness.session.openFile(at: file, line: nil)
+
+        XCTAssertNil(harness.session.issue, "a file above the cap was refused rather than drawn")
+        XCTAssertEqual(harness.session.openFiles.count, 1)
+        XCTAssertEqual(FilesPanelReadout(session: harness.session).viewer, .unsupported)
+        XCTAssertTrue(harness.surface.commands.isEmpty, "nothing above the cap reaches the editor")
+    }
+
+    /// The other side of the same branch: a path that is not a readable regular file is still the
+    /// panel-local error it always was.
+    func testAPathThatIsNotAFileIsStillTheUnreadableState() async throws {
+        let missing = tree.root.appending(path: "not-there.swift")
+        let harness = try makeHarness()
+
+        await harness.session.openFile(at: missing, line: nil)
+
+        XCTAssertEqual(harness.session.issue, .unreadableFile)
+        XCTAssertEqual(harness.session.openFiles.count, 0)
+    }
+
+    // MARK: - 25. an external writer that puts the previous contents back
+
+    /// After saving B both baselines are B, so a writer restoring A is a change and not this
+    /// save's own echo. The end-to-end half of the rule §15 asserts as two digests: it is drivable
+    /// now that `FileSnapshot` reads through `stat(2)` rather than through a long-lived `URL`'s
+    /// cached resource values.
+    func testAnExternalWriterRestoringTheLoadedBytesAfterASaveIsSeenAsAChange() async throws {
+        let file = try tree.file("restored-end-to-end.swift", "alpha\n")
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .milliseconds(50))
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false),
+                                               text: "beta and then some\n"))
+        XCTAssertEqual(harness.session.selected?.isDirty, false)
+        harness.surface.reset()
+
+        try "alpha\n".write(to: file, atomically: true, encoding: .utf8)
+
+        try await waitUntil("the restore reaches the buffer") { !harness.surface.commands.isEmpty }
+        XCTAssertEqual(harness.surface.shapes.first,
+                       .open(name: "restored-end-to-end.swift", language: "swift",
+                             text: "alpha\n", line: nil),
+                       "the writer's restore was swallowed as the save's own echo")
+    }
+
     // MARK: - Harness
 
     /// A session and the recorder it drives, held together so a test cannot let the session go by
@@ -957,7 +1297,36 @@ final class RecordingSurface: EditorSurface {
     private(set) var commands: [EditorCommand] = []
     var onEvent: (@MainActor @Sendable (EditorEvent) -> Void)?
 
-    func send(_ command: EditorCommand) { commands.append(command) }
+    /// Whether this surface answers `save` out of the buffer below, as the bridge's `readBuffer`
+    /// answers it out of its model. **Off by default**: most tests synthesise the reply by hand,
+    /// and two answers to one `save` would be two writes.
+    var answersSave = false
+    /// What the buffer holds: the text of the last `open` or `setText`, and whatever `type(_:)`
+    /// has put there since — which is the user having typed.
+    private(set) var buffer: String?
+    /// The path the buffer belongs to, taken from the last `open`, exactly as the bridge reads it
+    /// back out of the model's URI.
+    private(set) var bufferPath: String?
+
+    func send(_ command: EditorCommand) {
+        commands.append(command)
+        switch command {
+        case let .open(path, _, text, _):
+            bufferPath = path
+            buffer = text
+        case .setText(let text):
+            buffer = text
+        case .save where answersSave:
+            guard let bufferPath, let buffer else { return }
+            deliver(.saveRequested(path: bufferPath, text: buffer))
+        default:
+            break
+        }
+    }
+
+    /// The user typing into this window's buffer.
+    func type(_ text: String) { buffer = text }
+
     func reset() { commands = [] }
     func deliver(_ event: EditorEvent) { onEvent?(event) }
 

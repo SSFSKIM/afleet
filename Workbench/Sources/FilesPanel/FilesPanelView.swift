@@ -298,7 +298,7 @@ private struct EditorHeader: View {
             // The one way out of a diff. Everything else that clears it opens another file, and
             // the bridge refuses `save` while the diff is the surface (Design §7).
             if readout.viewer == .diff {
-                Button("Close diff") { session.dismissDiff() }
+                Button("Close diff") { Task { await session.dismissDiff() } }
             }
             // Design §7: W4's vocabulary is closed, so the editor cannot report Cmd+S. The button
             // is the host-side action, and the `saveRequested` that comes back is written.
@@ -392,23 +392,40 @@ struct EmptyState: View {
 /// `MonacoEditorView` in SwiftUI: created once, `load()`ed once, and handed to the session as its
 /// `EditorSurface`.
 ///
-/// There is no coordinator, deliberately: everything a coordinator would hold — the open buffers,
-/// the cursor, the dirty flag, the conflict — is on the session already, and a second copy is a
-/// second thing to keep true. `updateNSView` does nothing for the same reason: the session drives
-/// the view through the command seam, not through this struct's stored properties.
+/// The coordinator holds nothing but the session, and exists for one reason: `dismantleNSView` is
+/// static, so a torn-down surface can only reach the session it was attached to through it.
+/// Everything else a coordinator might hold — the open buffers, the cursor, the dirty flag, the
+/// conflict — is on the session already, and a second copy is a second thing to keep true.
+/// `updateNSView` does nothing for the same reason: the session drives the view through the
+/// command seam, not through this struct's stored properties.
 struct MonacoEditorSurface: NSViewRepresentable {
 
     let session: FilesPanelSession
 
+    @MainActor final class Coordinator {
+        let session: FilesPanelSession
+        init(session: FilesPanelSession) { self.session = session }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(session: session) }
+
     func makeNSView(context: Context) -> MonacoEditorView {
         let view = MonacoEditorView()
-        // Attach first: anything the session emitted before a surface existed — a restore's `open`
-        // is the ordinary case — is drained into the view here, and the bridge queues it behind
-        // `ready` exactly as it queues everything sent before the page is live.
+        // Attach first: anything the session emitted before any surface existed — a restore's
+        // `open` is the ordinary case — is drained into the view here, and the bridge queues it
+        // behind `ready` exactly as it queues everything sent before the page is live. A view
+        // built while another window is already attached is brought up to date instead, which is
+        // what makes a SwiftUI remount draw the file rather than a blank page.
         session.attach(view)
         view.load()
         return view
     }
 
     func updateNSView(_ nsView: MonacoEditorView, context: Context) {}
+
+    /// The subtree went away. The session must let this surface go: nothing may keep a dead web
+    /// view alive, and a detached editor stops answering for the session's buffer.
+    static func dismantleNSView(_ nsView: MonacoEditorView, coordinator: Coordinator) {
+        coordinator.session.detach(nsView)
+    }
 }
