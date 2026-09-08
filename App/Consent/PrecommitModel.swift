@@ -29,13 +29,43 @@ final class PrecommitModel {
     /// `openInTerminal`, which resolves the directory itself.
     static let untrustedSentence = "This project has not been trusted in Claude Code."
 
+    /// One evaluation of one channel: the channel a verdict was read for, the project directory a
+    /// decline is recorded against, and the number that says which evaluation it was.
+    ///
+    /// A value rather than two independent properties because the two are only ever meaningful
+    /// together. A selection that moves starts a new evaluation while the previous one is still
+    /// suspended in `preconditions(for:)`, and a model that assigned the channel and the project on
+    /// the way *in* would already be holding B's project when A's verdict arrived — so an accept
+    /// taken from the sheet A raised would record A's servers against B's project. Both are
+    /// therefore published with the verdict they belong to, and `id` is what tells a late result it
+    /// is late.
+    struct Evaluation: Sendable {
+        let id: Int
+        let channel: ChannelKey
+        let project: URL
+    }
+
+    /// What the sheet was shown with: an evaluation and the servers §6.12 is asking about, as one
+    /// value. The sheet's two answers carry it back, so neither can be paired with a project the
+    /// user never saw. `id` is the evaluation's, which is what makes a superseded sheet a different
+    /// item to SwiftUI and gets it taken down.
+    struct ConsentRequest: Identifiable, Sendable {
+        let evaluation: Evaluation
+        let servers: [ProjectMCPServer]
+        var id: Int { evaluation.id }
+    }
+
     private let lifecycle: any LifecycleAPI
     private let panels: any PanelHost
 
-    /// The channel this model was last evaluated for, and the project directory a decline is
-    /// recorded against. Nil until `evaluate(channel:project:)` has run once.
-    private(set) var channel: ChannelKey?
-    private(set) var project: URL?
+    /// The evaluation the verdict on screen belongs to. Nil until `evaluate(channel:project:)` has
+    /// published one.
+    private(set) var evaluation: Evaluation?
+
+    /// The number of the evaluation that has been *started* last, which is not always the one on
+    /// screen: a result whose number is not this one is a result the user has already navigated
+    /// away from, and is dropped rather than published.
+    private var started = 0
 
     /// The last verdict. `.ready` until one has been read, which is what a channel with no
     /// precondition looks like and is what draws nothing.
@@ -55,10 +85,11 @@ final class PrecommitModel {
 
     // MARK: - The verdict
 
-    /// The servers the sheet lists, or nil when no sheet is up.
-    var consentServers: [ProjectMCPServer]? {
-        if case .consentNeeded(let servers) = precondition { return servers }
-        return nil
+    /// The sheet, or nil when no sheet is up: the pending servers and the evaluation they were read
+    /// for, which the sheet's two answers hand back.
+    var consentRequest: ConsentRequest? {
+        guard let evaluation, case .consentNeeded(let servers) = precondition else { return nil }
+        return ConsentRequest(evaluation: evaluation, servers: servers)
     }
 
     /// §6.11: an untrusted project opens history-only. Nothing here spawns and nothing offers to.
@@ -69,10 +100,19 @@ final class PrecommitModel {
 
     /// Reads the precondition for a channel. The only call that asks the fleet anything before a
     /// user has clicked.
+    ///
+    /// **The verdict and the channel it was read for are published together, or not at all.** Two
+    /// evaluations can be in flight at once — the column re-runs this whenever the selection moves,
+    /// and nothing orders their completions — so a result that arrives after a later evaluation
+    /// started is dropped here. Publishing it would put one channel's servers on screen beside
+    /// another channel's project, which is the pair the two answers below act on.
     func evaluate(channel: ChannelKey, project: URL) async {
-        self.channel = channel
-        self.project = project
-        precondition = await lifecycle.preconditions(for: channel)
+        started += 1
+        let id = started
+        let verdict = await lifecycle.preconditions(for: channel)
+        guard id == started else { return }
+        evaluation = Evaluation(id: id, channel: channel, project: project)
+        precondition = verdict
     }
 
     // MARK: - §6.12, the consent sheet's two answers
@@ -80,26 +120,27 @@ final class PrecommitModel {
     /// *Accept*: the store remembers the acceptance per project and server hash, and nothing is
     /// written to disk. The verdict is re-read afterwards, so the sheet closes because the fleet
     /// stopped asking rather than because the view decided it had.
-    func accept(_ servers: [ProjectMCPServer]) {
-        guard let project, claim() else { return }
+    func accept(_ request: ConsentRequest) {
+        guard isCurrent(request.evaluation), claim() else { return }
         Task {
             defer { isAnswering = false }
-            await lifecycle.acceptProjectServers(servers, project: project)
+            await lifecycle.acceptProjectServers(request.servers, project: request.evaluation.project)
             banner = nil
-            await reread()
+            await reread(request.evaluation)
         }
     }
 
     /// *Decline*: exactly the names the user declined, recorded through C4 in the project's
     /// `.claude/settings.local.json`. A refusal is fail-closed and says so.
-    func decline(_ names: [String]) {
-        guard let project, claim() else { return }
+    func decline(_ request: ConsentRequest) {
+        guard isCurrent(request.evaluation), claim() else { return }
         Task {
             defer { isAnswering = false }
             do {
-                try await lifecycle.declineProjectServers(names, project: project)
+                try await lifecycle.declineProjectServers(request.servers.map(\.name),
+                                                          project: request.evaluation.project)
                 banner = nil
-                await reread()
+                await reread(request.evaluation)
             } catch let error as LifecycleError {
                 banner = Self.banner(for: error)
             } catch {
@@ -114,7 +155,8 @@ final class PrecommitModel {
     /// included**. C4 accepts a `PaneExit` only for the id it is waiting on, so a request rebuilt
     /// here would have its exit discarded and the re-read of trust would never happen.
     func reviewTrustInTerminal() {
-        guard let channel, claim() else { return }
+        guard let evaluation, claim() else { return }
+        let channel = evaluation.channel
         Task {
             defer { isAnswering = false }
             do {
@@ -162,8 +204,16 @@ final class PrecommitModel {
         return true
     }
 
-    private func reread() async {
-        guard let channel else { return }
-        precondition = await lifecycle.preconditions(for: channel)
+    /// Whether an answer's evaluation is still the one on screen. An answer taken from a sheet the
+    /// user has navigated past acts on a project that is no longer shown, so it does nothing.
+    private func isCurrent(_ evaluation: Evaluation) -> Bool { evaluation.id == started }
+
+    /// Re-reads the verdict for the evaluation an answer belongs to, under the same fence
+    /// `evaluate` publishes under: an answer's re-read landing after the selection moved would
+    /// replace the new channel's verdict with the old channel's.
+    private func reread(_ evaluation: Evaluation) async {
+        let verdict = await lifecycle.preconditions(for: evaluation.channel)
+        guard isCurrent(evaluation) else { return }
+        precondition = verdict
     }
 }

@@ -47,12 +47,19 @@ struct ChannelDecorations: ViewModifier {
             }
             content
         }
-        .sheet(isPresented: .constant(model?.consentServers != nil)) {
-            if let model, let servers = model.consentServers {
-                ConsentSheet(servers: servers,
+        // **Presented by the evaluation it belongs to, not by a boolean.** The sheet's two answers
+        // are closures, and one that captured A's servers while the model had moved on to B's
+        // project would record consent for a pair the user was never shown — no out-of-order
+        // completion needed, only a selection that moved while the sheet was up. Carrying the whole
+        // `ConsentRequest` — servers and evaluation together — is what makes that pair impossible
+        // to form, and `item:` is what takes a superseded sheet down: the id is the evaluation's,
+        // so a new evaluation is a new item.
+        .sheet(item: .constant(model?.consentRequest)) { request in
+            if let model {
+                ConsentSheet(servers: request.servers,
                              isAnswering: model.isAnswering,
-                             accept: { model.accept(servers) },
-                             decline: { model.decline(servers.map(\.name)) })
+                             accept: { model.accept(request) },
+                             decline: { model.decline(request) })
             }
         }
         // Keyed by the channel: the verdict is per channel, and a selection that moves has to read
