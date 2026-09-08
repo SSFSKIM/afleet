@@ -1974,3 +1974,36 @@ is renumbered.
      just made and wrong for a link delivered to a channel that is not on screen. Closer: the X7
      amendment of C7.5's Parent revision 4 — the capability carries the originating `ChannelKey`
      and `LinkTarget` may match on it. Owner: C5's fence; C7.6 and C7.7 register per channel too.
+
+241. **Re-baselining the editor after a save can overwrite a keystroke.** W4's vocabulary is closed
+     and `readBuffer` deliberately leaves the dirty flag alone, so the only way to tell Monaco "this
+     is the saved state now" is `setText` — which replaces the buffer. A character typed between the
+     `saveRequested` that captured the text and the `setText` that acknowledges it is lost. The
+     alternative is worse and is why the trade was made: without the acknowledgement the editor stays
+     dirty in its own eyes, `reportDirty` fires only on a transition, and every subsequent edit is
+     invisible to the host — including to the watcher's refresh, which would replace them all. Found
+     by C7.5's second merge round. Closer: a `setBaseline` message on the bridge that resets
+     `savedVersionId` without touching the model, which is a W4 amendment. Owner: C7.2's contract,
+     whichever leaf next opens it.
+
+242. **A panel session cannot capture its buffer when its view unmounts.** `dismantleNSView` detaches
+     the surface, and the only way to obtain the text is a `save` round trip through a web view that
+     is already going away. So text typed and never stashed by a switch, a toggle or a diff is lost
+     on a bare remount. Everything a *user action* triggers stashes first; this is the path with no
+     action in it. Found by C7.5's second merge round. Closer: a `dirty` event carrying the text, or
+     a periodic stash while a buffer is dirty. Owner: C7.5's follow-up.
+
+243. **Cmd+S resolves the main window's channel, not the focused one.** `AppModel.filesSaveTarget`
+     reads `PanelHostModel.selectedChannel` and `selected`, which describe the main window;
+     `PoppedOutPanelScene` keeps its own channel and does not update them. With a Files pop-out
+     focused, the menu item's enabled state and its action both speak about the main window's
+     channel. The pop-out's own *Save* button is unaffected. Found by C7.5's second merge round.
+     Closer: the host tracking which scene is key, which is C5's fence. Owner: C5.
+
+244. **The save's containment check and its temporary creation are two moments.** The config-home
+     refusal resolves the destination and then `atomicallyWrite` creates a temporary by pathname; an
+     ancestor directory swapped for a symlink in between redirects the temporary into the protected
+     directory, and the pre-rename revalidation checks contents rather than containment. The threat
+     is a racing local writer on the user's own machine — the class C7.3 ruled out of scope twice as
+     entry 191. Found by C7.5's second merge round. Closer: descriptor-relative creation (`openat`
+     from a descriptor on the validated parent). Owner: whichever leaf makes 191 worth closing.
