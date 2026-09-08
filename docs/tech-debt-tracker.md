@@ -883,3 +883,19 @@ symlink-containment debt in entry 78 is unchanged.
     the missing-control and press assertions fail closed if the framework shape changes.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
+
+## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
+
+187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
+     `AgentRunTree.apply(agentMetadata:for:)` and `apply(metaFile:)` are called only from tests;
+     in production the tree is built from the wire alone and only the two-step join ever answers
+     the parent question. The ingestion's file-side `agentMetadata` handling is item-shaped
+     (`StreamState.metadata` → `StreamProjection.metadata` → `RecordReducer`'s `taskRun` items and
+     thread attachment) and never reaches a tree. Consequences: a foreign or archived channel
+     opened from its files has no agent-run tree at all, so C6.4's Agents tab is empty for it; a
+     live channel's tree loses the parent evidence the `agent_metadata` mirror entry and the
+     `.meta.json` sidecar would give. Found by the `2dc57ba` corrective (which routed the tree to
+     the app, X4 amended) and left standing on purpose. Closer: the ingestion feeds its file-side
+     metadata into the reducer's tree (or a file-only tree the ingestion owns when there is no
+     wire) through the two existing, tested entry points; then C6.4 reads one tree for every
+     channel kind. Owner: C3, before C6.4's Agents tab is judged on foreign channels.
