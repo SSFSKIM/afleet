@@ -1974,3 +1974,22 @@ is renumbered.
     a target with no source-level import passes. Closer: parse the manifest's target
     dependencies, or narrow the comment to what the walk actually checks. Owner: C7.1 with the
     manifest.
+93. **A host waiting on `awaitFeedCapacity()` cannot be cancelled out of the wait.** The
+    continuation is resumed only when the adapter's backlog falls below the low-water mark, so a
+    renderer that wedges permanently leaves the waiting host suspended with no way out; today the
+    only such host is the S1 harness, whose process ends anyway. Closer: register the waiter under
+    `withTaskCancellationHandler` and resume it on cancellation, the way the PTY layer's write
+    gate already does. Owner: C7.4 when a pane's read loop has a lifetime of its own.
+94. **Back-pressure is on the concrete adapter, not on `TerminalSurface`.** `feed` is the
+    protocol's only delivery seam and returns `Void`, so `outstandingFeedByteCount` and
+    `awaitFeedCapacity()` live on `GhosttyTerminalSurface`; a host that holds panes only through
+    W2 has no way to stop reading a flooding child. C7.4 holds the concrete type, which is why
+    this is a hand-off rather than a defect, and it is the same reasoning `themeResolution`
+    already records. Closer: a one-line W2 amendment, on evidence, if a second surface or a
+    protocol-only host appears. Owner: C7.4 with the parent.
+95. **`renderedViewportText()` waits on the adapter's backlog by polling.** It calls the
+    session's own drain barrier in a bounded loop (1,000 attempts) because the dependency offers
+    no completion signal, so a diagnostic read behind a large backlog spins on the main thread
+    rather than suspending. Diagnostic-only — no pane path calls it — and the bound keeps it from
+    hanging. Closer: a completion callback on the adapter's drain that the read can await, or
+    upstream support. Owner: C7.1 if G2's self-test leg ever reads behind a flood.
