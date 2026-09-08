@@ -54,7 +54,7 @@ struct AfleetApp: App {
         }
     }
 
-    /// §8.7's shortcuts, the four C5 owns.
+    /// §8.7's shortcuts: the four C5 owns, and C7.5's Cmd+S.
     ///
     /// **Cmd+, is absent on purpose and is not missing.** SwiftUI gives a `Settings` scene the
     /// standard *Settings…* item under the application menu with Cmd+, already bound; declaring a
@@ -80,6 +80,16 @@ struct AfleetApp: App {
                 Button(model.panels.title(for: tab)) { shell.selectPanelTab(at: index + 1) }
                     .keyboardShortcut(Self.digit(index + 1), modifiers: .command)
             }
+            Divider()
+            // Cmd+S for the Files panel (C7.5 Design §7; §8.7's list gains it by Parent revision
+            // 1, which the architect accepted). W4's editor vocabulary is closed, so Monaco cannot
+            // report the key press and the host owns it: this is the same action the panel's own
+            // *Save* button performs. Offered only while the window is showing Files over a dirty
+            // buffer, and the disabled state resolves a session the host already holds rather than
+            // creating one.
+            Button("Save") { model.saveFilesPanel() }
+                .keyboardShortcut("s", modifiers: .command)
+                .disabled(!model.canSaveFiles)
         }
     }
 

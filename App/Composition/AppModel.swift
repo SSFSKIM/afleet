@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import FleetKit
+import Workbench
 
 /// The one state machine over the four routes, and the only thing the window observes.
 ///
@@ -135,13 +136,43 @@ final class AppModel {
         // could is a future initialiser registering something first — in which case the placeholder
         // would vanish with no signal, and the tab C6 hands itself is the last thing that should
         // disappear quietly.
+        //
+        // C7.5's Files tab under `.files`, which nothing holds, so it is a plain registration and
+        // not a handover (C7.5 Design §10). Asserted for the same reason: a shipped tab that
+        // vanished from the tab bar with no signal is the thing this must not do quietly.
         do {
             try panels.register(PlaceholderTab())
             panels.select(.thread)
+            try panels.register(FilesTab())
         } catch {
-            assertionFailure("the placeholder is the first registration on a freshly built host")
+            assertionFailure("the shipped tabs are the first registrations on a freshly built host")
         }
     }
+
+    // MARK: - The Files panel's save (C7.5 spec Design §7)
+
+    /// The session Cmd+S reaches: the Files panel's, for the channel the main window is showing,
+    /// and only while Files is the tab it is showing.
+    ///
+    /// **It resolves a session rather than creating one.** `session(for:context:)` builds one for
+    /// any context handed to it, and a menu item computing its own enabled state must not bring a
+    /// panel into being as a side effect. The two guards are what prevent it: `selected == .files`
+    /// means the panel column is already rendering Files for `selectedChannel`, so the host holds
+    /// that session, and a channel the host has never rendered has no context to ask with.
+    var filesSaveTarget: FilesPanelSession? {
+        guard panels.selected == .files,
+              let key = panels.selectedChannel,
+              let context = panels.context(for: key) else { return nil }
+        return panels.session(for: .files, context: context) as? FilesPanelSession
+    }
+
+    /// Whether the *Save* item has anything to do. The panel's own header button is disabled on
+    /// the same fact, so the key and the button agree.
+    var canSaveFiles: Bool { filesSaveTarget?.selected?.isDirty ?? false }
+
+    /// Cmd+S. W4's editor vocabulary is closed, so Monaco cannot report the key press: the host
+    /// sends `save` and writes the `saveRequested` that comes back (C7.5 Design §7).
+    func saveFilesPanel() { filesSaveTarget?.save() }
 
     /// Binds the two app-scoped, workspace-dependent owners to the workspace a launch reached.
     ///
