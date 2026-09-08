@@ -345,7 +345,36 @@ final class ChannelTimelineModel {
         guard let ingestion, transcriptPath != path else { return }
         transcriptPath = path
         await ingestion.relocated(mainPath: path)
+        // The rest of the same move, as a host signal: no frame states a relocation, and the fold
+        // that has to hear about it is the ingestion's.
+        await signal(.relocated(mainPath: path))
     }
+
+    /// The app's raise site for the host signals no frame states: a prompt this host sent, a
+    /// decision this host answered, a rewind this host asked for, a transcript this host moved.
+    ///
+    /// **`HostSignal` is modelled by C3 and was constructed nowhere in the tree.** That is why no
+    /// decision card could leave `.pending` and why no turn summary could carry a `.prompted`
+    /// attribution: the fold has always known how to apply these, and nothing ever raised one. This
+    /// method is where they are raised, and it is a **forwarder** — the fold itself lives in
+    /// `StreamIngestion`, one per channel, and not on this side.
+    ///
+    /// **C6.1 drives exactly one of the four** — `relocated`, from `transcriptMoved(to:)`, because it
+    /// owns the path the index reports. The other three are called from the leaves that own the
+    /// host's side of them: C6.2 after a `.send` and after an honoured rewind, C6.3 after a
+    /// successful `perform(.answer)`. The name is theirs as much as this leaf's and is a cross-leaf
+    /// contract rather than a local choice.
+    func signal(_ signal: HostSignal) async {
+        await ingestionSignal?(signal)
+    }
+
+    /// Where a host signal reaches the ingestion.
+    ///
+    /// A declared seam rather than a direct call, because the C3 corrective that gives
+    /// `StreamIngestion` a `signal(_:)` of its own is in flight and is not on `main`: this side is
+    /// written now and the architect reconciles it at that landing. `.relocated` continues to reach
+    /// the ingestion through `relocated(mainPath:)` as well, which is unchanged and is not this.
+    @ObservationIgnored var ingestionSignal: (@Sendable (HostSignal) async -> Void)?
 
     /// Releases the ingestion and both loops. The registry calls it when a new launch replaces the
     /// workspace this model was built over.
