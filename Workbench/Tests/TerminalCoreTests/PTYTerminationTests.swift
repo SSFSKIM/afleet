@@ -268,10 +268,12 @@ final class PTYTerminationTests: XCTestCase {
                 environment: ["AFLEET_COMPLETION_MARKER": completionMarker.path]
             )
         )
-        let processIdentifier = process!.processIdentifier
+        let childIdentity = try XCTUnwrap(
+            PTYTestChild.identity(ofChild: process!.processIdentifier)
+        )
         var needsCleanup = true
         defer {
-            if needsCleanup { PTYTestChild.terminateAndReap(pid: processIdentifier) }
+            if needsCleanup { PTYTestChild.terminateAndReap(childIdentity) }
         }
         let retainedEvents = process!.events
 
@@ -336,15 +338,14 @@ final class PTYTerminationTests: XCTestCase {
     func testDroppingOwnerBestEffortKillsHangupIgnoringProcessGroup() async throws {
         let directory = try PTYTestChild.temporaryDirectory()
         defer { PTYTestChild.remove(directory) }
-        let pid = try await spawnThenReleaseOwner(cwd: directory)
+        let childIdentity = try await spawnThenReleaseOwner(cwd: directory)
         var needsCleanup = true
         defer {
-            if needsCleanup { PTYTestChild.terminateAndReap(pid: pid) }
+            if needsCleanup { PTYTestChild.terminateAndReap(childIdentity) }
         }
 
         try await PTYTestChild.waitUntil(seconds: 3) {
-            errno = 0
-            return Darwin.kill(pid, 0) == -1 && errno == ESRCH
+            !PTYTestChild.stillNamesTheSameChild(childIdentity)
         }
         needsCleanup = false
     }
@@ -352,15 +353,14 @@ final class PTYTerminationTests: XCTestCase {
     func testDroppingOwnerBestEffortContinuesAndKillsStoppedProcessGroup() async throws {
         let directory = try PTYTestChild.temporaryDirectory()
         defer { PTYTestChild.remove(directory) }
-        let pid = try await spawnStoppedThenReleaseOwner(cwd: directory)
+        let childIdentity = try await spawnStoppedThenReleaseOwner(cwd: directory)
         var needsCleanup = true
         defer {
-            if needsCleanup { PTYTestChild.terminateAndReap(pid: pid) }
+            if needsCleanup { PTYTestChild.terminateAndReap(childIdentity) }
         }
 
         try await PTYTestChild.waitUntil(seconds: 3) {
-            errno = 0
-            return Darwin.kill(pid, 0) == -1 && errno == ESRCH
+            !PTYTestChild.stillNamesTheSameChild(childIdentity)
         }
         needsCleanup = false
     }
@@ -429,7 +429,69 @@ final class PTYTerminationTests: XCTestCase {
         )
     }
 
-    private func spawnThenReleaseOwner(cwd: URL) async throws -> pid_t {
+    /// The owner-release tests keep only an identifier and clean up on timeout, while the actor's
+    /// waiter goes on reaping without them. A pid the waiter has already reaped can be held by
+    /// anything, so cleanup that names it by number alone can signal a stranger on the developer's
+    /// own machine. This drives that case directly: an identity the helper can no longer prove,
+    /// against a live process group of this test's own.
+    func testOwnerReleaseCleanupRefusesAPidItCannotStillProveIsTheChild() throws {
+        let bystander = try Self.spawnGroupLeader(sleepingFor: 30)
+        defer { Self.killAndReap(bystander) }
+        let identity = try XCTUnwrap(PTYTestChild.identity(ofChild: bystander))
+        // The same number, a different process: what a caller holds after the reaper has taken the
+        // status it was recorded for and the kernel has handed the number on.
+        let stale = PTYTestChild.ChildIdentity(
+            pid: identity.pid,
+            startedAtSeconds: identity.startedAtSeconds - 1,
+            startedAtMicroseconds: identity.startedAtMicroseconds
+        )
+
+        XCTAssertFalse(PTYTestChild.stillNamesTheSameChild(stale), "stale-identity=accepted")
+        PTYTestChild.terminateAndReap(stale)
+        usleep(250_000)
+
+        XCTAssertTrue(PTYTestChild.isRunning(identity), "unrelated-process-group=signalled")
+        // And the helper still does its job for the identity it can prove.
+        PTYTestChild.terminateAndReap(identity)
+        XCTAssertFalse(
+            PTYTestChild.stillNamesTheSameChild(identity),
+            "proven-child=not-reaped"
+        )
+    }
+
+    /// A child of this test process in a process group of its own — the shape of a pty child, so
+    /// the group signal the cleanup helper sends is the same syscall it would send there. Spawned
+    /// with an empty environment: nothing of this process's, `CLAUDE*` included, reaches it.
+    private static func spawnGroupLeader(sleepingFor seconds: Int) throws -> pid_t {
+        var attributes: posix_spawnattr_t?
+        guard posix_spawnattr_init(&attributes) == 0 else { throw PTYTestChild.Failure.spawnRefused }
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
+        posix_spawnattr_setpgroup(&attributes, 0)
+
+        var pid: pid_t = 0
+        let path = "/bin/sleep"
+        let spawned = path.withCString { executable in
+            String(seconds).withCString { duration -> Int32 in
+                var argv: [UnsafeMutablePointer<CChar>?] = [
+                    strdup(executable), strdup(duration), nil,
+                ]
+                var environment: [UnsafeMutablePointer<CChar>?] = [nil]
+                defer { argv.forEach { free($0) } }
+                return posix_spawn(&pid, executable, nil, &attributes, &argv, &environment)
+            }
+        }
+        guard spawned == 0 else { throw PTYTestChild.Failure.spawnRefused }
+        return pid
+    }
+
+    private static func killAndReap(_ pid: pid_t) {
+        _ = Darwin.kill(pid, SIGKILL)
+        var status: Int32 = 0
+        while Darwin.waitpid(pid, &status, 0) == -1, errno == EINTR {}
+    }
+
+    private func spawnThenReleaseOwner(cwd: URL) async throws -> PTYTestChild.ChildIdentity {
         let process = try PTYProcess(
             spawning: PTYTestChild.request(
                 cwd: cwd,
@@ -437,10 +499,14 @@ final class PTYTerminationTests: XCTestCase {
             )
         )
         _ = try await PTYTestChild.output(from: process.events, until: "owner-ready")
-        return process.processIdentifier
+        // Taken while the child is provably alive and ours, which is the only moment an identity
+        // can be taken: the owner is released next and its waiter may reap at any time after.
+        return try XCTUnwrap(PTYTestChild.identity(ofChild: process.processIdentifier))
     }
 
-    private func spawnStoppedThenReleaseOwner(cwd: URL) async throws -> pid_t {
+    private func spawnStoppedThenReleaseOwner(
+        cwd: URL
+    ) async throws -> PTYTestChild.ChildIdentity {
         let process = try PTYProcess(
             spawning: PTYTestChild.request(
                 cwd: cwd,
@@ -448,7 +514,7 @@ final class PTYTerminationTests: XCTestCase {
             )
         )
         _ = try await collectThroughStop(process.events)
-        return process.processIdentifier
+        return try XCTUnwrap(PTYTestChild.identity(ofChild: process.processIdentifier))
     }
 
     private func collectToCompletion(

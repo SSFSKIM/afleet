@@ -251,19 +251,77 @@ enum PTYTestChild {
     private static let statusSettlingAttempts = 1_000
     private static let statusSettlingMicroseconds: UInt32 = 1_000
 
-    /// Cleanup for a pid whose `PTYProcess` is gone, which is the one case with no gate to ask and
-    /// no other reaper: nothing else in this process can have consumed the status, so the pid is
-    /// still this process's child and still ours to name. Callers clear their own cleanup flag
-    /// once something else has provably reaped it.
-    static func terminateAndReap(pid: pid_t) {
-        guard pid > 1 else { return }
-        _ = Darwin.kill(-pid, SIGCONT)
-        _ = Darwin.kill(-pid, SIGKILL)
+    /// A pid together with what tells that pid apart from whatever process comes to hold the
+    /// number next: the kernel's own start time for it, and the fact that it is this process's
+    /// child and its own group leader.
+    ///
+    /// A released `PTYProcess` does not take its reaper with it — the waiter holds the pid and the
+    /// process group independently of the actor and goes on to `waitpid`. Once it has reaped, the
+    /// number is free, so a bare pid is not a safe thing for cleanup to signal.
+    struct ChildIdentity: Sendable, Equatable {
+        let pid: pid_t
+        let startedAtSeconds: Int64
+        let startedAtMicroseconds: Int32
+    }
+
+    /// The identity of a pid that is alive now. Taken while the child is provably ours, and
+    /// compared again before cleanup signals anything.
+    static func identity(ofChild pid: pid_t) -> ChildIdentity? {
+        guard pid > 1, let information = processInformation(pid: pid) else { return nil }
+        let startedAt = information.kp_proc.p_un.__p_starttime
+        return ChildIdentity(
+            pid: pid,
+            startedAtSeconds: Int64(startedAt.tv_sec),
+            startedAtMicroseconds: Int32(startedAt.tv_usec)
+        )
+    }
+
+    /// Whether the pid still names the same process, still this process's unreaped child, and
+    /// still its own process group leader. All three have to hold before a group signal: a reaped
+    /// pid can be reused within a scheduler turn, and its group with it. A zombie counts — it has
+    /// not been reaped, so the number is still ours and signalling it reaches nobody else.
+    static func stillNamesTheSameChild(_ identity: ChildIdentity) -> Bool {
+        guard let information = processInformation(pid: identity.pid) else { return false }
+        let startedAt = information.kp_proc.p_un.__p_starttime
+        return Int64(startedAt.tv_sec) == identity.startedAtSeconds
+            && Int32(startedAt.tv_usec) == identity.startedAtMicroseconds
+            && information.kp_eproc.e_ppid == Darwin.getpid()
+            && information.kp_eproc.e_pgid == identity.pid
+    }
+
+    /// The same child, and not yet a zombie: what a test means when it asks whether a process it
+    /// did not intend to signal is still running.
+    static func isRunning(_ identity: ChildIdentity) -> Bool {
+        guard stillNamesTheSameChild(identity),
+              let state = processState(pid: identity.pid) else { return false }
+        return state != Int8(SZOMB)
+    }
+
+    /// Cleanup for a child whose `PTYProcess` is gone. The actor's waiter outlives the actor and
+    /// reaps on its own, so this is not the only reaper and it never assumes it is: it signals
+    /// only a group it can still prove is this child's, and it reaps by polling under that same
+    /// proof, so it neither signals a stranger that inherited the number nor blocks on a pid
+    /// somebody else has already taken the status of.
+    static func terminateAndReap(_ identity: ChildIdentity) {
+        guard stillNamesTheSameChild(identity) else { return }
+        _ = Darwin.kill(-identity.pid, SIGCONT)
+        _ = Darwin.kill(-identity.pid, SIGKILL)
         var status: Int32 = 0
-        while Darwin.waitpid(pid, &status, 0) == -1, errno == EINTR {}
+        for _ in 0..<statusSettlingAttempts {
+            let waited = Darwin.waitpid(identity.pid, &status, WNOHANG)
+            if waited == identity.pid { return }
+            if waited == -1, errno != EINTR { return }
+            // The actor's waiter may have taken the status instead; either way the child is gone.
+            guard stillNamesTheSameChild(identity) else { return }
+            usleep(statusSettlingMicroseconds)
+        }
     }
 
     static func processState(pid: pid_t) -> Int8? {
+        processInformation(pid: pid)?.kp_proc.p_stat
+    }
+
+    private static func processInformation(pid: pid_t) -> kinfo_proc? {
         var information = kinfo_proc()
         var byteCount = MemoryLayout<kinfo_proc>.stride
         var name = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
@@ -271,7 +329,7 @@ enum PTYTestChild {
             sysctl(buffer.baseAddress, u_int(buffer.count), &information, &byteCount, nil, 0)
         }
         guard result == 0, byteCount != 0 else { return nil }
-        return information.kp_proc.p_stat
+        return information
     }
 
     static func remove(_ directory: URL) {
