@@ -354,6 +354,53 @@ final class FilesPanelSessionTests: XCTestCase {
         XCTAssertEqual(harness.session.issue, .saveRefusedWhileDiffShown)
     }
 
+    /// T7 found the gap this closes: `isShowingDiff` was cleared only by opening or selecting an
+    /// editor-backed file, so a user in a diff had no way back to the file they came from, and
+    /// the bridge refuses `save` for as long as the diff is up (§7).
+    func testDismissingTheDiffReturnsToTheSelectedFilesEditorAndClearsTheRefusal() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        let harness = try makeHarness(cwd: repository.root, environment: repository.environment)
+        await harness.session.openFile(at: repository.root.appending(path: "notes.swift"), line: nil)
+        await harness.session.open(.diff(DiffRef(repository: repository.root, path: "notes.swift",
+                                                 base: .workingTreeAgainstHEAD)),
+                                   from: .currentPanel)
+        harness.session.save()
+        harness.surface.deliver(.error(message: "save while a diff is on screen: the diff is read-only"))
+        XCTAssertEqual(harness.session.issue, .saveRefusedWhileDiffShown)
+        harness.surface.reset()
+
+        harness.session.dismissDiff()
+
+        XCTAssertEqual(harness.surface.shapes,
+                       [.open(name: "notes.swift", language: "swift", text: "working\n", line: nil)],
+                       "leaving the diff did not put the selected file back on the editor")
+        XCTAssertFalse(harness.session.isShowingDiff, "the diff is still the surface on screen")
+        XCTAssertNil(harness.session.issue, "the refusal outlived the diff that caused it")
+        XCTAssertEqual(FilesPanelReadout(session: harness.session).viewer, .editor)
+    }
+
+    /// The other branch: a diff opened with nothing else open leaves the empty state, not a
+    /// diff nobody can dismiss into a file that is not there.
+    func testDismissingADiffWithNoOpenFileLeavesTheEmptyStateAndSendsNothing() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        let harness = try makeHarness(cwd: repository.root, environment: repository.environment)
+        await harness.session.open(.diff(DiffRef(repository: repository.root, path: "notes.swift",
+                                                 base: .workingTreeAgainstHEAD)),
+                                   from: .currentPanel)
+        harness.surface.reset()
+
+        harness.session.dismissDiff()
+
+        XCTAssertTrue(harness.surface.commands.isEmpty, "the empty state sent a command")
+        XCTAssertFalse(harness.session.isShowingDiff)
+        XCTAssertEqual(FilesPanelReadout(session: harness.session).viewer, .nothing)
+        XCTAssertEqual(harness.session.openFiles.count, 0)
+    }
+
     // MARK: - 10. persistence
 
     func testASecondSessionOverTheSameStoreRestoresTheOpenFilesTheSelectionAndTheCursor()

@@ -554,6 +554,27 @@ public final class FilesPanelSession: PanelTabSession {
         }
     }
 
+    /// *Close diff*: leaves the diff and puts the selected file's editor back, or the empty state
+    /// when nothing is open.
+    ///
+    /// Without it the only exit from a diff was opening or selecting another editor-backed file —
+    /// the only other place `isShowingDiff` is cleared — and the bridge refuses `save` for as long
+    /// as the diff is the surface (§7), so a user who arrived here from a link was stuck. The
+    /// refusal notice goes with the diff that caused it; any other panel-local state is somebody
+    /// else's and stays.
+    public func dismissDiff() {
+        guard isShowingDiff else { return }
+        isShowingDiff = false
+        if issue == .saveRefusedWhileDiffShown { issue = nil }
+        // `present` clears the flag itself for an editor-backed file, but returns early for one
+        // with a native viewer, so the line above is what makes both branches leave the diff.
+        if let url = selected?.url {
+            present(url, revealing: nil)
+        } else {
+            presentedPath = nil
+        }
+    }
+
     // MARK: - The theme
 
     /// The panel's appearance control. The session sends **no** `setTheme` of its own: C7.2's view

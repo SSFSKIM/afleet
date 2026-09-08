@@ -290,6 +290,11 @@ private struct EditorHeader: View {
                 .labelsHidden()
                 .frame(width: 150)
             }
+            // The one way out of a diff. Everything else that clears it opens another file, and
+            // the bridge refuses `save` while the diff is the surface (Design §7).
+            if readout.viewer == .diff {
+                Button("Close diff") { session.dismissDiff() }
+            }
             // Design §7: W4's vocabulary is closed, so the editor cannot report Cmd+S. The button
             // is the host-side action, and the `saveRequested` that comes back is written.
             Button("Save") { session.save() }
