@@ -189,7 +189,7 @@ extension ComposerModel {
             // instead — a picture answering a question the user has already moved on from.
             let images = attachments
             guard await post(UserInput(text: text, images: images)) else { return false }
-            dropAttachments(images.count)
+            dropAttachments(images)
             ghostText = nil
             return true
         case .native(let surface):
