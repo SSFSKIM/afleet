@@ -1443,15 +1443,19 @@ final class LifecycleRowTests: XCTestCase {
         try await supervisor.spawn(reason: .open)
         let request = try await rig.steppingClock { try await supervisor.openInTerminal() }
 
-        // The "terminal" is a real process this test started, so its pid can genuinely stop being alive.
-        let tab = try rig.startHelper()
+        // Both holders are real processes this test started, so their pids can genuinely stop being alive, and the
+        // roles are assigned from the two observed pids rather than assumed: the decoy has to sort ahead of the
+        // tab, and the test runner's own pid could not promise that, because macOS wraps pids near 100000 and a
+        // runner that started before a wrap gets a helper below it. Both are killed in the rig's teardown.
+        let helpers = try [rig.startHelper(), rig.startHelper()].sorted()
+        let decoy = helpers[0], tab = helpers[1]
         try rig.files.writeRegistry(pid: tab, sessionID: session, kind: "interactive", entrypoint: "cli")
         // A background job on the same session, sorted ahead of the tab by pid. The re-adoption must wait for the
         // record *the tab wrote*: waiting out whichever holder came first would be waiting for a process that was
-        // never the tab's, and this one's pid is the test runner's and never dies.
+        // never the tab's, and this one's process outlives the tab's — it dies only in teardown.
         try rig.files.writeJob(short: "j00001", state: "working", sessionID: session, resumeSessionID: session,
-                               pid: ScriptedHolderFiles.livePID)
-        XCTAssertLessThan(ScriptedHolderFiles.livePID, tab, "the decoy holder sorts first")
+                               pid: decoy)
+        XCTAssertLessThan(decoy, tab, "the decoy holder sorts first")
         _ = await rig.observer.reconcileNow()
         rig.forgetTransitions()
         let labelsBefore = rig.reader.checkLabels.count

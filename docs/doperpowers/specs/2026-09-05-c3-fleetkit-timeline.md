@@ -1584,6 +1584,28 @@ one; entry 23 is worth more to C1 than a guessed fix would have been to C6.
 
 ## Revision Notes
 
+- 2026-09-08: **the host-signal seam, a corrective on `main`.** C6.3 filed a `[parent-impact]`
+  against X4 and X5 while planning its decision cards: `HostSignal` is modelled here and reduced
+  by `WireReducer.apply(_:at:)`, but nothing in the tree ever constructed one and the actor the
+  app holds per channel exposed no member that took one, so a card could never leave `.pending`
+  and no turn was ever attributed `.prompted` however correctly the app answered through X5's
+  lifecycle API — the app is the raiser, and it had no seam to raise through. `StreamIngestion`
+  therefore gains `signal(_: HostSignal) async -> Effect` and, on the coordinator's ruling of the
+  same day, **owns the channel's single wire fold**: one `WireReducer` lives in the actor, the
+  tap it already consumes is folded into it, and the host's signals are applied to it at the
+  actor's clock. Every live change either of them moves — the overlay's items, the streaming
+  preview, the overlay and session markers — is published on `effects` beside the record half's,
+  riding the effect the actor already publishes for an event it handles itself and taking one of
+  its own for an event it does not; nothing is published when nothing moved, which is the rule
+  the record half already followed. The app subscribes to that one stream and reads `overlay`,
+  `preview` and `timeline` off the actor instead of folding the wire a second time; coalescing to
+  a frame rate is the renderer's. The durable half stays the record reducer's (§7.3) and the wire
+  reducer's own durable projection is discarded; `relocated(mainPath:)` keeps the single
+  implementation of the path half and `signal(.relocated(mainPath:))` calls it. *Source
+  arbitration*'s "this actor holds no reducer" and its "every other event belongs to the
+  channel's `WireReducer`, which holds its own subscription" both fall; X4's tap contract and
+  X5's answer path are the architect's to reword at the parent.
+
 - 2026-09-06: **v2.7, merged to `main`.** `main` at `1249c17` (twenty fixtures) was merged into
   the branch at `681ec88` first, and the wider corpus turned 96 assertions red. Every failure was
   classified before any repin: most were count pins, three were findings, and none was repinned
