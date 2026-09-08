@@ -228,6 +228,73 @@ final class ThreadTabTests: XCTestCase {
         XCTAssertTrue(model.offersReply, "the tool-detail thread offered no reply")
     }
 
+    // MARK: - G2: replying to a card is answering it
+
+    /// Item 37: a reply to a pending permission card sends `.deny` with the typed text as the
+    /// `message` — **the emitted answer**, not the card's state, and `interrupt: false` with it
+    /// (spec D6, D16).
+    func testAReplyToAPendingPermissionCardEmitsDenyCarryingTheTypedText() async throws {
+        let (lifecycle, model) = await hosted()
+        let card = try card("permission-allow")
+        XCTAssertTrue(card.state == .pending, "the recorded ask did not open pending")
+        model.open(.decision(card))
+
+        model.draft = "An invented reason not to."
+        try press("Send", in: ThreadView(model: model).body)
+        await model.answering.whenIdle()
+
+        let actions = await lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "one reply produced \(actions.count) actions")
+        let answer = try XCTUnwrap(self.answer(in: actions), "the reply sent no answer")
+        guard case .permission(.deny(let message, let interrupt, let classification)) = answer else {
+            return XCTFail("a reply to a permission card did not send a denial")
+        }
+        XCTAssertEqual(message, "An invented reason not to.", "the denial does not carry the typed text")
+        XCTAssertFalse(interrupt, "the denial interrupts the turn")
+        XCTAssertEqual(classification, .userReject, "the denial carries the wrong classification")
+    }
+
+    /// §7.5: a plan card's reply is the rejection with the text as feedback, and a question card's
+    /// reply is *Other* with the text, keyed by the raw question the engine asked (anchor 9).
+    func testAReplyToAPlanCardRejectsAndAReplyToAQuestionCardAnswersOther() async throws {
+        let (planLifecycle, planModel) = await hosted()
+        planModel.open(.decision(try card("exit-plan-mode")))
+        planModel.draft = "An invented objection."
+        try press("Send", in: ThreadView(model: planModel).body)
+        await planModel.answering.whenIdle()
+
+        let planActions = await planLifecycle.actions
+        let planAnswer = try XCTUnwrap(answer(in: planActions), "the plan reply sent no answer")
+        guard case .permission(.deny(let feedback, _, let planClass)) = planAnswer else {
+            return XCTFail("a reply to a plan card did not send a rejection")
+        }
+        XCTAssertEqual(feedback, "An invented objection.", "the rejection does not carry the typed feedback")
+        XCTAssertEqual(planClass, .userReject, "the rejection carries the wrong classification")
+
+        let (questionLifecycle, questionModel) = await hosted()
+        let question = try card("ask-user-question")
+        guard case .question(let tool) = question.payload else {
+            return XCTFail("the recorded ask no longer decodes as a question")
+        }
+        let asked = try XCTUnwrap(QuestionPrompt.list(in: tool.fields.inputObject).first,
+                                  "the recorded ask carries no question")
+        questionModel.open(.decision(question))
+        questionModel.draft = "An invented answer of my own."
+        try press("Send", in: ThreadView(model: questionModel).body)
+        await questionModel.answering.whenIdle()
+
+        let questionActions = await questionLifecycle.actions
+        let questionAnswer = try XCTUnwrap(answer(in: questionActions), "the question reply sent no answer")
+        guard case .permission(.allow(let updatedInput, _, let questionClass)) = questionAnswer else {
+            return XCTFail("a reply to a question card did not answer it")
+        }
+        XCTAssertEqual(questionClass, .userTemporary, "the question answer carries the wrong classification")
+        let echoed = try XCTUnwrap(updatedInput, "the question answer echoed no input")
+        let answers = try XCTUnwrap(echoed["answers"], "the answer echoed no answers object")
+        XCTAssertTrue(answers[asked.question] == .string("An invented answer of my own."),
+                      "*Other* was not answered with the typed text under the engine's own question key")
+    }
+
     // MARK: - G2: the two posting kinds
 
     /// §7.5: the tool-detail and sent-file threads post to the main session with `Re: <tool>

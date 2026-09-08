@@ -80,7 +80,9 @@ enum ThreadReply {
 ///
 /// **What it does not build (D10).** The reply field is one line of text. There is no router, no
 /// `@`, no `!`, no attachments and no slash handling: every one of those is C6.2's composer, and a
-/// second one here would be the duplicate that seam was recorded to prevent.
+/// second one here would be the duplicate that seam was recorded to prevent. The three answerable
+/// kinds do not even send text — a reply *is* the card's textual outcome, so it goes through the
+/// same `DecisionCard.answer(_:)` the buttons go through.
 ///
 /// **Who opens a thread.** Nothing inside this tab does: an anchor arrives from the surface the user
 /// clicked — the timeline's tool row, its decision row, *Ask on the side* on a message — and those
@@ -154,9 +156,14 @@ final class ThreadModel: PanelTabSession {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let anchor else { return }
         switch anchor {
-        case .decision:
-            // §7.5's textual outcome, which is the card's own answer. Filled by the next deliverable.
-            break
+        case .decision(let card):
+            guard let action = card.replyAction(text: text) else {
+                banner = RowBanner(text: "This decision cannot be answered with a reply.")
+                return
+            }
+            banner = nil
+            draft = ""
+            answering.send(action, on: card, in: channel)
         case .toolDetail(let call):
             post(ThreadReply.prefixed(tool: call.name, toolUseID: call.toolUseID, text: text))
         case .sentFile(let sent):
@@ -186,6 +193,36 @@ final class ThreadModel: PanelTabSession {
             } catch {
                 self.banner = RowBanner(text: "The reply failed: \(type(of: error)).")
             }
+        }
+    }
+}
+
+extension DecisionCard {
+
+    /// §7.5's Decision row: *replying instead of clicking is the card's textual outcome*.
+    ///
+    /// It picks an action out of the closed set the buttons already use — a permission card denies
+    /// with the text as the `message`, a plan card rejects with it as feedback, a question card
+    /// answers *Other* with it — so the answer a reply produces is the answer `DecisionCard.answer(_:)`
+    /// produces and this child still has exactly one mapping (spec D10, item 37).
+    ///
+    /// Nil for a card whose kind §7.5 gives no textual outcome: an elicitation, either dialog, and a
+    /// payload this build does not model. Those are answered by their own controls or not at all.
+    func replyAction(text: String) -> DecisionAction? {
+        switch payload {
+        case .permission:
+            .deny(message: text)
+        case .plan:
+            .rejectPlan(feedback: text)
+        case .question(let tool):
+            // *Other* on the first question the engine asked. `answers` is keyed by raw question
+            // text (anchor 9), so a reply needs a question to key itself by; an ask that carried
+            // none cannot be answered by typing.
+            QuestionPrompt.list(in: tool.fields.inputObject).first.map { prompt in
+                .answerQuestion([QuestionResponse(question: prompt.question, selections: [text])])
+            }
+        case .elicitation, .dialog, .unmodelled:
+            nil
         }
     }
 }
