@@ -1798,6 +1798,33 @@ is renumbered.
      given the shape. Owner: C4. **Any child whose floor shows exactly this one red should re-run
      before treating it as their own.**
 
+132. **The table measures every row's height on a render, and each measurement builds a hosting
+     view.** `NSTableView` with `usesAutomaticRowHeights` off asks its delegate for the height of
+     *every* row when it reloads, because it needs the document's total height to size the scroller
+     — not just the twenty rows on screen. `TimelineTableController.height(of:width:)` answers by
+     constructing an `NSHostingView` over the row's SwiftUI body and reading its fitting size, which
+     is the only honest answer while contract Y1's builder returns `AnyView`. The heights are cached
+     per `ItemID` and a publish invalidates only the ids it names, so the cost is paid once per row
+     rather than once per publish — but it is paid for the whole channel at the first render, and a
+     channel with thousands of items therefore builds thousands of hosting views before it draws
+     one. G5 opens a foreign session's real history, which is where this would first be felt. Found
+     at C6.1 Task 2. Closers, in order of preference: estimate a height from the item's own shape
+     and correct it when the row is first hosted, which is what a cheap row-height estimator buys;
+     or measure with a single reused hosting view rather than a fresh one per row. Owner: C6.1, at
+     Task 5's measurement pass, if the number turns out to matter.
+
+133. **A timeline mounted without `AppModel` in the environment draws rows with no capabilities and
+     says nothing.** `TimelineListView` reads `@Environment(AppModel.self)` and builds
+     `TimelineRenderContext` only when it finds one; with no model the environment value is nil and
+     every row draws without a link router, without contract Y4's navigation seam and without the
+     channel's collapse state. That is the right behaviour for a preview or a reflection-only test,
+     and the wrong one for the app, where the single host — `AfleetApp`'s `.environment(model)` —
+     is three files away from the view that depends on it and `RootView` between them is closed. The
+     failure mode is a row whose links quietly do nothing, which is exactly the shape tracker 129
+     records for the host-signal seam. Found at C6.1 Task 2. Closer: an assertion that the mounted
+     column resolves a non-nil context through a real launch, once Task 4's rows give the context a
+     use worth asserting on. Owner: C6.1, at Task 4.
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
