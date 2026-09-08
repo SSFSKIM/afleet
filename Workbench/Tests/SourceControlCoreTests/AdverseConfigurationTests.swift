@@ -12,7 +12,7 @@ import AfleetCore
 /// does the opposite by contract: X11 runs the *user's* `git` with the *user's* configuration, so
 /// that hooks, credential helpers and worktrees behave as the user's own terminal does. The two
 /// together leave the fixtures structurally blind to any setting that changes the bytes a parser
-/// here reads — which is how `log.decorate=full` and `log.showRoot=false` both reached review as
+/// here reads — which is how `log.decorate` and `log.showRoot=false` both reached review as
 /// live defects. Hermeticity stays the default for every other test; this one file is its
 /// adversary, and it is the test that catches the next instance rather than the last two.
 ///
@@ -43,10 +43,12 @@ final class AdverseConfigurationTests: XCTestCase {
     /// whole-configuration test below covers it without a new fixture. Each entry names the reader
     /// it attacks and what it does to that reader's bytes when the pin is missing.
     static let hostile: [String: String] = [
-        // `git log`: `%D` prints `refs/heads/main` and `refs/remotes/origin/main`, so an attached
-        // branch keeps the prefix and every other local branch is read as a remote branch of a
-        // remote named `refs`. Pinned by `--decorate=short`.
-        "log.decorate": "full",
+        // `git log`: `%D` prints shortened decorations, which drop the namespace a ref came
+        // from — a local branch named `origin/feature` becomes indistinguishable from the
+        // remote-tracking one, and a local `feature/x` reads as a remote `feature`'s branch `x`.
+        // Adverse in this direction since W7's 2026-09-08 amendment (D52); pinned by
+        // `--decorate=full`.
+        "log.decorate": "short",
         // `git show`: a root commit's listings both come back empty, so the join agrees on "no
         // changed files" and a non-empty initial tree is reported as no change at all — the silent
         // wrong answer. Pinned by `--root`.
@@ -137,18 +139,22 @@ final class AdverseConfigurationTests: XCTestCase {
     }
 
     /// A two-commit history carrying one decoration of every kind `%D` prints: an attached `HEAD`,
-    /// a tag and a local branch on the root commit, and a second local branch on the tip.
+    /// a tag, a local branch and a **remote-tracking** branch on the root commit, and a second
+    /// local branch — deliberately **slashed** — on the tip.
     ///
-    /// Both branch names are deliberately **unslashed**. A slashed local branch is misread under
-    /// the shortened form too (tracker 115, the ambiguity `--decorate=full` would resolve), so a
-    /// slashed name here would fail for two reasons at once and stop separating this suite's
-    /// question — is the decoration form the parser assumes the one it gets — from that one.
+    /// The remote-tracking ref and the slashed name are what make this fixture able to *exhibit*
+    /// `log.decorate=short` now that `--decorate=full` is the pin (tracker 123's lesson). A
+    /// tripwire over a form is only worth its name if the repository under it carries the names
+    /// that form cannot express: under the shortened form `origin/feature` is what a
+    /// remote-tracking branch and a local branch of that name both print, which is the ambiguity
+    /// tracker 115 recorded and `--decorate=full` closed.
     private func decoratedFixture() async throws -> (GitFixture, root: String, tip: String) {
         let fixture = try await GitFixture(tree)
         let root = try await fixture.commit(message: "the first commit",
                                             files: ["a.txt": "one\n", "b.txt": "two\n"])
         try await fixture.tag("v0.1")
-        try await fixture.branch("sidecar", from: root)
+        try await fixture.publishAsRemoteBranch("main", named: "feature")
+        try await fixture.branch("sidecar/one", from: root)
         let tip = try await fixture.commit(message: "the sidecar commit",
                                            files: ["c.txt": "three\n"])
         try await fixture.checkout("main")
@@ -157,24 +163,29 @@ final class AdverseConfigurationTests: XCTestCase {
 
     // MARK: - one adverse setting at a time
 
-    /// `log.decorate=full` — the R4 reviewer's first instance.
+    /// `log.decorate=short` — the R4 reviewer's first instance, in the direction W7's 2026-09-08
+    /// amendment turned it (D52). The parser strips full ref paths, so a user holding the
+    /// shortened form is the one who loses the namespace.
     ///
     /// What would have to be true for this to fail: `GitLog`'s command line losing
-    /// `--decorate=short`, or a `git` in which that option stops overriding the configuration.
-    func testDecorationsAreReadCorrectlyUnderLogDecorateFull() async throws {
+    /// `--decorate=full`, or a `git` in which that option stops overriding the configuration.
+    func testDecorationsAreReadCorrectlyUnderLogDecorateShort() async throws {
         let (fixture, root, tip) = try await decoratedFixture()
-        try await configure(fixture, ["log.decorate": "full"])
+        try await configure(fixture, ["log.decorate": "short"])
 
         let parsed = try await commits(fixture)
         let refs = Dictionary(uniqueKeysWithValues: parsed.map { ($0.hash, Set($0.refs)) })
 
         XCTAssertEqual(refs[root], [GitRef(kind: .head, name: "HEAD"),
                                     GitRef(kind: .branch, name: "main"),
-                                    GitRef(kind: .tag, name: "v0.1")],
-                       "under log.decorate=full the root commit's decorations were not read as an "
-                       + "attached HEAD, the local branch main and the tag v0.1")
-        XCTAssertEqual(refs[tip], [GitRef(kind: .branch, name: "sidecar")],
-                       "under log.decorate=full the branch sidecar was not read as a local branch")
+                                    GitRef(kind: .tag, name: "v0.1"),
+                                    GitRef(kind: .remoteBranch(remote: "origin"), name: "feature")],
+                       "under log.decorate=short the root commit's decorations were not read as an "
+                       + "attached HEAD, the local branch main, the tag v0.1 and the "
+                       + "remote-tracking branch origin/feature")
+        XCTAssertEqual(refs[tip], [GitRef(kind: .branch, name: "sidecar/one")],
+                       "under log.decorate=short the slashed branch sidecar/one was not read as a "
+                       + "local branch")
     }
 
     /// `log.showRoot=false` — the R4 reviewer's second instance, and the worst shape: both
@@ -468,8 +479,14 @@ final class AdverseConfigurationTests: XCTestCase {
         XCTAssertEqual(Set(parsed.map(\.hash)), [root, tip],
                        "the commit window is wrong under the whole hostile configuration")
         XCTAssertEqual(Set(parsed.first { $0.hash == tip }?.refs ?? []),
-                       [GitRef(kind: .branch, name: "sidecar")],
-                       "the decorations are wrong under the whole hostile configuration")
+                       [GitRef(kind: .branch, name: "sidecar/one")],
+                       "the tip's decorations are wrong under the whole hostile configuration")
+        XCTAssertEqual(Set(parsed.first { $0.hash == root }?.refs ?? []),
+                       [GitRef(kind: .head, name: "HEAD"), GitRef(kind: .branch, name: "main"),
+                        GitRef(kind: .tag, name: "v0.1"),
+                        GitRef(kind: .remoteBranch(remote: "origin"), name: "feature")],
+                       "the root commit's decorations are wrong under the whole hostile "
+                       + "configuration")
 
         let list = try await changes(fixture, .commitAgainstParent(root))
         XCTAssertEqual(Set(list.map(\.path)), ["a.txt", "b.txt"],

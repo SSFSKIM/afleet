@@ -3,8 +3,8 @@ import Foundation
 /// One decoration `git log` printed beside a commit — a branch, a remote-tracking branch, a tag,
 /// or `HEAD` itself.
 ///
-/// The kinds come from what `%D` prints, measured on `git` 2.55.0; see `GitLog.refs(from:)` for
-/// the syntax and for the one ambiguity the shortened form leaves behind.
+/// The kinds come from what `%D` prints under `--decorate=full`, measured on `git` 2.55.0; see
+/// `GitLog.refs(from:)` for the syntax and for the one ambiguity the full form still leaves.
 public struct GitRef: Hashable, Sendable {
 
     public enum Kind: Hashable, Sendable {
@@ -15,8 +15,10 @@ public struct GitRef: Hashable, Sendable {
         case head
         /// A local branch.
         case branch
-        /// A remote-tracking branch. `name` is the branch part alone: `origin/main` is
-        /// `.remoteBranch(remote: "origin")` named `main`.
+        /// A remote-tracking branch. `name` is the branch part alone: `refs/remotes/origin/main`
+        /// is `.remoteBranch(remote: "origin")` named `main`. A *local* branch whose own name
+        /// contains a slash is a `.branch` carrying the slash — `feature/x`, or even
+        /// `origin/feature` — which is the distinction `--decorate=full` buys.
         case remoteBranch(remote: String)
         case tag
     }

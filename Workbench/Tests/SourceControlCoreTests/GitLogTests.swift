@@ -126,26 +126,37 @@ final class GitLogTests: XCTestCase {
     /// that depends on it, naming `git` 2.55.0 and the measured shape, so a future git whose bytes
     /// differ fails a named test instead of silently mis-parsing.
     ///
-    /// Measured with `git` 2.55.0 (`git log -1 --format='%D'`): decorations are comma-and-space
-    /// separated; a tag is prefixed `tag: `; an attached `HEAD` prints `HEAD -> main`; a detached
-    /// one prints a bare `HEAD`, and a detached `HEAD` that also carries a tag and sits on a
-    /// branch prints `HEAD, tag: v9, main`; a remote-tracking branch prints `origin/main`.
+    /// Measured with `git` 2.55.0 (`git log -1 --format='%D' --decorate=full`): decorations are
+    /// comma-and-space separated; every ref arrives at its full path; a tag is additionally
+    /// prefixed `tag: `; an attached `HEAD` prints `HEAD -> refs/heads/main`; a detached one
+    /// prints a bare `HEAD`, and a detached `HEAD` that also carries a tag and sits on a branch
+    /// prints `HEAD, tag: refs/tags/v9, refs/heads/main`; a remote-tracking branch prints
+    /// `refs/remotes/origin/main`; and `refs/stash`, the one ref `--all` reaches from outside the
+    /// three namespaces, is printed unshortened by both forms and keeps its whole path as a name.
     func testTheDecorationSyntaxMeasuredOnGit2_55_0Parses() throws {
         let cases: [(decoration: String, expected: Set<GitRef>)] = [
             ("", []),
-            ("HEAD -> main", [GitRef(kind: .head, name: "HEAD"), GitRef(kind: .branch, name: "main")]),
+            ("HEAD -> refs/heads/main",
+             [GitRef(kind: .head, name: "HEAD"), GitRef(kind: .branch, name: "main")]),
             ("HEAD", [GitRef(kind: .head, name: "HEAD")]),
-            ("HEAD, tag: v9, main", [GitRef(kind: .head, name: "HEAD"),
-                                     GitRef(kind: .tag, name: "v9"),
-                                     GitRef(kind: .branch, name: "main")]),
-            ("origin/main", [GitRef(kind: .remoteBranch(remote: "origin"), name: "main")]),
-            ("HEAD -> main, origin/main, tag: v9",
+            ("HEAD, tag: refs/tags/v9, refs/heads/main", [GitRef(kind: .head, name: "HEAD"),
+                                                          GitRef(kind: .tag, name: "v9"),
+                                                          GitRef(kind: .branch, name: "main")]),
+            ("refs/remotes/origin/main", [GitRef(kind: .remoteBranch(remote: "origin"), name: "main")]),
+            ("HEAD -> refs/heads/main, refs/remotes/origin/main, tag: refs/tags/v9",
              [GitRef(kind: .head, name: "HEAD"), GitRef(kind: .branch, name: "main"),
               GitRef(kind: .remoteBranch(remote: "origin"), name: "main"),
               GitRef(kind: .tag, name: "v9")]),
+            // The names the shortened form could not tell apart, and the one ref outside the
+            // three namespaces.
+            ("refs/heads/origin/feature, refs/remotes/origin/feature, refs/heads/feature/x",
+             [GitRef(kind: .branch, name: "origin/feature"),
+              GitRef(kind: .remoteBranch(remote: "origin"), name: "feature"),
+              GitRef(kind: .branch, name: "feature/x")]),
+            ("refs/stash", [GitRef(kind: .branch, name: "refs/stash")]),
         ]
         // The floor: a loop over an empty table passes every assertion inside it.
-        XCTAssertEqual(cases.count, 6, "the decoration table lost a case")
+        XCTAssertEqual(cases.count, 8, "the decoration table lost a case")
         for (decoration, expected) in cases {
             let parsed = try GitLog.parse(record("3333333333333333333333333333333333333333", "",
                                                  decoration, "Wren Alcove", "1614800003", "a subject"))
@@ -156,6 +167,38 @@ final class GitLogTests: XCTestCase {
             XCTAssertTrue(actual.isSubset(of: expected),
                           "the decoration '\(decoration)' invented refs")
         }
+    }
+
+    // MARK: - a slashed local branch, and a remote-tracking branch it collides with
+
+    /// Tracker 115, closed by W7's amendment to `--decorate=full`.
+    ///
+    /// Three names that the *shortened* form cannot keep apart, in one repository: a local branch
+    /// literally named `origin/feature`, a real remote-tracking `origin/feature`, and a local
+    /// branch `feature/x`. Measured on `git` 2.55.0, `%D` prints the three as `origin/feature`,
+    /// `origin/feature` and `feature/x` under `--decorate=short` — the first two are the same
+    /// bytes and the third looks like a remote's branch — and as `refs/heads/origin/feature`,
+    /// `refs/remotes/origin/feature` and `refs/heads/feature/x` under `--decorate=full`, which is
+    /// the form the parser now strips.
+    func testASlashedLocalBranchAndItsRemoteTrackingHomonymAreToldApart() async throws {
+        let fixture = try await GitFixture(tree)
+        let only = try await fixture.commit(message: "the first commit", files: ["a.txt": "one\n"])
+        try await fixture.publishAsRemoteBranch("main", named: "feature")
+        try await fixture.run(["branch", "origin/feature"])
+        try await fixture.run(["branch", "feature/x"])
+
+        let commits = try await GitLog.commits(root: fixture.root, environment: fixture.environment,
+                                               runner: ToolRunner())
+        XCTAssertEqual(commits.count, 1, "the fixture's single commit did not parse to one commit")
+        XCTAssertEqual(commits.first?.hash, only, "the parsed hash is not the commit the fixture made")
+        assertRefs(of: commits.first ?? .init(hash: "", parents: [], refs: [], authorName: "",
+                                              authorTimestamp: .distantPast, subject: ""),
+                   are: [GitRef(kind: .head, name: "HEAD"),
+                         GitRef(kind: .branch, name: "main"),
+                         GitRef(kind: .branch, name: "origin/feature"),
+                         GitRef(kind: .branch, name: "feature/x"),
+                         GitRef(kind: .remoteBranch(remote: "origin"), name: "feature")],
+                   "the commit carrying every colliding name")
     }
 
     // MARK: - a subject carrying separator-like bytes survives
@@ -201,10 +244,12 @@ final class GitLogTests: XCTestCase {
     /// W7 is binding, and the argument vector is the only place it can be checked. `--parents` is
     /// redundant with `%P` and is kept because W7 names it.
     ///
-    /// `--decorate=short` and `--encoding=UTF-8` are the R4 wave's configuration pins (D45): they
-    /// change nothing under a default configuration and are what makes the parser's assumptions
-    /// true under the user's own, which is what production runs with (X11). The behaviour each one
-    /// pins is asserted in `AdverseConfigurationTests`; this test pins that they are still passed.
+    /// `--decorate=full` and `--encoding=UTF-8` are the configuration pins (D45): they are what
+    /// makes the parser's assumptions true under the user's own configuration, which is what
+    /// production runs with (X11). `--decorate=full` is W7's 2026-09-08 amendment (D52) and is no
+    /// longer a no-op under a default configuration — it asks for the form the parser strips, and
+    /// `log.decorate=short` is now the adverse setting. The behaviour each pin defends is asserted
+    /// in `AdverseConfigurationTests`; this test pins that they are still passed.
     /// `--no-show-signature` is R5's third pin (D47), for the same reason and over signed commits.
     func testTheCommandLineIsW7sPlusTheWindow() async throws {
         let runner = RecordingRunner()
@@ -214,7 +259,7 @@ final class GitLogTests: XCTestCase {
         XCTAssertEqual(runner.invocations.first?.tool, .git, "commits() ran a tool that is not git")
         XCTAssertEqual(runner.invocations.first?.arguments,
                        ["log", "--topo-order", "--all", "--parents",
-                        "--decorate=short", "--encoding=UTF-8", "--no-show-signature",
+                        "--decorate=full", "--encoding=UTF-8", "--no-show-signature",
                         "--format=%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1e",
                         "-n", "7", "--skip", "3"],
                        "the git log argument vector is not W7's plus the window")

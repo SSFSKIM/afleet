@@ -306,3 +306,24 @@ extension GitFixture {
         try await run(["add", "-A"])
     }
 }
+
+// MARK: - added by the W7 `--decorate=full` amendment, additively and without touching anything above
+
+extension GitFixture {
+
+    /// Creates a bare repository beside this one, adds it as the remote `origin`, and pushes
+    /// `local` there under `branch`, so that a genuine `refs/remotes/origin/<branch>` exists.
+    ///
+    /// `publishToUpstream(_:)` pushes a branch to its own name and sets it as the upstream, which
+    /// cannot build the shape tracker 115 is about: a remote-tracking ref whose *shortened* name
+    /// collides with a local branch's name. Here the remote branch is named independently of the
+    /// local one, so a caller can create `refs/heads/origin/feature` alongside
+    /// `refs/remotes/origin/feature` and ask the parser to tell them apart.
+    func publishAsRemoteBranch(_ local: String, named branch: String) async throws {
+        let remote = try tree.directory("remote-\(UUID().uuidString)")
+        try await run(["init", "--bare", "-b", "main"], in: remote)
+        try await run(["remote", "add", "origin", remote.path(percentEncoded: false)])
+        try await run(["push", "origin", "\(local):refs/heads/\(branch)"])
+        try await run(["fetch", "origin"])
+    }
+}

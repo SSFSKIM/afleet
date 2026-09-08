@@ -37,10 +37,11 @@ public enum GitLog {
     /// is therefore invisible to the suite unless it is pinned here or attacked in
     /// `AdverseConfigurationTests`. Two settings measured on `git` 2.55.0 do change them:
     ///
-    /// - `log.decorate=full` makes `%D` print `refs/heads/main` and `refs/remotes/origin/main`, so
-    ///   `refs(from:)` keeps the prefix on an attached branch and reads every other local branch as
-    ///   a remote branch of a remote named `refs`. `--decorate=short` pins the shortened form the
-    ///   parser already assumes, and is a no-op under the default (`auto`).
+    /// - `log.decorate` changes which form `%D` prints. `--decorate=full` pins the *full* form —
+    ///   `refs/heads/…`, `refs/remotes/<remote>/…`, `refs/tags/…` — which is the one form that
+    ///   says which namespace a ref came from, and is what `refs(from:)` strips. A user holding
+    ///   `log.decorate=short` is the adverse value in this direction: the shortened form drops the
+    ///   namespace and a local branch named `origin/feature` becomes the remote-tracking one.
     /// - `i18n.logOutputEncoding` re-encodes the whole of the output, so a user whose terminal is
     ///   not UTF-8 would hand `parse` bytes that are not the format's — measured as a
     ///   `decodeFailed` on the timestamp field under `UTF-16`. `--encoding=UTF-8` pins what
@@ -59,14 +60,14 @@ public enum GitLog {
     ///   fixture was *unsigned*, which is the §17.7 shape: the tripwire was green because the
     ///   fixture could not make it red.
     ///
-    /// Should W7 move to `--decorate=full` with a prefix-stripping parser (the ledger's
-    /// Parent-revisions item 3), the pin is the one token that changes.
+    /// W7 was amended on 2026-09-08 (ledger D52) to take `--decorate=full`, which is what closed
+    /// tracker 115; the pin stays explicit because `log.decorate=short` is adverse to it.
     public static func commits(root: URL, environment: [String: String],
                                runner: any ToolRunning, limit: Int = defaultLimit,
                                skip: Int = 0) async throws -> [GitCommit] {
         let output = try await runner.run(.git,
                                           arguments: ["log", "--topo-order", "--all", "--parents",
-                                                      "--decorate=short", "--encoding=UTF-8",
+                                                      "--decorate=full", "--encoding=UTF-8",
                                                       "--no-show-signature",
                                                       "--format=\(format)",
                                                       "-n", "\(limit)", "--skip", "\(skip)"],
@@ -114,34 +115,56 @@ public enum GitLog {
 
     /// Decodes one `%D` decoration list.
     ///
-    /// Measured on `git` 2.55.0: decorations are comma-and-space separated; a tag is prefixed
-    /// `tag: `; an attached `HEAD` prints `HEAD -> main`, which is two refs, not one; a detached
-    /// `HEAD` prints a bare `HEAD`, and a detached `HEAD` that also carries a tag and sits on a
-    /// branch prints `HEAD, tag: v9, main`; a remote-tracking branch prints `origin/main`.
+    /// Measured on `git` 2.55.0 under `--decorate=full`: decorations are comma-and-space
+    /// separated; every ref arrives as its full path — `refs/heads/x`, `refs/remotes/origin/x`,
+    /// `refs/tags/v9` — a tag is additionally prefixed `tag: `; an attached `HEAD` prints
+    /// `HEAD -> refs/heads/main`, which is two refs, not one; a detached `HEAD` prints a bare
+    /// `HEAD`, and a detached `HEAD` that also carries a tag and sits on a branch prints
+    /// `HEAD, tag: refs/tags/v9, refs/heads/main`.
     ///
-    /// The one thing the shortened form cannot express: `origin/main` and a local branch literally
-    /// named `origin/main` print identically, so a slash is read as a remote separator. A local
-    /// branch with a slash in its name — `feature/x` — is therefore reported as a remote-tracking
-    /// branch of a remote named `feature`. The fix is `--decorate=full`, which prints
-    /// `refs/heads/…` and `refs/remotes/…` unambiguously, but that is a change to W7's command
-    /// line, so it is filed as tech debt rather than taken here — and `commits` now pins
-    /// `--decorate=short` explicitly (D45), so taking it is a one-token swap on the command line
-    /// plus a prefix-stripping branch in this function. The arrow form is exempt:
-    /// `HEAD -> feature/x` names a local branch by construction and is read as one.
+    /// The full form is what closed tracker 115: under the shortened form a local branch named
+    /// `origin/feature` and the remote-tracking `origin/feature` printed the same bytes, and a
+    /// local `feature/x` had to be guessed at as a remote `feature`'s branch `x`. The namespace
+    /// now says which is which and no guess is left.
+    ///
+    /// One narrower ambiguity survives and cannot be read out of `%D` at all: a remote whose own
+    /// name contains a slash. `refs/remotes/a/b/x` is the branch `b/x` of a remote `a` or the
+    /// branch `x` of a remote `a/b`, and the ref path does not record where the boundary is; the
+    /// first slash is taken, which is right for every remote name without one.
     static func refs(from decoration: some StringProtocol) -> [GitRef] {
         decoration.components(separatedBy: ", ").flatMap { component -> [GitRef] in
             if component.isEmpty { return [] }
             if let arrow = component.range(of: " -> ") {
                 return [GitRef(kind: .head, name: String(component[component.startIndex..<arrow.lowerBound])),
-                        GitRef(kind: .branch, name: String(component[arrow.upperBound...]))]
+                        ref(atFullPath: String(component[arrow.upperBound...]))]
             }
             if component == "HEAD" { return [GitRef(kind: .head, name: "HEAD")] }
-            if component.hasPrefix("tag: ") { return [GitRef(kind: .tag, name: String(component.dropFirst(5)))] }
-            if let slash = component.firstIndex(of: "/") {
-                return [GitRef(kind: .remoteBranch(remote: String(component[component.startIndex..<slash])),
-                               name: String(component[component.index(after: slash)...]))]
-            }
-            return [GitRef(kind: .branch, name: component)]
+            if component.hasPrefix("tag: ") { return [ref(atFullPath: String(component.dropFirst(5)))] }
+            return [ref(atFullPath: component)]
         }
+    }
+
+    /// Turns one full ref path into a `GitRef`.
+    ///
+    /// A path under none of the three namespaces keeps its whole path as the name of a
+    /// `.branch` — `refs/stash` is the one `--all` actually reaches, and it prints identically
+    /// under both decoration forms because git shortens only the three. Naming it verbatim is
+    /// the honest answer: `GitRef.Kind` has no case for it, and inventing a remote called `refs`
+    /// out of the slash is the very reading tracker 115 was about.
+    private static func ref(atFullPath path: String) -> GitRef {
+        if let name = path.dropping("refs/heads/") { return GitRef(kind: .branch, name: name) }
+        if let name = path.dropping("refs/tags/") { return GitRef(kind: .tag, name: name) }
+        if let rest = path.dropping("refs/remotes/"), let slash = rest.firstIndex(of: "/") {
+            return GitRef(kind: .remoteBranch(remote: String(rest[rest.startIndex..<slash])),
+                          name: String(rest[rest.index(after: slash)...]))
+        }
+        return GitRef(kind: .branch, name: path)
+    }
+}
+
+private extension String {
+    /// The remainder after `prefix`, or nil when the string does not carry it.
+    func dropping(_ prefix: String) -> String? {
+        hasPrefix(prefix) ? String(dropFirst(prefix.count)) : nil
     }
 }
