@@ -292,6 +292,7 @@ final class RecordingAppFleet: AppFleet {
         case .stopEverything: "stopEverything"
         case .backgroundAll: "backgroundAll"
         case .logout: "logout"
+        case .quit: "quit"
         case .reopen: "reopen"
         case .answer: "answer"
         }
@@ -346,6 +347,7 @@ final class RecordingAppFleet: AppFleet {
     func paneExited(_ exit: PaneExit) async { await inner.paneExited(exit) }
     func jobs() async -> [JobEntry] { await inner.jobs() }
     func isDormantEligible(_ key: ChannelKey) async -> Bool { await inner.isDormantEligible(key) }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { await inner.liveTaskIDs(of: key) }
     func declineProjectServers(_ names: [String], project: URL) async throws {
         try await inner.declineProjectServers(names, project: project)
     }

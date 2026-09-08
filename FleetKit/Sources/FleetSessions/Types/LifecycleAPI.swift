@@ -34,6 +34,11 @@ public protocol LifecycleAPI: Sendable {
     /// `claude stop|respawn|rm <short>` through the runner; no PTY.
     func performJob(_ verb: JobVerb, _ short: JobShort) async throws
     func isDormantEligible(_ key: ChannelKey) async -> Bool
+    /// This channel's background tasks that are running or armed, by id; `[]` for a key the fleet owns no
+    /// supervisor for. §7.4's "busy" — a turn running, or local shells still working — is the fleet's own fact, and
+    /// this is the half of it a surface cannot see for itself: a surface reads `presence` and this, never a count
+    /// it kept locally, so a channel that was spawned but never viewed is judged the same as one on screen.
+    func liveTaskIDs(of key: ChannelKey) async -> [String]
     /// The §6.12 write.
     func declineProjectServers(_ names: [String], project: URL) async throws
     /// Store only.

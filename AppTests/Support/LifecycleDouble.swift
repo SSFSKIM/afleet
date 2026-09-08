@@ -167,6 +167,7 @@ actor LifecycleDouble: LifecycleAPI {
     func paneExited(_ exit: PaneExit) async { paneExits.append(exit) }
     func performJob(_ verb: JobVerb, _ short: JobShort) async throws { unreachable("performJob") }
     func isDormantEligible(_ key: ChannelKey) async -> Bool { unreachable("isDormantEligible") }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { unreachable("liveTaskIDs") }
     func declineProjectServers(_ names: [String], project: URL) async throws { unreachable("declineProjectServers") }
     func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async { unreachable("acceptProjectServers") }
     /// A fresh fan-out for a channel `openEvents(of:)` opened, and nil otherwise — which is
@@ -247,6 +248,7 @@ actor FleetDouble: AppFleet {
     func events(of key: ChannelKey) async -> AsyncStream<WireEvent>? { nil }
     func paneExited(_ exit: PaneExit) async {}
     func isDormantEligible(_ key: ChannelKey) async -> Bool { false }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { [] }
 
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition { unreachable("preconditions") }
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState { unreachable("perform") }

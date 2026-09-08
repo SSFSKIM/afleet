@@ -1170,6 +1170,82 @@ final class FleetFacadeTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.localSettingsFile.path(percentEncoded: false)))
     }
 
+    // MARK: - §7.4 *Quit*
+
+    /// The quit verb is not the reap. `perform(.reap)` is gated on dormant eligibility on purpose — the reap the
+    /// user asks for from the header must not kill a background shell that is still working — and that gate refuses
+    /// exactly the channels the quit dialog has just warned about. `perform(.quit)` is the same terminate without
+    /// the gate: §7.4's warning is what licenses it, so a confirmed quit ends the child the reap refused to touch.
+    ///
+    /// Deliberate break: route `.quit` through `perform(.reap)`'s eligibility gate -> the quit half throws the
+    /// refusal the reap half asserts.
+    func testAQuitEndsAChannelTheReapRefusesToTouch() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: SessionID())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        let handle = try XCTUnwrap(harness.handles.all.first)
+
+        let taskID = "task-invented-quit-shell-1"
+        let frame = try await expectEventDelivery(in: fleet, on: k,
+                                                  description: "the running task frame was delivered") {
+            if case .frame = $0 { true } else { false }
+        }
+        defer { frame.observer.cancel() }
+        handle.push(.frame(try Self.taskStarted(taskID: taskID, session: k.session), handle.epoch))
+        try await TestTiming.awaitDelivery([frame.expectation])
+        await fleet.channel(k)?.drainEligibility()
+
+        do {
+            _ = try await fleet.perform(.reap, on: k)
+            XCTFail("the reap ended a child with a background task running")
+        } catch {
+            XCTAssertEqual(error as? LifecycleError, .notEligible(.taskRunning(taskID)),
+                           "the reap's gate refuses the channel the quit is about")
+        }
+        XCTAssertEqual(handle.terminateCount, 0, "the refusal did not touch the child")
+
+        let quit = try await fleet.perform(.quit, on: k)
+        XCTAssertEqual(handle.terminateCount, 1, "the confirmed quit ended the child the reap refused")
+        XCTAssertEqual(quit.origin, .owned(.dormant), "a channel whose process really exited rests dormant")
+        XCTAssertNil(quit.wedged, "the child exited, so nothing is left behind")
+    }
+
+    /// §7.4's "busy" is the fleet's fact: the ids come from the channel's own mirror, running and armed alike, and a
+    /// key the fleet owns no supervisor for has none rather than an error.
+    ///
+    /// Deliberate break: answer from the caller's own count -> the unknown key stops being empty, or the armed task
+    /// stops being listed.
+    func testLiveTaskIDsAreTheChannelsRunningAndArmedTasksAndEmptyForAnUnknownKey() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: SessionID())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        let handle = try XCTUnwrap(harness.handles.all.first)
+
+        let running = "task-invented-live-running-1"
+        let armed = "task-invented-live-armed-1"
+        for (id, frame) in [(running, try Self.taskStarted(taskID: running, session: k.session)),
+                            (armed, try Self.backgroundTasksChanged(taskIDs: [armed], session: k.session))] {
+            let delivery = try await expectEventDelivery(in: fleet, on: k,
+                                                         description: "a task frame was delivered") {
+                if case .frame = $0 { true } else { false }
+            }
+            defer { delivery.observer.cancel() }
+            _ = id
+            handle.push(.frame(frame, handle.epoch))
+            try await TestTiming.awaitDelivery([delivery.expectation])
+        }
+        await fleet.channel(k)?.drainEligibility()
+
+        let live = await fleet.liveTaskIDs(of: k)
+        XCTAssertEqual(Set(live), [running, armed], "the mirror's running and armed rows, both of them")
+        let unknown = await fleet.liveTaskIDs(of: ChannelKey(configHome: harness.home.url, session: SessionID()))
+        XCTAssertEqual(unknown.count, 0, "a key the fleet owns no supervisor for has no live tasks")
+    }
+
     // MARK: - `/logout` is fleet-level
 
     /// The `/logout` barrier is not a channel banner: the plan is fleet-wide, the refusal it raises is

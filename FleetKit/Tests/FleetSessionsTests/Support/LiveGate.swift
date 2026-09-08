@@ -18,7 +18,13 @@ enum LiveGate {
 
     static func skipUnlessLive() throws {
         guard ProcessInfo.processInfo.environment["AFLEET_LIVE_CLI"] == "1" else {
-            throw XCTSkip("set AFLEET_LIVE_CLI=1 to run against the installed CLI")
+            throw XCTSkip("""
+                set AFLEET_LIVE_CLI=1 to run against the installed CLI, under the scratch config \
+                home at /tmp/afleet-fixtures/config-home and no other. That spelling works for \
+                `swift test`; reached through the app scheme under xcodebuild the working spelling \
+                is TEST_RUNNER_AFLEET_LIVE_CLI=1, which the runner re-exports with the prefix \
+                stripped — an unprefixed switch never reaches the test host at all
+                """)
         }
         let markers = [".credentials.json", "credentials.json", ".claude.json"]
         guard markers.contains(where: {
@@ -30,7 +36,10 @@ enum LiveGate {
 
     static func skipUnlessTurns() throws {
         guard ProcessInfo.processInfo.environment["AFLEET_LIVE_CLI_TURNS"] == "1" else {
-            throw XCTSkip("set AFLEET_LIVE_CLI_TURNS=1 to let this scenario spend model turns")
+            throw XCTSkip("""
+                set AFLEET_LIVE_CLI_TURNS=1 to let this scenario spend model turns — \
+                TEST_RUNNER_AFLEET_LIVE_CLI_TURNS=1 when it is reached through xcodebuild
+                """)
         }
     }
 

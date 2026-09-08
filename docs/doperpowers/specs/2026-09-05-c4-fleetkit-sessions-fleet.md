@@ -1858,6 +1858,23 @@ which is the only reason the redactor artifact was ever found.
 
 ## Revision Notes
 
+- 2026-09-08 corrective on `main` from C6.2's `[parent-impact]`: X5 gains `quit` and
+  `liveTaskIDs(of:)`. Parent §7.4's *Quit* clause — terminate every owned channel that has a
+  process, then `Fleet.shutdown()`, then exit — was added at C5's merge, after C4's FleetKit
+  had merged, so the facade never received the verb: the only terminate it exposed was
+  `perform(.reap)`, whose dormant-eligibility gate refuses precisely the busy channels a quit
+  dialog has just warned about, and a literal implementation of the clause would have
+  terminated nothing. `LifecycleAction.quit` runs `ChannelSupervisor.terminateForQuit()`,
+  which is the bare `endProcess(during: .quit)` — no gate, and no `inFlight` guard, because a
+  quit must end a channel whose spawn or restart is mid-flight too — and `.quit` joins
+  `LifecycleTable.TerminatingAction` with the restart's and logout's from-states, ready and
+  connecting, so a ghost the quit leaves behind is recorded under the action that left it. It
+  is not a typed command: `LifecycleActionName` is unchanged and the host's quit path is the
+  only caller. `liveTaskIDs(of:)` answers the channel's running-or-armed background task ids,
+  `[]` for an unknown key, because §7.4's "busy" is the fleet's own fact: a surface reads
+  `presence` and this rather than a count it kept locally, so a channel that was spawned but
+  never viewed is judged the same as one on screen.
+
 - 2026-09-08: `LifecycleAPI` gains `sendPrompt(_:on:)`, answering the uuid the engine will echo
   for the user message. `ChannelSupervisor.send` has always minted and returned it and
   `perform(.send)` has always discarded it, so the composer had no way to raise

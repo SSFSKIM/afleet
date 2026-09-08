@@ -1,0 +1,9 @@
+{
+  "name": "afleet-monaco-build",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Input manifest for Tools/build-monaco.sh. Pins the Monaco release whose build output is committed under Workbench/Sources/EditorCore/Resources/monaco.",
+  "dependencies": {
+    "monaco-editor": "0.56.0"
+  }
+}

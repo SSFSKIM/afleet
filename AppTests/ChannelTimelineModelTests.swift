@@ -181,38 +181,41 @@ final class ChannelTimelineModelTests: XCTestCase {
         await rig.lifecycle.finishEvents(of: key)
     }
 
-    // MARK: - The bounded settle
+    // MARK: - The settle
 
-    /// `StreamIngestion.open` returns on a finished event stream instead of burning its fifty settle
-    /// rounds.
+    /// `ChannelTimelineModel.open` settles once the ingestion's event stream is over.
     ///
-    /// The measured property *is* the elapsed time, so this is a timing assertion and not a wait on
-    /// a wall clock. The budget is the ingestion's own: fifty rounds of the twenty-millisecond
-    /// default `tapSettle`, one second in total, which the archived path only reaches if the tap it
-    /// was given keeps producing.
+    /// An archived channel has no supervisor, so the model hands `StreamIngestion.open` an
+    /// already-finished stream; this is the app-side assertion that the whole pipeline behind that
+    /// call returns and publishes rather than hanging on a tap that will never speak.
+    ///
+    /// **The wait is fulfilled by the settle, not by a clock.** The earlier version of this test
+    /// measured the elapsed time of the `open` and compared it against a few hundred milliseconds,
+    /// which made a busy machine — a parallel build alongside the bundle — indistinguishable from a
+    /// pipeline that never settled, and it failed twice on exactly that. The timeout below is
+    /// `LaunchFixtures.hangGuard` and exists only to turn a hang into a failure. How *fast* the
+    /// ingestion gives up on a quiet tap is a separate claim and is guarded separately, in
+    /// `IngestionTests.testOpenGivesUpOnAQuietTapAfterOneRound`, where `tapSettle` is injectable and
+    /// the bound can be set where load cannot reach it.
     func testOpenSettlesOnAFinishedEventStream() async throws {
         let rig = try await Rig(fixtures: ["plain-two-turn"])
         let model = rig.registry.model(for: rig.keys[0])
+        let row = rig.row(0)
 
-        let started = ContinuousClock.now
-        await model.open(rig.row(0))
-        let elapsed = started.duration(to: .now)
+        let settled = XCTestExpectation(description: "open returned on a finished event stream")
+        let opener = Task { @MainActor in
+            await model.open(row)
+            settled.fulfill()
+        }
 
-        XCTAssertFalse(model.items.isEmpty, "the open that was timed read 0 items")
-        XCTAssertLessThan(elapsed, Self.settleBudget,
-                          "open took \(elapsed.milliseconds) ms against a \(Self.settleBudget.milliseconds) ms budget")
+        // Asserted, not merely awaited: on a timeout the run would otherwise fall through to the
+        // item clause, which reads the model directly and could pass on a half-built open.
+        let outcome = await XCTWaiter().fulfillment(of: [settled], timeout: LaunchFixtures.hangGuard)
+        opener.cancel()
+        XCTAssertEqual(outcome, .completed,
+                       "open did not settle on a finished event stream inside the hang guard")
+        XCTAssertFalse(model.items.isEmpty, "the settled open read 0 items")
     }
-
-    /// Twenty-five settle rounds of the twenty-millisecond default `tapSettle`. `StreamIngestion`
-    /// keeps both numbers internal to its own module, so they are restated here with their source
-    /// named.
-    ///
-    /// **Half the fifty-round ceiling, and deliberately.** A correct archived open exits after one
-    /// round and measures about 45 ms, so the full 1000 ms ceiling left a broken run only 1.46x
-    /// above the bound — a chatty tap that fell quiet after half a second would have passed it. This
-    /// bound is still comfortably inside the fifty rounds the brief names, keeps 11x of headroom over
-    /// the passing path, and fails a tap that burns more than half the rounds instead of all of them.
-    private static let settleBudget: Duration = .milliseconds(25 * 20)
 
     // MARK: - The change feed
 
