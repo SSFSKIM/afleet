@@ -138,5 +138,6 @@ fi
 grep -E "^\s+Executed [0-9]+ tests?, with|Test run with [0-9]+ tests?" "$work_dir/test.log" \
     | tail -2 | sed 's/^[[:space:]]*/   /'
 say "== RESULT: PASSED with the network denied."
-say "   Bound (accepted [parent-impact]): the remote dependencies above resolved from SwiftPM's"
-say "   machine-level repository cache, not from the network."
+say "   Bound (accepted [parent-impact]): the dependencies above resolved from SwiftPM's"
+say "   machine-level caches — the repository cache for the two source packages, the artifact"
+say "   cache for GhosttyKit's xcframework — and not from the network."
