@@ -942,3 +942,16 @@ symlink-containment debt in entry 78 is unchanged.
      field on `error`, or a distinct refusal message — either is a W4 vocabulary addition and
      therefore a contract change, of the same class as entry 104's acknowledgement. Owner: C7.5
      the first time it wires *Save* beside C7.7's diff.
+
+106. **The bun executable that generates the Monaco bundle is recorded, not enforced.**
+     `Tools/build-monaco.sh` refuses to run without `bun` on PATH and writes `bun --version` into
+     the bundle's `VERSION`, but nothing checks *which* version that is. `Tools/monaco/bun.lock`
+     pins Monaco's dependency graph; it does not pin the bundler that reads it, and the script
+     emits minified, code-split, content-hashed output — so the committed inputs do not by
+     themselves determine the committed bytes, and a rebuild under a different bun can produce a
+     different tree from an unchanged repository. That is only a latent nuisance today (nothing
+     rebuilds the bundle in CI, and `VERSION` carries no date so an unchanged rebuild is a no-op),
+     but it is exactly the property the committed bundle is supposed to have. Closer: pin the
+     version in the script and refuse to build under another, or — the weaker half, already
+     present — keep recording it in `VERSION` beside Monaco's and treat a mismatch as a rebuild
+     hazard. Owner: C7.2's build script, whoever next bumps Monaco.

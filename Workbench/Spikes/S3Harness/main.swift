@@ -9,17 +9,25 @@ import Foundation
 //
 //   swift run [-c release] --package-path Workbench S3Harness \
 //       [--route scheme|blob|file] [--hold] [--frames <n>] [--bytes <n>]
+//       [--self-check] [--evaluate-report <path>]
 //
 // `--hold` leaves the window up after the report for the human half of "no visible jank";
 // `--frames` and `--bytes` shrink the scroll sample and the synthetic file when the run is a
-// diagnostic rather than a measurement.
+// diagnostic rather than a measurement. `--self-check` and `--evaluate-report` open no window
+// and measure nothing: they drive the verdict from stubbed reports, which is how an executable
+// whose tests are its own runs gets a test that can fail.
 //
 // Its report goes to stdout as one JSON object and nothing else, so the run is scriptable; the
-// human-readable summary goes to stderr. Exit 0 when the route carries the document, a
-// dynamic-import chunk and all five workers — the workers proven by answering, not merely by
-// starting without an error; 2 when it does not, which is the signal to advance to the next
-// route; 5 when every load path is carried but the cold load is over budget, which is a
-// measurement and not a broken run.
+// human-readable summary goes to stderr. The status is `Verdict.rule`'s, and its governing rule
+// is that a missing piece of evidence is never a pass:
+//
+//   0  every load path, every render workload, cold load within budget
+//   2  a load path is missing — advance to the next route. The workers are proven by answering
+//      AND by traffic on Monaco's own worker for that service, never by starting without error
+//   4  the window was given no animation frames; the render numbers are missing
+//   5  every load path and workload; the cold load is over budget — a measurement, not a break
+//   6  a render workload did not complete; the reason names which
+//   7  the editor reported an error during the run
 
 /// The kernel's own record of when this process began, which is earlier than anything Swift can
 /// observe: it includes dyld, the SwiftPM-built binary's startup and AppKit's. The gate is
@@ -58,6 +66,17 @@ if let index = arguments.firstIndex(of: "--frames"), index + 1 < arguments.count
 if let index = arguments.firstIndex(of: "--bytes"), index + 1 < arguments.count,
    let bytes = Int(arguments[index + 1]) {
     options.sourceBytes = bytes
+}
+
+// `--evaluate-report <path>` rules on a report read from disk and exits with the status, with
+// no window, no WebKit and no measurement. It is how the verdict is tested: the harness is an
+// executable, so its tests are its own runs, and a stubbed report is the only way to drive the
+// status function through evidence a real run does not produce on demand.
+if let index = arguments.firstIndex(of: "--evaluate-report"), index + 1 < arguments.count {
+    exit(Verdict.evaluate(path: arguments[index + 1]))
+}
+if arguments.contains("--self-check") {
+    exit(SelfCheck.run())
 }
 
 let application = NSApplication.shared

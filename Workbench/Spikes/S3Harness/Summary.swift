@@ -57,11 +57,24 @@ enum Summary {
             for file in started.keys.sorted() {
                 lines.append("  worker      \(file.padding(toLength: 17, withPad: " ", startingAt: 0)) started=\(started[file] ?? false)")
             }
+            let messages = workers["messagesByMonacoWorker"] as? [String: Int] ?? [:]
             if let functional = workers["functional"] as? [String: Any] {
                 for name in functional.keys.sorted() where name != "errors" {
                     let answered = (functional[name] as? [String: Any])?["answered"] as? Bool ?? false
-                    lines.append("  service     \(name.padding(toLength: 17, withPad: " ", startingAt: 0)) answered=\(answered)")
+                    // The answer and its attribution on one line: an answer with no traffic on
+                    // Monaco's own worker for that service is the main-thread fallback.
+                    lines.append("  service     \(name.padding(toLength: 17, withPad: " ", startingAt: 0))"
+                                 + " answered=\(answered)"
+                                 + " monacoWorkerMessages=\(messages[name].map(String.init) ?? "-")")
                 }
+            }
+            lines.append("  editor.worker  monacoWorkerMessages=\(messages[WorkerEvidence.editorWorkerKey].map(String.init) ?? "-")"
+                         + " computedDiff=\(workers["editorWorkerComputedDiff"] as? Bool ?? false)")
+            if workers["mainThreadFallback"] as? Bool == true {
+                lines.append("  ** Monaco fell back to the main thread: Design §7 makes this a stop, not a fallback.")
+            }
+            if let why = workers["unprovenBecause"] as? String {
+                lines.append("  workers     unproven: \(why)")
             }
             // The verdict's own line, so a reader is never left inferring it from the rows above.
             lines.append("  workers     proven=\(workers["proven"] as? Bool ?? false)"
@@ -79,9 +92,14 @@ enum Summary {
         case 2: meaning = "this route drops a load path — advance to the next route"
         case 4: meaning = "the window was given no frames; the render numbers are missing"
         case 5: meaning = "this route carries every load path; the cold load is over budget"
+        case 6: meaning = "a render workload did not complete — the run carries no evidence for it"
+        case 7: meaning = "the editor reported an error during the run"
         default: meaning = "see the report"
         }
         lines.append("  exit \(status) — \(meaning)")
+        if let reason = (report["verdict"] as? [String: Any])?["reason"] as? String {
+            lines.append("             \(reason)")
+        }
         lines.append("")
         handle.write(Data(lines.joined(separator: "\n").utf8))
     }

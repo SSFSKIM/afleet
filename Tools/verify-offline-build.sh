@@ -43,6 +43,24 @@ trap cleanup EXIT
 say() { printf '%s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
+# How many entries a SwiftPM cache directory holds. A directory that does not exist holds none,
+# which is a finding this script exists to print — so it must be *counted*, not fatal. Written as
+# `ls ... | wc -l` it was fatal: under `set -euo pipefail` the pipeline takes `ls`'s status, the
+# assignment takes the pipeline's, and the script died one line before the diagnostic that says
+# the cache is empty. A machine cold on this cache is exactly the machine that needs to read it.
+cache_entry_count() {
+    local directory="$1"
+    if [[ ! -d "$directory" ]]; then printf '0\n'; return 0; fi
+    find "$directory" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' '
+}
+
+# `Tools/verify-offline-build.sh --count-cache-entries <dir>` prints that count and exits. It is
+# how the empty and missing cases are exercised without deleting a real cache.
+if [[ "${1:-}" == "--count-cache-entries" ]]; then
+    cache_entry_count "${2:?a directory is required}"
+    exit 0
+fi
+
 say "== branch: $branch"
 
 # --- 1. The sandbox actually denies the network -------------------------------------------
@@ -99,7 +117,7 @@ done < <(sed -n 's/.*"identity" : "\(.*\)".*/\1/p' "$clone/Workbench/Package.res
 # libghostty-spm ships GhosttyKit as a binary target, so a *second* cache is load-bearing:
 # SwiftPM's artifact cache, which holds the downloaded xcframework zip.
 artifact_cache="${HOME}/.swiftpm/cache/artifacts"
-artifact_count=$(ls -1 "$artifact_cache" 2>/dev/null | wc -l | tr -d ' ')
+artifact_count="$(cache_entry_count "$artifact_cache")"
 if [[ "$artifact_count" -gt 0 ]]; then
     say "   binary artifacts: $artifact_count in the SwiftPM artifact cache"
 else
