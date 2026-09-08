@@ -329,6 +329,10 @@ final class RecordingAppFleet: AppFleet {
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         try await inner.send(request, on: key)
     }
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        log.note("send")
+        return try await inner.sendPrompt(input, on: key)
+    }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
              ui: any StrategyUI) async throws -> StrategyOutcome {
         try await inner.run(strategy, arguments: arguments, on: key, ui: ui)

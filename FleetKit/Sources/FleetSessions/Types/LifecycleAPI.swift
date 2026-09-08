@@ -8,6 +8,10 @@ public protocol LifecycleAPI: Sendable {
     func states() async -> [ChannelState]
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState
+    /// Sends a prompt on an owned channel and returns the uuid the engine will echo for it, so the host can raise
+    /// `HostSignal.promptSent` before the echo arrives. Every precondition and every refusal is
+    /// `perform(.send(input), on:)`'s; only the answer differs.
+    @discardableResult func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID
     /// The composer's line, routed against the channel's own handshake, `system/init` and runtime record. A key the
     /// fleet owns no supervisor for routes against the local table alone.
     func route(_ text: String, on key: ChannelKey) async -> Routed

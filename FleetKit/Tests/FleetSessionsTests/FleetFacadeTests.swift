@@ -27,8 +27,12 @@ final class FleetFacadeTests: XCTestCase {
         let diagnosticsDirectory: URL
         /// The handles the scripted factory built, in spawn order; empty unless the harness was asked for them.
         let handles = ScriptedHandles()
+        /// Parent §11's opt-in raw frame capture, when the test asked for one: the only place a frame afleet
+        /// *wrote* to a child is written down whole, which is what a claim about the bytes on the wire needs.
+        let capture: RawCapture?
         private let storeDirectory: URL
         private let scriptDirectory: URL
+        private let captureRoot: URL
 
         /// `scriptedHandles` swaps the production factory for one that hands out a `ScriptedProcessHandle` per
         /// spawn, which is how a test reads back the control requests the facade sent.
@@ -36,7 +40,8 @@ final class FleetFacadeTests: XCTestCase {
         /// `replaying` are `FAKE_CLAUDE_SCRIPT` steps: the exchanges the replayed child answers the facade's own
         /// control requests with. `RouterTests` builds them the same way, against a supervisor; a facade test needs
         /// them here because the environment a `Fleet` launches its children with is fixed at construction.
-        init(scriptedHandles: Bool = false, replaying steps: [[String: Any]] = []) throws {
+        init(scriptedHandles: Bool = false, replaying steps: [[String: Any]] = [],
+             capturing: Bool = false) throws {
             home = try ScratchConfigHome()
             files = ScriptedHolderFiles(home: home)
             let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
@@ -44,6 +49,7 @@ final class FleetFacadeTests: XCTestCase {
             storeDirectory = temporary.appending(path: "afleet-c4-facade-store-\(UUID().uuidString)")
             diagnosticsDirectory = temporary.appending(path: "afleet-c4-facade-diag-\(UUID().uuidString)")
             scriptDirectory = temporary.appending(path: "afleet-c4-facade-script-\(UUID().uuidString)")
+            captureRoot = temporary.appending(path: "afleet-c4-facade-capture-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
             try home.trust(root: cwd)
 
@@ -56,12 +62,14 @@ final class FleetFacadeTests: XCTestCase {
             let script = steps.isEmpty
                 ? nil
                 : try ReplayScript.write(steps, fixture: FleetFacadeTests.fixture, into: scriptDirectory)
+            let capture = capturing ? RawCapture(root: captureRoot, configHome: home.configHome) : nil
+            self.capture = capture
             fleet = Fleet(configHome: home.configHome,
                               environment: FakeClaudeLaunch.environment(fixture: FleetFacadeTests.fixture,
                                                                         script: script),
                               binary: FakeClaudeLaunch.binary, store: store,
                               diagnosticsDirectory: diagnosticsDirectory, clock: clock, factory: factory,
-                              runner: runner)
+                              capture: { capture }, runner: runner)
         }
 
         /// A factory handing out one `ScriptedProcessHandle` per spawn, collected in order.
@@ -95,6 +103,22 @@ final class FleetFacadeTests: XCTestCase {
             try? FileManager.default.removeItem(at: storeDirectory)
             try? FileManager.default.removeItem(at: diagnosticsDirectory)
             try? FileManager.default.removeItem(at: scriptDirectory)
+            try? FileManager.default.removeItem(at: captureRoot)
+        }
+
+        /// Every `user` frame this harness's capture recorded for a session: the frames afleet wrote into the
+        /// child, read back from the one file that holds them whole. Empty when nothing has been captured yet,
+        /// so a wait can poll it.
+        func capturedUserFrames(of session: SessionID) -> [[String: Any]] {
+            guard capture != nil else { return [] }
+            let url = captureRoot.appending(path: RawCapture.configHomeHash(home.configHome))
+                .appending(path: "\(session.description).ndjson")
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+            return text.split(separator: "\n").compactMap { line in
+                guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      object["type"] as? String == "user" else { return nil }
+                return object
+            }
         }
 
         /// The suite's clock stepper and wall-clock wait, over this harness's manual clock. Both bodies live in
@@ -929,6 +953,110 @@ final class FleetFacadeTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? LifecycleError, .notOwned)
         }
+    }
+
+    // MARK: - The composer's prompt
+
+    /// `sendPrompt` answers the uuid the engine will echo for the user message, and it is the uuid the frame
+    /// written to the child carries. That is what lets the composer raise `HostSignal.promptSent(uuid:at:)` the
+    /// moment the send returns, which is the pre-echo preview C3's `StreamIngestion.signal(_:)` exists to receive.
+    ///
+    /// `perform(.send)` answers a `ChannelState` and drops the uuid the supervisor minted, and reaching below the
+    /// facade for it is contract Y5's refusal, so before this member there was no way for a host to know it.
+    ///
+    /// The child is `fake-claude` replaying a committed fixture and the frame is read back from parent §11's raw
+    /// capture, which writes what afleet wrote — no double stands between the assertion and the wire. The script's
+    /// one `expect` is what makes a user frame an accounted-for host frame in this recording rather than an
+    /// unexpected one; nothing is composed from engine bytes.
+    ///
+    /// Deliberate break: return a fresh `UUID()` from `Fleet.sendPrompt` → the capture names the other one.
+    func testSendPromptAnswersTheUuidTheFrameOnTheWireCarries() async throws {
+        await harness.tearDown()
+        harness = try Harness(replaying: [["expect": ["type": "user"], "timeout_ms": 60_000]], capturing: true)
+        let harness = self.harness!
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: try fixtureSession())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        try await harness.waitFor("the channel to be ready") { await fleet.state(of: k)?.origin == .owned(.ready) }
+
+        let minted = try await fleet.sendPrompt(UserInput(text: "invented prompt"), on: k)
+
+        try await harness.waitFor("the user frame to reach the capture") {
+            !harness.capturedUserFrames(of: k.session).isEmpty
+        }
+        let frames = harness.capturedUserFrames(of: k.session)
+        XCTAssertEqual(frames.count, 1, "one prompt, one user frame")
+        XCTAssertEqual(frames.first?["uuid"] as? String, minted.uuidString.lowercased(),
+                       "the frame written to the engine carries a uuid the caller was never given")
+    }
+
+    /// A prompt arriving behind a lifecycle operation is refused with the operation that holds the channel, exactly
+    /// as `perform(.send)` is: same guard, same error, and nothing written into a child being reaped.
+    ///
+    /// Deliberate break: call `ProcessHandle.send` from `Fleet.sendPrompt` instead of the supervisor's → the input
+    /// is written to a process the reap has already decided to end and `handle.sent` names it.
+    func testSendPromptIsRefusedWhileALifecycleOperationIsInFlight() async throws {
+        let harness = try scriptedHarness()
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: SessionID())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        let handle = try XCTUnwrap(harness.handles.all.first)
+        let held = HeldAnswer(), entered = HeldAnswer()
+        let reachedTerminate = entered.expectation(description: "the reap reached terminate")
+        handle.terminateGate = { entered.release(); await held.wait() }
+
+        let reaping = Task { try await fleet.perform(.reap, on: k) }
+        defer { held.release(); reaping.cancel() }
+        try await TestTiming.awaitDelivery([reachedTerminate])
+
+        var thrown: (any Error)?
+        do { _ = try await fleet.sendPrompt(UserInput(text: "invented prompt"), on: k) } catch { thrown = error }
+        XCTAssertEqual(thrown as? LifecycleError, .busy(.reap), "the prompt was admitted into a channel being reaped")
+
+        var viaPerform: (any Error)?
+        do { _ = try await fleet.perform(.send(UserInput(text: "invented prompt")), on: k) } catch { viaPerform = error }
+        XCTAssertEqual(viaPerform as? LifecycleError, thrown as? LifecycleError,
+                       "the two doors refuse a busy channel differently")
+        XCTAssertEqual(handle.sent, [], "nothing was written to a child being reaped")
+
+        held.release()
+        _ = try await reaping.value
+    }
+
+    /// A channel held in the user's terminal refuses a prompt the way `perform(.send)` does: rule 6's
+    /// `heldElsewhere`, with the banner that offers *Fork* left on the channel. Nothing here stops or adopts the
+    /// user's session; the holder is a scripted registry record and the pid is this test process's own.
+    ///
+    /// Deliberate break: read `state.origin` in `Fleet.sendPrompt` and write anyway → the refusal never happens.
+    func testSendPromptOnAForeignChannelIsRefusedTheWayPerformSendIs() async throws {
+        let harness = self.harness!
+        let fleet = harness.fleet
+        let session = try fixtureSession()
+        let k = key(session)
+        try harness.files.writeRegistry(pid: ScriptedHolderFiles.livePID, sessionID: session)
+        await fleet.start()
+        await fleet.register(k, cwd: harness.cwd, recent: true)
+        try await harness.waitFor("the foreign holder to be seen") {
+            await fleet.state(of: k)?.origin == .foreignLive(.usersTerminal)
+        }
+
+        var thrown: (any Error)?
+        do { _ = try await fleet.sendPrompt(UserInput(text: "invented prompt"), on: k) } catch { thrown = error }
+        guard case .heldElsewhere(let holders)? = thrown as? LifecycleError else {
+            return XCTFail("a prompt on a channel held in the user's terminal gave \(String(describing: thrown))")
+        }
+        XCTAssertFalse(holders.holders.isEmpty, "the refusal names the holder the banner is drawn from")
+
+        var viaPerform: (any Error)?
+        do { _ = try await fleet.perform(.send(UserInput(text: "invented prompt")), on: k) } catch { viaPerform = error }
+        XCTAssertEqual(viaPerform as? LifecycleError, thrown as? LifecycleError,
+                       "the two doors refuse a foreign channel differently")
+
+        let refused = await fleet.state(of: k)
+        XCTAssertEqual(refused?.origin, .foreignLive(.usersTerminal), "the channel stayed where it was")
+        XCTAssertEqual(refused?.banner, .heldElsewhere(holders), "the refusal is where the user can see why")
     }
 
     /// One out-frame a fixture recorded, by type and subtype, for a script to re-emit. The bytes are the reviewed
