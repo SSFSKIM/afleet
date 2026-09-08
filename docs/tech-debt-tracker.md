@@ -1346,3 +1346,23 @@ is renumbered.
     **not** report stops, which `WUNTRACED` does and the detach path needs, so the
     replacement is not a drop-in. Owner: C7.4 if a pane count that matters appears, else the
     child that first runs many panes at once. Found by the Task 3 independent review.
+
+86. **A full-rate flood costs the pane up to a quarter-second of input latency, and the cost
+    is the renderer's, not the host's.** Measured in the S1 harness over four ten-second `yes`
+    runs: run-loop heartbeat median 17.3–23.6 ms with maxima of 117–262 ms, 16–24% of 50 ms
+    ticks lost, and a real `NSEvent` keystroke round-tripping in 24.9–587.1 ms. The same ten
+    seconds headless through the identical PTY layer reads median 2.025 ms, max 10.115 ms,
+    199/200 ticks and roughly 15x the throughput, and only 251–347 ms of the ten seconds is
+    spent inside `feed` — so host delivery is not the cost and no amount of coalescing on our
+    side addresses it. The window stays responsive, not smooth: a drag during a full-rate
+    flood hitches. Not fixed here because the remedy is the renderer's (frame pacing, or
+    dropping intermediate frames when the grid is being overwritten faster than it is drawn),
+    and because a pane flooding at full rate is not the ordinary case. Closer: revisit if a
+    user reports hitching, or when a `libghostty-vt` Swift renderer makes frame pacing ours.
+    Owner: C7.4 if it ships pane throttling, else whoever owns the renderer swap.
+87. **The S1 harness's grid claims rest on `GhosttyTerminalSurface.renderedViewportText()`,
+    added so a separate module could read the grid.** It waits for pending output and returns
+    `readViewportText()`, and one test pins its headless contract (`nil` with no surface
+    attached, which is what keeps the harness's "it rendered" claim falsifiable). It exists
+    for the spike, and C7.4 has no need of it; if the panel never adopts it, it should be
+    withdrawn rather than left as public surface area nobody calls. Owner: C7.4 at its close.
