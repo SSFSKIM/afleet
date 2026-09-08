@@ -820,21 +820,20 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     the rule these two would quietly break. Closer: delete both. Owner: the next task that opens
     `LaunchDoubles.swift`.
 
-77. **Background roster changes outside afleet have no complete app-consumable signal (C5 review F6).**
-    `SidebarView` loads the roster once; afleet's Adopt and Stop refresh it, but external exec
-    jobs and job-state changes can remain invisible until relaunch. The existing
-    `LifecycleAPI.updates` carries channel states, not roster changes: `HolderReader` omits
-    exec jobs from channel holders, and `FleetObserver.perform` publishes only when holders
-    change, ignoring changes in `HolderSnapshot.jobs`. Session jobs with registered supervisors
-    can produce channel-origin transitions, but those cannot cover exec jobs, job-state text,
-    or sessions without supervisors. Refreshing on every channel state would also call
-    `Fleet.jobs()` → `reconcileNow` → `agents --json`, booting the CLI on the state stream's
-    registration burst. C5 therefore adds neither a polling timer nor a partial channel-only
-    refresh and does not claim this finding fixed. Closer: C4 publishes roster changes from
-    the observer's existing watch/reconcile cycle through X5, carrying the current `[JobEntry]`
-    (including exec jobs and state changes), so C5 can update its Background list without an
-    extra CLI reconciliation. Owner: C4 for `FleetObserver`/`LifecycleAPI` and its X5 amendment;
-    C5's fleet browser for the consumer once that signal exists.
+77. **Closed 2026-09-08 (`248ac93`, `6c3ead2`).** Background roster changes outside afleet had no
+    complete app-consumable signal (C5 review F6): `SidebarView` loaded the roster once and only
+    afleet's own Adopt and Stop refreshed it, while `LifecycleAPI.updates` carries channel states,
+    which cannot represent an exec job (no session, so no channel) or a job's own state text. X5
+    now has `jobUpdates`. `FleetObserver` publishes its read whenever `HolderSnapshot.jobs` differs
+    by value from the last published one — `f9da990`'s rule over the roster, and separately from
+    the holders — and `Fleet` forwards each as the full current `[JobEntry]`, derived by
+    `HolderSnapshot.roster`, which `jobs()` reads too. The publication rides the watch and the
+    five-second poll the observer already ran, so no `agents --json` is added; the Background list
+    subscribes before it takes its initial snapshot and patches by row, and Adopt and Stop no
+    longer refresh. `RosterSignalTests` and `BackgroundRosterTests` pin both halves.
+    Remaining: the sidebar still takes one `jobs()` snapshot at launch, so the roster's first paint
+    costs the CLI boot `reconcileNow` has always cost — the stream cannot replace it, because a
+    launch has to start from somewhere and the first publication is not owed until something moves.
 
 **R3 correction, 2026-09-07:** entry 78's two-guard statement excludes the filesystem-root
 case: C5 now handles it by path components; the C4 guard still misses it (entry 80). The

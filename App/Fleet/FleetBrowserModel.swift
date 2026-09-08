@@ -62,6 +62,12 @@ final class FleetBrowserModel {
     private let now: @Sendable () -> Date
     private var groupingModel: ProjectGrouping
     private var updatesTask: Task<Void, Never>?
+    /// The `jobUpdates` loop. Separate from `updatesTask` because the two streams are separate: `updates` is keyed
+    /// by channel and an exec job has none, so a roster change is not expressible as a `ChannelState`.
+    private var rosterTask: Task<Void, Never>?
+    /// Whether X5 has published a roster into this model. The initial `jobs()` snapshot is a starting point and
+    /// nothing more: once the stream has spoken, its roster is the current one and the snapshot is behind it.
+    private var rosterPublished = false
     /// The filesystem answers grouping needs, paid once per distinct directory per launch rather
     /// than once per rebuild.
     private let paths = PathMemo()
@@ -232,6 +238,7 @@ final class FleetBrowserModel {
     /// length of the drain. Ingesting is a dictionary write; the flush that follows is scheduled
     /// once and merges every state that arrived before it ran.
     func startUpdates() {
+        startRosterUpdates()
         guard updatesTask == nil else { return }
         let stream = lifecycle.updates
         updatesTask = Task { [weak self] in
@@ -249,6 +256,8 @@ final class FleetBrowserModel {
     func stopUpdates() {
         updatesTask?.cancel()
         updatesTask = nil
+        rosterTask?.cancel()
+        rosterTask = nil
         flushTask?.cancel()
         flushTask = nil
     }
@@ -380,8 +389,49 @@ final class FleetBrowserModel {
         }
     }
 
+    /// Subscribes the Background list to X5's roster signal and takes the one snapshot it starts from.
+    ///
+    /// **The subscription is installed before the snapshot is asked for.** `jobs()` runs `agents --json` and takes
+    /// its time; a roster published while it is in flight would otherwise be the one change the sidebar never hears
+    /// about, and the list would be wrong until the next one happened to arrive. For the same reason the snapshot
+    /// is dropped rather than written once the stream has spoken: what the stream carries is the current roster,
+    /// and overwriting it with a read that began earlier would be the sidebar arguing with itself.
     func refreshBackground() async {
-        background = await lifecycle.jobs()
+        startRosterUpdates()
+        let snapshot = await lifecycle.jobs()
+        guard !rosterPublished else { return }
+        applyRoster(snapshot)
+    }
+
+    /// The roster loop. Idempotent, and started from both ends — the coordinator's `startUpdates` and the sidebar's
+    /// own first load — because either may run first and neither may be the one that leaves the list unsubscribed.
+    private func startRosterUpdates() {
+        guard rosterTask == nil else { return }
+        let stream = lifecycle.jobUpdates
+        rosterTask = Task { @MainActor [weak self] in
+            for await roster in stream {
+                guard let self else { return }
+                self.rosterPublished = true
+                self.applyRoster(roster)
+            }
+        }
+    }
+
+    /// Writes a published roster into the list, by row where the rows are the same ones.
+    ///
+    /// A roster that names the same jobs in the same order is patched entry by entry, so a job changing state
+    /// touches one row rather than replacing the list SwiftUI has already diffed; a roster whose membership moved
+    /// replaces it outright, because that is what actually happened. A roster equal to the one on screen writes
+    /// nothing at all — the same rule the observer publishes under, held again here because `jobs()` and the stream
+    /// can legitimately deliver the same list one after the other.
+    private func applyRoster(_ roster: [JobEntry]) {
+        guard roster != background else { return }
+        if roster.map(\.short) == background.map(\.short) {
+            for index in roster.indices where roster[index] != background[index] { background[index] = roster[index] }
+        } else {
+            background = roster
+        }
+        releaseWaiters()
     }
 
     // MARK: - Selection and actions
@@ -425,6 +475,10 @@ final class FleetBrowserModel {
 
     /// *Adopt*: take over a job's session through X5. A job that runs no session — an exec job —
     /// has nothing to adopt, and says so rather than silently doing nothing.
+    ///
+    /// It takes no roster refresh of its own. What adoption does to the roster is a change to the files the
+    /// observer already watches, so X5 publishes it on `jobUpdates` like any other; re-reading it here would run
+    /// `agents --json` — booting the CLI — to learn something already on its way.
     func adopt(_ job: JobEntry) async {
         guard let session = job.sessionID else {
             jobBanners[job.short.rawValue] = "This job runs no session, so there is nothing to adopt."
@@ -440,7 +494,6 @@ final class FleetBrowserModel {
         } catch {
             jobBanners[job.short.rawValue] = Self.sentence(for: error)
         }
-        await refreshBackground()
     }
 
     /// *Attach*: the `PaneRequest` X5 hands back for the job's pane. **C5 renders no pane** — the
@@ -457,7 +510,8 @@ final class FleetBrowserModel {
         }
     }
 
-    /// *Stop*: `claude stop <short>` through X5's job verb, never a signal of our own.
+    /// *Stop*: `claude stop <short>` through X5's job verb, never a signal of our own. The job leaving the roster
+    /// arrives on `jobUpdates`, for the same reason Adopt takes no refresh of its own.
     func stop(_ job: JobEntry) async {
         do {
             try await lifecycle.performJob(.stop, job.short)
@@ -465,7 +519,6 @@ final class FleetBrowserModel {
         } catch {
             jobBanners[job.short.rawValue] = Self.sentence(for: error)
         }
-        await refreshBackground()
     }
 
     /// The same sentences a row's banner uses, so a refusal reads identically wherever it surfaced.
