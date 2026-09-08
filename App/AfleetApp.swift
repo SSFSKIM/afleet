@@ -80,13 +80,18 @@ struct AfleetApp: App {
                 Button(model.panels.title(for: tab)) { shell.selectPanelTab(at: index + 1) }
                     .keyboardShortcut(Self.digit(index + 1), modifiers: .command)
             }
-            Divider()
-            // Cmd+S for the Files panel (C7.5 Design §7; §8.7's list gains it by Parent revision
-            // 1, which the architect accepted). W4's editor vocabulary is closed, so Monaco cannot
-            // report the key press and the host owns it: this is the same action the panel's own
-            // *Save* button performs. Offered only while the window is showing Files over a dirty
-            // buffer, and the disabled state resolves a session the host already holds rather than
-            // creating one.
+        }
+        // Cmd+S for the Files panel (C7.5 Design §7; §8.7's list gains it by Parent revision 1,
+        // which the architect accepted). W4's editor vocabulary is closed, so Monaco cannot report
+        // the key press and the host owns it: this is the same action the panel's own *Save*
+        // button performs. Offered only while the window is showing Files over a dirty buffer, and
+        // the disabled state resolves a session the host already holds rather than creating one.
+        //
+        // It sits at `.saveItem` and not beside the panel shortcuts above, because that placement
+        // is what puts *Save* in the **File** menu, where every macOS user reaches for it. The
+        // group above is the View region; a Save item there carries the right key and stands under
+        // the wrong heading.
+        CommandGroup(after: .saveItem) {
             Button("Save") { model.saveFilesPanel() }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(!model.canSaveFiles)
