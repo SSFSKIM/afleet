@@ -6,13 +6,23 @@ import XCTest
 /// manifest cannot say what a source file did not import.
 final class ImportGraphTests: XCTestCase {
 
-    /// Foundation, SwiftUI, AppKit, UserNotifications, Observation and OSLog are the platform;
-    /// the four packages are what `project.yml` declares. `PanelHostAPI` is listed although the
-    /// `Workbench` umbrella re-exports it, because a source file may import it directly and that
-    /// is legal.
+    /// Foundation, SwiftUI, AppKit, UserNotifications, Observation, OSLog, WebKit and QuartzCore
+    /// are the platform; the six packages are what `project.yml` declares. `PanelHostAPI` is listed
+    /// although the `Workbench` umbrella re-exports it, because a source file may import it
+    /// directly and that is legal.
+    ///
+    /// **Widened 2026-09-08 by C6.1's seam commit**, which is the one commit authorised to touch
+    /// this list and `project.yml`. `Markdown` is `swift-markdown`, already named in the parent's
+    /// §11 dependency list; `HighlightKit` is the pure-Swift highlighter the human gate left to
+    /// C6.1 to choose; `WebKit` is the diagram and S7-fallback seam; `QuartzCore` is
+    /// `CADisplayLink`, which S7's frame-time harness samples on. Four names, and the app target's
+    /// dependency edges are otherwise unchanged: X1's rule is that the app depends on the four
+    /// first-party packages and the platform, and these two remote packages are declared in the
+    /// manifest this test is the other half of.
     private static let allowed: Set<String> = ["Foundation", "SwiftUI", "AppKit", "UserNotifications",
-                                               "Observation", "OSLog", "AfleetCore", "ClaudeWire",
-                                               "FleetKit", "Workbench", "PanelHostAPI"]
+                                               "Observation", "OSLog", "WebKit", "QuartzCore",
+                                               "AfleetCore", "ClaudeWire", "FleetKit", "Workbench",
+                                               "PanelHostAPI", "Markdown", "HighlightKit"]
 
     /// `App/`, from this file's own location.
     private static var sources: URL {

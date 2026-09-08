@@ -11,6 +11,23 @@ packages:
   ClaudeWire: { path: ClaudeWire }
   FleetKit:   { path: FleetKit }
   Workbench:  { path: Workbench }
+  # C6.1's two, both pinned to one immovable point the way `Workbench/Package.swift` pins
+  # libghostty. Neither is imported yet: they land in the seam commit so the leaf's fence — which
+  # is `App/Timeline/**` and its tests — closes again and no later task has to reopen this file.
+  #
+  # swift-markdown publishes **no semver tags**, only `swift-DEVELOPMENT-SNAPSHOT-*`, so `exact`
+  # has nothing to name and a revision pin is what "pinned exactly" means here. `de3e245b` is the
+  # tip of both `release/6.3` and `release/6.3.1` — the same commit — and the 6.3 line is the one
+  # matching this repository's Swift 6.3.3.
+  Markdown:
+    url: https://github.com/swiftlang/swift-markdown.git
+    revision: de3e245b6044386b623ecce11d1ccb5fe766e3db
+  # The highlighter, chosen for token-level fidelity with the engine's own: it is a Swift port of
+  # highlight.js 11.11.1, which is what the terminal renderer highlights with, pinned by its own
+  # differential fixtures against that source (child spec §6). MIT, no dependencies, macOS 15+.
+  HighlightKit:
+    url: https://github.com/PhraseHQ/HighlightKit.git
+    exactVersion: 0.2.0
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -47,6 +64,10 @@ targets:
       - package: ClaudeWire
       - package: FleetKit
       - package: Workbench
+      - package: Markdown
+        product: Markdown
+      - package: HighlightKit
+        product: HighlightKit
   AfleetTests:
     type: bundle.unit-test
     platform: macOS

@@ -656,7 +656,12 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     view and may attach earlier or on a different trigger. Found at C5 Task 7. Closer: either
     make `attach` imply the first `open`, or assert in the model that a `nil` projection with
     `hasOpened` false is unreachable so a future caller trips it.
-66. **`hasOpened` is set before the index lookup, so a missing entry pins `failure` for the
+66. **Closed 2026-09-08 by C6.1 (`child/c6-timeline-renderer`).** `hasOpened` now moves to after
+    the index lookup succeeds, and a retry that finds the entry clears the failure the attempt
+    before it recorded; `testAMissingIndexEntryIsRetried` holds both halves and was demonstrated
+    failing against the pre-fix shape. The entry's original text follows.
+
+    **`hasOpened` is set before the index lookup, so a missing entry pins `failure` for the
     model's life.** A channel whose index entry is absent at open time — a transcript deleted
     between listing and opening — records the failure and never retries, because the guard that
     prevents re-opening has already fired. No C5 path produces it: the sidebar lists from the
@@ -883,3 +888,113 @@ symlink-containment debt in entry 78 is unchanged.
     the missing-control and press assertions fail closed if the framework shape changes.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
+
+## From C6.1 (`child/c6-timeline-renderer`)
+
+Entries **127 through 141** are C6.1's, as the C6 composite's leaf table allots them. Nothing above
+is renumbered.
+
+127. **The live thinking-token estimate has no home in C3's model.** `system/thinking_tokens`
+     carries `estimated_tokens`, `estimated_tokens_delta` and a `uuid` naming the *user* message the
+     turn answers (2.1.263 `cli.pretty.js:811445`; emitted at `:523066` and `:289222`). ClaudeWire
+     models the frame as `SystemFrame.thinkingTokens`, but `Overlay` has no field for the estimate
+     and `WireReducer.route(_ system:)` sends the frame to its `default:` arm, where it becomes an
+     opaque item — an "unrecognized event" row for every one of the nine `nested-depth-2` carries.
+     §8.3 wants the estimate live under a thinking disclosure while a message streams. It is a
+     scalar with a lifetime shorter than an item's and §7.3's differential invariant is about items,
+     so it is not obviously an item; `Overlay` already holds non-item state (`queue`, `banners`,
+     `sessionState`) and is the natural home. Found at C6.1's grill. Closer: an
+     `Overlay.thinkingEstimate` set from the frame and cleared when the message settles, so the
+     renderer reads it where it reads everything else. Owner: C3, at its next corrective; until then
+     the disclosure has no number.
+
+128. **No fixture carries a `tool_use_summary` frame, so cluster labelling has no recorded
+     witness.** §8.3 labels a cluster from the engine's own `tool_use_summary`
+     (`summary`, `preceding_tool_use_ids`), falling back to counts and elapsed time. Across all
+     twenty committed fixtures the frame appears zero times, and
+     `FleetKit/Tests/FleetTimelineTests/Invariant/ProjectionEqualityTests.swift` asserts that as an
+     invariant with a comment telling whoever adds one to *read* it rather than construct one.
+     `WireReducerTests` constructs one by hand for the same reason. So the labelled arm of every
+     cluster test — C6.1's G2 included — injects a frame it invented, and the fallback arm is the
+     only one any recording exercises. Found at C6.1's grill. Closer: C1 records a scenario whose
+     turn produces consecutive tool calls the engine summarises, at the next fixture re-pin; the
+     tests then read it. Owner: C1 for the recording, C6.1 for adopting it.
+
+129. **Closed 2026-09-08**, in the same change that took C3's one-fold corrective (`01eb7a7`).
+     `StreamIngestion.signal(_:)` exists now, so the seam property it describes is deleted rather
+     than wired: `ChannelTimelineModel.signal(_:)` calls the ingestion directly, and there is no
+     longer a property that could be left unassigned. `ChannelTimelineSeamTests`'
+     `testAnAnsweredDecisionLeavesPending` asserts the behaviour the seam existed to enable — a
+     `DecisionItem` leaving `.pending` — instead of counting calls on a double, and it was shown
+     failing against a `signal(_:)` that returns without calling the ingestion. The entry stands
+     below as filed, because what it describes was true of the tree for the hours between the seam
+     commit and the corrective.
+
+     **`ChannelTimelineModel.ingestionSignal` is never set in production, so `signal(_:)` is a
+     no-op in the running app.** The forwarder landed with C6.1's seam commit and is exercised by
+     `ChannelTimelineSeamTests`, but the only writers of the property are those tests: nothing at
+     the composition root assigns it, because the C3 corrective that gives `StreamIngestion` a
+     `signal(_:)` of its own was not on `main` when the seam was written. `check-app-wiring` does
+     not flag it — the check keys on a bare name and `signal(_:)` *reads* the property in
+     production — so the tool's substance is unmet while its letter is satisfied, which is
+     precisely the shape tracker 72 exists to catch. The consequence is worse than a missing seam:
+     C6.2 and C6.3 call `signal(_:)` by a name the architect gave them, and until the property is
+     assigned their calls succeed and do nothing, so a decision stays `.pending` with no error
+     anywhere. Found at C6.1's review of its own seam commit. Closer: assign it at the composition
+     root in the same change that lands the C3 corrective, and add a wiring assertion that the
+     app — not a test — set it. Owner: the architect, at the corrective's reconciliation.
+
+130. **Closed 2026-09-08**, by the first of the two closers it named. C3's
+     `StreamIngestion.signal(_:)` performs the path rebind itself — `if case .relocated(let mainPath)
+     = signal { await relocated(mainPath: mainPath) }`, at its own definition — so
+     `transcriptMoved(to:)` now raises the signal and nothing else, and one move travels one route.
+     `testARelocationReachesTheFold` holds it, with the idempotence clause the coordinator's
+     path-on-every-update behaviour needs. The entry stands below as filed.
+
+     **`.relocated` will reach the ingestion twice once the seam is wired.**
+     `ChannelTimelineModel.transcriptMoved(to:)` calls `ingestion.relocated(mainPath:)` and then
+     raises `signal(.relocated(mainPath:))`. Today the second reaches a nil seam and costs nothing.
+     When `ingestionSignal` is pointed at `StreamIngestion.signal(_:)` the same move arrives by two
+     routes, and whether that is idempotent is a property of the corrective, not of this side —
+     C6.1's test can only pin the idempotence of its own double. Both calls are deliberate: the
+     first is the path rebind the ingestion already needed, the second is the fold hearing about a
+     move no frame states. Found at C6.1's review. Closer: at the corrective's landing, either make
+     `StreamIngestion.signal(.relocated:)` subsume the rebind so the app raises only the signal, or
+     assert the double delivery is idempotent against the real ingestion. Owner: the architect,
+     with C3.
+
+131. **Closed 2026-09-08 (`37d8f0a` on `main`): the rig's `startObserver()` returned before the
+     observer's poll and reconciliation timers were parked, so a `TestClock.advance` could pass a
+     timer not yet armed, and the in-place roster rewrite fires no vnode event, so the poll was
+     the only re-read route. Test support only; bundle 8/8 after, 2/5 failed before. Original:**
+     `LifecycleRowTests.testABackgroundJobWhoseRosterWorkerGoesArchivesTheChannel` is flaky, and
+     it reddens every child's floor.** It fails with "timed out waiting for the archived outcome;
+     state was backgroundJob" after the rig's 30-second guard. Measured at C6.1's Task 0 floor:
+     one failure in a full `make test`, then **two passes and one failure in three isolated runs**
+     of that test alone (`swift test --package-path FleetKit --filter …`). The failing run costs
+     30 seconds; the passing runs take 0.03. Nothing in C6.1 can reach it — the diff touches
+     `App/Timeline/` and `AppTests/`, and `FleetSessionsTests` does not import the app target — and
+     it arrived with `main`'s roster-signal work, which is also what the test exercises: it waits
+     for a channel to archive when its roster worker disappears, and the signal it waits on is the
+     `jobUpdates` stream X5 gained at the tracker 77 corrective. A 30-second guard that trips on a
+     third of runs is a race, not a slow machine. Found at C6.1 Task 0's floor. Closer: make the
+     archival wait delivery-fulfilled rather than deadline-bounded, the way tracker 2's instance was
+     converted; or find the roster-signal race it is reporting, which is the more likely reading
+     given the shape. Owner: C4. **Any child whose floor shows exactly this one red should re-run
+     before treating it as their own.**
+
+## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
+
+187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
+     `AgentRunTree.apply(agentMetadata:for:)` and `apply(metaFile:)` are called only from tests;
+     in production the tree is built from the wire alone and only the two-step join ever answers
+     the parent question. The ingestion's file-side `agentMetadata` handling is item-shaped
+     (`StreamState.metadata` → `StreamProjection.metadata` → `RecordReducer`'s `taskRun` items and
+     thread attachment) and never reaches a tree. Consequences: a foreign or archived channel
+     opened from its files has no agent-run tree at all, so C6.4's Agents tab is empty for it; a
+     live channel's tree loses the parent evidence the `agent_metadata` mirror entry and the
+     `.meta.json` sidecar would give. Found by the `2dc57ba` corrective (which routed the tree to
+     the app, X4 amended) and left standing on purpose. Closer: the ingestion feeds its file-side
+     metadata into the reducer's tree (or a file-only tree the ingestion owns when there is no
+     wire) through the two existing, tested entry points; then C6.4 reads one tree for every
+     channel kind. Owner: C3, before C6.4's Agents tab is judged on foreign channels.

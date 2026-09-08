@@ -2395,7 +2395,11 @@ SwiftPM package or target that builds and tests without the children above it, p
   bookkeeping fields stay the durable half's and read zero on a purely live effect); it exposes
   `overlay`, `preview` and `timeline` (the three in one read, the only one that cannot straddle
   a mutation). C6 subscribes to `effects` and reads `timeline`; it never folds the wire itself
-  and never holds a second reducer.
+  and never holds a second reducer. Amended 2026-09-08 (corrective `2dc57ba`): the channel's
+  agent-run tree is the reducer's `agents`, exposed as `StreamIngestion.agents: AgentRunTree?`
+  (nil before `open`, and nil for a file-only channel — the tree is wire-fed) and carried on
+  `ChannelTimeline.agents` so one read holds the tree beside the items its nodes point at;
+  `TimelineChange.agentsChanged` is appended once per apply when the tree moved by value.
 - **X5 Lifecycle API.** Channel origin and sub-state as observable state; the actions
   open, send, reap, adopt, sendToBackground, openInTerminal, fork, quiescentRestart,
   stopEverything, backgroundAll, logout; the preconditions as a typed result (ready,

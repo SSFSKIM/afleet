@@ -151,9 +151,12 @@ public actor StreamIngestion {
     /// model X4 names and the only one of the three that cannot straddle a mutation.
     public var overlay: Overlay { wire?.overlay ?? .empty }
     public var preview: StreamingPreview? { wire?.preview }
+    /// The channel's agent-run tree, the Agents tab's model and the source of the timeline's agent rows. Nil before
+    /// `open` builds the reducer, and nil for good on a file-only channel: no wire means no fold, so no tree.
+    public var agents: AgentRunTree? { wire?.agents }
     /// One consistent read of both halves, for the app that renders them together.
     public var timeline: ChannelTimeline {
-        ChannelTimeline(durable: projectionCache, overlay: overlay, preview: preview)
+        ChannelTimeline(durable: projectionCache, overlay: overlay, preview: preview, agents: agents)
     }
     public var state: State { stateValue }
     public var offsets: [LogicalStream: Int] { streams.mapValues(\.offset) }
@@ -215,7 +218,7 @@ public actor StreamIngestion {
         return changes.filter { change in
             switch change {
             case .inserted(let id), .updated(let id), .removed(let id): return live.contains(id)
-            case .previewChanged, .overlayChanged, .sessionStateChanged: return true
+            case .previewChanged, .overlayChanged, .sessionStateChanged, .agentsChanged: return true
             }
         }
     }

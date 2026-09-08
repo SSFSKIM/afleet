@@ -9,9 +9,13 @@ public struct ChannelTimeline: Sendable, Hashable {
     public var durable: DurableProjection
     public var overlay: Overlay
     public var preview: StreamingPreview?
+    /// The channel's agent-run tree, read in the same snapshot as the items its nodes point at. Nil for a channel
+    /// with no wire fold.
+    public var agents: AgentRunTree?
 
-    public init(durable: DurableProjection = .empty, overlay: Overlay = .empty, preview: StreamingPreview? = nil) {
-        self.durable = durable; self.overlay = overlay; self.preview = preview
+    public init(durable: DurableProjection = .empty, overlay: Overlay = .empty, preview: StreamingPreview? = nil,
+                agents: AgentRunTree? = nil) {
+        self.durable = durable; self.overlay = overlay; self.preview = preview; self.agents = agents
     }
 
     /// The durable items with the overlay's items merged by timestamp, stable for ties with the durable item first;
