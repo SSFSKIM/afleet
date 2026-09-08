@@ -18,6 +18,7 @@ struct HeaderReadoutView: View {
 
     var body: some View {
         HeaderReadoutBar(readout: model.readout)
+            .task { model.startReadbacks() }
     }
 }
 

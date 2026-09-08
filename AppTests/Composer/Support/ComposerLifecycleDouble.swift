@@ -174,6 +174,17 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func stageSendSequence(_ subtype: String, _ answers: [Result<JSONValue, WireError>]) {
         sendSequences[subtype] = answers
     }
+    /// A refusal that is not a `WireError`.
+    ///
+    /// `stageSend` is typed to the wire's own error because that is what a control request usually
+    /// fails with; the fleet refuses one *before* the wire on a channel it is already busy with, and
+    /// X5's rule about what a surface may do with a refusal — leave the last readback standing,
+    /// never retry — is written about `LifecycleError.busy` and not about a transport failure. A
+    /// staged refusal takes precedence over a staged answer, so a suite can stage a good answer once
+    /// and then refuse the next call without unstaging it.
+    func stageSendRefusal(_ subtype: String, _ error: any Error) { sendRefusals[subtype] = error }
+    private var sendRefusals: [String: any Error] = [:]
+
     func stageResolveSetting(_ outcome: Result<Void, LifecycleError>) { resolveOutcome = outcome }
     func stagePane(_ outcome: Result<PaneRequest, LifecycleError>) { paneRequest = outcome }
     /// The engine's own report, taken from the very events the composer is fed, so the double and the
@@ -393,6 +404,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         calls.append(.send(key, subtype: request.subtype, payload: request.payload))
         if isSendHeld { await withCheckedContinuation { heldSenders.append($0) } }
+        if let refusal = sendRefusals[request.subtype] { throw refusal }
         if var queued = sendSequences[request.subtype], !queued.isEmpty {
             let answer = queued.count == 1 ? queued[0] : queued.removeFirst()
             sendSequences[request.subtype] = queued

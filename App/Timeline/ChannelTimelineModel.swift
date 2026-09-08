@@ -19,18 +19,24 @@ struct ChannelHeader: Hashable, Sendable {
     var presence: Presence?
     var banner: ChannelBanner?
     var systemItem: SystemItem?
+    /// The row's `gitBranch`, which C3's index reads from the transcript's own `gitBranch` field
+    /// (child spec §10). It rides on the header rather than being read off the row at the readout,
+    /// because the column already watches this value and calls `adopt` on every change to it: a
+    /// branch that moves under a selected channel therefore moves on screen, with no second watcher
+    /// and no edit to a file another leaf owns.
+    var branch: String?
 
     var glyph: OriginGlyph? { origin.map(OriginGlyph.init) }
 
     init(title: String = "No channel selected", origin: ChannelOrigin? = nil, presence: Presence? = nil,
-         banner: ChannelBanner? = nil, systemItem: SystemItem? = nil) {
+         banner: ChannelBanner? = nil, systemItem: SystemItem? = nil, branch: String? = nil) {
         self.title = title; self.origin = origin; self.presence = presence
-        self.banner = banner; self.systemItem = systemItem
+        self.banner = banner; self.systemItem = systemItem; self.branch = branch
     }
 
     init(row: ChannelRow) {
         self.init(title: row.title, origin: row.origin, presence: row.presence,
-                  banner: row.channelBanner, systemItem: row.systemItem)
+                  banner: row.channelBanner, systemItem: row.systemItem, branch: row.gitBranch)
     }
 }
 
@@ -197,6 +203,11 @@ final class ChannelTimelineModel {
     @ObservationIgnored private var ingestion: StreamIngestion?
     @ObservationIgnored private var effectsTask: Task<Void, Never>?
     @ObservationIgnored private var changesTask: Task<Void, Never>?
+    /// The readback loop, and whether anything has asked for one. Both are needed: a header that has
+    /// never been drawn asks the engine nothing, and a channel that had no process when the strip
+    /// was drawn is asked as soon as it has one.
+    @ObservationIgnored private var readbackTask: Task<Void, Never>?
+    @ObservationIgnored private var readbacksWanted = false
     /// The ingestion's own lifetime, owned here and not by whatever called `open`. See `open`.
     @ObservationIgnored private var openingTask: Task<Void, Never>?
 
@@ -220,6 +231,7 @@ final class ChannelTimelineModel {
         effectsTask?.cancel()
         changesTask?.cancel()
         openingTask?.cancel()
+        readbackTask?.cancel()
     }
 
     // MARK: - The header
@@ -230,7 +242,51 @@ final class ChannelTimelineModel {
     /// change under a channel that stays selected, and the read must not be restarted — or, worse,
     /// cancelled mid-flight — every time one of them does. The column calls this on every change to
     /// those four fields and calls `open` once per channel.
-    func adopt(_ header: ChannelHeader) { self.header = header }
+    func adopt(_ header: ChannelHeader) {
+        self.header = header
+        // A channel that was archived or connecting when the strip was first drawn has a process
+        // now, and this is the moment that becomes true. Nothing is armed on a timer, and nothing
+        // starts here for a channel whose header nobody has drawn.
+        beginReadbacks()
+    }
+
+    // MARK: - The header's readbacks
+
+    /// Asks the engine for the readbacks, and keeps asking after each turn. Called by
+    /// `HeaderReadoutView`'s `task`, which is what makes the strip's presence the thing that asks.
+    ///
+    /// Idempotent, and safe to call for a channel with no process: it records that the readbacks are
+    /// wanted and starts them when there is something to ask.
+    func startReadbacks() {
+        readbacksWanted = true
+        beginReadbacks()
+    }
+
+    /// One pass: `get_settings` for the model and the effort, and the channel's retained handshake
+    /// for the mode.
+    ///
+    /// **Only for a channel with a live process**, and a refusal leaves the last readback standing —
+    /// each answer is folded in only when there is one, and nothing here retries (X5).
+    func refreshReadbacks() async {
+        guard let poller else { return }
+        if let settings = await poller.settings() { readout.apply(settings) }
+    }
+
+    /// The poller for a channel that has a process to ask, and nil for one that has not.
+    private var poller: ReadbackPoller? {
+        guard let lifecycle, ReadbackPoller.hasLiveProcess(header.origin) else { return nil }
+        return ReadbackPoller(key: key, lifecycle: lifecycle)
+    }
+
+    /// Takes the readback the strip is drawn with. One pass, on the channel's own terms: nothing is
+    /// armed on a timer and nothing is re-issued.
+    private func beginReadbacks() {
+        guard readbacksWanted, readbackTask == nil, !isTerminated, poller != nil else { return }
+        readbackTask = Task { @MainActor [weak self] in
+            await self?.refreshReadbacks()
+            self?.readbackTask = nil
+        }
+    }
 
     // MARK: - Opening
 
@@ -249,7 +305,7 @@ final class ChannelTimelineModel {
     /// the caller's cancellation, so the read completes whatever the view does; only `close()`,
     /// which the registry owns, ends it.
     func open(_ row: ChannelRow) async {
-        header = ChannelHeader(row: row)
+        adopt(ChannelHeader(row: row))
         if let openingTask {
             // A second caller waits for the first rather than starting a second ingestion. Awaiting
             // a non-throwing task is not itself cancellable, so this is safe from a cancelled view.
@@ -408,6 +464,7 @@ final class ChannelTimelineModel {
         openingTask?.cancel(); openingTask = nil
         effectsTask?.cancel(); effectsTask = nil
         changesTask?.cancel(); changesTask = nil
+        readbackTask?.cancel(); readbackTask = nil
         let ingestion = self.ingestion
         self.ingestion = nil
         Task { await ingestion?.close() }
