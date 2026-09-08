@@ -58,9 +58,10 @@ ALLOWLIST: dict[str, str] = {
     # root installs. An allowlist entry outlives its reason silently, so they are removed rather
     # than re-worded. `edit` was retired 2026-09-09 by C6.1 Task 7 for the same reason: contract Y6's
     # *Edit* row action on a past user message is `ComposerModel.edit(_:)`'s production caller.
-    "retains": "filled by C6.3 Task 8 — RetractionRegistry.retains(_:) is D11's render-time filter "
-               "and the channel's list is its caller; the list mounts at Task 8, which removes this "
-               "entry with the mount",
+    # `retains` was retired 2026-09-09 by C6.1 Task 8, which is the mount its entry named:
+    # `TimelineListView.retained(_:by:)` filters the channel's rows through
+    # `RetractionRegistry.retains(_:)` before the table is handed them, so D11's render-time filter
+    # has a production caller.
     # Requirements of a FleetKit protocol, called by FleetKit and never by App/.
     "confirm": "a `StrategyUI` requirement (FleetKit). `StrategyExecutor.run` calls it through the "
                "`ui:` the composer hands itself in as, so its caller is outside App/ by construction "
