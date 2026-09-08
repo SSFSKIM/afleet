@@ -148,11 +148,19 @@ public enum GitDiff {
     /// sections at once, so the parse agrees on "no changed files" and the panel shows a clean tree
     /// over a real change. `--ignore-submodules=none` pins git's own default and is a no-op under
     /// it. The same pin is on `WorkingTreeStatus`'s command line, for the same setting.
+    ///
+    /// **`--end-of-options` before the revision.** `DiffRef.Base` carries a `String` that reaches
+    /// this module from a rendered row, exactly as `workingTreeFile`'s path does, and until it was
+    /// pinned here a base spelled like an option — `--output=<path>` — was appended to the command
+    /// line and *executed as one*: git exited 0 and wrote the diff to a file of the caller's
+    /// choosing. `--end-of-options` is git's own answer to that (2.24 and later), and it is the
+    /// second half of the fix rather than the whole of it: the base is resolved to an object name
+    /// first (`resolvedBase`), so this line is what holds when a future spelling slips past.
     static func arguments(for base: DiffRef.Base) -> [String] {
         // `--raw` before `--numstat` only for readability: git prints the raw section first
         // whichever order they are given in, and the parser reads sections rather than positions.
         let tail = ["--raw", "--numstat", "-z", "--find-renames", "-l\(renameLimit)",
-                    "--ignore-submodules=none"]
+                    "--ignore-submodules=none", "--end-of-options"]
         switch base {
         case .workingTreeAgainstHEAD:
             return ["diff"] + tail + ["HEAD"]
@@ -190,10 +198,69 @@ public enum GitDiff {
                                timeout: Duration = readTimeout) async throws -> [FileChange] {
         let root = try await GitCommands.repositoryRoot(cwd: root, environment: environment,
                                                         runner: runner, timeout: timeout)
-        let base = try await resolvingAnUnbornHead(base, root: root, environment: environment,
+        let resolved = try await resolvedBase(base, root: root, environment: environment,
+                                              runner: runner, timeout: timeout)
+        let base = try await resolvingAnUnbornHead(resolved, root: root, environment: environment,
                                                    runner: runner, timeout: timeout)
         return try parse(await read(root: root, base: base, environment: environment,
                                     runner: runner, timeout: timeout))
+    }
+
+    /// The base's commit, resolved to a full object name **before** any diff command is built.
+    ///
+    /// `DiffRef.Base` carries a `String` the panel composed, and this module appended it to a git
+    /// command line unchecked: a base spelled `--output=<path>` was read by git as the option of
+    /// that name, so a diff a panel merely *listed* wrote a file wherever the caller pointed it and
+    /// exited 0. Two answers, and both are needed. Here: a base beginning with `-` is refused
+    /// before a command runs, and anything that is not already a full object name is put through
+    /// `rev-parse --verify --end-of-options <base>^{commit}`, whose answer — an object name, or
+    /// nothing — is what the diff is asked for. On the command line: `--end-of-options` ahead of
+    /// the revision, so that no spelling can be parsed as an option even if it reaches it.
+    ///
+    /// `^{commit}` rather than a bare verify, for the reason `resolvingAnUnbornHead` uses it: the
+    /// two bases here name a *commit*, and a tag or a tree that cannot be one is refused for what
+    /// it is rather than mis-diffed. `.workingTreeAgainstHEAD` carries no caller byte at all and is
+    /// returned untouched, and this runs **before** the unborn-HEAD substitution, whose replacement
+    /// is git's own empty-tree object name and is not a commit.
+    private static func resolvedBase(_ base: DiffRef.Base, root: URL,
+                                     environment: [String: String], runner: any ToolRunning,
+                                     timeout: Duration) async throws -> DiffRef.Base {
+        switch base {
+        case .workingTreeAgainstHEAD:
+            return base
+        case .commit(let hash):
+            return .commit(try await resolvedCommit(hash, root: root, environment: environment,
+                                                    runner: runner, timeout: timeout))
+        case .commitAgainstParent(let hash):
+            return .commitAgainstParent(try await resolvedCommit(hash, root: root,
+                                                                 environment: environment,
+                                                                 runner: runner, timeout: timeout))
+        }
+    }
+
+    /// One base revision as a full object name, or a refusal. Runs no command for a revision that
+    /// is already one.
+    private static func resolvedCommit(_ rev: String, root: URL, environment: [String: String],
+                                       runner: any ToolRunning,
+                                       timeout: Duration) async throws -> String {
+        guard !rev.isEmpty, !rev.hasPrefix("-") else {
+            throw fail("a diff base that is empty or begins with a dash cannot name a commit")
+        }
+        if isFullObjectName(rev) { return rev }
+        let resolved = try await runner.run(.git,
+                                            arguments: ["rev-parse", "--verify", "--quiet",
+                                                        "--end-of-options", "\(rev)^{commit}"],
+                                            cwd: root, environment: environment, timeout: timeout)
+        try resolved.requireCompleted(tool: .git, timeout: timeout)
+        guard resolved.exitCode == 0 else {
+            throw ToolError.commandFailed(tool: .git, exitCode: resolved.exitCode,
+                                          stderrTail: resolved.stderrTail)
+        }
+        let name = resolved.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isFullObjectName(name) else {
+            throw fail("rev-parse did not resolve the diff base to an object name")
+        }
+        return name
     }
 
     /// `.workingTreeAgainstHEAD` in a repository that has **no first commit**, compared against
@@ -553,7 +620,24 @@ public enum GitDiff {
     /// Either refusal is `.pathOutsideRepository`, which is the module's own answer about the path
     /// it was handed rather than a `.decodeFailed` about output git never produced: this function
     /// runs no command at all.
-    public static func workingTreeFile(root: URL, path: String) throws -> Data {
+    /// **The entry is opened once, and the descriptor is what everything else is asked of.** An
+    /// `lstat` followed by a separate read is two questions about a name, and between them a local
+    /// writer — the user's own editor, a build — can put something else there; and the read that
+    /// followed was `Data(contentsOf:)`, which has no bound and no notion of what it is reading. So
+    /// a tracked path replaced by a **FIFO** blocked the caller inside `open` for as long as no
+    /// writer appeared, and a tracked file of any size was loaded whole, past the cap the process
+    /// layer holds every `git` invocation to. One `open` with `O_NOFOLLOW | O_NONBLOCK` and an
+    /// `fstat` on its descriptor answer all three: a link at the final component cannot be
+    /// followed by the call that would have followed it, a FIFO returns rather than blocks, and
+    /// what is read is a **regular file** of at most `limitBytes`.
+    ///
+    /// `limitBytes` defaults to the runner's own retained-output cap, because both sides of a diff
+    /// end up in the same panel and a working-tree side that cannot be reached through `git` must
+    /// not be the one that exhausts the app's memory (D53/b). Injectable so a test can reach it
+    /// without writing 64 MiB.
+    public static func workingTreeFile(root: URL, path: String,
+                                       limitBytes: Int = ToolRunner.defaultOutputLimitBytes)
+        throws -> Data {
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
         guard !path.isEmpty, !path.hasPrefix("/"), !components.contains("..") else {
             throw ToolError.pathOutsideRepository(
@@ -568,15 +652,50 @@ public enum GitDiff {
             throw ToolError.pathOutsideRepository(
                 reason: "a working-tree path's parent chain does not resolve inside the repository")
         }
+        // `O_NOFOLLOW` so a symbolic link at the final component is refused by the call that would
+        // otherwise have followed it — there is no window between a check and a read for a writer
+        // to swap one in. `O_NONBLOCK` so a FIFO is opened rather than waited on: without it this
+        // call parks until a writer appears, which for a panel is forever. `O_CLOEXEC` so the
+        // descriptor is not inherited by any `git` this app spawns while the read runs.
+        let descriptor = open(fileSystemPath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard descriptor >= 0 else {
+            // `ELOOP` is the one refusal this function answers instead: the final component is a
+            // symbolic link, and a link's *destination text* is what git stores as its blob, so
+            // that text is the side of the diff to return (D42).
+            if errno == ELOOP { return try symbolicLinkDestination(fileSystemPath) }
+            throw ToolError.unreadableWorkingTreeEntry(
+                reason: "a working-tree path could not be opened for reading")
+        }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0 else {
+            throw ToolError.unreadableWorkingTreeEntry(
+                reason: "an opened working-tree entry could not be described")
+        }
+        guard (info.st_mode & S_IFMT) == S_IFREG else {
+            throw ToolError.unreadableWorkingTreeEntry(
+                reason: "a working-tree path names \(kind(of: info.st_mode)) rather than a "
+                        + "regular file")
+        }
+        guard info.st_size <= limitBytes else {
+            throw ToolError.outputLimitExceeded(tool: .git, limitBytes: limitBytes)
+        }
+        return try readAll(descriptor, limitBytes: limitBytes)
+    }
+
+    /// The destination text of the symbolic link at `fileSystemPath`.
+    ///
+    /// `readlink` rather than `destinationOfSymbolicLink`, which returns a `String`: a link's
+    /// destination is a path, and a path on macOS need not be valid UTF-8 (the same reason the
+    /// listing parser splits over bytes). `st_size` is the destination's length for a link; the
+    /// buffer is one byte longer so that a full read is distinguishable from a truncated one, and
+    /// `readlink` never terminates what it writes.
+    private static func symbolicLinkDestination(_ fileSystemPath: String) throws -> Data {
         var info = stat()
         guard lstat(fileSystemPath, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK else {
-            return try Data(contentsOf: url)
+            throw ToolError.unreadableWorkingTreeEntry(
+                reason: "a working-tree entry stopped being a symbolic link while it was read")
         }
-        // `readlink` rather than `destinationOfSymbolicLink`, which returns a `String`: a link's
-        // destination is a path, and a path on macOS need not be valid UTF-8 (the same reason the
-        // listing parser splits over bytes). `st_size` is the destination's length for a link;
-        // the buffer is one byte longer so that a full read is distinguishable from a truncated
-        // one, and `readlink` never terminates what it writes.
         var buffer = [UInt8](repeating: 0, count: max(Int(info.st_size), 1) + 1)
         let written = buffer.withUnsafeMutableBytes { raw in
             readlink(fileSystemPath, raw.baseAddress!.assumingMemoryBound(to: CChar.self), raw.count)
@@ -585,6 +704,44 @@ public enum GitDiff {
             throw fail("a symbolic link's destination could not be read")
         }
         return Data(buffer[0..<written])
+    }
+
+    /// Everything the descriptor holds, refused the moment it passes `limitBytes`.
+    ///
+    /// The size `fstat` reported is checked first and this is checked again, because a file can
+    /// grow between the two — the bound has to hold on what is actually read, not on what was
+    /// promised.
+    private static func readAll(_ descriptor: Int32, limitBytes: Int) throws -> Data {
+        var result = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let taken = buffer.withUnsafeMutableBytes {
+                Darwin.read(descriptor, $0.baseAddress, $0.count)
+            }
+            if taken == 0 { return result }
+            if taken < 0 {
+                if errno == EINTR { continue }
+                throw ToolError.unreadableWorkingTreeEntry(
+                    reason: "a working-tree file could not be read to its end")
+            }
+            result.append(contentsOf: buffer[0..<taken])
+            guard result.count <= limitBytes else {
+                throw ToolError.outputLimitExceeded(tool: .git, limitBytes: limitBytes)
+            }
+        }
+    }
+
+    /// What an entry is, in this module's own words. Named rather than numbered because this
+    /// string is rendered, and named without the path for the same reason (§6.3, §11).
+    private static func kind(of mode: mode_t) -> String {
+        switch mode & S_IFMT {
+        case S_IFDIR: "a directory"
+        case S_IFIFO: "a named pipe"
+        case S_IFSOCK: "a socket"
+        case S_IFCHR, S_IFBLK: "a device"
+        case S_IFLNK: "a symbolic link"
+        default: "something that is not a file"
+        }
     }
 
     /// `realpath(3)`: every symbolic link and `.`/`..` component resolved, or nil when the path

@@ -581,6 +581,96 @@ final class ToolRunnerTests: XCTestCase {
                        "\(survivors) process(es) survived the cancelled call two seconds after it returned")
     }
 
+    // MARK: - the final wave: a cancelled call starts nothing
+
+    /// Cancellation was handled *around* the spawn and not before it, so a task cancelled before
+    /// the call was ever entered — a panel refresh the user scrolled past while it queued — still
+    /// launched the executable, ran whatever it starts, and then killed what it had just started.
+    ///
+    /// The call parks on a sleep first, which a cancelled task returns from at once, so the run
+    /// below is entered by a task that is already cancelled rather than by one racing the cancel.
+    ///
+    /// **What is asserted, and why it is the elapsed time.** A child spawned and immediately
+    /// signalled usually dies before it can do anything observable — the `SIGTERM` reaches it
+    /// while the kernel is still `exec`ing it — so a marker file the child would write cannot
+    /// discriminate on its own, and it is checked here only as the second half. What a spawn
+    /// always costs is the **teardown**: a job with a child in it goes through `SIGTERM`, a grace,
+    /// `SIGKILL` and a second grace before it settles, which is a second of wall clock. A call
+    /// that started nothing has nothing to tear down and returns in milliseconds. The bound is
+    /// generous against the second the escalation takes.
+    ///
+    /// What would have to be true for this to fail: the spawn happening before the state of the
+    /// task is asked.
+    func testAnAlreadyCancelledCallSpawnsNothing() async throws {
+        let marker = tree.root.appending(path: "the-child-that-should-not-run").path(percentEncoded: false)
+        let cwd = tree.root
+        let call = Task {
+            try? await Task.sleep(for: .seconds(3600))
+            // The child ignores `SIGTERM` before it acts, so if it ever reaches its own first line
+            // the marker is there to find.
+            return try await ToolRunner().run(executable: URL(filePath: "/bin/sh"),
+                                              arguments: ["-c", "trap '' TERM; /usr/bin/touch '\(marker)'"],
+                                              cwd: cwd, environment: [:], timeout: .seconds(30))
+        }
+        let clock = ContinuousClock()
+        let started = clock.now
+        call.cancel()
+        do {
+            _ = try await call.value
+            XCTFail("an already-cancelled call returned a result")
+        } catch let error as ToolError {
+            guard case .cancelled(let tool) = error else {
+                return XCTFail("an already-cancelled call threw something other than .cancelled")
+            }
+            XCTAssertEqual(tool, .git)
+        }
+        let elapsed = clock.now - started
+        let elapsedMilliseconds = Int(elapsed.components.seconds) * 1_000
+            + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+        XCTAssertTrue(elapsedMilliseconds < 300,
+                      "the cancelled call took \(elapsedMilliseconds) ms, which is a child being "
+                      + "signalled and escalated rather than a call that started nothing")
+
+        // And nothing the child would have done was done.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker),
+                       "an already-cancelled call spawned its child")
+    }
+
+    // MARK: - the final wave: the cause is whichever came first
+
+    /// The timeout begins a termination and the child gets a grace period, and a child that floods
+    /// *during* that grace reached the retained-output cap — which `requireCompleted` reports
+    /// **before** the timeout. The call was then reported as an output overrun when what actually
+    /// happened is that it outlived its budget, which is a different thing for a panel to say and
+    /// a different thing for a user to do about.
+    ///
+    /// The child is that shape exactly: it sleeps past its budget, and its `SIGTERM` handler — a
+    /// handler rather than an ignore, so that the disposition is not inherited by the sleep it is
+    /// waiting on — floods stdout with far more than the injected cap.
+    ///
+    /// What would have to be true for this to fail: the cap being latched after a termination has
+    /// begun.
+    func testAChildThatFloodsAfterItsDeadlineIsReportedAsTimedOut() async throws {
+        let budget = Duration.milliseconds(500)
+        let limit = 1024
+        let output = try await ToolRunner(outputLimitBytes: limit)
+            .run(executable: URL(filePath: "/bin/sh"),
+                 arguments: ["-c", "trap 'exec /bin/dd if=/dev/zero bs=65536 count=8 2>/dev/null' TERM;"
+                             + " /bin/sleep 30"],
+                 cwd: tree.root, environment: [:], timeout: budget)
+
+        XCTAssertTrue(output.timedOut, "the child that outlived its budget was not timed out")
+        XCTAssertNil(output.outputLimitBytes,
+                     "a flood that arrived after the deadline was recorded as the cause")
+        XCTAssertThrowsError(try output.requireCompleted(tool: .git, timeout: budget),
+                             "a child that outlived its budget was reported as complete") { error in
+            guard case ToolError.timedOut = error else {
+                return XCTFail("the reported cause was not the timeout that came first")
+            }
+        }
+    }
+
     /// Blocks until `pattern` matches a running process, so that a cancellation lands on a child
     /// that exists. `pgrep` exits 1 when nothing matched, which is its documented "no match".
     private func waitUntilRunning(matching pattern: String,

@@ -629,8 +629,12 @@ final class GitDiffTests: XCTestCase {
     /// mapping is the one place this leaf decides what "diff" means and the fixtures above would
     /// still pass if `.commitAgainstParent` quietly became `git diff <h>` on a non-root commit.
     func testTheThreeBaseCasesMapToTheirCommandLines() {
+        // `--end-of-options` is the final wave's pin: the revision that follows it cannot be
+        // parsed as an option however it is spelled, which is the second half of refusing a base
+        // like `--output=<path>` (the first is resolving it to an object name before any command
+        // is built).
         let tail = ["--raw", "--numstat", "-z", "--find-renames", "-l1000",
-                    "--ignore-submodules=none"]
+                    "--ignore-submodules=none", "--end-of-options"]
         XCTAssertEqual(GitDiff.arguments(for: .workingTreeAgainstHEAD), ["diff"] + tail + ["HEAD"])
         XCTAssertEqual(GitDiff.arguments(for: .commit("f00d")), ["diff"] + tail + ["f00d"])
         // `--first-parent` is the R3 wave's F1 fix (D41): without it a merge commit's listing is
@@ -907,6 +911,166 @@ extension GitDiffTests {
             XCTAssertEqual(afterMs, 30_000, "the error named a budget other than the read timeout")
         }
     }
+
+    // MARK: - the final wave: the base is a revision, never an option
+
+    /// `DiffRef.Base` carries a `String` the panel composed, and it was appended to a git command
+    /// line unchecked. A base spelled `--output=<path>` was therefore *executed as that option*:
+    /// git exited 0, listed nothing, and wrote the diff to a file of the caller's choosing — a
+    /// read of a repository that writes to the file system on request.
+    ///
+    /// What would have to be true for this to fail: the base reaching a command line without being
+    /// resolved to an object name first, or `--end-of-options` leaving the argument vector.
+    func testADiffBaseSpelledLikeAnOptionIsRefusedAndWritesNothing() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "the first commit", files: ["a.txt": "one\n"])
+        let target = tree.root.appending(path: "not-created-by-a-refused-diff.txt")
+            .path(percentEncoded: false)
+        let runner = CountingRunner()
+
+        for base in [DiffRef.Base.commit("--output=\(target)"),
+                     .commitAgainstParent("--output=\(target)")] {
+            do {
+                let list = try await GitDiff.changes(root: fixture.root, base: base,
+                                                     environment: fixture.environment,
+                                                     runner: runner)
+                XCTFail("a base spelled like an option was accepted and listed "
+                        + "\(list.count) change(s)")
+            } catch let error as ToolError {
+                guard case .decodeFailed = error else {
+                    return XCTFail("a base spelled like an option was not refused by a typed error")
+                }
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: target),
+                           "a refused diff base still created a file")
+        }
+        XCTAssertFalse(runner.invocations.contains { $0.first == "diff" || $0.first == "show" },
+                       "a refused base still ran a diff command")
+
+        // The floor: a symbolic base is resolved and listed, so the refusals above are not a
+        // reader that refuses everything.
+        let list = try await GitDiff.changes(root: fixture.root, base: .commitAgainstParent("HEAD"),
+                                             environment: fixture.environment, runner: runner)
+        XCTAssertEqual(list.map(\.path), ["a.txt"],
+                       "a symbolic base did not list what the commit changed")
+        XCTAssertTrue(runner.invocations.contains { $0.contains("HEAD^{commit}") },
+                      "a symbolic base was not resolved to an object name before the listing")
+    }
+
+    // MARK: - the final wave: the working-tree read is bounded and type-checked
+
+    /// A tracked path can be *replaced* by something that is not a file, and the read fell through
+    /// to `Data(contentsOf:)` for everything that was not a symbolic link. A **named pipe** with no
+    /// writer then parked the caller inside `open` for as long as nobody wrote — forever, for a
+    /// panel — and a directory failed as an untyped error nobody above this layer can act on.
+    ///
+    /// The read is performed off this task and polled, so that a read which never returns fails
+    /// this test in five seconds rather than hanging the suite.
+    ///
+    /// What would have to be true for this to fail: an open that can block, or a read that does
+    /// not ask what it opened.
+    func testAWorkingTreePathThatIsNotARegularFileIsRefusedRatherThanRead() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "the first commit",
+                                     files: ["a.txt": "one\n", "sub/nested.txt": "two\n"])
+        let replaced = fixture.root.appending(path: "a.txt").path(percentEncoded: false)
+        try FileManager.default.removeItem(atPath: replaced)
+        XCTAssertEqual(mkfifo(replaced, 0o600), 0, "the fixture could not create a named pipe")
+
+        let root = fixture.root
+        let outcome = ReadOutcome()
+        Task.detached { outcome.set(Result { try GitDiff.workingTreeFile(root: root, path: "a.txt") }) }
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(5)
+        while outcome.value == nil, clock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        guard let result = outcome.value else {
+            return XCTFail("the working-tree read of a named pipe did not return within five seconds")
+        }
+        switch result {
+        case .success(let bytes):
+            XCTFail("a named pipe was read as a file, for \(bytes.count) byte(s)")
+        case .failure(let error):
+            guard case ToolError.unreadableWorkingTreeEntry = error else {
+                return XCTFail("a named pipe was not refused by a typed error naming its kind")
+            }
+        }
+
+        // A directory, for the other half of the same question.
+        XCTAssertThrowsError(try GitDiff.workingTreeFile(root: fixture.root, path: "sub"),
+                             "a directory was read as a file") { error in
+            guard case ToolError.unreadableWorkingTreeEntry = error else {
+                return XCTFail("a directory was not refused by a typed error naming its kind")
+            }
+        }
+        // The floor: an ordinary file is still read.
+        XCTAssertEqual(try GitDiff.workingTreeFile(root: fixture.root, path: "sub/nested.txt"),
+                       Data("two\n".utf8), "an ordinary file inside the repository was refused")
+    }
+
+    /// The other half of the same fall-through: a tracked file of any size was loaded whole, past
+    /// the cap the process layer holds every `git` invocation to (D53/b). Both sides of a diff end
+    /// up in the same panel, so the side that does not go through `git` must not be the one that
+    /// exhausts the app's memory.
+    ///
+    /// The cap is injected rather than met at its 64 MiB default, so the fixture is a moment's
+    /// work. Byte counts, never bytes (§6.3, §11).
+    func testAWorkingTreeFileAboveTheCapIsRefusedAndOneUnderItIsRead() async throws {
+        let fixture = try await GitFixture(tree)
+        _ = try await fixture.commit(message: "the first commit", files: ["a.txt": "one\n"])
+        let cap = 1024
+        try fixture.write("large.bin", bytes: Data(repeating: 0x61, count: cap * 4))
+
+        XCTAssertThrowsError(try GitDiff.workingTreeFile(root: fixture.root, path: "large.bin",
+                                                         limitBytes: cap),
+                             "a working-tree file four times the cap was read whole") { error in
+            guard case ToolError.outputLimitExceeded(let tool, let limitBytes) = error else {
+                return XCTFail("a file above the cap was not refused by .outputLimitExceeded")
+            }
+            XCTAssertEqual(tool, .git)
+            XCTAssertEqual(limitBytes, cap, "the refusal named a cap other than the one passed")
+        }
+        XCTAssertEqual(try GitDiff.workingTreeFile(root: fixture.root, path: "a.txt",
+                                                   limitBytes: cap).count, 4,
+                       "a file well under the cap was not read")
+    }
+
+    // MARK: - the final wave: only rev-parse's terminator is framing
+
+    /// `rev-parse --show-toplevel` prints the root and one line feed. Every other byte belongs to
+    /// the **pathname**, and a directory name may end in a space or a tab — legal on every
+    /// filesystem this runs on. Trimming the whole whitespace set took those with it, so the
+    /// resolved root named a directory that does not exist and every reader built its paths on it.
+    ///
+    /// What would have to be true for this to fail: any framing strip wider than one `\n`.
+    func testARepositoryRootWhoseNameEndsInASpaceKeepsIt() async throws {
+        let fixture = try await GitFixture(tree, name: "a repository named with a space ")
+        _ = try await fixture.commit(message: "the first commit", files: ["a.txt": "one\n"])
+
+        let root = try await GitCommands.repositoryRoot(cwd: fixture.root,
+                                                        environment: fixture.environment,
+                                                        runner: ToolRunner())
+        XCTAssertTrue(root.lastPathComponent.hasSuffix(" "),
+                      "the resolved root lost the trailing space its name ends in")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path(percentEncoded: false)),
+                      "the resolved repository root is not a directory that exists")
+        XCTAssertEqual(try GitDiff.workingTreeFile(root: root, path: "a.txt"), Data("one\n".utf8),
+                       "a file could not be read under the resolved root")
+    }
+}
+
+/// The result of one synchronous working-tree read, set from whichever task performed it.
+///
+/// A box rather than a task group: the read under test may *never return* before its fix, and a
+/// child task that blocks a thread would take the whole suite with it. This lets the test poll,
+/// fail at its own bound, and leave the blocked read behind.
+private final class ReadOutcome: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var stored: Result<Data, any Error>?
+
+    var value: Result<Data, any Error>? { lock.withLock { stored } }
+
+    func set(_ result: Result<Data, any Error>) { lock.withLock { stored = result } }
 }
 
 /// Runs every command for real except the one `when` selects, whose result carries the process-

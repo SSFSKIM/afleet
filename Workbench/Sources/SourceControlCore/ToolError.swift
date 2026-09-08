@@ -52,6 +52,16 @@ public enum ToolError: Error, Equatable, Sendable {
     /// the reason stated above: the offending path is the caller's byte and a rendered error is a
     /// published one (§6.3, §11).
     case pathOutsideRepository(reason: String)
+    /// A working-tree read resolved *inside* the repository and still could not be performed: the
+    /// path names something that is not a regular file — a named pipe, a device, a socket, a
+    /// directory — or the entry could not be opened, described or read to its end. The sibling of
+    /// `pathOutsideRepository`, for the half of the question containment does not answer: a
+    /// tracked path can be replaced by any of those, and a reader that fell through to an ordinary
+    /// read blocked forever on the pipe and met the directory as an error nobody typed.
+    ///
+    /// `reason` names the kind, in this module's own words and never with the path, for the reason
+    /// the case above it carries: a rendered error is a published byte (§6.3, §11).
+    case unreadableWorkingTreeEntry(reason: String)
     /// Output that did not have the shape the parser requires. `subject` names what was being
     /// decoded; a parser that silently skipped the record it could not read would make the test
     /// that compares it unfalsifiable (§17.7).

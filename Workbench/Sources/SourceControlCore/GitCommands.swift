@@ -40,7 +40,13 @@ public enum GitCommands {
         let output = try await runner.run(.git, arguments: ["rev-parse", "--show-toplevel"],
                                           cwd: cwd, environment: environment, timeout: timeout)
         try output.requireCompleted(tool: .git, timeout: timeout)
-        let path = output.stdoutText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Exactly one trailing line feed, because exactly one is framing. `rev-parse` prints the
+        // path and terminates the line; every other byte it printed belongs to the pathname, and a
+        // directory name may end in a space or a tab — legal on every filesystem this runs on.
+        // Trimming the whole whitespace set took those with it and resolved the repository to a
+        // directory that does not exist, which every reader then read a working tree out of.
+        var path = output.stdoutText
+        if path.hasSuffix("\n") { path.removeLast() }
         guard output.exitCode == 0, !path.isEmpty else { throw ToolError.notARepository }
         return URL(filePath: path, directoryHint: .isDirectory)
     }

@@ -157,6 +157,13 @@ public struct ToolRunner: ToolRunning {
     /// `tool` labels the thrown error and nothing else.
     func run(executable: URL, arguments: [String], cwd: URL, environment: [String: String],
              timeout: Duration, tool: Tool = .git) async throws -> ToolOutput {
+        // Asked before the spawn and not only around the await: a task cancelled before this call
+        // was entered — a panel refresh the user scrolled past while it queued — otherwise launched
+        // `git`, ran whatever hooks and credential helpers came with it, and cancelled the child it
+        // had just started. A cancelled read is a read the panel asked not to happen (D53/c), so
+        // the answer is the one the awaiting path already gives, with nothing started to give it
+        // about.
+        guard !Task.isCancelled else { throw ToolError.cancelled(tool: tool) }
         let job = ToolJob(executable: executable, arguments: arguments, cwd: cwd,
                           environment: environment, outputLimitBytes: outputLimitBytes)
         do {
@@ -410,6 +417,14 @@ private final class ToolJob: @unchecked Sendable {
         // its `await`, so the job cannot go away before it settles and nothing here is missed.
         queue.asyncAfter(deadline: .now() + .nanoseconds(nanos)) { [weak self] in
             guard let self, !self.settled else { return }
+            // The kernel is asked before the verdict is reached. `exited` is set by the process
+            // source's handler, which is a *queued* event: a child that exited microseconds before
+            // this deadline can have its status waiting to be collected while its handler is still
+            // behind this block on the queue, and the call would then be reported as an overrun of
+            // a budget it met. `reapIfExited` is the same non-blocking `waitpid` that handler makes
+            // and is safe to make twice, so the verdict below is taken against the child's actual
+            // state rather than against how far its notification has travelled.
+            self.reapIfExited()
             // The `exited` guard is what keeps a child that finished microseconds before this timer
             // from being called an overrun; the `terminating` guard keeps a call already being torn
             // down for another reason — a cancellation, the output cap — from being relabelled.
@@ -546,6 +561,13 @@ private final class ToolJob: @unchecked Sendable {
         }
         sink(chunk.prefix(room))
         retained += max(room, 0)
+        // The cause is whichever came first. Once the call is being torn down for another reason
+        // — a timeout, a cancellation — the child is under `SIGTERM` and has a grace period in
+        // which it can still write, and a child that floods *during* that grace would otherwise
+        // relabel a timeout as an output overrun: `requireCompleted` reports the cap before it
+        // reports the budget. Nothing is lost by not latching it, because `room` is zero from here
+        // on and no further byte is retained.
+        guard !terminating else { return }
         limitReached = true
         beginTermination()
     }
