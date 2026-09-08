@@ -40,6 +40,20 @@ enum CardTree {
     static func texts(in body: Any) -> [String] {
         ViewTree.values(of: Text.self, in: body).flatMap { ViewTree.values(of: String.self, in: $0) }
     }
+
+    /// The strings the card's **tool-input** view draws, at whatever depth the branch it took puts
+    /// them. Spelled out for the same reason the descent above is: the card stores the input view as
+    /// a value, and the generic branch stores a second one inside that.
+    static func inputTexts(in cardBody: Any) -> [String] {
+        guard let view = ViewTree.values(of: ToolInputView.self, in: cardBody).first else { return [] }
+        var drawn = texts(in: view.body)
+        // The generic branch draws its rows from a `ForEach` closure, which reflection does not
+        // enter; the fields it was built with are stored, and they are what those rows draw.
+        for generic in ViewTree.values(of: GenericToolInputView.self, in: view.body) {
+            drawn += generic.fields.flatMap { [$0.key, $0.text] }
+        }
+        return drawn
+    }
 }
 
 /// The card component: what it emits, what it disables, what it reads out, and the four readings a
@@ -291,6 +305,51 @@ final class DecisionCardTests: XCTestCase {
             XCTAssertEqual(unnamed.count, 0,
                            "\(unnamed.count) of \(directories.count) directories were left out of the reading")
         }
+    }
+
+    /// sweep#1: a card **shows the input it is asking approval for**, whatever the tool.
+    ///
+    /// The specialised views cover the file and search tools; an MCP call parses as `.other`, and
+    /// `Agent` and `SendMessage` have no branch of their own. Those cards drew a title, a reason and
+    /// three buttons over nothing at all — an approval of arguments the user was never shown, which
+    /// is the one thing a permission card exists to prevent. Each sample below is invented, and each
+    /// clause asserts both halves: the arguments are drawn, and the approval is still offered, so a
+    /// card that answered by hiding its buttons would fail here too.
+    func testAToolWithNoSpecialisedViewStillShowsTheInputItAsksApprovalFor() async throws {
+        let (_, answering) = await answering()
+        let samples: [(tool: String, input: [String: Any], drawn: [String])] = [
+            ("mcp__invented-ledger__record_entry",
+             ["account": "invented-account-7", "memo": "a line the user has to read", "amount": 42],
+             ["account", "invented-account-7", "memo", "a line the user has to read"]),
+            ("Agent",
+             ["description": "an invented errand", "prompt": "do the invented thing",
+              "subagent_type": "invented-worker"],
+             ["description", "an invented errand", "prompt", "do the invented thing"]),
+            ("SendMessage",
+             ["to": "invented-worker", "message": "an invented instruction"],
+             ["to", "invented-worker", "message", "an invented instruction"])
+        ]
+        for (index, sample) in samples.enumerated() {
+            let card = try card("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaab1\(index)",
+                                overrides: ["tool_name": sample.tool, "input": sample.input])
+            let body = try permissionView(card, .full, answering).body
+            let drawn = CardTree.inputTexts(in: body)
+            let missing = sample.drawn.filter { needle in !drawn.contains { $0.contains(needle) } }
+            XCTAssertEqual(missing.count, 0,
+                           "\(missing.count) of \(sample.drawn.count) parts of the input were not drawn")
+            XCTAssertNotNil(ViewTree.button("Allow once", in: body),
+                            "the card drew its input and then offered no approval")
+        }
+
+        // And the rendering is bounded: an engine may send an argument of any size, and one field
+        // must not be able to push the buttons off the screen. What is held back is reachable.
+        let long = String(repeating: "n", count: GenericToolInput.visibleCharacters * 3)
+        XCTAssertTrue(GenericToolInput.isElided(long), "an argument three times the bound was drawn whole")
+        let head = GenericToolInput.head(of: long)
+        XCTAssertLessThan(head.count, long.count, "the elided head is not shorter than the value")
+        XCTAssertTrue(long.hasPrefix(head.dropLast()), "the elided head is not the start of the value")
+        let short = "an invented instruction"
+        XCTAssertEqual(GenericToolInput.head(of: short), short, "an ordinary argument was elided")
     }
 
     // MARK: - Why the engine is asking
