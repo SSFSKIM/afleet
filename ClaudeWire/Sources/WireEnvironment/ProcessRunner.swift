@@ -27,6 +27,60 @@ public struct FoundationProcessRunner: ProcessRunner {
     }
 }
 
+/// One pass over a descriptor that is being drained, and the bound on how much it takes.
+///
+/// Internal rather than private, because the bound is the whole point and no black-box test can see
+/// it: a child flooding a pipe still gets timed out and killed with the pass unbounded, since the
+/// producer is slower than the drain and the loop reaches `EAGAIN` between events. The property that
+/// has to hold is not "the timeout fires against this producer" but "one readable event takes a
+/// bounded amount of work", and that is stated here and tested directly.
+enum PipeDrain {
+
+    /// One `read(2)`'s buffer.
+    static let chunk = 64 * 1024
+
+    /// The most one pass takes before it returns the queue to whatever else is waiting on it —
+    /// sixteen full reads.
+    ///
+    /// Why a bound at all: the timeout, the `SIGKILL` escalation and the settlement all run on the
+    /// *same* serial queue as these passes (`ProcessJob.queue`), so work done here is time none of
+    /// them can run. An unbounded pass — read while data keeps arriving, return only on `EAGAIN` —
+    /// hands the queue to whichever producer can keep the pipe fed, and the engine processes this
+    /// runner drives are long-lived and talkative. Bounded, the worst case is one mebibyte of
+    /// copying between two turns of the queue.
+    static let bytesPerPass = 16 * chunk
+
+    /// What a pass found.
+    enum Outcome: Equatable {
+        /// The descriptor is still usable: it ran dry, or the pass had taken enough. Either way the
+        /// reader comes back.
+        case open
+        /// End of file, or an error that makes further reads pointless. The reader does not come
+        /// back and the source is cancelled.
+        case closed
+    }
+
+    /// Reads what `fd` holds right now, appending each read's bytes, and stops at `bytesPerPass`.
+    ///
+    /// Stopping at the bound reports `.open`, exactly as running dry does: in both cases the
+    /// descriptor is still usable and the reader comes back — on the next readable event during the
+    /// call, and on the exit path's last pass at the end of it. `EINTR` is retried and does not
+    /// count against the bound, because no bytes came with it.
+    static func pass(_ fd: Int32, into append: (Data) -> Void) -> Outcome {
+        var buffer = [UInt8](repeating: 0, count: chunk)
+        var taken = 0
+        while taken < bytesPerPass {
+            let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            if n > 0 { append(Data(buffer[0..<n])); taken += n; continue }
+            if n == 0 { return .closed }
+            if errno == EINTR { continue }
+            if errno == EAGAIN { return .open }
+            return .closed
+        }
+        return .open
+    }
+}
+
 /// Single owner of a Process, its pipes and the accumulated output.
 ///
 /// The invariant: every mutation of this object's state, and every `isRunning`, `terminate()` and
@@ -119,7 +173,7 @@ private final class ProcessJob: @unchecked Sendable {
         // timers meant to bound this call, and the EAGAIN arm below could never be reached.
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-        source.setEventHandler { [self] in _ = readAvailable(fd, into: append, source: source) }
+        source.setEventHandler { [self] in readAvailable(fd, into: append, source: source) }
         source.setCancelHandler { [self] in
             try? handle.close()
             drains.removeAll { $0.fd == fd }
@@ -128,23 +182,23 @@ private final class ProcessJob: @unchecked Sendable {
         source.resume()
     }
 
-    /// Reads what the pipe holds right now, appending it. Returns false once the writer is gone or the
-    /// descriptor is unusable, having cancelled the source.
-    @discardableResult
-    private func readAvailable(_ fd: Int32, into append: (Data) -> Void, source: DispatchSourceRead) -> Bool {
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
-            if n > 0 { append(Data(buffer[0..<n])); continue }
-            if n == 0 { source.cancel(); return false }
-            if errno == EINTR { continue }
-            if errno == EAGAIN { return true }
-            source.cancel(); return false
-        }
+    /// One pass over a pipe, cancelling its source once the writer is gone or the descriptor is
+    /// unusable. A pass that stopped because it had taken enough leaves the source armed: the event
+    /// fires again while the descriptor still holds data, so the rest arrives on a later turn of this
+    /// queue rather than on this one, and the timeout, the kill and the settlement get their turn.
+    private func readAvailable(_ fd: Int32, into append: (Data) -> Void, source: DispatchSourceRead) {
+        if PipeDrain.pass(fd, into: append) == .closed { source.cancel() }
     }
 
     /// The last pass over each pipe, on the exit path: everything the child wrote before it exited is in the
     /// kernel's buffer by now, whoever else still holds the write end.
+    ///
+    /// Bounded like every other pass, and deliberately *one* of them. A pipe holds at most its own
+    /// buffer — 64 KiB here, a sixteenth of the bound — so one pass empties whatever the child left
+    /// behind. What one pass cannot empty is a pipe a *surviving* grandchild is still filling, and
+    /// looping until that one runs dry would hand the queue to a process the child no longer
+    /// controls, at the moment the caller is owed its answer. Settlement is keyed to the child's exit
+    /// and not to end-of-file (see the type's note), and this is that ruling applied to the last read.
     private func drainRemaining() { for d in drains { readAvailable(d.fd, into: d.append, source: d.source) } }
 
     /// The three explanations a budget overrun has, and the facts that separate them. `gone` with `exited`
