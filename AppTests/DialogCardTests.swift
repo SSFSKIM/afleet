@@ -219,6 +219,84 @@ final class DialogCardTests: XCTestCase {
                        "a null category still drew a category line")
     }
 
+    // MARK: - Retraction
+
+    /// The discriminating clause of G1f, asserted across the card's whole lifetime and in both
+    /// directions: the messages the dialog names are **retained while it is pending** and gone after
+    /// **any** resolution. A registry that evicted on receipt would pass a test that only looked at
+    /// the end.
+    ///
+    /// The items are the recording's own — folded by C3's reducer from the frames that preceded the
+    /// dialog — so the uuid under test is one the engine really streamed.
+    func testTheRetractedMessagesAreRetainedWhilePendingAndGoneAfterAnyResolution() async throws {
+        let resolutions = ["Retry on the fallback model", "Edit the prompt", "Keep the refusal", "Close"]
+        for label in resolutions {
+            let registry = RetractionRegistry()
+            let (_, answering) = await hosted()
+            let raised = try card("dialog-refusal-fallback", at: 1)
+            let retracted = try XCTUnwrap(raised.refusalFallback?.retractedMessageUUIDs.first,
+                                          "the recorded dialog retracts nothing")
+
+            // The timeline as it stood when this dialog was raised.
+            let reducer = try reduced("dialog-refusal-fallback", untilDialog: 1)
+            let items = reducer.durable.items
+            let doomed = items.filter { $0.id.key == retracted }
+            XCTAssertEqual(doomed.count, 1, "the recording holds \(doomed.count) items for the retracted uuid")
+            let survivors = items.filter { $0.id.key != retracted }
+            XCTAssertGreaterThan(survivors.count, 0, "the recording holds nothing but the retracted message")
+
+            // Received *and drawn*, not yet answered: nothing goes. The card is built and its body
+            // evaluated before this assertion, so a registry fed at receipt or at draw time — which
+            // is the failure this clause exists to catch — is already wrong here.
+            let body = try dialogView(raised, answering, retraction: registry).body
+            XCTAssertTrue(doomed.allSatisfy(registry.retains),
+                          "a message was evicted before \(label) was pressed")
+
+            try press(label, in: body)
+            await answering.whenIdle()
+
+            XCTAssertTrue(doomed.allSatisfy { !registry.retains($0) },
+                          "the retracted message survived \(label)")
+            XCTAssertTrue(survivors.allSatisfy(registry.retains),
+                          "\(survivors.count) unretracted items were evicted by \(label)")
+        }
+    }
+
+    /// §8.4: a `control_cancel_request` that retires the dialog is a resolution too. The card reads
+    /// D12's first row, the retraction settles, and **nothing** goes on the wire — the binary
+    /// already settled the request.
+    func testACancelRequestThatRetiresTheDialogAlsoResolvesTheRetraction() async throws {
+        let registry = RetractionRegistry()
+        let (lifecycle, _) = await hosted()
+        let requests = try dialogRequests("dialog-refusal-fallback")
+        XCTAssertGreaterThan(requests.count, 1, "the fixture records \(requests.count) dialogs")
+        let request = requests[1]
+
+        var reducer = try reduced("dialog-refusal-fallback", untilDialog: 1)
+        let items = reducer.durable.items
+        _ = reducer.apply(.request(request))
+        let pending = try XCTUnwrap(reducer.overlay.decisions[request.id], "the reducer opened no dialog decision")
+        let card = DecisionCard(pending)
+        let retracted = try XCTUnwrap(card.refusalFallback?.retractedMessageUUIDs.first,
+                                      "the recorded dialog retracts nothing")
+        let doomed = items.filter { $0.id.key == retracted }
+        XCTAssertEqual(doomed.count, 1, "the recording holds \(doomed.count) items for the retracted uuid")
+        XCTAssertTrue(doomed.allSatisfy(registry.retains), "a message was evicted while the dialog was pending")
+
+        _ = reducer.apply(.requestCancelled(request.id, .first))
+        let retired = DecisionCard(try XCTUnwrap(reducer.overlay.decisions[request.id],
+                                                 "the cancelled dialog left the overlay"))
+        XCTAssertTrue(retired.state == .cancelled, "a retired dialog did not reach the cancelled state")
+        XCTAssertEqual(retired.reading(inStaleOverlay: false)?.text, "Answered elsewhere.",
+                       "a retired dialog does not read as answered elsewhere")
+
+        registry.resolved(retired, in: Self.channel)
+        XCTAssertTrue(doomed.allSatisfy { !registry.retains($0) },
+                      "the retracted message survived the dialog being retired")
+        let count = await lifecycle.actions.count
+        XCTAssertEqual(count, 0, "a retired dialog put \(count) actions on the wire")
+    }
+
     /// Every `model_consent_fallback` a fixture's frames carry.
     private static func consentFallbacks(_ frames: [Frame]) -> [ModelConsentFallback] {
         frames.compactMap { frame in

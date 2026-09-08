@@ -57,6 +57,9 @@ ALLOWLIST: dict[str, str] = {
                 "leaf claims its kinds through, and no production code registers until one does. The "
                 "check keys on a bare name and `register` is declared elsewhere under App/ too, so it "
                 "would not be flagged today; the entry records the intent, not an exemption in force",
+    "retains": "filled by C6.3 Task 8 — RetractionRegistry.retains(_:) is D11's render-time filter "
+               "and the channel's list is its caller; the list mounts at Task 8, which removes this "
+               "entry with the mount",
     "show": "filled by C6.4 — AgentNavigating.show(run:in:) is contract Y4's seam, called by C6.1's "
             "agent chip once that leaf lands",
     "agentNavigation": "filled by C6.4 — the composition root installs Y4's no-op so C6.1's chip has "
