@@ -49,6 +49,17 @@ struct TimelineRenderContext {
     /// thirty times a second while a message streams.
     let links: any LinkRouterCapability
 
+    /// Contract Y7 — the channel fold's raise site for the host signals no frame states.
+    ///
+    /// A row that answers something has to tell the fold it answered: `HostSignal.decisionAnswered`
+    /// is what moves a decision card out of `.pending`, and the fold has always known how to apply
+    /// it while nothing in the tree ever raised one. So the raise travels with the row's other
+    /// capabilities, wired to `ChannelTimelineModel.signal(_:)` at the same place the link router is
+    /// wired, and **not** defaulted to a no-op for a later leaf to replace. A defaulted capability
+    /// nobody assigns is the failure this contract exists to prevent: every gate passes and the card
+    /// stays pending for ever, which is tracker 129's shape exactly.
+    let signal: @Sendable (HostSignal) async -> Void
+
     /// Where an `Agent` chip goes — contract Y4's seam, a no-op until C6.4 fills it.
     let agents: any AgentNavigating
 
@@ -69,8 +80,14 @@ private struct TimelineRenderContextKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    /// The render context on the timeline's subtree. Nil outside it — a row drawn by a preview or a
-    /// test that injected nothing draws without capabilities rather than trapping.
+    /// The render context on the timeline's subtree.
+    ///
+    /// **Optional, and deliberately without an inert stand-in.** The alternative — a default context
+    /// whose capabilities are empty closures — is what lets a row call a capability, succeed, and do
+    /// nothing, which is the failure Y7 exists to prevent. With no default there is nothing to call:
+    /// a row outside the timeline's subtree cannot reach a capability at all, so a mount that forgot
+    /// to inject the context is a row that visibly has no affordance rather than one whose
+    /// affordance silently goes nowhere. A preview or a reflection-only test sees nil and draws.
     var timelineContext: TimelineRenderContext? {
         get { self[TimelineRenderContextKey.self] }
         set { self[TimelineRenderContextKey.self] = newValue }

@@ -35,14 +35,26 @@ struct TimelineListView: View {
         // No change set: the model republishes the whole timeline and states no diff, so the table
         // computes one by key. When the model does start naming its changes the table prefers them.
         renderer.view(for: TimelineRenderInput(rows: model.rows, preview: model.timeline.preview))
-            .environment(\.timelineContext, context)
+            .environment(\.timelineContext, app.map(context(in:)))
     }
 
-    /// Contract Y1's per-row capabilities, injected on this subtree and nowhere else.
-    private var context: TimelineRenderContext? {
-        guard let app else { return nil }
-        return TimelineRenderContext(key: model.key, links: app.panels.links,
-                                     agents: app.agentNavigation, collapse: collapse)
+    /// Contract Y1's per-row capabilities and contract Y7's raise, injected on this subtree and
+    /// nowhere else.
+    ///
+    /// **Both capabilities are the running objects', not stand-ins.** `links` is
+    /// `PanelHostModel.links`, a plain `let`, and never `context(for:cwd:)`, which mutates the host
+    /// inside `body` (tracker 67). `signal` is this channel's own model, so a row that raises one
+    /// reaches the fold that owns the channel and not a closure a later leaf is expected to replace.
+    ///
+    /// It takes the model rather than reading the environment property, so the one construction the
+    /// view performs is a function a test can call and exercise — a capability wired to nothing
+    /// passes any assertion that only reads the value back.
+    func context(in app: AppModel) -> TimelineRenderContext {
+        TimelineRenderContext(key: model.key,
+                              links: app.panels.links,
+                              signal: { [model] signal in await model.signal(signal) },
+                              agents: app.agentNavigation,
+                              collapse: collapse)
     }
 }
 

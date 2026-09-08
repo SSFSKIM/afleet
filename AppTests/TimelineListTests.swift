@@ -5,6 +5,7 @@ import XCTest
 import AfleetCore
 import ClaudeWire
 import FleetKit
+import PanelHostAPI
 @testable import Afleet
 
 /// C6.1 Task 2: the list, and the four properties that make it a table rather than a `List`.
@@ -194,6 +195,67 @@ final class TimelineListTests: XCTestCase {
                       "a channel that could not be read drew \(broken.count) landmark(s) and none of them a placeholder")
         XCTAssertFalse(broken.contains("TimelineListView"),
                        "a channel that could not be read drew the timeline")
+    }
+
+    // MARK: - The context's two capabilities
+
+    /// Contract Y1's link router and contract Y7's host-signal raise both reach the running objects.
+    ///
+    /// **Asserted by observing a call on each, never by reading the value back.** A context whose
+    /// `links` was an empty closure and whose `signal` went nowhere would satisfy any assertion that
+    /// only checked the fields were non-nil, and that is precisely the failure both contracts exist
+    /// to prevent — a row that answers a decision, succeeds, and leaves the card `.pending` for ever.
+    /// So the link capability is exercised against a registered target that records its delivery, and
+    /// the raise is exercised against a relocation the fold refuses, whose refusal is a banner this
+    /// side can see.
+    ///
+    /// The context is built by the view's own construction, which is the only one in the tree.
+    func testTheContextCarriesLiveCapabilities() async throws {
+        let rig = try Self.makeRig()
+        let (app, _) = try await Self.makeColumn(rig)
+        let row = try XCTUnwrap(app.browser?.row(LaunchFixtures.sessionA),
+                                "the launch painted no channel row to build a context for")
+        let model = app.timelines.model(for: row.key)
+        await model.open(row)
+        XCTAssertNil(model.failure, "the channel could not be read, so it has no fold to raise a signal at")
+
+        let context = TimelineListView(model: model).context(in: app)
+
+        // The link half. The target is registered on the **host's** router and the link is opened
+        // through the **context's**, so the assertion fails unless they are the same object: a
+        // context carrying a router of its own would deliver nowhere and record nothing.
+        let deliveries = Deliveries()
+        await app.panels.links.register(LinkTarget(tab: .thread, specificity: 100,
+                                                   handles: { if case .file = $0 { true } else { false } },
+                                                   open: { _, _ in deliveries.record() }))
+        await context.links.open(.file(rig.temp.root.appending(path: "invented.txt"), line: nil),
+                                 from: .currentPanel)
+        XCTAssertEqual(deliveries.count, 1,
+                       "the link capability delivered \(deliveries.count) time(s) to a registered target")
+
+        // The raise half: a move the fold refuses, which it answers with a banner. A resolvable path
+        // would be reduced silently and would prove nothing about whether the raise arrived.
+        let before = model.timeline.overlay.banners.count
+        XCTAssertEqual(before, 0, "the channel raised \(before) banner(s) before the move")
+        let elsewhere = rig.configHome
+            .appending(path: "projects/invented-not-this-session", directoryHint: .isDirectory)
+            .appending(path: "00000000-0000-4000-8000-0000000000ff.jsonl")
+        await context.signal(.relocated(mainPath: elsewhere))
+
+        // No wait: `signal(_:)` awaits the fold and republishes before it returns, so the banner is
+        // there or the raise never arrived.
+        let raised = model.timeline.overlay.banners.count
+        XCTAssertEqual(raised, 1, "the raise reached the fold with \(raised) banner(s), not 1")
+        XCTAssertEqual(model.timeline.overlay.banners.first?.kind, .compatibility,
+                       "the fold raised a banner of a kind a refused relocation does not produce")
+    }
+
+    /// What a registered link target saw. A class so the closure the router stores and the assertion
+    /// below it read one count.
+    @MainActor
+    private final class Deliveries {
+        private(set) var count = 0
+        func record() { count += 1 }
     }
 
     // MARK: - Fixtures
