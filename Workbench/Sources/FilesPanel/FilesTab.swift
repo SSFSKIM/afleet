@@ -6,6 +6,25 @@ import AfleetCore
 import LinkRouting
 import PanelHostAPI
 
+/// What the tab asks the app for when a link is delivered: the Files session for the channel the
+/// window is showing **now**, and the selection that brings the panel forward.
+///
+/// It exists because X7 hands a tab a `ChannelContext` and no host, and both questions are the
+/// host's to answer: which channel the window is on, and which session belongs to it. Resolving
+/// them here rather than from whichever view rendered last is what makes a delivery land in the
+/// channel the link names — see `linkTargets()`.
+///
+/// `AnyObject` so the tab can hold it weakly (the host owns the tab), `Sendable` so the target's
+/// handler may carry it; a main-actor class satisfies both.
+@MainActor
+public protocol FilesTabHost: AnyObject, Sendable {
+    /// The Files session for the channel the window is showing, built if this is its first visit.
+    /// Nil when the window is on no channel at all.
+    func filesSession() -> FilesPanelSession?
+    /// Brings the Files tab forward in the main panel.
+    func selectFilesTab()
+}
+
 /// The Files tab.
 ///
 /// `.files` is held by nothing, so the app registers this with a plain `register` rather than
@@ -19,24 +38,37 @@ public final class FilesTab: PanelTab {
     public var title: String { id.defaultTitle }
     public var systemImage: String { id.defaultSystemImage }
 
-    /// The session a delivered link is routed to: the one whose channel the panel is presenting.
-    /// Weakly held, so a session the host's LRU released leaves the targets inert.
+    /// The app, weakly. Bound at construction by whoever registers the tab; nil in a test that is
+    /// about the tab alone, which is what the anchor below is still for.
+    private let hosted = HostAnchor()
+    /// The session the render path last drew — the fallback for a tab built with no host, and
+    /// nothing a hosted delivery consults.
     private let presented = SessionAnchor()
     /// Whether the pair below has been registered. Once for the tab, not once per channel.
     private var hasRegistered = false
 
-    public init() {}
+    /// `host` is what a delivered link is resolved through. A tab built without one falls back to
+    /// the session the render path last drew, which is all a package test has.
+    public init(host: (any FilesTabHost)? = nil) {
+        if let host { hosted.bind(host) }
+    }
 
     /// Available for every channel: a channel has a working directory, and that is the whole of
     /// what this tab needs.
     public func isAvailable(in context: ChannelContext) -> Bool { true }
 
-    /// Builds the session, makes it the one links are routed to, and **activates** it.
+    /// Builds the session, records it as the one an unhosted delivery reaches, and **activates**
+    /// it.
     ///
     /// `makeSession` is called once per (tab, channel) by the host, while `activate()` is `async`
     /// and `makeSession` is not, so the activation is spawned here. Doing it from the view instead
     /// would re-run it on every remount, because a channel switch unmounts and remounts the
     /// subtree while the host keeps this session.
+    ///
+    /// The link targets are registered here **only if nothing has registered them yet**, which for
+    /// the app is never: `AppModel` registers them when it registers the tab, because a session is
+    /// built lazily for rendering and a link raised before the first visit to Files must still
+    /// resolve. This line is what a package test drives, and the flag is what keeps one pair.
     public func makeSession(for context: ChannelContext) -> any PanelTabSession {
         let session = FilesPanelSession(context: context)
         presented.bind(session)
@@ -52,8 +84,6 @@ public final class FilesTab: PanelTab {
 
     public func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
         guard let session = session as? FilesPanelSession else { return AnyView(EmptyView()) }
-        // The host calls this for the channel it is about to draw, which is what "the channel the
-        // panel is presenting" means for the routing below.
         presented.bind(session)
         return AnyView(FilesPanelView(session: session))
     }
@@ -70,53 +100,97 @@ public final class FilesTab: PanelTab {
     /// leaf's Parent revision 4 and tracker 240.
     ///
     /// **What this mitigation covers, and what it does not.** One pair exists, so the router has
-    /// nothing to pick wrongly between, and the delivery reaches the session for the channel the
-    /// panel is presenting — which is right for the case links are actually created by, a click in
-    /// the channel on screen. It is *wrong* for a link delivered on behalf of a channel that is
-    /// not on screen: the panel has no way to name that channel, and the file opens in the one it
-    /// is showing. Only the X7 amendment can fix that.
+    /// nothing to pick wrongly between, and the delivery reaches the session the *host* resolves
+    /// for the channel it is showing at the moment of delivery — which is right for the case links
+    /// are actually created by, a click in the channel on screen. It is *wrong* for a link
+    /// delivered on behalf of a channel that is not on screen: the link cannot name that channel,
+    /// and the file opens in the one the window is on. Only the X7 amendment can fix that.
     ///
-    /// The anchor holds the session weakly for the reason it always did: `LinkRouterCapability`
-    /// has no per-registration withdrawal, so a released session must leave an inert target
-    /// rather than resurrect itself, and the router takes W5's fallback instead.
+    /// **The resolution is the host's, not the render path's.** A view is made for the tab the
+    /// column is drawing, so switching channels while another tab is selected renders no Files
+    /// view at all and a pop-out renders one for its own channel: an anchor bound in `makeView`
+    /// therefore names whichever channel was drawn last, which is not the channel a
+    /// `.currentPanel` link belongs to. Asking the host is what removes the coupling. The anchor
+    /// stays as the answer for a tab built with no host.
+    ///
+    /// Both anchors are weak, for the reason the session anchor always was:
+    /// `LinkRouterCapability` has no per-registration withdrawal, so a released session — or a
+    /// released host — must leave an inert target rather than resurrect itself, and the router
+    /// takes W5's fallback instead.
     func linkTargets() -> [LinkTarget] {
         let anchor = presented
+        let host = hosted
         let handler: @MainActor @Sendable (WorkspaceLink, LinkDestination) async -> Void = {
             link, destination in
-            // The destination is received and deliberately not branched on: the host has already
-            // popped the tab out for `.newWindow` before the handler runs, and a popped-out window
-            // draws the same session, because the host retains one per (tab, channel). Recorded
-            // here so a later reader does not read the absence of a branch as a dropped case (§9).
-            await anchor.session()?.open(link, from: destination)
+            // The destination decides one thing and one thing only: whether the main panel's
+            // selection moves. `.newWindow` has already had the tab popped out by the host before
+            // this runs and draws this same session, because the host retains one per
+            // (tab, channel) — so the *open* is the same either way, and moving the main window's
+            // selection for a link that asked for a window of its own would be wrong (§9).
+            guard let session = host.host()?.filesSession() ?? anchor.session() else { return }
+            if destination == .currentPanel { host.host()?.selectFilesTab() }
+            await session.open(link, from: destination)
         }
         return [
             LinkTarget(tab: .files, specificity: FilesPanelSession.linkSpecificity,
                        handles: { link in
                            guard case .file = link else { return false }
-                           return anchor.isAlive
+                           return host.isAlive || anchor.isAlive
                        },
                        open: handler),
             LinkTarget(tab: .files, specificity: FilesPanelSession.linkSpecificity,
                        handles: { link in
                            guard case .diff = link else { return false }
-                           return anchor.isAlive
+                           return host.isAlive || anchor.isAlive
                        },
                        open: handler),
         ]
     }
 
-    /// Registers the pair through `links` and routes deliveries to `session`. The seam the tests
-    /// drive, and what `makeSession` does on the host's behalf.
-    func registerLinkTargets(through links: any LinkRouterCapability,
-                             presenting session: FilesPanelSession) async {
-        presented.bind(session)
+    /// Registers the pair through `links`, once. What the app calls when it registers the tab, so
+    /// the targets exist before anything renders Files.
+    public func registerLinkTargets(through links: any LinkRouterCapability) async {
         guard !hasRegistered else { return }
         hasRegistered = true
         for target in linkTargets() { await links.register(target) }
     }
 
-    /// Makes `session`'s channel the one a delivered link opens in.
+    /// The same registration for a tab with no host, naming the session an unhosted delivery
+    /// reaches. The seam the package's own tests drive.
+    func registerLinkTargets(through links: any LinkRouterCapability,
+                             presenting session: FilesPanelSession) async {
+        presented.bind(session)
+        await registerLinkTargets(through: links)
+    }
+
+    /// Makes `session`'s channel the one an unhosted delivery opens in.
     func present(_ session: FilesPanelSession) {
         presented.bind(session)
+    }
+}
+
+/// A weak, `Sendable` hold on the app, so a target's handler can ask it something without the tab
+/// — which the app owns, through the host — keeping it alive. The session anchor's shape, for the
+/// same reason.
+final class HostAnchor: Sendable {
+    private nonisolated(unsafe) weak var held: (any FilesTabHost)?
+    private let lock = NSLock()
+
+    func bind(_ host: any FilesTabHost) {
+        lock.lock()
+        defer { lock.unlock() }
+        held = host
+    }
+
+    var isAlive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return held != nil
+    }
+
+    @MainActor func host() -> (any FilesTabHost)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return held
     }
 }

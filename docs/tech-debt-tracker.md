@@ -2025,3 +2025,23 @@ is renumbered.
      (~15 s of the package's ~33 s) that the next leaf to add to it should know where the time goes
      before adding more. Closer: share the fixtures per entry 232 and build the media corpus once
      per suite rather than once per test. Owner: C7.7, which will add to this target.
+
+341. **A watched symbolic link polls for the life of the watch, and its source can sit on a stale
+     inode.** `FileWatch` now keeps the stat poll armed beside the vnode source whenever the path is
+     a link, because `open(2)` follows it and the source therefore watches the target's inode —
+     which a retarget or a removal of the link never touches. Two costs follow. The poll is the only
+     thing carrying such a path, so a change is observed at the poll interval rather than
+     immediately; and after a retarget the source stays armed on the *previous* target's inode,
+     holding an `O_EVTONLY` descriptor on a file nothing is interested in until the watch ends.
+     Neither is wrong — the poll delivers, and the descriptor is released with the watch. Closer:
+     re-arm from the tick when a symlinked path's observation moves, which needs the source's
+     current inode to compare against. Owner: C7.5's follow-up. Found by C7.5's fix wave B.
+
+342. **`FileTree`'s listing cache is keyed by the exact `URL` value a caller passed.** A URL from
+     `contentsOfDirectory` carries a trailing slash for a directory and may resolve `/tmp` to
+     `/private/tmp`, so a hand-built `root.appending(path: "src")` is a *different* key from the
+     `src` node's own `url`. Every caller today walks by node — the column, and `refreshAll` over
+     the cache's own keys — so nothing is currently wrong; a future caller that constructs a URL
+     for `refresh(_:)` or `children(of:)` would silently enumerate a second time or refresh
+     nothing. Closer: normalise on the way into `loaded`. Owner: whichever leaf next adds a caller
+     that names a directory rather than walking to it. Found by C7.5's fix wave B.

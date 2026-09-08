@@ -27,6 +27,63 @@ final class FilesPanelWiringTests: XCTestCase {
                       "the host built something other than the Files panel's session")
     }
 
+    /// Design §9: the tab's two link targets exist from the moment the tab is registered, not from
+    /// the first time somebody looks at Files. The host builds a session lazily, for rendering, so
+    /// a registration that waited for one would leave every `.file` and `.diff` link raised before
+    /// the first visit resolving to nothing.
+    func testTheFilesLinkTargetsAreRegisteredBeforeThePanelIsEverDisplayed() async throws {
+        let app = AppModel()
+
+        try await waitUntilRegistered(app)
+        XCTAssertEqual(app.panels.liveSessionCount, 0,
+                       "registering the targets brought a session into being")
+    }
+
+    /// Design §9's mitigation of tracker 240, as the app runs it: the delivery goes to the channel
+    /// the **host** is showing, resolved through the host's own session lookup at the moment of
+    /// delivery — not to whichever session a view rendered last. And a `.currentPanel` delivery
+    /// brings Files forward, so a routed file does not open behind the tab that is up.
+    func testADeliveredFileLinkOpensInTheShownChannelAndBringsFilesForward() async throws {
+        let rig = try await PanelRig(channels: 2)
+        let app = AppModel()
+        app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
+        let left = try rig.temp.directory("left")
+        let shown = try rig.temp.directory("shown")
+        let file = try rig.temp.file("shown/notes.swift", "let a = 1\n")
+        let leftContext = try XCTUnwrap(app.panels.context(for: rig.keys[0], cwd: left))
+        let shownContext = try XCTUnwrap(app.panels.context(for: rig.keys[1], cwd: shown))
+        // The window drew Files for the first channel, then moved to the second with Thread up.
+        _ = app.panels.view(for: .files, context: leftContext)
+        app.panels.focusChannel(rig.keys[1])
+        app.panels.select(.thread)
+        try await waitUntilRegistered(app)
+
+        await app.panels.links.open(.file(file, line: nil), from: .currentPanel)
+
+        let shownSession = try XCTUnwrap(app.panels.session(for: .files, context: shownContext)
+                                            as? FilesPanelSession)
+        let leftSession = try XCTUnwrap(app.panels.session(for: .files, context: leftContext)
+                                            as? FilesPanelSession)
+        XCTAssertEqual(shownSession.openFiles.count, 1,
+                       "the link did not reach the channel the window is showing")
+        XCTAssertEqual(leftSession.openFiles.count, 0,
+                       "the link followed the last render rather than the window")
+        XCTAssertEqual(app.panels.selected, .files,
+                       "a delivered link opened into a tab nobody could see")
+    }
+
+    /// The registration is spawned from `AppModel.init`, so a bounded wait is what a test has.
+    /// A count, never a target (§11).
+    private func waitUntilRegistered(_ app: AppModel,
+                                     file: StaticString = #filePath, line: UInt = #line) async throws {
+        let deadline = ContinuousClock().now + .seconds(10)
+        while ContinuousClock().now < deadline {
+            if await app.panels.links.targetCount == 2 { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("the Files tab's two link targets never registered", file: file, line: line)
+    }
+
     /// Design §7: Cmd+S reaches the Files session of the channel the main window is showing, is
     /// offered only when Files is the selected tab, and is enabled only over a dirty buffer.
     ///
