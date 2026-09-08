@@ -146,6 +146,112 @@ final class DecisionRowTests: XCTestCase {
                        "a readable file was reported as unreadable")
     }
 
+    // MARK: - D2: the raise
+
+    /// A successful answer moves the item out of `.pending`, through C3's reducer and no view.
+    ///
+    /// Asserted through `StreamIngestion.timeline` — the one-read view — and on the `Effect` the
+    /// fold returned, because the effect is what the channel republishes from. Without the raise
+    /// the card stays `.pending` for ever: the engine sends no frame back for an answer.
+    func testASuccessfulAnswerRaisesDecisionAnsweredAndTheItemLeavesPending() async throws {
+        let rig = try await IngestionRig(fixture: "permission-allow")
+        defer { rig.finish() }
+        let ask = try rig.pushPermissionAsk(id: "req_invented_c63_raise_0001")
+        let pending = await rig.settle { await $0.timeline.overlay.decisions[ask.id]?.state == .pending }
+        XCTAssertTrue(pending, "the pushed ask never became a pending decision, so nothing here could leave it")
+
+        let lifecycle = LifecycleDouble()
+        await lifecycle.always(.success(ActivityFixtures.state(rig.key)))
+        let answering = DecisionAnswering(lifecycle: lifecycle)
+        let effects = EffectLog()
+        answering.raise = { [ingestion = rig.ingestion] _, signal in
+            await effects.record(ingestion.signal(signal))
+        }
+
+        let item = try XCTUnwrap(DecisionItem(surfacing: ask, in: rig.key),
+                                 "the surfacing initialiser opened no item for the pushed ask")
+        answering.send(.allowOnce, on: DecisionCard(item), in: rig.key)
+        await answering.whenIdle()
+
+        let state = await rig.ingestion.timeline.overlay.decisions[ask.id]?.state
+        XCTAssertEqual(state, .answered(outcome: "allowed"),
+                       "the answered decision reads \(state.map(Self.reading) ?? "no state at all"), not answered")
+
+        XCTAssertEqual(effects.count, 1, "the answer raised \(effects.count) signal(s), not 1")
+        XCTAssertFalse(effects.changes.isEmpty, "the fold returned an effect carrying no change")
+        XCTAssertTrue(effects.changes.contains { if case .overlayChanged = $0 { return true } else { return false } },
+                      "the effect's \(effects.changes.count) change(s) carry no overlay change")
+    }
+
+    /// The discriminating half: a `perform` that threw leaves the decision `.pending` and raises
+    /// **nothing**.
+    ///
+    /// The break cannot be executed — a raise placed outside the success path answers the wire
+    /// identically — so the substitute is a trace assertion on the signal seam: the dangerous path
+    /// was never entered (§6.3, Global Constraints). A card marked answered on a refused `perform`
+    /// hides a request the engine is still waiting on.
+    func testAnAnswerThatFailedRaisesNothingAndLeavesTheItemPending() async throws {
+        let rig = try await IngestionRig(fixture: "permission-allow")
+        defer { rig.finish() }
+        let ask = try rig.pushPermissionAsk(id: "req_invented_c63_raise_0002")
+        let pending = await rig.settle { await $0.timeline.overlay.decisions[ask.id]?.state == .pending }
+        XCTAssertTrue(pending, "the pushed ask never became a pending decision")
+
+        let lifecycle = LifecycleDouble()
+        await lifecycle.always(.failure(.notOwned))
+        let answering = DecisionAnswering(lifecycle: lifecycle)
+        let effects = EffectLog()
+        answering.raise = { [ingestion = rig.ingestion] _, signal in
+            await effects.record(ingestion.signal(signal))
+        }
+
+        let item = try XCTUnwrap(DecisionItem(surfacing: ask, in: rig.key),
+                                 "the surfacing initialiser opened no item for the pushed ask")
+        answering.send(.allowOnce, on: DecisionCard(item), in: rig.key)
+        await answering.whenIdle()
+
+        XCTAssertEqual(effects.count, 0, "a refused answer raised \(effects.count) signal(s)")
+        XCTAssertNotNil(answering.banner, "a refused answer raised no banner either, so nothing told the user")
+        let state = await rig.ingestion.timeline.overlay.decisions[ask.id]?.state
+        XCTAssertEqual(state, .pending,
+                       "a refused answer left the decision reading \(state.map(Self.reading) ?? "no state at all")")
+    }
+
+    /// A signal for a request id the fold never saw changes nothing, and publishes nothing.
+    ///
+    /// That is what makes the two tests above mean something: `StreamIngestion.signal` returns an
+    /// empty `Effect` for a no-op by its own contract, so a mis-keyed raise cannot be read as a
+    /// successful one.
+    func testASignalForAnUnknownRequestIdChangesNothing() async throws {
+        let rig = try await IngestionRig(fixture: "permission-allow")
+        defer { rig.finish() }
+        let ask = try rig.pushPermissionAsk(id: "req_invented_c63_raise_0003")
+        let pending = await rig.settle { await $0.timeline.overlay.decisions[ask.id]?.state == .pending }
+        XCTAssertTrue(pending, "the pushed ask never became a pending decision")
+
+        let before = await rig.ingestion.timeline.items.count
+        let effect = await rig.ingestion.signal(
+            .decisionAnswered(RequestID(rawValue: "req_invented_c63_no_such_0009"), outcome: .allowed))
+
+        XCTAssertTrue(effect.changes.isEmpty, "an unknown request id produced \(effect.changes.count) change(s)")
+        let after = await rig.ingestion.timeline.items.count
+        XCTAssertEqual(after, before, "the timeline moved from \(before) to \(after) item(s) on a no-op signal")
+        let state = await rig.ingestion.timeline.overlay.decisions[ask.id]?.state
+        XCTAssertEqual(state, .pending, "the real decision was settled by a signal that did not name it")
+    }
+
+    // MARK: - Readings, so no assertion prints an engine byte
+
+    private static func reading(_ state: DecisionItem.State) -> String {
+        switch state {
+        case .pending: "pending"
+        case .answered: "answered"
+        case .cancelled: "cancelled"
+        case .policyAnswered: "policy-answered"
+        case .inert: "inert"
+        }
+    }
+
     private static func decisionItem(state: DecisionItem.State) -> TimelineItem {
         .decision(DecisionItem(id: ItemID(stream: stream, key: "invented-decision-1"),
                                provenance: Provenance(stream: stream, origin: .wire),
@@ -158,6 +264,16 @@ final class DecisionRowTests: XCTestCase {
 }
 
 // MARK: - Support
+
+/// Every `Effect` a raise produced, and the changes they carried. A class because the raise closure
+/// is `@MainActor` and the assertions read it after the round trip.
+@MainActor
+private final class EffectLog {
+    private(set) var effects: [StreamIngestion.Effect] = []
+    var count: Int { effects.count }
+    var changes: [TimelineChange] { effects.flatMap(\.changes) }
+    func record(_ effect: StreamIngestion.Effect) { effects.append(effect) }
+}
 
 /// One channel's fold, over a committed fixture's transcript in a scratch config home.
 ///
