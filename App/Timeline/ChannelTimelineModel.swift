@@ -156,6 +156,11 @@ final class ChannelTimelineModel {
 
     private(set) var header = ChannelHeader()
 
+    /// What the header's readback strip draws (child spec §10): the branch, and the four values the
+    /// engine answers for. Replaced field by field as answers arrive, and never from a request this
+    /// app made — see `ChannelHeaderReadout`.
+    private(set) var readout = ChannelHeaderReadout()
+
     /// True once `open(_:)` has driven the ingestion; a channel switch away and back does not
     /// restart it, which is what the registry retains this object for.
     private(set) var hasOpened = false
