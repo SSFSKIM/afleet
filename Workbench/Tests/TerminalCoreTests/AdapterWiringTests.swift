@@ -254,6 +254,16 @@ final class AdapterWiringTests: XCTestCase {
         XCTAssertTrue(surface.session.readViewportText() == nil, "headless-surface=unexpected")
     }
 
+    /// The read the S1 harness asserts G2's rendering with. Headless it must answer `nil` and
+    /// return, because the in-memory session is inert until a view attaches a surface: an
+    /// accessor that blocked here, or that fabricated an empty grid, would make the harness's
+    /// "it rendered" claim unfalsifiable in the one place it has to be falsifiable.
+    /// This asserts the accessor's headless contract, not rendering; rendering is G2's.
+    func testTheRenderedViewportReadIsEmptyWithNoSurfaceAttached() {
+        let surface = makeSurface()
+        XCTAssertTrue(surface.renderedViewportText() == nil, "headless-rendered-viewport=present")
+    }
+
     private func makeSurface(
         terminfoDirectory: URL? = nil,
         resizeSource: ResizeCallbackSource = ResizeCallbackSource(),

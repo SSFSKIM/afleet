@@ -168,6 +168,16 @@ public final class GhosttyTerminalSurface: TerminalSurface {
         finishSession(session, UInt32(bitPattern: code), runtimeMilliseconds())
     }
 
+    /// The rendered viewport, read back through the in-memory backend's own host-side read after
+    /// every pending `receive` has been parsed. `nil` until a view has attached a surface, which
+    /// is why it answers nothing in a headless test and everything in the S1 harness. Diagnostic
+    /// only: it exists so "it rendered" can be an assertion rather than a recollection, and no
+    /// pane path calls it.
+    public func renderedViewportText() -> String? {
+        session.waitForPendingOutput()
+        return session.readViewportText()
+    }
+
     public func setAppearance(_ appearance: TerminalAppearance) {
         let ghosttyAppearance = GhosttyAppearance(appearance)
         terminalController.setTheme(ghosttyAppearance.theme)
