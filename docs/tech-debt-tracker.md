@@ -1942,3 +1942,35 @@ is renumbered.
     attached, which is what keeps the harness's "it rendered" claim falsifiable). It exists
     for the spike, and C7.4 has no need of it; if the panel never adopts it, it should be
     withdrawn rather than left as public surface area nobody calls. Owner: C7.4 at its close.
+
+88. **Harness teardown is inconsistent, and one path cannot execute.** `S1Harness`'s
+    `HarnessWindow.swift:379` is `defer { Task { await child.teardown() } }` while
+    `main.swift:55-57` calls `exit(status)` on the same main-actor turn, so the escalation ladder
+    never runs; the `shell` leg calls `teardown()` on no path, and the attach leg's write-failure
+    return skips its own. Harmless in practice — `exit()` closes the master and the kernel's
+    revoke hangs up the group — but the harness is what C7.4 will read. Closer: one teardown path
+    per leg, awaited before `exit`. Owner: C7.1 if the harness outlives the spike, else C7.4.
+89. **`AdapterWiringTests` carries one assertion that cannot fail as named, and several that pin
+    the dependency rather than this child.** The `feed`-returns-promptly assertion targets a
+    blocking `feed`, which would hang the test rather than fail it, so every non-blocking
+    implementation passes trivially; the `readViewportText() == nil` assertions pin libghostty's
+    inertness with no surface attached, not our code. Both are cheap and honest, neither is
+    evidence. Closer: express the blocking case as a timeout that reports, and label the
+    dependency-pinning assertions as such. Owner: C7.1 tests.
+90. **`openpty` returning a descriptor in 0, 1 or 2 would make the child close its own
+    standard streams.** `Darwin+PTY.swift:106-125` opens the slave as 0, dups to 1 and 2, then
+    closes the inherited master and slave by number; if the host had stdin closed and `master`
+    came back as fd 0, the close would take the child's own stdout or stdin with it — a pane that
+    renders nothing, with no error anywhere. Unreachable from the app and under XCTest today,
+    which is why it is logged rather than fixed. Closer: refuse or `dup` any pty descriptor below
+    3 before building the file actions. Owner: C7.1 if a host ever spawns with closed standard
+    streams. Found by the whole-branch review.
+91. **`write()` after the child exits returns two different errors depending on timing.** Before
+    the read source observes EOF it surfaces `PTYError.systemCall(.write, EIO)`; afterwards,
+    `PTYError.closed`. C7.4 would have to match on both to mean one thing. Closer: map `EIO` on a
+    master whose child has ended to `.closed`. Owner: C7.4 when it handles pane write failures.
+92. **The X1 import test proves half of what its comment claims.** Its header says "the manifest
+    is one half of that boundary", but neither test parses `Package.swift`: adding a dependency to
+    a target with no source-level import passes. Closer: parse the manifest's target
+    dependencies, or narrow the comment to what the walk actually checks. Owner: C7.1 with the
+    manifest.
