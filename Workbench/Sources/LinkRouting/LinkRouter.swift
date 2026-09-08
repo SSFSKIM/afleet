@@ -186,7 +186,9 @@ public actor LinkRouter {
     /// A resolved target whose `popsOutForNewWindow` is `false` takes that same non-suspending
     /// path even when a `prepare` was supplied: it answers `.newWindow` by leaving the app, so
     /// there is no window to open for it and nothing for the hook to do (X7's amendment, ruled at
-    /// C7.6's gate).
+    /// C7.6's gate). That answer is read **before** the preparation bound and the prepared-tab
+    /// guard below, because both are costs of a preparation: a target asking for none neither
+    /// spends the bound nor claims the window an earlier attempt opened, so neither may refuse it.
     ///
     /// `prepare` is a main-actor `await`, so the router *suspends* between resolving and
     /// delivering, and an `unregister(tab:)` can land in that window — the host's own teardown
@@ -212,22 +214,6 @@ public actor LinkRouter {
         var preparations = 0
         for _ in 0..<Self.maxResolutionAttempts {
             guard let chosen = mostSpecific(for: link) else { break }
-            if let prepared {
-                // A window was opened for `prepared.tab`. Only that tab's own replacement may
-                // deliver into it; a different target would need a second, irreversible
-                // preparation for a window this call has no way to take back.
-                guard chosen.target.tab == prepared.tab else { break }
-                if prepared.epoch == epoch(of: chosen.target.tab) {
-                    // The window this call opened is still the one the target will render into.
-                    await deliver(chosen, link, destination)
-                    return
-                }
-                // It is not: a teardown landed on the tab since, and may have taken that window
-                // with it. Preparing once more is the answer while the bound allows one, and when
-                // it does not the open **falls back** rather than telling a handler `.newWindow`
-                // for a window nothing holds (spec §3, 2026-09-08 final wave).
-                if preparations >= Self.maxPreparationsPerOpen { break }
-            }
             guard let prepare, chosen.target.popsOutForNewWindow else {
                 // Nothing suspends between the resolution above and this commit.
                 //
@@ -243,6 +229,26 @@ public actor LinkRouter {
                 // nobody.
                 await deliver(chosen, link, destination)
                 return
+            }
+            // Everything below is the cost of a *preparation*, so it is charged only to a target
+            // that needs one. The guard above is what puts it there: a target that answers
+            // `.newWindow` by leaving the app is not spending the bound, is not claiming the
+            // window an earlier attempt opened, and cannot be refused for either (fix wave B).
+            if let prepared {
+                // A window was opened for `prepared.tab`. Only that tab's own replacement may
+                // deliver into it; a different target would need a second, irreversible
+                // preparation for a window this call has no way to take back.
+                guard chosen.target.tab == prepared.tab else { break }
+                if prepared.epoch == epoch(of: chosen.target.tab) {
+                    // The window this call opened is still the one the target will render into.
+                    await deliver(chosen, link, destination)
+                    return
+                }
+                // It is not: a teardown landed on the tab since, and may have taken that window
+                // with it. Preparing once more is the answer while the bound allows one, and when
+                // it does not the open **falls back** rather than telling a handler `.newWindow`
+                // for a window nothing holds (spec §3, 2026-09-08 final wave).
+                if preparations >= Self.maxPreparationsPerOpen { break }
             }
             let epochAtPreparation = epoch(of: chosen.target.tab)
             await prepare(chosen.target, destination)

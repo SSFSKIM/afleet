@@ -74,18 +74,103 @@ final class LinkTargetPopOutTests: XCTestCase {
         XCTAssertEqual(sink.urls, [], "the open fell back to the external opener")
     }
 
+    // MARK: - The budget is the preparing target's, not the resolution's
+
+    /// Two handovers, and the target the third resolution finds **declines** the pop-out.
+    ///
+    /// The preparation bound has been spent by then, and it was spent on two targets that each
+    /// wanted a window. The one that survives wants none: it answers `.newWindow` by leaving the
+    /// app. A router that charged it for the budget those two ran through would fall back over a
+    /// live target that needs nothing further from the host — and W5's fallback for a
+    /// `.pullRequest` is a diagnostic, so the link is simply dropped.
+    @MainActor
+    func testADecliningReplacementIsDeliveredToAfterTheBudgetIsSpent() async {
+        let recorder = Recorder()
+        let sink = Sink()
+        let handovers = Counter()
+        let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
+        await router.register(Self.target(.files, declining: false, into: recorder,
+                                          specificity: 10, label: "first"))
+
+        await router.open(Fixtures.pullRequest, from: .newWindow) { target, _ in
+            recorder.note("prepare:\(target.tab.rawValue)")
+            switch handovers.next() {
+            case 0:
+                await router.unregister(tab: .files)
+                await router.register(Self.target(.files, declining: false, into: recorder,
+                                                  specificity: 10, label: "second"))
+            case 1:
+                await router.unregister(tab: .files)
+                await router.register(Self.target(.files, declining: true, into: recorder,
+                                                  specificity: 10, label: "decliner"))
+            default:
+                break
+            }
+        }
+
+        XCTAssertEqual(recorder.events,
+                       ["prepare:files", "prepare:files", "open:decliner:newWindow"],
+                       "the recorded order was \(recorder.events)")
+        XCTAssertEqual(sink.messages, [],
+                       "a link a live target could have taken produced a diagnostic instead")
+    }
+
+    /// The other half of the same rule: the prepared target is withdrawn, and re-resolution finds a
+    /// **different** tab whose target declines.
+    ///
+    /// The prepared-tab guard exists so that a second, irreversible preparation is never run for a
+    /// window this call cannot take back. A declining target asks for no preparation at all, so the
+    /// guard has nothing to protect against and the surviving target delivers.
+    @MainActor
+    func testAWithdrawnPreparationReResolvesOntoADecliningTargetOnAnotherTab() async {
+        let recorder = Recorder()
+        let sink = Sink()
+        let handover = Once()
+        let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
+        await router.register(Self.target(.files, declining: false, into: recorder,
+                                          specificity: 10, label: "specific"))
+        await router.register(Self.target(.browser, declining: true, into: recorder,
+                                          specificity: 1, label: "browser"))
+
+        await router.open(Fixtures.pullRequest, from: .newWindow) { target, _ in
+            recorder.note("prepare:\(target.tab.rawValue)")
+            guard target.tab == .files, handover.firstTime() else { return }
+            await router.unregister(tab: .files)
+        }
+
+        XCTAssertEqual(recorder.events, ["prepare:files", "open:browser:newWindow"],
+                       "the recorded order was \(recorder.events)")
+        XCTAssertEqual(sink.messages, [],
+                       "the surviving Browser target lost the link to a diagnostic")
+    }
+
     /// A target for `tab` that records what it receives, declining the pop-out or not.
     ///
-    /// Specificity 1 against the fixtures' 0, so the tests above are about the field and not about
-    /// which of two targets won.
+    /// Specificity defaults to 1 against the fixtures' 0, so the first tests here are about the
+    /// field and not about which of two targets won; the budget cases above set it, because they
+    /// are about two targets at once.
     @MainActor
     private static func target(_ tab: PanelTabID, declining: Bool,
-                               into recorder: Recorder) -> LinkTarget {
-        LinkTarget(tab: tab, specificity: 1, popsOutForNewWindow: !declining,
-                   handles: { _ in true },
-                   open: { link, destination in
-                       recorder.delivered(tab: tab, link: link, destination: destination,
-                                          label: tab.rawValue)
-                   })
+                               into recorder: Recorder,
+                               specificity: Int = 1,
+                               label: String? = nil) -> LinkTarget {
+        let label = label ?? tab.rawValue
+        return LinkTarget(tab: tab, specificity: specificity, popsOutForNewWindow: !declining,
+                          handles: { _ in true },
+                          open: { link, destination in
+                              recorder.delivered(tab: tab, link: link, destination: destination,
+                                                 label: label)
+                          })
+    }
+}
+
+/// How many times a `prepare` has run, so a chain of handovers can act differently on each. `Once`
+/// answers the one-handover cases; a two-handover chain needs to count.
+@MainActor
+final class Counter {
+    private var count = 0
+    func next() -> Int {
+        defer { count += 1 }
+        return count
     }
 }
