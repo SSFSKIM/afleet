@@ -1847,6 +1847,36 @@ is renumbered.
      the rebuild, which is one field and is only worth doing once a settings change can arrive
      mid-turn (Task 5's readout). Owner: C6.1, at Task 5.
 
+136. **Per-tool result forms stop at eleven; parity §41.16.7 tabulates about thirty.** `Read`,
+     `Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Agent`, `WebFetch`, `WebSearch`, `TodoWrite` and the
+     `mcp__<server>__<tool>` family have the engine's own sentences; every other tool takes the
+     generic `Done` / `(No output)` form, so `LSP`, `Skill`, `TaskOutput`, `TaskStop`, the worktree
+     pair, `Monitor`, the cron trio, `NotebookEdit`, `memory_write`, the `claude-in-chrome` and
+     `computer-use` families and the MCP resource readers all render as an unnamed result. Nothing
+     is lost — the raw text is behind the disclosure — but a reader gets a count where the terminal
+     gives a sentence. Found at C6.1 Task 4, and scoped out there deliberately. Closer: the parity
+     table is the map; each form is a case in `ToolResultForms.completed(_:)` and a line in
+     `ToolResultFormTests`. Owner: C6.1 or whoever next touches the forms.
+
+137. **A tool row's diff is a count, not a diff.** `Edit` renders parity's `Added N lines, removed
+     M lines` from `structuredPatch`, and `Write` renders its line count, but neither draws the
+     patch: §41.16.8's unified renderer, the word-level diffing and the four truncations are
+     unimplemented, and the structured patch reaches the disclosure only as raw text. Found at
+     C6.1 Task 4. Closer: a unified-diff view over `structuredPatch` with the ANSI path's line
+     numbering (the Ink path's rewind is the odd one, and §41.16.8 says so), mounted in the same
+     slot the raw disclosure occupies. Owner: C6.1's successor on the rows, or C7.2 if the diff
+     belongs in the panel instead.
+
+138. **The thinking disclosure's duration is the span from the item before it, not the model's own
+     thinking time.** A `thinking` block carries no start instant and the assistant item carries
+     one timestamp, so "Thought for N seconds" is measured from the preceding item's instant — which
+     over-reports whenever the gap holds anything but thinking (a slow tool result, a reader's
+     pause before a prompt). The number is right for the ordinary streamed turn and wrong for a
+     resumed or interleaved one. Found at C6.1 Task 4. Closer: the streaming path knows when the
+     first thinking delta arrived; carrying that instant on `StreamingPreview` would make the span
+     exact, which is the same corrective tracker 127 asks for and could land with it. Owner: C3 for
+     the field, C6.1 for reading it.
+
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
