@@ -161,8 +161,9 @@ final class PanelHostTests: XCTestCase {
                        "after the unregister the link did not fall through to the next target")
         XCTAssertEqual(recorder.tabs.filter { $0 == .thread }.count, 1,
                        "the withdrawn tab received \(recorder.tabs.filter { $0 == .thread }.count) links, not 1")
-        XCTAssertEqual(host.links.targetCount, 1,
-                       "the registry holds \(host.links.targetCount) targets after one tab was withdrawn")
+        let remaining = await host.links.targetCount
+        XCTAssertEqual(remaining, 1,
+                       "the registry holds \(remaining) targets after one tab was withdrawn")
     }
 
     /// Cmd+1…7 is one-based over `available(for:)`, and an index outside it changes nothing.
@@ -631,6 +632,22 @@ final class PanelHostTests: XCTestCase {
         XCTAssertEqual(recorder.links.count, 2, "the handler ran \(recorder.links.count) times, not 2")
         XCTAssertTrue(recorder.links.allSatisfy { $0 == PanelFixtures.fileLink },
                       "the handler received a link the test did not open")
+    }
+
+    /// A `.url` nobody registered for reaches the external opener the host was built with.
+    ///
+    /// The opener is injected through `HostLinkRouter.init` rather than assigned afterwards,
+    /// because the delegated router takes its fallbacks at construction; the production default
+    /// opens a browser window and a test must not. The URL is invented (§11), and the assertion
+    /// compares one string this file wrote.
+    func testAnUnclaimedURLLinkReachesTheInjectedExternalOpener() async throws {
+        let opened = URLBox()
+        let router = HostLinkRouter(externalOpener: { url in opened.set(opened.value + [url.absoluteString]) })
+
+        await router.open(.url(PanelFixtures.url(1)), from: .currentPanel)
+
+        XCTAssertEqual(opened.value, [PanelFixtures.url(1).absoluteString],
+                       "the unclaimed .url link did not reach the injected external opener")
     }
 
     // MARK: - G4d: the pane seam
