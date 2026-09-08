@@ -88,6 +88,23 @@ private final class PTYChildProcessGroup: Sendable {
     }
 }
 
+func terminalEnvironment(
+    overlaying requestEnvironment: [String: String],
+    for terminal: TerminalDescription
+) -> [String: String] {
+    var environment = requestEnvironment
+    environment["TERM"] = terminal.term
+    if let directory = terminal.terminfoDirectory {
+        let directoryPath = directory.path
+        if let requestedSearchPath = requestEnvironment["TERMINFO_DIRS"] {
+            environment["TERMINFO_DIRS"] = "\(directoryPath):\(requestedSearchPath)"
+        } else {
+            environment["TERMINFO_DIRS"] = directoryPath
+        }
+    }
+    return environment
+}
+
 public actor PTYProcess {
     // Task 6 replaces this single policy with bounded, coalesced delivery. Keeping the current
     // behavior named here avoids threading an implicit AsyncStream default through the actor.
@@ -145,6 +162,11 @@ public actor PTYProcess {
     private var writabilityWaits: [UUID: WritabilityWait] = [:]
 
     public init(spawning request: PTYSpawnRequest) throws {
+        var request = request
+        request.environment = terminalEnvironment(
+            overlaying: request.environment,
+            for: request.terminal
+        )
         let spawned = try DarwinPTY.spawn(request)
         let eventChannel = AsyncStream<PTYEvent>.makeStream(
             bufferingPolicy: Self.eventBufferingPolicy

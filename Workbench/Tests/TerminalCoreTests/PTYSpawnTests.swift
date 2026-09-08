@@ -88,8 +88,8 @@ final class PTYSpawnTests: XCTestCase {
             "AFLEET_REQUESTED_LAPIS should print present"
         )
         XCTAssertTrue(
-            tokens.contains("environment-count=5"),
-            "child environment entry count was not 5"
+            tokens.contains("environment-count=6"),
+            "child environment entry count was not 6"
         )
     }
 
