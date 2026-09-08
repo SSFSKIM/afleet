@@ -962,3 +962,19 @@ is renumbered.
      `StreamIngestion.signal(.relocated:)` subsume the rebind so the app raises only the signal, or
      assert the double delivery is idempotent against the real ingestion. Owner: the architect,
      with C3.
+
+131. **`LifecycleRowTests.testABackgroundJobWhoseRosterWorkerGoesArchivesTheChannel` is flaky, and
+     it reddens every child's floor.** It fails with "timed out waiting for the archived outcome;
+     state was backgroundJob" after the rig's 30-second guard. Measured at C6.1's Task 0 floor:
+     one failure in a full `make test`, then **two passes and one failure in three isolated runs**
+     of that test alone (`swift test --package-path FleetKit --filter …`). The failing run costs
+     30 seconds; the passing runs take 0.03. Nothing in C6.1 can reach it — the diff touches
+     `App/Timeline/` and `AppTests/`, and `FleetSessionsTests` does not import the app target — and
+     it arrived with `main`'s roster-signal work, which is also what the test exercises: it waits
+     for a channel to archive when its roster worker disappears, and the signal it waits on is the
+     `jobUpdates` stream X5 gained at the tracker 77 corrective. A 30-second guard that trips on a
+     third of runs is a race, not a slow machine. Found at C6.1 Task 0's floor. Closer: make the
+     archival wait delivery-fulfilled rather than deadline-bounded, the way tracker 2's instance was
+     converted; or find the roster-signal race it is reporting, which is the more likely reading
+     given the shape. Owner: C4. **Any child whose floor shows exactly this one red should re-run
+     before treating it as their own.**
