@@ -151,7 +151,12 @@ struct QuestionCardView: View {
             if prompt.isChoice {
                 selections = draft.picked[prompt.question] ?? []
                 let other = draft.typed[prompt.question]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if !other.isEmpty { selections.append(other) }
+                // A single-select question has one answer. *Other* and the options are two ways to
+                // give it, not two halves of it: the engine joins a selection list with `", "`, so a
+                // card that carried both would send a pair the user never chose. The controls keep
+                // each other clear as they are used, and the assignment here is that invariant said
+                // once more where the answer is built.
+                if !other.isEmpty { selections = prompt.multiSelect ? selections + [other] : [other] }
             } else {
                 // The extended variant's `defaultValue` is what the field opens with, so it is the
                 // answer until the user types over it — a shown value the answer dropped would be a
@@ -160,8 +165,11 @@ struct QuestionCardView: View {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty { selections = [text] }
             }
-            guard !selections.isEmpty else { return nil }
+            // A note is something the user said about this question, so a question carrying only a
+            // note is still a question the user answered. Dropping it here dropped its annotation
+            // from the whole reply, and another question's answer made the send look complete.
             let note = draft.notes[prompt.question]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !selections.isEmpty || !note.isEmpty else { return nil }
             return QuestionResponse(question: prompt.question,
                                     selections: selections,
                                     annotation: note.isEmpty ? nil : .init(preview: nil, notes: note))
@@ -197,7 +205,7 @@ struct QuestionCardView: View {
                 ForEach(prompt.options) { option in
                     self.option(option, of: prompt)
                 }
-                TextField("Other", text: binding(\.typed, prompt.question))
+                TextField("Other", text: other(prompt))
             } else {
                 typedField(prompt)
             }
@@ -257,8 +265,24 @@ struct QuestionCardView: View {
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
+    /// A bound or a default as text. `Int64(_: Double)` traps outside its range and on a non-finite
+    /// value, and `min`, `max`, `step` and `defaultValue` are numbers the engine wrote, so the
+    /// conversion is guarded rather than trusted.
     private static func number(_ value: Double) -> String {
-        value == value.rounded() ? String(Int64(value)) : String(value)
+        ElicitationForm.spell(value, isInteger: false)
+    }
+
+    /// *Other*'s binding. Internal for the reason `question(_:)` is: SwiftUI stores the binding
+    /// and not the edit made through it, so this is the only handle on what typing an alternative
+    /// does to the draft.
+    func other(_ prompt: QuestionPrompt) -> Binding<String> {
+        let draft = draft
+        return Binding(get: { draft.typed[prompt.question] ?? "" }, set: { text in
+            draft.typed[prompt.question] = text
+            guard !prompt.multiSelect,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            draft.picked[prompt.question] = []
+        })
     }
 
     /// A single-select question holds one label; a multi-select toggles.
@@ -268,6 +292,7 @@ struct QuestionCardView: View {
             if let index = current.firstIndex(of: label) { current.remove(at: index) } else { current.append(label) }
         } else {
             current = current == [label] ? [] : [label]
+            draft.typed[prompt.question] = nil
         }
         draft.picked[prompt.question] = current
     }

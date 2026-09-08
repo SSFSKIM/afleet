@@ -42,10 +42,17 @@ struct ElicitationForm: Sendable, Hashable {
     /// form is the whole schema.
     var isPartial: Bool { fields.contains { if case .raw = $0.control { return true }; return false } }
 
-    /// Nil for a schema that is not an object with properties — a url-mode elicitation has no schema
-    /// at all, and a form with no field is not a form.
+    /// Nil for a schema that is not an object at all — a url-mode elicitation has no schema, and a
+    /// schema of some other type has no properties to draw.
+    ///
+    /// **An object with no properties is a form.** It draws no control and its valid answer is the
+    /// empty object, which is a thing the user can accept; refusing to build it left a request on
+    /// screen with no way to answer it, and that is the one state §6.4 forbids.
     init?(_ schema: JSONValue?) {
-        guard let schema, let properties = schema["properties"]?.objectValue, !properties.isEmpty else { return nil }
+        guard let schema else { return nil }
+        let declared = schema["properties"]?.objectValue
+        guard declared != nil || schema["type"]?.stringValue == "object" else { return nil }
+        let properties = declared ?? [:]
         let required = Set((schema["required"]?.arrayValue ?? []).compactMap(\.stringValue))
         fields = properties.keys.sorted().map { name in
             let property = properties[name] ?? .null
@@ -57,7 +64,14 @@ struct ElicitationForm: Sendable, Hashable {
         }
     }
 
+    /// The keywords that compose a property out of other schemas. A property carrying one of them is
+    /// not described by its `type` — the branches are — so it is outside the subset whatever the
+    /// `type` says, and drawing a control from the `type` alone would drop the branches silently and
+    /// leave the card claiming the form was whole.
+    static let composition = ["oneOf", "anyOf", "allOf", "not"]
+
     private static func control(for property: JSONValue) -> Control {
+        guard !Self.composition.contains(where: { property[$0] != nil }) else { return .raw(schema: property) }
         let fallback = property["default"]
         switch property["type"]?.stringValue {
         case "string":
@@ -72,8 +86,8 @@ struct ElicitationForm: Sendable, Hashable {
         case "boolean":
             return .toggle(default: fallback?.boolValue ?? false)
         case "array":
-            guard let items = property["items"], items["type"]?.stringValue == "string",
-                  property["oneOf"] == nil else { return .raw(schema: property) }
+            guard let items = property["items"], items["type"]?.stringValue == "string"
+            else { return .raw(schema: property) }
             let options = items["enum"]?.arrayValue?.compactMap(\.stringValue)
             return .multiSelect(options: (options?.isEmpty ?? true) ? nil : options,
                                 default: fallback?.arrayValue?.compactMap(\.stringValue) ?? [])
@@ -82,12 +96,47 @@ struct ElicitationForm: Sendable, Hashable {
         }
     }
 
+    /// Text typed into a numeric control as the JSON value an answer would carry, and nil when the
+    /// card cannot carry it.
+    static func numberValue(_ text: String, isInteger: Bool) -> JSONValue? {
+        Double(text.trimmingCharacters(in: .whitespaces)).flatMap { numberValue($0, isInteger: isInteger) }
+    }
+
+    /// A parsed number as the JSON value an answer would carry.
+    ///
+    /// **The trapping conversion is never run on a number this card did not choose.**
+    /// `Int64(_: Double)` traps on a non-finite value and on one outside `Int64`'s range, and every
+    /// number reaching an integer control comes from the user's typing or a server's `default` —
+    /// `1e20` and `nan` are legal to write in both places. A value that cannot be carried is refused
+    /// with the field left empty, which is the same state as a field never filled in: absent from
+    /// `content`, and a required field that cannot be accepted.
+    static func numberValue(_ value: Double, isInteger: Bool) -> JSONValue? {
+        guard value.isFinite else { return nil }
+        guard isInteger else { return .number(value) }
+        return int64(value).map(JSONValue.integer)
+    }
+
+    /// A double as an `Int64` when it is one, and nil when the conversion would trap.
+    static func int64(_ value: Double) -> Int64? {
+        guard value.isFinite, value >= -9223372036854775808.0, value < 9223372036854775808.0 else { return nil }
+        return Int64(value)
+    }
+
+    /// A numeric control's text for a value: the integer spelling where the value is one, and
+    /// nothing at all where the value could not be sent — so the field shows what an accept carries.
+    static func spell(_ value: Double, isInteger: Bool) -> String {
+        guard value.isFinite else { return "" }
+        if isInteger { return int64(value).map(String.init) ?? "" }
+        if value == value.rounded(), let exact = int64(value) { return String(exact) }
+        return String(value)
+    }
+
     /// What a field starts as, before the user touches anything.
     static func initialValue(_ control: Control) -> JSONValue? {
         switch control {
         case .text(let value): value.map(JSONValue.string)
         case .picker(_, let value): value.map(JSONValue.string)
-        case .number(let isInteger, let value): value.map { isInteger ? .integer(Int64($0)) : .number($0) }
+        case .number(let isInteger, let value): value.flatMap { numberValue($0, isInteger: isInteger) }
         case .toggle(let value): .bool(value)
         case .multiSelect(_, let value): value.isEmpty ? nil : .array(value.map(JSONValue.string))
         case .raw: nil
@@ -95,10 +144,14 @@ struct ElicitationForm: Sendable, Hashable {
     }
 
     /// The `content` an accept carries: one key per field the user gave a value for, as a sibling of
-    /// `action` (anchor 10). A field left empty is absent rather than null, because a null is an
-    /// answer and an untouched optional field is not.
+    /// `action` (anchor 10).
+    ///
+    /// **A null here was typed, so it stays.** An untouched field is absent because the card never
+    /// puts a value in for it, not because nulls are filtered — and a raw field holding `null` is a
+    /// property answered with the one value a nullable schema asks for. Filtering it made a required
+    /// nullable property unanswerable and dropped an optional one without saying so.
     static func content(_ values: [String: JSONValue]) -> JSONValue {
-        .object(values.filter { $0.value != .null })
+        .object(values)
     }
 
     /// A raw field's typed text as JSON, and as a string when it does not parse. The point of the

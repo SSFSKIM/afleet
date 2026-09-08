@@ -35,6 +35,11 @@ struct ElicitationCardView: View {
         var values: [String: JSONValue] = [:]
         /// A raw field's text, kept as text so an unparseable draft is not thrown away mid-edit.
         var rawText: [String: String] = [:]
+        /// The properties the user **emptied**, which `values` cannot hold because an empty value is
+        /// no value. Without it a cleared field is indistinguishable from an untouched one and the
+        /// schema's default comes back — so deselecting the last default option reselected it and a
+        /// defaulted text field could not be cleared at all.
+        var cleared: Set<String> = []
         init() {}
     }
 
@@ -58,18 +63,37 @@ struct ElicitationCardView: View {
 
     var url: String? { request.fields.url }
 
-    /// Nil in url mode, and nil for a form-mode request whose schema carries no properties.
+    /// Nil in url mode, and nil for a form-mode request whose schema is not an object.
     var form: ElicitationForm? { isURLMode ? nil : ElicitationForm(request.fields.requestedSchema) }
 
+    /// What the user has said about one property, which is three states and not two: a value, an
+    /// explicit emptying, and silence. Only the third falls back to the schema's `default`.
+    enum Entry: Sendable, Hashable {
+        case untouched, cleared, value(JSONValue)
+    }
+
+    func entry(_ name: String) -> Entry {
+        if let value = draft.values[name] { return .value(value) }
+        return draft.cleared.contains(name) ? .cleared : .untouched
+    }
+
     /// The `content` an accept would carry: the user's values over the schema's defaults.
+    ///
+    /// **An emptied list is an empty list; an emptied string is no answer.** `string[]` has a value
+    /// meaning "none of these" and the card sends it, because the user chose it. A string does not:
+    /// `""` is indistinguishable from a field nobody filled in, so an emptied text field is absent,
+    /// which is also what leaves a required one unacceptable.
     var content: JSONValue {
         guard let form else { return .object([:]) }
         var out: [String: JSONValue] = [:]
         for field in form.fields {
-            if let typed = draft.values[field.name] {
+            switch entry(field.name) {
+            case .value(let typed):
                 out[field.name] = typed
-            } else if let initial = ElicitationForm.initialValue(field.control) {
-                out[field.name] = initial
+            case .cleared:
+                if case .multiSelect = field.control { out[field.name] = .array([]) }
+            case .untouched:
+                if let initial = ElicitationForm.initialValue(field.control) { out[field.name] = initial }
             }
         }
         return ElicitationForm.content(out)
@@ -130,6 +154,10 @@ struct ElicitationCardView: View {
             ForEach(form.fields) { field in
                 self.field(field)
             }
+            if form.fields.isEmpty {
+                Text("This server asked for no values: accepting sends it an empty answer.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if form.isPartial {
                 Text("Part of this form is shown as raw JSON: the server asked for a shape afleet does not draw.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -157,8 +185,13 @@ struct ElicitationCardView: View {
         switch field.control {
         case .text(let fallback):
             TextField(field.title, text: text(field.name, default: fallback ?? ""))
-        case .picker(let options, let fallback):
-            Picker(field.title, selection: text(field.name, default: fallback ?? options.first ?? "")) {
+        case .picker(let options, _):
+            Picker(field.title, selection: selection(for: field)) {
+                // The empty row is the selection an untouched enum with no `default` has. Without a
+                // row of its own that state drew as the first option, so the card showed a choice
+                // the answer did not carry — and, for a required property, showed one while Accept
+                // stayed disabled.
+                Text("Not chosen").tag("")
                 ForEach(options, id: \.self) { Text($0).tag($0) }
             }
             .labelsHidden()
@@ -185,54 +218,83 @@ struct ElicitationCardView: View {
 
     // MARK: - The controls' bindings
 
-    private func text(_ name: String, default fallback: String) -> Binding<String> {
-        Binding(get: { draft.values[name]?.stringValue ?? fallback },
-                set: { draft.values[name] = $0.isEmpty ? nil : .string($0) })
+    /// A picker's selection, which is the empty string when nothing is selected. Not private for the
+    /// same reason `control(_:)` is not: a `Picker`'s selection lives in SwiftUI's storage, so this
+    /// is the only handle on the value the card is showing — and that value is what an accept has to
+    /// agree with.
+    func selection(for field: ElicitationForm.Field) -> Binding<String> {
+        guard case .picker(_, let fallback) = field.control else { return text(field.name, default: "") }
+        return text(field.name, default: fallback ?? "")
     }
 
-    private func number(_ name: String, isInteger: Bool, default fallback: Double?) -> Binding<String> {
+    /// The bindings are internal for the reason `control(_:)` is: SwiftUI stores a control's
+    /// binding, not the edit a user makes through it, so this is the only handle on what typing
+    /// into a field does to the draft.
+    func text(_ name: String, default fallback: String) -> Binding<String> {
         Binding(get: {
-            if let typed = draft.values[name]?.doubleValue { return Self.spell(typed, isInteger: isInteger) }
-            return fallback.map { Self.spell($0, isInteger: isInteger) } ?? ""
-        }, set: { text in
-            guard let parsed = Double(text.trimmingCharacters(in: .whitespaces)) else {
-                draft.values[name] = nil
-                return
+            switch entry(name) {
+            case .value(let value): value.stringValue ?? fallback
+            case .cleared: ""
+            case .untouched: fallback
             }
-            draft.values[name] = isInteger ? .integer(Int64(parsed)) : .number(parsed)
+        }, set: { typed in
+            draft.values[name] = typed.isEmpty ? nil : .string(typed)
+            if typed.isEmpty { draft.cleared.insert(name) } else { draft.cleared.remove(name) }
         })
     }
 
-    private func toggle(_ name: String, default fallback: Bool) -> Binding<Bool> {
+    func number(_ name: String, isInteger: Bool, default fallback: Double?) -> Binding<String> {
+        Binding(get: {
+            if let typed = draft.values[name]?.doubleValue {
+                return ElicitationForm.spell(typed, isInteger: isInteger)
+            }
+            return fallback.map { ElicitationForm.spell($0, isInteger: isInteger) } ?? ""
+        }, set: { text in
+            draft.values[name] = ElicitationForm.numberValue(text, isInteger: isInteger)
+        })
+    }
+
+    func toggle(_ name: String, default fallback: Bool) -> Binding<Bool> {
         Binding(get: { draft.values[name]?.boolValue ?? fallback }, set: { draft.values[name] = .bool($0) })
     }
 
     /// A free-typed string array: one value per comma-separated element, which is what a server
     /// asking for `string[]` without an `enum` has no better way to receive.
-    private func list(_ name: String, default fallback: [String]) -> Binding<String> {
+    func list(_ name: String, default fallback: [String]) -> Binding<String> {
         Binding(get: {
-            let current = draft.values[name]?.arrayValue?.compactMap(\.stringValue) ?? fallback
-            return current.joined(separator: ", ")
+            self.selected(name, default: fallback).joined(separator: ", ")
         }, set: { text in
             let parts = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            draft.values[name] = parts.isEmpty ? nil : .array(parts.map(JSONValue.string))
+            self.store(parts, in: name)
         })
     }
 
-    private func raw(_ name: String) -> Binding<String> {
+    func raw(_ name: String) -> Binding<String> {
         Binding(get: { draft.rawText[name] ?? "" }, set: { text in
             draft.rawText[name] = text
             draft.values[name] = ElicitationForm.rawValue(text)
+            if draft.values[name] == nil { draft.cleared.insert(name) } else { draft.cleared.remove(name) }
         })
     }
 
-    private func pick(_ option: String, in name: String, default fallback: [String]) {
-        var current = draft.values[name]?.arrayValue?.compactMap(\.stringValue) ?? fallback
+    func pick(_ option: String, in name: String, default fallback: [String]) {
+        var current = selected(name, default: fallback)
         if let index = current.firstIndex(of: option) { current.remove(at: index) } else { current.append(option) }
-        draft.values[name] = current.isEmpty ? nil : .array(current.map(JSONValue.string))
+        store(current, in: name)
     }
 
-    private static func spell(_ value: Double, isInteger: Bool) -> String {
-        isInteger || value == value.rounded() ? String(Int64(value)) : String(value)
+    /// A list control's current elements: the draft's, then the schema's default, and none at all
+    /// once the user has emptied it.
+    private func selected(_ name: String, default fallback: [String]) -> [String] {
+        switch entry(name) {
+        case .value(let value): value.arrayValue?.compactMap(\.stringValue) ?? fallback
+        case .cleared: []
+        case .untouched: fallback
+        }
+    }
+
+    private func store(_ elements: [String], in name: String) {
+        draft.values[name] = elements.isEmpty ? nil : .array(elements.map(JSONValue.string))
+        if elements.isEmpty { draft.cleared.insert(name) } else { draft.cleared.remove(name) }
     }
 }
