@@ -21,7 +21,16 @@ enum FileLink {
     /// The line is `ReadInput.offset` where the call carried one and **nil** where it did not — a
     /// fabricated line 1 would scroll a reader away from the top of a file they asked to see whole.
     static func paths(in call: ToolCallItem) -> [(path: String, line: Int?)] {
-        switch call.input {
+        paths(in: call.input)
+    }
+
+    /// The same reading, over a tool input that arrived without a call to belong to.
+    ///
+    /// A permission card holds the input the engine is *asking* about, and no `ToolCallItem` exists
+    /// for it — the call has not happened. One derivation for both, so the path a card links and the
+    /// path the row for that same call links later cannot disagree.
+    static func paths(in input: ToolInput) -> [(path: String, line: Int?)] {
+        switch input {
         case .read(let input): [(input.filePath, input.offset)]
         case .edit(let input): [(input.filePath, nil)]
         case .write(let input): [(input.filePath, nil)]
@@ -65,22 +74,37 @@ struct FileLinkLabel: View {
 
     let path: String
     var line: Int?
+    /// The context, where the host that draws this label already holds one.
+    ///
+    /// **Not a second capability route.** It is the same value the environment carries, handed down
+    /// by a host that read it once for the whole row rather than read again per label — which is
+    /// also what makes an emission from a card assertable without a render pass, since a property
+    /// wrapper reads its default outside one. A label drawn with none falls back to the environment,
+    /// which is how every tool row draws its paths.
+    var context: TimelineRenderContext?
 
-    @Environment(\.timelineContext) private var context
+    @Environment(\.timelineContext) private var environmentContext
+
+    /// The context this label acts through: the host's, else the subtree's, else none at all.
+    private var capabilities: TimelineRenderContext? { context ?? environmentContext }
 
     var body: some View {
         Button {
-            if let context { FileLink.open(path, line: line, in: context) }
+            if let capabilities { FileLink.open(path, line: line, in: capabilities) }
         } label: {
+            // The label is a bare `Text` and every modifier is on the button, which draws the same
+            // thing: a modifier applied inside the closure makes this a `Button<ModifiedContent<…>>`
+            // and the affordance stops being reachable by the type a test can name — an assertion
+            // that a link is *drawn* would then have to rebuild it, which asserts nothing.
             Text(line.map { "\(display) : \($0)" } ?? display)
-                .font(.caption.monospaced())
-                .lineLimit(1)
-                .truncationMode(.middle)
         }
+        .font(.caption.monospaced())
+        .lineLimit(1)
+        .truncationMode(.middle)
         .buttonStyle(.link)
         // A row outside the timeline's subtree has no context and therefore no capability to call
         // (contract Y7): the label draws, and does nothing, rather than calling a stand-in.
-        .disabled(context == nil)
+        .disabled(capabilities == nil)
     }
 
     /// The last two components, which is what a reader recognises a file by; the full path is the

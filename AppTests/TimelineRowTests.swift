@@ -17,13 +17,17 @@ final class TimelineRowTests: XCTestCase {
 
     // MARK: - The claim
 
-    /// Contract Y1: C6.1 claims eleven of the thirteen kinds and never `decision` or `sentFile`,
-    /// which keep resolving to C5's placeholder until C6.3 lands.
+    /// Contract Y1: every one of the thirteen kinds resolves to a row, and none draws C5's
+    /// placeholder.
     ///
-    /// Both directions, because "eleven are claimed" and "two are not" are different failures: a
-    /// registration loop that claimed all thirteen would break another leaf's fence at the merge,
-    /// and one that claimed ten would leave a kind drawing a one-line summary for ever.
-    func testEveryClaimedKindHasABuilderAndTwoDoNot() {
+    /// **Amended 2026-09-09 (Task 8).** This said eleven, with `decision` and `sentFile` left to the
+    /// leaf that owns their cards. Contract Y7's mount is what changed it: those two rows exist to
+    /// consume the render context, the context is this leaf's, and the claim is made in one call
+    /// rather than two. Both directions are kept and still mean something — `claimed` and `deferred`
+    /// are written lists and the loop reports what actually resolved, so a kind dropped from the
+    /// registration shows up here as a placeholder rather than as a one-line summary in front of a
+    /// reader.
+    func testEveryClaimedKindHasABuilderAndNoneDrawsThePlaceholder() {
         let registry = RowRegistry()
         TimelineRowKinds.register(on: registry)
 
@@ -38,9 +42,11 @@ final class TimelineRowTests: XCTestCase {
             }
         }
 
-        XCTAssertEqual(claimed.count, 11, "\(claimed.count) kind(s) resolved to a C6.1 row, not 11")
+        XCTAssertEqual(claimed.count, TimelineCategory.allCases.count,
+                       "\(claimed.count) kind(s) resolved to a row, not \(TimelineCategory.allCases.count)")
         XCTAssertEqual(placeholders, TimelineRowKinds.deferred,
                        "the kinds still drawing the placeholder are \(placeholders.map(\.rawValue).sorted())")
+        XCTAssertTrue(placeholders.isEmpty, "\(placeholders.count) kind(s) still draw C5's placeholder")
         XCTAssertEqual(claimed, TimelineRowKinds.claimed,
                        "the kinds drawing a C6.1 row are \(claimed.map(\.rawValue).sorted())")
     }

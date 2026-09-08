@@ -6,13 +6,24 @@ three"): the channel column's list, every row kind but `decision` and `sentFile`
 markdown, clusters, thinking, chips, members, turn summaries, hidden meta, the header's readbacks
 and S7. No other leaf edits anything in this directory.
 
-## Rows/ — the eleven kinds (C6.1 Task 4)
+**Amended 2026-09-09 (Task 8).** The sentence above still describes the *ownership* split — the two
+cards, their answer mappings and the retraction bookkeeping are C6.3's and live in `App/Decisions/` —
+but this directory now holds the two rows that **mount** them, because those rows exist to consume
+the render context and the context is this leaf's (contract Y7).
+
+## Rows/ — the thirteen kinds (C6.1 Task 4, completed at Task 8)
 
 One file per kind group, and two pure layers under the views so the parts worth asserting are
 values rather than layout:
 
-- `TimelineRowBuilders.swift` — contract Y1's registration. Eleven kinds claimed, `decision` and
-  `sentFile` never; `AppModel.init` claims them on the registry it is given.
+- `TimelineRowBuilders.swift` — contract Y1's registration. All thirteen kinds claimed in one call,
+  on the registry `AppModel.init` is given; the claim on `RowRegistry.shared` is made once per
+  process, and the registry's trap on a second claim of a *kind* is left saying the one thing it
+  exists to say.
+- `DecisionRow.swift`, `SentFileRow.swift` — contract Y7's two mounts. They draw another leaf's card
+  and row and supply what a builder is not handed: the channel, the link capability, the app's one
+  `DecisionReservations` and the fold's raise. With no context they fall back to the readable halves,
+  which is what an archived channel gets.
 - `ToolResultForms.swift` — the per-tool sentences of parity §41.16.7 and the error normalisation
   of §41.16.6, as a value. Eleven tools have their own form; everything else takes the generic one
   and tracker 136 carries the remainder with the parity table as its map.
@@ -25,8 +36,8 @@ values rather than layout:
   TCC-gated and blocks on a consent dialog.
 - `ClusterRow.swift`, `ThinkingDisclosure.swift`, `MessageRows.swift`, `ToolCallRow.swift`,
   `TaskRunRow.swift`, `NoticeRows.swift`, `CompactBoundaryRow.swift`, `TurnSummaryRow.swift`,
-  `OpaqueRow.swift` — the rest of §8, with the `taskRun` row hosting C6.3's `TaskCardView` behind
-  a seam named for it.
+  `OpaqueRow.swift` — the rest of §8, with the `taskRun` row hosting C6.3's `TaskCardView` through
+  `TaskCardSeam` (contract Y2's second host, filled at Task 8).
 
 Everything a row needs that is not its item arrives through `TimelineRenderContext`, including the
 `TimelineNeighbourhood` gathered once per publish: the tool calls a cluster names, the instant

@@ -35,6 +35,11 @@ struct TimelineListView: View {
     /// the refusal comes back long after the row value that pressed the button was discarded.
     @State private var editing = TimelineEditState()
 
+    /// What a settled refusal dialog took back (spec D11). Channel-scoped and held here because it
+    /// outlives the card that wrote into it: the dialog is answered, the row is discarded, and the
+    /// messages it retracted must stay off the screen for every draw after that.
+    @State private var retraction = RetractionRegistry()
+
     var body: some View {
         // No change set: the model republishes the whole timeline and states no diff, so the table
         // computes one by key. When the model does start naming its changes the table prefers them.
@@ -57,12 +62,20 @@ struct TimelineListView: View {
         TimelineRenderContext(key: model.key,
                               links: app.panels.links,
                               signal: { [model] signal in await model.signal(signal) },
+                              // The app's one set, and never one made here: every surface that can
+                              // answer a request reserves in the same one, which is what makes the
+                              // second of two answers refuse instead of reaching the wire (Y7, §15).
+                              decisions: app.decisions,
+                              lifecycle: app.timelines.lifecycle,
+                              retraction: retraction,
+                              cwd: app.browser?.row(model.key.session)?.cwd,
                               agents: app.agentNavigation,
                               collapse: collapse,
                               composer: composerSite(in: app),
                               editing: editing,
                               neighbourhood: TimelineNeighbourhood(items: model.timeline.items,
-                                                                   agents: model.timeline.agents))
+                                                                   agents: model.timeline.agents),
+                              isOverlayStale: model.timeline.overlay.stale)
     }
 
     /// Contract Y6's route from a row to the channel's composer: the app's one `ComposerRegistry`,

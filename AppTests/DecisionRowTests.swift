@@ -74,26 +74,42 @@ final class DecisionRowTests: XCTestCase {
     /// It resolves through `RowRegistry.shared` after building an `AppModel`, because the
     /// registration is the deliverable — a test that registered on a registry of its own would
     /// assert that the views exist and say nothing about whether the app reaches them.
+    ///
+    /// **Amended 2026-09-09 (C6.1 Task 8), on two counts, both of them merges rather than changes
+    /// of intent.** The kinds now resolve to `DecisionRow` and `SentFileRow`, contract Y7's mounts,
+    /// which draw the two rows asserted below and hand them the capabilities a builder is not given;
+    /// the rows themselves are reached through the mount's own body and not from the registry's
+    /// `AnyView`, so the type named here is the mount. And the fence's other direction is no longer
+    /// "the placeholder": on a branch carrying both leaves every kind is claimed, so what says the
+    /// two claims claimed no third is that a third kind draws **its own leaf's row**.
     func testTheAppRegistersBothKindsAndResolvesThemToThisChildsRows() throws {
         _ = AppModel()
 
         let decision = RowRegistry.shared.view(for: TimelineRow(Self.decisionItem(state: .pending)))
-        XCTAssertEqual(ViewTree.values(of: DecisionRowView.self, in: decision).count, 1,
-                       "the .decision kind resolved to \(ViewTree.values(of: DecisionRowView.self, in: decision).count) decision row(s), not 1")
+        XCTAssertEqual(ViewTree.values(of: DecisionRow.self, in: decision).count, 1,
+                       "the .decision kind resolved to \(ViewTree.values(of: DecisionRow.self, in: decision).count) decision row(s), not 1")
+        // And the mount draws this child's row: with no capabilities — which is what a row outside
+        // the timeline's subtree has — the readable half is what it falls back to.
+        let mounted = DecisionRowContent(row: TimelineRow(Self.decisionItem(state: .pending)),
+                                         context: nil, answering: nil)
+        XCTAssertEqual(ViewTree.values(of: DecisionRowView.self, in: mounted.body).count, 1,
+                       "the mount drew \(ViewTree.values(of: DecisionRowView.self, in: mounted.body).count) decision row(s), not 1")
 
         let sent = RowRegistry.shared.view(for: TimelineRow(Self.sentFile(files: ["/invented/a.txt"])))
-        XCTAssertEqual(ViewTree.values(of: SentFileRowView.self, in: sent).count, 1,
-                       "the .sentFile kind resolved to \(ViewTree.values(of: SentFileRowView.self, in: sent).count) sent-file row(s), not 1")
+        XCTAssertEqual(ViewTree.values(of: SentFileRow.self, in: sent).count, 1,
+                       "the .sentFile kind resolved to \(ViewTree.values(of: SentFileRow.self, in: sent).count) sent-file row(s), not 1")
+        let sentMount = SentFileRowContent(row: TimelineRow(Self.sentFile(files: ["/invented/a.txt"])), context: nil)
+        XCTAssertEqual(ViewTree.values(of: SentFileRowView.self, in: sentMount.body).count, 1,
+                       "the mount drew \(ViewTree.values(of: SentFileRowView.self, in: sentMount.body).count) sent-file row(s), not 1")
 
-        // The fence, in the other direction: claiming two kinds claims no third. A kind C6.1 owns
-        // still draws C5's placeholder on this branch.
+        // The fence, in the other direction: claiming two kinds claims no third.
         let opaque = RowRegistry.shared.view(for: TimelineRow(.opaque(OpaqueItem(
             id: ItemID(stream: Self.stream, key: "invented-opaque-1"),
             provenance: Provenance(stream: Self.stream, origin: .file),
             reason: "an unmodelled frame", value: .null))))
-        XCTAssertEqual(ViewTree.values(of: PlaceholderRowView.self, in: opaque).count, 1,
-                       "a kind this child did not claim no longer draws the placeholder row")
-        XCTAssertEqual(ViewTree.values(of: DecisionRowView.self, in: opaque).count, 0,
+        XCTAssertEqual(ViewTree.values(of: OpaqueRow.self, in: opaque).count, 1,
+                       "a kind this child does not own no longer draws the row of the leaf that does")
+        XCTAssertEqual(ViewTree.values(of: DecisionRow.self, in: opaque).count, 0,
                        "this child's decision row was reached for a kind it does not own")
     }
 

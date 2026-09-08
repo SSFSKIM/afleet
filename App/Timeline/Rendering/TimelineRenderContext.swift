@@ -60,6 +60,43 @@ struct TimelineRenderContext {
     /// stays pending for ever, which is tracker 129's shape exactly.
     let signal: @Sendable (HostSignal) async -> Void
 
+    /// Contract Y7's third capability — **the app's one reservation set**, `AppModel.decisions`
+    /// (spec §15).
+    ///
+    /// A request the engine is waiting on is answerable exactly once, and three surfaces can answer
+    /// it: Activity's row, the Thread tab and this list's card. Each builds its own
+    /// `DecisionAnswering` and they all reserve in *this* set, so the second click finds the id
+    /// already taken and sends nothing, and a refused reply keeps its draft. A row that built a set
+    /// of its own would disable only itself and reopen the double-answer window, which is what
+    /// another leaf's tracker 300 records. It travels here rather than being reached for, because
+    /// this value is the only thing a row is handed.
+    let decisions: DecisionReservations
+
+    /// The channel's X5 lifecycle, for the two cards another leaf owns whose actions leave this
+    /// side: the decision card's `LifecycleAction.answer` and the task card's `stop_task` and
+    /// `background_tasks`.
+    ///
+    /// Nil is a real answer here. A channel with no process — an archived one, or a host built
+    /// without a workspace — has nothing to send to, and the rows then draw their reading and offer
+    /// no action rather than offering one that goes nowhere.
+    let lifecycle: (any LifecycleAPI)?
+
+    /// Where a resolved refusal dialog's retracted uuids go, and what the list filters through
+    /// before it draws (spec D11).
+    ///
+    /// **Both halves of one registry, deliberately.** The card writes into it when a dialog settles
+    /// and `TimelineListView.retained(_:by:)` reads it when the rows reach the table; a registry
+    /// with only one half wired either retracts nothing or filters nothing, and neither failure is
+    /// visible from the other side.
+    let retraction: RetractionRegistry
+
+    /// The channel's working directory, which is what a relative path in an item resolves against.
+    ///
+    /// Nil where the host cannot name one — a channel the index has no cwd for. A relative path is
+    /// then not resolved at all, because resolving it against the app's own process directory would
+    /// name a different file, and previewing or linking that would be a lie about the item.
+    let cwd: URL?
+
     /// Where an `Agent` chip goes — contract Y4's seam, a no-op until C6.4 fills it.
     let agents: any AgentNavigating
 
@@ -95,6 +132,12 @@ struct TimelineRenderContext {
     /// them (tracker 187).
     var neighbourhood = TimelineNeighbourhood()
 
+    /// C3's overlay is stale — the process this channel's pending cards belong to has exited. It is
+    /// the second half of D12's `.inert` reading, and a card cannot derive it: it is a property of
+    /// the overlay and not of the item. Defaulted, because a row drawn outside a channel's publish
+    /// has no overlay to be stale.
+    var isOverlayStale: Bool = false
+
     /// `get_settings`' auto-scroll preference. Task 6 lands the readout that sets it; until then a
     /// channel follows its stream, which is what the engine's own renderer does.
     var autoScrollEnabled: Bool = true
@@ -104,6 +147,49 @@ struct TimelineRenderContext {
     /// renderer honours rather than a debug switch. Task 5 lands the readout that sets it; until
     /// then fenced blocks are highlighted, which is what the engine's own renderer does.
     var syntaxHighlightingEnabled: Bool = true
+}
+
+// MARK: - What a row builds through the context
+
+/// The two objects a row cannot build for itself, built here (contract Y7, spec §15).
+///
+/// **They are built through the context rather than handed down ready-made** because both hold
+/// per-surface state a row is entitled to its own copy of — a refusal banner, a card's in-flight
+/// flag — while the state that must *not* be duplicated, the reservation set, is the context's and
+/// is passed in. One shared set, one banner per card, is the split contract Y2 asks for.
+extension TimelineRenderContext {
+
+    /// The object a decision card's answer leaves by.
+    ///
+    /// Two things are wired here and each is a way for the mount to be silently wrong: the
+    /// reservation set is **this context's**, so a second surface answering the same request finds
+    /// the slot taken; and `raise` is **this context's `signal`**, so a successful answer reaches
+    /// the channel's fold. The engine sends no frame back for an answer, so a raise that went
+    /// nowhere would leave the card reading `.pending` for ever with every gate on both leaves
+    /// green — which is the failure Y7 exists to prevent.
+    ///
+    /// Nil for a channel with no process: nothing to answer through, and the row draws its reading.
+    @MainActor
+    func makeAnswering() -> DecisionAnswering? {
+        guard let lifecycle else { return nil }
+        let answering = DecisionAnswering(lifecycle: lifecycle, reservations: decisions)
+        answering.raise = { [signal] _, hostSignal in await signal(hostSignal) }
+        return answering
+    }
+
+    /// Contract Y2's second host: the model behind `TaskCardView` on the `taskRun` row.
+    ///
+    /// **The registry mirror is empty, and that is a known gap rather than a placeholder.** §8.4
+    /// offers *Move to background* only for a task C3's `RegistryMirror` knows, and no mirror is
+    /// reachable from the timeline's read model — `ChannelTimeline` carries the overlay, the durable
+    /// half and the preview, and the fold's mirror is inside the ingestion. So the card offers
+    /// *Stop*, which reads the item's own status, and never offers the backgrounding action.
+    /// Tracker 321.
+    @MainActor
+    func makeTaskCard(_ item: TaskRunItem) -> TaskCardModel? {
+        guard let lifecycle else { return nil }
+        return TaskCardModel(item: item, registry: RegistryMirror(), lifecycle: lifecycle, channel: key)
+    }
 }
 
 // MARK: - The neighbourhood
