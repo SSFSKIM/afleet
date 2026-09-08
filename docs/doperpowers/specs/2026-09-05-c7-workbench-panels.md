@@ -59,7 +59,9 @@ sum of its leaves:
    checkout with no network, covering the PTY layer's spawn, resize and exit, `LinkRouter`
    over every case, lane assignment for a merge, an octopus merge and a detached tag, the
    Monaco bridge's message codec, and the git and gh parsers; an import test proves that no
-   Workbench module imports `ClaudeWire` (X1).
+   Workbench module imports `ClaudeWire` (X1) — the package-wide walk over `Workbench/Sources`
+   is C7.1's, with the manifest (ruled 2026-09-08 at C7.3's merge); each leaf keeps a local
+   walk over its own sources.
 7. **The spikes are settled** with a Revision Note either way: S1 promoted or SwiftTerm
    adopted behind `TerminalSurface`; S3 promoted or its fallback adopted.
 8. Because C7 is code-bearing, recomposition ends with an independent review of the merged
@@ -191,7 +193,8 @@ every target, one library product `Workbench` whose umbrella target re-exports t
 below. Dependencies: `../AfleetCore`, `../FleetKit` (X1; never `ClaudeWire`), and
 `Lakr233/libghostty-spm` pinned `exact: "1.5.20260903"` until a leaf bumps it with a
 Revision Note. Targets, each owned by exactly one leaf; a leaf adds targets only inside its
-own marked region of the manifest, and C7.1 owns the file itself:
+own marked region of the manifest, and C7.1 owns the file itself and the package-wide X1
+import test over `Workbench/Sources` (amended 2026-09-08 at C7.3's merge):
 
 | Target | Owner | Depends on | Notes |
 |---|---|---|---|
@@ -309,7 +312,26 @@ intact, one proving the fallback, one proving specificity.
 
 **[binding — C7.7 renders only these types]** `SourceControlCore` defines `GitCommit
 {hash, parents: [String], refs: [GitRef], authorName, authorTimestamp, subject}` parsed from
-`git log --topo-order --all --parents --format='%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1e'`,
+`git log --topo-order --all --parents --decorate=full -z
+--format='%H%x00%P%x00%D%x00%an%x00%at%x00%s'`, parsed as fixed groups of six NUL-separated
+fields (amended 2026-09-08 at C7.3's merge: `%D`'s shortened decorations cannot tell a
+remote-tracking `origin/feature` from a local branch of that name, so `--decorate=full` prints
+`refs/heads/…`, `refs/remotes/…`, `refs/tags/…` and the parser strips the prefixes; subjects may
+legally carry 0x1e and 0x1f, so the old framing let one commit in any cloned repository blank
+the graph, and git forbids NUL in commit metadata, which is why the field count is the frame;
+both pins stay explicit because a user's `log.decorate` is then the adverse setting). The
+changed-file list is one `git diff --raw --numstat -z --end-of-options …` invocation — one
+snapshot, modes read so a gitlink is classified and never blob-read, object ids deliberately
+unread — with `--ignore-submodules=none` on it and on `git status`; a base that is not a full
+object id is resolved through `rev-parse --verify --end-of-options` first, so no revision is
+ever parsed as an option. Every reader resolves the repository root through
+`GitCommands.repositoryRoot` (`rev-parse --show-toplevel`; `.notARepository` otherwise), and a
+working-tree read is confined to it (no absolute or `..` path, `realpath` ancestors inside the
+root, `open(O_NOFOLLOW)` + `fstat` regular-file-only and at most the runner's 64 MiB cap). The
+six user settings that corrupt the record — `log.decorate`, `log.showRoot`, `log.showSignature`,
+`status.showUntrackedFiles`, `diff.renameLimit`, `status.renameLimit` — plus
+`diff.ignoreSubmodules` are pinned on the command line and exercised hostile by C7.3's
+`AdverseConfigurationTests`,
 `WorkingTreeStatus` from `git status --porcelain=v2 --branch`, `LaneAssignment {rows:
 [GraphRow]}` where a row carries the commit, its lane, and the edges to the next row, and
 the `gh` models `PullRequest`, `CheckRun`, `Issue` decoded from the verified field subsets
@@ -431,8 +453,10 @@ pane, C4 owns the transition.
 
 - **Purpose:** The pure and process-level half of Source Control and GitHub: the
   `ToolRunner` that resolves `git` and `gh` through the resolved environment, the parsers
-  for `git log`, `git status` and `git diff`, lane assignment, and the `gh` models over the
-  verified field subsets.
+  for `git log`, `git status` and `git diff` — the third being the changed-file list plus
+  blob access, because the Monaco bridge takes two texts rather than a patch (narrowed
+  2026-09-08 at merge, C7.3's D8) — lane assignment, and the `gh` models over the verified
+  field subsets.
 - **Acceptance:** G1 (required): lane assignment tests on fixture repositories the tests
   build in a temporary directory with the `git` binary: a merge (at least two lanes), an
   octopus merge (three parents), a detached tag, and a repository with the working tree
@@ -444,6 +468,13 @@ pane, C4 owns the transition.
   evaluable when `gh` is logged in on the machine running it, else skipped with a named
   reason): `gh pr list --json` on a public repository with open pull requests decodes with
   no missing key.
+  **Outcome 2026-09-08:** G1 met on nine lane fixtures, every test naming the lane of every
+  commit it asserts, the first-parent mutation killed by all nine; G2 met with the
+  environment asserted by names in both directions and the timeout mutation taking 31.6 s to
+  fail; G3 evaluated live (five pull requests decoded, no missing key, no unfamiliar enum),
+  skip path verified three ways. 128 (package 128, 0 skipped) tests, 0 failures, 0 skips. The edge model was
+  replaced wholesale mid-leaf (several edges may arrive in one lane; a whole-graph property
+  pins it); merge commits' diff listing fixed; six review rounds.
 - **Edges:** blocked-by: C2 (landed), the W1 skeleton; blocks: C7.7.
 - **Contracts:** W1, W7 (owner), X11.
 - **Design inheritance:** §9.2 (scope binding, algorithm advisory), W7, the Grounding
@@ -612,7 +643,7 @@ parent's decision); any write under `<configHome>` (X9); IDE registration.
 | W1 skeleton | landed by the orchestrator on `main` before dispatch | pending |
 | C7.1 Terminal core | plan `plans/<date>-c7.1-terminal-core.md` on `child/c7-terminal-core` | not-dispatched, dispatchable after W1 |
 | C7.2 Editor core | plan `plans/<date>-c7.2-editor-core.md` on `child/c7-editor-core` | not-dispatched, dispatchable after W1 |
-| C7.3 Source Control core | ledger `ledgers/<date>-c7.3-scm-core.md` on `child/c7-scm-core` | not-dispatched, dispatchable after W1 |
+| C7.3 Source Control core | ledger `ledgers/2026-09-07-c7.3-scm-core.md`; Outcomes in the ledger | **merged** 2026-09-08 at `aa5df80` from `child/c7-scm-core` `20cdbc1` (41 commits); G1–G3 met, G3 live; 128 (package 128, 0 skipped) tests; tracker 112–126 (115 closed on the branch by `--decorate=full`; 125 is a `main` corrective on C2's `ProcessRunner`); six review rounds, the last two one pinned class (tracker 123, owner C7.7) |
 | C7.4 Terminal panel | plan on `child/c7-terminal-panel` | blocked-by C7.1, C4, C5.G4 |
 | C7.5 Files panel | plan on `child/c7-files-panel` | blocked-by C7.2, C5.G4 |
 | C7.6 Browser panel | ledger on `child/c7-browser-panel` | blocked-by C7.2, C4, C5.G4 |
@@ -792,4 +823,13 @@ retrospect.
   The alternative of dropping `async` from `unregister(tab:)` was rejected precisely because it
   would force C7.2's registry to be main-actor-isolated state rather than an actor; C7.2 keeps
   that choice.
-
+- 2026-09-08 reconciliation of C7.3 (merge `aa5df80` from `child/c7-scm-core` `20cdbc1`,
+  41 commits). No `[parent-impact]`. Three Parent revisions applied: the package-wide X1
+  import test is C7.1's with the manifest (item 6, W1); W7's diff clause is the changed-file list
+  plus blob access; W7's command line gains `--decorate=full`, ruled and applied on the branch
+  before merge (tracker 115 closed). Found by its reviews and worth the record: a `TempTree` guard
+  that compared components case-sensitively before the path existed (an X9 path on a
+  case-insensitive volume, fixed by canonicalising through the nearest existing ancestor); the
+  user-configuration class the fixtures were blind to (six settings pinned, an adverse-fixture
+  suite and a tripwire); C2's `ProcessRunner` carrying the same unbounded pipe drain (tracker
+  125, corrective on `main`). Tracker 112 (two runners, the price of X1) stands. 
