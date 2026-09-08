@@ -159,6 +159,19 @@ public struct HolderSnapshot: Sendable {
     public init(holders: HolderSet, jobs: [JobShort: JobRecord], skipped: Int) {
         self.holders = holders; self.jobs = jobs; self.skipped = skipped
     }
+
+    /// The roster as `LifecycleAPI.jobs()` answers it: every job that has not gone terminal, joined by short to the
+    /// holder that names its worker. One derivation, read by the call and by the published roster signal, so a
+    /// surface that listens and a surface that polls cannot be told two different things about the same read.
+    public var roster: [JobEntry] {
+        jobs.filter { !$0.value.isTerminal }.map { short, record in
+            let holder = holders.holders.first { $0.jobShort == short.rawValue }
+            return JobEntry(short: short, state: record.state, kind: holder?.kind ?? "bg",
+                            sessionID: record.sessionId.flatMap(SessionID.init),
+                            cwd: record.cwd.map { URL(filePath: $0) },
+                            name: holder?.presence?.name)
+        }.sorted { $0.short.rawValue < $1.short.rawValue }
+    }
 }
 
 public protocol HolderReader: Sendable {

@@ -51,6 +51,15 @@ public actor Fleet: LifecycleAPI {
     /// Every supervisor's transitions, merged. A supervisor built later joins the same stream.
     public nonisolated let updates: AsyncStream<ChannelState>
 
+    private let jobUpdatesContinuation: AsyncStream<[JobEntry]>.Continuation
+    /// The roster, republished in full whenever the observer's read of it changes. Derived from the read the
+    /// observer had already taken, so a surface that listens here costs no `agents --json` run of its own.
+    public nonisolated let jobUpdates: AsyncStream<[JobEntry]>
+    /// The task carrying the observer's roster reads onto `jobUpdates`. Held apart from `tasks` because `shutdown`
+    /// awaits it rather than cancelling it: the observer finishes its stream first, so awaiting drains whatever it
+    /// published last instead of dropping it.
+    private var rosterForwarding: Task<Void, Never>?
+
     // MARK: - Construction
 
     /// `factory` nil is production: a real `ClaudeProcess` per spawn, with the `CapturingDiagnostics` every factory
@@ -97,6 +106,7 @@ public actor Fleet: LifecycleAPI {
         self.factory = factory ?? Self.liveFactory(environment: environment, configHome: configHome,
                                                    wireSink: wireSink, capture: capture)
         (updates, updatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (jobUpdates, jobUpdatesContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
         pids.fleet = self
     }
 
@@ -150,6 +160,11 @@ public actor Fleet: LifecycleAPI {
                 await self.fanOut(set)
             }
         })
+        let rosters = observer.jobUpdates
+        let continuation = jobUpdatesContinuation
+        rosterForwarding = Task {
+            for await snapshot in rosters { continuation.yield(snapshot.roster) }
+        }
         await observer.start()
     }
 
@@ -161,9 +176,15 @@ public actor Fleet: LifecycleAPI {
     public func shutdown() async {
         for supervisor in supervisors.values { await supervisor.shutdown() }
         await observer.stop()
+        // `observer.stop()` finished the roster stream, so this ends of its own accord once it has forwarded
+        // everything the last read published. Awaiting it is what makes "the roster the fleet published" the whole
+        // roster and not whatever happened to arrive before the cancel.
+        await rosterForwarding?.value
+        rosterForwarding = nil
         for task in tasks { task.cancel() }
         tasks = []
         updatesContinuation.finish()
+        jobUpdatesContinuation.finish()
         diagnostics.flush()
     }
 
@@ -401,16 +422,7 @@ public actor Fleet: LifecycleAPI {
     /// job carries its session; an exec job carries none and is a `JobEntry` only.
     public func jobs() async -> [JobEntry] {
         _ = await observer.reconcileNow(label: OwnershipLabel.poll)
-        let snapshot = await observer.detailedSnapshot()
-        var entries: [JobEntry] = []
-        for (short, record) in snapshot.jobs where !record.isTerminal {
-            let holder = snapshot.holders.holders.first { $0.jobShort == short.rawValue }
-            entries.append(JobEntry(short: short, state: record.state, kind: holder?.kind ?? "bg",
-                                    sessionID: record.sessionId.flatMap(SessionID.init),
-                                    cwd: record.cwd.map { URL(filePath: $0) },
-                                    name: holder?.presence?.name))
-        }
-        return entries.sorted { $0.short.rawValue < $1.short.rawValue }
+        return await observer.detailedSnapshot().roster
     }
 
     /// `claude stop|respawn|rm <short>` through the runner; no PTY. A job is keyed by its short and not by a
