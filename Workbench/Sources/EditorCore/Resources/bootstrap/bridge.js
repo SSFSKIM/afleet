@@ -17,7 +17,15 @@
 
   // --- editor to host -------------------------------------------------------------------
 
+  // The host's injection, read once: one document is one navigation, so the generation this
+  // page's events are stamped with cannot change under it.
+  var config = global.afleetEditorConfig || {};
+
   function post(event) {
+    // Every event names the navigation it belongs to. A page keeps running until WebKit tears
+    // it down, so a `ready` or a `saveRequested` can arrive at the host after it has loaded
+    // another document; the host drops anything not stamped with the navigation it is showing.
+    event.generation = config.navigationGeneration;
     global.webkit.messageHandlers.afleet.postMessage(event);
   }
 
@@ -85,7 +93,6 @@
   // are fetched from inside the worker context, which the scheme handler serves like any other
   // request.
 
-  var config = global.afleetEditorConfig || {};
   var workerRoute = config.workerRoute || "scheme";
   var monacoBase = new URL("../monaco/", document.baseURI).href;
 
@@ -215,8 +222,37 @@
     // A model URI has to be unique per path, and Monaco refuses a second model at a URI it
     // already holds. The scheme is this app's own, so it can never collide with a bundle
     // resource.
+    //
+    // The URI is the identity of the file, and a model is what markers, decorations, language
+    // state and a language worker's diagnostics are keyed to — so two paths that are two files
+    // must never land on one URI. Two ways they could:
+    //
+    //   * `#` and `?` are ordinary characters in a file name and delimiters in a URI, and
+    //     `encodeURI` leaves both alone. Each path SEGMENT is escaped with
+    //     `encodeURIComponent`, which escapes them and leaves only the `/` separators as
+    //     structure.
+    //   * `/tmp/a.ts` and `tmp/a.ts` are a file and a file relative to a working directory.
+    //     The distinction is carried in the AUTHORITY rather than by a marker segment, because
+    //     an authority cannot be mistaken for a directory a real path could also contain.
+    var absoluteAuthority = "absolute";
+    var relativeAuthority = "relative";
+
     function modelURI(path) {
-      return monaco.Uri.parse("afleet-file:///" + encodeURI(path).replace(/^\/+/, ""));
+      var absolute = path.charAt(0) === "/";
+      var authority = absolute ? absoluteAuthority : relativeAuthority;
+      var body = absolute ? path.slice(1) : path;
+      var escaped = body.split("/").map(encodeURIComponent).join("/");
+      return monaco.Uri.parse("afleet-file://" + authority + "/" + escaped);
+    }
+
+    // The other direction, and the reason the escaping above has to be reversible: the path the
+    // host is offered a buffer for is read back out of the model URI, so a file it is told to
+    // write is the file the model is keyed by rather than a second spelling of it. `Uri.parse`
+    // percent-decodes the authority and the path, so the fields are already the path's own
+    // characters.
+    function pathFromModelURI(uri) {
+      var body = uri.path.replace(/^\/+/, "");
+      return uri.authority === absoluteAuthority ? "/" + body : body;
     }
 
     function reportDirty() {
@@ -260,7 +296,7 @@
         model = monaco.editor.createModel(text, language || undefined, uri);
       }
       state.model = model;
-      state.path = path;
+      state.path = pathFromModelURI(uri);
       state.savedVersionId = model.getAlternativeVersionId();
       state.wasDirty = false;
       state.editor.setModel(model);

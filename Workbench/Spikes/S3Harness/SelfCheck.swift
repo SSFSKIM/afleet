@@ -149,6 +149,11 @@ enum SelfCheck {
                          $0["complete"] = false
                          $0["timedOutWaitingForFrame"] = true
                      }),
+            // A reduced workload is not the gate's workload. `--bytes` is a diagnostic lever,
+            // and a run that took it has measured a smaller file than the clause names.
+            Scenario(name: "the large file was shrunk below the gate's 5 MiB", expected: 6,
+                     because: "65536 bytes, short of the 5242880",
+                     report: mutating("fiveMegabyteFile") { $0["bytes"] = 65_536 }),
             Scenario(name: "the scroll histogram recorded no frames", expected: 6, because: "scroll histogram recorded no frames",
                      report: mutating("scroll") { $0["frames"] = 0 }),
             // A partial histogram is a different number from the one the gate asks for: the

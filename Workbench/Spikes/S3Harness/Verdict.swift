@@ -13,6 +13,10 @@ enum Verdict {
         let reason: String
     }
 
+    /// The large-file workload the gate names, in bytes: `Spike.Options.sourceBytes` defaults to
+    /// it, and a run that took `--bytes` below it has measured something else.
+    static let requiredSourceBytes = 5 * 1024 * 1024
+
     /// The evidence the report prints, and what its absence is called.
     ///
     /// Every one of these is a workload the run is documented as performing. A run that did not
@@ -22,6 +26,15 @@ enum Verdict {
         let large = report["fiveMegabyteFile"] as? [String: Any] ?? [:]
         if large["complete"] as? Bool != true || large["toRenderMs"] == nil || large["toRenderMs"] is NSNull {
             return "the 5 MB file's render recorder never completed"
+        }
+        // `--bytes` is a diagnostic lever, and a run that took it completed a *smaller*
+        // workload than the clause names. The report records the count it actually generated,
+        // so the shortfall is readable — and a status that read only `complete` would let a
+        // reduced run exit 0 claiming the gate's numbers.
+        let sourceBytes = large["bytes"] as? Int ?? 0
+        if sourceBytes < requiredSourceBytes {
+            return "the large-file workload carried \(sourceBytes) bytes, short of the"
+                + " \(requiredSourceBytes) the gate names"
         }
         let scroll = report["scroll"] as? [String: Any] ?? [:]
         let recordedFrames = scroll["frames"] as? Int ?? 0
