@@ -219,7 +219,7 @@ import test over `Workbench/Sources` (amended 2026-09-08 at C7.3's merge):
 | `SourceControlCore` | C7.3 | AfleetCore | `git log` and `git status` parsers, lane assignment, diff model, `gh` JSON models and runner |
 | `PanelHostAPI` | C5 (see the flow-back below) | AfleetCore, FleetKit | X7's tab-registration and channel-context protocol; declared here so both Workbench and the app can import it |
 | `TerminalPanel` | C7.4 | TerminalCore, LinkRouting, PanelHostAPI, FleetKit | panes, job attach, the hatch, `claude logs` |
-| `FilesPanel` | C7.5 | EditorCore, LinkRouting, PanelHostAPI, FleetKit | tree, viewers, watcher, banners |
+| `FilesPanel` | C7.5 | AfleetCore, EditorCore, SourceControlCore, LinkRouting, PanelHostAPI, FleetKit | tree, viewers, watcher, banners; the `.diff` target reads its two texts through C7.3's `GitDiff` (row amended 2026-09-09 at C7.5's gate: W7 makes every git invocation C7.3's, and `AfleetCore` is needed to name `WorkspaceLink`/`DiffRef` under member-import visibility) |
 | `BrowserPanel` | C7.6 | LinkRouting, PanelHostAPI, FleetKit | shared tabs, quick-open, persistence |
 | `SourceControlPanel` | C7.7 | SourceControlCore, EditorCore, LinkRouting, PanelHostAPI, FleetKit | graph, detail, diffs, GitHub tab |
 | `Workbench` | umbrella | all of the above | `@_exported import` of each |
@@ -384,11 +384,16 @@ refresh cadence, and pagination.
 
 ### Store namespaces (contract W6)
 
-**[binding — X6 says who owns what]** Workbench persists under two keys of FleetKit's store:
-`workbench.browser` (the shared tab set: URLs, titles, order, selected index) and
-`workbench.panel.<configHomeHash>.<sessionId>` (per-channel panel state: open files with
-cursor positions, pane count and cwd overrides, the selected tab). Both are `Codable`
-types owned by Workbench with a schema version; FleetKit never reads them.
+**[binding — X6 says who owns what]** Workbench persists in the `workbench` namespace of FleetKit's
+store (the host binds the namespace; keys do not restate it) under `browser` (the shared tab set:
+URLs, titles, order, selected index — C7.6's) and one key per panel tab per channel,
+`panel.<tab>.<configHomeHash>.<sessionId>` — `panel.files.…` for open files with cursor positions
+(C7.5), `panel.terminal.…` for pane count and cwd overrides (C7.4), `panel.host.…` for the selected
+tab (C5). Each is a `Codable` type owned by the leaf that writes it, with its own schema version;
+FleetKit never reads them. Amended 2026-09-09 at C7.5's gate from its `[parent-impact]`: the original
+single `workbench.panel.<configHomeHash>.<sessionId>` document had three owners writing it through a
+whole-value read-modify-write, which loses writes across owners and forces one schema version on three
+worktrees.
 
 ### What the panels need from the host (contract W8, X7)
 
@@ -891,3 +896,8 @@ retrospect.
   tracker 97 (`PanelHostModel.unregister` releases host state before awaiting the router's
   withdrawal) is a `main` corrective, owner C5's fence. C7.1 and C7.3 inherit the offline bound
   and the flag. 
+- 2026-09-09 rulings at C7.5's gate (two `[parent-impact]`s accepted, applied here because C7.6 is in
+  flight on W6): the W1 `FilesPanel` row gains `AfleetCore` and `SourceControlCore`; W6 becomes one key
+  per panel tab per channel plus `browser`, in the `workbench` namespace. C7.5's advisory Parent revisions
+  (Cmd+S in §8.7; C7.7 shows a diff by emitting a `.diff` link, never by importing `FilesPanel`; the
+  tree watcher narrowed to open files with refresh on expansion and on demand) are applied at its merge.
