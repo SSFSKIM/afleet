@@ -155,11 +155,14 @@ struct BrowserURLBar: View {
                 Button { model.goForward() } label: { Image(systemName: "chevron.right") }
                     .disabled(model.chrome?.canGoForward != true)
                 Button {
-                    model.reload()
+                    // One control with two jobs, and the model decides which: while the label is
+                    // an `xmark` this stops the load rather than starting it again.
+                    model.reloadOrStop()
                 } label: {
                     Image(systemName: model.chrome?.isLoading == true ? "xmark" : "arrow.clockwise")
                 }
                 .disabled(model.selected?.web == nil)
+                .help(model.chrome?.isLoading == true ? "Stop" : "Reload")
 
                 TextField("Address", text: $typed)
                     .textFieldStyle(.roundedBorder)
@@ -182,6 +185,17 @@ struct BrowserURLBar: View {
                     .frame(height: 2)
             }
             if let message = model.urlBarMessage ?? model.notice {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 4)
+            }
+            // A load that ended without a page: a quiet row and never an alert (§10). A page that
+            // does not load is an ordinary thing for a browser to have happen, and the panel that
+            // said nothing about it left the user looking at the page before it.
+            if let message = model.loadFailureMessage {
                 Text(message)
                     .font(.caption2)
                     .foregroundStyle(.secondary)

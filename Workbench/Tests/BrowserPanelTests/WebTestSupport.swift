@@ -42,19 +42,37 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     /// learned to redirect at the D38 fix wave.
     private let redirects: [String: String]
 
+    /// Paths the server accepts a request for and then **never answers**, leaving the navigation
+    /// loading until something stops it. What a stop control has to be tested against: a page that
+    /// finishes on its own would settle whether the control worked or not.
+    private let stalls: Set<String>
+
+    /// Paths the server answers by closing the connection with no response at all. A load that
+    /// fails for an ordinary reason — the far end went away — without any test reaching a network.
+    private let drops: Set<String>
+
     private let listener: NWListener
     private let queue = DispatchQueue(label: "afleet.browserpanel.tests.loopback")
     private let lock = NSLock()
     private var requestedPaths: [String] = []
+    /// Connections a stalled path is holding open. Kept because an `NWConnection` nobody retains is
+    /// a *closed* one, which is a failed load rather than a load that never finishes.
+    private var held: [NWConnection] = []
+    private var requestExpectations: [(path: String, expectation: XCTestExpectation)] = []
     private var started: CheckedContinuation<Void, Error>?
     private var didSettleStart = false
 
     /// The base URL, once `start()` has returned. Loopback, so §11 holds: no test names a real host.
     private(set) var baseURL = URL(string: "http://127.0.0.1/")!
 
-    init(pages: [String: String], redirects: [String: String] = [:]) throws {
+    init(pages: [String: String],
+         redirects: [String: String] = [:],
+         stalls: Set<String> = [],
+         drops: Set<String> = []) throws {
         self.pages = pages
         self.redirects = redirects
+        self.stalls = stalls
+        self.drops = drops
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
@@ -88,6 +106,11 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     }
 
     func stop() {
+        lock.lock()
+        let holding = held
+        held = []
+        lock.unlock()
+        for connection in holding { connection.cancel() }
         listener.cancel()
     }
 
@@ -95,6 +118,16 @@ final class LoopbackHTTPServer: @unchecked Sendable {
     var requests: [String] {
         lock.lock(); defer { lock.unlock() }
         return requestedPaths
+    }
+
+    /// Fulfils `expectation` once `path` has been requested, so a test that must act *while* a
+    /// navigation is in flight waits for the request rather than for the chrome to catch up.
+    func expectRequest(_ path: String, _ expectation: XCTestExpectation) {
+        lock.lock()
+        let already = requestedPaths.contains(path)
+        if !already { requestExpectations.append((path, expectation)) }
+        lock.unlock()
+        if already { expectation.fulfill() }
     }
 
     func requestCount(for path: String) -> Int {
@@ -149,7 +182,23 @@ final class LoopbackHTTPServer: @unchecked Sendable {
 
         lock.lock()
         requestedPaths.append(path)
+        let waiting = requestExpectations.filter { $0.path == path }
+        requestExpectations.removeAll { $0.path == path }
         lock.unlock()
+        for entry in waiting { entry.expectation.fulfill() }
+
+        if drops.contains(path) {
+            connection.cancel()
+            return
+        }
+
+        if stalls.contains(path) {
+            // Held open deliberately, and retained: the connection is cancelled at teardown.
+            lock.lock()
+            held.append(connection)
+            lock.unlock()
+            return
+        }
 
         if let location = redirects[path] {
             let head = """

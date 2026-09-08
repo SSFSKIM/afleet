@@ -498,6 +498,111 @@ final class BrowserModelTests: XCTestCase {
         XCTAssertTrue(model.rendersWebViews(on: .panel), "bringing them back did not")
     }
 
+    // MARK: The stop control, and a load that ended without a page
+
+    /// While a page is loading the round control is a stop control, and it has to stop.
+    ///
+    /// The server never answers `/slow`, so the navigation is still in flight when the control is
+    /// used and cannot settle on its own. Two things are asserted, because either alone passes for
+    /// the wrong reason: the load ends, and the page is **not requested again** — a reload would
+    /// also end the first load, by starting a second.
+    func testTheStopControlEndsTheLoadWithoutRequestingThePageAgain() async throws {
+        let server = try LoopbackHTTPServer(pages: [:], stalls: ["/slow"])
+        try await server.start()
+        defer { server.stop() }
+        let (model, _, _) = makeModel()
+
+        let asked = expectation(description: "the page is requested")
+        server.expectRequest("/slow", asked)
+        model.openNewTab(url: server.url("/slow"))
+        await fulfillment(of: [asked], timeout: Self.webDeadline)
+        XCTAssertEqual(model.chrome?.isLoading, true, "the page settled before it could be stopped")
+
+        model.reloadOrStop()
+
+        let stopped = observed(model.selected!.web!.chrome, "the load stops") { !$0.isLoading }
+        await fulfillment(of: [stopped], timeout: Self.webDeadline)
+        XCTAssertEqual(server.requestCount(for: "/slow"), 1,
+                       "the stop control re-requested the page it was asked to abandon")
+        // WebKit reports a stopped load as an error, and a user who stopped a load is not owed a
+        // line telling them the page failed.
+        XCTAssertNil(model.loadFailureMessage, "stopping a load was reported as a failed load")
+    }
+
+    /// The companion: the same control on a settled page **is** a reload.
+    func testTheSameControlReloadsAPageThatIsNotLoading() async throws {
+        let server = try await startServer()
+        defer { server.stop() }
+        let (model, _, _) = makeModel()
+
+        await settling(model, "the page loads") { model.openNewTab(url: server.url("/one")) }
+        XCTAssertEqual(server.requestCount(for: "/one"), 1)
+
+        await settling(model, "the page loads again") { model.reloadOrStop() }
+
+        XCTAssertEqual(server.requestCount(for: "/one"), 2,
+                       "the control did not reload a page that had finished")
+    }
+
+    /// A connection that goes away is an ordinary failure, and the panel says so quietly (§10).
+    ///
+    /// The server accepts the request and closes without answering, which is what a server that
+    /// went away looks like from inside WebKit. No test reaches a network to produce it.
+    func testALoadThatFailsBecomesARowUnderTheURLBar() async throws {
+        let server = try LoopbackHTTPServer(pages: [:], drops: ["/gone"])
+        try await server.start()
+        defer { server.stop() }
+        let (model, _, _) = makeModel()
+
+        await settling(model, "the load fails") { model.openNewTab(url: server.url("/gone")) }
+
+        XCTAssertNotNil(model.chrome?.failure, "a failed load left no failure on the chrome")
+        XCTAssertNotNil(model.loadFailureMessage, "a failed load produced no line for the panel")
+    }
+
+    /// The page that loads after a failure clears the row, so a line never outlives what it is
+    /// about.
+    func testAPageThatLoadsAfterAFailureClearsTheRow() async throws {
+        let server = try LoopbackHTTPServer(pages: ["/one": Self.page("First page")],
+                                            drops: ["/gone"])
+        try await server.start()
+        defer { server.stop() }
+        let (model, _, _) = makeModel()
+
+        await settling(model, "the load fails") { model.openNewTab(url: server.url("/gone")) }
+        XCTAssertNotNil(model.loadFailureMessage)
+
+        await settling(model, "the page loads") { model.open(server.url("/one"), in: .currentTab) }
+
+        XCTAssertNil(model.loadFailureMessage, "the row outlived the load it was about")
+    }
+
+    /// A refusal this panel issued deliberately is **not** a failed load. WebKit reports the
+    /// panel's own policy cancellations to the same delegate methods a dropped connection reaches,
+    /// so a panel that took every error at face value would tell the user a page failed every time
+    /// it declined one on purpose.
+    func testAPolicyRefusalIsNotAFailedLoad() async throws {
+        let refusing = """
+            <html><head><title>Refused</title></head><body>
+            <script>location.href = 'data:text/html;base64,PGgxPmhpPC9oMT4='</script>
+            </body></html>
+            """
+        let server = try LoopbackHTTPServer(pages: ["/refused": refusing])
+        try await server.start()
+        defer { server.stop() }
+        let (model, _, _) = makeModel()
+
+        await settling(model, "the page loads") { model.openNewTab(url: server.url("/refused")) }
+        // The refusal happens after the load settles, so the wait is on the consequence it has: a
+        // `data:` URL from page content is refused in the panel and says so (D29).
+        let refused = observed(model, "the page's own navigation is refused") { $0.notice != nil }
+        await fulfillment(of: [refused], timeout: Self.webDeadline)
+
+        XCTAssertNil(model.chrome?.failure,
+                     "a navigation the panel refused on purpose was reported as a failed load")
+        XCTAssertNil(model.loadFailureMessage)
+    }
+
     // MARK: Chrome delegation
 
     func testBackAndForwardFollowTheSelectedTab() async throws {

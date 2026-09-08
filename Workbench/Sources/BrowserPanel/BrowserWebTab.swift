@@ -9,9 +9,36 @@ import WebKit
 /// It is a separate type from the tab on purpose. The tab is an `NSObject` because WebKit's
 /// delegates are `@objc` protocols; observation is a property of the state, and keeping the two
 /// apart means the chrome depends on six values rather than on a delegate.
+/// Why a load ended without a page.
+///
+/// A classification and never the underlying error: `NSError`'s description carries the host and
+/// the path it failed on, and a rendered line is a published byte (§11). The cases are the ones the
+/// panel has different words for; everything else is `.other`, which is honest rather than a guess.
+public enum BrowserLoadFailure: Sendable, Equatable {
+    /// Nothing answered: the connection was refused, dropped, or there is no route to the host.
+    case cannotConnect
+    /// The name did not resolve.
+    case hostNotFound
+    /// The far end answered but the connection could not be secured.
+    case insecureConnection
+    /// It answered too slowly.
+    case timedOut
+    case other
+}
+
 @Observable
 @MainActor
 public final class BrowserChromeState {
+
+    /// Why the last navigation ended without a page, or `nil` if it did not.
+    ///
+    /// The one value here that is not a KVO mirror: WebKit reports a failure to the navigation
+    /// delegate and nowhere else. It is on the chrome state and not on the tab because it is a
+    /// thing the chrome draws, and because the chrome is what the panel observes.
+    ///
+    /// **A cancelled navigation is not a failure.** WebKit reports the panel's own policy refusals
+    /// as errors, and a user who stopped a load asked for exactly what happened.
+    public internal(set) var failure: BrowserLoadFailure?
 
     public internal(set) var url: URL?
     public internal(set) var title: String?
@@ -100,6 +127,11 @@ public final class BrowserWebTab: NSObject {
             webView.load(URLRequest(url: url))
         }
     }
+
+    /// Stops the load in progress. The toolbar's control is a stop control while a page is
+    /// loading, and a control that reloaded instead would re-request the page it was asked to
+    /// abandon.
+    public func stopLoading() { webView.stopLoading() }
 
     public func goBack() { webView.goBack() }
     public func goForward() { webView.goForward() }
@@ -212,18 +244,70 @@ extension BrowserWebTab: WKNavigationDelegate {
         act(on: decision, for: url, allow: {})
     }
 
+    /// A load beginning is what clears the last one's failure, so the line the panel draws is never
+    /// about a page the tab has already left.
+    public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        chrome.failure = nil
+    }
+
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        chrome.failure = nil
         navigationDidSettle?(self)
     }
 
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        record(error)
         navigationDidSettle?(self)
     }
 
     public func webView(_ webView: WKWebView,
                         didFailProvisionalNavigation navigation: WKNavigation!,
                         withError error: Error) {
+        record(error)
         navigationDidSettle?(self)
+    }
+
+    /// Keeps a real failure and drops a cancellation, leaving whatever the chrome already said.
+    private func record(_ error: Error) {
+        guard let failure = Self.failure(from: error) else { return }
+        chrome.failure = failure
+    }
+
+    /// Classifies a navigation error, or answers `nil` for one the user is owed nothing about.
+    ///
+    /// **Cancellations are not failures**, and this panel produces them on purpose: every policy
+    /// refusal is a `.cancel` handed back to WebKit, which reports it as an error, and the stop
+    /// control is a cancellation the user asked for. Both would otherwise draw a line saying a page
+    /// failed to load every time the panel did exactly what it was told.
+    ///
+    /// Only the code is read. The rest of an `NSError` — its user info, its failing URL, its
+    /// description — carries the host and the path, and a rendered line is a published byte (§11).
+    static func failure(from error: Error) -> BrowserLoadFailure? {
+        let error = error as NSError
+        if error.domain == "WebKitErrorDomain" {
+            // 102 is `frameLoadInterrupted`: the policy said no. 101 is a URL WebKit will not show,
+            // which for this panel is the same refusal arriving by another name.
+            return error.code == 102 || error.code == 101 ? nil : .other
+        }
+        guard error.domain == NSURLErrorDomain else { return .other }
+        switch error.code {
+        case NSURLErrorCancelled, NSURLErrorUserCancelledAuthentication:
+            return nil
+        case NSURLErrorTimedOut:
+            return .timedOut
+        case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+            return .hostNotFound
+        case NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost,
+             NSURLErrorNotConnectedToInternet, NSURLErrorCannotLoadFromNetwork:
+            return .cannotConnect
+        case NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateHasBadDate,
+             NSURLErrorServerCertificateUntrusted, NSURLErrorServerCertificateHasUnknownRoot,
+             NSURLErrorServerCertificateNotYetValid, NSURLErrorClientCertificateRejected,
+             NSURLErrorClientCertificateRequired:
+            return .insecureConnection
+        default:
+            return .other
+        }
     }
 }
 

@@ -283,6 +283,17 @@ public final class BrowserModel {
     public func goForward() { selected?.web?.goForward() }
     public func reload() { selected?.web?.reload() }
 
+    /// What the toolbar's one round control does, decided here rather than at the control: the
+    /// button's label already says "stop" while a page is loading, and which of the two actions
+    /// that label stands for is a thing a test can fail on.
+    public func reloadOrStop() {
+        if chrome?.isLoading == true {
+            selected?.web?.stopLoading()
+        } else {
+            reload()
+        }
+    }
+
     /// The URL bar's entry path: Q9's table, then `NavigationPolicy` (D29 — the bar parses, the
     /// policy decides). A string that is not a URL goes nowhere and says so.
     public func submitURLBar(_ raw: String) {
@@ -394,6 +405,31 @@ public final class BrowserModel {
     private func report(_ reason: NavigationPolicy.Reason) {
         guard !reason.isDiagnosticOnly else { return }
         notice = Self.copy(for: reason)
+    }
+
+    /// What the panel shows about a load that ended without a page, or `nil` when the selected tab
+    /// is not on one. Derived from the selected tab's chrome rather than stored, so it follows the
+    /// selection and is cleared by that tab's next navigation without anything having to remember
+    /// to clear it (§10 — a failed load is ordinary, so it is a row and never an alert).
+    public var loadFailureMessage: String? {
+        chrome?.failure.map(Self.copy(for:))
+    }
+
+    /// One line for each way a load can end without a page. It names what happened and never the
+    /// URL, for the reason every other line in this panel does not.
+    static func copy(for failure: BrowserLoadFailure) -> String {
+        switch failure {
+        case .cannotConnect:
+            "That page could not be loaded: nothing answered."
+        case .hostNotFound:
+            "That page could not be loaded: the address has no host."
+        case .insecureConnection:
+            "That page could not be loaded: its connection could not be secured."
+        case .timedOut:
+            "That page took too long to answer."
+        case .other:
+            "That page could not be loaded."
+        }
     }
 
     /// What the panel shows about the tab-set document, or `nil` when there is nothing to say.
