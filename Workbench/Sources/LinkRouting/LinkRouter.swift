@@ -99,8 +99,10 @@ public actor LinkRouter {
     /// under it: the teardown may have taken the window that preparation opened with it, so the
     /// replacement registered in the new epoch is prepared for once more rather than delivered
     /// into a window that is no longer there. The second is the last: the bound is what stops a
-    /// tab that hands itself over on every attempt from presenting windows for ever, and the
-    /// attempt that follows it delivers into the most recent preparation.
+    /// tab that hands itself over on every attempt from presenting windows for ever. The attempt
+    /// that follows it delivers into the last preparation **only while that preparation is still
+    /// live**; a tab torn down again under it leaves the call with no window to deliver into, and
+    /// that is W5's fallback rather than an unprepared `.newWindow`.
     private static let maxPreparationsPerOpen = 2
 
     private static let log = Logger(subsystem: "com.afleet.app", category: "panel-links")
@@ -210,11 +212,16 @@ public actor LinkRouter {
                 // deliver into it; a different target would need a second, irreversible
                 // preparation for a window this call has no way to take back.
                 guard chosen.target.tab == prepared.tab else { break }
-                let stillLive = prepared.epoch == epoch(of: chosen.target.tab)
-                if stillLive || preparations >= Self.maxPreparationsPerOpen {
+                if prepared.epoch == epoch(of: chosen.target.tab) {
+                    // The window this call opened is still the one the target will render into.
                     await deliver(chosen, link, destination)
                     return
                 }
+                // It is not: a teardown landed on the tab since, and may have taken that window
+                // with it. Preparing once more is the answer while the bound allows one, and when
+                // it does not the open **falls back** rather than telling a handler `.newWindow`
+                // for a window nothing holds (spec §3, 2026-09-08 final wave).
+                if preparations >= Self.maxPreparationsPerOpen { break }
             }
             guard let prepare else {
                 // Nothing suspends between the resolution above and this commit.

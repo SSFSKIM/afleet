@@ -331,10 +331,13 @@ final class LinkRouterTests: XCTestCase {
     ///
     /// The successor is prepared for again before it is delivered to, because the teardown that
     /// made it the live target may have taken the first preparation's window with it (test 12).
+    /// The handover runs once — a tab that hands itself over on *every* attempt spends the
+    /// preparation bound and takes the fallback instead, which is the test above.
     @MainActor
     func testAReplacementRegisteredDuringPrepareReceivesTheLink() async {
         let recorder = Recorder()
         let sink = Sink()
+        let handover = Once()
         let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
         await router.register(Fixtures.target(.files, specificity: 10, into: recorder,
                                               label: "placeholder"))
@@ -342,7 +345,7 @@ final class LinkRouterTests: XCTestCase {
 
         await router.open(Fixtures.file, from: .newWindow) { target, _ in
             recorder.note("prepare:\(target.tab.rawValue)")
-            guard target.tab == .files else { return }
+            guard target.tab == .files, handover.firstTime() else { return }
             await router.unregister(tab: .files)
             await router.register(Fixtures.target(.files, specificity: 10, into: recorder,
                                                   label: "successor"))
@@ -359,10 +362,17 @@ final class LinkRouterTests: XCTestCase {
     /// This `prepare` hands the tab over on **every** attempt, so a router that re-resolved against
     /// the live registry and prepared each time would never leave `open`, and one that prepared
     /// once per stale preparation would present a window per attempt. It leaves after two
-    /// preparations and one outcome: the second preparation is the last the bound allows, and the
-    /// replacement resolved after it delivers into the window that preparation opened.
+    /// preparations — and with **no delivery at all**.
+    ///
+    /// That last clause is the discriminating one. The third attempt reaches a target whose tab was
+    /// torn down *again* after the second preparation, so the window that preparation opened may
+    /// have gone with it. A router that spent its bound and then delivered anyway would tell the
+    /// handler `.newWindow` with nothing on screen to render into. The bound being reached is a
+    /// reason to stop, not a licence to commit an unprepared delivery: W5's fallback is the
+    /// outcome, and for a `.file` that is one diagnostic naming the kind (spec §3, 2026-09-08
+    /// final wave).
     @MainActor
-    func testAHandoverRepeatedOnEveryAttemptStillFinishesWithBoundedPreparations() async {
+    func testAHandoverRepeatedOnEveryAttemptFallsBackRatherThanDeliveringUnprepared() async {
         let recorder = Recorder()
         let sink = Sink()
         let router = LinkRouter(externalOpener: { sink.opened($0) }, diagnostic: { sink.said($0) })
@@ -374,11 +384,18 @@ final class LinkRouterTests: XCTestCase {
             await router.register(Fixtures.target(.files, specificity: 10, into: recorder))
         }
 
-        XCTAssertEqual(recorder.tabs, [.files], "a target delivered \(recorder.tabs.count) times, not once")
-        XCTAssertEqual(recorder.events, ["prepare:files", "prepare:files", "open:files:newWindow"],
+        XCTAssertEqual(recorder.tabs, [], "a target delivered \(recorder.tabs.count) times, not zero")
+        XCTAssertEqual(recorder.destinations, [],
+                       "the open delivered \(recorder.destinations) with no live preparation")
+        XCTAssertEqual(recorder.events, ["prepare:files", "prepare:files"],
                        "the recorded order was \(recorder.events)")
-        XCTAssertEqual(sink.messages, [], "a link that reached a target also produced a diagnostic")
+        XCTAssertEqual(sink.messages, ["no panel target for a file link"],
+                       "the fallback produced \(sink.messages.count) diagnostics, not 1")
     }
+
+    /// The companion is test 12's `testAReplacementInANewEpochIsPreparedForAgain`: one handover, so
+    /// the second preparation is never torn down under it and the open delivers into it. Together
+    /// they say the clause is about the last preparation's *liveness* and not about the count.
 
     // MARK: - 11. The tab's withdrawal epoch
 

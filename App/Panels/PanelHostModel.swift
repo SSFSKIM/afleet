@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 import SwiftUI
 import AfleetCore
 import FleetKit
@@ -44,6 +45,10 @@ final class PanelHostModel: PanelHost {
     /// How many URLs a context's feed republishes on each timeline change.
     static let recentURLLimit = 100
 
+    /// Where the host's own diagnostics go. Every message names a fact and never a tab, a channel,
+    /// a session id or a path (§11).
+    private static let log = Logger(subsystem: "com.afleet.app", category: "panel-host")
+
     private(set) var selected: PanelTabID?
 
     /// The popped-out windows, in the order they were popped. Every channel named here is exempt
@@ -85,6 +90,21 @@ final class PanelHostModel: PanelHost {
     @ObservationIgnored private var tabs: [PanelTabID: any PanelTab] = [:]
     @ObservationIgnored private var runners: [PanelTabID: any PaneRunning] = [:]
     @ObservationIgnored private var sessions: [SessionSlot: any PanelTabSession] = [:]
+    /// Which generation of each id the host currently holds. Bumped by every `register`.
+    ///
+    /// **Ownership of the host's state is the host's own fact.** A teardown suspends inside
+    /// `unregister(_:)` while the link registry drains, and by the time it resumes the id may
+    /// belong to a replacement — but only a *host* registration can have made that so. A verdict
+    /// from the link registry says who owns a `LinkTarget`, which is not the same question: a
+    /// panel may register a target during the drain without any tab changing hands (spec §3,
+    /// 2026-09-08 final wave).
+    @ObservationIgnored private var generations: [PanelTabID: Int] = [:]
+    /// The generation each withdrawal in flight captured at entry, by tab. An array because two
+    /// withdrawals of one id may overlap.
+    ///
+    /// It is also what makes a registration over a *withdrawing* owner legal: that owner is on its
+    /// way out, and only its own generation may be taken from it.
+    @ObservationIgnored private var withdrawing: [PanelTabID: [Int]] = [:]
     /// The channels that hold sessions, least recently rendered first. The eviction order.
     @ObservationIgnored private var recency: [ChannelKey] = []
     /// The working directory each channel was last rendered with, so a popped-out window can
@@ -129,8 +149,29 @@ final class PanelHostModel: PanelHost {
 
     // MARK: - Registration and order
 
+    /// Takes the id, refusing a second live holder — and **accepting a holder that is on its way
+    /// out**.
+    ///
+    /// X7's handover is `await unregister(id)` and then `register(replacement)`, and the withdrawal
+    /// it awaits can take arbitrarily long: it returns only once no delivery for the tab is still
+    /// in flight. A registration that arrives while that drain is running is the same handover with
+    /// the two halves overlapped, and refusing it would make the handover's success depend on
+    /// whether a link happened to be in flight.
+    ///
+    /// It succeeds rather than waits because `PanelHost.register` is X7's **synchronous** member:
+    /// waiting would mean making it `async`, an X7 signature change with no caller asking for it.
+    /// So the outgoing owner's release is ordered *before* this registration completes instead —
+    /// otherwise the replacement would inherit the retired tab's sessions and its pane runner — and
+    /// the generation bump tells the withdrawal still draining that the id is no longer its own to
+    /// release.
     func register(_ tab: any PanelTab) throws {
-        guard tabs[tab.id] == nil else { throw PanelHostError.duplicateTab(tab.id) }
+        if tabs[tab.id] != nil {
+            guard withdrawing[tab.id, default: []].contains(generations[tab.id] ?? 0) else {
+                throw PanelHostError.duplicateTab(tab.id)
+            }
+            release(tab.id)
+        }
+        generations[tab.id, default: 0] += 1
         tabs[tab.id] = tab
     }
 
@@ -149,13 +190,36 @@ final class PanelHostModel: PanelHost {
     /// delivery the registry had already committed would then read a tab and sessions this method
     /// had torn down (contract X7's 2026-09-06 amendment; tracker 97).
     ///
-    /// **And it releases nothing when the withdrawal comes back `superseded`.** The registry
-    /// answers for the epoch this teardown opened: a second teardown of the same tab, or the
-    /// replacement the handover registers *during* the drain, owns the tab's state by the time
-    /// this line runs, and releasing it here would delete the successor's sessions and its pane
-    /// runner (spec §3, 2026-09-08).
+    /// **And what decides whether it releases is the host's own generation, not the registry's
+    /// verdict.** The registry answers for the epoch this teardown opened in the *link* registry,
+    /// where a panel registering a target during the drain is enough to make the answer
+    /// `superseded` — and a `LinkTarget` changing hands is no evidence that a tab, a pane runner or
+    /// a session did. Only a host `register` moves those, and that is exactly what the generation
+    /// records. The verdict is still worth a log line, because a target registered against a tab
+    /// this teardown is about to release is a thing worth seeing (spec §3, 2026-09-08 final wave).
     func unregister(_ id: PanelTabID) async {
-        guard await links.withdraw(tab: id) == .complete else { return }
+        let generation = generations[id] ?? 0
+        withdrawing[id, default: []].append(generation)
+        let verdict = await links.withdraw(tab: id)
+        if let index = withdrawing[id]?.firstIndex(of: generation) {
+            withdrawing[id]?.remove(at: index)
+            if withdrawing[id]?.isEmpty ?? false { withdrawing[id] = nil }
+        }
+        if verdict == .superseded {
+            // Named without the tab, the channel or the session (§11).
+            Self.log.notice("a tab withdrawal was superseded in the link registry")
+        }
+        // A replacement registered while this was draining already released what this would have.
+        guard (generations[id] ?? 0) == generation else { return }
+        release(id)
+    }
+
+    /// Everything the host holds for one tab id: the tab itself, its pane runner, its sessions in
+    /// every channel, its pop-outs and the selection if it was on it.
+    ///
+    /// Its two callers are the two halves of the handover — the teardown that still owns the id,
+    /// and the registration that takes it from a teardown still draining.
+    private func release(_ id: PanelTabID) {
         tabs[id] = nil
         runners[id] = nil
         for slot in sessions.keys where slot.tab == id { sessions[slot] = nil }

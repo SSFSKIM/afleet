@@ -695,12 +695,12 @@ final class PanelHostTests: XCTestCase {
     /// and falls back to the id's default for once the tab is gone, so a release that landed under
     /// the handler is visible rather than inferred.
     ///
-    /// **And it releases nothing that a successor owns by the time the drain is over.** The
-    /// registration that lands here while the withdrawal is draining is X7's handover: the
-    /// registry keeps it, because it belongs to the epoch the withdrawal opened rather than to the
-    /// one it withdrew, and the host must keep the tab and the sessions the successor now routes
-    /// into. A teardown that released them on the way out would leave a live target delivering
-    /// into a tab the host no longer holds.
+    /// **A `LinkTarget` registered during the drain does not stop the release.** The registry keeps
+    /// that target — it belongs to the epoch the withdrawal opened rather than to the one it
+    /// withdrew, so the withdrawal comes back `superseded` — but a target changing hands is not a
+    /// tab changing hands. Nothing here registered a *tab*, so the teardown still owns the tab, its
+    /// pane runner and its sessions, and a host that read the registry's verdict as its own would
+    /// keep them for a successor that does not exist (spec §3, 2026-09-08 final wave).
     func testUnregisterWithdrawsTheLinkTargetBeforeReleasingTheTabsState() async throws {
         let host = PanelHostModel()
         let title = "Invented Files Title"
@@ -734,17 +734,120 @@ final class PanelHostTests: XCTestCase {
 
         XCTAssertEqual(recorder.notes, ["start:\(title)", "end:\(title)", "unregistered"],
                        "the recorded order was \(recorder.notes)")
-        XCTAssertEqual(host.title(for: .files), title,
-                       "the teardown released a tab a successor had already registered for")
-        XCTAssertEqual(counter.released, 0,
-                       "the teardown released \(counter.released) sessions the successor owns")
-        XCTAssertEqual(host.liveSessionCount, 1,
-                       "the host holds \(host.liveSessionCount) sessions after a superseded teardown, not 1")
+        XCTAssertNotEqual(host.title(for: .files), title,
+                          "the teardown kept a tab no replacement had registered for")
+        XCTAssertEqual(counter.released, 1,
+                       "the teardown released \(counter.released) of the 1 session the tab held")
+        XCTAssertEqual(host.liveSessionCount, 0,
+                       "the host holds \(host.liveSessionCount) sessions after the teardown, not 0")
 
-        // And the successor is the live target: the link reaches it, in the tab the host still holds.
+        // The target registered during the drain is still the registry's: withdrawal is by tab and
+        // by epoch, and this one belongs to the epoch the withdrawal opened.
         await host.links.open(PanelFixtures.fileLink, from: .currentPanel)
         XCTAssertEqual(recorder.notes.last, "successor",
                        "the recorded order was \(recorder.notes)")
+    }
+
+    /// X7's concrete handover, driven with a link-target registration landing inside the drain:
+    /// `await unregister(.thread)` and then `register` of the replacement, which **must succeed**.
+    ///
+    /// This is the shape C6 takes over C5's placeholder, and the only thing unusual about it here
+    /// is that a panel registered a `LinkTarget` for the id while the withdrawal was draining. That
+    /// makes the registry's verdict `superseded`, and a host that let the verdict decide whether it
+    /// released its own state kept the placeholder — so the very next line, the handover's own
+    /// `register`, threw `duplicateTab` and the child could never take the id. The registry answers
+    /// for link targets; the tab is the host's (spec §3, 2026-09-08 final wave).
+    func testTheHandoverSucceedsWhenALinkTargetRegistersDuringTheDrain() async throws {
+        let host = PanelHostModel()
+        let placeholder = SessionCounter()
+        try host.register(StubPanelTab(.thread, title: "an invented placeholder", counter: placeholder))
+        _ = host.session(for: .thread, context: PanelFixtures.context())
+        let recorder = LinkRecorder()
+        let gate = HandlerGate()
+        await host.links.register(LinkTarget(tab: .thread, specificity: 5,
+                                             handles: { link in if case .file = link { true } else { false } },
+                                             open: { _, _ in
+                                                 recorder.note("start")
+                                                 await gate.arrive()
+                                                 recorder.note("end")
+                                             }))
+
+        let routing = Task { await host.links.open(PanelFixtures.fileLink, from: .currentPanel) }
+        await gate.waitForArrival()
+        let withdrawal = Task {
+            await host.unregister(.thread)
+            recorder.note("unregistered")
+        }
+        for _ in 0..<50 { await Task.yield() }
+        // A link target for the same id, registered while the withdrawal is still draining.
+        await host.links.register(PanelFixtures.fileTarget(.thread, specificity: 5, into: recorder,
+                                                           note: "target"))
+        gate.open()
+        await withdrawal.value
+        await routing.value
+
+        let successor = StubPanelTab(.thread, title: "a later child's thread")
+        try host.register(successor)
+
+        XCTAssertEqual(recorder.notes, ["start", "end", "unregistered"],
+                       "the recorded order was \(recorder.notes)")
+        XCTAssertEqual(host.title(for: .thread), "a later child's thread",
+                       "the host reports another tab's title after the handover")
+        XCTAssertEqual(host.available(for: PanelFixtures.context()), [.thread],
+                       "the successor is not the tab the host presents for .thread")
+        XCTAssertEqual(placeholder.released, 1,
+                       "the handover released \(placeholder.released) of the placeholder's 1 session")
+    }
+
+    /// The same handover with its two halves **overlapped**: the replacement registers while the
+    /// withdrawal of the id it is taking is still draining.
+    ///
+    /// It succeeds rather than waits, because `PanelHost.register` is X7's synchronous member and
+    /// waiting would mean making it `async`. What it may not do is succeed and leave the retired
+    /// tab's sessions behind for the replacement to inherit, so the outgoing owner's release is
+    /// ordered before the registration completes — and the withdrawal that resumes afterwards must
+    /// release nothing, because the id is no longer the generation it began withdrawing.
+    func testARegistrationDuringTheDrainTakesTheIDAndKeepsItsOwnState() async throws {
+        let host = PanelHostModel()
+        let outgoing = SessionCounter()
+        try host.register(StubPanelTab(.thread, title: "an invented placeholder", counter: outgoing))
+        _ = host.session(for: .thread, context: PanelFixtures.context())
+        host.select(.thread)
+        let recorder = LinkRecorder()
+        let gate = HandlerGate()
+        await host.links.register(LinkTarget(tab: .thread, specificity: 5,
+                                             handles: { link in if case .file = link { true } else { false } },
+                                             open: { _, _ in await gate.arrive() }))
+
+        let routing = Task { await host.links.open(PanelFixtures.fileLink, from: .currentPanel) }
+        await gate.waitForArrival()
+        let withdrawal = Task {
+            await host.unregister(.thread)
+            recorder.note("unregistered")
+        }
+        for _ in 0..<50 { await Task.yield() }
+
+        let replacement = SessionCounter()
+        XCTAssertNoThrow(try host.register(StubPanelTab(.thread, title: "a later child's thread",
+                                                        counter: replacement)),
+                         "registering over an id whose owner is mid-withdrawal was refused")
+        _ = host.session(for: .thread, context: PanelFixtures.context())
+        XCTAssertEqual(outgoing.released, 1,
+                       "the registration left \(1 - outgoing.released) of the retired tab's sessions behind")
+        XCTAssertEqual(replacement.created, 1,
+                       "the replacement made \(replacement.created) sessions, not 1")
+
+        gate.open()
+        await withdrawal.value
+        await routing.value
+
+        XCTAssertEqual(recorder.notes, ["unregistered"], "the recorded order was \(recorder.notes)")
+        XCTAssertEqual(host.title(for: .thread), "a later child's thread",
+                       "the withdrawal released a tab it no longer owned")
+        XCTAssertEqual(replacement.released, 0,
+                       "the withdrawal released \(replacement.released) of the replacement's sessions")
+        XCTAssertEqual(host.liveSessionCount, 1,
+                       "the host holds \(host.liveSessionCount) sessions after the overlapped handover, not 1")
     }
 
     /// A `.currentPanel` link is routed with **no preparation at all**, so a withdrawal has no
