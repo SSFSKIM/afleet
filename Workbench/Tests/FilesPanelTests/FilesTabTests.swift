@@ -93,6 +93,104 @@ final class FilesTabTests: XCTestCase {
         XCTAssertEqual(links.count, 2, "two targets, registered once")
     }
 
+    /// Design §9 registered a pair per **session**, and every pair carries the same tab at the
+    /// same specificity: `LinkRouter.mostSpecific` compares specificity and canonical tab order and
+    /// nothing else, so it cannot tell one channel's target from another's. The mitigation inside
+    /// this leaf's fence is one registration for the tab (Parent revision 4, tracker 240).
+    func testTheTabRegistersOneLinkPairHoweverManyChannelsItBuildsSessionsFor() async throws {
+        let tab = FilesTab()
+        let links = CountingLinks()
+
+        _ = tab.makeSession(for: try makeContext(store: try makeStore(), links: links))
+        _ = tab.makeSession(for: try makeContext(store: try makeStore(),
+                                                 cwd: try tree.directory("second"), links: links))
+        _ = tab.makeSession(for: try makeContext(store: try makeStore(),
+                                                 cwd: try tree.directory("third"), links: links))
+
+        try await waitUntil("the two link targets to register") { links.count == 2 }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(links.count, 2, "the registration grew with the number of channels")
+    }
+
+    /// The same fact seen from the real router, which is what a host would ask.
+    func testTheRoutersTargetCountDoesNotGrowWithTheNumberOfChannels() async throws {
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let capability = RouterCapability(router: router)
+        let tab = FilesTab()
+
+        for name in ["one", "two", "three", "four"] {
+            _ = tab.makeSession(for: try makeContext(store: try makeStore(),
+                                                     cwd: try tree.directory(name),
+                                                     links: capability))
+        }
+
+        try await waitUntilCount(2, in: router)
+        try await Task.sleep(for: .milliseconds(100))
+        let count = await router.targetCount
+        XCTAssertEqual(count, 2, "two targets for the tab, whatever the channel count")
+    }
+
+    /// And the routing itself: the delivery reaches the session for the channel the panel is
+    /// presenting, rather than whichever channel happened to register first.
+    func testALinkOpensInTheChannelThePanelIsPresenting() async throws {
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let capability = RouterCapability(router: router)
+        let tab = FilesTab()
+        let offscreen = try makeContext(store: try makeStore(),
+                                        cwd: try tree.directory("offscreen"), links: capability)
+        let onscreen = try makeContext(store: try makeStore(),
+                                       cwd: try tree.directory("onscreen"), links: capability)
+        // The on-screen channel's session is built *first*, so neither registration order nor
+        // creation order can be what makes this pass: only the presentation can.
+        let shown = try XCTUnwrap(tab.makeSession(for: onscreen) as? FilesPanelSession)
+        let hidden = try XCTUnwrap(tab.makeSession(for: offscreen) as? FilesPanelSession)
+        let file = try tree.file("onscreen/routed.swift", "let routed = true\n")
+        // The host draws the channel it is on, which is what makes that session the presented one.
+        _ = tab.makeView(session: shown, context: onscreen)
+        try await waitUntilCount(2, in: router)
+
+        await router.open(.file(file, line: 3), from: .currentPanel)
+
+        XCTAssertEqual(shown.openFiles.count, 1, "the link did not reach the panel on screen")
+        XCTAssertEqual(hidden.openFiles.count, 0,
+                       "the link opened in a channel the user was not looking at")
+    }
+
+    /// The weak half survives the move: a released session leaves the tab's targets claiming
+    /// nothing, and the router takes W5's fallback rather than delivering into nothing.
+    func testATargetWhoseSessionWasReleasedIsInertAndTheOpenFallsBack() async throws {
+        let file = try tree.file("routed.swift", "let routed = true\n")
+        let fell = Fallbacks()
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { fell.record($0) })
+
+        try await registerThenRelease(router: router)
+
+        await router.open(.file(file, line: 7), from: .currentPanel)
+
+        XCTAssertEqual(fell.count, 1, "the open took W5's fallback")
+        let count = await router.targetCount
+        XCTAssertEqual(count, 2, "the registrations outlive the session; only their claim does not")
+    }
+
+    /// Builds a tab and a session, registers, and lets both go. Separate so nothing in the test's
+    /// own frame keeps either alive.
+    private func registerThenRelease(router: LinkRouter) async throws {
+        let tab = FilesTab()
+        _ = tab.makeSession(for: try makeContext(store: try makeStore(),
+                                                 links: RouterCapability(router: router)))
+        try await waitUntilCount(2, in: router)
+    }
+
+    /// Polls the router's target count under a bounded wait. A count, never a target (§11).
+    private func waitUntilCount(_ expected: Int, in router: LinkRouter) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await router.targetCount == expected { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("timed out waiting for \(expected) registered targets")
+    }
+
     // MARK: - 2. the readout over a session driven through its own API
 
     func testAnEmptyPanelDrawsNothingAndSaysNothing() throws {
