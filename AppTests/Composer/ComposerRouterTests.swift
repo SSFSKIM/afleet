@@ -121,6 +121,75 @@ final class ComposerRouterTests: XCTestCase {
         }
     }
 
+    /// The control-request **subtypes** a row's strategy names, in order.
+    ///
+    /// The strings come from ClaudeWire's own specs (`SetModel.subtype` and its siblings) rather than
+    /// being spelled here: a leaf that wrote `"set_model"` out would be a second opinion about a
+    /// shape C2 owns, and the Acceptance preamble reserves the raw form for a subtype ClaudeWire does
+    /// not type. Exhaustive, so a `RouteStrategy` C4 adds fails to compile here.
+    ///
+    /// `.restart` names its two readbacks, which is why that row reaches four members: the process is
+    /// replaced and then §7.4's gate asks `list_models` and `get_settings` whether the setting
+    /// survived.
+    private func expectedSubtypes(for strategy: RouteStrategy) -> [String] {
+        switch strategy {
+        case .setModel: return [SetModel.subtype]
+        case .setPermissionMode: return [SetPermissionMode.subtype]
+        case .applyFlagSetting: return [ApplyFlagSettings.subtype]
+        case .renameSession: return [RenameSession.subtype]
+        case .setCwd: return [SetCwd.subtype]
+        case .interrupt: return [Interrupt.subtype]
+        case .sideQuestion: return [SideQuestion.subtype]
+        case .restart: return [ListModels.subtype, GetSettings.subtype]
+        case .rewind, .login, .permissionsView, .mcpPopover, .memoryFiles, .lifecycle, .text, .native:
+            return []
+        }
+    }
+
+    /// The `RouteStrategy` values a row hands to `run(_:arguments:on:ui:)`, in order. A row that runs
+    /// a strategy runs **its own**, so a cross-wiring inside the `["route", "run"]` family — `/mcp`
+    /// reaching `.memoryFiles` — fails here where the member sequence alone could not see it.
+    private func expectedStrategies(for strategy: RouteStrategy) -> [RouteStrategy] {
+        switch strategy {
+        case .rewind, .login, .permissionsView, .mcpPopover, .memoryFiles: return [strategy]
+        case .setModel, .setPermissionMode, .applyFlagSetting, .renameSession, .setCwd, .interrupt,
+             .sideQuestion, .restart, .lifecycle, .text, .native:
+            return []
+        }
+    }
+
+    /// The lifecycle **actions** a row performs, named. `.lifecycle` reaches the action the row names
+    /// and `.restart` reaches `.quiescentRestart` specifically; every other strategy performs none.
+    private func expectedActionNames(for strategy: RouteStrategy) -> [String] {
+        switch strategy {
+        case .lifecycle(let name): return [name.rawValue]
+        case .restart: return ["quiescentRestart"]
+        case .setModel, .setPermissionMode, .applyFlagSetting, .renameSession, .setCwd, .interrupt,
+             .sideQuestion, .rewind, .login, .permissionsView, .mcpPopover, .memoryFiles, .text, .native:
+            return []
+        }
+    }
+
+    /// One `LifecycleAction` as a name. Exhaustive, so an action C4 adds stops this file compiling
+    /// rather than slipping past as an unnamed one; a name and never a payload (§11).
+    private func name(of action: LifecycleAction) -> String {
+        switch action {
+        case .open: return "open"
+        case .send: return "send"
+        case .reap: return "reap"
+        case .adopt: return "adopt"
+        case .sendToBackground: return "sendToBackground"
+        case .fork: return "fork"
+        case .quiescentRestart: return "quiescentRestart"
+        case .stopEverything: return "stopEverything"
+        case .backgroundAll: return "backgroundAll"
+        case .logout: return "logout"
+        case .quit: return "quit"
+        case .reopen: return "reopen"
+        case .answer: return "answer"
+        }
+    }
+
     /// Every row of `RouterTable.local` reaches the member its strategy names, and no other.
     ///
     /// Two-directional: the whole member sequence is compared, so an extra call fails as loudly as a
@@ -155,6 +224,24 @@ final class ComposerRouterTests: XCTestCase {
             let members = await double.memberSequence
             XCTAssertEqual(members, expectedMembers(for: command.strategy),
                            "row \(command.name) reached \(members.count) member(s): " + members.joined(separator: ", "))
+
+            // The **case**, not just the member. Without these four, five rows collapse to
+            // `["route", "run"]` and a cross-wiring inside that family passes: the double records the
+            // subtype, the strategy and the action, and this is where they are read.
+            let subtypes = await double.sentSubtypes
+            XCTAssertEqual(subtypes, expectedSubtypes(for: command.strategy),
+                           "row \(command.name) sent \(subtypes.count) control request(s): "
+                               + subtypes.joined(separator: ", "))
+            let ran = await double.strategies
+            let wantedStrategies = expectedStrategies(for: command.strategy)
+            XCTAssertEqual(ran.count, wantedStrategies.count,
+                           "row \(command.name) ran \(ran.count) strateg(ies); \(wantedStrategies.count) were named")
+            XCTAssertTrue(ran == wantedStrategies,
+                          "row \(command.name) ran a strategy other than the one it names")
+            let performed = await double.actions.map(name(of:))
+            XCTAssertEqual(performed, expectedActionNames(for: command.strategy),
+                           "row \(command.name) performed \(performed.count) action(s): "
+                               + performed.joined(separator: ", "))
 
             if case .native(let surface) = command.strategy {
                 surfacesOpened += 1
@@ -304,6 +391,16 @@ final class ComposerRouterTests: XCTestCase {
                            RouterTable.explanation(forDrift: name, shape: shape),
                            "the replacement is not the table's own sentence for this shape")
             XCTAssertEqual(model.lastInterception?.shape, shape, "the interception was filed under the other shape")
+            // The map a timeline row looks the replacement up in, keyed by the assistant frame's own
+            // uuid. Confirmed here because §7.7's *substitution* — drawing the replacement in place
+            // of the refused row — happens at a render site in `App/Timeline/`, which is C6.1's and
+            // is filed on tracker 153. What this leaf owns is that the value is there, keyed
+            // correctly, for that row to read.
+            XCTAssertEqual(model.interceptedReplacements.count, 1,
+                           "one interception left \(model.interceptedReplacements.count) replacement(s) for a row to read")
+            XCTAssertEqual(model.interceptedReplacements["invented-assistant-uuid"],
+                           RouterTable.explanation(forDrift: name, shape: shape),
+                           "the replacement filed under the assistant frame's own uuid is not the table's sentence")
             let hits = await model.interceptor.driftCount(of: shape)
             XCTAssertEqual(hits, 1, "the intercepted shape counted \(hits) time(s)")
             for other in RefusalShape.allCases where other != shape {

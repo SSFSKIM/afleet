@@ -173,36 +173,59 @@ final class QueueChipTests: XCTestCase {
 
     // MARK: - Both send arms
 
-    /// A send while a turn is running produces one `sendPrompt` **and** a chip; a send with no turn
-    /// running produces one `sendPrompt` and **no** chip.
+    /// A send while a turn is running produces one `sendPrompt` **and** a chip row for **that
+    /// send's own** queued id; a send with no turn running produces one `sendPrompt` and no row,
+    /// read after the same bounded wait the positive arm uses.
     ///
-    /// Both arms, so a chip that is always on cannot pass. What separates them is the engine: a
-    /// message sent into a running turn is queued and the engine says so with `command_lifecycle`,
-    /// and a message sent into an idle channel is not. The composer now raises
-    /// `HostSignal.promptSent` on both — and the chip still shows nothing until `command_lifecycle`
-    /// names the id, because the fold puts that signal nowhere the chip reads (see
-    /// `testPromptSentPutsNoRowInTheChip`). The chip is the fold's answer and not afleet's guess.
+    /// Both halves were vacuous until Task 11's audit: the chip appeared for an invented uuid
+    /// unrelated to either send, so it proved only that *a* queued id draws a row, and the no-chip
+    /// arm read `rows` with no settle, at an instant when no implementation could have had one.
+    /// Now each send's uuid is staged and known, the running turn is the first send with no `result`
+    /// spent against it, and the queued frame the engine answers with names the **second** send.
+    ///
+    /// What separates the arms is the engine, not afleet: a message sent into a running turn is
+    /// queued and `command_lifecycle` says so; a message sent into an idle channel is not, and the
+    /// composer invents no row for it — the chip is the fold's answer (contract X4).
     func testBothSendArms() async throws {
         let rig = try await Rig()
-        let idle = try XCTUnwrap(rig.composer, "the registry built no composer for the channel")
+        let composer = try XCTUnwrap(rig.composer, "the registry built no composer for the channel")
+        let firstSend = UUID(), secondSend = UUID()
+        await rig.lifecycle.stageSendPrompt(.success(firstSend))
+        await rig.lifecycle.stageSendPrompt(.success(secondSend))
 
-        // Arm one: no turn running. The engine queues nothing.
-        idle.draft = "an invented first message"
-        await idle.send()
+        // Arm one: nothing is running. The engine queues nothing, so the chip has nothing to show —
+        // and it is given the same chance to show something as the positive arm below.
+        composer.draft = "an invented first message"
+        await composer.send()
         var prompts = await rig.lifecycle.prompts
         XCTAssertEqual(prompts.count, 1, "an idle send sent \(prompts.count) prompt(s), not 1")
-        XCTAssertTrue(rig.chip.rows.isEmpty,
-                      "a send with no turn running showed \(rig.chip.rows.count) chip row(s)")
+        let appeared = await rig.settle { !$0.rows.isEmpty }
+        XCTAssertFalse(appeared,
+                       "a send with no turn running showed \(rig.chip.rows.count) chip row(s) after a full settle")
+        XCTAssertTrue(rig.timeline.timeline.overlay.queue.queued.isEmpty,
+                      "the fold queued \(rig.timeline.timeline.overlay.queue.queued.count) command(s) for an idle send")
 
-        // Arm two: a turn is running, so the engine queues the message and says so.
-        idle.draft = "an invented second message"
-        await idle.send()
+        // The turn starts running: the engine says the first message began, and no `result` is ever
+        // spent against it, so it is still in flight when the second send goes out.
+        await rig.push(state: "started", commandUUID: firstSend.uuidString.lowercased())
+        XCTAssertEqual(rig.turns.count, 0,
+                       "\(rig.turns.count) turn(s) had already completed, so nothing was running for the second send")
+
+        // Arm two: a turn is running, so the engine queues this message and names **its** uuid.
+        composer.draft = "an invented second message"
+        await composer.send()
         prompts = await rig.lifecycle.prompts
         XCTAssertEqual(prompts.count, 2, "the queued send sent \(prompts.count) prompt(s) in total, not 2")
-        await rig.push(state: "queued", commandUUID: Rig.inventedCommandUUIDs[0])
+        await rig.push(state: "queued", commandUUID: secondSend.uuidString.lowercased())
 
         let chipped = await rig.settle { $0.rows.count == 1 }
         XCTAssertTrue(chipped, "a send the engine queued showed \(rig.chip.rows.count) chip row(s), not 1")
+        // The row is *this* send's. A chip keyed on the running turn, or on the first send, fails
+        // here while still showing exactly one row.
+        XCTAssertTrue(rig.chip.rows.first?.id == secondSend.uuidString.lowercased(),
+                      "the chip's row does not name the send the engine queued")
+        XCTAssertFalse(rig.chip.rows.contains { $0.id == firstSend.uuidString.lowercased() },
+                       "the chip named the running turn's own send as queued")
 
         await rig.finish()
     }

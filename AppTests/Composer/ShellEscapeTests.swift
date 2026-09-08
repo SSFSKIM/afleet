@@ -30,11 +30,18 @@ final class ShellEscapeTests: XCTestCase {
 
     /// A context over the invented stubs, carrying the scratch directory as the channel's cwd and
     /// `/bin/sh` as the shell the resolved environment reports.
+    /// An invented variable the channel's `ResolvedEnvironment` carries and afleet's own process does
+    /// not. Its name is this test's invention (§11) and its whole purpose is that a runner handed the
+    /// inherited environment instead of the channel's cannot produce it.
+    private static let inventedVariable = "AFLEET_INVENTED_CHANNEL_VARIABLE"
+    private static let inventedValue = "invented-channel-value"
+
     private func context(cwd: URL) -> ChannelContext {
         ChannelContext(key: makeKey(),
                        session: makeKey().session,
                        cwd: cwd,
-                       environment: ResolvedEnvironment(variables: ["PATH": "/usr/bin:/bin"],
+                       environment: ResolvedEnvironment(variables: ["PATH": "/usr/bin:/bin",
+                                                                    Self.inventedVariable: Self.inventedValue],
                                                         shell: "/bin/sh",
                                                         capturedAt: Date(timeIntervalSince1970: 0),
                                                         mode: .login),
@@ -295,6 +302,60 @@ final class ShellEscapeTests: XCTestCase {
                        "the posted text names `bash-exit-code` \(count("bash-exit-code", in: text)) time(s)")
     }
 
+    // MARK: - The channel's own directory and environment
+
+    /// **G2's first clause, the half the equality could not see.** The command runs in
+    /// `ChannelContext.cwd`, with `ChannelContext.environment` — not in afleet's own process
+    /// directory and not with the environment afleet inherited.
+    ///
+    /// Both are read out of the posted text rather than out of the runner, because what the model is
+    /// shown is the evidence: `pwd` names the directory the child was given, and the invented
+    /// variable is one only the channel's `ResolvedEnvironment` carries. A composer handing the
+    /// runner `FileManager.default.currentDirectoryPath` and `ProcessInfo.processInfo.environment`
+    /// passes every other arm in this file, including the execute-only one — which is the gap this
+    /// closes.
+    ///
+    /// The directory is compared by **occurrence count**, never printed: a path in a failure message
+    /// is exactly what §11 refuses.
+    func testTheCommandRunsInTheChannelsDirectoryWithTheChannelsEnvironment() async throws {
+        let tree = try TempTree()
+        let work = try tree.directory("work")
+        let double = ComposerLifecycleDouble()
+        await double.stageSendPrompt(.success(UUID()))
+        let model = makeModel(double, cwd: work)
+        model.draft = "!pwd; printf '%s\\n' \"$\(Self.inventedVariable)\""
+
+        await model.send()
+
+        guard let text = await postedText(double), let out = stdoutElement(of: text) else {
+            return XCTFail("the shell escape posted no frame with a `<bash-stdout>` element")
+        }
+        // `getcwd(3)` answers the **physical** path and Foundation's `resolvingSymlinksInPath`
+        // deliberately leaves `/var` alone, so both sides go through `realpath(3)` instead. Measured:
+        // without it the two spellings of the same directory differ by the `/private` prefix.
+        let expected = Self.physicalPath(work.path)
+        let process = Self.physicalPath(FileManager.default.currentDirectoryPath)
+        XCTAssertNotEqual(expected.count, 0, "the channel directory resolved to an empty path")
+        XCTAssertFalse(expected == process,
+                       "the channel directory and afleet's own process directory are the same, "
+                       + "so this arm could not tell them apart")
+        // The first line the child wrote is what `pwd` answered. Compared as a whole line rather
+        // than by substring: afleet's own process directory is `/` in a test host, and a substring
+        // count over that is every separator in the channel's own path.
+        let reported = Self.physicalPath(String(out.drop { $0 == "\n" }.prefix { $0 != "\n" }))
+        XCTAssertTrue(reported == expected,
+                      "the child's working directory was not the channel's; it reported "
+                      + "\(reported.count) character(s) against the channel's \(expected.count)")
+        XCTAssertFalse(reported == process,
+                       "the child's working directory was afleet's own process directory")
+
+        XCTAssertNil(ProcessInfo.processInfo.environment[Self.inventedVariable],
+                     "afleet's own environment already carries the invented variable, so its arrival proves nothing")
+        XCTAssertEqual(count(Self.inventedValue, in: out), 1,
+                       "the channel's own environment variable reached the child "
+                       + "\(count(Self.inventedValue, in: out)) time(s)")
+    }
+
     // MARK: - No descriptor on the user's directory
 
     /// The channel's directory is created **execute-only**: a child may `chdir` into it, and
@@ -325,6 +386,14 @@ final class ShellEscapeTests: XCTestCase {
         let after = Self.descriptorCount(under: work)
         XCTAssertEqual(before, 0, "afleet held \(before) descriptor(s) under the channel directory before the run")
         XCTAssertEqual(after, 0, "afleet held \(after) descriptor(s) under the channel directory after the run")
+    }
+
+    /// One path as `getcwd(3)` would spell it. Returns the input unchanged when it does not resolve,
+    /// so a failure here is the comparison's and never this helper's.
+    private static func physicalPath(_ path: String) -> String {
+        guard let resolved = realpath(path, nil) else { return path }
+        defer { free(resolved) }
+        return String(validatingCString: resolved) ?? path
     }
 
     /// How many of this process's open descriptors resolve to a path under `directory`. `F_GETPATH`

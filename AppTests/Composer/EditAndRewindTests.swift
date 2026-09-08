@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 import AfleetCore
 import ClaudeWire
@@ -113,8 +114,23 @@ final class EditAndRewindTests: XCTestCase {
     func testTheRecordedStaleTargetRefusalForksAndRaisesNoSignal() async throws {
         let rig = try await Rig()
         let target = try rig.messageWithAPrecedingAssistant()
-        let entry = try XCTUnwrap(rig.precedingAssistantKey(before: target),
-                                  "the chosen message has no preceding assistant item, so this arm cannot run")
+
+        // **The oracle, and the fixture's own value that certifies it.** The expected fork point used
+        // to be a second copy of production's `precedingAssistantKey(before:)`, so a wrong walk in
+        // both places passed (Task 10's audit). It now follows the recording's `parentUuid` links —
+        // a different source from the fold's item order — and the recording's honoured body, which
+        // measured one such answer on the engine itself, is what says that walk is right.
+        let honoured = try Rig.recordedHonouredBody()
+        let recordedTarget = try XCTUnwrap(honoured["targetMessageUuid"]?.stringValue,
+                                           "the recorded honoured leg names no target message")
+        let recordedPreceding = try XCTUnwrap(honoured["precedingAssistantUuid"]?.stringValue,
+                                              "the recorded honoured leg names no preceding assistant")
+        XCTAssertTrue(try Rig.recordedParentAssistantRecord(of: recordedTarget) == recordedPreceding,
+                      "the oracle disagrees with the engine's own answer on the recorded leg, "
+                      + "so it cannot be trusted on this one")
+        let entry = try rig.itemKey(holding: try Rig.recordedParentAssistantRecord(of: target.promptUUID))
+        XCTAssertNotEqual(entry, target.promptUUID,
+                          "the fork point and the edited message are the same record, so this arm proves nothing")
 
         await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
         await rig.composer.edit(target)
@@ -128,7 +144,8 @@ final class EditAndRewindTests: XCTestCase {
         }
         let fork = try XCTUnwrap(point, "the fork carries no fork point, so it forks from the end")
         XCTAssertEqual(fork.entryUUID, entry,
-                       "the fork's entry is not the assistant item immediately before the edited message")
+                       "the fork's entry is not the item holding the assistant record the transcript names "
+                       + "before the edited message")
         XCTAssertEqual(fork.dropsTurn, target.promptUUID,
                        "the fork does not drop the edited message's own turn")
         XCTAssertEqual(rig.composer.draft, target.text,
@@ -277,6 +294,47 @@ final class EditAndRewindTests: XCTestCase {
         try await rig.assertNoFileRewind()
         await rig.finish()
     }
+
+    // MARK: - The note, on screen
+
+    /// **G4's "shows a visible note", through the view.** `ComposerModel.editNote` was set, and
+    /// asserted, by every arm above; until Task 11 no view read it, so the clause was a claim about a
+    /// property rather than about anything a person could see.
+    ///
+    /// Walked with `ComposerViewTree`, which stops at every reference type that is not a view — an
+    /// unbounded `Mirror` walk leaves the view layer, runs into the app's cyclic object graph and
+    /// takes the bundle down, after which `xcodebuild` retries it and the suite reports `Executed 0`
+    /// at exit 0 (tracker 147).
+    func testTheRefusedRewindsNoteIsDrawnByTheComposer() async throws {
+        let rig = try await Rig()
+        let target = try rig.messageWithAPrecedingAssistant()
+        await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
+
+        await rig.composer.edit(target)
+
+        let note = try XCTUnwrap(rig.composer.editNote, "the refused rewind set no note to draw")
+        let surface = try XCTUnwrap(ComposerViewTree.view(named: "EditNoteSurface",
+                                                          in: ComposerViewTree.body(of: ComposerView(model: rig.composer))),
+                                    "the composer's body draws no surface for the edit note")
+        let drawn = try XCTUnwrap(Mirror(reflecting: surface).descendant("note") as? String,
+                                  "the note surface was drawn with nothing in it")
+        XCTAssertTrue(drawn == note,
+                      "the drawn note is \(drawn.count) character(s); the model's is \(note.count)")
+        XCTAssertTrue(drawn.contains("not rewound") && drawn.contains("fork"),
+                      "the drawn \(drawn.count)-character note does not say the conversation was not rewound "
+                      + "and a fork was opened")
+
+        // The floor: the same surface carries nothing once the model has no note, so the arm above is
+        // about the note reaching the view and not about the surface merely existing.
+        rig.composer.editNote = nil
+        let empty = try XCTUnwrap(ComposerViewTree.view(named: "EditNoteSurface",
+                                                        in: ComposerViewTree.body(of: ComposerView(model: rig.composer))),
+                                  "the composer stopped drawing the surface once the note was cleared")
+        XCTAssertNil(Mirror(reflecting: empty).descendant("note") as? String,
+                     "the note surface still carries a note after the model dropped it")
+
+        await rig.finish()
+    }
 }
 
 // MARK: - Support
@@ -381,6 +439,51 @@ private final class Rig {
             if case .assistantMessage(let assistant) = item { return assistant.recordUUIDs.last ?? assistant.id.key }
         }
         return nil
+    }
+
+    /// The assistant **record** the fixture's own transcript names before `uuid`, followed through
+    /// the recording's `parentUuid` links.
+    ///
+    /// This is G4's independent oracle for the fork point. Production walks the **fold's item order**
+    /// backwards (`ComposerModel.precedingAssistantKey(before:)`); this follows the **engine's own
+    /// parent links in the recording**, skipping the attachment and bookkeeping records that render
+    /// nothing. Two different sources, so a wrong answer in one is not a wrong answer in the other —
+    /// which is what the previous expectation, a second copy of the production walk, could not claim.
+    ///
+    /// The oracle is itself checked against the recording's `precedingAssistantUuid` in the test that
+    /// uses it, so the engine's own measurement is what says this walk is right.
+    static func recordedParentAssistantRecord(of uuid: String) throws -> String {
+        guard let main = try mainTranscript(of: "rewind-turn") else { throw RigError.noMainTranscript }
+        let file = main.slugDirectory.appending(path: "\(main.session).jsonl")
+        let decoder = JSONDecoder()
+        var byUUID: [String: JSONValue] = [:]
+        for line in try String(contentsOf: file, encoding: .utf8).split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let record = try? decoder.decode(JSONValue.self, from: data),
+                  let id = record["uuid"]?.stringValue
+            else { continue }
+            byUUID[id] = record
+        }
+        var cursor = byUUID[uuid]?["parentUuid"]?.stringValue
+        while let current = cursor, let record = byUUID[current] {
+            if record["type"]?.stringValue == "assistant" { return current }
+            cursor = record["parentUuid"]?.stringValue
+        }
+        throw RigError.noRecordedLeg
+    }
+
+    /// The `ItemID.key` of the assistant item that **holds** `record`.
+    ///
+    /// A containment lookup and never an ordering one: the fold groups consecutive assistant records
+    /// of one message into a run keyed by the run's first record, and this only resolves a record
+    /// into the run that holds it. Nothing here asks what comes before what.
+    func itemKey(holding record: String) throws -> String {
+        for item in timeline.timeline.items {
+            if case .assistantMessage(let assistant) = item, assistant.recordUUIDs.contains(record) {
+                return assistant.id.key
+            }
+        }
+        throw RigError.noRecordedLeg
     }
 
     /// The **oldest** user message the fold rendered that has an assistant item before it, so a fork

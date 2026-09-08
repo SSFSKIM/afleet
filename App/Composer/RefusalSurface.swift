@@ -45,3 +45,30 @@ struct RefusalSurface: View {
         }
     }
 }
+
+/// What *Edit* says when the conversation was not rewound (spec §8.5, gate G4).
+///
+/// A view of its own rather than a third branch of `RefusalSurface`, because the two say different
+/// things: a refusal is a line that did not run, and this is a rewind that was refused **and a fork
+/// that was opened instead** — a thing that happened, which the user has to be told about because
+/// the conversation they are now typing into is not the one they were reading.
+///
+/// The sentence is `ComposerModel`'s (`forkNote`, `noForkPointNote`, `explanation(of:)`); nothing is
+/// composed here.
+struct EditNoteSurface: View {
+
+    let note: String?
+
+    var body: some View {
+        if let note {
+            Label {
+                Text(note)
+            } icon: {
+                Image(systemName: "arrow.uturn.backward.circle")
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+        }
+    }
+}

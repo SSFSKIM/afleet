@@ -18,6 +18,10 @@ struct ComposerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             RefusalSurface(refusal: model.refusal, interception: model.lastInterception)
+            // G4's "shows a visible note": the note *Edit* sets when the engine refused the rewind
+            // and a fork was opened instead. It was set and asserted on the model with no view
+            // reading it until Task 11 (tracker 153's sibling).
+            EditNoteSurface(note: model.editNote)
             QueueChipView(model: model.queue)
             CommandCompletionView(model: model)
             FileMentionView(model: model)
