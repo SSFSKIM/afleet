@@ -253,4 +253,49 @@ final class DecisionCardTests: XCTestCase {
                        "stripping the escapes changed the sentence")
     }
 
+    // MARK: - D12's four inert readings
+
+    /// All four readings, and the two live ones either side of them.
+    ///
+    /// The discriminating pair is *session ended* against *left to the binary*: `.inert` has two
+    /// producers — `.exited` rewriting every pending decision, and an undeclared dialog kind left to
+    /// the binary — and `overlay.stale` is the only thing that separates them. An implementation
+    /// reading `.inert` alone tells the user a live session has ended.
+    func testTheFourInertReadings() async throws {
+        let (_, answering) = await answering()
+        let pending = try card("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaab1")
+
+        func reading(_ state: DecisionItem.State, stale: Bool) -> [String] {
+            var card = pending
+            card.state = state
+            let view = DecisionCardView(card: card, presentation: .full, in: Self.channel,
+                                        isStale: stale, answering: answering)
+            return CardTree.texts(in: view.body)
+        }
+
+        XCTAssertTrue(reading(.cancelled, stale: false).contains("Answered elsewhere."),
+                      "a cancelled card did not read answered elsewhere")
+        XCTAssertTrue(reading(.inert, stale: true).contains("This session ended."),
+                      "an inert card in a stale overlay did not read session ended")
+        let binary = reading(.inert, stale: false)
+        XCTAssertFalse(binary.contains("This session ended."),
+                       "an inert card in a live overlay claimed the session had ended")
+        XCTAssertTrue(binary.contains(where: { $0.contains("Left to the binary") }),
+                      "an inert card in a live overlay did not read left to the binary")
+        XCTAssertTrue(reading(.policyAnswered(error: "an invented policy refusal"), stale: false)
+                        .contains("an invented policy refusal"),
+                      "a policy-answered card did not show its error verbatim")
+        XCTAssertTrue(reading(.answered(outcome: "Allowed once"), stale: false).contains("Allowed once"),
+                      "an answered card did not show its outcome")
+
+        // The floor: a pending card is not inert and keeps its actions, in both overlays.
+        for stale in [false, true] {
+            let view = DecisionCardView(card: pending, presentation: .full, in: Self.channel,
+                                        isStale: stale, answering: answering)
+            let body = try XCTUnwrap(CardTree.permissionBody(in: view.body),
+                                     "a pending card drew no permission card")
+            XCTAssertNotNil(ViewTree.button("Allow once", in: body),
+                            "a pending card lost its actions")
+        }
+    }
 }

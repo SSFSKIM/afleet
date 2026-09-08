@@ -20,8 +20,9 @@ struct DecisionCardView: View {
     let card: DecisionCard
     let presentation: Presentation
     let channel: ChannelKey
-    /// C3's overlay is stale — the process this decision belongs to has exited. Read by the inert
-    /// readings, which land next.
+    /// C3's overlay is stale — the process this decision belongs to has exited. It is the second
+    /// half of D12's `.inert` reading and the card cannot derive it, because it is a property of
+    /// the overlay and not of the item.
     let isStale: Bool
     let answering: DecisionAnswering
 
@@ -39,7 +40,13 @@ struct DecisionCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: presentation == .full ? 8 : 4) {
-            live
+            if let reading = card.reading(inStaleOverlay: isStale) {
+                Text(reading.text)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                live
+            }
         }
     }
 
@@ -62,7 +69,35 @@ struct DecisionCardView: View {
     }
 }
 
+/// What a card that is no longer waiting on the user reads (spec D12).
+struct DecisionReading: Hashable, Sendable {
+    var text: String
+}
+
 extension DecisionCard {
+
+    /// D12's four inert readings, and the outcome of an answered card. Nil while the engine is
+    /// still waiting, which is the only state with actions.
+    ///
+    /// `.inert` has **two** producers — `.exited` rewriting every pending decision, and an
+    /// undeclared dialog kind left to the binary — and `overlay.stale` is what separates them. A
+    /// card reading `.inert` alone would tell the user a live session had ended.
+    func reading(inStaleOverlay stale: Bool) -> DecisionReading? {
+        switch state {
+        case .pending:
+            nil
+        case .answered(let outcome):
+            DecisionReading(text: outcome)
+        case .cancelled:
+            DecisionReading(text: "Answered elsewhere.")
+        case .policyAnswered(let error):
+            DecisionReading(text: error)
+        case .inert:
+            stale
+                ? DecisionReading(text: "This session ended.")
+                : DecisionReading(text: "Left to the binary: afleet does not handle this kind.")
+        }
+    }
 
     /// One line naming what the card is about, for a kind this build draws no card for yet.
     var summaryLine: String {
