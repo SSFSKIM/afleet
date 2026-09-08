@@ -1584,6 +1584,12 @@ one; entry 23 is worth more to C1 than a guessed fix would have been to C6.
 
 ## Revision Notes
 
+- 2026-09-09 corrective on `main` (tracker 194, 161): the two `FleetTimelineTests` waits that read
+  a loaded host as a product failure are delivery-fulfilled — the whole-wire-stream test awaits the
+  effect counts it then asserts, the tailer's watchdog becomes a hang guard that fails with a count
+  of its own, and the restart test writes its file only once the replacement stream is the sole
+  reader, since the read offset is the tailer's and not one stream's.
+
 - 2026-09-08: **the agent-run tree's route to the app.** `WireReducer.agents` has always been
   folded from the task frames and the parent-tool-use observations, but nothing exposed it past
   the ingestion, so C6.4's Agents tab and the timeline's own agent rows had no reader.

@@ -1604,16 +1604,28 @@ final class IngestionTests: XCTestCase {
         tap.finish()
         XCTAssertEqual(expectedEffects, 15, "the recording's transcript_mirror frames, counted from its own frames")
 
-        try await Task.sleep(for: .milliseconds(500))               // every event folded and every effect logged
+        // **Delivery-fulfilled, not a fixed window.** Every count below is the count it always was; only the wait in
+        // front of them changed. The 500 ms sleep this replaces was a measurement of the host: on a loaded machine
+        // the fan-out had produced 12 of the 15 mirror effects when it ended, and once 5 of 15, and the assertions
+        // then reported dropped frames that were still in flight (tracker 194). The waits below end when the wire
+        // has delivered what the recording holds, and `TestTiming.hangGuard` only turns a hang into a failure.
+        await TestTiming.awaitDelivery("mirror effects", of: expectedEffects) {
+            log.all.filter(Self.movedTheDurableHalf).count
+        }
+        // Then the whole fan-out, mirror half and live half together. Reaching this count is also what puts the log
+        // level with the sink, so the `published` reading further down races nothing: the recording's events are all
+        // folded and every effect they produced has been collected.
+        await TestTiming.awaitDelivery("effects", of: expectedEffects + Self.liveHalfEffects) { log.count }
+
         let effects = log.all
-        let fromMirror = effects.filter { $0.duplicates + $0.routedElsewhere + $0.applied.count > 0 }
+        let fromMirror = effects.filter(Self.movedTheDurableHalf)
         XCTAssertEqual(fromMirror.count, expectedEffects,
                        "one effect per mirror frame: fewer means a dropped frame, more means a second apply path")
         XCTAssertEqual(fromMirror.reduce(0) { $0 + $1.duplicates }, 53, "every mirrored entry was claimed against the read")
         XCTAssertEqual(fromMirror.reduce(0) { $0 + $1.routedElsewhere }, 0, "the new-slug path resolves to the same session")
         XCTAssertEqual(fromMirror.reduce(0) { $0 + $1.applied.count }, 0, "the file already held every record")
 
-        let fromLive = effects.filter { $0.duplicates + $0.routedElsewhere + $0.applied.count == 0 }
+        let fromLive = effects.filter { !Self.movedTheDurableHalf($0) }
         XCTAssertFalse(fromLive.isEmpty, "the recording's assistant, result and system frames move the live half")
         XCTAssertTrue(fromLive.allSatisfy { !$0.changes.isEmpty },
                       "every live-half effect reports what moved; an event that moved nothing publishes nothing")
@@ -1625,9 +1637,20 @@ final class IngestionTests: XCTestCase {
 
         let published = log.count
         await ingestion.close()
-        try await Task.sleep(for: .milliseconds(50))
-        XCTAssertTrue(log.finished, "close() finishes effects")
-        XCTAssertEqual(log.count, published, "and nothing arrives after it")
+        await TestTiming.awaitDelivery("the effect stream's finish", of: 1) { log.finished ? 1 : 0 }
+        XCTAssertEqual(log.count, published, "close() finishes effects and nothing arrives after it")
+    }
+
+    /// The live half of the same recording: one effect per event that moved it, counted from a run of the fan-out
+    /// rather than from the frames, since an event that moved nothing publishes nothing. It is a wait target and not
+    /// an assertion — a fan-out that published *more* than this is caught by the mirror count and by the reading
+    /// after `close()`, and one that publishes fewer stops at the hang guard with the shortfall in its message.
+    private static let liveHalfEffects = 45
+
+    /// An effect the mirror produced: the record bookkeeping rides on it. The live half's carry changes and none of
+    /// these three.
+    private static func movedTheDurableHalf(_ effect: StreamIngestion.Effect) -> Bool {
+        effect.duplicates + effect.routedElsewhere + effect.applied.count > 0
     }
 
     // MARK: - A main path that does not exist yet
