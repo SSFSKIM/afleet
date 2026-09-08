@@ -1826,6 +1826,13 @@ is renumbered.
      local dependency and a workspace member) and point it at the project's own
      `xcshareddata/swiftpm/Package.resolved`; until then the floor's Makefile target restores the
      file after the run. Owner: C5 (`project.yml`), noted 2026-09-08.
+     Root cause found 2026-09-09 at C7.1's merge: two tools rewrite the one file toward different
+     graphs — the App floor's xcodebuild adds the app's pins (HighlightKit, swift-cmark) to
+     `Workbench/Package.resolved` as part of the workspace resolution, and `swift package`/`swift test`
+     under `Workbench/` prunes them again as unused by the manifest. Whichever copy is committed, the
+     other tool dirties the tree. Closer: pin every Workbench dependency exactly in the manifest (most
+     already are) and stop committing `Workbench/Package.resolved`, so neither tool's rewrite is a diff;
+     `main` keeps the App floor's copy until then. Owner: the architect.
 
 189. **`SourceControlCore` decodes pathnames lossily.** Both git parsers convert path bytes with
      `String(decoding:as: UTF8.self)`, which replaces invalid sequences, so a non-UTF-8 path reaches a
