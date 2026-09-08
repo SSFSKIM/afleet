@@ -125,6 +125,12 @@ final class MarkdownRenderingTests: XCTestCase {
                        "a two-by-two table built \(tableCells(table)) table cell(s)")
         XCTAssertFalse(table.string.contains("|"),
                        "the table drew its own source pipes, which is the preformatted rendering §5 replaces")
+        // And the row draws it as one: a table block takes the TextKit path, because SwiftUI's
+        // `Text` drops the paragraph styles the cells live in.
+        XCTAssertTrue(TimelineTextMeasure.holdsATable(table), "the table block does not read as a table to the row")
+        XCTAssertFalse(TimelineTextMeasure.holdsATable(wide), "the bailed table still reads as a table to the row")
+        XCTAssertGreaterThan(TimelineTextMeasure.height(of: table, width: 320), 0,
+                             "the table laid out to no height at 320 points")
     }
 
     /// The third override cannot be reproduced, and this is where that is written down.

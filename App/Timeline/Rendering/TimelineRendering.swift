@@ -186,17 +186,27 @@ struct RenderedRow: Identifiable {
     }
 
     /// A cheap height, measured from the laid-out attributed text plus the tail.
+    ///
+    /// A block carrying a real table is measured by TextKit instead: `boundingRect` lays out runs
+    /// and knows nothing about the cells a paragraph style puts them in, so a table measured that
+    /// way is a row too short to hold it.
     func height(forWidth width: CGFloat) -> CGFloat {
         let joined = NSMutableAttributedString()
-        for block in settled { joined.append(block); joined.append(NSAttributedString(string: "\n")) }
+        var tables: CGFloat = 0
+        for block in settled where TimelineTextMeasure.holdsATable(block) {
+            tables += TimelineTextMeasure.height(of: block, width: width - 24)
+        }
+        for block in settled where !TimelineTextMeasure.holdsATable(block) {
+            joined.append(block); joined.append(NSAttributedString(string: "\n"))
+        }
         if !tail.isEmpty {
             joined.append(NSAttributedString(string: tail,
                                              attributes: [.font: NSFont.systemFont(ofSize: 13)]))
         }
-        guard joined.length > 0 else { return 18 }
+        guard joined.length > 0 else { return max(18, tables + 8) }
         let bounds = joined.boundingRect(with: NSSize(width: width - 24, height: .greatestFiniteMagnitude),
                                          options: [.usesLineFragmentOrigin, .usesFontLeading])
-        return max(18, ceil(bounds.height) + 8)
+        return max(18, ceil(bounds.height) + tables + 8)
     }
 }
 
@@ -209,9 +219,17 @@ struct TimelineMarkdownRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(Array(row.settled.enumerated()), id: \.offset) { _, block in
-                Text(AttributedString(block))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                if TimelineTextMeasure.holdsATable(block) {
+                    // A table lives in the paragraph style, and SwiftUI's `Text` draws an
+                    // `AttributedString`'s fonts and colours and drops its paragraph styles. So the
+                    // one block kind whose structure would be lost is drawn by the one thing that
+                    // lays a text table out (§5).
+                    TimelineTextKitBlock(block: block)
+                } else {
+                    Text(AttributedString(block))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if !row.tail.isEmpty {
                 // The live tail: plain text in the same font, never parsed (§4).
@@ -223,6 +241,63 @@ struct TimelineMarkdownRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
+    }
+}
+
+/// A settled block that carries a real table, drawn by TextKit.
+///
+/// Deliberately narrow: only a block with a table takes this path, so every other block keeps the
+/// SwiftUI text rendering the rest of the surface is built on and nothing about the row's ordinary
+/// cost changes.
+struct TimelineTextKitBlock: NSViewRepresentable {
+
+    let block: NSAttributedString
+
+    func makeNSView(context: Context) -> NSTextView {
+        let view = NSTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.drawsBackground = false
+        view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        view.textContainer?.widthTracksTextView = true
+        view.textStorage?.setAttributedString(block)
+        return view
+    }
+
+    func updateNSView(_ view: NSTextView, context: Context) {
+        view.textStorage?.setAttributedString(block)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
+        let width = proposal.width ?? nsView.bounds.width
+        guard width > 0 else { return nil }
+        return CGSize(width: width, height: TimelineTextMeasure.height(of: block, width: width))
+    }
+}
+
+/// Laying text out to ask how tall it is, for the one block kind `boundingRect` cannot measure.
+enum TimelineTextMeasure {
+
+    /// Whether any run of this block belongs to a table cell.
+    static func holdsATable(_ text: NSAttributedString) -> Bool {
+        var found = false
+        text.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: text.length)) { value, _, stop in
+            guard let style = value as? NSParagraphStyle else { return }
+            if style.textBlocks.contains(where: { $0 is NSTextTableBlock }) { found = true; stop.pointee = true }
+        }
+        return found
+    }
+
+    static func height(of text: NSAttributedString, width: CGFloat) -> CGFloat {
+        let storage = NSTextStorage(attributedString: text)
+        let container = NSTextContainer(size: NSSize(width: max(1, width), height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        let manager = NSLayoutManager()
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        manager.ensureLayout(for: container)
+        return ceil(manager.usedRect(for: container).height)
     }
 }
 
