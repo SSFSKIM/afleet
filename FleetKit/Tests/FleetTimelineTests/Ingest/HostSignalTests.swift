@@ -280,6 +280,129 @@ final class HostSignalTests: XCTestCase {
         tap.finish()
     }
 
+    // MARK: - The agent-run tree's route to the app
+
+    /// The tree the reducer has always folded, now reachable: a `task_started` through the tap moves it, the move is
+    /// published once, and the one consistent read carries the same tree the actor exposes.
+    func testATaskStartedThroughTheTapPublishesTheTreeOnceAndReachesTheApp() async throws {
+        let fx = try FixtureCorpus.named("nested-depth-2")
+        let (ingestion, tap, log, tree) = try await opened(fx)
+        defer { _ = tree }
+        let started = try XCTUnwrap(firstAgentTaskStarted(try FixtureWireReplay.steps(for: fx)),
+                                    "the fixture's replay carries no agent task_started")
+        await expectEqual(await ingestion.agents?.nodes.isEmpty, true, "the tree starts empty")
+        let before = log.count
+
+        tap.send(started.event)
+
+        let agents = await settledAgents(ingestion) { $0?.node(started.taskID) != nil }
+        XCTAssertNotNil(agents?.node(started.taskID), "the run the frame armed is readable off the ingestion")
+        let published = await logged(log, before + 1)
+        XCTAssertEqual(published, before + 1, "the tree's movement reached `effects`")
+        await quiet()
+        XCTAssertEqual(agentsChanges(Array(log.all.dropFirst(before))), 1,
+                       "one apply reports the tree once: \(log.all.map(\.changes))")
+        await expectEqual(await ingestion.timeline.agents, await ingestion.agents,
+                          "the one read carries the tree the actor exposes")
+        await expectEqual(await ingestion.timeline.agents?.node(started.taskID) != nil, true)
+        await ingestion.close()
+        tap.finish()
+    }
+
+    /// The negative the case has to earn: an event that inserts an item and never touches the tree publishes no
+    /// `.agentsChanged`. The frame is the constructed `tool_use_summary` above — no fixture carries one.
+    func testAnEventThatMovesItemsButNotTheTreePublishesNoAgentsChange() async throws {
+        let fx = try FixtureCorpus.named("ask-user-question")
+        let (ingestion, tap, log, tree) = try await opened(fx)
+        defer { _ = tree }
+        let main = LogicalStream(configHome: tree.root, sessionID: fx.sessionID, name: .main)
+        let lead = "toolu_invented_0003"
+        let line = JSONValue.object([
+            "type": .string("tool_use_summary"),
+            "summary": .string("afleet invented second cluster label"),
+            "preceding_tool_use_ids": .array([.string(lead)]),
+            "uuid": .string("44444444-4444-4444-8444-444444444444"),
+            "session_id": .string("55555555-5555-4555-8555-555555555555"),
+        ])
+        let before = log.count
+
+        tap.send(.frame(FrameDecoder.decode(line: try line.canonicalData()), .first))
+
+        let overlay = await settled(ingestion) { $0.clusters[ItemID(stream: main, key: lead)] != nil }
+        XCTAssertNotNil(overlay.clusters[ItemID(stream: main, key: lead)], "the frame did move an item")
+        let published = await logged(log, before + 1)
+        XCTAssertEqual(published, before + 1)
+        await quiet()
+        await expectEqual(await ingestion.agents?.nodes.isEmpty, true, "and the tree never moved")
+        XCTAssertEqual(agentsChanges(log.all), 0, "so nothing reported it: \(log.all.map(\.changes))")
+        await ingestion.close()
+        tap.finish()
+    }
+
+    /// One apply, more than one tree-changing observation. The corpus's instance is `nested-depth-2`'s depth-2
+    /// `task_started`: it creates the node *and* resolves the two-step join the spawning frame left standing, so the
+    /// same apply adds a node and records a parent answer. The reducer still reports the tree once, because the
+    /// report is a comparison of the whole tree and not a count of the calls that moved it.
+    ///
+    /// Driven against the reducer itself: the invariant is the reducer's, and the frame that exercises it only exists
+    /// partway through the recording's own order. The pass also pins the whole rule over every apply the recording
+    /// makes — a tree that moved is reported exactly once, a tree that did not is never reported.
+    func testTwoTreeObservationsInOneApplyStillReportTheTreeOnce() throws {
+        let fx = try FixtureCorpus.named("nested-depth-2")
+        var reducer = try FixtureWireReplay.reducer(for: fx)
+        var moves = 0
+        var doubleObservations = 0
+
+        for step in try FixtureWireReplay.steps(for: fx) {
+            let now = Date(timeIntervalSince1970: Double(step.t) / 1000)
+            for event in step.events {
+                let before = reducer.agents
+                let changes = reducer.apply(event, at: now)
+                let after = reducer.agents
+                let reported = changes.filter { $0 == .agentsChanged }.count
+                guard after != before else {
+                    XCTAssertEqual(reported, 0, "an unmoved tree is never reported")
+                    continue
+                }
+                moves += 1
+                XCTAssertEqual(reported, 1, "a moved tree is reported exactly once")
+                if after.nodes.count > before.nodes.count, after.parentAnswers != before.parentAnswers {
+                    doubleObservations += 1
+                }
+            }
+        }
+
+        XCTAssertGreaterThan(moves, 0, "the recording moves the tree at all")
+        XCTAssertGreaterThan(doubleObservations, 0,
+                             "the recording carries an apply that both adds a node and links it")
+    }
+
+    /// The agents half of `settled`.
+    private func settledAgents(_ ingestion: StreamIngestion, within bound: TimeInterval = 2,
+                               until predicate: @Sendable (AgentRunTree?) -> Bool) async -> AgentRunTree? {
+        let deadline = Date().addingTimeInterval(bound)
+        while true {
+            let agents = await ingestion.agents
+            if predicate(agents) || Date() >= deadline { return agents }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    /// The first `task_started` the fixture's replay carries that names an agent run, with the id it armed.
+    private func firstAgentTaskStarted(_ steps: [FixtureWireReplay.Step]) -> (event: WireEvent, taskID: String)? {
+        for step in steps {
+            for event in step.events {
+                guard case .frame(.system(.taskStarted(let f)), _) = event, f.taskType == "local_agent" else { continue }
+                return (event, f.taskID)
+            }
+        }
+        return nil
+    }
+
+    private func agentsChanges(_ effects: [StreamIngestion.Effect]) -> Int {
+        effects.reduce(0) { total, effect in total + effect.changes.filter { $0 == .agentsChanged }.count }
+    }
+
     // MARK: - Assertion helpers
 
     // XCTest's assertions take non-async autoclosures and every query on this actor is `await`; these are the same

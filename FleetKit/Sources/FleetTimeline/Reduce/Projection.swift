@@ -110,4 +110,6 @@ public struct DurableProjection: Hashable, Sendable {
 /// What changed between two projections, at the granularity C4's store publishes and C6 animates.
 public enum TimelineChange: Hashable, Sendable {
     case inserted(ItemID), updated(ItemID), removed(ItemID), previewChanged, overlayChanged, sessionStateChanged
+    /// The channel's agent-run tree moved. Reported at most once per apply, by comparing the tree before and after.
+    case agentsChanged
 }
