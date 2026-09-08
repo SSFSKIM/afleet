@@ -56,7 +56,7 @@ final class HeaderActionTests: XCTestCase {
                                                                                        status: "connected")]))))
             await double.stagePane(.success(Self.paneRequest()))
             let header = HeaderRig.header(double, key: key)
-            header.paneRunner = { _ in }
+            header.paneRunner = { _, _ in }
 
             await scenario.run(header)
 
@@ -96,7 +96,7 @@ final class HeaderActionTests: XCTestCase {
             await double.stageRun(.success(.mcp(MCPPopover(servers: []))))
             await double.stagePane(.success(Self.paneRequest()))
             let owned = HeaderRig.header(double, key: key, mode: .ownedCandidate)
-            owned.paneRunner = { _ in }
+            owned.paneRunner = { _, _ in }
             await action(owned)
             let members = await double.memberSequence
             let acted = !members.isEmpty || owned.composer.pendingConfirmation != nil
@@ -112,7 +112,7 @@ final class HeaderActionTests: XCTestCase {
         let key = HeaderRig.key()
         await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
         let header = HeaderRig.header(double, key: key, mode: .readOnly(.teammate))
-        header.paneRunner = { _ in XCTFail("a read-only row reached the pane runner") }
+        header.paneRunner = { _, _ in XCTFail("a read-only row reached the pane runner") }
 
         XCTAssertFalse(header.offersOwnedActions, "a read-only row reported that it offers owned actions")
         let explanation = try XCTUnwrap(header.readOnlyExplanation,
@@ -307,13 +307,15 @@ final class HeaderActionTests: XCTestCase {
 
     // MARK: - Open in terminal
 
-    /// *Open in terminal* is the first production caller of `PanelHostModel.run(_:)`, and surfaces
-    /// `PanelHostError.noPaneRunner` as an inline note **naming the terminal** — item 47's
+    /// *Open in terminal* is the first production caller of `PanelHostModel.run(_:for:)`, and
+    /// surfaces `PanelHostError.noPaneRunner` as an inline note **naming the terminal** — item 47's
     /// degradation stated by the composite, not a silent skip.
     ///
-    /// The request is handed to the runner **unchanged, `id` included**: C4 accepts a pane exit only
-    /// when its `request.id` is the one it is waiting on, so a header that minted a fresh one would
-    /// have every exit discarded with nothing to say why.
+    /// The request is handed to the runner **unchanged, `id` included**, and with the channel the
+    /// header is drawn for: C4 accepts a pane exit only when its `request.id` is the one it is
+    /// waiting on, so a header that minted a fresh one would have every exit discarded with nothing
+    /// to say why, and a pane opened in another channel would leave X5 waiting on one that never
+    /// exits there.
     func testOpenInTerminalHandsTheRequestOnAndSurfacesTheMissingPaneRunner() async throws {
         let double = ComposerLifecycleDouble()
         let key = HeaderRig.key()
@@ -321,7 +323,7 @@ final class HeaderActionTests: XCTestCase {
         await double.stagePane(.success(request))
         let header = HeaderRig.header(double, key: key)
         var handed: [UUID] = []
-        header.paneRunner = { handed.append($0.id) }
+        header.paneRunner = { request, _ in handed.append(request.id) }
 
         await header.openInTerminal()
 
@@ -332,7 +334,7 @@ final class HeaderActionTests: XCTestCase {
         await refusing.stagePane(.success(Self.paneRequest()))
         let refused = HeaderRig.header(refusing, key: key)
         let host = PanelHostModel()
-        refused.paneRunner = { try await host.run($0) }
+        refused.paneRunner = { request, channel in try await host.run(request, for: channel) }
 
         await refused.openInTerminal()
 
@@ -357,7 +359,7 @@ final class HeaderActionTests: XCTestCase {
         await double.stageLiveTasks(["invented-live"], for: key)
         let header = HeaderRig.header(double, key: key)
         var handed: [UUID] = []
-        header.paneRunner = { handed.append($0.id) }
+        header.paneRunner = { request, _ in handed.append(request.id) }
 
         await header.openInTerminal()
 
@@ -386,7 +388,7 @@ final class HeaderActionTests: XCTestCase {
         await double.stageLiveTasks(["invented-live"], for: key)
         let header = HeaderRig.header(double, key: key)
         var handed: [UUID] = []
-        header.paneRunner = { handed.append($0.id) }
+        header.paneRunner = { request, _ in handed.append(request.id) }
 
         await header.openInTerminal()
         header.composer.cancelPending()

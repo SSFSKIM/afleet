@@ -5,6 +5,10 @@ import FleetKit
 public enum PanelHostError: Error, Hashable, Sendable {
     case duplicateTab(PanelTabID)
     case noPaneRunner(PanelTabID)
+    /// The host holds no `ChannelContext` for the channel the caller named, so there is nothing to
+    /// run the pane in. A channel the host has never rendered, or one that has left the index while
+    /// the request was being prepared, arrives here.
+    case noChannelContext
 }
 
 /// The panel-tab host. C5's app shell implements it; C6 and the C7 leaves register into it.
@@ -47,8 +51,20 @@ public enum PanelHostError: Error, Hashable, Sendable {
     /// each (tab, channel) a stable SwiftUI identity so the subtree is not rebuilt from scratch.
     func session(for id: PanelTabID, context: ChannelContext) -> any PanelTabSession
     func view(for id: PanelTabID, context: ChannelContext) -> AnyView
-    /// X5's pane request, delivered to the registered runner unchanged, `id` included.
-    func run(_ request: PaneRequest) async throws
+    /// X5's pane request, delivered to the registered runner unchanged, `id` included, in the
+    /// context of the channel **the caller names**.
+    ///
+    /// The channel is a parameter because every caller already holds one: a header action, a trust
+    /// banner and a sidebar row each act on a channel they were drawn for. Resolving it from the
+    /// host's focus instead would be resolving it later than the decision was made — `openInTerminal`
+    /// suspends across a whole ownership handoff, long enough for the user to select another channel
+    /// — and the pane would then open in a channel X5 never released, while X5 waits on an exit from
+    /// the one it did. There is no context-less form to fall back to, so no caller can reach that
+    /// ambiguity at all.
+    ///
+    /// Throws `noChannelContext` when the host can resolve no context for that channel, having
+    /// selected no tab and reached no runner.
+    func run(_ request: PaneRequest, for channel: ChannelKey) async throws
 }
 
 // Link opening is deliberately NOT a `PanelHost` member: it lives on `LinkRouterCapability`,

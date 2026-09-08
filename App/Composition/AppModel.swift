@@ -156,7 +156,7 @@ final class AppModel {
         composers.attach(to: workspace,
                          context: { [panels] key, cwd in panels.context(for: key, cwd: cwd) },
                          timeline: { [timelines] key in timelines.model(for: key) },
-                         paneRunner: { [panels] request in try await panels.run(request) },
+                         paneRunner: { [panels] request, channel in try await panels.run(request, for: channel) },
                          lifecycle: lifecycle)
         // *Fork from here* opens a sibling channel and the window has to move to it, which is C5's own selection
         // path and not a second one. Set after `attach`, which releases the models of the previous workspace.

@@ -48,18 +48,20 @@ final class PanelHostTests: XCTestCase {
 
     /// R2: run must select the visible terminal, not just start a pane behind Thread.
     func testPaneRunUpdatesTheRenderedSelection() async throws {
-        let app = AppModel()
-        try app.panels.register(StubPanelTab(.terminal))
+        let rig = try await PanelRig(channels: 1)
+        let key = rig.keys[0]
+        _ = rig.host.context(for: key, cwd: PanelFixtures.cwd)
+        try rig.host.register(StubPanelTab(.terminal))
         let runner = RecordingPaneRunner()
-        app.panels.registerPaneRunner(runner, for: .terminal)
-        XCTAssertEqual(app.shell.panelTab, .thread, "test must begin on another tab")
+        rig.host.registerPaneRunner(runner, for: .terminal)
+        XCTAssertEqual(rig.shell.panelTab, .thread, "test must begin on another tab")
 
-        try await app.panels.run(PanelFixtures.paneRequest())
+        try await rig.host.run(PanelFixtures.paneRequest(), for: key)
 
         let count = await runner.received.count
         XCTAssertEqual(count, 1, "the registered runner never received the pane")
-        XCTAssertEqual(app.shell.panelTab, .terminal, "pane ran behind the old visible tab")
-        XCTAssertEqual(app.panels.selected, .terminal, "run did not select its registered tab")
+        XCTAssertEqual(rig.shell.panelTab, .terminal, "pane ran behind the old visible tab")
+        XCTAssertEqual(rig.host.selected, .terminal, "run did not select its registered tab")
     }
 
     // MARK: - G4a: registration and order
@@ -949,11 +951,10 @@ final class PanelHostTests: XCTestCase {
         let context = try XCTUnwrap(rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd),
                                     "the host built no context")
         let runner = RecordingPaneRunner()
-        await runner.bind(context.reportPaneExit)
         rig.host.registerPaneRunner(runner, for: .terminal)
         let request = PanelFixtures.paneRequest()
 
-        try await rig.host.run(request)
+        try await rig.host.run(request, for: context.key)
 
         let received = await runner.received
         XCTAssertEqual(received.count, 1, "the runner received \(received.count) requests, not 1")
@@ -964,6 +965,77 @@ final class PanelHostTests: XCTestCase {
         XCTAssertTrue(exits.first?.request.id == request.id,
                       "the exit reaching the lifecycle carries a different request id")
         XCTAssertTrue(exits.first?.request == request, "the exit's request is not the one that was run")
+    }
+
+    /// A pane lands in the channel **the caller named**, and the runner is handed that channel's
+    /// context.
+    ///
+    /// The assertion is on `context.key` rather than on the fact that a run happened, because a host
+    /// resolving the channel from anywhere else — its focus, its selection, the first channel it
+    /// holds — also runs the request, and only the identity of the context says which channel the
+    /// pane opened in.
+    func testAPaneRunsInTheContextOfTheChannelTheCallerNamed() async throws {
+        let rig = try await PanelRig(channels: 2)
+        let named = rig.keys[1]
+        _ = rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd)
+        _ = rig.host.context(for: named, cwd: PanelFixtures.cwd)
+        let runner = RecordingPaneRunner()
+        rig.host.registerPaneRunner(runner, for: .terminal)
+
+        try await rig.host.run(PanelFixtures.paneRequest(), for: named)
+
+        let channels = await runner.channels
+        XCTAssertEqual(channels.count, 1, "the runner ran \(channels.count) pane(s), not 1")
+        XCTAssertTrue(channels.first == named, "the pane opened in a channel the caller did not name")
+    }
+
+    /// **The discriminating test.** Two resolvable channels, the window focused on one of them, and
+    /// the request run for the other: the pane opens in the channel the caller named.
+    ///
+    /// A host that resolved the channel from its own focus passes every other test in this group and
+    /// fails only this one. That is the failure the amendment exists to make unrepresentable —
+    /// `openInTerminal` suspends across a whole ownership handoff, so focus can move between the
+    /// click and the run, and X5 is waiting on a pane in the channel it released.
+    func testAPaneRunsInTheNamedChannelAndNotTheFocusedOne() async throws {
+        let rig = try await PanelRig(channels: 2)
+        let named = rig.keys[0]
+        let focused = rig.keys[1]
+        _ = rig.host.context(for: named, cwd: PanelFixtures.cwd)
+        _ = rig.host.context(for: focused, cwd: PanelFixtures.cwd)
+        rig.host.focusChannel(focused)
+        let runner = RecordingPaneRunner()
+        rig.host.registerPaneRunner(runner, for: .terminal)
+
+        try await rig.host.run(PanelFixtures.paneRequest(), for: named)
+
+        let channels = await runner.channels
+        XCTAssertEqual(channels.count, 1, "the runner ran \(channels.count) pane(s), not 1")
+        XCTAssertTrue(channels.first == named, "the pane opened in the focused channel, not the named one")
+    }
+
+    /// A channel the host can resolve no context for refuses: `.noChannelContext`, no runner reached,
+    /// and the selection where it was.
+    ///
+    /// The selection clause is half the claim. A host that moved to the Terminal tab and then threw
+    /// would leave the window showing an empty panel for a pane that never started.
+    func testAPaneForAnUnresolvableChannelRefusesAndReachesNoRunner() async throws {
+        let rig = try await PanelRig(channels: 1)
+        _ = rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd)
+        try rig.host.register(StubPanelTab(.terminal))
+        let runner = RecordingPaneRunner()
+        rig.host.registerPaneRunner(runner, for: .terminal)
+        let unknown = PanelFixtures.key(9)
+
+        do {
+            try await rig.host.run(PanelFixtures.paneRequest(), for: unknown)
+            XCTFail("a pane ran for a channel the host cannot resolve")
+        } catch let error as PanelHostError {
+            XCTAssertEqual(error, .noChannelContext, "the host refused with a different error")
+        }
+
+        let count = await runner.received.count
+        XCTAssertEqual(count, 0, "the runner received \(count) request(s) for an unresolvable channel")
+        XCTAssertNil(rig.host.selected, "the refused run moved the panel selection")
     }
     /// The tab reads the channel's identity, its working directory and X11's environment out of the
     /// context, and each is asserted.
@@ -1152,18 +1224,23 @@ private final class LinkRecorder {
     }
 }
 
-/// A `PaneRunning` that records what it was given and reports an exit through the context.
+/// A `PaneRunning` that records what it was given and reports an exit through the context it was
+/// handed.
+///
+/// The reporter is the *given* context's and never one bound beforehand: a runner that had to be
+/// told where to report could report from the wrong channel and no test would see it, which is the
+/// whole of what the amended seam removes.
 private actor RecordingPaneRunner: PaneRunning {
     private(set) var received: [PaneRequest] = []
-    private var report: (@Sendable (PaneExit) async -> Void)?
+    /// The channel each received request was run in, so a host that resolved the wrong one fails.
+    private(set) var channels: [ChannelKey] = []
 
-    func bind(_ report: @escaping @Sendable (PaneExit) async -> Void) { self.report = report }
-
-    func run(_ request: PaneRequest) async {
+    func run(_ request: PaneRequest, in context: ChannelContext) async {
         received.append(request)
+        channels.append(context.key)
         // The exit carries the request the runner was handed, unedited. Whether that is the request
         // the host was given is what the test asserts.
-        await report?(PaneExit(request: request, code: 0, observedAt: Date()))
+        await context.reportPaneExit(PaneExit(request: request, code: 0, observedAt: Date()))
     }
 }
 

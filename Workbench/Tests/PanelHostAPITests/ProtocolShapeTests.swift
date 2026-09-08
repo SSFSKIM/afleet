@@ -180,7 +180,9 @@ final class ProtocolShapeTests: XCTestCase {
         func popOut(_ id: PanelTabID, channel: ChannelKey) {}
         func session(for id: PanelTabID, context: ChannelContext) -> any PanelTabSession { StubSession() }
         func view(for id: PanelTabID, context: ChannelContext) -> AnyView { AnyView(EmptyView()) }
-        func run(_ request: PaneRequest) async throws { throw PanelHostError.noPaneRunner(.terminal) }
+        func run(_ request: PaneRequest, for channel: ChannelKey) async throws {
+            throw PanelHostError.noPaneRunner(.terminal)
+        }
     }
 
     struct Fixture: Sendable {
