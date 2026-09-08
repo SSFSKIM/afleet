@@ -12,7 +12,7 @@ import FleetKit
 /// produces no user record, so the transcript the channel column draws gains nothing, while a
 /// composer line would have added one.
 ///
-/// **The history accumulates here** — the asking itself lands with the next deliverable. The engine reads `history` as `{question, response,
+/// **The history accumulates here.** The engine reads `history` as `{question, response,
 /// fallback_notice?}` objects in ask order and omits the key entirely when there is none
 /// (`ClaudeWire/Sources/WireFrames/OutboundRequests.swift`, and the engine's own
 /// `askSideQuestion` at `cli.pretty.js:289480` in 2.1.263, which spreads `history` only when it is
@@ -49,5 +49,36 @@ final class SideQuestionThread {
 
     init(anchorText: String) {
         self.anchorText = anchorText
+    }
+
+    /// The `history` the next ask carries: every answered exchange, in ask order. Empty until one
+    /// has been answered, and `SideQuestion` omits the key entirely for an empty one.
+    var history: [JSONValue] {
+        exchanges.compactMap { exchange in
+            guard let response = exchange.response else { return nil }
+            var object: [String: JSONValue] = ["question": .string(exchange.question),
+                                               "response": .string(response)]
+            if let notice = exchange.fallbackNotice { object["fallback_notice"] = .string(notice) }
+            return .object(object)
+        }
+    }
+
+    /// One ask, on the side. Y5: `send(AnyControlRequest(SideQuestion(...)))` and nothing else.
+    func ask(_ question: String, through lifecycle: any LifecycleAPI, on channel: ChannelKey) async {
+        let asked = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !asked.isEmpty, !isAsking else { return }
+        isAsking = true
+        defer { isAsking = false }
+        let request = AnyControlRequest(SideQuestion(question: asked, history: history))
+        do {
+            let reply = try await lifecycle.send(request, on: channel)
+            banner = nil
+            exchanges.append(Exchange(question: asked,
+                                      response: reply["response"]?.stringValue,
+                                      fallbackNotice: reply["refusalFallback"]?["content"]?.stringValue))
+        } catch {
+            banner = TaskCardModel.banner(for: error)
+            exchanges.append(Exchange(question: asked, response: nil, fallbackNotice: nil))
+        }
     }
 }

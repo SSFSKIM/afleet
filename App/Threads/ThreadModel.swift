@@ -168,9 +168,9 @@ final class ThreadModel: PanelTabSession {
             post(ThreadReply.prefixed(tool: call.name, toolUseID: call.toolUseID, text: text))
         case .sentFile(let sent):
             post(ThreadReply.prefixed(tool: ThreadReply.sentFileTool, toolUseID: sent.toolUseID, text: text))
-        case .sideQuestion:
-            // `side_question` with its accumulated history. Filled by the last deliverable.
-            break
+        case .sideQuestion(let thread):
+            draft = ""
+            Task { await thread.ask(text, through: lifecycle, on: channel) }
         case .task:
             // §7.5: stop only. The card's own *Stop* is the action; there is no reply to post.
             break

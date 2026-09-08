@@ -331,6 +331,93 @@ final class ThreadTabTests: XCTestCase {
         let requests = await fileLifecycle.sent
         XCTAssertEqual(requests.count, 0, "a posting reply sent \(requests.count) control request(s)")
     }
+
+    // MARK: - G2: Ask on the side
+
+    /// §7.5 and item 10, first half: `side_question` carries **no `history` key** on the first ask
+    /// and the accumulated array on the second, in ask order.
+    ///
+    /// The engine spreads `history` only when it is non-empty (`askSideQuestion`,
+    /// `cli.pretty.js:289480` in 2.1.263) and `SideQuestion` omits it the same way, so an empty array
+    /// on the wire is a different request from the one the engine reads.
+    func testAskingOnTheSideOmitsHistoryFirstAndAccumulatesAfterwards() async throws {
+        let (lifecycle, model) = await hosted()
+        await lifecycle.stageReply(.success(.object(["response": .string("An invented side answer."),
+                                                     "synthetic": .bool(false)])))
+        let thread = SideQuestionThread(anchorText: "An invented message.")
+        model.open(.sideQuestion(thread))
+
+        model.draft = "An invented first question?"
+        try press("Ask", in: ThreadView(model: model).body)
+        await thread.settled(1)
+
+        var requests = await lifecycle.sent
+        XCTAssertEqual(requests.count, 1, "one ask sent \(requests.count) control request(s)")
+        XCTAssertEqual(requests.first?.subtype, "side_question", "*Ask on the side* sent another request")
+        XCTAssertNil(requests.first?.payload["history"],
+                     "the first ask carried a history key the engine reads as absent")
+
+        await lifecycle.stageReply(.success(.object(["response": .string("An invented second answer."),
+                                                     "synthetic": .bool(false)])))
+        model.draft = "An invented second question?"
+        try press("Ask", in: ThreadView(model: model).body)
+        await thread.settled(2)
+
+        requests = await lifecycle.sent
+        XCTAssertEqual(requests.count, 2, "two asks sent \(requests.count) control request(s)")
+        let history = try XCTUnwrap(requests.last?.payload["history"]?.arrayValue,
+                                    "the second ask carried no history")
+        XCTAssertEqual(history.count, 1, "the second ask carried \(history.count) history entries")
+        XCTAssertTrue(history.first?["question"] == .string("An invented first question?"),
+                      "the history's question is not the one that was asked")
+        XCTAssertTrue(history.first?["response"] == .string("An invented side answer."),
+                      "the history's response is not the one that came back")
+        XCTAssertEqual(thread.exchanges.count, 2, "the thread holds \(thread.exchanges.count) exchanges")
+    }
+
+    /// Item 10's negative, and the clause the item exists for: **the main transcript gains no
+    /// records**. Counted as durable items before and after, in both directions.
+    ///
+    /// The instrument is C3's own reducer, folded over a committed recording. An ask on the side is a
+    /// control request and produces no record, so the count cannot move; a posted reply is a user
+    /// message and the engine echoes it, so the count moves by one. Both are folded through the same
+    /// reducer in the same test, because a counter that is never shown moving proves nothing about
+    /// the case where it must not move.
+    func testAskingOnTheSideAddsNoRecordToTheMainTranscriptAndAReplyDoes() async throws {
+        var reducer = try reduced("send-user-file")
+        let before = reducer.durable.items.count
+        XCTAssertGreaterThan(before, 0, "the recording folded no durable items to count")
+
+        let (lifecycle, model) = await hosted()
+        await lifecycle.stageReply(.success(.object(["response": .string("An invented side answer."),
+                                                     "synthetic": .bool(false)])))
+        let thread = SideQuestionThread(anchorText: "An invented message.")
+        model.open(.sideQuestion(thread))
+        model.draft = "An invented question?"
+        try press("Ask", in: ThreadView(model: model).body)
+        await thread.settled(1)
+
+        // A control request produces no frame at all: there is nothing to fold, and nothing that
+        // could have been folded — the double recorded no `perform` of any kind.
+        let actions = await lifecycle.actions
+        XCTAssertEqual(actions.count, 0, "*Ask on the side* performed \(actions.count) lifecycle action(s)")
+        XCTAssertEqual(reducer.durable.items.count, before,
+                       "the transcript gained \(reducer.durable.items.count - before) item(s) from an ask on the side")
+
+        // The other direction, through the same reducer: a posted reply is a user record, and the
+        // engine echoes the line it was sent.
+        let (call, _) = try postingAnchors()
+        model.open(.toolDetail(call))
+        model.draft = "An invented follow-up."
+        try press("Send", in: ThreadView(model: model).body)
+        await model.whenIdle()
+        let postedActions = await lifecycle.actions
+        let posted = try XCTUnwrap(sentInput(in: postedActions), "the reply sent no user input")
+        _ = reducer.apply(.frame(FrameDecoder.decode(line: try posted.frame(uuid: UUID()).canonicalData()), .first))
+
+        XCTAssertEqual(reducer.durable.items.count, before + 1,
+                       "a posted reply moved the count by \(reducer.durable.items.count - before), not by one")
+    }
 }
 
 // MARK: - Support
@@ -430,10 +517,19 @@ actor ThreadDouble: LifecycleAPI {
     }
 }
 
-/// The in-flight state a posted reply holds, as a probe: a test that has pressed a button
+/// The two pieces of in-flight state the tab holds, as probes: a test that has pressed a button
 /// waits for the round trip rather than for a duration.
 extension ThreadModel {
     func whenIdle() async {
         while isPosting { await Task.yield() }
+    }
+}
+
+extension SideQuestionThread {
+    /// Waits for the ask that produces the `count`-th exchange. Counted rather than flagged because
+    /// the ask starts inside a `Task`: a flag read before it has begun would report idle.
+    func settled(_ count: Int) async {
+        while exchanges.count < count { await Task.yield() }
+        while isAsking { await Task.yield() }
     }
 }
