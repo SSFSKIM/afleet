@@ -98,7 +98,20 @@ public struct PullRequestURLResolver {
                                               stderrTail: output.stderrTail)
             }
             do {
-                return .resolved(try JSONDecoder().decode(Document.self, from: output.stdout).url)
+                let answered = try JSONDecoder().decode(Document.self, from: output.stdout).url
+                // **What a tool printed is not authority to launch anything.** The API endpoint is
+                // configurable, the `gh` that ran is whichever one the session's PATH holds, and
+                // this is one field of somebody's response — so a custom scheme or a `file:` would
+                // otherwise reach `NSWorkspace` from a click on a pull-request number, and the
+                // panel's own URL bar authority from a click at `.currentPanel`. A page is an
+                // absolute `http`/`https` URL with a host; enterprise hosts are exactly that.
+                guard let page = Self.page(answered) else {
+                    throw ToolError.decodeFailed(subject: "pull-request url",
+                                                 message: "not an absolute http(s) URL")
+                }
+                return .resolved(page)
+            } catch let error as ToolError {
+                throw error
             } catch {
                 throw ToolError.decodeFailed(subject: "pull-request url",
                                              message: "\(error)")
@@ -109,6 +122,18 @@ public struct PullRequestURLResolver {
             return .failed(BrowserLinkError(
                 message: "Pull request #\(number) could not be looked up."))
         }
+    }
+
+    /// The URL if it names a page this panel may open, and `nil` otherwise.
+    ///
+    /// Deliberately a shape check and not a host list: pinning `github.com` would refuse every
+    /// self-hosted GitHub, which is the case `gh` exists to serve.
+    static func page(_ url: URL) -> URL? {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return nil
+        }
+        guard let host = url.host(), !host.isEmpty else { return nil }
+        return url
     }
 
     /// One line for each way the lookup can fail, and the hint where there is one.

@@ -36,12 +36,13 @@ final class BrowserModelTests: XCTestCase {
 
     /// A model over an in-memory store, with every seam injected.
     private func makeModel(store backing: InMemoryScopedStore = InMemoryScopedStore(),
-                           sleeper: ManualSleeper = ManualSleeper())
+                           sleeper: ManualSleeper = ManualSleeper(),
+                           openExternally: (@Sendable (URL) -> Void)? = nil)
         -> (BrowserModel, InMemoryScopedStore, ManualSleeper) {
         let tabStore = BrowserTabStore(store: backing, sleep: sleeper.sleep)
         let model = BrowserModel(store: tabStore,
                                  factory: BrowserWebViewFactory(),
-                                 openExternally: { _ in
+                                 openExternally: openExternally ?? { _ in
                                      XCTFail("no test in this file may reach the system opener")
                                  })
         return (model, backing, sleeper)
@@ -348,6 +349,109 @@ final class BrowserModelTests: XCTestCase {
 
         XCTAssertEqual(model.tabs.count, 1, "typing into the bar with no tab open should open one")
         XCTAssertEqual(model.selected?.url, URL(string: "https://example.invalid")!)
+    }
+
+    // MARK: What may be remembered (D48)
+
+    /// A destination the policy hands to the system rather than loading is **not** the tab's URL
+    /// and never reaches the document.
+    ///
+    /// This is the security half of D38 rather than a tidiness one: everything a tab remembers is
+    /// dispatched again at restore through `activate`, with the URL bar's authority — the strongest
+    /// authority in this design — so a persisted `mailto:` would launch an application at startup.
+    func testAnExternallyOpenedDestinationIsNeitherTheTabsURLNorPersisted() async throws {
+        let opened = URLSink()
+        let (model, backing, _) = makeModel(openExternally: { opened.opened($0) })
+        let mail = URL(string: "mailto:someone@example.invalid")!
+
+        model.openNewTab(url: mail)
+        await model.flush()
+
+        XCTAssertEqual(opened.urls, [mail], "the URL bar's own destination did not reach the opener")
+        XCTAssertNil(model.selected?.url, "a destination the panel never loaded became the tab's URL")
+        let document = try await backing.document(BrowserTabSetDocument.self, key: BrowserTabStore.storeKey)
+        XCTAssertEqual(document?.tabs.count, 0, "an externally-opened destination was persisted")
+    }
+
+    /// The same for a destination the policy refuses outright, arriving in the current tab.
+    ///
+    /// Asserted with no `await` in the body on purpose: the tab is following a real navigation, and
+    /// a suspension here would let the chrome write the page's own URL back over whatever `open`
+    /// left behind — which is a correction, not the rule under test.
+    func testARefusedDestinationIsNotWhatTheDocumentWouldRemember() {
+        let (model, _, _) = makeModel()
+        let page = URL(string: "https://one.example.invalid/")!
+        model.openNewTab(url: page)
+
+        model.open(URL(string: "file:///invented/secret.txt")!, in: .currentTab)
+
+        XCTAssertEqual(model.selected?.url, page, "a refused destination replaced the tab's URL")
+        XCTAssertEqual(model.snapshot().tabs.map(\.url), [page], "a refused destination would be persisted")
+        XCTAssertNotNil(model.notice, "a refusal the user is owed an answer about was not shown")
+    }
+
+    /// And a document that already holds one — written by hand, or by a build before this rule —
+    /// cannot launch anything on the way back in.
+    func testARestoredDestinationThePanelWillNotLoadNeverReachesTheExternalOpener() async throws {
+        let backing = InMemoryScopedStore()
+        try await backing.write(
+            BrowserTabSetDocument(tabs: [PersistedTab(url: URL(string: "mailto:someone@example.invalid")!,
+                                                      title: "Mail")],
+                                  selectedIndex: 0),
+            key: BrowserTabStore.storeKey)
+        let opened = URLSink()
+        let (model, _, _) = makeModel(store: backing, openExternally: { opened.opened($0) })
+
+        await model.restore()
+
+        XCTAssertEqual(opened.urls, [], "a restore handed a persisted destination to the system opener")
+        XCTAssertEqual(model.tabs.count, 1, "the restored tab itself is still there")
+        XCTAssertNil(model.tabs.first?.url, "the restored tab kept a destination the panel will not load")
+    }
+
+    // MARK: The store's trouble, as the panel sees it
+
+    /// A coalesced write that fails half a second later reaches the panel's error row.
+    ///
+    /// `commitEdit` returns as soon as it has scheduled its window, so a model that sampled the
+    /// store's row at the commit sampled it before the write — and the row the panel shows would
+    /// say the last *structural* write's answer for ever.
+    func testAFailedCoalescedWriteReachesThePanelsErrorRow() async throws {
+        let (model, backing, sleeper) = makeModel()
+        await model.restore()
+        model.openNewTab(url: URL(string: "https://one.example.invalid/")!)
+        await model.persistenceSettled()
+        XCTAssertNil(model.storeError, "the precondition: the structural write succeeded")
+
+        await backing.setFailsWrites(true)
+        model.open(URL(string: "https://two.example.invalid/")!, in: .currentTab)
+        await model.persistenceSettled()
+
+        await sleeper.waitForSleep()
+        await sleeper.advance()
+        await model.flush()
+
+        XCTAssertEqual(model.storeError, .writeFailed,
+                       "the write that failed never reached the panel's error row")
+        XCTAssertNotNil(model.storeErrorMessage, "and there is no line for the panel to show")
+    }
+
+    /// A document this build may never write over is a panel-local state with a line of its own
+    /// (§10) — not an alert, and not silence behind ordinary editable tabs.
+    func testADocumentFromANewerBuildIsAPanelStateWithALine() async throws {
+        let backing = InMemoryScopedStore()
+        await backing.seed(json: #"{"schemaVersion":2,"tabs":[],"selection":{"tabID":null}}"#,
+                           key: BrowserTabStore.storeKey)
+        let (model, _, _) = makeModel(store: backing)
+
+        await model.restore()
+
+        XCTAssertEqual(model.storeError, .documentFromANewerBuild(found: 2))
+        XCTAssertNotNil(model.storeErrorMessage,
+                        "the panel has nothing to say about tabs it can never save")
+        for error: BrowserTabStoreError in [.documentFromANewerBuild(found: 2), .documentUnreadable, .writeFailed] {
+            XCTAssertFalse(BrowserModel.copy(for: error).isEmpty, "\(error) has no line")
+        }
     }
 
     // MARK: Q8 — Enter and Cmd-Enter

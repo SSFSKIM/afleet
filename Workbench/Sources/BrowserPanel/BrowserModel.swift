@@ -112,7 +112,9 @@ public final class BrowserModel {
     private let store: BrowserTabStore
     private let factory: BrowserWebViewFactory
     private let openExternally: BrowserWebTab.ExternalOpener
-    private var hasRestored = false
+
+    /// The one restoration, shared by every caller. See `restore`.
+    private var restoreTask: Task<Void, Never>?
 
     /// Persistence runs in order behind this chain. The store is an actor and each commit is a hop,
     /// so two commits spawned independently could reach it in either order — and the one that lost
@@ -155,17 +157,51 @@ public final class BrowserModel {
 
     /// Reads the persisted set and builds the tabs, loading **only** the selected one.
     ///
-    /// Idempotent: the panel is rendered once per channel and every one of them would otherwise ask
-    /// for a restore, and the second would duplicate the set.
+    /// **One restoration, and every caller joins it.** The panel is rendered once per channel and
+    /// every one of them asks; a routed link asks too, before it touches the set. A guard that
+    /// merely returned early would let the second caller run *in front of* the read the first is
+    /// still waiting on — and this method replaces the whole tab set, so whatever that caller did
+    /// would be thrown away, or would publish a set the store never saw. The task is what makes
+    /// "already restoring" and "restored" the same answer to a caller.
     public func restore() async {
-        guard !hasRestored else { return }
-        hasRestored = true
+        await restoring().value
+    }
+
+    private func restoring() -> Task<Void, Never> {
+        if let restoreTask { return restoreTask }
+        let task = Task { @MainActor in await self.performRestore() }
+        restoreTask = task
+        return task
+    }
+
+    private func performRestore() async {
+        // Installed before the read, so the row the panel shows follows every write from here on
+        // and not only the ones a commit happened to sample (D50).
+        await store.observeErrors { [weak self] error in
+            await MainActor.run { self?.storeError = error }
+        }
         let set = await store.load()
         storeError = await store.lastError
-        tabs = set.tabs.map { BrowserLiveTab(id: $0.id, url: $0.url, title: $0.title) }
+        // A persisted destination the policy will not load in the panel is dropped rather than
+        // dispatched: `activate` navigates with the URL bar's authority, and a restore must not
+        // mint the strongest authority in this design (D48). The tab stays, so the set the user
+        // left behind is still the set that comes back.
+        tabs = set.tabs.map {
+            BrowserLiveTab(id: $0.id, url: Self.destinationForPanel($0.url), title: $0.title)
+        }
         guard let index = set.selection, tabs.indices.contains(index) else { return }
         selectedID = tabs[index].id
         activate(tabs[index])
+    }
+
+    /// Opens `url` on behalf of a `LinkTarget`, behind the restoration.
+    ///
+    /// A link can arrive before the Browser tab has ever been drawn, so this is the entry point
+    /// that orders the two: a structural write made in front of an unfinished read is a write the
+    /// read then overwrites, in memory and on disk both (A1).
+    func openRouted(_ url: URL, in destination: OpenDestination) async {
+        await restore()
+        open(url, in: destination)
     }
 
     // MARK: The operations
@@ -173,13 +209,25 @@ public final class BrowserModel {
     /// Opens a tab, selects it, and loads `url` if there is one. `nil` is the `+` control and Cmd-T.
     @discardableResult
     public func openNewTab(url: URL?) -> BrowserLiveTab {
-        let tab = BrowserLiveTab(url: url, title: "")
+        // The tab remembers only a destination the policy loads here (D48). `activate` navigates
+        // to whatever it remembers, so anything else would be persisted and then dispatched again
+        // at the next launch with the URL bar's authority behind it.
+        let tab = BrowserLiveTab(url: url.flatMap(Self.destinationForPanel), title: "")
         tabs.append(tab)
         selectedID = tab.id
         clearNotices()
         activate(tab)
+        // A destination the tab does not keep is still answered — refused with a notice, or handed
+        // to the system opener — exactly once, and by the same policy.
+        if let url, tab.url == nil { tab.web?.navigate(to: url) }
         persistStructure()
         return tab
+    }
+
+    /// The destination a tab may remember: one `NavigationPolicy` loads in the panel, and nothing
+    /// else. `nil` for a URL the policy refuses or hands to the system.
+    static func destinationForPanel(_ url: URL) -> URL? {
+        NavigationPolicy.decide(.urlBarEntry(url)) == .allow ? url : nil
     }
 
     public func open(_ url: URL, in destination: OpenDestination) {
@@ -194,8 +242,10 @@ public final class BrowserModel {
             clearNotices()
             activate(tab)
             // Set before the load, so a page that never finishes still leaves the tab pointing at
-            // what the user asked for; the settled navigation corrects it either way.
-            tab.url = url
+            // what the user asked for; the settled navigation corrects it either way. Only if the
+            // policy loads it here, though — a refused or externally-opened destination leaves the
+            // tab where it was rather than becoming what a relaunch dispatches (D48).
+            if let kept = Self.destinationForPanel(url) { tab.url = kept }
             tab.web?.navigate(to: url)
             persistEdit()
         }
@@ -344,6 +394,27 @@ public final class BrowserModel {
     private func report(_ reason: NavigationPolicy.Reason) {
         guard !reason.isDiagnosticOnly else { return }
         notice = Self.copy(for: reason)
+    }
+
+    /// What the panel shows about the tab-set document, or `nil` when there is nothing to say.
+    ///
+    /// A panel-local state and not an alert (§10): the tabs still work, and what the user needs to
+    /// know is that they are not being kept.
+    public var storeErrorMessage: String? {
+        storeError.map(Self.copy(for:))
+    }
+
+    /// One line for each way the document can be trouble. It names a kind and never a path, a key
+    /// or an underlying error, for the reason `BrowserTabStoreError` itself does.
+    static func copy(for error: BrowserTabStoreError) -> String {
+        switch error {
+        case .documentFromANewerBuild:
+            "A newer version of afleet saved these tabs. Nothing opened here is being saved."
+        case .documentUnreadable:
+            "The saved tabs could not be read, so this window started empty."
+        case .writeFailed:
+            "These tabs are not being saved right now."
+        }
     }
 
     /// One line for a refusal the user is owed an answer about. It names the scheme and never the

@@ -48,7 +48,7 @@ public enum BrowserLinkTargets {
                        handles: { link in if case .url = link { true } else { false } },
                        open: { link, destination in
                            guard case .url(let url) = link else { return }
-                           deliver(url, to: destination, model: model,
+                           await deliver(url, to: destination, model: model,
                                    selectBrowserTab: selectBrowserTab,
                                    openExternally: openExternally)
                        }),
@@ -58,7 +58,7 @@ public enum BrowserLinkTargets {
                            guard case .pullRequest(let number) = link else { return }
                            switch await pullRequests.resolve(number) {
                            case .resolved(let url):
-                               deliver(url, to: destination, model: model,
+                               await deliver(url, to: destination, model: model,
                                        selectBrowserTab: selectBrowserTab,
                                        openExternally: openExternally)
                            case .failed(let error):
@@ -79,11 +79,14 @@ public enum BrowserLinkTargets {
     @MainActor
     private static func deliver(_ url: URL, to destination: LinkDestination, model: BrowserModel,
                                 selectBrowserTab: TabRequest,
-                                openExternally: BrowserWebTab.ExternalOpener) {
+                                openExternally: BrowserWebTab.ExternalOpener) async {
         switch destination {
         case .currentPanel:
             selectBrowserTab()
-            model.open(url, in: .currentTab)
+            // Behind the restoration, always: a link can arrive before the panel has ever been
+            // drawn, and a tab opened in front of an unfinished read is a tab that read discards
+            // (A1). `openRouted` is idempotent once the restore has run.
+            await model.openRouted(url, in: .currentTab)
         case .newWindow:
             // Nothing about the panel changes: the page is going somewhere else, and a tab opened
             // here as well would leave the user with the same page twice.

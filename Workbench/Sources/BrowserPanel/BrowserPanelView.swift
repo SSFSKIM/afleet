@@ -189,6 +189,18 @@ struct BrowserURLBar: View {
                     .padding(.horizontal, 10)
                     .padding(.bottom, 4)
             }
+            // The tab-set document's own trouble: a quiet row and never an alert (§10). A newer
+            // build's document refuses every write for the life of the process, and a panel that
+            // presented ordinary editable tabs over it would be showing the user work that is not
+            // being kept.
+            if let message = model.storeErrorMessage {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 4)
+            }
             // A link the panel could not open: its own row rather than a notice, because it comes
             // with something to do about it (§10, Q2).
             if let error = model.linkError {

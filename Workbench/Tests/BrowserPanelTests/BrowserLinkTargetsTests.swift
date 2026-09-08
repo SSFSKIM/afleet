@@ -29,8 +29,8 @@ final class BrowserLinkTargetsTests: XCTestCase {
     }
 
     /// A model over an in-memory store, with every seam injected.
-    private func makeModel() -> BrowserModel {
-        BrowserModel(store: BrowserTabStore(store: InMemoryScopedStore(), sleep: ManualSleeper().sleep),
+    private func makeModel(store backing: InMemoryScopedStore = InMemoryScopedStore()) -> BrowserModel {
+        BrowserModel(store: BrowserTabStore(store: backing, sleep: ManualSleeper().sleep),
                      factory: BrowserWebViewFactory(),
                      openExternally: { _ in
                          XCTFail("the model's own external opener must not be reached by a link target")
@@ -43,13 +43,14 @@ final class BrowserLinkTargetsTests: XCTestCase {
     /// The router is the real one and not a stand-in, because two of the claims below are about the
     /// registry — the link arriving *intact* through resolution, and W5's fallback not firing.
     private func makeRouter(channel: ChannelContext?,
+                            store backing: InMemoryScopedStore = InMemoryScopedStore(),
                             runner: any ToolRunning = StubToolRunner { _, _ in
                                 XCTFail("no tool was expected to run")
                                 return StubToolRunner.exited(0)
                             })
         async -> (model: BrowserModel, router: LinkRouter, opened: URLSink,
                   fallback: URLSink, selection: SelectionLog) {
-        let model = makeModel()
+        let model = makeModel(store: backing)
         let opened = URLSink()
         let fallback = URLSink()
         let selection = SelectionLog()
@@ -142,6 +143,44 @@ final class BrowserLinkTargetsTests: XCTestCase {
                       "no target handles a .url link")
         XCTAssertTrue(targets.contains { $0.handles(.pullRequest(Values.pullRequestNumber)) },
                       "no target handles a .pullRequest link")
+    }
+
+    /// **A routed link does not race the restore** (A1).
+    ///
+    /// The panel is being drawn for the first time — its restore is in flight, holding on the
+    /// store's read — and a `.url` arrives in that window. Both orders lose something if the two
+    /// are not ordered: an `open` that runs first is thrown away when the restore replaces the tab
+    /// set, and a restore that lands first over an `open` publishes a set the store never saw.
+    /// The clicked page is the one on screen, and the saved tabs are still there.
+    func testALinkDeliveredDuringTheRestoreKeepsTheSavedTabsAndLandsOnTheClickedPage() async throws {
+        let backing = InMemoryScopedStore()
+        let first = URL(string: "https://saved-one.example.invalid/")!
+        let second = URL(string: "https://saved-two.example.invalid/")!
+        try await backing.write(BrowserTabSetDocument(tabs: [PersistedTab(url: first, title: "One"),
+                                                             PersistedTab(url: second, title: "Two")],
+                                                      selectedIndex: 0),
+                                key: BrowserTabStore.storeKey)
+        await backing.holdReads()
+        let rig = await makeRouter(channel: Values.channel(), store: backing)
+
+        // The panel is drawn: `BrowserPanelView`'s own `.task { await model.restore() }`.
+        let render = Task { await rig.model.restore() }
+        let reading = expectation(description: "the restore reached the store")
+        await backing.expectReadArrival(reading)
+        await fulfillment(of: [reading], timeout: 5)
+
+        // The click, while the read is still held open.
+        let delivery = Task { await rig.router.open(Values.pageLink, from: .currentPanel) }
+        for _ in 0..<50 { await Task.yield() }
+        await backing.releaseReads()
+        await render.value
+        await delivery.value
+
+        guard case .url(let clicked) = Values.pageLink else { return XCTFail("the fixture is not a .url") }
+        XCTAssertEqual(rig.model.tabs.count, 2, "the saved tab set did not survive the click")
+        XCTAssertEqual(rig.model.tabs.last?.url, second, "the saved set came back changed")
+        XCTAssertEqual(rig.model.selected?.url, clicked,
+                       "the panel is on \(String(describing: rig.model.selected?.url)), not the page that was clicked")
     }
 
     // MARK: - Q2: the `.pullRequest` route
@@ -250,6 +289,54 @@ final class BrowserLinkTargetsTests: XCTestCase {
         // document instead and produces a different row with an equally empty hint.
         XCTAssertTrue(rig.model.linkError?.message.contains("exit 1") == true,
                       "the row was \(String(describing: rig.model.linkError?.message))")
+    }
+
+    /// **What `gh` prints is not authority to launch anything** (A4).
+    ///
+    /// The API endpoint is configurable, the `gh` that runs is whatever the session's PATH holds,
+    /// and `--json url` is one field of somebody's response. Unvalidated, a custom scheme or a
+    /// `file:` gets `NSWorkspace` from a click on a pull-request number at `.newWindow`, and the
+    /// URL bar's authority in the panel at `.currentPanel`. Only an absolute `http`/`https` URL
+    /// with a host is a page; everything else is a panel-local row.
+    func testAPullRequestURLThatIsNotAnAbsoluteWebURLIsARowAtEitherDestination() async {
+        let answers = [#"{"url":"x-launch://run/anything"}"#,
+                       #"{"url":"file:///invented/secret.txt"}"#,
+                       #"{"url":"/o/r/pull/7"}"#,
+                       #"{"url":"https:///pull/7"}"#]
+        for answer in answers {
+            for destination in [LinkDestination.currentPanel, .newWindow] {
+                let runner = StubToolRunner { tool, _ in
+                    tool == .git ? StubToolRunner.printed(Values.repositoryRoot + "\n")
+                                 : StubToolRunner.printed(answer)
+                }
+                let rig = await makeRouter(channel: Values.channel(), runner: runner)
+
+                await rig.router.open(.pullRequest(Values.pullRequestNumber), from: destination)
+
+                XCTAssertEqual(rig.opened.urls, [],
+                               "\(answer) at \(destination) reached the system opener")
+                XCTAssertTrue(rig.model.tabs.isEmpty,
+                              "\(answer) at \(destination) navigated the panel")
+                XCTAssertNotNil(rig.model.linkError,
+                                "\(answer) at \(destination) left no error row")
+            }
+        }
+    }
+
+    /// The control half: an enterprise host is an ordinary answer and still resolves. A check that
+    /// pinned the hostname rather than the shape would break every self-hosted GitHub.
+    func testAnEnterpriseHostStillResolves() async {
+        let page = "https://git.enterprise.invalid/o/r/pull/7"
+        let runner = StubToolRunner { tool, _ in
+            tool == .git ? StubToolRunner.printed(Values.repositoryRoot + "\n")
+                         : StubToolRunner.printed("{\"url\":\"\(page)\"}")
+        }
+        let rig = await makeRouter(channel: Values.channel(), runner: runner)
+
+        await rig.router.open(.pullRequest(Values.pullRequestNumber), from: .currentPanel)
+
+        XCTAssertEqual(rig.model.selected?.url, URL(string: page))
+        XCTAssertNil(rig.model.linkError, "an enterprise host was refused")
     }
 
     /// A directory in no repository is the panel's row, not a guess at a URL.
