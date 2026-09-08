@@ -23,7 +23,8 @@ import Foundation
 //
 //   0  every load path, every render workload, cold load within budget
 //   2  a load path is missing — advance to the next route. The workers are proven by answering
-//      AND by traffic on Monaco's own worker for that service, never by starting without error
+//      AND by traffic on Monaco's own worker for that service, never by starting without error,
+//      and never while any of those workers has recorded an error of its own
 //   4  the window was given no animation frames; the render numbers are missing
 //   5  every load path and workload; the cold load is over budget — a measurement, not a break
 //   6  a render workload did not complete; the reason names which

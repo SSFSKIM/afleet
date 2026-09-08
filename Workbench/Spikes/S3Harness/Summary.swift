@@ -28,11 +28,13 @@ enum Summary {
                                 large["toRenderMs"] as? Double ?? -1))
         }
         if let scroll = report["scroll"] as? [String: Any] {
-            lines.append(String(format: "  scroll      p50 %.1f  p95 %.1f  worst %.1f ms over %d frames",
+            lines.append(String(format: "  scroll      p50 %.1f  p95 %.1f  worst %.1f ms over %d of %d requested frames%@",
                                 scroll["p50Ms"] as? Double ?? -1,
                                 scroll["p95Ms"] as? Double ?? -1,
                                 scroll["worstMs"] as? Double ?? -1,
-                                scroll["frames"] as? Int ?? 0))
+                                scroll["frames"] as? Int ?? 0,
+                                scroll["requestedFrames"] as? Int ?? 0,
+                                scroll["timedOut"] as? Bool == true ? "  (timed out)" : ""))
         }
         if let diff = report["diff"] as? [String: Any] {
             lines.append("  diff        computed=\(diff["computed"] as? Bool ?? false)"
@@ -70,6 +72,12 @@ enum Summary {
             }
             lines.append("  editor.worker  monacoWorkerMessages=\(messages[WorkerEvidence.editorWorkerKey].map(String.init) ?? "-")"
                          + " computedDiff=\(workers["editorWorkerComputedDiff"] as? Bool ?? false)")
+            if let recorded = workers["errorsByMonacoWorker"] as? [String: [String]], !recorded.isEmpty {
+                for service in recorded.keys.sorted() {
+                    lines.append("  ** Monaco's own \(service) worker recorded \(recorded[service]?.count ?? 0) error(s):"
+                                 + " \(recorded[service]?.prefix(2).joined(separator: "; ") ?? "")")
+                }
+            }
             if workers["mainThreadFallback"] as? Bool == true {
                 lines.append("  ** Monaco fell back to the main thread: Design §7 makes this a stop, not a fallback.")
             }

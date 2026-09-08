@@ -64,7 +64,8 @@ enum SelfCheck {
             // Annotated: an all-numeric literal infers `[String: Double]`, `frames` becomes
             // 180.0, and `as? Int` then reads nil — a stub that lies in the shape the verdict
             // is most likely to be wrong about. The self-check found this on its first run.
-            "scroll": ["frames": 180, "p50Ms": 17.0, "p95Ms": 28.0, "worstMs": 52.0] as [String: Any],
+            "scroll": ["requestedFrames": 180, "frames": 180, "timedOut": false,
+                       "p50Ms": 17.0, "p95Ms": 28.0, "worstMs": 52.0] as [String: Any],
             "reopen": ["contentsReplaced": true, "requestedLineRevealed": true,
                        "errorsDuringReopen": [String](), "reopenSucceeded": true],
             "diff": ["computed": true, "changeCount": 508, "renderedInsertLines": 23,
@@ -121,6 +122,17 @@ enum SelfCheck {
                          $0["monacoWorkers"] = ["workerCount": 0, "byService": [String: Any](),
                                                 "fallbackWarnings": ["Could not create web worker(s)."]]
                      }),
+            // Traffic is not health: a worker can exchange messages and then die, and a verdict
+            // that reads only the counts calls that route carried.
+            Scenario(name: "a worker exchanged messages and then recorded an error", expected: 2,
+                     because: "Monaco's own css worker recorded 1 error",
+                     report: mutating("workers") {
+                         var counts = monacoWorkerCounts(received: 6)
+                         counts["css"] = ["workers": 1, "sent": 6, "received": 6,
+                                          "errors": ["Worker terminated: css.worker.js"]]
+                         $0["monacoWorkers"] = ["workerCount": 5, "fallbackWarnings": [String](),
+                                                "byService": counts]
+                     }),
             Scenario(name: "the editor worker exchanged no messages", expected: 2, because: "editor worker exchanged",
                      report: mutating("workers") {
                          var counts = monacoWorkerCounts(received: 6)
@@ -139,6 +151,12 @@ enum SelfCheck {
                      }),
             Scenario(name: "the scroll histogram recorded no frames", expected: 6, because: "scroll histogram recorded no frames",
                      report: mutating("scroll") { $0["frames"] = 0 }),
+            // A partial histogram is a different number from the one the gate asks for: the
+            // probe's timeout can return any positive count, and percentiles over a truncated
+            // sample describe a scroll that was never finished.
+            Scenario(name: "the scroll stopped short of the requested frames", expected: 6,
+                     because: "recorded 90 of 180 requested frames",
+                     report: mutating("scroll") { $0["frames"] = 90; $0["timedOut"] = true }),
             Scenario(name: "the diff pane was never displayed", expected: 6, because: "diff pane was never displayed",
                      report: mutating("diff") { $0["diffPaneDisplayed"] = false }),
             Scenario(name: "the diff rendered nothing into the DOM", expected: 6, because: "rendered nothing into the DOM",
