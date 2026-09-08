@@ -874,8 +874,8 @@ symlink-containment debt in entry 78 is unchanged.
 
 ## From C7.2 (`child/c7-editor-core`)
 
-97. **`PanelHostModel.unregister` releases the tab's state before awaiting the link-target
-    withdrawal (C7.2 fix-wave finding, outside its fence).** `App/Panels/PanelHostModel.swift`
+97. **Closed 2026-09-08 (`b9ef4f8`).** **`PanelHostModel.unregister` releases the tab's state
+    before awaiting the link-target withdrawal (C7.2 fix-wave finding, outside its fence).** `App/Panels/PanelHostModel.swift`
     drops `tabs[id]`, the pane runners and every session, and only then awaits
     `links.unregister(tab:)`. While it is suspended on that await the main actor is free, so a
     delivery already committed inside `LinkRouter` can reach a target whose tab and sessions the
@@ -886,7 +886,8 @@ symlink-containment debt in entry 78 is unchanged.
     `PanelHostModel.unregister`. Not done here because C7.2's app fence is `HostLinkRouter.swift`
     alone and C6's leaves are opening in the same target. Owner: C5/C6 (X7).
 
-98. **`LinkRouter.open` may run `prepare` more than once for one call.** When the resolved target
+98. **Closed 2026-09-08 (`b9ef4f8`).** **`LinkRouter.open` may run `prepare` more than once
+    for one call.** When the resolved target
     is withdrawn during `prepare`, the router re-resolves and runs `prepare` again for the
     successor — deliberately, because a pop-out prepared for a tab that then left is not one
     prepared for its replacement. The host's pop-out is idempotent enough today that this is
