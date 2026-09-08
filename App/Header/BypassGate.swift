@@ -55,6 +55,15 @@ extension ChannelHeaderActionsModel {
             say("This account does not allow the bypass permission mode.")
             return
         }
+        // §8.6's acceptance is three steps with two awaits inside it, and the **store write is the
+        // first** of them. A second selection taken while one is running would therefore find the
+        // acceptance already recorded and take item 4's path — the mode alone — to a process the
+        // prerequisite restart has not replaced yet. One acceptance at a time, and the second
+        // selection is told so rather than being let past a gate that is still closing.
+        guard !pickers.isAcceptingBypass else {
+            say(Self.acceptanceInFlight)
+            return
+        }
         if await refreshBypassAcceptance() {
             await sendBypassPermissionMode()
             return
@@ -78,6 +87,11 @@ extension ChannelHeaderActionsModel {
     func acceptBypassMode() async {
         isShowingBypassDisclaimer = false
         guard gate() else { return }
+        guard pickers.beginBypassAcceptance() else {
+            say(Self.acceptanceInFlight)
+            return
+        }
+        defer { pickers.endBypassAcceptance() }
 
         // 1. The acceptance, in afleet's own store. Never the CLI's user settings (§7.8).
         guard let store else {
@@ -99,6 +113,11 @@ extension ChannelHeaderActionsModel {
         //    was launched with the flag.
         await sendBypassPermissionMode()
     }
+
+    /// What a second bypass selection is told while the first acceptance is still running. A sentence
+    /// about this channel, naming no value (§11).
+    static let acceptanceInFlight =
+        "The bypass permission mode is already being enabled in this channel; nothing was changed."
 
     /// `set_permission_mode {mode: "bypassPermissions"}`, through the picker so the click is not
     /// adopted as a displayed value: the only readback permission mode has is the handshake's

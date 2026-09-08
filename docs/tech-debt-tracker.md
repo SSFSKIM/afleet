@@ -1262,7 +1262,34 @@ symlink-containment debt in entry 78 is unchanged.
      was latent before (the snapshot carried the same stale value, so the two agreed by accident)
      and is visible now that the snapshot carries the mode the channel is running. Closer: the
      readback waits for a handshake whose epoch is the new process's before comparing the mode —
-     the same watch item 205 needs. Owner: C6.2. Raised by C6.2's fix wave.
+     the same watch item 205 needs. Owner: C6.2. Raised by C6.2's fix wave. **Closed** by C6.2's
+     second fix wave: the mode is read from X5's `engineReports(of:)` — the handshake the fleet
+     retains for the channel — after the epoch has been established to have advanced, and an
+     unresolved mode holds the gate instead of releasing it (item 214 is what remains of the watch).
+
+214. **An owed readback is settled only by a handshake that arrives afterwards.** C6.2's second fix
+     wave retains the snapshot when a confirmation cannot be completed — the channel did not answer
+     `get_settings`, or the fleet had no permission mode to report for the replacement — and the
+     field stays closed until the next handshake re-runs the comparison. That handshake is the
+     replacement reporting, so it normally arrives; but a replacement that handshook *before* the
+     hold was taken, or one whose handshake is lost, leaves the confirmation owed with nothing to
+     settle it, and the field stays shut until the user changes a setting. It is the same missing
+     watch as item 205 — a surface with no per-channel state to subscribe to — and the closer is the
+     same: the composer's own event loop, or per-channel state on X5, re-running an owed
+     confirmation on any epoch change rather than only on a handshake it happens to see. Owner: the
+     C6 composite, with C4 if the second shape is chosen. Raised by C6.2's second fix wave.
+
+215. **Answering the fleet's banner re-sends a value the engine already applied.** The fleet resolves
+     its unresolved settings strictly in order, so a correction made out of that order cannot advance
+     it; the surface now re-answers each setting the fleet still names with the value the readback
+     reports, which for a setting the user has already corrected is one extra `set_model`,
+     `apply_flag_settings` or `set_permission_mode` carrying a value the process is already running.
+     It is idempotent and bounded by the three settings the pickers own, and it is what makes the
+     banner's promise ("pick a value to continue") true for a user who picks in their own order. What
+     would remove it: `resolveSetting` accepting a correction for any unresolved setting rather than
+     only the head of the list, so one request answers both halves whatever order they arrive in.
+     Owner: C4 (`ChannelSupervisor.resolveSetting`), with C6.2 dropping the re-answer when it lands.
+     Raised by C6.2's second fix wave.
 
 209. **`HostSignal.promptSent` is raised after `sendPrompt` returns, and an engine result can arrive
      first.** `ComposerModel.post` registers the uuid with the fold only once the facade has answered,

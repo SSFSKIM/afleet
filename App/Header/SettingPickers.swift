@@ -120,6 +120,29 @@ final class SettingPickersModel {
     /// Nil whenever nothing was asked for; the menu clears it when it closes.
     var presentedPicker: String?
 
+    /// How many restart operations have closed the gate and not yet reached a terminal transition.
+    ///
+    /// **A count and not a flag**, because two restart-required changes are one restart on the fleet's
+    /// side: the second `quiescentRestart` merges into the pending change and answers straight away,
+    /// and its caller's *queued* transition must not release the gate the first one is still holding.
+    private(set) var restartsInFlight = 0
+
+    /// The snapshot a restart's readback is still owed, when one is: set when the confirmation could
+    /// not be completed — the channel did not answer, or its replacement has not reported the mode —
+    /// and cleared by the confirmation that completes. While it is set the field stays closed and the
+    /// next handshake re-runs the comparison against it.
+    private(set) var awaitedRestart: RestartSnapshot?
+
+    /// Whether §8.6's acceptance — the store write, the restart, the mode switch — is running now.
+    /// Read by `BypassGate`, which refuses to re-enter while it is true.
+    private(set) var isAcceptingBypass = false
+
+    /// The settings the user has picked a value for since the banner went up. The fleet resolves its
+    /// own unresolved settings **in order**, so a correction made out of that order applies the value
+    /// and leaves the fleet's list where it was; this is what lets the surface answer the fleet's
+    /// banner again with the value the engine now reports rather than asking the user to pick twice.
+    @ObservationIgnored private var corrected: Set<String> = []
+
     /// The two surface names that name a picker this model draws. The router's strings, compared and
     /// never re-spelled: `CommandRouter.picker(for:)` builds them from the command's own name.
     static let pickerSurfaces = ["modelPicker", "effortPicker"]
@@ -173,6 +196,19 @@ final class SettingPickersModel {
 
     // MARK: - Reading the engine
 
+    /// The first readback, taken as part of drawing this channel's pickers. **Idempotent**, and the
+    /// reason it exists at all: the header's slot keeps its SwiftUI identity across a channel switch,
+    /// so a `.task` attached to the picker row runs once — for the first channel's model — and never
+    /// again for the second's, which would then draw an empty menu for a perfectly live channel and
+    /// never ask. The same answer the composer's own mount gives (Decision Log, 2026-09-08): resolve
+    /// and start on draw, rather than key a view identity no test in this tree can see.
+    func start() {
+        guard refreshTask == nil else { return }
+        refreshTask = Task { [weak self] in await self?.refresh() }
+    }
+
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
+
     /// Records the handshake: the mode readback, and the disagreement arm for a mode that was clicked
     /// and did not take.
     ///
@@ -193,6 +229,9 @@ final class SettingPickersModel {
             }
         }
         if hasAskedTheEngine, !lastRefreshSucceeded { await refresh() }
+        // A handshake is also the moment an owed confirmation can be settled: it is the replacement
+        // reporting, and the readback that could not be taken when the restart returned is taken now.
+        if let owed = awaitedRestart { await confirm(owed) }
     }
 
     /// Both readbacks: the options from `list_models` and the applied values from `get_settings`.
@@ -264,7 +303,7 @@ final class SettingPickersModel {
         let clicked = modelOptions.first { $0.value == value }?.canonical ?? value
         let shown = displayedModel?.canonical ?? appliedModel
         note(agrees: shown == clicked, setting: "model")
-        clearRestartGate(for: Self.modelSetting)
+        await clearRestartGate(for: Self.modelSetting)
         return true
     }
 
@@ -285,7 +324,7 @@ final class SettingPickersModel {
                           otherwise: AnyControlRequest(ApplyFlagSettings(settings: setting))) else { return false }
         await readSettings()
         note(agrees: appliedEffort == level, setting: "effort")
-        clearRestartGate(for: Self.effortSetting)
+        await clearRestartGate(for: Self.effortSetting)
         return true
     }
 
@@ -331,9 +370,22 @@ final class SettingPickersModel {
             return reason
         }
         requestedMode = mode
-        clearRestartGate(for: Self.modeSetting)
+        await clearRestartGate(for: Self.modeSetting)
         return nil
     }
+
+    /// §8.6's acceptance, claimed. Answers false when one is already running, which is what makes a
+    /// second bypass selection wait rather than take the stored-acceptance path: the acceptance is
+    /// written before the restart it needs, so a second click that read it would send the mode to a
+    /// process that was never launched with the flag.
+    func beginBypassAcceptance() -> Bool {
+        guard !isAcceptingBypass else { return false }
+        isAcceptingBypass = true
+        return true
+    }
+
+    /// The acceptance finished — on every arm, including the ones that stopped early.
+    func endBypassAcceptance() { isAcceptingBypass = false }
 
     /// A routed `/model`, `/effort` or `/permissions <mode>`, taken through the click path the menu
     /// takes rather than sent straight out (§8.6 binds every path to the bypass gate, and §7.4 binds
@@ -402,8 +454,7 @@ final class SettingPickersModel {
     /// are separate — `unresolvedSettings` keeps the channel connecting, `surface.isDisabled` closes
     /// the field — and a click that answered only the one it can see leaves the other one shut.
     private func fleetIsHolding(_ name: String) async -> Bool {
-        guard case .settingDidNotSurvive(let held)? = await lifecycle.state(of: key)?.banner else { return false }
-        return held == name
+        await fleetHeldSetting() == name
     }
 
     /// The engine's sentence, when the error carries one. `WireError.controlError` holds the wire's
@@ -453,14 +504,36 @@ final class SettingPickersModel {
     /// key and *permission mode* is a sentence.
     static func label(of name: String) -> String { name == modeSetting ? "permission mode" : name }
 
+    /// **The gate, as a state machine.** Every transition below is one of these, and nothing else
+    /// writes `surface.isDisabled`:
+    ///
+    /// | state | field | what holds it |
+    /// | --- | --- | --- |
+    /// | *open* | editable | nothing: no restart running, nothing owed, nothing outstanding |
+    /// | *restarting* | closed | `restartsInFlight > 0` — a process is being replaced |
+    /// | *queued* | as the rest of the machine says | the change was recorded for the dormant timer |
+    /// | *owed* | closed | `awaitedRestart` — a replacement exists and has not reported |
+    /// | *outstanding* | closed | `restartFailures`, or a setting the **fleet** still names |
+    ///
+    /// Transitions: `beginRestart` opens a restart (*restarting*, and the count is why a second one
+    /// merging into the first cannot release it); `confirmReadback` closes one, and lands in *open*,
+    /// *owed* or *outstanding* depending on what the replacement reported; `noteQueuedRestart` and
+    /// `cancelRestart` close one with nothing replaced; `restartFailed` closes one that threw and
+    /// lands in *owed* when the channel is still connecting, because a replacement is on the other
+    /// end whatever the error said. A handshake settles an *owed* one. A picker click leaves
+    /// *outstanding* only when neither this surface nor the fleet names anything further.
+    ///
     /// Closes the composer while a restart-required setting is being confirmed. Called before the
     /// restart is issued, so no keystroke reaches a process that is going away.
     func beginRestart(reason: String) {
+        restartsInFlight += 1
         surface.isRestarting = true
         surface.isDisabled = true
         surface.disabledReason = reason
         restartBanner = nil
         restartFailures = []
+        awaitedRestart = nil
+        corrected = []
     }
 
     /// Whether the state a `quiescentRestart` answered with is a process that was really replaced.
@@ -476,48 +549,74 @@ final class SettingPickersModel {
         return after.epoch != before?.epoch
     }
 
-    /// A restart that was recorded rather than run. The process is still the one it was, so the field
-    /// re-opens — nothing is being replaced and a closed field would be closed for as long as the
-    /// channel stays busy — and the change is named as pending (§7.4's *applies when the current work
-    /// finishes*).
-    func noteQueuedRestart() {
-        surface.isRestarting = false
-        surface.isDisabled = false
-        surface.disabledReason = nil
-        restartBanner = "This channel is busy; the setting applies when the current work finishes."
+    /// A restart that was recorded rather than run. This operation's process is still the one it was,
+    /// so *this* operation stops holding the field — and the change is named as pending (§7.4's
+    /// *applies when the current work finishes*).
+    ///
+    /// It does **not** follow that the field re-opens: a second restart-required change merges into a
+    /// restart already in flight and answers exactly like a queued one, so releasing here
+    /// unconditionally would open the field while the first operation's replacement or confirmation
+    /// is still running.
+    func noteQueuedRestart() async {
+        restartsInFlight = max(0, restartsInFlight - 1)
+        let pending = "This channel is busy; the setting applies when the current work finishes."
+        await releaseOrHold()
+        if !surface.isDisabled { restartBanner = pending }
     }
 
-    /// A restart that never happened: the field re-opens rather than staying shut behind a process
-    /// that was never replaced.
-    func cancelRestart() {
-        surface.isRestarting = false
-        surface.isDisabled = false
-        surface.disabledReason = nil
+    /// A restart that never happened: this operation stops holding the field, which re-opens unless
+    /// something else in the machine still holds it.
+    func cancelRestart() async {
+        restartsInFlight = max(0, restartsInFlight - 1)
+        await releaseOrHold()
     }
 
-    /// §7.4's readback rule. Driven by the composer's own `.restart` route (`CommandRouting`) and, at
-    /// Task 8, by the header's restart-required settings.
+    /// A restart that **threw**, judged by the channel it threw over.
+    ///
+    /// `quiescentRestart` spawns the replacement and then restores the flag settings and reads them
+    /// back, and both of those throw: an error is therefore not a claim that nothing happened. A
+    /// channel left connecting has a new process on the other end that has not reported, so the gate
+    /// stays closed and the readback stays owed — re-opening it would let a send into the queued
+    /// input of a process with no readiness transition to flush it. Any other state is a restart that
+    /// did not replace anything, which is `cancelRestart`.
+    func restartFailed(_ state: ChannelState?, expecting expected: RestartSnapshot) async {
+        guard case .owned(.connecting)? = state?.origin else {
+            await cancelRestart()
+            return
+        }
+        restartsInFlight = max(0, restartsInFlight - 1)
+        hold(expected, saying: Self.stillConnectingBanner)
+    }
+
+    /// §7.4's readback rule. Driven by the composer's own `.restart` route (`CommandRouting`) and by
+    /// the header's restart-required settings.
     ///
     /// The composer stays disabled behind the connecting glyph until **every** readback matches; a
     /// mismatch raises a banner naming the setting that did not survive and keeps it disabled until
-    /// the user picks a value. Answers whether every readback matched.
+    /// the user picks a value. Answers whether every readback matched **and** the field is open.
     ///
     /// The banner names settings, never the values on either side: the engine's model id or effort
     /// level is a value read off a process, and the reader needs to know which setting to look at.
     @discardableResult
     func confirmReadback(of expected: RestartSnapshot) async -> Bool {
-        surface.isRestarting = false
+        restartsInFlight = max(0, restartsInFlight - 1)
+        return await confirm(expected)
+    }
+
+    /// The comparison itself, with the in-flight count already accounted for. Re-run from
+    /// `noteHandshake` for a confirmation that was owed, which is why it does not close an operation
+    /// of its own.
+    @discardableResult
+    private func confirm(_ expected: RestartSnapshot) async -> Bool {
+        surface.isRestarting = restartsInFlight > 0
         // **A comparison needs values that were read, not values that were kept.** `readSettings`
         // leaves the last readback in place when the channel does not answer — right for a display,
         // and wrong here: comparing the retained values against a snapshot taken from those same
         // values agrees with itself and releases the field without the new process having reported
         // anything at all.
         guard await refresh() else {
-            restartFailures = []
-            restartBanner = "The channel did not report its settings after the restart; "
-                + "the field stays closed until it does."
-            surface.isDisabled = true
-            surface.disabledReason = restartBanner
+            hold(expected, saying: "The channel did not report its settings after the restart; "
+                 + "the field stays closed until it does.")
             return false
         }
         var failed: [String] = []
@@ -526,20 +625,54 @@ final class SettingPickersModel {
             if (displayedModel?.canonical ?? appliedModel) != wanted { failed.append(Self.modelSetting) }
         }
         if expected.effort != appliedEffort { failed.append(Self.effortSetting) }
-        if let mode = expected.permissionMode, handshakeMode != mode { failed.append(Self.modeSetting) }
-        guard failed.isEmpty else {
-            restartFailures = failed
-            restartBanner = Self.banner(for: failed)
-            surface.isDisabled = true
-            surface.disabledReason = restartBanner
-            return false
+        if let mode = expected.permissionMode {
+            // **The replacement's own report, and not the one the subscription happens to have
+            // delivered.** The mode has no readback but a handshake, that handshake reaches this
+            // model through the composer's `events(of:)` loop, and this comparison runs the moment
+            // `perform` returns — so a mode compared against `handshakeMode` is compared against
+            // whichever process last got through, which on a slow delivery is the old one. X5's
+            // `engineReports(of:)` answers the handshake the fleet has **retained** for the channel,
+            // which after a replaced epoch is the replacement's; a fleet with none to report has not
+            // resolved the mode yet, and the gate stays closed rather than releasing on a stale match.
+            guard let reported = await modeOfTheRunningProcess() else {
+                hold(expected, saying: Self.unresolvedModeBanner)
+                return false
+            }
+            handshakeMode = reported
+            if reported != mode { failed.append(Self.modeSetting) }
         }
-        restartFailures = []
-        restartBanner = nil
-        surface.isDisabled = false
-        surface.disabledReason = nil
-        return true
+        awaitedRestart = nil
+        restartFailures = failed
+        restartBanner = failed.isEmpty ? nil : Self.banner(for: failed)
+        await releaseOrHold()
+        return failed.isEmpty && !surface.isDisabled
     }
+
+    /// The permission mode the process the fleet is running reports, from the handshake X5 retained
+    /// for the channel. Nil when the fleet owns no supervisor for it or has no handshake to report.
+    private func modeOfTheRunningProcess() async -> PermissionMode? {
+        await lifecycle.engineReports(of: key)?.handshake?.currentPermissionMode
+    }
+
+    /// A confirmation that could not be completed: the snapshot stays owed, the field stays closed,
+    /// and the next handshake re-runs the comparison against it. Without the snapshot the field would
+    /// stay disabled for ever — a recovered readback has nothing left to confirm against, and
+    /// `clearRestartGate` cannot act on an empty failure list.
+    private func hold(_ expected: RestartSnapshot, saying banner: String) {
+        awaitedRestart = expected
+        restartFailures = []
+        restartBanner = banner
+        surface.isRestarting = restartsInFlight > 0
+        surface.isDisabled = true
+        surface.disabledReason = banner
+    }
+
+    static let stillConnectingBanner =
+        "The channel is still connecting after the restart; the field stays closed until it reports."
+
+    static let unresolvedModeBanner =
+        "The channel has not reported its permission mode since the restart; the field stays closed "
+        + "until it does."
 
     /// The banner, over the settings that did not survive. Names, never the values on either side: a
     /// model id or an effort level is a value read off a process, and what the reader needs is which
@@ -551,22 +684,92 @@ final class SettingPickersModel {
 
     /// The recovery the banner promises, for one setting the user has just picked a value for.
     ///
-    /// The field re-opens only when the **last** one has been answered; until then the banner names
-    /// what is left. The fleet's own half of the gate is answered where the click goes out, through
-    /// `resolveSetting` — this is the surface's half, and a picker that moved one without the other
-    /// would leave the channel connecting behind an open field or the field shut behind a ready
-    /// channel.
-    private func clearRestartGate(for name: String) {
-        guard let index = restartFailures.firstIndex(of: name) else { return }
-        restartFailures.remove(at: index)
-        guard restartFailures.isEmpty else {
-            restartBanner = Self.banner(for: restartFailures)
+    /// The field re-opens only when the **last** one has been answered — this surface's and the
+    /// fleet's both. A picker that moved one without the other would leave the channel connecting
+    /// behind an open field or the field shut behind a ready channel.
+    private func clearRestartGate(for name: String) async {
+        corrected.insert(name)
+        if let index = restartFailures.firstIndex(of: name) { restartFailures.remove(at: index) }
+        restartBanner = restartFailures.isEmpty ? nil : Self.banner(for: restartFailures)
+        await releaseOrHold()
+    }
+
+    /// The one place the field re-opens. It opens only when nothing holds it: no restart replacing a
+    /// process, no readback owed, no setting this surface is still waiting for a value for, and no
+    /// setting the **fleet** is still holding the channel connecting over.
+    private func releaseOrHold() async {
+        guard restartsInFlight == 0 else {
+            surface.isRestarting = true
+            surface.isDisabled = true
+            return
+        }
+        surface.isRestarting = false
+        guard awaitedRestart == nil, restartFailures.isEmpty else {
+            surface.isDisabled = true
             surface.disabledReason = restartBanner
             return
         }
+        if let held = await settleFleetBanner() {
+            restartBanner = Self.banner(for: [held])
+            surface.isDisabled = true
+            surface.disabledReason = restartBanner
+            return
+        }
+        corrected = []
         restartBanner = nil
         surface.isDisabled = false
         surface.disabledReason = nil
+    }
+
+    /// The setting the fleet is still holding this channel connecting over, after every correction
+    /// the user has already made has been re-offered to it. Nil when it holds none.
+    ///
+    /// **The fleet resolves its unresolved settings strictly in order** (`ChannelSupervisor` advances
+    /// only when the name it is given is the head of the list). A correction made out of that order
+    /// therefore applies the value and leaves the fleet's list where it was, and resolving the head
+    /// afterwards advances the banner onto a setting the user has already answered — the channel stays
+    /// connecting while this surface has nothing outstanding left to hold the field with. So each
+    /// setting the fleet still names that has already been corrected here is answered again, with the
+    /// value the **engine now reports** and never a click, until the fleet names one the user has not
+    /// answered or names none at all. Bounded by the number of settings this model owns, so a fleet
+    /// that does not advance ends the loop rather than driving it.
+    private func settleFleetBanner() async -> String? {
+        for _ in 0..<Self.settleRounds {
+            guard let held = await fleetHeldSetting() else { return nil }
+            guard corrected.contains(held), let value = readbackValue(of: held) else { return held }
+            corrected.remove(held)
+            do {
+                try await lifecycle.resolveSetting(held, to: value, on: key)
+            } catch {
+                disagreement = Self.reason(of: error)
+                return held
+            }
+        }
+        return await fleetHeldSetting()
+    }
+
+    /// The three settings this model owns, which is how many times the fleet's banner can advance.
+    private static let settleRounds = 3
+
+    /// The setting the channel's own banner names, when it names one.
+    private func fleetHeldSetting() async -> String? {
+        guard case .settingDidNotSurvive(let held)? = await lifecycle.state(of: key)?.banner else { return nil }
+        return held
+    }
+
+    /// What the engine now reports for one setting, in the shape `resolveSetting` takes. The readback
+    /// and never the click, so re-answering the fleet cannot re-apply a value the engine refused.
+    private func readbackValue(of name: String) -> JSONValue? {
+        switch name {
+        case Self.modelSetting:
+            return (displayedModel?.value ?? appliedModel).map(JSONValue.string)
+        case Self.effortSetting:
+            return appliedEffort.map(JSONValue.string) ?? .null
+        case Self.modeSetting:
+            return (requestedMode ?? handshakeMode).map { .string($0.rawValue) }
+        default:
+            return nil
+        }
     }
 
     // MARK: - Plumbing
@@ -613,7 +816,12 @@ struct SettingPickersView: View {
     @Bindable var model: SettingPickersModel
 
     var body: some View {
-        HStack(spacing: 8) {
+        // The readback is taken as part of drawing this channel's pickers, and not from a `.task`
+        // attached here: the header's slot keeps its structural identity across a channel switch, so
+        // that task runs once for the first channel's model and never for the second's, which would
+        // draw an empty menu against a live channel and never ask. `start()` is idempotent per model.
+        model.start()
+        return HStack(spacing: 8) {
             Menu(model.displayedModel?.displayName ?? model.displayedModelValue ?? "Model") {
                 ForEach(model.modelOptions) { option in
                     Button(option.displayName) { Task { await model.selectModel(option.value) } }
@@ -664,7 +872,6 @@ struct SettingPickersView: View {
                 Label(banner, systemImage: "exclamationmark.triangle").font(.callout)
             }
         }
-        .task { await model.refresh() }
     }
 }
 

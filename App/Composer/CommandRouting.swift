@@ -80,7 +80,7 @@ enum ComposerConfirmation: Hashable, Sendable {
     var title: String {
         switch self {
         case .stopEverything: "Stop everything in this channel?"
-        case .backgroundAll: "Send every live channel to the background?"
+        case .backgroundAll: "Move this channel's running tools to the background?"
         case .logout: "Sign out of every channel on this machine?"
         case .sendToBackground: "Send this channel to the background?"
         case .trustDirectory: "Trust this directory?"
@@ -90,7 +90,13 @@ enum ComposerConfirmation: Hashable, Sendable {
     var message: String {
         switch self {
         case .stopEverything: "The running turn and every background task in this channel stop. Their shells close."
-        case .backgroundAll: "Every channel afleet owns hands off to a background job and its window goes quiet."
+        // What the verb does, and no more: one `background_tasks` with no `tool_use_id` on **this**
+        // channel (`Fleet`'s `.backgroundAll` arm, and the parent's `/background-all` row). It is not
+        // a handoff — nothing is replaced by a background job — and it records nothing, so a restart
+        // leaves none of it behind.
+        case .backgroundAll:
+            "Every tool the current turn is running in this channel moves to the background. "
+                + "Nothing stops, no session is handed off, and nothing survives a restart."
         case .logout: "Every owned channel and every afleet-launched job on this machine signs out."
         case .sendToBackground: "This channel's process is replaced by a background job; its local shells close."
         // The directory is what the user is being asked about, so it is named: a trust dialog that
@@ -103,7 +109,7 @@ enum ComposerConfirmation: Hashable, Sendable {
     var confirmTitle: String {
         switch self {
         case .stopEverything: "Stop Everything"
-        case .backgroundAll: "Send to Background"
+        case .backgroundAll: "Move to Background"
         case .logout: "Sign Out"
         case .sendToBackground: "Send to Background"
         case .trustDirectory: "Trust and Change"
@@ -143,9 +149,15 @@ extension ComposerModel {
             if let handled = await pickers.apply(routed: request) { return handled }
             return await sendRouted(request)
         case .strategy(let strategy, let arguments):
+            // What the field held when the command was issued. A strategy is an await — `/rewind`'s
+            // is two, with a confirmation sheet between them — and the field stays editable across
+            // it, so the prefill an honoured rewind hands back is written only over the words the
+            // command was issued with. This is *Edit*'s rule (`EditAndRewind`), which this path did
+            // not have: it overwrote whatever had been typed since.
+            let draftWhenIssued = draft
             do {
                 let outcome = try await lifecycle.run(strategy, arguments: arguments, on: key, ui: self)
-                present(outcome)
+                present(outcome, draftWhenIssued: draftWhenIssued)
                 return true
             } catch {
                 refuse(error)
@@ -165,7 +177,11 @@ extension ComposerModel {
             do {
                 after = try await lifecycle.perform(.quiescentRestart(request), on: key)
             } catch {
-                pickers.cancelRestart()
+                // The same fact the header's restart path reads: `quiescentRestart` spawns the
+                // replacement before it restores and re-reads the settings, so an error can arrive
+                // with a new process connecting on the other end. Re-opening the field there lets a
+                // send into that process's queued input with no readiness transition to flush it.
+                await pickers.restartFailed(await lifecycle.state(of: key), expecting: expected)
                 refuse(error)
                 return false
             }
@@ -173,7 +189,7 @@ extension ComposerModel {
             // old process still on the other end; a readback confirmed there would release the field
             // over a restart that has not happened.
             guard SettingPickersModel.replacedTheProcess(after, from: before) else {
-                pickers.noteQueuedRestart()
+                await pickers.noteQueuedRestart()
                 return true
             }
             _ = await pickers.confirmReadback(of: expected)
@@ -300,13 +316,23 @@ extension ComposerModel {
     /// their own, which this leaf does not draw (tracker 206). Counts and the engine's own sentences
     /// only — a memory file is a path and a signed-in account is an address, and neither is named
     /// here (§11).
-    func present(_ outcome: StrategyOutcome) {
+    /// `draftWhenIssued` is what the field held when the command went out, for the one arm that
+    /// writes into the field. Nil means "write it": a caller that is not dispatching a typed line has
+    /// no typing to protect.
+    func present(_ outcome: StrategyOutcome, draftWhenIssued: String? = nil) {
         switch outcome {
         case .rewind(let preview, let done):
             editNote = Self.rewindNote(preview, done)
             // The prompt the engine handed back for an honoured rewind, exactly as it sent it — the
-            // same prefill *Edit* puts in the field.
-            if done?.rewound == true, let prefill = done?.prefillText { draft = prefill }
+            // same prefill *Edit* puts in the field, on *Edit*'s terms: only over the words the
+            // command was issued with, and otherwise the typing is kept and the note says so.
+            if done?.rewound == true, let prefill = done?.prefillText {
+                if let draftWhenIssued, draft != draftWhenIssued {
+                    editNote = Self.typedAheadNote
+                } else {
+                    draft = prefill
+                }
+            }
         case .login(_, let done):
             switch done {
             case .signedIn: editNote = "Signed in."

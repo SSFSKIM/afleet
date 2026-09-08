@@ -284,12 +284,61 @@ final class PickerReadbackTests: XCTestCase {
         XCTAssertEqual(composer.draft.count, typed.count,
                        "the disabled field kept \(composer.draft.count) of the \(typed.count) character(s) typed")
 
-        composer.pickers.cancelRestart()
+        await composer.pickers.cancelRestart()
         await composer.send()
 
         let after = await double.memberSequence
         XCTAssertEqual(after, ["sendPrompt"],
                        "with the gate open the send reached \(after.count) member(s): " + after.joined(separator: ", "))
+    }
+
+    // MARK: - Drawing the pickers
+
+    /// **The readback follows the model being drawn, not the view's appearance.**
+    ///
+    /// The header's slot keeps its structural identity across a channel switch: nothing appears and
+    /// nothing disappears, so a `.task` attached to the picker row runs once — for the first
+    /// channel's model — and never again. The second channel then draws a menu with no options
+    /// against a perfectly live process, and nothing ever asks: `noteHandshake` re-asks only for a
+    /// refresh that was already attempted and came back short.
+    ///
+    /// Two models drawn through one view structure, and a redraw after them: the second must have
+    /// asked, and the third must not have asked again.
+    func testDrawingThePickersReadsTheEngineForTheModelBeingDrawn() async throws {
+        let double = ComposerLifecycleDouble()
+        let first = try await makeModel(double)
+
+        _ = SettingPickersView(model: first).body
+
+        let firstAsked = await settle { !first.modelOptions.isEmpty }
+        XCTAssertTrue(firstAsked, "drawing the pickers asked the engine nothing")
+
+        let second = SettingPickersModel(key: makeKey(), lifecycle: double, surface: ChannelSurfaceState())
+
+        _ = SettingPickersView(model: second).body
+
+        let secondAsked = await settle { !second.modelOptions.isEmpty }
+        XCTAssertTrue(secondAsked,
+                      "the channel switched to offered \(second.modelOptions.count) model row(s)")
+        let asked = await double.sentSubtypes.count
+
+        _ = SettingPickersView(model: second).body
+        // Drained rather than read on the next line: a redraw that re-asked from a detached task
+        // would not have reached the double yet.
+        for _ in 0..<200 { await Task.yield() }
+
+        let again = await double.sentSubtypes.count
+        XCTAssertEqual(again, asked, "a redraw of the same model took \(again - asked) further request(s)")
+    }
+
+    /// A bounded wait on the readback a draw starts: the draw does not block on a control request,
+    /// so the assertion is on the answer arriving and not on a duration.
+    private func settle(_ predicate: () async -> Bool) async -> Bool {
+        for _ in 0..<400 {
+            if await predicate() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await predicate()
     }
 
     // MARK: - The recording
