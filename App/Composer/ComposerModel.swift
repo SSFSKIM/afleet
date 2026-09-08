@@ -68,6 +68,11 @@ final class ComposerModel {
     /// Which event subscription is the current one; see `start()`.
     @ObservationIgnored private var generation = 0
 
+    /// Whether `subscription` is still the current one. `generation` is `private`, which in Swift is file-scoped,
+    /// and the seeding it fences lives in `LateMountMetadata.swift`; this is the narrowest way to let that file ask
+    /// rather than opening the counter itself to writing.
+    func isCurrentSubscription(_ subscription: Int) -> Bool { generation == subscription }
+
     /// The engine's own report of what it offers, taken off this channel's event stream: the
     /// handshake's `commands`, and `system/init`'s `slash_commands` and `terminal_slash_commands`.
     ///
@@ -114,12 +119,6 @@ final class ComposerModel {
     /// the `!` escape's directory and environment. Set when the composer appears; nil for a channel
     /// the panel host has never drawn, where there is no Browser tab to hand a URL to.
     @ObservationIgnored var context: ChannelContext?
-
-    /// Where Shift+Tab's cycle currently stands (`ComposerShortcuts`).
-    ///
-    /// A cursor, not a readback, and nothing displays it: §7.4 says a displayed setting comes from
-    /// the engine, and Task 7's picker replaces this with the handshake's own `permissionMode`.
-    var permissionMode: PermissionMode = .default
 
     /// The paths the engine's index answered the current `@` token with, in its own order
     /// (`FileMentions`). Empty whenever no popover is showing; nothing here is derived from disk.
@@ -353,9 +352,16 @@ final class ComposerModel {
                 if let self, self.generation == generation { self.events = nil }
             }
             guard let self, let stream = await self.lifecycle.events(of: self.key) else { return }
+            // **The generation is checked after every await, not only where the handle is cleared.** Acquiring the
+            // subscription is one suspension and seeding the reports is several more, and a `stop()` with a fresh
+            // `start()` behind it can land in any of them. An old loop that carried on would seed the handshake, the
+            // picker's mode readback and `system/init` over the values the *new* subscription has already applied —
+            // and it would do so from a stream nobody is reading, so nothing downstream could notice.
+            guard self.generation == generation, !Task.isCancelled else { return }
             // After the subscription and before the first frame: what the engine already reported
             // and will not report again (`LateMountMetadata`).
-            await self.seedEngineReports()
+            await self.seedEngineReports(ifGenerationIs: generation)
+            guard self.generation == generation, !Task.isCancelled else { return }
             for await event in stream {
                 if Task.isCancelled { return }
                 self.onEvent?(event)

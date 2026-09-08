@@ -40,6 +40,10 @@ public actor Fleet: LifecycleAPI {
     /// The key each supervisor is filed under, so a fork that re-keys itself can be found and re-filed.
     private var filedAs: [ObjectIdentifier: ChannelKey] = [:]
     private var seeds: [ChannelKey: Seed] = [:]
+    /// Where each fork's provisional key went, for `resolvedForkKey(of:)`. Written once per re-key and taken by the
+    /// first reader; an entry nobody reads is one key pair per fork this process opened, which is the price of the
+    /// only record that the two ids were ever the same channel.
+    private var forkResolutions: [ChannelKey: ChannelKey] = [:]
     /// The line each channel was built from; the precondition gate reads its setting sources and its cwd.
     private var launches: [ChannelKey: LaunchConfiguration] = [:]
     private var tasks: [Task<Void, Never>] = []
@@ -293,6 +297,10 @@ public actor Fleet: LifecycleAPI {
             filedAs[id] = state.key
             if let seed = seeds.removeValue(forKey: filed) { seeds[state.key] = seed }
             if let launch = launches.removeValue(forKey: filed) { launches[state.key] = launch }
+            // The one place the provisional-to-resolved link exists at all. `resolvedForkKey(of:)` reads it for the
+            // caller that arrives *after* this line has run — the supervisor is no longer filed under the
+            // provisional key by then, and nothing in a published state names the id the channel used to carry.
+            forkResolutions[filed] = state.key
         }
         updatesContinuation.yield(state)
     }
@@ -440,6 +448,17 @@ public actor Fleet: LifecycleAPI {
         let supervisor = supervisor(for: key)
         try spawnBarrier.check()
         return try await supervisor.fork(at: point)
+    }
+
+    /// X5's `resolvedForkKey(of:)`: the key that fork is filed under once its own session id has landed.
+    ///
+    /// Two answers for one question, because the re-key can land on either side of the caller's arrival. While the
+    /// sibling is still filed under the provisional key it is asked directly and suspends there until its identity
+    /// settles; once `publish` has moved the map the supervisor cannot be found by that key at all, and the note
+    /// `publish` left is the answer. Neither is a guess: both come from the decision the supervisor already took.
+    public func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey {
+        if let sibling = supervisors[provisional] { return await sibling.settledForkKey() }
+        return forkResolutions.removeValue(forKey: provisional) ?? provisional
     }
 
     public func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {

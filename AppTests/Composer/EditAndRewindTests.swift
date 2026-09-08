@@ -207,6 +207,43 @@ final class EditAndRewindTests: XCTestCase {
         await rig.finish()
     }
 
+    /// **The draft is handed to the identity the fork resolved to, not to the id its spawn was minted under.**
+    ///
+    /// `fork(at:on:)` answers while the sibling is still keyed on a provisional session, and the fleet re-keys the
+    /// channel when the engine announces its own on `auth_status`. The browser lists that channel under the resolved
+    /// id, and the registry keys both the pending prefill and the selection by whatever key it is handed — so a
+    /// handoff on the provisional key selects nothing and leaves the edited message in a channel that never appears.
+    ///
+    /// Deliberate break: hand `handOffToFork` the key `fork(at:on:)` answered.
+    func testTheForksPrefillLandsOnTheIdentityTheForkResolvedTo() async throws {
+        let rig = try await Rig()
+        let target = try rig.messageWithAPrecedingAssistant()
+        let provisional = ChannelKey(configHome: rig.key.configHome, session: SessionID())
+        let resolved = ChannelKey(configHome: rig.key.configHome, session: SessionID())
+        await rig.lifecycle.stageFork(.success(provisional))
+        await rig.lifecycle.stageForkIdentity(resolved, resolving: provisional)
+        await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
+
+        await rig.composer.edit(target)
+
+        // Booleans and a count over the keys: an equality would print a config home and two session ids (§11).
+        XCTAssertEqual(rig.selected.count, 1, "the window was moved to \(rig.selected.count) channel(s), not 1")
+        XCTAssertTrue(rig.selected.first == resolved,
+                      "the window was moved to a channel that is not the one the fork resolved to")
+        let forked = try XCTUnwrap(rig.composers.model(for: resolved),
+                                   "the registry holds no composer for the identity the fork resolved to")
+        XCTAssertEqual(forked.draft, target.text,
+                       "the fork's field carries \(forked.draft.count) character(s) of the edited message")
+        // And nothing was left behind under the provisional key: one prefill, taken once.
+        let stranded = try XCTUnwrap(rig.composers.model(for: provisional),
+                                     "the registry could not build a composer for the provisional key")
+        XCTAssertEqual(stranded.draft.count, 0,
+                       "\(stranded.draft.count) character(s) of the edited message were left under the "
+                       + "provisional key, where nothing will ever look for them")
+        XCTAssertNotNil(rig.composer.editNote, "the refused rewind showed no note at all")
+        await rig.finish()
+    }
+
     /// `"unseen later turn"` takes the identical path and says something different.
     ///
     /// Injected, because `rewind-turn` was recorded without `last_seen_user_message_uuid` and the

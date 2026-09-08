@@ -164,6 +164,10 @@ public actor ChannelSupervisor {
     /// cannot cover it: without this a fork whose engine never announces an id sits connecting forever, holding a
     /// live child and a cap slot the counter can never reclaim.
     private var forkIdentityTimer: Task<Void, Never>?
+    /// Callers suspended in `settledForkKey()` until this fork's own id has settled — resolved, timed out, or
+    /// gone with its child. Every one of those three paths resumes them, so nothing here outlives the deadline
+    /// the timer above already bounds.
+    private var identityWaiters: [CheckedContinuation<ChannelKey, Never>] = []
     private let spawnSibling: SiblingSpawner
     /// The §6.12 gate every spawn passes first. nil in a rig that is driving a lifecycle row rather than a project.
     private let preconditions: SpawnPreconditions?
@@ -365,7 +369,20 @@ public actor ChannelSupervisor {
     /// sees every publish that action caused — which `updates`, drained from outside, cannot promise.
     public private(set) var publishedCount = 0
 
+    /// **Presence is recomputed on every publication, and that is what makes the field authoritative.**
+    ///
+    /// `deliver`, the `.user` and `.result` arms of the pump and the queued-input flush each move
+    /// `turnRunning` and then publish; only `enter` and the decision arms recomputed the field. A
+    /// publication that yielded the stored value therefore reported an ordinary running turn as
+    /// idle — and §7.4's *Quit* clause reads exactly this field to decide whether to ask before it
+    /// ends a channel, so the gap was a working conversation terminated with no dialog.
+    ///
+    /// It costs nothing anywhere else: `presenceNow()` answers with the stored value for every
+    /// origin that is not an owned, uncontended channel, so a holder's presence — which
+    /// `OriginResolver` resolved and the caller has already stored — is preserved rather than
+    /// guessed at.
     private func publish() {
+        state.presence = presenceNow()
         publishedCount += 1
         updatesContinuation.yield(state)
     }
@@ -908,6 +925,9 @@ public actor ChannelSupervisor {
         forkIdentityTimer?.cancel(); forkIdentityTimer = nil
         respawnTask?.cancel(); respawnTask = nil
         pumpTask?.cancel(); pumpTask = nil
+        // The cancelled deadline above will not fire, so a fork's caller would wait here for the life of the
+        // process. It is answered with the key the channel is under, exactly as a timed-out fork's caller is.
+        settleIdentityWaiters()
         finishSubscribers()
         updatesContinuation.finish()
     }
@@ -1268,6 +1288,11 @@ public actor ChannelSupervisor {
     /// therefore stays `.connecting` until `.sessionIdentityResolved`, when the ownership check runs against the id
     /// that actually arrived and the counter's slot is rekeyed onto it.
     ///
+    /// **The answer is the provisional key and returning is not waiting for the id.** A host that needs the key the
+    /// sibling ends up filed under — because it is keying a draft or a selection by it — asks
+    /// `LifecycleAPI.resolvedForkKey(of:)` afterwards; the spawn itself must answer as soon as the child is up,
+    /// because a fork whose engine is slow to announce would otherwise hold its caller for the identity budget.
+    ///
     /// `--resume-session-at` and `--resume-drops-turn` are the line composer's: this appends no argument of its own.
     @discardableResult
     public func fork(at point: ForkPoint?) async throws -> ChannelKey {
@@ -1277,6 +1302,25 @@ public actor ChannelSupervisor {
         guard let sibling = await spawnSibling(key, provisional, start) else { throw LifecycleError.notOwned }
         try await sibling.open()
         return provisional
+    }
+
+    /// This channel's key, once a fork's identity has stopped moving.
+    ///
+    /// Answers at once for anything that is not a fork still awaiting its id, and for a fork whose spawn ended
+    /// without arming the deadline — a spawn a newer epoch overtook, which leaves nothing to wait for. Otherwise it
+    /// suspends until `resolveForkIdentity`, `forkIdentityDeadlineExpired` or `handleExit` settles the wait; all
+    /// three do so unconditionally, so no caller can be left here by an early return inside any of them.
+    public func settledForkKey() async -> ChannelKey {
+        guard isAwaitingFork, forkIdentityTimer != nil || forkIdentityPending != nil else { return key }
+        return await withCheckedContinuation { identityWaiters.append($0) }
+    }
+
+    /// Hands every waiter the key this channel is filed under now. Called from the three exits above.
+    private func settleIdentityWaiters() {
+        guard !identityWaiters.isEmpty else { return }
+        let waiting = identityWaiters
+        identityWaiters = []
+        for waiter in waiting { waiter.resume(returning: key) }
     }
 
     /// The fork's own id has arrived. In order: the post-handshake check against the *resolved* id, where a holder
@@ -1293,6 +1337,10 @@ public actor ChannelSupervisor {
         let ownsMarker = inFlight == nil
         if ownsMarker { inFlight = .spawn }
         defer { if ownsMarker { inFlight = nil } }
+        // Whatever this method decides, the identity has stopped moving by the time it returns: the clean path has
+        // re-keyed the channel and the refusing ones have left it under the provisional id for good. A `defer`
+        // rather than a line at the end, because four of the returns below are early ones.
+        defer { settleIdentityWaiters() }
         forkIdentityTimer?.cancel(); forkIdentityTimer = nil
         forkReservation = nil
 
@@ -1373,6 +1421,9 @@ public actor ChannelSupervisor {
     /// reservation goes back, nothing is published ready, and the channel is left connecting with no process.
     private func forkIdentityDeadlineExpired(epoch deadlineEpoch: ProcessEpoch) async {
         forkIdentityTimer = nil
+        // The bound under `settledForkKey()`: no id arrived, so the provisional key is the answer and the caller
+        // stops waiting here rather than for the life of the process.
+        defer { settleIdentityWaiters() }
         guard isAwaitingFork, deadlineEpoch == epoch, let reservation = forkReservation else { return }
         forkReservation = nil
         forkIdentityPending = nil
@@ -1664,6 +1715,9 @@ public actor ChannelSupervisor {
     /// Every branch publishes exactly once — directly, or through the `apply` that succeeded — so a caller watching
     /// `publishedCount` has a synchronisation point that is after the whole decision and not in the middle of it.
     private func handleExit(_ status: ExitStatus, epoch exited: ProcessEpoch) async {
+        // The child whose id was being waited for is gone, and the deadline this exit cancels below would never
+        // fire: the provisional key is the answer and `settledForkKey()`'s caller is released here.
+        defer { settleIdentityWaiters() }
         // A fork's reservation is confirmed nowhere but `resolveForkIdentity`, and an exit before the identity
         // arrives reaches neither that nor the deadline: leaving it here would keep a claim in the counter's
         // `reserved` map for the life of the process, one of six slots, permanently, per such crash. `release` on an

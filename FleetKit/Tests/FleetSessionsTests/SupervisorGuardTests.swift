@@ -75,4 +75,52 @@ final class SupervisorGuardTests: XCTestCase {
         try await TestTiming.awaitDelivery([streamFinished])
         consumer.cancel()
     }
+
+    /// **The published presence is the channel's own turn state, and it is recomputed at publication.**
+    ///
+    /// `deliver` marks the turn running and publishes; the pump's `.result` arm clears it and publishes. Neither
+    /// recomputed `state.presence`, so both yielded whatever the last transition had stored — an ordinary running
+    /// turn read as idle by everything above X5. §7.4's *Quit* clause asks exactly this field whether to warn before
+    /// it ends a channel, so a stale idle is a working conversation terminated with no dialog.
+    ///
+    /// The frame is decoded from an invented line rather than taken from a recording: nothing here is an engine byte
+    /// (§11), and the fields are the four `ResultFields` requires plus the two the arm reads.
+    ///
+    /// Deliberate break: drop the `state.presence = presenceNow()` from `publish()`.
+    func testADeliveredSendPublishesBusyAndItsResultPublishesIdle() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        try await rig.waitUntil(supervisor, "the channel to be ready") { $0.origin == .owned(.ready) }
+        let handle = try XCTUnwrap(rig.scriptedHandles.first)
+        let before = await supervisor.publishedCount
+
+        _ = try await supervisor.send(UserInput(text: "an invented prompt"))
+
+        let sending = await supervisor.state
+        XCTAssertEqual(sending.presence, .busy,
+                       "the channel that has just been written to publishes a presence that is not busy")
+
+        handle.push(.frame(Self.result, handle.epoch))
+        try await rig.waitUntil(supervisor, "the result to reach the pump") { $0.presence == .idle }
+        let done = await supervisor.state
+        XCTAssertEqual(done.presence, .idle, "the finished turn publishes a presence that is not idle")
+
+        // A floor: both readings above have to be publications and not a field the test happened to catch between
+        // two of them.
+        let published = await supervisor.publishedCount
+        XCTAssertGreaterThanOrEqual(published - before, 2,
+                                    "the send and its result published \(published - before) state(s), not 2")
+    }
+
+    /// One `result` frame, built from an invented line through the decoder every frame reaches the supervisor
+    /// through. Nothing recorded, nothing quoted.
+    private static let result: Frame = {
+        let line = Data("""
+            {"type":"result","subtype":"success","duration_ms":1,"is_error":false,"num_turns":1,\
+            "total_cost_usd":0,"uuid":"invented-result-uuid","session_id":"invented-session-id"}
+            """.utf8)
+        return FrameDecoder.decode(line: line)
+    }()
 }

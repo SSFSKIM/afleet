@@ -68,7 +68,9 @@ private struct ChannelTimelineColumn: View {
                 List(model.rows) { TimelineRowSlot(row: $0) }
                     .listStyle(.inset)
             }
-            ChannelComposerMount(key: row.key, cwd: row.cwd, composers: composers)
+            // The row's listing policy travels with the mount: a read-only row is a teammate's transcript, and the
+            // composer is the one surface in this column that can write to a channel.
+            ChannelComposerMount(key: row.key, cwd: row.cwd, readOnly: row.readOnlyReason, composers: composers)
         }
         // The header and the opening are two concerns, and keying one task on both was a defect.
         // The header has to follow a channel that goes busy, raises a banner or crashes while it

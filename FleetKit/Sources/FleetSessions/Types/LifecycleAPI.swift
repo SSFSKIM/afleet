@@ -29,6 +29,22 @@ public protocol LifecycleAPI: Sendable {
     /// channel the fork produced. Every precondition and every refusal is `perform(.fork(at: point), on:)`'s; only
     /// the answer differs — `perform` answers the *source's* state, which names the sibling nowhere.
     @discardableResult func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey
+    /// **The key that fork ended up filed under**, awaited.
+    ///
+    /// `fork(at:on:)` answers as soon as the child is up, and at that moment the sibling is keyed on a provisional
+    /// id the engine has not confirmed: `--fork-session` makes it mint a fresh session and announce it later on
+    /// `auth_status`, and the fleet re-keys the channel onto that id when it arrives. Everything above this contract
+    /// — the browser's rows, the window's selection, a composer's pending draft — is keyed by the id that resolves,
+    /// so a host that filed anything under the provisional key filed it under a channel nothing will ever reach.
+    ///
+    /// Separate from `fork` rather than folded into it, because the two answers are wanted at different moments. The
+    /// spawn's refusals belong to the click, and a `fork` that waited would hold its caller for the whole identity
+    /// budget on a slow engine — and the sibling is legitimately connecting under the provisional key until then,
+    /// which is what a caller that only wants to know the spawn succeeded is looking at.
+    ///
+    /// Answers the provisional key unchanged when no id arrives: a fork whose child died or whose deadline expired
+    /// has no other identity to be filed under.
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey
     /// The composer's line, routed against the channel's own handshake, `system/init` and runtime record. A key the
     /// fleet owns no supervisor for routes against the local table alone.
     func route(_ text: String, on key: ChannelKey) async -> Routed

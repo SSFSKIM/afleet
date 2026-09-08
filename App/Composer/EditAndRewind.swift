@@ -107,6 +107,13 @@ extension ComposerModel {
     /// composer's own draft is left exactly as the user left it: a prefill written here is a message the user
     /// believes is going into the fork and which the engine receives on the conversation they edited away from.
     ///
+    /// **And it belongs to the fork's own identity, not to the id the spawn was minted under.** `fork(at:on:)`
+    /// answers while the sibling is still keyed on a provisional session the engine has not confirmed, and the fleet
+    /// re-keys the channel when `auth_status` brings its own id. The registry keys both the pending prefill and the
+    /// selection by that key, and the browser lists the fork under the resolved id — so handing off the provisional
+    /// one selects nothing and strands the draft under a channel that never appears. `resolvedForkKey(of:)` is X5's
+    /// answer to which channel this fork became, and it is what the handoff names.
+    ///
     /// The **note** stays here, because this is the channel the user is looking at and the note is what explains
     /// where the edit went.
     ///
@@ -117,10 +124,12 @@ extension ComposerModel {
             return
         }
         do {
-            let sibling = try await lifecycle.fork(at: ForkPoint(entryUUID: entry, dropsTurn: target.promptUUID),
-                                                   on: key)
-            handOffToFork?(sibling, target.text)
+            let provisional = try await lifecycle.fork(at: ForkPoint(entryUUID: entry, dropsTurn: target.promptUUID),
+                                                       on: key)
+            // Said before the identity is waited on: the fork is open either way, and this sentence is what the user
+            // is owed for the edit they just made rather than something that arrives with the engine's `auth_status`.
             editNote = Self.forkNote(reason)
+            handOffToFork?(await lifecycle.resolvedForkKey(of: provisional), target.text)
         } catch let error as LifecycleError {
             editNote = Self.explanation(of: error)
         } catch {

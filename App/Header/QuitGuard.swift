@@ -167,9 +167,25 @@ struct FleetQuitTermination: QuitFleet {
                                         // contended channel is one whose process afleet still holds;
                                         // dormant is the resting state of every processless one.
                                         hasProcess: owned != .dormant,
-                                        isBusy: state.presence == .busy || !tasks.isEmpty))
+                                        isBusy: Self.isBusy(state.presence) || !tasks.isEmpty))
         }
         return channels
+    }
+
+    /// §7.4's "busy", first half, over the presence C4 publishes.
+    ///
+    /// **A channel waiting on a decision is mid-turn.** The engine has asked afleet something and is holding the
+    /// conversation open for the answer; quitting ends that turn exactly as it ends a running one, so it belongs in
+    /// the dialog. Reading only `.busy` let the clause end a channel with a permission prompt on the screen without
+    /// asking about it.
+    ///
+    /// `.unknown` is not busy: it is the presence of a channel whose holder's record said nothing, and every such
+    /// channel is a foreign one this census has already filtered out.
+    static func isBusy(_ presence: Presence) -> Bool {
+        switch presence {
+        case .busy, .waiting: true
+        case .idle, .unknown: false
+        }
     }
 
     /// `terminate()` on one owned channel: X5's `.quit`, once, and nothing else.

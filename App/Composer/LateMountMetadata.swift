@@ -18,12 +18,22 @@ extension ComposerModel {
     /// Seeded and never merged: anything the stream delivers afterwards is newer by construction and
     /// overwrites this. A channel the fleet owns no supervisor for answers nil, and a composer over
     /// an archived channel shows nothing — which is what it should show.
-    func seedEngineReports() async {
+    ///
+    /// **Fenced on the subscription that asked for it.** Everything here is committed after an await — the query
+    /// itself, and `noteHandshake`, which can issue two control requests of its own before the picker's values land.
+    /// A `stop()` with a fresh `start()` behind it can land in either window, and this call then goes on writing for
+    /// a subscription nobody reads. Its answers are older than the new one's by construction, so the handshake, the
+    /// mode readback and `system/init` would each land stale over values the current subscription has already
+    /// applied. The generation is re-read after every await rather than once at entry, because every await is a
+    /// fresh chance to lose it.
+    func seedEngineReports(ifGenerationIs subscription: Int) async {
         guard let reports = await lifecycle.engineReports(of: key) else { return }
+        guard isCurrentSubscription(subscription) else { return }
         if let handshake = reports.handshake {
             self.handshake = handshake
             // The mode picker's readback, on the same terms a live handshake sets it.
             await pickers.noteHandshake(handshake)
+            guard isCurrentSubscription(subscription) else { return }
         }
         if let systemInit = reports.systemInit { self.systemInit = systemInit }
     }

@@ -117,14 +117,24 @@ extension ComposerModel {
     /// Also through `route`, as `/permissions <mode>`, for the same reason: the row that turns that
     /// line into `set_permission_mode` — and that refuses a mode the engine does not know — is C4's.
     ///
-    /// The cursor advances only when the request was accepted. It is a local cursor and **not** a
-    /// displayed value: §7.4's readback rule says what the picker shows comes from the engine, and
-    /// Task 7 replaces this with the handshake's `permissionMode` readback.
+    /// **The cycle starts from the mode the channel is actually in, which is the pickers' value and not a cursor of
+    /// this leaf's own.** Task 7's `SettingPickersModel` holds the handshake's `permissionMode` readback and the
+    /// mode a click or a routed line last requested; a second store here started every channel at `.default`, so the
+    /// first Shift+Tab on a channel launched in `acceptEdits` — or on one whose mode the header just changed —
+    /// asked the engine for the mode it was already in, and the user pressed the key and saw nothing happen.
+    ///
+    /// §7.4's readback rule is why the *displayed* value is the pickers': there is one place a mode comes from and
+    /// this reads it rather than keeping a second opinion. Nothing is written back here either — the routed
+    /// `/permissions <mode>` reaches `SettingPickersModel.apply(routed:)`, which is what records the request.
     func cyclePermissionMode() async {
         let modes = Self.cyclablePermissionModes
-        let index = modes.firstIndex(of: permissionMode) ?? modes.count - 1
+        // A channel whose engine has not reported a mode yet is in the engine's own default, which is what the
+        // launch line asked for; and a channel sitting in `bypassPermissions` is not in the cycle at all, so it
+        // wraps to the first mode rather than staying where a gate put it.
+        let current = pickers.currentSnapshot.permissionMode ?? .default
+        let index = modes.firstIndex(of: current) ?? modes.count - 1
         let next = modes[(index + 1) % modes.count]
-        if await dispatch(routing: "/permissions \(next.rawValue)") { permissionMode = next }
+        await dispatch(routing: "/permissions \(next.rawValue)")
     }
 
     /// Cmd+Shift+Esc, first half: raise the confirm. Nothing reaches the lifecycle here.

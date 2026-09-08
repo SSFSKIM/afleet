@@ -222,6 +222,63 @@ final class ForkTests: XCTestCase {
         guard case .granted = decision else { return XCTFail("the freed slot was not granted: \(decision)") }
     }
 
+    // MARK: - The key the host files the fork under
+
+    /// **`settledForkKey()` waits, and answers the id the engine announced.**
+    ///
+    /// `fork(at:)` answers the provisional key while the child is still connecting, and every host-side reader —
+    /// the browser's rows, the window's selection, a composer's pending draft — is keyed by the id that resolves. A
+    /// host that filed a draft under the provisional key filed it under a channel nothing will ever reach, so X5
+    /// carries this second answer and this is the primitive under it.
+    ///
+    /// Both halves are asserted: that the call is still suspended before the identity event, which is what makes it
+    /// a wait rather than a read, and that it comes back on the resolved key afterwards.
+    ///
+    /// Deliberate break: return `keyBox.key` from `settledForkKey()` without suspending.
+    func testTheSettledForkKeyWaitsForTheIdentityAndThenNamesTheResolvedSession() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        let provisional = try await supervisor.fork(at: nil)
+        let fork = try XCTUnwrap(rig.supervisor(for: provisional))
+        let forkHandle = try XCTUnwrap(rig.scriptedHandles.last)
+        let resolved = SessionID()
+
+        let settled = Task { await fork.settledForkKey() }
+        // Bounded, and a count: a call that answered at once would be finished long before this loop is.
+        for _ in 0..<64 { await Task.yield() }
+        XCTAssertFalse(settled.isCancelled)
+        XCTAssertEqual(rig.published(of: fork).filter { $0.origin == .owned(.ready) }.count, 0,
+                       "the fork was already ready, so a call that answered at once would prove nothing")
+
+        forkHandle.push(.sessionIdentityResolved(resolved, forkHandle.epoch))
+        let answered = await settled.value
+
+        XCTAssertTrue(answered == ChannelKey(configHome: provisional.configHome, session: resolved),
+                      "the wait answered a key that is not the one the engine announced")
+        XCTAssertFalse(answered == provisional, "the wait answered the provisional key the fork was minted under")
+    }
+
+    /// The bound under the wait: an identity that never arrives ends it at the deadline rather than holding the
+    /// caller for the life of the process, and the provisional key is the answer because there is no other.
+    func testTheSettledForkKeyIsReleasedByTheIdentityDeadline() async throws {
+        let rig = try newRig()
+        rig.useScriptedHandle()
+        let supervisor = rig.supervisor(session: SessionID(), origin: .owned(.connecting))
+        try await supervisor.spawn(reason: .open)
+        let provisional = try await supervisor.fork(at: nil)
+        let fork = try XCTUnwrap(rig.supervisor(for: provisional))
+
+        let settled = Task { await fork.settledForkKey() }
+        try await rig.waitForSleeper(due: Self.handshakeTimeout)
+        await rig.clock.advance(by: Self.handshakeTimeout)
+
+        let answered = await settled.value
+        XCTAssertTrue(answered == provisional,
+                      "the expired deadline answered a key the channel is not filed under")
+    }
+
     // MARK: - What the resolved identity has to change
 
     /// Once a fork has learned its own id, every later launch of that channel resumes *it*. The template it was

@@ -337,6 +337,9 @@ final class RecordingAppFleet: AppFleet {
     func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
         try await inner.fork(at: point, on: key)
     }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey {
+        await inner.resolvedForkKey(of: provisional)
+    }
 
     func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
         log.note("send")
