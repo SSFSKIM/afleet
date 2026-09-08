@@ -1,0 +1,74 @@
+import Foundation
+
+/// The stderr half of the report: the same facts, laid out for a person watching the run.
+/// stdout stays pure JSON so the harness can be driven by a script.
+enum Summary {
+
+    static func write(_ report: [String: Any], status: Int32, to handle: FileHandle) {
+        var lines: [String] = []
+        lines.append("")
+        lines.append("S3 — route \(report["route"] as? String ?? "?")")
+
+        if let cold = report["coldLoad"] as? [String: Any] {
+            if cold["reachedReady"] as? Bool == true {
+                lines.append(String(format: "  cold load   process start -> ready  %8.1f ms   (gate: < 1000)",
+                                    cold["processStartToReadyMs"] as? Double ?? -1))
+                lines.append(String(format: "              navigation    -> ready  %8.1f ms",
+                                    cold["navigationStartToReadyMs"] as? Double ?? -1))
+            } else {
+                lines.append("  cold load   never reached ready")
+            }
+        }
+
+        if let large = report["fiveMegabyteFile"] as? [String: Any] {
+            let bytes = large["bytes"] as? Int ?? 0
+            lines.append(String(format: "  %d MB file  setText sync %.1f ms, to next render %.1f ms",
+                                bytes / (1024 * 1024),
+                                large["syncMs"] as? Double ?? -1,
+                                large["toRenderMs"] as? Double ?? -1))
+        }
+        if let scroll = report["scroll"] as? [String: Any] {
+            lines.append(String(format: "  scroll      p50 %.1f  p95 %.1f  worst %.1f ms over %d frames",
+                                scroll["p50Ms"] as? Double ?? -1,
+                                scroll["p95Ms"] as? Double ?? -1,
+                                scroll["worstMs"] as? Double ?? -1,
+                                scroll["frames"] as? Int ?? 0))
+        }
+        if let diff = report["diff"] as? [String: Any] {
+            lines.append("  diff        computed=\(diff["computed"] as? Bool ?? false)"
+                         + " changes=\(diff["changeCount"] as? Int ?? 0)"
+                         + " renderedInsertLines=\(diff["renderedInsertLines"] as? Int ?? 0)")
+        }
+        if let chunk = report["chunk"] as? [String: Any] {
+            lines.append("  chunk       swift grammar loaded=\(chunk["loaded"] as? Bool ?? false)"
+                         + " in \(Int(chunk["elapsedMs"] as? Double ?? -1)) ms")
+        }
+        if let workers = report["workers"] as? [String: Any],
+           let started = workers["startedByFile"] as? [String: Bool] {
+            for file in started.keys.sorted() {
+                lines.append("  worker      \(file.padding(toLength: 17, withPad: " ", startingAt: 0)) started=\(started[file] ?? false)")
+            }
+            if let functional = workers["functional"] as? [String: Any] {
+                for name in functional.keys.sorted() where name != "errors" {
+                    let answered = (functional[name] as? [String: Any])?["answered"] as? Bool ?? false
+                    lines.append("  service     \(name.padding(toLength: 17, withPad: " ", startingAt: 0)) answered=\(answered)")
+                }
+            }
+        }
+        if let errors = report["editorErrors"] as? [String], !errors.isEmpty {
+            lines.append("  editor errors:")
+            for message in errors.prefix(8) { lines.append("    - \(message)") }
+        }
+        let meaning: String
+        switch status {
+        case 0: meaning = "this route carries every load path and the cold load is within budget"
+        case 2: meaning = "this route drops a load path — advance to the next route"
+        case 4: meaning = "the window was given no frames; the render numbers are missing"
+        case 5: meaning = "this route carries every load path; the cold load is over budget"
+        default: meaning = "see the report"
+        }
+        lines.append("  exit \(status) — \(meaning)")
+        lines.append("")
+        handle.write(Data(lines.joined(separator: "\n").utf8))
+    }
+}

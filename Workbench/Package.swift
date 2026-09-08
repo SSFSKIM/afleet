@@ -48,6 +48,12 @@ let package = Package(
         // PanelHostAPITests: LinkRouting does not re-export them, so a test constructing a
         // `WorkspaceLink` or a `LinkTarget` must import the module that defines it.
         .testTarget(name: "LinkRoutingTests", dependencies: ["LinkRouting", "PanelHostAPI", core], swiftSettings: v6),
+        // The S3 spike (spec Design §8). An executable and not a test: it opens a real NSWindow
+        // and measures frame times, neither of which a `swift test` process can do honestly. It
+        // is in no product and not in the `Workbench` umbrella, so nothing the app links reaches
+        // it; `swift run --package-path Workbench S3Harness` is its only entry point.
+        .executableTarget(name: "S3Harness", dependencies: ["EditorCore"], path: "Spikes/S3Harness",
+                          swiftSettings: v6),
         // MARK: - end of C7.2
 
         // MARK: - C7.3 source control core (owner: C7.3)
