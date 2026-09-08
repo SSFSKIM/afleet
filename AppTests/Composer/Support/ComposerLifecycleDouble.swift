@@ -48,8 +48,22 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         }
     }
 
+    /// What a member answers when the test staged nothing for it.
+    ///
+    /// **Thrown, never trapped.** C5's convention is that a double traps on a member outside its surface, and that
+    /// still holds below for `attach`, `jobs` and the rest. But an *unstaged* answer on a member that IS in the
+    /// surface is a different thing: it is exactly what a "this must not happen" arm provokes, and a `fatalError`
+    /// there takes the whole test bundle down with no assertion instead of failing the one test cleanly. Found at
+    /// Task 1, where a mutation arm crashed the bundle rather than reporting the count it was written to report.
+    /// The call is appended to `calls` before the throw, so the count a negative assertion reads is still right.
+    enum StagingError: Error, Sendable { case nothingStaged(member: String) }
+
     nonisolated let updates: AsyncStream<ChannelState>
     private nonisolated let continuation: AsyncStream<ChannelState>.Continuation
+    /// X5's roster feed, amended onto `LifecycleAPI` on `main` for tracker 77. Nothing in this leaf reads it; it is
+    /// here because the protocol declares it.
+    nonisolated let jobUpdates: AsyncStream<[JobEntry]>
+    private nonisolated let jobContinuation: AsyncStream<[JobEntry]>.Continuation
 
     /// Every call, in the order it arrived. The single source for every ordering assertion.
     private(set) var calls: [Call] = []
@@ -69,6 +83,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
 
     init() {
         (updates, continuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
+        (jobUpdates, jobContinuation) = AsyncStream.makeStream(bufferingPolicy: .unbounded)
     }
 
     // MARK: - Staging
@@ -85,7 +100,8 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     nonisolated func enqueue(_ event: WireEvent, to key: ChannelKey) { sink.push(event, to: key) }
     func finishEvents(of key: ChannelKey) { sink.finish(key) }
     nonisolated func emit(_ state: ChannelState) { continuation.yield(state) }
-    nonisolated func finish() { continuation.finish() }
+    nonisolated func finish() { continuation.finish(); jobContinuation.finish() }
+    nonisolated func emitJobs(_ jobs: [JobEntry]) { jobContinuation.yield(jobs) }
 
     // MARK: - Reading the log
 
@@ -128,7 +144,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         calls.append(.perform(key, action))
         let outcome = performOutcomes.isEmpty ? performFallback : performOutcomes.removeFirst()
-        guard let outcome else { unreachable("perform with no staged outcome") }
+        guard let outcome else { throw StagingError.nothingStaged(member: "perform") }
         let state = try outcome.get()
         table[state.key] = state
         return state
@@ -160,7 +176,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
 
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
         calls.append(.openInTerminal(key))
-        guard let paneRequest else { unreachable("openInTerminal with no staged outcome") }
+        guard let paneRequest else { throw StagingError.nothingStaged(member: "openInTerminal") }
         return try paneRequest.get()
     }
 

@@ -883,3 +883,66 @@ symlink-containment debt in entry 78 is unchanged.
     the missing-control and press assertions fail closed if the framework shape changes.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
+
+## From C6.2 (`child/c6-composer`)
+
+142. **`cancel_async_message` has no typed spec in ClaudeWire, though the engine declares one.**
+     The queue chip's cancel goes out as `AnyControlRequest(subtype: "cancel_async_message",
+     payload: ["message_uuid": …])` through `RawControlRequest`, which carries the same bytes as a
+     typed spec would. The engine declares the pair in its own request table (2.1.263
+     `cli.pretty.js:94602`; handler `:452054-452063`, schema `:94598`), so the shape is known and
+     stable: `{message_uuid: String}` in, `{cancelled: Bool}` out, where `false` means the message
+     was never in the queue. Filed rather than fixed because `ClaudeWire` is C2's file and this
+     leaf's fence stops at `App/`. Closer: add `CancelAsyncMessage` to
+     `ClaudeWire/Sources/WireFrames/OutboundRequests.swift` at the next typings pass and let the
+     composer construct it. Owner: C2.
+
+143. **`RewindOutcome` models neither `precedingAssistantUuid` nor `targetMessageUuid`.** The
+     engine's `rewind_conversation` body carries both (`control-shapes`, `rewind-turn`), and
+     `precedingAssistantUuid` is the fork point *Fork from here* needs. C6.2's *Edit* path is
+     unaffected because it reads the raw `JSONValue` off `LifecycleAPI.send(_:on:)` rather than
+     going through `StrategyExecutor`, but `/rewind`'s strategy does go through it, so a *Fork from
+     here* ever offered from `/rewind` would have no fork point to offer. Closer: add the two
+     fields to `RewindOutcome` and populate them where the executor already reads the body. Owner:
+     C4 (`FleetKit/Sources/FleetSessions/Router/CommandRouter.swift`).
+
+144. **Closed 2026-09-08 on `main` at `6abd4a0`.** The engine has two refusal sentences, not one:
+     the bare form (2.1.263 `cli.pretty.js:540254`) and an interactive-panel form (`:540305`) that
+     ends by telling the user to run the command from the Claude Code terminal.
+     `RouterTable.bareRefusalPattern` is anchored at both ends and matched only the first, so the
+     second reached the channel unintercepted and uncounted — carrying, in the engine's own words,
+     the one sentence §7.7 forbids afleet from showing, while the drift log read zero for the whole
+     class. Filed by C6.2 as a `[parent-impact]` against X10 and fixed by the C4 corrective
+     (`8dd10fe`, `2cfc67a`): a second pattern, a `RefusalShape` on `Intercepted`, per-shape counts
+     through `driftCount(of:)`, `refusal_shape` on the drift-log entry, and copy that no longer
+     sends anyone to the terminal on either path.
+
+145. **Closed 2026-09-08 by probe `spike_rewind_last_seen` (`77a0d62`), spec corrected at
+     `81a3dca`.** §8.5 read `rewind_conversation`'s `"stale target"` as a fact about which process
+     sent the message, so item 13 was written around a fallback. It is not: the engine runs a
+     later-turn scan whose reach is set by the optional `last_seen_user_message_uuid`
+     (`:452145-452153`). Measured on 2.1.263, zero turns, three forks of a scratch session — with
+     the field naming the newest user message an older target is **honoured**; with the field
+     omitted the same target is `"stale target"`; with the field naming the target itself it is
+     `"unseen later turn"`. So the composer always sends the field, the rewind is the ordinary path
+     and the fork is the exception. The wrong-but-obvious value — the target's own uuid — refuses
+     every older edit and hides behind the fallback, which is why C6.2's G4 asserts the payload
+     names the newest message and not the target.
+
+146. **`LifecycleRowTests.testPaneExitReAdoptsWhenTheRecordIsGone` fails when the machine's pid
+     counter wraps.** The test arranges a decoy job holder at `ScriptedHolderFiles.livePID` — the
+     test runner's own pid, which never dies — and asserts it sorts ahead of the helper process the
+     test then spawns (`XCTAssertLessThan(livePID, tab)`, "the decoy holder sorts first"). That
+     holds only while pids increase monotonically. macOS wraps them near 100000, so a run whose
+     runner starts at a high pid and whose helper is spawned after the wrap gets a *lower* helper
+     pid and the arrangement inverts. Observed here at C6.2's Task 1 boundary: runner 97819, helper
+     715, one failure; the same test passed alone minutes later with the runner at a low pid, and
+     passed in the leaf's baseline run half an hour earlier. So it is neither a regression from the
+     roster-signal commits nor anything C6.2 touched — it is latent in the arrangement and fires on
+     roughly one run in a thousand-pid window.
+     Closer: do not derive the decoy pid from the runner. Spawn a second helper for the decoy and
+     order the two by their observed pids, or keep the runner's pid and *skip* with a named reason
+     when `livePID >= tab`, so an impossible arrangement reports as a skip rather than as a product
+     failure. The `XCTAssertLessThan` is already an arrangement guard rather than a subject
+     assertion, which is why it reads as a defect in the code under test when it fires.
+     Owner: C4 (`FleetKit/Tests/FleetSessionsTests/LifecycleRowTests.swift`). Found by C6.2.
