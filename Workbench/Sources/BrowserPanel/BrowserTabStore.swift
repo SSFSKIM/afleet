@@ -147,17 +147,25 @@ public actor BrowserTabStore {
 
     /// Writes whatever a window is holding, now. The panel calls this when it is going away, so a
     /// title typed into the last half-second is not the one thing a relaunch forgets.
+    ///
+    /// **It is a drain and not a check**: it returns only when nothing is pending *and* nothing is
+    /// in flight. Both of its waits are suspensions, and this actor is free during them — a commit
+    /// entering there installs a newer snapshot that is in no chain this call is waiting on, so a
+    /// flush that sampled once would return having written the set before it. `QuitGuard` drains
+    /// exactly once, so that snapshot would be the one G3 loses at quit (C5 of fix wave C).
     public func flushPendingEdits() async {
-        if let pending = pendingEdit {
-            pendingEdit = nil
-            windowIsOpen = false
-            generation += 1
-            await persist(pending)
-        }
-        // And whatever a window already handed to the store, pending or not. A drain that returned
-        // in front of a write in flight would let the app exit mid-write, which is the one thing a
-        // drain exists to prevent.
-        await writeChain.value
+        repeat {
+            if let pending = pendingEdit {
+                pendingEdit = nil
+                windowIsOpen = false
+                generation += 1
+                await persist(pending)
+            }
+            // And whatever a window already handed to the store, pending or not. A drain that
+            // returned in front of a write in flight would let the app exit mid-write, which is the
+            // one thing a drain exists to prevent.
+            await writeChain.value
+        } while pendingEdit != nil
     }
 
     /// Told the error row after every write, so the panel's own copy follows the write rather than

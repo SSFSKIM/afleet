@@ -221,6 +221,42 @@ final class BrowserTabStoreTests: XCTestCase {
         XCTAssertEqual(atReturn, 1, "the flush returned with a write still in flight")
     }
 
+    /// A snapshot installed while the flush is suspended is still written before it returns.
+    ///
+    /// `flushPendingEdits` takes the pending edit and then awaits the store; during that suspension
+    /// a commit can install a *newer* snapshot, which is in no write chain the flush is waiting on.
+    /// A flush that checked once would return having written the older set, and `QuitGuard` drains
+    /// exactly once — so that snapshot is what G3 loses at quit. The flush is a drain: it returns
+    /// only when nothing is pending and nothing is in flight.
+    func testAFlushDrainsASnapshotInstalledWhileItIsSuspended() async throws {
+        let completions = CompletionCounter()
+        let backing = GatedScopedStore(completions: completions)
+        let sleeper = ManualSleeper()
+        let store = BrowserTabStore(store: backing, sleep: sleeper.sleep)
+
+        // A window has already handed its edit to the store, and that write is at the gate.
+        await store.commitEdit(Self.set(["first"], selection: 0))
+        await sleeper.waitForSleep()
+        let arrived = expectation(description: "the coalesced write reached the store")
+        await backing.expectWriteArrivals(1, arrived)
+        await sleeper.advance()
+        await fulfillment(of: [arrived], timeout: Self.deadline)
+
+        // The flush suspends on that write with nothing of its own pending...
+        let flushed = Task { await store.flushPendingEdits() }
+        for _ in 0..<Self.yields { await Task.yield() }
+        // ...and a newer snapshot is installed underneath it, in no chain the flush is waiting on.
+        await store.commitEdit(Self.set(["installed-during-the-flush"], selection: 0))
+
+        await backing.openGate()
+        await flushed.value
+
+        let document = try await backing.document(BrowserTabSetDocument.self,
+                                                  key: BrowserTabStore.storeKey)
+        XCTAssertEqual(document?.tabs.map(\.title), ["installed-during-the-flush"],
+                       "the flush returned without writing a snapshot installed while it waited")
+    }
+
     /// A bounded number of cooperative yields: enough for a call that does not wait to run to its
     /// return, and never enough for one that is waiting on a gate the test has not opened.
     private static let yields = 50
