@@ -158,6 +158,8 @@ def one_fork(ctx, binary, cwd, home, project_dir, sid, label, target, last_seen)
     session = harness.Session(harness.Launch(binary=binary, cwd=cwd, config_home=home, resume=sid,
                                              fork=True, max_turns=1), redact.Redactor())
     session.start(timeout=60)
+    if session.proc is None:
+        raise RuntimeError("session.start() returned without launching a process")
     fork_sid = fork_session_id(home, session.proc.pid)
     fork_path = os.path.join(project_dir, (fork_sid or "no-such-session") + ".jsonl")
     try:
@@ -182,7 +184,7 @@ def one_fork(ctx, binary, cwd, home, project_dir, sid, label, target, last_seen)
         session.close()
 
 
-def run(session, ctx):
+def run(_session, ctx):
     home = ctx["config_home"]
     binary = ctx["launch"].binary
     picked = pick_session(home)
@@ -191,7 +193,7 @@ def run(session, ctx):
                             "still exists; nothing measured (a session is not created here: that would cost a turn)"
                             % MIN_USER_MESSAGES)
         return
-    count, _mtime, path, cwd, users, records = picked
+    count, _, path, cwd, users, records = picked
     sid = os.path.basename(path)[:-len(".jsonl")]
     ctx["notes"].append("picked a session with %d user turns in %d records, cwd exists; resumed with --fork-session "
                         "three times, once per request" % (count, records))
