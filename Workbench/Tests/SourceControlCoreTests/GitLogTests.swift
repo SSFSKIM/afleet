@@ -205,6 +205,7 @@ final class GitLogTests: XCTestCase {
     /// change nothing under a default configuration and are what makes the parser's assumptions
     /// true under the user's own, which is what production runs with (X11). The behaviour each one
     /// pins is asserted in `AdverseConfigurationTests`; this test pins that they are still passed.
+    /// `--no-show-signature` is R5's third pin (D47), for the same reason and over signed commits.
     func testTheCommandLineIsW7sPlusTheWindow() async throws {
         let runner = RecordingRunner()
         _ = try await GitLog.commits(root: URL(filePath: "/"), environment: ["PATH": "/usr/bin"],
@@ -213,7 +214,7 @@ final class GitLogTests: XCTestCase {
         XCTAssertEqual(runner.invocations.first?.tool, .git, "commits() ran a tool that is not git")
         XCTAssertEqual(runner.invocations.first?.arguments,
                        ["log", "--topo-order", "--all", "--parents",
-                        "--decorate=short", "--encoding=UTF-8",
+                        "--decorate=short", "--encoding=UTF-8", "--no-show-signature",
                         "--format=%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1e",
                         "-n", "7", "--skip", "3"],
                        "the git log argument vector is not W7's plus the window")

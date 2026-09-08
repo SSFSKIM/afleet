@@ -34,6 +34,10 @@ final class GitFixture {
 
     /// The repository's working-tree root.
     let root: URL
+    /// The tree this repository lives in, so that the R5 wave's signing material can be written
+    /// *beside* the repository rather than inside it — a key file in the working tree would show
+    /// up as an untracked path in every status assertion.
+    private let tree: TempTree
     /// The hermetic environment every invocation in this fixture runs with.
     private(set) var environment: [String: String]
     private let runner = ToolRunner()
@@ -41,6 +45,7 @@ final class GitFixture {
 
     /// Creates and initialises a repository at `tree.root/<name>`, on branch `main`.
     init(_ tree: TempTree, name: String = "repo") async throws {
+        self.tree = tree
         root = try tree.directory(name)
         let home = try tree.directory("\(name)-home")
         // `PATH` is the test process's, because the fixture has to find the machine's `git`; every
@@ -211,5 +216,93 @@ extension GitFixture {
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.createSymbolicLink(atPath: url.path(percentEncoded: false),
                                                    withDestinationPath: destination)
+    }
+}
+
+// MARK: - added by the R5 fix wave, additively and without touching anything above
+
+extension GitFixture {
+
+    /// Turns on **SSH commit signing** for this repository with an ephemeral key, so that a
+    /// fixture can exhibit the one condition `log.showSignature` acts on.
+    ///
+    /// Returns `false` when the machine has no `ssh-keygen` on the fixture's `PATH`; the caller
+    /// skips with a named reason rather than failing, because signing is a property of the host
+    /// and not of the code under test.
+    ///
+    /// Everything it writes lives inside the `TempTree`, **beside** the repository and never in
+    /// it: the key would otherwise be an untracked path in every status the fixture reports. The
+    /// machine's own `~/.ssh` and git configuration are never read or written — `HOME` already
+    /// points inside the tree and the configuration is repository-local, exactly as every other
+    /// adverse value here is. The key is generated per fixture, lives for the test, and is deleted
+    /// with the tree; it is test material, never committed (§11).
+    ///
+    /// `gpg.ssh.allowedSignersFile` is set as well, so that the verdict git prints under
+    /// `log.showSignature` is the **verified** one (`Good "git" signature for …`) rather than the
+    /// unverifiable `No signature`. Both forms contaminate the output identically, but a fixture
+    /// that could only produce the failure branch would be pinning the weaker of the two.
+    func enableSSHSigning() async throws -> Bool {
+        guard let keygen = Self.executableOnPath("ssh-keygen", environment) else { return false }
+        let keys = try tree.directory("signing-\(UUID().uuidString)")
+        let key = keys.appending(path: "id")
+        _ = try await ToolRunner().run(executable: keygen,
+                                       arguments: ["-t", "ed25519", "-N", "", "-C", Self.authorEmail,
+                                                   "-f", key.path(percentEncoded: false), "-q"],
+                                       cwd: keys, environment: environment, timeout: .seconds(30))
+        let publicKey = try String(contentsOf: keys.appending(path: "id.pub"), encoding: .utf8)
+        let allowed = keys.appending(path: "allowed_signers")
+        try "\(Self.authorEmail) \(publicKey)".write(to: allowed, atomically: true, encoding: .utf8)
+
+        try await run(["config", "gpg.format", "ssh"])
+        try await run(["config", "user.signingkey",
+                       keys.appending(path: "id.pub").path(percentEncoded: false)])
+        try await run(["config", "gpg.ssh.allowedSignersFile", allowed.path(percentEncoded: false)])
+        try await run(["config", "commit.gpgsign", "true"])
+        return true
+    }
+
+    /// The first executable named `name` on the fixture environment's `PATH`, or nil.
+    ///
+    /// `ToolRunner.resolve` only answers for the `Tool` cases this module ships, and `ssh-keygen`
+    /// is deliberately not one of them: it is fixture machinery, not something the panel runs.
+    private static func executableOnPath(_ name: String, _ environment: [String: String]) -> URL? {
+        guard let path = environment["PATH"] else { return nil }
+        for component in path.split(separator: ":") where component.hasPrefix("/") {
+            let candidate = URL(filePath: String(component)).appending(path: name)
+            if FileManager.default.isExecutableFile(atPath: candidate.path(percentEncoded: false)) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// Attaches a git note to `ref`, so that a fixture can exhibit the condition
+    /// `notes.displayRef` acts on.
+    func note(_ message: String, on ref: String) async throws {
+        try await run(["notes", "add", "-m", message, ref])
+    }
+
+    /// Creates a bare repository beside this one, pushes `branch` to it and sets it as the
+    /// upstream, so that a fixture can exhibit the condition `status.aheadBehind` acts on: with no
+    /// upstream configured `git status` prints no `# branch.ab` header at all, and a tripwire over
+    /// that setting reads green for want of the header rather than for want of an effect.
+    func publishToUpstream(_ branch: String = "main") async throws {
+        let remote = try tree.directory("upstream-\(UUID().uuidString)")
+        try await run(["init", "--bare", "-b", branch], in: remote)
+        try await run(["remote", "add", "origin", remote.path(percentEncoded: false)])
+        try await run(["push", "origin", branch])
+        try await run(["branch", "--set-upstream-to=origin/\(branch)", branch])
+    }
+
+    /// Renames `from` to `to` **and rewrites its contents**, staging both.
+    ///
+    /// The distinction that matters: git pairs an *exact* rename cheaply, before any limit
+    /// applies, while a rename whose content also changed is paired only by the exhaustive pass
+    /// that `diff.renameLimit` and `status.renameLimit` cut off. A fixture whose only rename is
+    /// exact therefore cannot exhibit a low limit at all — which is why R4 ruled that setting out.
+    func renameEditing(_ from: String, to: String, contents: String) async throws {
+        try await run(["mv", from, to])
+        try contents.write(to: root.appending(path: to), atomically: true, encoding: .utf8)
+        try await run(["add", "-A"])
     }
 }

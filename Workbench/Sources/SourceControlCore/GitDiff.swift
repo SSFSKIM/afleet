@@ -103,17 +103,40 @@ public enum GitDiff {
     /// correct on an ordinary macOS path (D7). `--find-renames` explicitly, because the fixture
     /// environment disables the user's configuration and a repository that set `diff.renames`
     /// off would otherwise report every rename as a delete and an add.
+    ///
+    /// **The R5 pins (D47, D48).** Two more settings measured on `git` 2.55.0 to change these
+    /// bytes, both invisible to R4 because its fixtures were too plain to exhibit them:
+    ///
+    /// - `log.showSignature=true` makes `git show` print its signature verdict on stdout ahead of
+    ///   the listing whenever the commit is **signed** — a line the `--name-status` parser reads
+    ///   as a status code and rejects with `.decodeFailed`. `--no-show-signature` pins the default
+    ///   and is a no-op under it. It is passed only on the `show` form: the setting is a `log`/`show`
+    ///   one, and `git diff` never consults it.
+    /// - `diff.renameLimit`, set low, makes git skip the *inexact* half of rename detection, so a
+    ///   rename that also edited the file comes back as a delete and an add — the same two rows for
+    ///   one change that `--find-renames` exists to prevent, reached by the other door. R4 ruled the
+    ///   setting out on a fixture whose only rename was **exact**, and exact renames are paired
+    ///   before the limit applies. `-l\(renameLimit)` pins git's own documented default.
     static func arguments(for base: DiffRef.Base, listing: String) -> [String] {
-        let tail = [listing, "-z", "--find-renames"]
+        let tail = [listing, "-z", "--find-renames", "-l\(renameLimit)"]
         switch base {
         case .workingTreeAgainstHEAD:
             return ["diff"] + tail + ["HEAD"]
         case .commit(let hash):
             return ["diff"] + tail + [hash]
         case .commitAgainstParent(let hash):
-            return ["show", "--format=", "--first-parent", "--root"] + tail + [hash]
+            return ["show", "--format=", "--first-parent", "--root", "--no-show-signature"]
+                + tail + [hash]
         }
     }
+
+    /// git's own documented default for `diff.renameLimit`: the number of paths past which the
+    /// exhaustive, inexact half of rename detection is skipped.
+    ///
+    /// Pinned rather than lifted (`-l0`, unlimited) deliberately. A user who lowered the limit did
+    /// it for speed on a large repository, and the panel's answer should be git's default answer,
+    /// not a slower one no configuration would ever have produced.
+    static let renameLimit = 1000
 
     // MARK: - the changed-file list
 

@@ -46,6 +46,19 @@ public enum GitLog {
     ///   `decodeFailed` on the timestamp field under `UTF-16`. `--encoding=UTF-8` pins what
     ///   `stdoutText` decodes, and is a no-op under the default, which already converts to UTF-8.
     ///
+    /// A third, added by R5 (D47) and the worst shape of the class so far:
+    ///
+    /// - `log.showSignature=true` makes git run its signature check on every **signed** commit and
+    ///   print the verdict on stdout *before* the record the format asked for — measured on `git`
+    ///   2.55.0 as a `Good "git" signature for …` line, or `No signature` where the signature
+    ///   cannot be verified. A custom `--format` does not suppress it. The record still splits into
+    ///   exactly six fields, so `parse` does not throw: the verdict line lands **inside**
+    ///   `GitCommit.hash`, every parent match fails, and every lookup by hash misses. That is a
+    ///   silent wrong answer, not a failure. `--no-show-signature` pins the default and prints
+    ///   nothing extra under it. R4 ruled this setting out because every adverse-configuration
+    ///   fixture was *unsigned*, which is the §17.7 shape: the tripwire was green because the
+    ///   fixture could not make it red.
+    ///
     /// Should W7 move to `--decorate=full` with a prefix-stripping parser (the ledger's
     /// Parent-revisions item 3), the pin is the one token that changes.
     public static func commits(root: URL, environment: [String: String],
@@ -54,6 +67,7 @@ public enum GitLog {
         let output = try await runner.run(.git,
                                           arguments: ["log", "--topo-order", "--all", "--parents",
                                                       "--decorate=short", "--encoding=UTF-8",
+                                                      "--no-show-signature",
                                                       "--format=\(format)",
                                                       "-n", "\(limit)", "--skip", "\(skip)"],
                                           cwd: root, environment: environment,

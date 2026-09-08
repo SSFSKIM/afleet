@@ -110,12 +110,29 @@ extension WorkingTreeStatus {
     ///   staged rename as a delete and an add, so `Entry.Change.renamed(from:)` never occurs and a
     ///   panel draws two rows for one change. `--find-renames` pins detection at git's own default
     ///   threshold and changes nothing under the default configuration.
+    ///
+    /// **The R5 pin (D48).** `--find-renames` turns detection *on*; it does not restore the budget
+    /// detection is allowed to spend. `diff.renameLimit`, and `status.renameLimit` which overrides
+    /// it here, cap the number of paths past which the exhaustive, inexact half of the pairing is
+    /// skipped. Set low, they return a rename-with-an-edit as a delete and an add — the very shape
+    /// `--find-renames` exists to prevent, reached by the other door. `git status` has no
+    /// command-line option for either (`-l` is a `git diff` option and `git status` rejects it), so
+    /// the pin is a `-c` override ahead of the subcommand, carrying git's own documented default.
+    /// R4 ruled `diff.renameLimit` out on a fixture whose only rename was **exact**, and exact
+    /// renames are paired before the limit applies.
     public static func arguments(includeIgnored: Bool = false) -> [String] {
-        var arguments = ["status", "--porcelain=v2", "--branch", "-z",
+        var arguments = ["-c", "diff.renameLimit=\(renameLimit)",
+                         "-c", "status.renameLimit=\(renameLimit)",
+                         "status", "--porcelain=v2", "--branch", "-z",
                          "--untracked-files=normal", "--find-renames"]
         if includeIgnored { arguments.append("--ignored") }
         return arguments
     }
+
+    /// git's own documented default for `diff.renameLimit`. Pinned rather than lifted (`0`,
+    /// unlimited): a user who lowered it did so for speed, and the panel's answer should be git's
+    /// default answer, not a slower one no configuration would ever have produced.
+    static let renameLimit = 1000
 
     /// Runs `git status` at `root` and parses it.
     ///

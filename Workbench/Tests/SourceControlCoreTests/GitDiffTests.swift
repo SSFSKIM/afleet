@@ -526,13 +526,16 @@ final class GitDiffTests: XCTestCase {
     /// still pass if `.commitAgainstParent` quietly became `git diff <h>` on a non-root commit.
     func testTheThreeBaseCasesMapToTheirCommandLines() {
         XCTAssertEqual(GitDiff.arguments(for: .workingTreeAgainstHEAD, listing: "--name-status"),
-                       ["diff", "--name-status", "-z", "--find-renames", "HEAD"])
+                       ["diff", "--name-status", "-z", "--find-renames", "-l1000", "HEAD"])
         XCTAssertEqual(GitDiff.arguments(for: .commit("f00d"), listing: "--numstat"),
-                       ["diff", "--numstat", "-z", "--find-renames", "f00d"])
+                       ["diff", "--numstat", "-z", "--find-renames", "-l1000", "f00d"])
         // `--first-parent` is the R3 wave's F1 fix (D41): without it a merge commit's two
         // listings disagree and its status codes are combined ones the parser rejects.
+        // `-l1000` and `--no-show-signature` are the R5 wave's pins (D47, D48); what each buys is
+        // asserted against a hostile repository in `AdverseConfigurationTests`, and this test pins
+        // that they are still passed at all.
         XCTAssertEqual(GitDiff.arguments(for: .commitAgainstParent("f00d"), listing: "--name-status"),
-                       ["show", "--format=", "--first-parent", "--root", "--name-status", "-z",
-                        "--find-renames", "f00d"])
+                       ["show", "--format=", "--first-parent", "--root", "--no-show-signature",
+                        "--name-status", "-z", "--find-renames", "-l1000", "f00d"])
     }
 }
