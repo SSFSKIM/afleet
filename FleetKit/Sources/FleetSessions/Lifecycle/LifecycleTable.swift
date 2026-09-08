@@ -18,7 +18,7 @@ public enum LifecycleTable {
     /// It also names a fork's identity-deadline expiry, which yields from the same state for the same reason: a
     /// handshake that cannot be finished, ended from Owned-connecting.
     public enum TerminatingAction: String, CaseIterable, Hashable, Sendable {
-        case reap, sendToBackground, openInTerminal, restart, logout, capEviction, postHandshakeYield
+        case reap, sendToBackground, openInTerminal, restart, logout, quit, capEviction, postHandshakeYield
     }
     public enum Event: Hashable, Sendable {
         case opened, userSent, handshakeClean, handshakeFoundHolder, dormantTimerFired, holderAppeared, exitedClean
@@ -56,14 +56,14 @@ public enum LifecycleTable {
         .init(.dormantHolderAppeared, .archivedOlder, .holderAppeared, .foreignUsersTerminal),
         .init(.dormantHolderAppeared, .archivedOlder, .holderAppeared, .backgroundJob),
     ] + TerminatingAction.allCases.flatMap { action -> [Transition] in
-        // A dormant channel holds no process, so the terminating actions run from ready; a restart or a logout can
-        // also catch a handshake, and the post-handshake yield fires *only* from connecting — `handshakeFoundHolder`
+        // A dormant channel holds no process, so the terminating actions run from ready; a restart, a logout or a
+        // quit can also catch a handshake, and the post-handshake yield fires *only* from connecting — `handshakeFoundHolder`
         // exists nowhere else — so it is one scenario, before the contended/foreign branch, and never a ready one.
         let event = Event.terminateReturnedNil(during: action)
         switch action {
         case .postHandshakeYield:
             return [Transition(.terminateExhausted, .connecting, event, .wedged)]
-        case .restart, .logout:
+        case .restart, .logout, .quit:
             return [Transition(.terminateExhausted, .ready, event, .wedged),
                     Transition(.terminateExhausted, .connecting, event, .wedged)]
         case .reap, .sendToBackground, .openInTerminal, .capEviction:

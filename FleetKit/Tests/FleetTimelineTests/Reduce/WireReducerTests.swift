@@ -824,6 +824,48 @@ final class WireReducerTests: XCTestCase {
         XCTAssertNil(reducer.overlay.sessionState)
     }
 
+    // MARK: - A cancelled prompt
+
+    /// A cancelled prompt leaves the outstanding list, so the **next** turn is attributed to the prompt that
+    /// actually caused it.
+    ///
+    /// Two prompts are outstanding and the first is cancelled — the engine answered its `cancel_async_message`
+    /// with `cancelled: true`, so it will never produce a turn. Two recorded `result` frames then arrive. A reducer
+    /// that kept the cancelled uuid attributes the first turn to a message that never ran and the second to the one
+    /// that did; a reducer that dropped both prompts attributes neither. Both fail, and differently.
+    ///
+    /// The uuids are invented — repeated nibbles, this suite's own, never an engine byte (C3 constraint 12) — and
+    /// the only recorded values used are two `result` frames, which are replayed and never printed.
+    func testACancelledPromptLeavesTheOutstandingListAndTheNextTurnIsAttributedToTheNextPrompt() throws {
+        let fixture = try FixtureCorpus.named("plain-two-turn")
+        var reducer = try FixtureWireReplay.reducer(for: fixture)
+        let results = try FixtureWireReplay.steps(for: fixture).flatMap(\.events).filter {
+            if case .frame(.result, _) = $0 { return true } else { return false }
+        }
+        XCTAssertGreaterThanOrEqual(results.count, 2,
+                                    "the fixture published \(results.count) result frame(s); 2 are needed to tell "
+                                    + "a spent prompt from a cancelled one")
+
+        let cancelled = "00000000-0000-4000-8000-0000000000b1"
+        let kept = "00000000-0000-4000-8000-0000000000b2"
+        let now = Date(timeIntervalSince1970: 0)
+        _ = reducer.apply(.promptSent(uuid: cancelled, at: now), at: now)
+        _ = reducer.apply(.promptSent(uuid: kept, at: now), at: now)
+        _ = reducer.apply(.promptCancelled(uuid: cancelled), at: now)
+        XCTAssertEqual(reducer.outstandingPrompts.count, 1,
+                       "\(reducer.outstandingPrompts.count) prompt(s) are outstanding after one of two was cancelled")
+
+        for result in results.prefix(2) { _ = reducer.apply(result, at: now) }
+
+        let attributed = reducer.overlay.turns.compactMap { Self.promptedUUID(of: $0.attribution) }
+        XCTAssertEqual(attributed, [kept],
+                       "\(attributed.count) turn(s) were attributed to a prompt; only the surviving prompt is owed one")
+        XCTAssertEqual(reducer.overlay.turns.map { Self.label(of: $0.attribution) }, ["prompted", "unprompted"],
+                       "a turn was attributed to a prompt the engine had cancelled")
+        XCTAssertTrue(reducer.outstandingPrompts.isEmpty,
+                      "\(reducer.outstandingPrompts.count) prompt(s) are still outstanding after both turns")
+    }
+
     // MARK: - Helpers
 
     private static func label(of attribution: TurnAttribution) -> String {

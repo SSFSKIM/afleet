@@ -64,6 +64,15 @@ ALLOWLIST: dict[str, str] = {
             "agent chip once that leaf lands",
     "agentNavigation": "filled by C6.4 — the composition root installs Y4's no-op so C6.1's chip has "
                        "something to call; the call site arrives with C6.1",
+    "edit": "filled by C6.1 — ComposerModel.edit(_:) is the *Edit* affordance's landing point, and "
+            "the affordance itself is a row action on a past user message, which is C6.1's "
+            "App/Timeline/. C6.2 owns the request, the refusal reading and the fork fallback; it "
+            "cannot own the button without editing another leaf's files",
+    # Requirements of a FleetKit protocol, called by FleetKit and never by App/.
+    "confirm": "a `StrategyUI` requirement (FleetKit). `StrategyExecutor.run` calls it through the "
+               "`ui:` the composer hands itself in as, so its caller is outside App/ by construction "
+               "\u2014 the same category the FRAMEWORK set covers for SwiftUI, for a protocol this "
+               "check does not know about",
     # Probes that exist for the suite and say so where they are declared.
     "pump": "a test-only probe on ActivityModel, named as one where it is declared",
     "settle": "a test-only probe on NotificationRouter, named as one where it is declared",

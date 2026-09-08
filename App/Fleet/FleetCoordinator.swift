@@ -78,9 +78,19 @@ final class FleetCoordinator: WorkspaceCoordinating {
     /// reference; the registry's own is what this closes.
     private let timelines: ChannelTimelineRegistry?
 
+    /// The app's one composer registry, so a channel that leaves the index releases the `ComposerModel` it was
+    /// typed into (spec §8.5; C6.2 *The fence*).
+    ///
+    /// The same defect class as the two above, and the same fix: `ComposerRegistry.release(_:)` existed, was
+    /// tested, and had no production caller, so a removed channel kept its composer — with the draft, the
+    /// attachments, the shared surface state and, where the view identity was retained, a live `events(of:)`
+    /// subscription — until the next launch replaced the workspace.
+    private let composers: ComposerRegistry?
+
     /// The production initialiser: everything from the workspace the launch resolved.
     convenience init(workspace: Workspace, panels: PanelHostModel? = nil,
                      timelines: ChannelTimelineRegistry? = nil,
+                     composers: ComposerRegistry? = nil,
                      now: @escaping @Sendable () -> Date = { Date() }) {
         let home = workspace.configHome.root
         self.init(configHome: home,
@@ -91,6 +101,7 @@ final class FleetCoordinator: WorkspaceCoordinating {
                   store: workspace.store,
                   panels: panels,
                   timelines: timelines,
+                  composers: composers,
                   now: now)
     }
 
@@ -105,10 +116,12 @@ final class FleetCoordinator: WorkspaceCoordinating {
          store: (any StateStore)? = nil,
          panels: PanelHostModel? = nil,
          timelines: ChannelTimelineRegistry? = nil,
+         composers: ComposerRegistry? = nil,
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.configHome = configHome
         self.panels = panels
         self.timelines = timelines
+        self.composers = composers
         // The default is the `CLAUDE_CONFIG_DIR` layout, which is what every scratch home in the
         // tests builds. Production never takes it: the convenience initialiser above passes the
         // resolved location.
@@ -205,6 +218,7 @@ final class FleetCoordinator: WorkspaceCoordinating {
         known.remove(id)
         panels?.releaseChannel(key)
         timelines?.release(key)
+        composers?.release(key)
     }
 
     // MARK: - Registration

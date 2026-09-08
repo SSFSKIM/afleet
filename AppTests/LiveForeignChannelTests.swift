@@ -292,6 +292,7 @@ final class RecordingAppFleet: AppFleet {
         case .stopEverything: "stopEverything"
         case .backgroundAll: "backgroundAll"
         case .logout: "logout"
+        case .quit: "quit"
         case .reopen: "reopen"
         case .answer: "answer"
         }
@@ -326,8 +327,23 @@ final class RecordingAppFleet: AppFleet {
     func states() async -> [ChannelState] { await inner.states() }
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition { await inner.preconditions(for: key) }
     func route(_ text: String, on key: ChannelKey) async -> Routed { await inner.route(text, on: key) }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { await inner.engineReports(of: key) }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        try await inner.resolveSetting(name, to: value, on: key)
+    }
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         try await inner.send(request, on: key)
+    }
+    func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey {
+        try await inner.fork(at: point, on: key)
+    }
+    func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey {
+        await inner.resolvedForkKey(of: provisional)
+    }
+
+    func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID {
+        log.note("send")
+        return try await inner.sendPrompt(input, on: key)
     }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
              ui: any StrategyUI) async throws -> StrategyOutcome {
@@ -342,6 +358,7 @@ final class RecordingAppFleet: AppFleet {
     func paneExited(_ exit: PaneExit) async { await inner.paneExited(exit) }
     func jobs() async -> [JobEntry] { await inner.jobs() }
     func isDormantEligible(_ key: ChannelKey) async -> Bool { await inner.isDormantEligible(key) }
+    func liveTaskIDs(of key: ChannelKey) async -> [String] { await inner.liveTaskIDs(of: key) }
     func declineProjectServers(_ names: [String], project: URL) async throws {
         try await inner.declineProjectServers(names, project: project)
     }

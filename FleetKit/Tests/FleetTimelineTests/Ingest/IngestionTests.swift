@@ -930,6 +930,38 @@ final class IngestionTests: XCTestCase {
         await ingestion.close()
     }
 
+    /// **A labelled latency regression guard, not gate evidence.** The complement of the test above:
+    /// where that one holds the ceiling on a tap that never falls quiet, this one holds that a tap
+    /// which is already over costs *one* settle round and not fifty. An archived channel — no
+    /// supervisor, so the app hands `open` a finished stream — pays that wait before it can render
+    /// anything, so losing the early exit would put a full `settleRounds` of `tapSettle` in front of
+    /// every such open with no other test noticing.
+    ///
+    /// The bound is set where machine load cannot reach it, which is the reason `tapSettle` is
+    /// injected large here: one round is 200 ms, the fifty-round ceiling is 10 s, and the assertion
+    /// sits at 4 s. Crossing it takes 3.8 s of scheduling delay on a 200 ms sleep, not the few
+    /// hundred milliseconds a parallel build costs.
+    func testOpenGivesUpOnAQuietTapAfterOneRound() async throws {
+        let fx = try FixtureCorpus.named("plain-two-turn")
+        let tree = try TempTree()
+        let mainPath = try tree.add(fx, slug: "plain")
+
+        let settle = Duration.milliseconds(200)
+        let ingestion = StreamIngestion(session: fx.sessionID, configHome: tree.root, mode: .filePrimary,
+                                        tapSettle: settle)
+        let finished = AsyncStream<WireEvent> { $0.finish() }
+
+        let started = ContinuousClock.now
+        let projection = try await ingestion.open(file: mainPath, events: finished)
+        let elapsed = started.duration(to: .now)
+        await ingestion.close()
+
+        XCTAssertFalse(projection.items.isEmpty, "the timed open read 0 items")
+        let ceiling = settle * StreamIngestion.settleRounds
+        XCTAssertLessThan(elapsed, .seconds(4),
+                          "open spent \(elapsed) on a tap that was already over, against a \(ceiling) ceiling")
+    }
+
     // MARK: - Notices
 
     func testNoticesCarryNoPathsOrPayload() async throws {

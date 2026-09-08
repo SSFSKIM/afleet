@@ -25,8 +25,11 @@ final class RegistrationScaleSpikeTests: XCTestCase {
     static let transcriptCount = 3_000
 
     func testRegisteringThreeThousandChannels() async throws {
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["AFLEET_SPIKE_C5_2"] == "1",
-                          "spike S-C5-2 runs only under AFLEET_SPIKE_C5_2=1")
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["AFLEET_SPIKE_C5_2"] == "1", """
+            spike S-C5-2 runs only under AFLEET_SPIKE_C5_2=1, which under xcodebuild is spelled \
+            TEST_RUNNER_AFLEET_SPIKE_C5_2=1: the runner re-exports it with the prefix stripped, \
+            and an unprefixed switch never reaches the test host at all
+            """)
 
         let tree = try TempTree()
         let home = try ScratchConfigHome(tree: tree)
@@ -133,8 +136,11 @@ final class RegistrationScaleSpikeTests: XCTestCase {
     /// a real launch cost and belongs to the composition root rather than to this spike; the other
     /// three are milliseconds. Everything the child owns runs for real.
     func testFirstPaintThroughTheLaunchSequence() async throws {
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["AFLEET_SPIKE_C5_2"] == "1",
-                          "spike S-C5-2 runs only under AFLEET_SPIKE_C5_2=1")
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["AFLEET_SPIKE_C5_2"] == "1", """
+            spike S-C5-2 runs only under AFLEET_SPIKE_C5_2=1, which under xcodebuild is spelled \
+            TEST_RUNNER_AFLEET_SPIKE_C5_2=1: the runner re-exports it with the prefix stripped, \
+            and an unprefixed switch never reaches the test host at all
+            """)
 
         let tree = try TempTree()
         let home = try ScratchConfigHome(tree: tree)

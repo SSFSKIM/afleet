@@ -1322,3 +1322,11 @@ turn was spent outside the live gate and its one wasted retry.
   shape is carried here too, so parity with `redact.py` holds line for line, and
   `secretStructurePaths` loses the two entries that existed only to protect the invented names.
 
+- 2026-09-08 (corrective `d0e32b6` on `main`, from C7.3's review, tracker 125): `ProcessRunner`'s
+  pipe drain read until `EAGAIN` on the serial queue that also runs the timeout, the `SIGKILL`
+  escalation and settlement, so a producer that kept the pipe non-empty starved all three. One
+  drain pass is now bounded (`PipeDrain.bytesPerPass`, one mebibyte, 64 KiB chunks); a spent
+  budget leaves the read source armed and the next readable event resumes on a later turn of the
+  queue. The discriminating tests read a regular file, which never returns `EAGAIN`, because no
+  user-space producer can out-write the drain; a streaming-child timeout test is a floor, kept
+  and labelled as such. ClaudeWire 251 executed, 6 skipped, 0 failures.
