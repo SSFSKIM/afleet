@@ -1121,7 +1121,11 @@ is renumbered.
      mainly so no later reader re-derives the false confidence. Found by C6.2 Task 4.
 
 151. **`ChannelTimelineModelTests.testOpenSettlesOnAFinishedEventStream` has a wall-clock budget that
-     fails under load.** Observed once during C6.2's Task 5: 621 ms against a 500 ms budget while
+     fails under load. Recurred; worth fixing now rather than watching.** Observed twice during
+     C6.2: 621 ms at Task 5 and **1022 ms at Task 6's boundary**, both against a 500 ms budget, both
+     while other builds were competing for the machine; alone on a quiet machine it settles in
+     **51 ms**, so the budget is 10x the real cost and the failures are entirely load. Original note:
+     observed once during C6.2's Task 5: 621 ms against a 500 ms budget while
      mutation builds were competing for the machine; it passed on the clean run and on the retry.
      Same family as entry 146 and as C2's entry 2 — a test whose failure reads as a product defect
      when what it measured was a busy host, and this repo now runs several `xcodebuild` invocations
@@ -1129,3 +1133,34 @@ is renumbered.
      Closer: raise the budget substantially, or make the assertion insensitive to load by settling on
      an observed event rather than on elapsed time. Owner: C6.1
      (`AppTests/ChannelTimelineModelTests.swift`). Found by C6.2 Task 5.
+
+152. **`HostSignal.rewound` moves only the live half, and that is the design — recorded so nobody
+     re-derives the alarm.** `StreamIngestion.signal` folds through `wire?.apply` and reports
+     `liveChanges` only (`StreamIngestion.swift:192-201`); the durable projection is a separate
+     cache and is untouched. C6.2's Task 6 read that as "an honoured rewind leaves the discarded
+     turn on screen" and wrote an assertion that failed. It is not a defect. The durable half is
+     built by walking back from the transcript's own leaf (`last-prompt.leafUuid`, else the last
+     conversation record) through `parentUuid` — `Reader/WindowedTranscript.swift:111-128` — and the
+     honoured rewind appends exactly one `last-prompt` naming the pre-rewind assistant, which
+     arrives mirrored (`Fixtures/rewind-turn/README.md`). So the abandoned records fall out of the
+     durable half as soon as that record lands, and `HostSignal.rewound` covers the live half in the
+     interval. Two halves, two mechanisms, no gap.
+     The observable a host-side test can actually assert is therefore the live one: an open
+     streaming preview is cleared by an honoured rewind and left alone by a refused one. C6.2's G4
+     asserts both arms. Filed for C6.3, which raises `decisionAnswered` through the same seam and
+     would otherwise spend the same hour. No closer; this entry is the answer.
+
+153. **C6.1 must call `ComposerModel.edit(_:)`, and no contract says so.** The composite gives C6.2
+     the *Edit* request, the body reading and the *Fork from here* fallback, and gives C6.1 every
+     row kind — so the affordance that starts an edit is a row action on a past user message, in
+     `App/Timeline/`, while everything it triggers is in `App/Composer/`. Neither leaf's section
+     names the call, and the cut's cross-child contracts (Y1–Y5) do not cover it: Y4 is the mirror
+     case in the other direction (C6.1 calls C6.4's `AgentNavigation.show`) and was named
+     explicitly, which is what makes the omission here visible rather than invisible.
+     Left as it stands, C6.1 ships a row with no *Edit*, or an *Edit* wired to nothing, and item 13
+     is dead at recomposition with every gate green on both sides. `check-wiring` reported
+     `ComposerModel.edit(_:)` as declared in `App/` and called only from `AppTests/` — correctly —
+     and C6.2 allowlisted it in the category the file already uses for Y4's seam ("filled by C6.n")
+     rather than inventing an affordance inside another leaf's directory.
+     Closer: name it in the composite as a cross-child contract in Y4's shape, and give C6.1 the one
+     call. Owner: the C6 composite (the architect). Raised by C6.2 Task 6.
