@@ -33,6 +33,87 @@ final class ThreadTabTests: XCTestCase {
             .appending(path: "afleet-c6-3-threads-unwritten"))
     }
 
+    private static var stream: LogicalStream {
+        LogicalStream(configHome: channel.configHome, sessionID: channel.session, name: .main)
+    }
+
+    /// A model over a double that accepts everything, which is what the reply clauses drive.
+    private func hosted() async -> (ThreadDouble, ThreadModel) {
+        let lifecycle = ThreadDouble()
+        await lifecycle.always(.success(ActivityFixtures.state(Self.channel)))
+        return (lifecycle, ThreadModel(channel: Self.channel, lifecycle: lifecycle))
+    }
+
+    /// Every item C3's reducer folds out of a fixture, and the reducer itself, so a test can keep
+    /// folding into the same one.
+    private func reduced(_ fixture: String) throws -> WireReducer {
+        var reducer = WireReducer(stream: Self.stream, slug: "invented-slug")
+        for event in try FixtureRunner.events(fixture) { _ = reducer.apply(event) }
+        return reducer
+    }
+
+    /// A recorded tool call and the recorded sent file from the same fixture: §7.5's two posting
+    /// anchors, taken from the recording rather than invented.
+    private func postingAnchors() throws -> (ToolCallItem, SentFileItem) {
+        let items = try reduced("send-user-file").durable.items
+        var call: ToolCallItem?
+        var sent: SentFileItem?
+        for item in items {
+            if case .toolCall(let c) = item, call == nil { call = c }
+            if case .sentFile(let s) = item { sent = s }
+        }
+        return (try XCTUnwrap(call, "the recording folded no tool call"),
+                try XCTUnwrap(sent, "the recording folded no sent file"))
+    }
+
+    /// A pending card over a recorded request.
+    private func card(_ fixture: String) throws -> DecisionCard {
+        let request = try FixtureRunner.request(fixture, subtype: "can_use_tool",
+                                                id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+        let item = try XCTUnwrap(DecisionItem(surfacing: request, in: Self.channel),
+                                 "the surfacing initialiser opened no item for a recorded ask")
+        return DecisionCard(item)
+    }
+
+    /// A task anchor over `background-shell`'s own recorded task frames.
+    private func taskAnchor(_ lifecycle: any LifecycleAPI) throws -> TaskCardModel {
+        var registry = RegistryMirror()
+        var taskID: String?
+        for frame in try FixtureRunner.frames("background-shell") {
+            guard case .system(let system) = frame else { continue }
+            let touched = registry.apply(system, at: Date(), epoch: .first)
+            taskID = taskID ?? touched.first
+        }
+        let recorded = try XCTUnwrap(taskID, "the recording carries no task frames")
+        let entry = try XCTUnwrap(registry.entries[recorded], "the mirror folded no entry for the recorded task")
+        let item = TaskRunItem(id: ItemID(stream: Self.stream, key: recorded),
+                               timestamp: Date(),
+                               provenance: Provenance(stream: Self.stream, epoch: .first, origin: .synthesised),
+                               taskID: recorded, kind: entry.kind, description: "An invented task",
+                               status: entry.status, toolUseID: entry.toolUseID)
+        return TaskCardModel(item: item, registry: registry, lifecycle: lifecycle, channel: Self.channel)
+    }
+
+    private func press(_ label: String, in body: Any) throws {
+        let button = try XCTUnwrap(ViewTree.button(label, in: body), "the thread offered no \(label) button")
+        XCTAssertTrue(ViewTree.press(button), "the \(label) button carried no action")
+    }
+
+    /// The `InboundAnswer` of the one answer this double was handed, or nil.
+    private func answer(in actions: [(key: ChannelKey, action: LifecycleAction)]) -> InboundAnswer? {
+        for (_, action) in actions {
+            if case .answer(_, let answer) = action { return answer }
+        }
+        return nil
+    }
+
+    private func sentInput(in actions: [(key: ChannelKey, action: LifecycleAction)]) -> UserInput? {
+        for (_, action) in actions {
+            if case .send(let input) = action { return input }
+        }
+        return nil
+    }
+
     // MARK: - G2: the handover
 
     /// Contract Y3, on the host: `.thread` passes from C5's placeholder to this child's tab, the tab
@@ -108,6 +189,81 @@ final class ThreadTabTests: XCTestCase {
         fleet.finish()
     }
 
+    // MARK: - G2: the five kinds, one at a time
+
+    /// §7.5's five kinds all open, and opening a second replaces the first — Slack-style, which is
+    /// what "one thread at a time" means. Both halves: a tab that appended would keep the first.
+    func testEachOfTheFiveKindsOpensAndASecondReplacesTheFirst() async throws {
+        let (lifecycle, model) = await hosted()
+        let (call, sent) = try postingAnchors()
+        let anchors: [ThreadAnchor] = [
+            .toolDetail(call),
+            .task(try taskAnchor(lifecycle)),
+            .decision(try card("permission-allow")),
+            .sideQuestion(SideQuestionThread(anchorText: "An invented message.")),
+            .sentFile(sent),
+        ]
+        XCTAssertEqual(Set(anchors.map(\.kind)).count, ThreadKind.allCases.count,
+                       "the test drives \(Set(anchors.map(\.kind)).count) of \(ThreadKind.allCases.count) kinds")
+
+        XCTAssertNil(model.anchor, "a fresh thread tab has a thread open")
+        var previous: ThreadKind?
+        for anchor in anchors {
+            model.open(anchor)
+            let open = try XCTUnwrap(model.anchor, "opening a \(anchor.kind.rawValue) thread opened nothing")
+            XCTAssertEqual(open.kind, anchor.kind, "the tab holds a different kind from the one opened")
+            if let previous {
+                XCTAssertNotEqual(open.kind, previous, "the second thread did not replace the first")
+            }
+            previous = anchor.kind
+            let drawn = CardTree.texts(in: ThreadView(model: model).body)
+            XCTAssertTrue(drawn.contains(ThreadView.name(of: anchor.kind)),
+                          "the \(anchor.kind.rawValue) thread does not name its kind")
+        }
+
+        // §7.5's Reply column: a task takes stop only.
+        model.open(.task(try taskAnchor(lifecycle)))
+        XCTAssertFalse(model.offersReply, "the task thread offered a reply")
+        model.open(.toolDetail(call))
+        XCTAssertTrue(model.offersReply, "the tool-detail thread offered no reply")
+    }
+
+    // MARK: - G2: the two posting kinds
+
+    /// §7.5: the tool-detail and sent-file threads post to the main session with `Re: <tool>
+    /// <short id>:`, through `perform(.send(UserInput))` — a plain text send, with no router, no
+    /// attachments and no composer of any kind (D10).
+    func testToolDetailAndSentFileRepliesCarryTheReplyPrefix() async throws {
+        let (call, sent) = try postingAnchors()
+
+        let (toolLifecycle, toolModel) = await hosted()
+        toolModel.open(.toolDetail(call))
+        toolModel.draft = "An invented follow-up."
+        try press("Send", in: ThreadView(model: toolModel).body)
+        await toolModel.whenIdle()
+
+        let toolActions = await toolLifecycle.actions
+        XCTAssertEqual(toolActions.count, 1, "one reply produced \(toolActions.count) actions")
+        let toolInput = try XCTUnwrap(sentInput(in: toolActions), "the tool-detail reply sent no user input")
+        XCTAssertEqual(toolInput.text,
+                       "Re: \(call.name) \(ThreadReply.shortID(call.toolUseID)): An invented follow-up.",
+                       "the tool-detail reply does not carry §7.5's prefix")
+        XCTAssertTrue(toolInput.images.isEmpty, "a plain text send carried \(toolInput.images.count) attachment(s)")
+
+        let (fileLifecycle, fileModel) = await hosted()
+        fileModel.open(.sentFile(sent))
+        fileModel.draft = "An invented note about the file."
+        try press("Send", in: ThreadView(model: fileModel).body)
+        await fileModel.whenIdle()
+
+        let fileActions = await fileLifecycle.actions
+        let fileInput = try XCTUnwrap(sentInput(in: fileActions), "the sent-file reply sent no user input")
+        XCTAssertEqual(fileInput.text,
+                       "Re: \(ThreadReply.sentFileTool) \(ThreadReply.shortID(sent.toolUseID)): An invented note about the file.",
+                       "the sent-file reply does not carry §7.5's prefix")
+        let requests = await fileLifecycle.sent
+        XCTAssertEqual(requests.count, 0, "a posting reply sent \(requests.count) control request(s)")
+    }
 }
 
 // MARK: - Support
@@ -204,5 +360,13 @@ actor ThreadDouble: LifecycleAPI {
 
     private nonisolated func unreachable(_ member: String) -> Never {
         fatalError("ThreadDouble.\(member) is not part of the Thread tab's surface")
+    }
+}
+
+/// The in-flight state a posted reply holds, as a probe: a test that has pressed a button
+/// waits for the round trip rather than for a duration.
+extension ThreadModel {
+    func whenIdle() async {
+        while isPosting { await Task.yield() }
     }
 }
