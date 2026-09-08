@@ -1170,25 +1170,6 @@ symlink-containment debt in entry 78 is unchanged.
      carries so a surface can branch without asking. Owner: C4, with the C6 composite ruling which.
      Raised by C6.2 Task 8.
 
-202. **Composer mounting asks nothing about the channel's origin.** `App/Composer/ComposerMount.swift`
-     mounts a composer for any key it is handed: it reads no `LifecycleAPI.state(of:)` and no listing
-     mode, so a channel the user's own terminal holds gets a live field whose every send is refused
-     one call later. The `!` half of this was closed in the C6.2 fix wave — the escape asks
-     `state(of:)` before it spawns anything, so no host-side effect precedes the refusal — and the
-     plain-send half is harmless in the same way every other refusal is: the words stay in the field
-     and the reason is shown. What is left is the affordance, not a correctness defect: the composer
-     offers a field where the answer is always no. Closer: the mount consults the origin and renders
-     the refusal (or the *Fork* the banner already offers) instead of the field. Owner: the C6.2 leaf
-     that owns `ComposerMount.swift`. Filed 2026-09-08 by the C6.2 fix wave.
-199. **An honoured rewind whose prefill is dropped offers no way back to it.** `ComposerModel.edit`
-     writes the engine's `prefillText` only when the field still holds what it held when the edit
-     was asked for; typing that arrived while the request was in flight is kept instead, and the
-     composer says so. That is the right side to err on — the user can see their own words and never
-     gave them to anything — but the edited message's text is then simply gone from the surface,
-     and the only way back to it is to edit the same message again. Small, and outside this wave's
-     scope: a second surface (an *Insert the edited message* affordance, or a held prefill the field
-     offers) is a design decision the composer's own spec should make rather than a fix. Raised by
-     the C6.2 fix wave for scalpel-2#6. Owner: C6.2.
 196. **A process acquired after the quit clause's last census is ended by the exit, not by afleet.**
      The clause now re-reads the owned set after each termination pass and terminates whatever
      gained a process, bounded to three passes (`App/Header/QuitGuard.swift`). What that cannot
@@ -1217,6 +1198,71 @@ symlink-containment debt in entry 78 is unchanged.
      the check is in the one place every raise passes through, but the natural home is a guard at the
      top of `confirm`. Closer: move it there and drop the observer. Owner: whichever wave next edits
      `CommandRouting.swift`. Filed 2026-09-08 by C6.2's review wave.
+
+199. **An honoured rewind whose prefill is dropped offers no way back to it.** `ComposerModel.edit`
+     writes the engine's `prefillText` only when the field still holds what it held when the edit
+     was asked for; typing that arrived while the request was in flight is kept instead, and the
+     composer says so. That is the right side to err on — the user can see their own words and never
+     gave them to anything — but the edited message's text is then simply gone from the surface,
+     and the only way back to it is to edit the same message again. Small, and outside this wave's
+     scope: a second surface (an *Insert the edited message* affordance, or a held prefill the field
+     offers) is a design decision the composer's own spec should make rather than a fix. Raised by
+     the C6.2 fix wave for scalpel-2#6. Owner: C6.2.
+
+202. **Composer mounting asks nothing about the channel's origin.** `App/Composer/ComposerMount.swift`
+     mounts a composer for any key it is handed: it reads no `LifecycleAPI.state(of:)` and no listing
+     mode, so a channel the user's own terminal holds gets a live field whose every send is refused
+     one call later. The `!` half of this was closed in the C6.2 fix wave — the escape asks
+     `state(of:)` before it spawns anything, so no host-side effect precedes the refusal — and the
+     plain-send half is harmless in the same way every other refusal is: the words stay in the field
+     and the reason is shown. What is left is the affordance, not a correctness defect: the composer
+     offers a field where the answer is always no. Closer: the mount consults the origin and renders
+     the refusal (or the *Fork* the banner already offers) instead of the field. Owner: the C6.2 leaf
+     that owns `ComposerMount.swift`. Filed 2026-09-08 by the C6.2 fix wave.
+
+205. **A queued quiescent restart is announced and then forgotten.** `perform(.quiescentRestart)`
+     answers as soon as the change is *recorded*, and a channel that is not eligible keeps it as
+     `pendingChange` for its dormant timer. C6.2's fix wave stops the surface confirming anything
+     there — the field re-opens and the banner says the change applies when the current work
+     finishes — but nothing resumes §7.4's readback when the timer later runs it, so the user is
+     told the setting is pending and never told it took. The signal exists on the wire (the new
+     process handshakes with a fresh epoch, on `events(of:)`, which *is* a fan-out); what does not
+     exist is a reason for the surface to be watching for it, since `LifecycleAPI.updates` is one
+     stream with one consumer and cannot be joined by a second. Closer: the composer's own event
+     loop notices a handshake whose epoch differs from the one the queued restart was asked
+     against and re-runs the readback, or X5 publishes per-channel state a surface may subscribe
+     to. Owner: the C6 composite, with C4 if the second shape is chosen. Raised by C6.2's fix wave.
+
+206. **A strategy's answer is a one-line note where three of them are screens.** `StrategyOutcome`
+     carries `permissions` (the whole `get_settings` body), `mcp` (the server list) and `memory`
+     (the memory files) and the composer now says how many of each came back, plus the engine's own
+     sentence for a refused rewind. That is presentation, not the surface each is: bare
+     `/permissions` is §7.7's read-only rules view, `/mcp` is the header's popover (which the header
+     already draws for its own menu item and the composer cannot reach), and `/memory` is a list of
+     paths a note may not name (§11). Closer: the panel or popover each names, once C6.4 and the
+     header's popover are reachable from a routed line. Owner: the C6 composite. Raised by C6.2's
+     fix wave.
+
+207. **Three `.native` destinations have no target to open.** `modelPicker` and `effortPicker` now
+     open the header's own pickers. `tasks`, `agents` and `switcher` are handed to the workspace's
+     link router as `WorkspaceLink.command(_:)`, which is the app's only "open the surface named
+     this" API — and no `LinkTarget` claims a command link today, so the router answers with a
+     diagnostic. What is missing, named: the Agents tab is C6.4's and does not exist; a Tasks
+     surface is named by the table and by nothing else in the tree; and C5's switcher is opened by
+     `ShellModel.presentSwitcher()`, which a composer cannot reach — it holds a `ChannelContext` and
+     the shell is not on it. Closer: each surface registers a `LinkTarget` for its own command name
+     as it lands, and the shell registers one for the switcher. Owner: C6.4 (agents), C5 (the
+     switcher). Raised by C6.2's fix wave.
+
+208. **The mode half of §7.4's readback races the handshake that carries it.** The only readback
+     permission mode has is the handshake's, which reaches the pickers through the composer's own
+     `events(of:)` loop, while `confirmReadback` runs on the caller's task the moment
+     `perform(.quiescentRestart)` returns. Nothing synchronises the two: on a slow delivery the
+     comparison reads the *old* process's mode and banners a setting that did in fact survive. It
+     was latent before (the snapshot carried the same stale value, so the two agreed by accident)
+     and is visible now that the snapshot carries the mode the channel is running. Closer: the
+     readback waits for a handshake whose epoch is the new process's before comparing the mode —
+     the same watch item 205 needs. Owner: C6.2. Raised by C6.2's fix wave.
 
 ## From C7.2 (`child/c7-editor-core`)
 

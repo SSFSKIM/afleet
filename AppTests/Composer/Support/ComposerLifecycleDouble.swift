@@ -34,6 +34,12 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         /// answers is what the prefill and the selection are aimed at.
         case fork(ChannelKey, ForkPoint?)
         case route(ChannelKey, String)
+        /// X5's two settings members Task 11 added: the late surface's read of what the engine already
+        /// reported, and the fleet's own answer to a setting that did not survive a restart. Recorded
+        /// like every other member, because both are claims about *which* member a click reached — a
+        /// correction that went out as a bare `set_permission_mode` leaves the channel connecting.
+        case engineReports(ChannelKey)
+        case resolveSetting(ChannelKey, name: String)
         /// The subtype and the payload exactly as they go to the wire.
         case send(ChannelKey, subtype: String, payload: JSONValue)
         case run(ChannelKey, RouteStrategy, arguments: [String])
@@ -57,6 +63,8 @@ actor ComposerLifecycleDouble: LifecycleAPI {
             case .sendPrompt: "sendPrompt"
             case .fork: "fork"
             case .route: "route"
+            case .engineReports: "engineReports"
+            case .resolveSetting: "resolveSetting"
             case .send: "send"
             case .run: "run"
             case .openInTerminal: "openInTerminal"
@@ -110,6 +118,9 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     /// Staged answers to `send`, keyed by subtype; a subtype with no answer staged returns `.null`,
     /// which is what an engine member with an empty success body sends (`rename_session`).
     private var sendAnswers: [String: Result<JSONValue, WireError>] = [:]
+    /// Answers per subtype in order; the last stays once the queue is down to it.
+    private var sendSequences: [String: [Result<JSONValue, WireError>]] = [:]
+    private var resolveOutcome: Result<Void, LifecycleError> = .success(())
     private var routeOutcomes: [Routed] = []
     /// What the engine reported about itself, as the real fleet's `route` sees it. Without these the
     /// fallback below would route every line against the local table alone, and G1's terminal-only
@@ -142,6 +153,13 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func stageRoute(_ routed: Routed) { routeOutcomes.append(routed) }
     func stageRun(_ outcome: Result<StrategyOutcome, LifecycleError>) { runOutcomes.append(outcome) }
     func stageSend(_ subtype: String, _ answer: Result<JSONValue, WireError>) { sendAnswers[subtype] = answer }
+    /// Answers for one subtype **in order**, for an exchange whose second answer differs from its
+    /// first: `set_cwd` answers `needs_trust` and then, for the call that carries the trust, `ok`. The
+    /// last one staged answers every call after it, so a sequence never runs out mid-test.
+    func stageSendSequence(_ subtype: String, _ answers: [Result<JSONValue, WireError>]) {
+        sendSequences[subtype] = answers
+    }
+    func stageResolveSetting(_ outcome: Result<Void, LifecycleError>) { resolveOutcome = outcome }
     func stagePane(_ outcome: Result<PaneRequest, LifecycleError>) { paneRequest = outcome }
     /// The engine's own report, taken from the very events the composer is fed, so the double and the
     /// model under test cannot be told two different stories. Both are `WireEvent`s because neither
@@ -289,6 +307,20 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         return try forkOutcomes.removeFirst().get()
     }
 
+    /// What the fleet retains about a channel it owns a supervisor for, and nil for one it does not —
+    /// `Fleet.engineReports(of:)`'s own contract. The values are the ones `stageEngineReport` staged,
+    /// so the double cannot tell the surface one story and `route` another.
+    func engineReports(of key: ChannelKey) async -> EngineReports? {
+        calls.append(.engineReports(key))
+        guard opened.contains(key) else { return nil }
+        return EngineReports(handshake: handshake, systemInit: systemInit)
+    }
+
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        calls.append(.resolveSetting(key, name: name))
+        try resolveOutcome.get()
+    }
+
     func route(_ text: String, on key: ChannelKey) async -> Routed {
         calls.append(.route(key, text))
         // With nothing staged the double routes through C4's own `CommandRouter`, which is what
@@ -302,6 +334,11 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
         calls.append(.send(key, subtype: request.subtype, payload: request.payload))
         if isSendHeld { await withCheckedContinuation { heldSenders.append($0) } }
+        if var queued = sendSequences[request.subtype], !queued.isEmpty {
+            let answer = queued.count == 1 ? queued[0] : queued.removeFirst()
+            sendSequences[request.subtype] = queued
+            return try answer.get()
+        }
         guard let staged = sendAnswers[request.subtype] else { return .null }
         return try staged.get()
     }

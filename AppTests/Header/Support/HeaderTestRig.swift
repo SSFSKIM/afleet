@@ -45,6 +45,28 @@ enum HeaderRig {
         return header
     }
 
+    /// The state a `perform(.quiescentRestart)` answers with when the process really was replaced.
+    ///
+    /// **By epoch.** A channel that is busy records the change for its dormant timer and answers
+    /// success straight away, and so does one whose change merged into a restart already in flight;
+    /// in both the process on the other end is still the old one. The epoch is the only thing that
+    /// separates them, so a header test that stages a state without one is staging the restart that
+    /// did not happen.
+    static func replaced(_ key: ChannelKey, epoch: ProcessEpoch = .first) -> ChannelState {
+        var state = SidebarFixtures.state(key, origin: .owned(.ready))
+        state.epoch = epoch
+        return state
+    }
+
+    /// The same answer for a restart that was only **queued**: no new process, and the request still
+    /// pending for when the channel is next eligible.
+    static func queued(_ key: ChannelKey, epoch: ProcessEpoch = .first) -> ChannelState {
+        var state = SidebarFixtures.state(key, origin: .owned(.ready))
+        state.epoch = epoch
+        state.pendingChange = RestartRequest(allowBypass: true)
+        return state
+    }
+
     /// One running or finished background task, as the channel's fold carries it.
     static func task(_ id: String, status: TaskStatus) -> TimelineItem {
         let stream = LogicalStream(configHome: URL(fileURLWithPath: "/invented/config-home"),

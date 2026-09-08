@@ -384,7 +384,8 @@ final class HeaderActionTests: XCTestCase {
     func testARestartRequiredSettingWaitsForItsReadbackAndBannersOnAMismatch() async throws {
         let double = ComposerLifecycleDouble()
         let key = HeaderRig.key()
-        await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await double.setStates([SidebarFixtures.state(key, origin: .owned(.ready))])
+        await double.alwaysPerform(.success(HeaderRig.replaced(key, epoch: ProcessEpoch.first.next())))
         await double.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
         await double.stageSend("get_settings", .success(try PickerReadbackTests.recordedBody("get_settings")))
         let header = HeaderRig.header(double, key: key)
@@ -399,7 +400,7 @@ final class HeaderActionTests: XCTestCase {
 
         // The arm where the setting did not survive: the model comes back as something else.
         let lost = ComposerLifecycleDouble()
-        await lost.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+        await lost.alwaysPerform(.success(HeaderRig.replaced(key, epoch: ProcessEpoch.first.next())))
         await lost.stageSend("list_models", .success(try PickerReadbackTests.recordedBody("list_models")))
         await lost.stageSend("get_settings", .success(try PickerReadbackTests.recordedBody("get_settings")))
         let lostHeader = HeaderRig.header(lost, key: key)

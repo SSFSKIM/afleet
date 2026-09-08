@@ -64,6 +64,10 @@ actor StubFleet: AppFleet {
     func preconditions(for key: ChannelKey) async -> SpawnPrecondition { unreachable("preconditions") }
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState { unreachable("perform") }
     func route(_ text: String, on key: ChannelKey) async -> Routed { unreachable("route") }
+    func engineReports(of key: ChannelKey) async -> EngineReports? { unreachable("engineReports") }
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {
+        unreachable("resolveSetting")
+    }
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue { unreachable("send") }
     func sendPrompt(_ input: UserInput, on key: ChannelKey) async throws -> UUID { unreachable("sendPrompt") }
     func fork(at point: ForkPoint?, on key: ChannelKey) async throws -> ChannelKey { unreachable("fork") }

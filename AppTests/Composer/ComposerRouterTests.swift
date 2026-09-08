@@ -97,7 +97,18 @@ final class ComposerRouterTests: XCTestCase {
     /// slipping through unasserted.
     private func expectedMembers(for strategy: RouteStrategy) -> [String] {
         switch strategy {
-        case .setModel, .setPermissionMode, .applyFlagSetting, .renameSession, .setCwd, .interrupt, .sideQuestion:
+        // The two rows a picker owns take §7.4's readback with them: the spec's dispatch table says
+        // `.controlRequest` is *`send(_:on:)`, then re-read the readback the row names*, and
+        // `apply_flag_settings` answers with no `response` key at all — so a routed `/model` or
+        // `/effort` that stopped at the request left the header displaying a value the engine had
+        // already moved past.
+        case .setModel:
+            return ["route", "send", "send"]
+        // Only the effort picker's own flag key: `/agent` and `/fast` are flags no picker displays,
+        // so they take no readback of their own here.
+        case .applyFlagSetting(let key):
+            return key == Self.effortFlagKey ? ["route", "send", "send"] : ["route", "send"]
+        case .setPermissionMode, .renameSession, .setCwd, .interrupt, .sideQuestion:
             return ["route", "send"]
         case .rewind, .login, .permissionsView, .mcpPopover, .memoryFiles:
             return ["route", "run"]
@@ -133,9 +144,11 @@ final class ComposerRouterTests: XCTestCase {
     /// survived.
     private func expectedSubtypes(for strategy: RouteStrategy) -> [String] {
         switch strategy {
-        case .setModel: return [SetModel.subtype]
+        case .setModel: return [SetModel.subtype, GetSettings.subtype]
         case .setPermissionMode: return [SetPermissionMode.subtype]
-        case .applyFlagSetting: return [ApplyFlagSettings.subtype]
+        case .applyFlagSetting(let key):
+            return key == Self.effortFlagKey ? [ApplyFlagSettings.subtype, GetSettings.subtype]
+                                             : [ApplyFlagSettings.subtype]
         case .renameSession: return [RenameSession.subtype]
         case .setCwd: return [SetCwd.subtype]
         case .interrupt: return [Interrupt.subtype]
@@ -195,6 +208,25 @@ final class ComposerRouterTests: XCTestCase {
     /// Two-directional: the whole member sequence is compared, so an extra call fails as loudly as a
     /// missing one. A row behind a confirm reaches nothing until the confirm is answered, and that is
     /// asserted on the empty log before the answer.
+    /// The state a `perform` answers with: **a process, by epoch**. A quiescent restart that was only
+    /// recorded — a busy channel, or a merge into one already in flight — answers success with the old
+    /// process still on the other end, and the epoch is what tells the two apart. A state carrying no
+    /// epoch reads as the restart that never happened.
+    /// The one `apply_flag_settings` key a picker displays, taken from the table's own row rather
+    /// than spelled here: the effort picker re-reads `get_settings` and the other flags do not.
+    static let effortFlagKey: String = {
+        for command in RouterTable.local {
+            if case .applyFlagSetting(let key) = command.strategy, command.name == "/effort" { return key }
+        }
+        return ""
+    }()
+
+    static func replaced(_ key: ChannelKey) -> ChannelState {
+        var state = SidebarFixtures.state(key, origin: .owned(.ready))
+        state.epoch = .first
+        return state
+    }
+
     func testEveryLocalRowDispatchesToTheMemberItsStrategyNames() async throws {
         XCTAssertGreaterThanOrEqual(RouterTable.local.count, 27,
                                     "the table carries \(RouterTable.local.count) row(s); the gate is written over all of them")
@@ -205,7 +237,7 @@ final class ComposerRouterTests: XCTestCase {
         for command in RouterTable.local {
             let double = ComposerLifecycleDouble()
             let key = makeKey()
-            await double.alwaysPerform(.success(SidebarFixtures.state(key, origin: .owned(.ready))))
+            await double.alwaysPerform(.success(Self.replaced(key)))
             await double.alwaysSendPrompt(.success(UUID()))
             let model = makeModel(double, key: key)
             model.draft = line(for: command)

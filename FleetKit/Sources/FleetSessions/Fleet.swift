@@ -571,6 +571,19 @@ public actor Fleet: LifecycleAPI {
                                    runtime: context.runtime)
     }
 
+    /// The two reports the engine has already made about itself, for a surface that subscribed after they arrived.
+    ///
+    /// `events(of:)` is future-only by construction — it is a fan-out of what the process sends from now on — so a
+    /// surface mounted onto a channel that handshook minutes ago sees neither the handshake nor `system/init`, and
+    /// has no permission mode to display and no engine command list to complete against. The supervisor keeps both
+    /// for its own routing; this hands the same two values out rather than leaving each surface to wait for a
+    /// stream that will not repeat itself.
+    public func engineReports(of key: ChannelKey) async -> EngineReports? {
+        guard let supervisor = supervisors[key] else { return nil }
+        let context = await supervisor.routingContext()
+        return EngineReports(handshake: context.handshake, systemInit: context.systemInit)
+    }
+
     /// One routed control request, on a channel.
     @discardableResult
     public func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {

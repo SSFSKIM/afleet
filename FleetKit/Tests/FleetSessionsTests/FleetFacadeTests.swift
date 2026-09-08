@@ -926,6 +926,49 @@ final class FleetFacadeTests: XCTestCase {
         XCTAssertEqual(explanation, RouterTable.explanation(forTerminalOnly: "/doctor"))
     }
 
+    /// The two reports a **late** surface reads back: the handshake and `system/init`, which the engine sends once
+    /// per process and never again.
+    ///
+    /// A composer that mounts onto a channel that came up minutes ago subscribes to a stream that will not repeat
+    /// either of them, so without this query the mode picker has nothing to display and autocomplete has no engine
+    /// command list. The values are the same ones `route` decides against — the supervisor's own — so the surface
+    /// and the router cannot come to disagree, and a key the fleet owns no supervisor for answers nil.
+    ///
+    /// Deliberate break: answer nil for an owned channel → the two unwraps below fail.
+    func testTheFacadeAnswersTheReportsALateSurfaceMissed() async throws {
+        let systemInit = try Self.recordedFrame("control-shapes", type: "system", subtype: "init")
+        await harness.tearDown()
+        harness = try Harness(replaying: [["emit": systemInit]])
+        let harness = self.harness!
+        let fleet = harness.fleet
+        let k = ChannelKey(configHome: harness.home.url, session: try fixtureSession())
+        await fleet.start()
+        _ = try await fleet.open(k, cwd: harness.cwd, recent: true)
+        try await harness.waitFor("the engine's system/init to land") {
+            await fleet.state(of: k)?.apiKeySource != nil
+        }
+
+        let answered = await fleet.engineReports(of: k)
+        let reports = try XCTUnwrap(answered, "an owned channel reported nothing")
+
+        let handshake = try XCTUnwrap(reports.handshake, "the retained handshake was not answered")
+        XCTAssertNotNil(handshake.currentPermissionMode, "the handshake carries no mode for a picker to display")
+        let commands = try XCTUnwrap(reports.systemInit?.terminalSlashCommands,
+                                     "the retained system/init was not answered")
+        XCTAssertGreaterThan(commands.count, 0,
+                             "the recorded system/init named \(commands.count) terminal command(s)")
+        // The same two values the router decides against, so the surface and the routing cannot disagree.
+        let owned = await fleet.channel(k)
+        let supervisor = try XCTUnwrap(owned, "the fleet owns no supervisor for an open channel")
+        let context = await supervisor.routingContext()
+        XCTAssertEqual(reports.systemInit?.slashCommands, context.systemInit?.slashCommands,
+                       "the surface and the router were told two different stories")
+
+        let unknown = key(SessionID())
+        let none = await fleet.engineReports(of: unknown)
+        XCTAssertNil(none, "a key the fleet owns no supervisor for reported something")
+    }
+
     /// A key the fleet owns no supervisor for is not a channel to act on, and the two acting operations refuse it
     /// with the error the facade already uses for that case. Routing is not one of them: it is a pure function of
     /// the line, and a line typed into a channel that has not opened yet still resolves against the local table.

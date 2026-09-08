@@ -2,6 +2,19 @@ import Foundation
 import AfleetCore
 import ClaudeWire
 
+/// The engine's own two reports about a channel, as a surface that missed them reads them back.
+///
+/// Values and never a stream: the handshake and `system/init` each arrive once per process, and what a late
+/// surface needs is the newest of each rather than a replay of everything between.
+public struct EngineReports: Sendable {
+    public var handshake: InitializeResponse?
+    public var systemInit: SystemInitFields?
+    public init(handshake: InitializeResponse?, systemInit: SystemInitFields?) {
+        self.handshake = handshake
+        self.systemInit = systemInit
+    }
+}
+
 /// What C5, C6 and C7 call. Nothing else spawns.
 public protocol LifecycleAPI: Sendable {
     func state(of key: ChannelKey) async -> ChannelState?
@@ -19,6 +32,14 @@ public protocol LifecycleAPI: Sendable {
     /// The composer's line, routed against the channel's own handshake, `system/init` and runtime record. A key the
     /// fleet owns no supervisor for routes against the local table alone.
     func route(_ text: String, on key: ChannelKey) async -> Routed
+    /// What the engine has already reported about itself on this channel: the handshake and `system/init`. A query,
+    /// for a surface that subscribed to `events(of:)` after they arrived — the stream is future-only and neither
+    /// report is sent twice. Nil for a key the fleet owns no supervisor for.
+    func engineReports(of key: ChannelKey) async -> EngineReports?
+    /// The user picked a value for a setting a quiescent restart could not read back. The value is applied first and
+    /// only then does the channel's banner advance, so a channel is never released over a setting the engine never
+    /// received. The names are `Readback.verify`'s own.
+    func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws
     /// One routed control request, on a channel.
     @discardableResult func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue
     /// One routed strategy, on a channel; `ui` is the browser tab and the confirmation sheet the multi-step

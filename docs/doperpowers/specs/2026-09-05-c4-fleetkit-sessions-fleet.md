@@ -1868,6 +1868,12 @@ which is the only reason the redactor artifact was ever found.
   write are separated in time: a send admitted while the channel is connecting is queued with the
   uuid its caller was answered and written under that uuid when the handshake lands, where the
   handle previously minted a second one that nothing above X5 ever saw.
+- 2026-09-08, from C6.2's fix wave: X5 gains `engineReports(of:)` — the handshake and
+  `system/init` this channel has already reported, for a surface that subscribed to the
+  future-only `events(of:)` after they arrived — and `resolveSetting(_:to:on:)`, which `Fleet`
+  already implemented and no protocol exposed, so a picker correcting a setting a restart did not
+  carry could not advance the fleet's own banner and left the channel connecting behind an open
+  field.
 
 - 2026-09-08 corrective on `main` from C6.2's `[parent-impact]`: X5 gains `quit` and
   `liveTaskIDs(of:)`. Parent §7.4's *Quit* clause — terminate every owned channel that has a
