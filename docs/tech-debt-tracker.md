@@ -978,7 +978,8 @@ symlink-containment debt in entry 78 is unchanged.
      names the newest message and not the target.
 
 146. **`LifecycleRowTests.testPaneExitReAdoptsWhenTheRecordIsGone` fails when the machine's pid
-     counter wraps.** The test arranges a decoy job holder at `ScriptedHolderFiles.livePID` — the
+     counter wraps.** **Closed 2026-09-08 by the `main` corrective `85006b4`** (a two-helper decoy;
+     no ordering assumption on pids). The test arranges a decoy job holder at `ScriptedHolderFiles.livePID` — the
      test runner's own pid, which never dies — and asserts it sorts ahead of the helper process the
      test then spawns (`XCTAssertLessThan(livePID, tab)`, "the decoy holder sorts first"). That
      holds only while pids increase monotonically. macOS wraps them near 100000, so a run whose
@@ -1055,7 +1056,9 @@ symlink-containment debt in entry 78 is unchanged.
      mainly so no later reader re-derives the false confidence. Found by C6.2 Task 4.
 
 151. **`ChannelTimelineModelTests.testOpenSettlesOnAFinishedEventStream` has a wall-clock budget that
-     fails under load. Recurred; worth fixing now rather than watching.** Observed twice during
+     fails under load. Recurred; worth fixing now rather than watching.** **Closed 2026-09-08 by the
+     `main` corrective `8e0f0d7`** (delivery-fulfilled wait; the one-round claim moved to
+     `FleetTimelineTests.IngestionTests`). Observed twice during
      C6.2: 621 ms at Task 5 and **1022 ms at Task 6's boundary**, both against a 500 ms budget, both
      while other builds were competing for the machine; alone on a quiet machine it settles in
      **51 ms**, so the budget is 10x the real cost and the failures are entirely load. Original note:
@@ -1084,7 +1087,9 @@ symlink-containment debt in entry 78 is unchanged.
      asserts both arms. Filed for C6.3, which raises `decisionAnswered` through the same seam and
      would otherwise spend the same hour. No closer; this entry is the answer.
 
-153. **C6.1 must call `ComposerModel.edit(_:)`, and no contract says so.** The composite gives C6.2
+153. **C6.1 must call `ComposerModel.edit(_:)`, and no contract says so.** **Named as contract Y6 at
+     C6.2's merge, 2026-09-08; the call and the two render sites are C6.1's (its G6); this entry
+     closes when C6.1's merge shows them.** The composite gives C6.2
      the *Edit* request, the body reading and the *Fork from here* fallback, and gives C6.1 every
      row kind — so the affordance that starts an edit is a row action on a past user message, in
      `App/Timeline/`, while everything it triggers is in `App/Composer/`. Neither leaf's section
@@ -1339,7 +1344,9 @@ symlink-containment debt in entry 78 is unchanged.
      Owner: C4 (`ChannelSupervisor.resolveSetting`), with C6.2 dropping the re-answer when it lands.
      Raised by C6.2's second fix wave.
 
-218. **`ToolRunner` carries both of the escalation defects the `!` escape just had.** C7.3's
+218. **`ToolRunner` carries both of the escalation defects the `!` escape just had.** **Closed
+     2026-09-09 by the `main` corrective `925a6e5`** (escalation keyed on its own flag; the group
+     signalled whether or not the leader was reaped; two descendant tests). C7.3's
      `Workbench/Sources/SourceControlCore/ToolRunner.swift` is the arrangement C6.2's `ShellChild`
      was copied from, and it still keys its `SIGKILL` on `settled` and its `signalTree` on `reaped`.
      Both windows are the same: a budget expiring inside a termination's grace reaps the child and
