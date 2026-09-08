@@ -94,6 +94,8 @@ public struct FilesPanelReadout: Equatable {
         case .saveRefusedIntoConfigHome:
             return "afleet never writes inside a Claude Code configuration directory."
         case .editorReported: return "The editor reported a problem."
+        case .editorDidNotAnswer:
+            return "The editor did not answer, so your unsaved changes are still open here."
         case .diffUnavailable: return "The repository could not be read."
         case .noTextDiff(let reason):
             switch reason {

@@ -2025,3 +2025,38 @@ is renumbered.
      (~15 s of the package's ~33 s) that the next leaf to add to it should know where the time goes
      before adding more. Closer: share the fixtures per entry 232 and build the media corpus once
      per suite rather than once per test. Owner: C7.7, which will add to this target.
+
+336. **A presentation can wait out the stash bound before it draws.** A file switch over a dirty
+     buffer is a `save` round trip, and a second switch arriving while the first is outstanding now
+     waits for the same answer rather than racing it — correct, and up to `stashTimeout` (two
+     seconds) of a panel that has not redrawn, with nothing on screen saying why. Found by C7.5's
+     fix wave A for the third merge round. Closer: a pending marker on the tab the presentation is
+     heading for, which is a view change; or a shorter bound, which trades a slow editor's captures
+     for responsiveness. Owner: C7.7, which draws the tab strip.
+
+337. **Two windows can hold two different unsaved buffers, and only one of them can win.** The
+     session holds one text per open file, so ownership follows the surface that last reported the
+     file dirty. If the user genuinely types in both windows, the second `dirty` report takes
+     ownership and the first window's edits are overwritten by the `setText` that follows the next
+     save. Fixing the *cursor* half of this (entry: fix wave A) removed the case where a window
+     that typed nothing could take the buffer; the divergent case remains and cannot be closed
+     without a per-surface buffer or a bridge command that reads a buffer without saving it. Found
+     by C7.5's fix wave A. Closer: a `readBuffer` in W4 that answers per surface, which is an
+     amendment to C7.2's contract. Owner: C7.2's contract, whichever leaf next opens it.
+
+338. **A retired buffer request is kept until an editor answers it, and the queue is capped by a
+     number.** `saveRequested` carries no request id, so replies are correlated positionally: an
+     expired request stays in the queue so its late answer can be recognised as belonging to a
+     request that is over. An editor that never answers therefore accumulates entries, and the cap
+     that stops that is 32 — a number chosen because an editor silent across that many requests is
+     not going to answer any of them, not because anything measured it. Found by C7.5's fix wave A.
+     Closer: a request id on the wire, which is the W4 amendment entry 241 also wants. Owner:
+     C7.2's contract.
+
+339. **The one-read fix for the buffer and its baseline has no failing test of its own.** The
+     window it closes is an atomic replacement landing between two reads of one path, which cannot
+     be driven deterministically without a test-only injection seam in the read path — judged worse
+     than the bug it would prove. What is tested is the new API's contract: the snapshot and the
+     bytes it was taken from are the same bytes. Found by C7.5's fix wave A. Closer: a seam in
+     `FileSnapshot` that a test can suspend, if a second such race ever needs proving. Owner:
+     whichever leaf next needs to test a file-system race.
