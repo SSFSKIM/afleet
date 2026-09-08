@@ -933,3 +933,12 @@ symlink-containment debt in entry 78 is unchanged.
      write succeeded, so `bridge.js` leaves the flag set until the next `open` or `setText`.
      C7.5 will meet this the first time it wires *Save*. Closer: a host-to-editor acknowledgement,
      which is a W4 vocabulary addition and therefore a contract change, not a local fix.
+
+105. **W4's `error` has no discriminator, so a host cannot tell a refusal from a failure.** The
+     bridge refuses `save` while a diff is on screen (C7.2 fix-wave finding B1) with
+     `error {message}`, because that is the whole editor-to-host vocabulary for "no". A host
+     that wants to re-issue the save against the editor, rather than surface a failure to the
+     user, has only prose to branch on, and prose is not a contract. Closer: a `kind` or `code`
+     field on `error`, or a distinct refusal message — either is a W4 vocabulary addition and
+     therefore a contract change, of the same class as entry 104's acknowledgement. Owner: C7.5
+     the first time it wires *Save* beside C7.7's diff.
