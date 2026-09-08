@@ -66,6 +66,22 @@ struct TimelineRenderContext {
     /// Which clusters and thinking blocks this channel has folded.
     let collapse: TimelineCollapseState
 
+    /// Contract Y6 — this channel's composer, for the three behaviours it owns whose only surface is
+    /// a row (§14, gate G6): the *Edit* action, the fork-fallback note, and the intercepted
+    /// replacement a row draws **in place of** the frame's own text.
+    ///
+    /// **Nil is a real answer here and not an unwired capability.** A channel C5 lists read-only has
+    /// no composer at all — `ChannelComposerMount` deliberately builds none, because every write in
+    /// that leaf leaves through it — so a teammate's transcript offers no *Edit*, which is the gate
+    /// the header's owned actions already carry (tracker 74). Undefaulted, on Y7's rule: a
+    /// capability the construction site can forget to state is the failure these contracts exist to
+    /// prevent.
+    let composer: (any ComposerSite)?
+
+    /// Which message this channel's *Edit* was last pressed on, so the composer's one note is drawn
+    /// beside that message and not beside every message. Channel-scoped for `collapse`'s reason.
+    let editing: TimelineEditState
+
     /// What a row needs to know about the items *around* it, gathered once per publish (§8, §9).
     ///
     /// A cluster names its members by `tool_use_id` and no member travels inside the cluster item; a

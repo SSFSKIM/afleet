@@ -194,12 +194,16 @@ enum InventedItems {
     static func context(links: any LinkRouterCapability = RecordingLinkRouter(),
                         agents: any AgentNavigating = NoAgentNavigation(),
                         neighbourhood: TimelineNeighbourhood = TimelineNeighbourhood(),
-                        collapse: TimelineCollapseState = TimelineCollapseState()) -> TimelineRenderContext {
+                        collapse: TimelineCollapseState = TimelineCollapseState(),
+                        composer: (any ComposerSite)? = nil,
+                        editing: TimelineEditState = TimelineEditState()) -> TimelineRenderContext {
         TimelineRenderContext(key: ChannelKey(configHome: stream.configHome, session: stream.sessionID),
                               links: links,
                               signal: { _ in },
                               agents: agents,
                               collapse: collapse,
+                              composer: composer,
+                              editing: editing,
                               neighbourhood: neighbourhood)
     }
 }

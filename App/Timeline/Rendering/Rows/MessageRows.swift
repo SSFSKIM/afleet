@@ -16,7 +16,11 @@ struct RowFrame<Body: View>: View {
     var badge: String?
     var timestamp: Date?
     var alignment: HorizontalAlignment = .leading
-    @ViewBuilder var content: () -> Body
+    /// **Main-actor isolated**, because two of the contents built into one are: contract Y6's sites
+    /// read `ComposerModel`, which is a `@MainActor` observable, and a plain closure could not call
+    /// them. Every `RowFrame` is built inside a `body`, so the isolation costs nothing and states
+    /// what was already true.
+    @ViewBuilder var content: @MainActor () -> Body
 
     var body: some View {
         VStack(alignment: alignment, spacing: 2) {
@@ -68,20 +72,57 @@ struct MarkdownBody: View {
 // MARK: - The three message kinds
 
 /// The person's own message (§8): right-aligned authorship, its text through the markdown pipeline,
-/// and its attachments named rather than inlined.
+/// its attachments named rather than inlined, and contract Y6's first two sites — *Edit*, and the
+/// note the composer writes when a rewind was refused and a fork opened instead (§14, gate G6).
 struct UserMessageRow: View {
 
     let item: UserMessageItem
 
+    @Environment(\.timelineContext) private var context
+
     var body: some View {
-        RowFrame(author: "You", timestamp: item.timestamp, alignment: .trailing) {
-            MarkdownBody(key: item.id.key, source: MessageText.text(of: item.blocks, fallback: item.text))
-            let attachments = MessageText.attachments(in: item.blocks)
-            if !attachments.isEmpty {
-                Text(attachments.joined(separator: " · "))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+        UserMessageBody(item: item, context: context)
+    }
+}
+
+/// The user row's content, with the context handed in rather than read from the environment.
+///
+/// Split out for the reason `AgentChip.content(for:in:)` is a function: an `@Environment` value is
+/// not populated in a constructed view, so affordances decided inline in a `body` are affordances no
+/// test can reach — and Y6 exists because exactly that kind of seam shipped with every gate on both
+/// sides of it green.
+struct UserMessageBody: View {
+
+    let item: UserMessageItem
+    let context: TimelineRenderContext?
+
+    var body: some View {
+        RowFrame(author: "You", timestamp: item.timestamp, alignment: .trailing) { content }
+    }
+
+    /// Walked directly by this row's own tests: `RowFrame` takes its content as a closure, and
+    /// `Mirror` does not descend into one.
+    @ViewBuilder @MainActor var content: some View {
+        MarkdownBody(key: item.id.key, source: MessageText.text(of: item.blocks, fallback: item.text))
+        let attachments = MessageText.attachments(in: item.blocks)
+        if !attachments.isEmpty {
+            Text(attachments.joined(separator: " · "))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        // **Y6 site 1.** The row calls `edit(_:)` and stops there: the `rewind_conversation` carrying
+        // `last_seen_user_message_uuid`, the refusal read from the body rather than the envelope, and
+        // the *Fork from here* fallback are all the composer's. Absent for a channel with no
+        // composer, which is every read-only listing.
+        if let context, let composer = context.composer {
+            Button("Edit") {
+                // Recorded before the call, so the note a refusal produces has a message to sit
+                // beside whichever way the request goes.
+                context.editing.note(edited: item.id)
+                Task { await composer.edit(item) }
             }
+            .buttonStyle(.link)
+            .font(.caption2)
         }
     }
 }

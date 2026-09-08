@@ -31,6 +31,10 @@ struct TimelineListView: View {
     /// Folding is the channel's view state and outlives every row that draws a disclosure.
     @State private var collapse = TimelineCollapseState()
 
+    /// Which message this channel's *Edit* was pressed on. Channel-scoped for `collapse`'s reason:
+    /// the refusal comes back long after the row value that pressed the button was discarded.
+    @State private var editing = TimelineEditState()
+
     var body: some View {
         // No change set: the model republishes the whole timeline and states no diff, so the table
         // computes one by key. When the model does start naming its changes the table prefers them.
@@ -55,8 +59,30 @@ struct TimelineListView: View {
                               signal: { [model] signal in await model.signal(signal) },
                               agents: app.agentNavigation,
                               collapse: collapse,
+                              composer: composerSite(in: app),
+                              editing: editing,
                               neighbourhood: TimelineNeighbourhood(items: model.timeline.items,
                                                                    agents: model.timeline.agents))
+    }
+
+    /// Contract Y6's route from a row to the channel's composer: the app's one `ComposerRegistry`,
+    /// which is how the column already reaches composers.
+    ///
+    /// **Gated on the row's listing policy, and that gate is the reason this is a function.**
+    /// `ComposerRegistry.model(for:)` *builds* a composer on first ask, and `ChannelComposerMount`
+    /// deliberately builds none for a channel C5 listed read-only — a teammate's transcript, which
+    /// afleet can show and may not write to. Resolving unconditionally here would build the one
+    /// composer that leaf refused to build and put an *Edit* on a teammate's message whose rewind
+    /// would reach their session. So the same gate the header's owned actions carry (tracker 74)
+    /// is asked first, and a read-only channel's rows get nil, which offers nothing.
+    ///
+    /// Gated on the *policy* rather than on whether a composer happens to exist yet: the mount that
+    /// builds it sits below this view in the column's stack, and a check on existence would answer
+    /// "no composer" on whichever pass drew the list first and never be re-asked, because the
+    /// registry is not observable.
+    private func composerSite(in app: AppModel) -> (any ComposerSite)? {
+        guard app.browser?.row(model.key.session)?.offersOwnedActions == true else { return nil }
+        return app.composers.model(for: model.key)
     }
 }
 
