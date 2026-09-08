@@ -35,6 +35,15 @@ struct ElicitationCardView: View {
         var values: [String: JSONValue] = [:]
         /// A raw field's text, kept as text so an unparseable draft is not thrown away mid-edit.
         var rawText: [String: String] = [:]
+        /// A numeric field's text, for the same reason: a number is typed one character at a time
+        /// and `1.`, `-` and `1e` are all states on the way to a value. Without it the control
+        /// redrew whatever the draft could parse, so a half-typed number erased itself.
+        var numberText: [String: String] = [:]
+        /// The raw fields whose text was written as JSON and does not parse. They are neither a
+        /// value nor an emptying: a syntax error is a field the user is still writing, and sending
+        /// it as the literal text they typed would answer an object-shaped property with a string
+        /// (scalpel-4#3). Accept waits.
+        var malformed: Set<String> = []
         /// The properties the user **emptied**, which `values` cannot hold because an empty value is
         /// no value. Without it a cleared field is indistinguishable from an untouched one and the
         /// schema's default comes back — so deselecting the last default option reselected it and a
@@ -103,9 +112,14 @@ struct ElicitationCardView: View {
     /// stay available regardless.
     var canAccept: Bool {
         guard let form else { return false }
+        guard draft.malformed.isEmpty else { return false }
         let answered = content.objectValue ?? [:]
         return form.fields.allSatisfy { !$0.isRequired || answered[$0.name] != nil }
     }
+
+    /// What the card says about a raw field that does not parse. The text stays in the control —
+    /// throwing away what the user typed is worse than refusing to send it.
+    static let malformedReading = "This value was written as JSON and does not parse, so it cannot be sent yet."
 
     private var isAnswering: Bool { answering.isAnswering(card.requestID) }
 
@@ -202,18 +216,45 @@ struct ElicitationCardView: View {
         case .multiSelect(let options, let fallback):
             if let options {
                 ForEach(options, id: \.self) { option in
-                    Button(option) { pick(option, in: field.name, default: fallback) }
+                    self.option(option, in: field)
                 }
             } else {
-                TextField(field.title, text: list(field.name, default: fallback))
+                TextField(field.title, text: list(field.name, default: fallback ?? []))
             }
         case .raw(let schema):
             VStack(alignment: .leading, spacing: 2) {
                 Text(ElicitationForm.schemaText(schema))
                     .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 TextField("JSON", text: raw(field.name))
+                if draft.malformed.contains(field.name) {
+                    Text(Self.malformedReading).font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
+    }
+
+    /// One option of an enum-array control.
+    ///
+    /// **A `Toggle`, because the control has to say which options are chosen** (sweep#3). The row
+    /// used to be a plain `Button(option)`, which draws the same whether the option is in the
+    /// answer or not: the user pressed an option, the card looked unchanged, and the only way to
+    /// find out what an accept would carry was to send it. Not private for the reason
+    /// `control(_:)` is not — `ForEach` stores its content closure rather than the views it makes,
+    /// so this is the only handle on what one option draws.
+    @ViewBuilder
+    func option(_ option: String, in field: ElicitationForm.Field) -> some View {
+        Toggle(option, isOn: optionSelection(option, in: field))
+    }
+
+    /// Whether one option of an enum-array control is in the answer. The setter is `pick`, so the
+    /// drawn state and the sent value cannot come apart.
+    func optionSelection(_ option: String, in field: ElicitationForm.Field) -> Binding<Bool> {
+        guard case .multiSelect(_, let fallback) = field.control else { return .constant(false) }
+        return Binding(get: {
+            self.selected(field.name, default: fallback ?? []).contains(option)
+        }, set: { _ in
+            self.pick(option, in: field.name, default: fallback ?? [])
+        })
     }
 
     // MARK: - The controls' bindings
@@ -243,14 +284,26 @@ struct ElicitationCardView: View {
         })
     }
 
+    /// A numeric control, in the same three states every other control has (sweep#2).
+    ///
+    /// Emptying it used to store `nil` and touch nothing else, so the getter fell through to the
+    /// schema's `default` and `content` carried it: a defaulted number could not be cleared, and
+    /// the field redrew the value the user had just deleted. The typed text is kept beside the
+    /// parsed value so that a number being typed — `-`, `1.`, `1e` — is not erased on its way to
+    /// being one.
     func number(_ name: String, isInteger: Bool, default fallback: Double?) -> Binding<String> {
         Binding(get: {
-            if let typed = draft.values[name]?.doubleValue {
-                return ElicitationForm.spell(typed, isInteger: isInteger)
+            if let typed = draft.numberText[name] { return typed }
+            switch entry(name) {
+            case .value(let value): return value.doubleValue.map { ElicitationForm.spell($0, isInteger: isInteger) } ?? ""
+            case .cleared: return ""
+            case .untouched: return fallback.map { ElicitationForm.spell($0, isInteger: isInteger) } ?? ""
             }
-            return fallback.map { ElicitationForm.spell($0, isInteger: isInteger) } ?? ""
         }, set: { text in
-            draft.values[name] = ElicitationForm.numberValue(text, isInteger: isInteger)
+            draft.numberText[name] = text
+            let parsed = ElicitationForm.numberValue(text, isInteger: isInteger)
+            draft.values[name] = parsed
+            if parsed == nil { draft.cleared.insert(name) } else { draft.cleared.remove(name) }
         })
     }
 
@@ -272,8 +325,22 @@ struct ElicitationCardView: View {
     func raw(_ name: String) -> Binding<String> {
         Binding(get: { draft.rawText[name] ?? "" }, set: { text in
             draft.rawText[name] = text
-            draft.values[name] = ElicitationForm.rawValue(text)
-            if draft.values[name] == nil { draft.cleared.insert(name) } else { draft.cleared.remove(name) }
+            switch ElicitationForm.rawEntry(text) {
+            case .value(let value):
+                draft.values[name] = value
+                draft.cleared.remove(name)
+                draft.malformed.remove(name)
+            case .empty:
+                draft.values[name] = nil
+                draft.cleared.insert(name)
+                draft.malformed.remove(name)
+            case .malformed:
+                // Neither a value nor an emptying: the field is still being written, and Accept
+                // waits rather than sending the text as a string.
+                draft.values[name] = nil
+                draft.cleared.insert(name)
+                draft.malformed.insert(name)
+            }
         })
     }
 
