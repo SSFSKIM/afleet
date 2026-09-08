@@ -84,6 +84,15 @@ final class HostLinkRouter: LinkRouterCapability {
     /// exists for nothing makes the router refuse an unrelated surviving target for a preparation
     /// no window came of. With no hook the router validates and delivers without suspending.
     ///
+    /// **A target that declines the pop-out never reaches this hook, and gets no window.** X7's
+    /// `LinkTarget.popsOutForNewWindow` (amended at C7.6's gate, 2026-09-09) marks a target that
+    /// answers `.newWindow` by *leaving the app* — the Browser hands the URL to the user's own
+    /// browser — so popping its tab out would present two windows for one Cmd-click. The registry
+    /// skips `prepare` for such a target rather than this closure returning early, because which
+    /// target a link resolves to is not known here: the hook is handed in before resolution runs.
+    /// Skipping it is also what keeps that delivery on the non-suspending path, for the reason the
+    /// paragraph above gives.
+    ///
     /// **What was captured is revalidated immediately before the pop-out.** The capture is a
     /// property of the action, but a window is presented in the present: between the two, the
     /// channel can leave the index or the host can be re-attached to a fresh workspace — both of

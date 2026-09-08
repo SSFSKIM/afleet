@@ -28,6 +28,25 @@ final class ProtocolShapeTests: XCTestCase {
         XCTAssertEqual(titles.count, PanelTabID.allCases.count, "two cases share a title")
     }
 
+    /// X7's `popsOutForNewWindow` amendment (ruled at C7.6's gate, 2026-09-09) defaults to
+    /// **true**, so every registrant written before it keeps the pop-out it was written against.
+    ///
+    /// The first half is asserted on a target built with the *pre-amendment* argument list, which
+    /// is the only shape that can fail: a target that named the field would say nothing about what
+    /// omitting it means.
+    @MainActor
+    func testLinkTargetPopsOutForNewWindowUnlessItSaysOtherwise() {
+        let inherited = LinkTarget(tab: .files, specificity: 1, handles: { _ in true },
+                                   open: { _, _ in })
+        XCTAssertTrue(inherited.popsOutForNewWindow,
+                      "a target that does not mention the field lost the pop-out it was written with")
+
+        let declining = LinkTarget(tab: .browser, specificity: 1, popsOutForNewWindow: false,
+                                   handles: { _ in true }, open: { _, _ in })
+        XCTAssertFalse(declining.popsOutForNewWindow,
+                       "a target that declined the pop-out did not keep the refusal")
+    }
+
     /// Equality, not containment. The point is that `lifecycle` is *absent*, and `ImportGraphTests`
     /// cannot catch its addition: `PanelHostAPI` already imports FleetKit, whose umbrella exposes
     /// `LifecycleAPI`, so `let lifecycle: any LifecycleAPI` needs no new import and would leave

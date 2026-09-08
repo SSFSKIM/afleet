@@ -183,6 +183,11 @@ public actor LinkRouter {
     /// *before* delivery, which is the ordering that rule is about. With no `prepare` this is the
     /// pure registry W5 describes, and nothing suspends between resolving and committing.
     ///
+    /// A resolved target whose `popsOutForNewWindow` is `false` takes that same non-suspending
+    /// path even when a `prepare` was supplied: it answers `.newWindow` by leaving the app, so
+    /// there is no window to open for it and nothing for the hook to do (X7's amendment, ruled at
+    /// C7.6's gate).
+    ///
     /// `prepare` is a main-actor `await`, so the router *suspends* between resolving and
     /// delivering, and an `unregister(tab:)` can land in that window — the host's own teardown
     /// path does exactly this. Three things follow, and they are one design rather than three
@@ -223,8 +228,19 @@ public actor LinkRouter {
                 // for a window nothing holds (spec §3, 2026-09-08 final wave).
                 if preparations >= Self.maxPreparationsPerOpen { break }
             }
-            guard let prepare else {
+            guard let prepare, chosen.target.popsOutForNewWindow else {
                 // Nothing suspends between the resolution above and this commit.
+                //
+                // A target that declined the pop-out (X7's `popsOutForNewWindow`, ruled at C7.6's
+                // gate) takes this path too, and that is the whole of the amendment here. The
+                // decision has to be the registry's rather than the host's, because only the
+                // registry knows *which* target a link resolved to — the host hands its pop-out in
+                // before resolution happens. It is expressed as skipping the hook and not as a hook
+                // that returns immediately, because calling `prepare` is what makes this actor
+                // suspend between resolving and committing, and every hazard the three rules above
+                // describe lives in that suspension. A target that has no window to be popped out
+                // into must not lose its delivery to a withdrawal that landed in one opened for
+                // nobody.
                 await deliver(chosen, link, destination)
                 return
             }
