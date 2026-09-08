@@ -656,7 +656,12 @@ The rebuild defect is closed by row patching and coalescing, as the later closer
     view and may attach earlier or on a different trigger. Found at C5 Task 7. Closer: either
     make `attach` imply the first `open`, or assert in the model that a `nil` projection with
     `hasOpened` false is unreachable so a future caller trips it.
-66. **`hasOpened` is set before the index lookup, so a missing entry pins `failure` for the
+66. **Closed 2026-09-08 by C6.1 (`child/c6-timeline-renderer`).** `hasOpened` now moves to after
+    the index lookup succeeds, and a retry that finds the entry clears the failure the attempt
+    before it recorded; `testAMissingIndexEntryIsRetried` holds both halves and was demonstrated
+    failing against the pre-fix shape. The entry's original text follows.
+
+    **`hasOpened` is set before the index lookup, so a missing entry pins `failure` for the
     model's life.** A channel whose index entry is absent at open time — a transcript deleted
     between listing and opening — records the failure and never retries, because the guard that
     prevents re-opening has already fired. No C5 path produces it: the sidebar lists from the
@@ -884,3 +889,34 @@ symlink-containment debt in entry 78 is unchanged.
     the missing-control and press assertions fail closed if the framework shape changes.
     This is not a pixel/layout or accessibility witness. Replace it with a reliable hosted
     accessibility instrument or native UI-test target when the app has one. Owner: C5 tests.
+
+## From C6.1 (`child/c6-timeline-renderer`)
+
+Entries **127 through 141** are C6.1's, as the C6 composite's leaf table allots them. Nothing above
+is renumbered.
+
+127. **The live thinking-token estimate has no home in C3's model.** `system/thinking_tokens`
+     carries `estimated_tokens`, `estimated_tokens_delta` and a `uuid` naming the *user* message the
+     turn answers (2.1.263 `cli.pretty.js:811445`; emitted at `:523066` and `:289222`). ClaudeWire
+     models the frame as `SystemFrame.thinkingTokens`, but `Overlay` has no field for the estimate
+     and `WireReducer.route(_ system:)` sends the frame to its `default:` arm, where it becomes an
+     opaque item — an "unrecognized event" row for every one of the nine `nested-depth-2` carries.
+     §8.3 wants the estimate live under a thinking disclosure while a message streams. It is a
+     scalar with a lifetime shorter than an item's and §7.3's differential invariant is about items,
+     so it is not obviously an item; `Overlay` already holds non-item state (`queue`, `banners`,
+     `sessionState`) and is the natural home. Found at C6.1's grill. Closer: an
+     `Overlay.thinkingEstimate` set from the frame and cleared when the message settles, so the
+     renderer reads it where it reads everything else. Owner: C3, at its next corrective; until then
+     the disclosure has no number.
+
+128. **No fixture carries a `tool_use_summary` frame, so cluster labelling has no recorded
+     witness.** §8.3 labels a cluster from the engine's own `tool_use_summary`
+     (`summary`, `preceding_tool_use_ids`), falling back to counts and elapsed time. Across all
+     twenty committed fixtures the frame appears zero times, and
+     `FleetKit/Tests/FleetTimelineTests/Invariant/ProjectionEqualityTests.swift` asserts that as an
+     invariant with a comment telling whoever adds one to *read* it rather than construct one.
+     `WireReducerTests` constructs one by hand for the same reason. So the labelled arm of every
+     cluster test — C6.1's G2 included — injects a frame it invented, and the fallback arm is the
+     only one any recording exercises. Found at C6.1's grill. Closer: C1 records a scenario whose
+     turn produces consecutive tool calls the engine summarises, at the next fixture re-pin; the
+     tests then read it. Owner: C1 for the recording, C6.1 for adopting it.
