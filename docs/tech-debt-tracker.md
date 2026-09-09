@@ -1959,3 +1959,17 @@ Reserved range 247–261.
      permits a second main window at all is C5's design question**, not the Browser panel's: the
      answer decides between extending the identity and disabling the command, and a leaf must not
      pick. Owner: C5. Filed 2026-09-09 at the R5 fix wave (wave D).
+
+252. **A quit that is abandoned after the panel drain leaves the Browser silently not persisting.**
+     Wave E's `BrowserModel.closeForQuit()` sets a one-way barrier and then drains, which is what
+     makes the drain the last word (D62). The barrier is never cleared, so if anything were to stop
+     the termination *after* `QuitGuard` reached the drain, the Browser panel would keep working —
+     tabs open, pages load — and quietly write nothing, with no row saying so. Unreachable today:
+     `QuitGuard.quit()` takes every decision that can decline before it drains, and returns `true`
+     unconditionally afterwards, so nothing in this tree abandons a quit past that point. It becomes
+     reachable the moment a second termination guard, an `applicationShouldTerminate` that can
+     answer `.terminateCancel` later, or a "quit was interrupted" path is added. Closers, in
+     ascending cost: clear the barrier if the quit is abandoned (one call, and the caller has to
+     know); or make the closed state visible as a panel-local row, which is the honest version and
+     is §10's shape. Owner: whoever adds a path that can abandon a quit after the drain — C5's
+     lifecycle, most likely. Filed 2026-09-09 at the R5 fix wave (wave E).
