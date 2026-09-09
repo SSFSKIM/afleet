@@ -1993,9 +1993,12 @@ is renumbered.
      action in it. Found by C7.5's second merge round. Closer: a `dirty` event carrying the text, or
      a periodic stash while a buffer is dirty. Owner: C7.5's follow-up.
 
-243. **Cmd+S resolves the main window's channel, not the focused one.** `AppModel.filesSaveTarget`
-     reads `PanelHostModel.selectedChannel` and `selected`, which describe the main window;
-     `PoppedOutPanelScene` keeps its own channel and does not update them. With a Files pop-out
+243. **Cmd+S resolves the main window's channel, not the focused one.** *Closed at C7.5's fix
+     wave D: the pop-out scene publishes its identity as a focused scene value, and the Save item
+     resolves both its target and its enablement against the key window through it.*
+     `AppModel.filesSaveTarget` read `PanelHostModel.selectedChannel` and `selected`, which
+     describe the main window; `PoppedOutPanelScene` keeps its own channel and does not update
+     them. With a Files pop-out
      focused, the menu item's enabled state and its action both speak about the main window's
      channel. The pop-out's own *Save* button is unaffected. Found by C7.5's second merge round.
      Closer: the host tracking which scene is key, which is C5's fence. Owner: C5.
@@ -2079,3 +2082,22 @@ is renumbered.
      for `refresh(_:)` or `children(of:)` would silently enumerate a second time or refresh
      nothing. Closer: normalise on the way into `loaded`. Owner: whichever leaf next adds a caller
      that names a directory rather than walking to it. Found by C7.5's fix wave B.
+
+361. **The whole-path symlink question answers "no" for the system's own `/var` and `/tmp`
+     aliases.** `FileWatch` decides whether to keep the poll armed by asking whether resolving the
+     path changes it, and `resolvingSymlinksInPath` normalises those two prefixes away — so a file
+     whose *only* symlinked ancestor is one of them is left to the vnode source alone. Nobody
+     retargets `/var`, and the alternative (an `lstat(2)` per component) puts a stat loop under
+     every watch on a file in the temporary directory, which is where every test tree and a fair
+     number of scratch files live. Closer: ask per component and exempt the aliases by name, if a
+     case ever appears that needs it. Owner: C7.5's follow-up. Found by C7.5's fix wave D.
+
+362. **The channel a `.newWindow` delivery lands in is carried by one slot, so two such links in
+     flight at once can cross.** `PanelHostModel.lastPopOut` records the pop-out the router just
+     prepared and the Files tab resolves its channel from it, which is what stops a delivery from
+     following a window that has moved on. Two `.newWindow` opens overlapping — two Cmd-clicks
+     before the first delivery lands — leave the second's pop-out in that slot for both, and the
+     first file opens in the second's channel. The real closer is entry 240's X7 amendment: the
+     capability carrying the originating `ChannelKey` makes the delivery name its own channel and
+     the slot disappear. Owner: X7's amendment, whichever leaf opens it. Found by C7.5's fix wave D.
+

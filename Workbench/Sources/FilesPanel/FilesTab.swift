@@ -6,8 +6,8 @@ import AfleetCore
 import LinkRouting
 import PanelHostAPI
 
-/// What the tab asks the app for when a link is delivered: the Files session for the channel the
-/// window is showing **now**, and the selection that brings the panel forward.
+/// What the tab asks the app for when a link is delivered: the Files session the delivery belongs
+/// in, and the selection that brings the panel forward.
 ///
 /// It exists because X7 hands a tab a `ChannelContext` and no host, and both questions are the
 /// host's to answer: which channel the window is on, and which session belongs to it. Resolving
@@ -18,9 +18,17 @@ import PanelHostAPI
 /// handler may carry it; a main-actor class satisfies both.
 @MainActor
 public protocol FilesTabHost: AnyObject, Sendable {
-    /// The Files session for the channel the window is showing, built if this is its first visit.
-    /// Nil when the window is on no channel at all.
-    func filesSession() -> FilesPanelSession?
+    /// The Files session the delivery belongs in, built if this is that channel's first visit.
+    /// Nil when there is no such channel — the window is on none, or the window this delivery was
+    /// prepared for is gone.
+    ///
+    /// **The destination is what names the channel**, which is why it is asked rather than
+    /// assumed. `.currentPanel` belongs to the channel the window is showing; `.newWindow` belongs
+    /// to the channel the host popped the tab out **for**, captured when the action was taken.
+    /// Routing suspends twice between that pop-out and this call and the main actor is free
+    /// throughout, so a resolution that re-read the current channel would open the file in one
+    /// channel while the window it opened renders another.
+    func filesSession(for destination: LinkDestination) -> FilesPanelSession?
     /// Brings the Files tab forward in the main panel.
     func selectFilesTab()
 }
@@ -110,8 +118,11 @@ public final class FilesTab: PanelTab {
     /// column is drawing, so switching channels while another tab is selected renders no Files
     /// view at all and a pop-out renders one for its own channel: an anchor bound in `makeView`
     /// therefore names whichever channel was drawn last, which is not the channel a
-    /// `.currentPanel` link belongs to. Asking the host is what removes the coupling. The anchor
-    /// stays as the answer for a tab built with no host.
+    /// `.currentPanel` link belongs to. Asking the host is what removes the coupling, and the
+    /// **destination goes with the question**, because a `.newWindow` delivery belongs to the
+    /// channel its window was popped out for and not to the one the window has moved on to. The
+    /// anchor stays as the answer for a tab built with no host, and for no other case: a host that
+    /// answers nothing means nothing is opened.
     ///
     /// Both anchors are weak, for the reason the session anchor always was:
     /// `LinkRouterCapability` has no per-registration withdrawal, so a released session — or a
@@ -122,12 +133,25 @@ public final class FilesTab: PanelTab {
         let host = hosted
         let handler: @MainActor @Sendable (WorkspaceLink, LinkDestination) async -> Void = {
             link, destination in
-            // The destination decides one thing and one thing only: whether the main panel's
-            // selection moves. `.newWindow` has already had the tab popped out by the host before
-            // this runs and draws this same session, because the host retains one per
-            // (tab, channel) — so the *open* is the same either way, and moving the main window's
-            // selection for a link that asked for a window of its own would be wrong (§9).
-            guard let session = host.host()?.filesSession() ?? anchor.session() else { return }
+            // The destination decides two things: **which channel** this delivery belongs to,
+            // which is the host's answer below, and whether the main panel's selection moves.
+            // `.newWindow` has already had the tab popped out by the host before this runs, and
+            // that window draws the very session resolved here, because the host retains one per
+            // (tab, channel) — so the *open* is the same work either way, and moving the main
+            // window's selection for a link that asked for a window of its own would be wrong (§9).
+            // **With a host, the host's answer is the whole answer.** Nil means this delivery
+            // has no channel to land in, and the session the render path drew last is a
+            // *different* channel's — a pop-out's, or whichever channel Files was drawn for last —
+            // so falling back to it would open the file somewhere the link never named and write
+            // it there on the next save. The anchor answers only for a tab built with no host,
+            // which is what a package test has.
+            let resolved: FilesPanelSession?
+            if let live = host.host() {
+                resolved = live.filesSession(for: destination)
+            } else {
+                resolved = anchor.session()
+            }
+            guard let session = resolved else { return }
             if destination == .currentPanel { host.host()?.selectFilesTab() }
             await session.open(link, from: destination)
         }
