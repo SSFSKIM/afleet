@@ -640,7 +640,10 @@ public final class BrowserModel {
         linkError = nil
     }
 
-    private func report(_ reason: NavigationPolicy.Reason) {
+    /// One refusal, as the row the user is owed — or as nothing, for the refusals a page produced
+    /// and the user never asked about. Reached from the navigation delegate and from
+    /// `BrowserLinkTargets`, which decides a routed URL by the same policy.
+    func report(_ reason: NavigationPolicy.Reason) {
         guard !reason.isDiagnosticOnly else { return }
         notice = Self.copy(for: reason)
     }

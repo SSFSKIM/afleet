@@ -463,6 +463,69 @@ final class BrowserLinkTargetsTests: XCTestCase {
     /// A deadline every wait in this file carries.
     private static let deadline: TimeInterval = 20
 
+    // MARK: - A routed URL is untrusted content (scalpel-2#1)
+
+    /// **A `.url` arriving from a message is page content, not a native action** — so it is
+    /// decided by the one `NavigationPolicy`, as a link, before either destination acts on it.
+    ///
+    /// `WorkspaceLink.url` carries whatever the message contained; nothing between a timeline row
+    /// and this target validates a scheme. Routed unchecked, `.currentPanel` reached
+    /// `navigate(to:)` with the URL bar's authority behind it and `.newWindow` called the system
+    /// opener directly — so a `javascript:` URL in a message was a self-XSS in the page the user
+    /// was reading, and a `file:` one was `NSWorkspace` opening the user's disk on a link nobody
+    /// vetted.
+    func testAJavaScriptURLRoutedToTheCurrentPanelIsRefusedAndSaysSo() async {
+        let rig = await makeRouter(channel: Values.channel())
+
+        await rig.router.open(Values.executableLink, from: .currentPanel)
+
+        XCTAssertTrue(rig.model.tabs.isEmpty, "the panel opened \(rig.model.tabs.count) tabs for a javascript: link")
+        XCTAssertEqual(rig.opened.urls, [], "a javascript: link reached the system opener")
+        XCTAssertEqual(rig.fallback.urls, [], "W5's fallback fired for a link the Browser claimed")
+        XCTAssertNotNil(rig.model.notice, "the panel refused a javascript: link without a word")
+    }
+
+    /// The same URL at `.newWindow`, which is the case the direct `openExternally` made worst:
+    /// handing `javascript:` to `NSWorkspace` is not safety, only somebody else's problem (D29).
+    func testAJavaScriptURLRoutedToANewWindowNeverReachesTheSystemOpener() async {
+        let rig = await makeRouter(channel: Values.channel())
+
+        await rig.router.open(Values.executableLink, from: .newWindow)
+
+        XCTAssertEqual(rig.opened.urls, [], "the system opener received \(rig.opened.urls)")
+        XCTAssertTrue(rig.model.tabs.isEmpty, "the panel opened \(rig.model.tabs.count) tabs instead")
+        XCTAssertEqual(rig.fallback.urls, [], "W5's fallback fired for a link the Browser claimed")
+        XCTAssertNotNil(rig.model.notice, "the panel refused a javascript: link without a word")
+    }
+
+    /// A `file:` link takes the policy's answer — refused, because reading the user's disk is the
+    /// Files tab's job — rather than the direct hand-off to the system opener.
+    func testAFileURLRoutedToANewWindowIsRefusedRatherThanOpened() async {
+        let rig = await makeRouter(channel: Values.channel())
+
+        await rig.router.open(Values.localFileLink, from: .newWindow)
+
+        XCTAssertEqual(rig.opened.urls, [], "the system opener received \(rig.opened.urls)")
+        XCTAssertTrue(rig.model.tabs.isEmpty, "the panel opened \(rig.model.tabs.count) tabs for a file: link")
+        XCTAssertNotNil(rig.model.notice, "the panel refused a file: link without a word")
+    }
+
+    /// The control the three above need: a web page still opens at both destinations, so a target
+    /// that refused everything could not pass this file.
+    func testAWebPageStillOpensAtBothDestinations() async {
+        let panel = await makeRouter(channel: Values.channel())
+        let window = await makeRouter(channel: Values.channel())
+
+        await panel.router.open(Values.pageLink, from: .currentPanel)
+        await window.router.open(Values.pageLink, from: .newWindow)
+
+        guard case .url(let expected) = Values.pageLink else { return XCTFail("the fixture is not a .url") }
+        XCTAssertEqual(panel.model.selected?.url, expected,
+                       "the panel is on \(String(describing: panel.model.selected?.url))")
+        XCTAssertNil(panel.model.notice, "an accepted page left a refusal row behind")
+        XCTAssertEqual(window.opened.urls, [expected], "the system opener received \(window.opened.urls)")
+    }
+
     // MARK: - Values
 
 }
@@ -474,6 +537,11 @@ enum Values {
     static let pullRequestNumber = 7
     static let pullRequestPage = URL(string: "https://example.invalid/o/r/pull/7")!
     static let pageLink = WorkspaceLink.url(URL(string: "https://example.invalid/page-1")!)
+
+    /// A routed link carrying a scheme no panel may render and no opener may be handed: what a
+    /// message can contain, and what the policy exists to refuse.
+    static let executableLink = WorkspaceLink.url(URL(string: "javascript:void(0)")!)
+    static let localFileLink = WorkspaceLink.url(URL(fileURLWithPath: "/invented/workspace/a/page.html"))
     static let repositoryRoot = "/invented/workspace/a"
 
     /// The one `gh` document this file decodes: the single field `--json url` asks for, with an

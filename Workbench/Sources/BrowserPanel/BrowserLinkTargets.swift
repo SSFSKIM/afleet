@@ -81,6 +81,20 @@ public enum BrowserLinkTargets {
 
     /// The one place a resolved page is acted on, so both targets answer a destination the same
     /// way and a later edit cannot make them differ.
+    ///
+    /// **A routed URL is untrusted content, and it is decided as a link.** `WorkspaceLink.url`
+    /// carries whatever the message it came from contained, and nothing between a timeline row and
+    /// this function checks a scheme — `ComposerModel.open(url:)` parses and no more. So the URL
+    /// goes through the one `NavigationPolicy` with `origin: .pageContent`, which is what it is:
+    /// `javascript:` and `data:` are refused before any other branch reads them, `file:` and every
+    /// other scheme the panel cannot render are refused rather than handed to `NSWorkspace`, and
+    /// the destination decides only what an *allowed* URL does. Forwarding unchecked gave a routed
+    /// link the URL bar's authority — the one native action page content is not supposed to reach
+    /// (D38) — on the panel side, and a direct `NSWorkspace` call on the pop-out side.
+    ///
+    /// `.newWindow` is read as the Cmd-click it is: the same policy, with `.command` held, which
+    /// answers `.openExternally` for exactly the URLs the panel would have been willing to render
+    /// itself and refuses the rest. So the pop-out opens externally only what the policy would.
     @MainActor
     /// `supersededSince` is the navigation generation the request was made at, for a request that
     /// had to wait for an answer before it could act; `nil` for one that did not wait at all.
@@ -88,17 +102,32 @@ public enum BrowserLinkTargets {
                                 selectBrowserTab: TabRequest,
                                 openExternally: BrowserWebTab.ExternalOpener,
                                 supersededSince generation: Int? = nil) async {
-        switch destination {
-        case .currentPanel:
+        let request = NavigationRequest(url: url,
+                                        navigationType: .linkActivated,
+                                        modifierFlags: destination == .newWindow ? [.command] : [],
+                                        hasTargetFrame: true,
+                                        origin: .pageContent)
+        switch NavigationPolicy.decide(request) {
+        case .allow:
             selectBrowserTab()
             // Behind the restoration, always: a link can arrive before the panel has ever been
             // drawn, and a tab opened in front of an unfinished read is a tab that read discards
             // (A1). `openRouted` is idempotent once the restore has run.
             await model.openRouted(url, in: .currentTab, supersededSince: generation)
-        case .newWindow:
+        case .openExternally(let target):
             // Nothing about the panel changes: the page is going somewhere else, and a tab opened
             // here as well would leave the user with the same page twice.
-            openExternally(url)
+            openExternally(target)
+        case .newPanelTab(let target):
+            selectBrowserTab()
+            await model.openRouted(target, in: .newTab, supersededSince: generation)
+        case .refuse(let reason):
+            // The row is the panel's, so a link that was going there anyway shows the panel; a
+            // Cmd-click that was refused does not seize the panel the user is reading. `report`
+            // is silent for the refusals the user never asked for, which is the same rule the
+            // navigation delegate takes.
+            if destination == .currentPanel { selectBrowserTab() }
+            model.report(reason)
         }
     }
 }
