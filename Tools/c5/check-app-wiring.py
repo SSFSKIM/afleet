@@ -68,6 +68,15 @@ ALLOWLIST: dict[str, str] = {
                "`ui:` the composer hands itself in as, so its caller is outside App/ by construction "
                "\u2014 the same category the FRAMEWORK set covers for SwiftUI, for a protocol this "
                "check does not know about",
+    # Requirements of a Workbench protocol, called by Workbench and never by App/.
+    "sourceControlSession": "a `SourceControlTabHost` requirement (Workbench/SourceControlPanel). "
+                            "`AppModel.init` registers the tab with itself as the host, and the "
+                            "one caller is the `.commit` target's handler inside "
+                            "`SourceControlTab.linkTargets()` \u2014 outside App/ by construction, "
+                            "which is what X7 handing a panel a capability and never the host "
+                            "means. Its Files twin escapes this check only because no test names "
+                            "it; this one is named because C7.7's G3 asserts the per-destination "
+                            "answer directly",
     # Probes that exist for the suite and say so where they are declared.
     "pump": "a test-only probe on ActivityModel, named as one where it is declared",
     "settle": "a test-only probe on NotificationRouter, named as one where it is declared",

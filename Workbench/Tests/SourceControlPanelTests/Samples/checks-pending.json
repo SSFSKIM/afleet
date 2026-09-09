@@ -1,0 +1,24 @@
+[
+  {
+    "bucket": "pass",
+    "completedAt": "2026-05-12T16:38:02Z",
+    "description": "",
+    "event": "pull_request",
+    "link": "https://github.com/nimbus-atelier/parchment-loom/actions/runs/8802/job/9421",
+    "name": "build (macos-26)",
+    "startedAt": "2026-05-12T16:30:11Z",
+    "state": "SUCCESS",
+    "workflow": "Workbench"
+  },
+  {
+    "bucket": "pending",
+    "completedAt": "0001-01-01T00:00:00Z",
+    "description": "",
+    "event": "pull_request",
+    "link": "",
+    "name": "integration (samples)",
+    "startedAt": "2026-05-12T16:40:00Z",
+    "state": "IN_PROGRESS",
+    "workflow": "Workbench"
+  }
+]

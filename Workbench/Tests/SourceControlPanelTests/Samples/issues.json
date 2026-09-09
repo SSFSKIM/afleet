@@ -1,0 +1,52 @@
+[
+  {
+    "assignees": [
+      {
+        "id": "MDQ6VXNlcjEwMDAwMDAy",
+        "is_bot": false,
+        "login": "dune-pellwick",
+        "name": "Dune Pellwick"
+      }
+    ],
+    "author": {
+      "id": "MDQ6VXNlcjEwMDAwMDAx",
+      "is_bot": false,
+      "login": "fennel-varro",
+      "name": "Fennel Varro"
+    },
+    "labels": [
+      {
+        "id": "LA_kwDOinvented0013",
+        "name": "bug",
+        "description": "Something behaves wrongly",
+        "color": "d73a4a"
+      },
+      {
+        "id": "LA_kwDOinvented0011",
+        "name": "panel",
+        "description": "Touches a workbench panel",
+        "color": "1d76db"
+      }
+    ],
+    "number": 312,
+    "state": "OPEN",
+    "title": "The rollup badge shows passing before the checks are read",
+    "updatedAt": "2026-05-13T07:19:44Z",
+    "url": "https://github.com/nimbus-atelier/parchment-loom/issues/312"
+  },
+  {
+    "assignees": [],
+    "author": {
+      "id": "MDQ6VXNlcjEwMDAwMDAz",
+      "is_bot": true,
+      "login": "loom-upkeep-bot",
+      "name": ""
+    },
+    "labels": [],
+    "number": 305,
+    "state": "OPEN",
+    "title": "Document the five-valued rollup in the panel help",
+    "updatedAt": "2026-05-08T22:03:10Z",
+    "url": "https://github.com/nimbus-atelier/parchment-loom/issues/305"
+  }
+]

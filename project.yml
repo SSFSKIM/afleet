@@ -121,3 +121,4 @@ schemes:
         - package: Workbench/TerminalPanelTests
         - package: Workbench/FilesPanelTests
         - package: Workbench/BrowserPanelTests
+        - package: Workbench/SourceControlPanelTests
