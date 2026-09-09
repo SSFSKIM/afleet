@@ -35,15 +35,10 @@ struct TimelineListView: View {
     /// the refusal comes back long after the row value that pressed the button was discarded.
     @State private var editing = TimelineEditState()
 
-    /// What a settled refusal dialog took back (spec D11). Channel-scoped and held here because it
-    /// outlives the card that wrote into it: the dialog is answered, the row is discarded, and the
-    /// messages it retracted must stay off the screen for every draw after that.
-    @State private var retraction = RetractionRegistry()
-
     var body: some View {
         // No change set: the model republishes the whole timeline and states no diff, so the table
         // computes one by key. When the model does start naming its changes the table prefers them.
-        renderer.view(for: TimelineRenderInput(rows: Self.retained(model.rows, by: retraction),
+        renderer.view(for: TimelineRenderInput(rows: Self.retained(model.rows, by: model.retraction),
                                                preview: model.timeline.preview))
             .environment(\.timelineContext, app.map(context(in:)))
     }
@@ -70,7 +65,8 @@ struct TimelineListView: View {
     /// view performs is a function a test can call and exercise — a capability wired to nothing
     /// passes any assertion that only reads the value back.
     func context(in app: AppModel) -> TimelineRenderContext {
-        TimelineRenderContext(key: model.key,
+        let row = app.browser?.row(model.key.session)
+        return TimelineRenderContext(key: model.key,
                               links: app.panels.links,
                               signal: { [model] signal in await model.signal(signal) },
                               // The app's one set, and never one made here: every surface that can
@@ -78,15 +74,26 @@ struct TimelineListView: View {
                               // second of two answers refuse instead of reaching the wire (Y7, §15).
                               decisions: app.decisions,
                               lifecycle: app.timelines.lifecycle,
-                              retraction: retraction,
-                              cwd: app.browser?.row(model.key.session)?.cwd,
+                              // The listing policy's own answer, and the same gate the composer
+                              // below asks: a row afleet may show and may not act on offers the
+                              // rows' readings and none of their actions (tracker 74).
+                              isOwned: row?.offersOwnedActions == true,
+                              // The channel's, and the model's own so it survives a channel switch:
+                              // the model is what the registry retains, and a registry rebuilt with
+                              // the view would draw every retracted message again for ever (D11).
+                              retraction: model.retraction,
+                              cwd: row?.cwd,
                               agents: app.agentNavigation,
                               collapse: collapse,
                               composer: composerSite(in: app),
                               editing: editing,
                               neighbourhood: TimelineNeighbourhood(items: model.timeline.items,
                                                                    agents: model.timeline.agents),
-                              isOverlayStale: model.timeline.overlay.stale)
+                              isOverlayStale: model.timeline.overlay.stale,
+                              // Parity §41.8 and §41.17's two rendering preferences, as the
+                              // channel's own `get_settings` readback answered them.
+                              autoScrollEnabled: model.readout.autoScrollEnabled,
+                              syntaxHighlightingEnabled: model.readout.syntaxHighlightingEnabled)
     }
 
     /// Contract Y6's route from a row to the channel's composer: the app's one `ComposerRegistry`,

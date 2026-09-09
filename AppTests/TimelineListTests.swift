@@ -250,6 +250,54 @@ final class TimelineListTests: XCTestCase {
                        "the fold raised a banner of a kind a refused relocation does not produce")
     }
 
+    // MARK: - The mutating capability, gated on the channel (round 1, scalpel-3 #2)
+
+    /// **A task card's *Stop* is offered only on a channel afleet owns.**
+    ///
+    /// A `taskRun` item is read out of the transcript, so a colleague's session — which C5 lists
+    /// read-only, and which afleet may show and may not act on — draws the same running task the
+    /// owner's does. The context supplied the workspace lifecycle to every channel and the card
+    /// offered *Stop* on the item's status alone, so the button was there, it went to
+    /// `stop_task`, and X5 refused it as `notOwned`: an action that looks available, does nothing,
+    /// and says so only after it has been pressed.
+    ///
+    /// Both arms over one launch, so the gate is about the listing policy and not about task cards
+    /// having stopped being built: the owned row's card offers *Stop* and the read-only row gets no
+    /// card at all. The premises are booleans; no assertion prints a row (§11).
+    func testStopIsOfferedOnlyOnAnOwnedChannel() async throws {
+        let rig = try Self.makeRig(sessions: [LaunchFixtures.sessionA, LaunchFixtures.sessionB],
+                                   teammates: [LaunchFixtures.sessionB])
+        let (app, _) = try await Self.makeColumn(rig)
+        let owned = try XCTUnwrap(app.browser?.row(LaunchFixtures.sessionA),
+                                  "the launch painted no owned row")
+        let teammate = try XCTUnwrap(app.browser?.row(LaunchFixtures.sessionB),
+                                     "the launch painted no read-only row")
+        XCTAssertTrue(owned.offersOwnedActions, "the first row is not an owned candidate, so the floor proves nothing")
+        XCTAssertFalse(teammate.offersOwnedActions,
+                       "the second row is not read-only, so this proves nothing about an unowned channel")
+
+        let mine = TimelineListView(model: app.timelines.model(for: owned.key)).context(in: app)
+        let card = try XCTUnwrap(mine.makeTaskCard(Self.runningTask(in: owned.key)),
+                                 "an owned channel's running task was given no card at all")
+        XCTAssertTrue(card.offersStop, "an owned channel's running task offers no Stop")
+
+        let theirs = TimelineListView(model: app.timelines.model(for: teammate.key)).context(in: app)
+        XCTAssertNil(theirs.makeTaskCard(Self.runningTask(in: teammate.key)),
+                     "a read-only channel's running task was given a card, whose Stop reaches a refusal")
+    }
+
+    /// A running task on one channel, invented throughout (§11).
+    private static func runningTask(in key: ChannelKey) -> TaskRunItem {
+        let stream = LogicalStream(configHome: key.configHome, sessionID: key.session, name: .main)
+        return TaskRunItem(id: ItemID(stream: stream, key: "task-invented-1"),
+                           timestamp: Date(timeIntervalSince1970: 1_800_000_000),
+                           provenance: Provenance(stream: stream, origin: .file),
+                           taskID: "task_invented0001",
+                           kind: .localAgent,
+                           description: "an invented errand",
+                           status: .running)
+    }
+
     /// What a registered link target saw. A class so the closure the router stores and the assertion
     /// below it read one count.
     @MainActor
@@ -341,18 +389,25 @@ final class TimelineListTests: XCTestCase {
         let sequence: LaunchSequence
     }
 
-    /// A launch that reaches a workspace with one listed channel. Everything is invented and every
+    /// A launch that reaches a workspace with the listed channels. Everything is invented and every
     /// path is under the process's temporary directory (X9).
-    private static func makeRig() throws -> Rig {
+    ///
+    /// `teammates` are the sessions C5's listing policy lists **read-only** — a colleague's
+    /// transcript, which afleet may show and may not act on.
+    private static func makeRig(sessions: [SessionID] = [LaunchFixtures.sessionA],
+                                teammates: Set<SessionID> = []) throws -> Rig {
         let temp = try TempTree()
         let configHome = try temp.directory("home")
         // The slug matches `LaunchFixtures.snapshot`'s entry path, so the index the launch is
         // given names the transcript that is actually on disk and the channel opens with items.
-        try LaunchFixtures.transcript(in: configHome, slug: "invented", session: LaunchFixtures.sessionA)
+        for session in sessions {
+            try LaunchFixtures.transcript(in: configHome, slug: "invented", session: session)
+        }
         let index = StubIndex(persisted: nil,
                               built: LaunchFixtures.snapshot(configHome: configHome,
-                                                             ids: [LaunchFixtures.sessionA]),
-                              delta: IndexDelta(added: [LaunchFixtures.sessionA]))
+                                                             ids: sessions,
+                                                             teammates: teammates),
+                              delta: IndexDelta(added: sessions))
         let binary = try temp.file("bin/claude", "#!/bin/sh\nexit 0\n")
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
 

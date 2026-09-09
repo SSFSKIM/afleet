@@ -113,6 +113,141 @@ final class HeaderReadoutTests: XCTestCase {
         rig.model.close()
     }
 
+    // MARK: - The subscription comes first (round 1, scalpel-5 #1)
+
+    /// **The header subscribes before it takes its opening readback**, so a mode reported while that
+    /// readback is in flight is not lost.
+    ///
+    /// `events(of:)` registers a future-only fan-out — the fleet's own contract, and the reason
+    /// `engineReports(of:)` exists at all. The opening `get_settings` is a round trip to a process
+    /// that may be mid-turn, and every frame the engine sends in that window goes to whoever is
+    /// listening at the time. Subscribing after it therefore drops them, and the one frame that
+    /// matters here is the only carrier of a mode change: the header would then show the launch mode
+    /// until the next one arrives, which on a quiet channel is never.
+    ///
+    /// The readback is **parked on the wire** rather than merely slow, which is what makes the
+    /// window a place and not a race. Discriminating twice over: the subscription is asserted to
+    /// exist while the readback is still in flight, and the mode reported in that window is asserted
+    /// to arrive.
+    func testTheSubscriptionIsTakenBeforeTheOpeningReadback() async throws {
+        let rig = try await Rig()
+        let double = rig.double
+        let key = rig.key
+        await double.stageSend("get_settings", .success(try Self.answer("control-shapes", to: "get_settings")))
+        await double.stageEngineReport(handshake: try Self.handshake("exit-plan-mode"), systemInitFrom: nil)
+        await double.holdSend()
+
+        rig.model.startReadbacks()
+        let attached = await LaunchFixtures.waitAsync(upTo: .seconds(5)) {
+            await double.memberSequence.contains("events")
+        }
+        XCTAssertTrue(attached, "the header had not subscribed while its opening readback was still in flight")
+
+        // The frame the engine sends inside that window.
+        let statuses = try Self.modeStatuses("exit-plan-mode")
+        XCTAssertEqual(statuses.count, 1,
+                       "the recording carries \(statuses.count) status frame(s) reporting a mode, not the 1 this replays")
+        for status in statuses { double.enqueue(status, to: key) }
+        await double.releaseSend()
+
+        let moved = await LaunchFixtures.waitAsync(upTo: .seconds(5)) { @MainActor in
+            rig.model.readout.mode == .acceptEdits
+        }
+        XCTAssertTrue(moved, "the mode reported while the opening readback was in flight never reached the readout")
+
+        let members = await double.memberSequence
+        let subscribed = try XCTUnwrap(members.firstIndex(of: "events"), "the header never subscribed at all")
+        let asked = try XCTUnwrap(members.firstIndex(of: "send"), "the header never took a readback at all")
+        XCTAssertLessThan(subscribed, asked, "the header asked the engine before it subscribed")
+
+        rig.model.close()
+    }
+
+    // MARK: - A restart replaces the process (round 1, scalpel-5 #2)
+
+    /// **A new process resets the mode's precedence**, so the replacement's handshake is read.
+    ///
+    /// A live `system/status` mode outranks the retained handshake for the life of *that* process,
+    /// which is the correction Task 8 made. A restart replaces the process while the channel model,
+    /// its readout and its subscription all survive: the fleet mints a fresh handshake, the old
+    /// live mode belongs to a process that no longer exists, and a precedence that never reset
+    /// rejected the new handshake for ever. The header then shows a mode nothing is running.
+    ///
+    /// Discriminating: against a latched precedence the readout keeps the first process's mode and
+    /// the last assertion fails. The floor is the middle assertion — the live mode really did
+    /// outrank the handshake first, so this is a reset and not a header that never followed a frame.
+    func testARestartResetsTheModePrecedence() async throws {
+        let rig = try await Rig()
+        let double = rig.double
+        let key = rig.key
+        await double.stageSend("get_settings", .success(try Self.answer("control-shapes", to: "get_settings")))
+        await double.stageEngineReport(handshake: try Self.handshake("exit-plan-mode"), systemInitFrom: nil)
+
+        rig.model.startReadbacks()
+        let attached = await LaunchFixtures.waitAsync { await double.memberSequence.contains("events") }
+        XCTAssertTrue(attached, "the header never subscribed, so no frame could reach it")
+        let opened = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .plan }
+        XCTAssertTrue(opened, "the first process's handshake never reached the readout")
+
+        for status in try Self.modeStatuses("exit-plan-mode") { double.enqueue(status, to: key) }
+        let moved = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .acceptEdits }
+        XCTAssertTrue(moved, "the readout did not follow the first process's status frame")
+
+        // The restart: a second epoch, and the handshake the fleet retains for it.
+        let second = ProcessEpoch.first.next()
+        await double.stageEngineReport(handshake: try Self.handshake("control-shapes"), systemInitFrom: nil)
+        double.enqueue(try Self.handshake("control-shapes", epoch: second), to: key)
+        let results = try Self.results("plain-two-turn", epoch: second)
+        XCTAssertGreaterThan(results.count, 0, "the fixture carried no result frame, so no readback is re-taken")
+        for result in results { double.enqueue(result, to: key) }
+
+        let followed = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .default }
+        XCTAssertTrue(followed,
+                      "the readout kept the mode a process that has been replaced reported, so the precedence never reset")
+
+        rig.model.close()
+    }
+
+    // MARK: - The rendering preferences (round 1, scalpel-4 #7)
+
+    /// **`get_settings`' two rendering preferences reach the render context.**
+    ///
+    /// Parity §41.8 and §41.17 name `autoScrollEnabled` and `syntaxHighlightingDisabled`, and this
+    /// leaf's own plan says both are read from the settings readback. The context declared them and
+    /// the readback dropped them, so the controller was handed `true` for both whatever the reader
+    /// had set — and `syntaxHighlightingDisabled` is an accessibility choice, not a debug switch.
+    ///
+    /// The answer is **invented rather than replayed**: the committed recordings' settings bodies
+    /// are redacted down to their keys because they are somebody's own preferences (§11), so what a
+    /// fixture could contribute here is the key spelling, which the parity map already states.
+    ///
+    /// Both arms: the defaults are what the engine's own renderer does, and the answer moves them.
+    func testTheRenderingPreferencesReachTheRenderContext() async throws {
+        let rig = try await Rig()
+        await rig.double.stageSend("get_settings",
+                                   .success(Self.settingsAnswer(autoScroll: false, highlightingDisabled: true)))
+        let app = AppModel(registry: RowRegistry())
+
+        let before = TimelineListView(model: rig.model).context(in: app)
+        XCTAssertTrue(before.autoScrollEnabled && before.syntaxHighlightingEnabled,
+                      "the preferences do not open as the engine's own defaults, so the change below proves nothing")
+
+        await rig.model.refreshReadbacks()
+        let after = TimelineListView(model: rig.model).context(in: app)
+        XCTAssertFalse(after.autoScrollEnabled, "the answer's auto-scroll preference never reached the render context")
+        XCTAssertFalse(after.syntaxHighlightingEnabled,
+                       "the answer's syntax-highlighting preference never reached the render context")
+    }
+
+    /// A `get_settings` body carrying the two preferences, invented throughout (§11). The shape is
+    /// the recorded one — `applied` for what the engine resolved, `effective` for the merged
+    /// settings files, which is where both preference keys live.
+    static func settingsAnswer(autoScroll: Bool, highlightingDisabled: Bool) -> JSONValue {
+        .object(["applied": .object(["model": .string("an-invented-model"), "effort": .null]),
+                 "effective": .object(["autoScrollEnabled": .bool(autoScroll),
+                                       "syntaxHighlightingDisabled": .bool(highlightingDisabled)])])
+    }
+
     // MARK: - The meter, polled because nothing pushes it
 
     /// One `get_context_usage` per `result` frame, plus the one the header takes when it opens, and
@@ -310,9 +445,9 @@ final class HeaderReadoutTests: XCTestCase {
 
     /// The channel's handshake, as the fleet retains it: the recorded `initialize` answer, wrapped
     /// the way `ClaudeProcess` wraps one.
-    static func handshake(_ fixture: String) throws -> WireEvent {
+    static func handshake(_ fixture: String, epoch: ProcessEpoch = .first) throws -> WireEvent {
         let raw = try answer(fixture, to: "initialize")
-        return .handshakeCompleted(Handshake(initialize: InitializeResponse(raw: raw), pending: []), .first)
+        return .handshakeCompleted(Handshake(initialize: InitializeResponse(raw: raw), pending: []), epoch)
     }
 
     /// The fixture's `system/status` frames that **report a permission mode**, as events.
@@ -328,9 +463,9 @@ final class HeaderReadoutTests: XCTestCase {
     }
 
     /// The fixture's `result` frames, as the events a channel's consumers see.
-    static func results(_ fixture: String) throws -> [WireEvent] {
+    static func results(_ fixture: String, epoch: ProcessEpoch = .first) throws -> [WireEvent] {
         try FixtureRunner.frames(fixture).compactMap { frame in
-            if case .result = frame { return .frame(frame, .first) }
+            if case .result = frame { return .frame(frame, epoch) }
             return nil
         }
     }
