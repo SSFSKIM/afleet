@@ -386,6 +386,83 @@ final class BrowserLinkTargetsTests: XCTestCase {
         XCTAssertNil(rig.model.linkError, "the error row survived a navigation the panel accepted")
     }
 
+    /// **A resolution that finished late does not navigate a tab the user has since aimed** (E1).
+    ///
+    /// `gh` is a process, so `.currentTab` is answered at a moment the click did not choose: a tab
+    /// selected — or a URL submitted — while the lookup was running becomes "the current tab", and
+    /// the older request navigated it and persisted the replacement. The click is still honoured,
+    /// in a tab of its own, because a page the user asked for is not something to discard and the
+    /// tab they aimed elsewhere is not something to take.
+    func testAPullRequestThatResolvesAfterTheUserSelectedAnotherTabDoesNotTakeIt() async throws {
+        let backing = InMemoryScopedStore()
+        let first = URL(string: "https://saved-one.example.invalid/")!
+        let second = URL(string: "https://saved-two.example.invalid/")!
+        try await backing.write(BrowserTabSetDocument(tabs: [PersistedTab(url: first, title: "One"),
+                                                             PersistedTab(url: second, title: "Two")],
+                                                      selectedIndex: 0),
+                                key: BrowserTabStore.storeKey)
+        let gate = ToolGate()
+        let runner = StubToolRunner(waitBeforeAnswering: { tool in
+            // Only `gh` waits: the repository root is local and answers at once, as it does in
+            // production. Holding both would prove nothing the second does not.
+            if tool == .gh { await gate.enter() }
+        }, respond: { tool, _ in
+            tool == .git ? StubToolRunner.printed(Values.repositoryRoot + "\n")
+                         : StubToolRunner.printed(Values.pullRequestDocument)
+        })
+        let rig = await makeRouter(channel: Values.channel(), store: backing, runner: runner)
+        await rig.model.restore()
+        XCTAssertEqual(rig.model.selected?.url, first, "the precondition did not hold")
+
+        // The click, on the first tab...
+        let delivery = Task { await rig.router.open(.pullRequest(Values.pullRequestNumber),
+                                                    from: .currentPanel) }
+        let running = expectation(description: "gh is running")
+        gate.expectArrival(running)
+        await fulfillment(of: [running], timeout: Self.deadline)
+
+        // ...and while it runs, the user moves to the other tab.
+        let target = try XCTUnwrap(rig.model.tabs.last?.id)
+        rig.model.select(target)
+        await rig.model.persistenceSettled()
+
+        gate.open()
+        await delivery.value
+
+        XCTAssertEqual(rig.model.tabs[1].url, second,
+                       "a resolution that finished late navigated the tab the user had selected")
+        XCTAssertEqual(rig.model.tabs.map(\.url), [first, second, Values.pullRequestPage],
+                       "the panel is showing \(rig.model.tabs.map(\.url))")
+        XCTAssertEqual(rig.model.selected?.url, Values.pullRequestPage,
+                       "the page the user clicked is not the one on screen")
+        XCTAssertNil(rig.model.linkError, "a resolved pull request left an error row behind")
+    }
+
+    /// The control half: a resolution nothing overtook still opens in the tab it was clicked from.
+    ///
+    /// Without it, a target that simply always opened a new tab would pass the test above.
+    func testAPullRequestNothingOvertookStillOpensInTheCurrentTab() async throws {
+        let backing = InMemoryScopedStore()
+        let first = URL(string: "https://saved-one.example.invalid/")!
+        try await backing.write(BrowserTabSetDocument(tabs: [PersistedTab(url: first, title: "One")],
+                                                      selectedIndex: 0),
+                                key: BrowserTabStore.storeKey)
+        let runner = StubToolRunner { tool, _ in
+            tool == .git ? StubToolRunner.printed(Values.repositoryRoot + "\n")
+                         : StubToolRunner.printed(Values.pullRequestDocument)
+        }
+        let rig = await makeRouter(channel: Values.channel(), store: backing, runner: runner)
+        await rig.model.restore()
+
+        await rig.router.open(.pullRequest(Values.pullRequestNumber), from: .currentPanel)
+
+        XCTAssertEqual(rig.model.tabs.map(\.url), [Values.pullRequestPage],
+                       "the resolution opened a tab of its own with nothing to be superseded by")
+    }
+
+    /// A deadline every wait in this file carries.
+    private static let deadline: TimeInterval = 20
+
     // MARK: - Values
 
 }
@@ -419,6 +496,57 @@ final class URLSink: @unchecked Sendable {
     func opened(_ url: URL) { lock.lock(); stored.append(url); lock.unlock() }
 }
 
+/// A gate a stub tool suspends at until the test opens it.
+///
+/// A lock and continuations rather than an actor, because the seam it is handed to is a
+/// `@Sendable` closure a stub calls from wherever it happens to be, and because the arrival has to
+/// be observable from the test's own thread.
+final class ToolGate: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+    private var arrivals = 0
+    private var arrivalExpectations: [XCTestExpectation] = []
+
+    /// Fulfils `expectation` once a call has reached the gate.
+    func expectArrival(_ expectation: XCTestExpectation) {
+        lock.lock()
+        if arrivals > 0 {
+            lock.unlock()
+            expectation.fulfill()
+            return
+        }
+        arrivalExpectations.append(expectation)
+        lock.unlock()
+    }
+
+    /// Lets everything at the gate through, and leaves it open.
+    func open() {
+        lock.lock()
+        isOpen = true
+        let waiters = waiting
+        waiting.removeAll()
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// The seam to hand a stub runner.
+    func enter() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            arrivals += 1
+            let due = arrivalExpectations
+            arrivalExpectations.removeAll()
+            let passing = isOpen
+            if !passing { waiting.append(continuation) }
+            lock.unlock()
+            for waiter in due { waiter.fulfill() }
+            if passing { continuation.resume() }
+        }
+    }
+}
+
 /// A `ToolRunning` that answers from a closure and records what it was asked to run.
 ///
 /// It is what makes the whole `.pullRequest` route testable without `git`, without `gh`, without a
@@ -436,9 +564,15 @@ final class StubToolRunner: ToolRunning, @unchecked Sendable {
     private var stored: [Call] = []
     private let respond: @Sendable (Tool, [String]) throws -> ToolOutput
 
+    /// An optional pause before the answer. `gh` is a process and a resolution can take as long as
+    /// one, so a test that is about *what happens meanwhile* has to be able to hold it open.
+    private let waitBeforeAnswering: @Sendable (Tool) async -> Void
+
     var calls: [Call] { lock.lock(); defer { lock.unlock() }; return stored }
 
-    init(respond: @escaping @Sendable (Tool, [String]) throws -> ToolOutput) {
+    init(waitBeforeAnswering: @escaping @Sendable (Tool) async -> Void = { _ in },
+         respond: @escaping @Sendable (Tool, [String]) throws -> ToolOutput) {
+        self.waitBeforeAnswering = waitBeforeAnswering
         self.respond = respond
     }
 
@@ -453,6 +587,7 @@ final class StubToolRunner: ToolRunning, @unchecked Sendable {
     func run(_ tool: Tool, arguments: [String], cwd: URL, environment: [String: String],
              timeout: Duration) async throws -> ToolOutput {
         record(Call(tool: tool, arguments: arguments, cwd: cwd))
+        await waitBeforeAnswering(tool)
         return try respond(tool, arguments)
     }
 

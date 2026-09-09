@@ -134,6 +134,19 @@ public final class BrowserModel {
     /// find on the other side of the suspension: see `isQuiescent(since:)`.
     private var enqueuedWork = 0
 
+    /// How many times the user has changed what "the current tab" means or what it is showing: a
+    /// tab selected, opened, closed, or navigated from the URL bar. A request that has to leave the
+    /// main actor before it can act reads this first and offers it back when it returns, and a
+    /// value that has moved is the whole of "somebody got there while I was away" (D61).
+    ///
+    /// It is not a version of the tab set. `performRestore` does not touch it — the restoration is
+    /// not something the user did, and a link that arrived before the read is still meant for the
+    /// tab the read produces (A1).
+    private var navigationGeneration = 0
+
+    /// What the user's next action would supersede. Read by a caller that is about to suspend.
+    var currentNavigationGeneration: Int { navigationGeneration }
+
     /// How many gated mutations are still waiting to run. It is what keeps the order the user made
     /// them in across the restoration boundary: while any of them is queued, one made *after* the
     /// restoration landed has to queue too, or it would overtake them (D59).
@@ -305,8 +318,22 @@ public final class BrowserModel {
     /// every mutation already queued behind that read, and the loser is decided by which
     /// continuation the runtime resumes first. It joins at the back of the queue, where it was made,
     /// and returns when the queue has run that far — which is what a routing target awaits.
-    func openRouted(_ url: URL, in destination: OpenDestination) async {
-        open(url, in: destination)
+    /// **A request that had to wait for an answer does not take a tab the user has since aimed**
+    /// (D61). `supersededSince` is the navigation generation the request was made at — the
+    /// `.pullRequest` route reads it before it runs `gh`, which is a process and can take as long
+    /// as one. If the user selected another tab, opened one, closed one or submitted a URL while
+    /// that ran, `.currentTab` no longer means the tab the click was made in, and navigating it
+    /// would replace a page the user just chose and persist the replacement. The click is still
+    /// honoured, in a tab of its own: a page the user asked for is not something to discard.
+    ///
+    /// The comparison is made where the operation runs and not where it is enqueued, so a mutation
+    /// still queued behind the restoration counts exactly like one that has already run.
+    func openRouted(_ url: URL, in destination: OpenDestination,
+                    supersededSince generation: Int? = nil) async {
+        gated {
+            let superseded = generation.map { $0 != self.navigationGeneration } ?? false
+            self.performOpen(url, in: superseded ? .newTab : destination)
+        }
         await gateChain?.value
     }
 
@@ -327,6 +354,7 @@ public final class BrowserModel {
         let tab = BrowserLiveTab(url: url.flatMap(Self.destinationForPanel), title: "")
         tabs.append(tab)
         selectedID = tab.id
+        navigationGeneration += 1
         clearNotices()
         activate(tab)
         // A destination the tab does not keep is still answered — refused with a notice, or handed
@@ -357,6 +385,7 @@ public final class BrowserModel {
             }
             clearNotices()
             activate(tab)
+            navigationGeneration += 1
             // Set before the load, so a page that never finishes still leaves the tab pointing at
             // what the user asked for; the settled navigation corrects it either way. Only if the
             // policy loads it here, though — a refused or externally-opened destination leaves the
@@ -374,6 +403,7 @@ public final class BrowserModel {
     private func performSelect(_ id: UUID) {
         guard let tab = tabs.first(where: { $0.id == id }) else { return }
         selectedID = id
+        navigationGeneration += 1
         activate(tab)
         persistStructure()
     }
@@ -385,6 +415,7 @@ public final class BrowserModel {
     private func performClose(_ id: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         tabs.remove(at: index)
+        navigationGeneration += 1
         if selectedID == id {
             // The tab that took the closed one's position, or the last one if it was the last.
             let next = min(index, tabs.count - 1)

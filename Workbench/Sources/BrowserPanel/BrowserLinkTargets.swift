@@ -56,11 +56,16 @@ public enum BrowserLinkTargets {
                        handles: { link in if case .pullRequest = link { true } else { false } },
                        open: { link, destination in
                            guard case .pullRequest(let number) = link else { return }
+                           // What the panel was showing when the link was clicked. `gh` is a
+                           // process, so what follows can take as long as one, and the request has
+                           // to be able to tell that the panel moved on while it ran (D61).
+                           let made = await model.currentNavigationGeneration
                            switch await pullRequests.resolve(number) {
                            case .resolved(let url):
                                await deliver(url, to: destination, model: model,
                                        selectBrowserTab: selectBrowserTab,
-                                       openExternally: openExternally)
+                                       openExternally: openExternally,
+                                       supersededSince: made)
                            case .failed(let error):
                                // The row is the panel's, so the panel is what the user is shown —
                                // but only when the link was going there anyway. A Cmd-click that
@@ -77,16 +82,19 @@ public enum BrowserLinkTargets {
     /// The one place a resolved page is acted on, so both targets answer a destination the same
     /// way and a later edit cannot make them differ.
     @MainActor
+    /// `supersededSince` is the navigation generation the request was made at, for a request that
+    /// had to wait for an answer before it could act; `nil` for one that did not wait at all.
     private static func deliver(_ url: URL, to destination: LinkDestination, model: BrowserModel,
                                 selectBrowserTab: TabRequest,
-                                openExternally: BrowserWebTab.ExternalOpener) async {
+                                openExternally: BrowserWebTab.ExternalOpener,
+                                supersededSince generation: Int? = nil) async {
         switch destination {
         case .currentPanel:
             selectBrowserTab()
             // Behind the restoration, always: a link can arrive before the panel has ever been
             // drawn, and a tab opened in front of an unfinished read is a tab that read discards
             // (A1). `openRouted` is idempotent once the restore has run.
-            await model.openRouted(url, in: .currentTab)
+            await model.openRouted(url, in: .currentTab, supersededSince: generation)
         case .newWindow:
             // Nothing about the panel changes: the page is going somewhere else, and a tab opened
             // here as well would leave the user with the same page twice.
