@@ -9,13 +9,24 @@ public struct ChannelTimeline: Sendable, Hashable {
     public var durable: DurableProjection
     public var overlay: Overlay
     public var preview: StreamingPreview?
-    /// The channel's agent-run tree, read in the same snapshot as the items its nodes point at. Nil for a channel
-    /// with no wire fold.
+    /// The channel's agent-run tree, read in the same snapshot as the items its nodes point at. Nil only before the
+    /// ingestion has opened; a channel with no wire has one too, fed from its `.meta.json` sidecars.
     public var agents: AgentRunTree?
+    /// The channel's background-task registry mirror, as a value snapshot taken in the same read as the items — the
+    /// same way `overlay` is carried, and for the same reason.
+    ///
+    /// §8.4 offers *Move to background* only for a running Bash call or agent run **the mirror knows**, and a
+    /// `tool_use_id` to name in the `background_tasks` request comes from the mirror's row. Carried here because the
+    /// renderer's task card has no other way to reach it: the fold's mirror lives inside `StreamIngestion`, and the
+    /// one other mirror the app holds is Activity's, which a timeline row reaching for would be the second capability
+    /// path C6's cut exists to prevent. Empty — not absent — for a channel with no fold, which is the honest reading:
+    /// a mirror that knows no task offers the action on no task.
+    public var registry: RegistryMirror
 
     public init(durable: DurableProjection = .empty, overlay: Overlay = .empty, preview: StreamingPreview? = nil,
-                agents: AgentRunTree? = nil) {
-        self.durable = durable; self.overlay = overlay; self.preview = preview; self.agents = agents
+                agents: AgentRunTree? = nil, registry: RegistryMirror = RegistryMirror()) {
+        self.durable = durable; self.overlay = overlay; self.preview = preview
+        self.agents = agents; self.registry = registry
     }
 
     /// The durable items with the overlay's items merged by timestamp, stable for ties with the durable item first;

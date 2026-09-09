@@ -4,6 +4,13 @@ import FleetKit
 
 /// The conversation column: a channel's header and its timeline (spec §8).
 ///
+/// **Superseded 2026-09-08 (C6.1 Task 2, C6.2).** The paragraph below is C5's and is refuted where
+/// it says what this column does not have. The composer is mounted (C6.2) and the placeholder `List`
+/// is gone (C6.1): the timeline is `TimelineListView`, an `NSTableView` virtualized by `ItemID` with
+/// markdown, streaming and the scroll behaviours parity §41.8 names. What survives unchanged is the
+/// column's *shape* — the header above, the placeholder branches, and the two lifecycle modifiers —
+/// because three leaves edit this one body and each owns disjoint lines of it.
+///
 /// **Deliberately plain, and replaced whole by C6.** A header showing origin, presence, banner and
 /// system item; a list of item category, timestamp and a one-line summary. No composer, no
 /// markdown, no clustering, no streaming and no cards — each of those is C6's, and each would have
@@ -68,10 +75,10 @@ private struct ChannelTimelineColumn: View {
                                   detail: "This channel's history is read from its transcript on disk.")
             } else {
                 // Every row is resolved through contract Y1's registry — the slot draws whichever
-                // builder owns the item's kind, and until a C6 leaf claims that kind the registry's
-                // default draws C5's placeholder row.
-                List(model.rows) { TimelineRowSlot(row: $0) }
-                    .listStyle(.inset)
+                // builder owns the item's kind. C6.1 has claimed eleven of the thirteen; `decision`
+                // and `sentFile` are C6.3's and draw C5's placeholder row until that leaf lands.
+                TimelineListView(model: model)
+                    .id(row.key)
             }
             // The row's listing policy travels with the mount: a read-only row is a teammate's transcript, and the
             // composer is the one surface in this column that can write to a channel.

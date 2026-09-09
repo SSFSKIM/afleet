@@ -118,5 +118,6 @@ schemes:
         - package: Workbench/LinkRoutingTests
         - package: Workbench/SourceControlCoreTests
         - package: Workbench/PanelHostAPITests
+        - package: Workbench/TerminalPanelTests
         - package: Workbench/FilesPanelTests
         - package: Workbench/BrowserPanelTests

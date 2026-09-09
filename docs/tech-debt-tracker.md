@@ -1709,6 +1709,11 @@ leaf's reservation; 125 onward are unused.
 Entries **127 through 141** are C6.1's, as the C6 composite's leaf table allots them. Nothing above
 is renumbered.
 
+**Extended 2026-09-09: entries 321 through 335 are also C6.1's.** The composite's leaf table allotted
+127–141 and this leaf spent all fifteen by Task 7; 142–320 are other blocks' reservations
+(292–319 C6.3's review, 298–299 C7.1's, 300–305 C6.3's). Everything C6.1 files from Task 8 onward is
+numbered from 321. Nothing above is renumbered.
+
 127. **The live thinking-token estimate has no home in C3's model.** `system/thinking_tokens`
      carries `estimated_tokens`, `estimated_tokens_delta` and a `uuid` naming the *user* message the
      turn answers (2.1.263 `cli.pretty.js:811445`; emitted at `:523066` and `:289222`). ClaudeWire
@@ -1797,6 +1802,198 @@ is renumbered.
      converted; or find the roster-signal race it is reporting, which is the more likely reading
      given the shape. Owner: C4. **Any child whose floor shows exactly this one red should re-run
      before treating it as their own.**
+
+132. **The table measures every row's height on a render, and each measurement builds a hosting
+     view.** `NSTableView` with `usesAutomaticRowHeights` off asks its delegate for the height of
+     *every* row when it reloads, because it needs the document's total height to size the scroller
+     — not just the twenty rows on screen. `TimelineTableController.height(of:width:)` answers by
+     constructing an `NSHostingView` over the row's SwiftUI body and reading its fitting size, which
+     is the only honest answer while contract Y1's builder returns `AnyView`. The heights are cached
+     per `ItemID` and a publish invalidates only the ids it names, so the cost is paid once per row
+     rather than once per publish — but it is paid for the whole channel at the first render, and a
+     channel with thousands of items therefore builds thousands of hosting views before it draws
+     one. G5 opens a foreign session's real history, which is where this would first be felt. Found
+     at C6.1 Task 2. Closers, in order of preference: estimate a height from the item's own shape
+     and correct it when the row is first hosted, which is what a cheap row-height estimator buys;
+     or measure with a single reused hosting view rather than a fresh one per row. Owner: C6.1, at
+     Task 5's measurement pass, if the number turns out to matter. Round 1 (scalpel-4 #1) sharpens
+     the same entry: the delegate builds and measures an `NSHostingView` on the main actor for every
+     uncached row, offscreen ones included, so a cold load pays for the whole document before it
+     draws a line, and the warm-up path skips item-backed rows entirely — closer unchanged, measure
+     only what the viewport needs and estimate the rest.
+
+133. **A timeline mounted without `AppModel` in the environment draws rows with no capabilities and
+     says nothing.** `TimelineListView` reads `@Environment(AppModel.self)` and builds
+     `TimelineRenderContext` only when it finds one; with no model the environment value is nil and
+     every row draws without a link router, without contract Y4's navigation seam and without the
+     channel's collapse state. That is the right behaviour for a preview or a reflection-only test,
+     and the wrong one for the app, where the single host — `AfleetApp`'s `.environment(model)` —
+     is three files away from the view that depends on it and `RootView` between them is closed. The
+     failure mode is a row whose links quietly do nothing, which is exactly the shape tracker 129
+     records for the host-signal seam. Found at C6.1 Task 2. Closer: an assertion that the mounted
+     column resolves a non-nil context through a real launch, once Task 4's rows give the context a
+     use worth asserting on. Owner: C6.1, at Task 4.
+
+134. **The untrusted-text sanitiser splits emoji sequences and drops variation selectors.**
+     Parity §41.7's strip set includes the default-ignorable code points, and U+200D (the zero-width
+     joiner) and U+FE00–FE0F (the variation selectors) are both in it. So a family emoji renders as
+     its three component glyphs and a heart with an emoji presentation selector renders in its text
+     presentation. This is exactly what the engine's own sanitiser does — the terminal shows the same
+     thing — so it is parity and not a regression, and the security half of the pass is what the
+     entry protects. But a GUI is where a reader notices. Found at C6.1 Task 3. Closer: exempt U+200D
+     between two extended-pictographic scalars and the variation selectors, which costs one lookahead
+     per scalar and leaves the bidi and zero-width-space classes untouched; the divergence from the
+     terminal is then in afleet's favour and is stated where the exemption is written. Owner: C6.1,
+     when a reader reports it or when the row kinds land emoji-heavy content.
+
+135. **The streaming preview keeps its highlighting across a `syntaxHighlightingDisabled` flip.**
+     `TimelineTableController.preferenceChanged()` drops both caches and re-settles every row that
+     carries its own source, and deliberately leaves the streaming preview alone: rebuilding it would
+     reset the character count the delta path indexes the preview's text by, and replay text already
+     on screen. So a message in flight when the preference flips finishes drawing highlighted, and
+     the durable item that replaces it within the turn draws unhighlighted. Found at C6.1 Task 3.
+     Closer: rebuild the preview row from its source *and* carry the consumed-character count across
+     the rebuild, which is one field and is only worth doing once a settings change can arrive
+     mid-turn (Task 5's readout). Owner: C6.1, at Task 5.
+
+136. **Per-tool result forms stop at eleven; parity §41.16.7 tabulates about thirty.** `Read`,
+     `Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Agent`, `WebFetch`, `WebSearch`, `TodoWrite` and the
+     `mcp__<server>__<tool>` family have the engine's own sentences; every other tool takes the
+     generic `Done` / `(No output)` form, so `LSP`, `Skill`, `TaskOutput`, `TaskStop`, the worktree
+     pair, `Monitor`, the cron trio, `NotebookEdit`, `memory_write`, the `claude-in-chrome` and
+     `computer-use` families and the MCP resource readers all render as an unnamed result. Nothing
+     is lost — the raw text is behind the disclosure — but a reader gets a count where the terminal
+     gives a sentence. Found at C6.1 Task 4, and scoped out there deliberately. Closer: the parity
+     table is the map; each form is a case in `ToolResultForms.completed(_:)` and a line in
+     `ToolResultFormTests`. Owner: C6.1 or whoever next touches the forms.
+
+137. **A tool row's diff is a count, not a diff.** `Edit` renders parity's `Added N lines, removed
+     M lines` from `structuredPatch`, and `Write` renders its line count, but neither draws the
+     patch: §41.16.8's unified renderer, the word-level diffing and the four truncations are
+     unimplemented, and the structured patch reaches the disclosure only as raw text. Found at
+     C6.1 Task 4. Closer: a unified-diff view over `structuredPatch` with the ANSI path's line
+     numbering (the Ink path's rewind is the odd one, and §41.16.8 says so), mounted in the same
+     slot the raw disclosure occupies. Owner: C6.1's successor on the rows, or C7.2 if the diff
+     belongs in the panel instead.
+
+138. **The thinking disclosure's duration is the span from the item before it, not the model's own
+     thinking time.** A `thinking` block carries no start instant and the assistant item carries
+     one timestamp, so "Thought for N seconds" is measured from the preceding item's instant — which
+     over-reports whenever the gap holds anything but thinking (a slow tool result, a reader's
+     pause before a prompt). The number is right for the ordinary streamed turn and wrong for a
+     resumed or interleaved one. Found at C6.1 Task 4. Closer: the streaming path knows when the
+     first thinking delta arrived; carrying that instant on `StreamingPreview` would make the span
+     exact, which is the same corrective tracker 127 asks for and could land with it. Owner: C3 for
+     the field, C6.1 for reading it.
+
+139. **Closed 2026-09-09 by C6.1 Task 8, and the premise below was wrong.** A mid-session mode change
+     is *not* invisible until a restart: `system/status` carries `permissionMode`, `StatusFields`
+     already modelled it, and the engine populates it — across the corpus's 40 status frames exactly
+     one carries a value, `acceptEdits`, in `exit-plan-mode`, the recording where a mode actually
+     changes. So the header now follows status frames as the live readback and falls back to the
+     handshake only for the value it opens with (`ReadbackPoller.liveMode(_:)`,
+     `ChannelHeaderReadout.apply(liveMode:)`, and the precedence flag that stops the retained
+     handshake folding the launch mode back over a live one on the next turn end). Asserted by
+     `HeaderReadoutTests.testTheModeFollowsAStatusFrameAndNotTheRetainedHandshake`, which replays
+     that recorded frame and was shown failing against the handshake-only readback first. What the
+     entry got right, and what still holds, is everything it says about `get_settings`: the mode is
+     not in that answer, and `effective` is the settings files rather than the process. The rest —
+     the closer, the two owners, the note about the spec — is superseded; the spec's §10 was
+     corrected on the same day. **What this entry does not close** is C6.2's *picker*, which reads
+     the handshake through `Readback.verify` and covers the same limit with a disagreement note; the
+     picker is that leaf's and is untouched here.
+     The refuted text follows.
+
+     **The header's permission-mode readback is the launch handshake's, so a mode changed inside a
+     process is invisible until that process is replaced.** The child spec's §10 names `get_settings`
+     as the source of model, mode and effort. The engine reports two of the three there: its answer
+     is `{applied: {model, effort, advisor, ultracode}, effective, sources}` (2.1.257
+     `cli.pretty.js:178217`, and both recordings that carry the subtype — `control-shapes` and
+     `zero-cost`), where `effective` is the merged *settings files* and a mode read out of it would
+     be what a file asks for rather than what the process runs. The readback the engine does offer is
+     `InitializeResponse.current_permission_mode`, which is what `Readback.verify` compares a restart
+     against and what C6.2's picker displays, so the strip reads it from `engineReports(of:)`. That
+     value is *retained per process*: a `set_permission_mode` mid-session produces no new handshake,
+     so the strip keeps showing the launch mode until a quiescent restart mints one. C6.2's picker
+     has the same limit and covers it with a disagreement note; the strip has no note. Found at C6.1
+     Task 5, where G4's clause is asserted across two replayed handshakes. Closer: the fleet's
+     runtime record (`SessionRuntimeState.permissionMode`) already tracks every applied mode and is
+     the honest source for a display; exposing it on `LifecycleAPI` — or having the strip read the
+     `set_permission_mode` echo off its own event subscription — closes it. Owner: C6.2 for the
+     display's story about a click, X5 for the accessor. The spec's §10 wants the same correction.
+
+140. **`HeaderReadoutView` has no production mount until C6.2's header bar calls it.** C6.1 owns the
+     readout and its view and C6.2 owns `App/Header/`, so the one line that mounts the strip is the
+     other leaf's, exactly as the child spec's *Parent revision* has it. Until that line lands, every
+     member the strip reaches — `ChannelTimelineModel.startReadbacks()` among them — is production
+     code the app never runs, and `check-app-wiring` cannot say so, because the calls are all inside
+     `App/`. This is the same shape as entry 129 and it is filed for the same reason: the letter of
+     the check is satisfied while its substance is not. Found at C6.1 Task 5. Closer: C6.2 mounts
+     `HeaderReadoutView(model:)` in its header bar, and the leaf that does it asserts the mount the
+     way `ComposerMountTests` asserts the composer's. Owner: C6.2.
+
+141. **The *Edit* target is recorded by the row, so a note the row did not cause has no message to
+     sit beside.** Contract Y6 has `ComposerModel.editNote` render beside the edited message, and
+     the composer records no target — its own surface is one line above the field, where "which
+     message" is not a question. So `TimelineEditState` records what the row itself did, and only a
+     note produced by a press on a row is drawn in the timeline. Two notes are not: the ones
+     `CommandRouting` writes for `/rewind`, `/cd` and the routed settings, and any note that arrives
+     after the channel subtree was rebuilt and the state reset. Both still draw above the field
+     through `EditNoteSurface`, so nothing is lost to the user; what is lost is the placement.
+     Found at C6.1 Task 7. Closer: the composer records the target it was given — one stored
+     `promptUUID` beside `editNote` — and the row reads it instead of remembering, which also makes
+     the placement survive a re-mount. Owner: C6.2, whose file the target would live in.
+
+321. **The task card mounted on the `taskRun` row has no registry mirror, so it never offers *Move
+     to background*.** §8.4 offers that action only for a running task C3's `RegistryMirror` knows,
+     with a `tool_use_id` to name in the `background_tasks` request — and no mirror is reachable from
+     the timeline's read model. `ChannelTimeline` carries the durable half, the overlay, the preview
+     and the agent tree; the fold's mirror lives inside `StreamIngestion` and is not published, and
+     the one mirror the app does hold is `ChannelEventPump.mirror`, which is Activity's and reaching
+     it from a row would be the second capability path the C6 cut exists to prevent. So
+     `TimelineRenderContext.makeTaskCard(_:)` builds the model over an empty `RegistryMirror()`: the
+     card offers *Stop*, which reads the item's own status, and the backgrounding action is absent
+     rather than wrong. The Thread tab's task card is unaffected — its host builds the model with the
+     pump's mirror. Found at C6.1 Task 8, mounting contract Y2's second host. Closer: `ChannelTimeline`
+     carries the mirror the fold already holds, and the context reads it where it reads the overlay.
+     Owner: C3 for the field, C6.1 for the read.
+     **Closed 2026-09-09 by the `corrective/c3-agent-tree-mirror` corrective on `main`, commit
+     `6c964e1`.** `ChannelTimeline.registry` carries the fold's mirror as a value snapshot per publish,
+     the way it carries the overlay; `TimelineNeighbourhoodCache` puts it on the neighbourhood with the
+     other reads a row makes of its timeline, and `makeTaskCard` builds the model over it. Activity's
+     `ChannelEventPump.mirror` is untouched, so the second capability path the C6 cut forbids was not
+     opened. Left standing: entry 406.
+
+322. **The timeline's task card takes its item by value and is rebuilt only when the task's status
+     changes, so a card's text lags its `task_progress`.** `TaskCardModel` stores the `TaskRunItem`
+     it was built with and replaces it only through `refresh`, which the card calls when the engine
+     contradicts it. The row therefore keys the model by `taskID` and `status`
+     (`TaskCardSeam.identity(of:)`): keying by the whole item would rebuild on every progress frame
+     and drop a refusal banner and an in-flight request the reader is watching, and keying by the
+     task alone would leave a finished run reading *Running* and offering *Stop*. What is lost in
+     between is a description or summary that changes without the status changing. Found at C6.1
+     Task 8. Closer: the card model takes the item as an observed input rather than a snapshot, so
+     the host replaces the value and not the object. Owner: C6.3, whose model it is.
+    Round 3 scalpel-1#3 restates it after wave E: the seam's identity now carries the capability but
+    still not `description`/`summary`, so same-status `task_progress` updates never reach the retained
+    `TaskCardModel.item`; `makeTaskCard` installs no item-update path. The closer is an update path on
+    the model, not a wider identity (a rebuild drops a refusal banner and an in-flight request).
+
+323. **Two Workbench suites carry run-to-run state and fail after a crashed test host, and one of
+     them says why in its own arithmetic.** Both reddened once at C6.1 Task 8, in the run
+     immediately after three test-host crashes, and both passed on the next clean run; neither is
+     reachable from that task's diff, which touches no file under `Workbench/`.
+     `SourceControlCoreTests.ToolRunnerTests.testAChildThatBlocksIsTimedOutAndKilled` proves the
+     child was killed with `pgrep -f "sleep 31.415926"` over a **fixed** marker, so any `sleep` with
+     that argument left behind by an earlier aborted run — which a crashed host leaves — matches and
+     fails the assertion; the marker wants to be unique per run.
+     `TerminalCoreTests.FloodTests.testMainActorStallDoesNotDuplicateOutstandingDelivery` counted
+     2,097,156 bytes against 2,097,152 expected: exactly 4 more, which is `go\r\n` echoed by the
+     PTY, so what it caught was terminal echo racing the child's read and not a duplicated delivery
+     — and the message it prints ("one in-flight output delivery was submitted more than once")
+     names a cause that was not the cause, which is the part worth fixing whatever else changes.
+     Found at C6.1 Task 8. Closer: a per-run marker in the first, and `ECHO` disabled — or the echo
+     accounted for — in the second. Owner: C7.3 for the runner, C7.1 for the PTY test.
 
 ## From C6.3 (`child/c6-decisions`)
 
@@ -2209,7 +2406,6 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      not check it. Closer: a generation captured before the await and compared after it, the fence
      `PrecommitModel.evaluate` already takes. Owner: C6.3. Filed 2026-09-09 at C6.3's third review
      round (hard stop).
-
 ## From `main` correctives, 2026-09-08 onward (numbered from 187; 82–186 are the C6 and C7 leaves' reservations)
 
 187. **Two of `AgentRunTree`'s three parent sources have no production caller.**
@@ -2225,6 +2421,14 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      metadata into the reducer's tree (or a file-only tree the ingestion owns when there is no
      wire) through the two existing, tested entry points; then C6.4 reads one tree for every
      channel kind. Owner: C3, before C6.4's Agents tab is judged on foreign channels.
+     **Closed 2026-09-09 by the `corrective/c3-agent-tree-mirror` corrective on `main`, commit
+     `d670f3f`.** `StreamIngestion` feeds both sources: a mirror-delivered `agent_metadata` entry goes
+     to `AgentRunTree.apply(agentMetadata:for:)` from `applyMirror`, and every `.meta.json` the file
+     path enumerates goes to `apply(metaFile:)` from `loadMetadata` — which the open read and the
+     watcher both call, so a live channel and a file-only one reach the same tree. `absorb` creates
+     the node when no `task_started` has, which is what a channel with no wire needed; first-source-
+     wins is unchanged and a later disagreeing source still lands in `conflicts`. Left standing: a
+     node the metadata created reads `.running` (entry 407).
 
 188. **`make test` rewrites `Workbench/Package.resolved` with the app's own dependency pins.**
      Since C6.1's seam range added HighlightKit to `project.yml` (`exactVersion: 0.2.0`), the
@@ -2894,3 +3098,491 @@ Reserved range 247–261.
      just chose. File: `Workbench/Sources/BrowserPanel/BrowserLinkTargets.swift`. Closer: read
      `made` on the failure branch too, and drop the row and the selection when it has moved.
      Owner: C7.6. Filed 2026-09-09 at C7.6's merge round (hard stop).
+
+324. **The child spec's §8 says the corpus folds four `isMeta` records; it folds three.** G2's
+     hidden-record clause scans every committed fixture through `RecordReducer` and counts the
+     records the durable projection actually hides: `compact-boundary` one,
+     `session-mirror-relocation` one, `session-mirror-resume` one — three, not the four §8 states
+     (which reads "`session-mirror-resume` 2"). The wire half is as stated: one `isSynthetic`, in
+     `compact-boundary` alone, and no other fixture carries one. Nothing is wrong in the app — the
+     obligation is that a hidden record is never a row, and it is not — but a number in the spec that
+     no fold produces is a floor a future gate could be written against and fail on correct
+     behaviour. Found at C6.1 Task 6, by the gate's first run; the gate now pins three and says
+     where the number came from. Closer: §8's sentence corrected to three at the next spec revision.
+     Owner: the leaf owner, with the Outcomes.
+
+325. **`StreamIngestion.agents` is never nil after `open`, so "a channel opened from its files has
+     no tree" is false as written.** §9 and tracker 187 both say the agent-run tree is *nil* for a
+     file-opened channel — every archived channel and every foreign session — and the C6.1 rows are
+     designed around it. `StreamIngestion.open` builds the `WireReducer` unconditionally, before the
+     tap starts, and `agents` reads `wire?.agents`, so what such a channel has is a **non-nil tree
+     holding no runs**. The behaviour every consumer depends on is unchanged — no node, no run id,
+     no navigation — and G5 measured exactly that live (0 runs). What is wrong is the predicate: a
+     caller writing `agents == nil` to mean "this channel has no tree" is testing something that is
+     never true, and would go on to build a navigable chip. Found at C6.1 Task 6, by G5's first live
+     run, which failed on the nil assertion. Closer: the two documents say "resolves no run" rather
+     than "nil", or `agents` answers nil while the fold has seen no wire event. Owner: C3 for the
+     property, the leaf owner for the sentence.
+
+326. **A row's button cannot be pressed by the test harness once it is inside a `RowFrame`.**
+     `ViewTree.press` recovers a `Button`'s action by reflection, and `RowFrame` stores its content
+     as a `@ViewBuilder @MainActor () -> Body` closure, which reflection cannot enter; the row also
+     reads its capabilities from `@Environment`, which a body evaluated outside a render pass does
+     not carry. So every row this leaf ships whose affordance is inside a `RowFrame` — the agent
+     chip, the cluster disclosure, the thinking disclosure — is asserted through the content its
+     action reads and the capability it calls, and not through a synthesised press. The decision row
+     avoids this by splitting `DecisionRowContent`, which takes the context as a parameter; the
+     chip and the two disclosures have no such split. Found at C6.1 Task 6, writing G2's chip
+     clause. Closer: the same split for the three rows, so a test constructs the body over a context
+     it supplies; or a harness that hosts the row in a real window and clicks it. Owner: C6.1.
+
+327. **G5's chip arm has no subject in the scratch config home.** The gate asserts that a channel
+     opened from its files renders an `Agent` chip and does not navigate, and the assertion is
+     structurally sound — it iterates the history's `Agent` calls and counts the navigable ones —
+     but the session the scratch home offers holds two rows and no `Agent` call at all, so the loop
+     runs zero times and the clause is carried by the tree assertion beside it (0 runs resolved).
+     The treeless arm is therefore witnessed at the tree, not at a chip. Found at C6.1 Task 6, from
+     the gate's own printed counts (agent chips 0). Closer: the scratch home holds a recorded
+     session whose history contains an `Agent` call, which is a fixture-corpus job rather than a
+     code one. Owner: C1 for the recording, C6.1 for adopting it.
+
+330. **A settled block picks up its highlight on the next render of it, and nothing schedules one.**
+     C6.1's markdown cache now notices that a cold highlight has landed and rebuilds the block over
+     the styled code, so the *next* render of a fenced block is highlighted. What no longer holds a
+     stale block is the cache; what still can is the screen. A row already visible when the fill
+     lands is redrawn only when the controller reloads it — which a streaming channel does within a
+     frame and a quiet one may not do at all, so a fenced block in the last message of an idle
+     channel can stay unhighlighted until the reader scrolls it out and back. Found at C6.1's fix
+     wave, verifying the cache fix against what a reader sees. Closer: the highlighter tells the
+     table which keys filled and the table reloads the rows holding them, which is a change in
+     `TimelineTableController` and belongs with whoever owns the reload path. Owner: C6.1.
+
+331. **The controller's own `settle` callers keep the streaming boundary rule for text that has
+     stopped arriving.** `MarkdownBody` — the path every durable message row draws through — now
+     finalises, so a completed message ending in `**Done**` is parsed in full. The two callers in
+     `TimelineTableController` that re-settle a source-backed row, the preference flip's rebuild and
+     `setRows`, still call `settle`, so a row carrying its own source can keep an unparsed tail. No
+     channel row is affected — an item row carries no source of its own — but the S7 corpus path
+     does, and a corpus document ending mid-block renders its own delimiters. Found at C6.1's fix
+     wave, deciding which callers `finalise` replaces. Closer: those two call sites finalise, which
+     is correct for both — neither is drawing text that is still arriving, and the streaming preview
+     beside them is the one caller that must keep the boundary rule. Owner: C6.1, in the file that
+     owns the controller.
+332. **A decision card on a channel afleet does not own still offers its answers.** Round 1's
+     scalpel-3 #2 closed the task card's *Stop* by gating `TimelineRenderContext.makeTaskCard` on
+     C5's listing policy; `makeAnswering` is not gated the same way, so a `pending` decision item on
+     a read-only or foreign channel would draw answerable buttons whose `LifecycleAction.answer`
+     X5 refuses as `notOwned`. It is filed rather than fixed because no surface can currently reach
+     it: a pending decision enters the overlay through this app's *own* control channel, and a
+     channel afleet does not own has none — an item read out of a foreign transcript settles as
+     answered or, under D12, `.inert`. Found at C6.1's round-1 fix wave. Closer: the same
+     `isOwned` gate on `makeAnswering`, taken together with whatever C6.3 concludes about a decision
+     item's state on a channel with no live overlay. Owner: C6.1 with C6.3.
+328. **A hosted row's asynchronous growth is implemented but witnessed only at its synchronous
+     entry.** `TimelineRowHostView` forwards SwiftUI's `invalidateIntrinsicContentSize` to a
+     deferred re-measure, which is what a card mounting its content a run loop after the row was
+     built relies on; the test drives the same re-measure through `update(root:context:)`, which is
+     synchronous and deterministic. So the *path* is asserted and the *trigger* is not: a SwiftUI
+     release that stops raising that invalidation would leave asynchronously grown rows clipped
+     with every gate green. Found at C6.1's review fix wave, writing the height-invalidation test.
+     Closer: a row whose content grows on its own after a mount, asserted after a bounded wait on
+     the height the table allocates — which needs a hosted window and a row that changes size for a
+     reason the test controls. Owner: C6.1.
+
+329. **A row's height is measured two ways, and the two can disagree by a point.** An unmounted row
+     is measured by the controller — a throwaway hosting view over a width-pinned root, or the
+     TextKit path for the two rows that are not items (tracker 132) — while a mounted row reports
+     its own `fittingSize` through its host. They agree to within a point in everything measured
+     here, and the reporting side wins because it is the height actually drawn, but the first mount
+     of a row can therefore note one height change that changes nothing a reader sees. Found at
+     C6.1's review fix wave. Closer: one measurement path, which means measuring through the row's
+     own host and having no second one — reachable only once every row is mounted before it is
+     measured, which a virtualised table does not do. Owner: C6.1.
+
+**Merge review, confirming round (2026-09-09): entries 333–335 and 375–379 file what the round found
+and the architect left standing.** The round's other twelve findings were fixed by waves D–G before
+the merge; one (asynchronous highlighting never redrawing the row) is already 330.
+
+333. **The anchor's transfer from the preview to its durable item needs the preview gone and a new
+    key appended in one publish, and two ordinary sequences deny it.** The reducer clears the
+    preview per assistant block, so the next `content_block_start` can reopen one before the item is
+    published; and `ItemBuilder.addAssistant` merges a matching `message.id` into an existing item,
+    so no key is new. Either way the bottom-pinned viewport keeps its old row and the reader sees a
+    jump. The fix reconciles anchors by message identity instead of by key novelty
+    (`TimelineTableController`, the anchor transfer). Round 2 scalpel-1#2.
+    Round 3 scalpel-1#2 adds the case where *another* preview is present: successive nil-ID previews
+    share `preview:streaming`, so the held anchor resolves to the new preview below the completed
+    block and an unpinned reader is moved past it. Same fix.
+
+334. **A changed task's cached height is dropped, and the fresh measurement can be the card's
+    placeholder, not the card.** `applyItems` removes the height; `height(of:)` measures a fresh host
+    whose `TaskCardSeam.card` is nil until its task runs, while the retained on-screen card keeps its
+    identity and `remeasure` suppresses an unchanged full height already `reported`. The smaller
+    fallback can stay cached and clip the card. The fix re-reports a mounted host's height after any
+    invalidation of its key. Round 2 scalpel-1#3.
+
+335. **Every hosting view the table has ever created is retained until its key leaves the history.**
+    `pruneHosts` removes keys absent from the items, never rows that left the viewport; each
+    neighbourhood change then updates and synchronously remeasures every retained host. Memory and
+    per-publish work grow with the rows a reader has visited, which on a long session undoes the
+    virtualisation the table exists for. A viewport-exit eviction with a small keep-alive margin is
+    the fix; the S7 measurement should be repeated against it. Round 2 scalpel-2#1 (and the sweep).
+
+375. **Task controls are offered on the mode, not on a live owned process.** `ChannelRow
+    .offersOwnedActions` is `mode == .ownedCandidate`, and the context always carries the workspace
+    lifecycle, so an archived or foreign-live owned-candidate transcript can build a running task
+    card that offers *Stop*; the supervisor then rejects the action as `notOwned`, so nothing is
+    stopped — the control is a dead button, not a wrong one. Gate on the channel's readiness being
+    `.owned` as well. Round 2 scalpel-3#3.
+
+376. **The syntax-highlighting preference is a process-wide flag.** Each controller's `apply` writes
+    `CodeHighlighter.shared.enabled`; `MarkdownBody` renders through the singleton without reading
+    its own context's preference, and `MarkdownText` caches by source alone. Two channels whose
+    `get_settings` readbacks disagree can render, and cache, each other's styling while their
+    controllers interleave. Carry the preference on the render context into the pipeline and key
+    the cache by it. Round 2 scalpel-4#1.
+
+377. **The streaming split's fence test is a parity count of lines beginning with three backticks.**
+    Tilde fences, indented fences and fences of unequal length are not recognised, so a preview can
+    settle inside an open block and the text after it is parsed as markdown (`**literal**` becomes
+    emphasis) and frozen that way. `finalise` at completion does not revisit it. Match the opening
+    delimiter (character and length, per CommonMark) when deciding whether a fence is open. Round 2
+    scalpel-4#2.
+
+378. **A permission-mode status reported before the timeline's first subscription is lost.**
+    `ChannelSupervisor.events` is a future-only stream; `Fleet.engineReports` retains the handshake
+    and `system/init` but not the latest status, and `SettingsReadback` takes the mode from the
+    handshake alone. The header shows the launch mode until the next change, which on a quiet channel
+    is never. The retained latest status belongs beside the handshake in X5's `EngineReports` (C4's
+    surface); the timeline then reads it at subscription. Round 2 scalpel-5#3; owner C4/X5, reader
+    here.
+
+379. **A settings readback and the handshake it is paired with are fetched without an epoch.**
+    `ReadbackPoller.settings` awaits `send` and then `engineReports` as two operations; a restart
+    between them pairs the old process's settings with the replacement's handshake, and
+    `refreshReadbacks` publishes the pair unchecked. Have `engineReports` carry the epoch and drop a
+    pair whose halves disagree. Round 2 scalpel-5#4.
+    Round 3 scalpel-5#3 and 5#5 widen this: the opening `refreshReadbacks` of a re-subscription does
+    not reconcile the retained epoch (wave G reconciles only on later events), so a replacement whose
+    handshake preceded the re-subscription and then stays idle keeps the old mode; and
+    `refreshReadbacks` checks eligibility before its awaits and publishes without revalidating the
+    process afterwards. Both close with the epoch on `EngineReports`.
+
+**Residue of waves D–G (2026-09-09), filed by the architect at the stitch: 380–383.**
+
+380. **A link's label is flattened through `plain()`.** Wave D made Strong and Emphasis recurse into
+    their children, so `**[guide](…)**` keeps its destination; the label of a link is still built by
+    `plain(link)`, so `[**bold** guide](…)` keeps the destination and loses the emphasis inside the
+    label. Route `Markdown.Link` through `inline` and lay the link attributes over the child runs.
+    Round 2 scalpel-4#5's remaining half.
+    Round 3 sweep#3: the `Heading` branch is `plain(heading)` with a font attribute too, so a link
+    inside a heading is unclickable. Same fix, same place.
+
+381. **`pruneHosts` and `refreshHostedRoots` still walk the whole row list per publish.** Wave F took
+    the concatenation out of every per-row reader (10,005 cached height queries on a 2,001-row table
+    with a preview: 7,141 ms before, 11 ms after), but a publish still builds `Set(rows.map(\.key))`
+    and, when the context changed, a dictionary of the same size. Removing that wants a maintained
+    key→index map on the controller, which needs one assignment point for `itemRows`. Per-publish,
+    not per-query, so it is bounded by the publish rate.
+    Round 3 scalpel-2#2: before its unchanged-return, `applyItems` builds every `RenderedRow`, maps
+    both key arrays and compares the historical items, so a preview-only publish still does
+    history-sized main-thread work. The same maintained index closes it.
+
+382. **`ChannelTimelineModel.rows` and `items` re-merge and re-sort both halves of the timeline on
+    every body evaluation.** The neighbourhood no longer pays this (wave F's cache), but the row
+    list the table diffs against still does, so a preview-only publish sorts the whole history
+    before the diff sees it. The same key the neighbourhood cache uses (the published timeline with
+    its preview cleared) would serve.
+
+383. **`testAContextChangeReachesMountedRows` passes vacuously.** `InventedItems.context` builds a
+    fresh `TimelineEditState`, `RetractionRegistry` and `DecisionReservations` per call, so the
+    identity half of `differs` reports a change whatever the cwd does; the test would pass with
+    `cwd` removed from the comparison. Wave E's capability test pins all three (the pattern to copy).
+
+**Final review round (2026-09-09, round 3, the hard stop): 394–397.** Eighteen P2, none P1; two §12
+gaps fixed by wave H (a file link's display string and the agent chip's title/headline were drawn
+unsanitised), ten already filed above (322, 330, 333–335, 376–381, extended where the round widened
+them), four new below. Numbers 384–393 are C7.4's; C6.1 continues from 394.
+
+394. **`TaskCardView` can keep the model it was first given after the replacement arrives.** On a status
+    change the row assigns the new identity to the view while still supplying the old `card`; the
+    `.task` then replaces `card` without the identity changing again, so the child's
+    `@State(initialValue:)` retains the first model. With `makeTaskCard`'s empty registry it can go on
+    showing *Running* and *Stop* after completion (the action fails as `notOwned`/not-running, a dead
+    button). Key the view's identity by the card's own identity (`ObjectIdentifier`) rather than by
+    the item. Round 3 scalpel-3#1.
+
+395. **The streaming split treats the last blank line as a container boundary.** `consumeClosedBlocks`
+    settles at a blank line, so an ordered list whose items arrive across appends is parsed as two
+    lists each starting at 1, and a continuation paragraph loses its list context; the durable
+    `MarkdownBody` reparses the whole source and is right, the settled preview rows are not. Keep a
+    list open across a single blank line when the next non-blank line continues it. Round 3
+    scalpel-4#3 (377 is the same split's fence rule).
+
+396. **A channel subscribed while connecting gets no readbacks until its first turn ends.** The
+    opening `refreshReadbacks` runs at once; a request sent before the process is running is refused
+    (or, if X5's connecting queue holds it, answered late — to be verified against `ProcessHandle
+    .send(_:uuid:)`), `observed(epoch:)` is false for the first epoch so the handshake triggers no
+    retry, and the live task blocks `adopt(.ready)` from opening another subscription. Retry the
+    opening readback on the handshake. Round 3 scalpel-5#1.
+
+397. **The reopen trigger is lost while the old subscription drains.** Archival finishes the stream,
+    but buffered events or an awaited refresh keep `readbackTask` non-nil while the channel reopens;
+    `beginReadbacks` rejects the trigger, and when the drain ends the task only clears itself without
+    rechecking a live channel, so readbacks stop for good on that channel. The existing test masks it
+    by calling `startReadbacks` repeatedly. Re-check liveness when the task ends. First corrective
+    after the merge (C6 recomposition). Round 3 scalpel-5#4.
+
+## From C7.4 (Terminal panel and jobs, `child/c7-terminal-panel`)
+
+Reserved ranges 262–276, 346–355 and 384–393. Filed 2026-09-09 at C7.4's close-out and after its
+four whole-branch review rounds.
+
+262. **A cancelled `awaitFeedCapacity()` waiter can leave one identifier behind.** The
+    cancellation handler and the normal return race at the end of a wait: `forgetWaiter` can clear
+    the record just before the racing `onCancel` inserts it, leaving one `UUID` in
+    `cancelledWaiters` for the life of the surface. Harmless — identifiers are minted per call, so a
+    stale entry can never refuse a future waiter — and bounded by the number of waits cancelled at
+    exactly that instant. Closer: have the cancellation path record only while the wait is
+    registered, or clear the set when the queue drains. Owner: C7.4, or C7.1 if the adapter's
+    waiter is reworked.
+263. **`FloodTests.testMainActorStallDoesNotDuplicateOutstandingDelivery` fails under full-suite
+    load.** Seen once during C7.4's T1 with 2097156 bytes against 2097152 — four bytes, the shape of
+    the pty echoing the test's own `"go\n"` release write. It touches no surface code, passed alone
+    three times and passed in both later full runs. Closer: subtract the release write's echo, or
+    send it down a path the child does not echo. Owner: C7.1's file.
+264. **`.failed`'s synthetic 127 is indistinguishable from a child that really exited 127.** The
+    panel reports `PaneSpawn.unexecutableExitCode` when a spawn never executed, because C4 is
+    waiting on the request's id and a hatch whose pane never started would otherwise leave its
+    channel released for ever (child spec Design §2). A child that exits 127 on its own is reported
+    identically. Accepted: X5's re-adoption keys on the event, not the number. Closer: a reason
+    field on `PaneExit`, which is X5's shape and a parent revision. Owner: C7.4 with the architect.
+265. **`PersistedPane.cwd` records where a shell pane was spawned, never where it is.** W6 asks for
+    cwd overrides and a pane opened at an explicit directory restores there, but a shell the user
+    `cd`s in restores where it started. Closer: OSC 7, or reading the child's cwd from the kernel;
+    neither exists below the pane today. Owner: C7.4.
+266. **A restored or restarted shell pane keeps nothing but its directory.** No scrollback, no shell
+    history reuse, and the pane bar labels panes by purpose alone, so two shell panes in one channel
+    are indistinguishable and cannot be reordered. Deliberate for v1 — the composite defers "split
+    panes and pane layouts beyond a stack" — and recorded so the next leaf does not read the
+    minimal bar as finished. Closer: a per-pane title from the child's own reporting, and a
+    scrollback the restore can replay. Owner: C7.4.
+267. **`PaneReadout` carries a hand-written signal-name table.** A signalled child is named
+    (`SIGKILL`) rather than numbered (137), which is the point, but the mapping is a switch in the
+    panel rather than `strsignal(3)`. A signal the table does not know falls back to its number.
+    Closer: `strsignal`, with the table kept only for the names it renders differently. Owner: C7.4.
+268. **The view claim is unwitnessed against a real second window.** `PaneSurfaceHost` re-registers
+    a claimant on every remount, and correctness rests on identity-checked withdrawal rather than on
+    ordering, which is right — but every assertion about it is model-level. A real pop-out has never
+    been driven. Closer: the human leg in G4.3, or a UI test that opens the second window. Owner:
+    C7.4's human gate.
+269. **The Background job row now carries four link buttons.** *Adopt*, *Attach*, *Logs* and *Stop*
+    sit in one sidebar row with no layout work; §9.5 asks for the verbs and not for a menu, but the
+    row is getting wide. Closer: a menu, or icons with help text. Owner: C5's sidebar with C7.4.
+270. **A job pane refused for want of a channel reads as a generic failure.** The sidebar's banner
+    for a row that can name no channel does not distinguish that case from any other lifecycle
+    refusal; only the trust banner's `noChannelContext` sentence says what actually happened.
+    Closer: one sentence per refusal in the sidebar, the way `PrecommitModel` already does. Owner:
+    C7.4.
+271. **Exit reports leave through an unstructured `Task`, so nothing can await one.**
+    `TerminalPanelSession.report` hands each `PaneExit` to a detached task; no caller and no test can
+    await delivery, so "exactly one exit" is only assertable by polling until the count agrees with
+    itself. Without that quiescence loop C7.4's double-report mutation would have passed, which is
+    the shape of a test that cannot fail. Production consequence is small — C4 is an actor and the
+    per-pane identity guard preserves ordering — but the seam is untestable by construction. Closer:
+    an awaitable report, or a session-level barrier the tests can use. Owner: C7.4.
+272. **The close path's reported exit code depends on a race with the read loop.** `close()` tears
+    the child down, cancels the loop, then reads `pane.state`: whether the loop observed the
+    termination first decides between the child's real status and the synthetic `128 + SIGHUP`. Both
+    are true statements about an instant, and X5 keys on the event rather than the number, so this is
+    recorded rather than fixed. Closer: read the termination the pty layer observed rather than the
+    pane's rendered state. Owner: C7.4.
+273. **`PanelRig.shellPath` and `LaunchFixtures.environment` each hardcode the same shell.** One of
+    the two should read the other; today a change to either leaves the pair disagreeing and only a
+    shell-pane test would notice. Closer: the rig reads the fixture. Owner: C7.4's test support.
+274. **`ChannelHeaderActionsModel.explanation(of:)` says a channel "was not handed off".** By the
+    time `handOff()` reaches the host, X5 has already released the channel — the pane simply never
+    opened. The inaccuracy predates C7.4 and now appears in two refusal arms rather than one.
+    Closer: say what did not happen, which is that no pane opened. Owner: C6.2's file.
+275. **`AfleetStoreKeys.window` is declared in `App/` and read nowhere in `App/`.** Found while
+    C7.4's live leg was tripping `check-app-wiring.py`: the check keys on bare names, so a
+    test-local identifier named `window` had been masking it. Either it is unwired window-state
+    persistence or it is dead. Closer: wire it or delete it. Owner: C5.
+276. **`check-app-wiring.py` keys on bare member names.** An unrelated test-local identifier can
+    surface or mask a finding about a declaration it has nothing to do with; entry 275 is a concrete
+    instance. The script's own docstring already concedes the limitation. Closer: key on the
+    declaring type as the X7 drift checker learned to. Owner: C5's tool.
+346. **A pane the user never looks at cannot report its child's exit while its renderer is full.**
+    The pane consumes output and termination through one event loop and waits on
+    `awaitFeedCapacity()` between deliveries. An unattached surface holds its backlog until a
+    surface attaches (C7.1 tracker 298), so once 1 MiB is outstanding the loop stops and cannot
+    reach `.ended`, even though `PTYProcess` has already observed the child's status. For a hatch
+    whose pane is never rendered — the request names a channel the window is not showing — the exit
+    report, and with it X5's re-adoption, waits for the tab to be opened or the pane to be closed.
+    Not fixed here because every cheap fix is wrong: a deadline on the wait defeats C7.1's
+    "nothing is dropped" backpressure, and the honest fix needs a seam the adapter does not expose.
+    Closer: publish attachment on `GhosttyTerminalSurface`, or give the pane a termination observer
+    independent of the output stream. Owner: C7.4 with C7.1.
+347. **A channel removed from the index leaves its Terminal session holding live children.**
+    `TerminalSessionRegistry` retains a session while it has panes, which is what keeps a pane alive
+    across the host's LRU eviction; but `FleetCoordinator.release` and the host's `releaseChannel`
+    tell the registry nothing, so a channel that leaves the index keeps its panes and their children
+    for the life of the process. C7.4 closed the workspace-reset half inside its own fence; this
+    half needs a host seam the leaf was not authorised to add. Closer: a channel-release callback
+    from `PanelHostModel.releaseChannel` into the registry. Owner: C7.4 with C5.
+348. **A workspace rebind during a pane handoff discharges through the wrong lifecycle.** The
+    header awaits its *original* `lifecycle.openInTerminal()`, but its pane-runner closure holds the
+    host, and `bindWorkspace` replaces that host's lifecycle and contexts. A delivery that lands
+    after the rebind reports — or discharges — through the replacement, and the original
+    supervisor's `pendingHatch` is never cleared. Not fixed, because the rebind that causes it
+    discards that supervisor's whole fleet in the same act: nothing observable outlives it today.
+    The reasoning is what makes this safe, so it is recorded rather than trusted to memory — a
+    future rebind that reused a fleet would make it a live defect. Closer: carry the lifecycle the
+    request was minted by, or refuse a delivery whose world has moved. Owner: C7.4 with C5.
+349. **A pane request delivered across a workspace release cannot be recognised as stale.**
+    `TerminalPaneRunner.run` hops to the main actor holding a `ChannelContext`; a release can
+    intervene before the session is made. The registry's staleness check compares the identity of
+    the context's `store`, but `ScopedStore` is not class-bound and the production
+    `WorkbenchScopedStore` is a struct, so the check answers "same world" rather than answering
+    falsely — it stands *behind* `bindWorkspace`'s release, not in front of it. Closer: a
+    first-class world token on `ChannelContext`, which is a `PanelHostAPI` change and a parent
+    revision. Owner: C7.4 with C5.
+350. **The composer's Escape and Shift+Tab reach the window while a terminal pane has focus.**
+    `ComposerShortcutBar` stays mounted beside the panel and binds both keys unconditionally, and
+    the renderer's `performKeyEquivalent` returns false for ordinary non-Command keys it has not
+    bound — so Escape in a pane can interrupt a turn instead of reaching the child, and Shift+Tab
+    can cycle permission mode instead of completing. It makes a full-screen TUI in a pane
+    (`claude --resume`, an editor) misbehave in a way that reads as the pane being broken. Not fixed
+    in C7.4: the shortcut bar is C6.2's, and suppressing it needs a focus signal that crosses the
+    two children. Closer: the composer's shortcuts stand down while the panel holds first
+    responder. Owner: C6.2 with C7.4; escalated to the architect at C7.4's merge.
+351. **`continueStopped()` signals a process-group number it read across an actor hop.** The pane
+    re-checks its own state and its pty before signalling (round three's fix), but not the pty
+    layer's ownership gate, which closes before the reap; the pane learns of `.ended` later, through
+    the output stream. A stopped child that exits inside that window could see the signal land on a
+    reused group number. Narrow — it needs a stop, an exit and a pid reuse inside one hop — and
+    §7.8's rule is what makes it worth recording anyway. Closer: a resume that the pty layer
+    performs under its own ownership gate, rather than a number handed out to a caller. Owner:
+    C7.4 with C7.1.
+352. **A persistence write can outlive the session that scheduled it.** `schedulePersist` captures
+    the store, the document and the preceding task without retaining the session, and an *empty*
+    session loses the registry's strong retention, so host eviction can discard it while a write is
+    still pending. A replacement session waits on the released flag, which ordinary eviction never
+    sets, so a restore can read in front of the old session's last write. Bounded — the document is
+    small, the window is one actor hop, and both sessions write the same channel's own key — but it
+    is a two-writer path W6's per-tab key was meant to end. Closer: a per-key write barrier the
+    registry owns rather than one chained inside a session. Owner: C7.4.
+353. **A job pane for an unvisited channel depends on the caller seeding the host's context.** The
+    ruled seam has the caller name the channel and the host resolve it, and the host can only
+    resolve a channel it has rendered or been told a cwd for. C7.4's sidebar path supplies the cwd
+    it knows, so *Attach* and *Logs* work for a job whose channel the window has never shown; a
+    caller that cannot name a cwd still refuses. Recorded because the dependency is not obvious
+    from the seam's shape and the next caller will meet it. Closer: `run(_:for:)` taking the cwd, or
+    the host resolving a channel through the fleet's own row. Owner: C7.4 with C5.
+354. **Quit does not know a Terminal pane is running.** `QuitGuard.forApp` is built from the fleet
+    and the composers; `FleetQuitTermination.quitChannels` filters to owned channels, and a shell
+    pane has no fleet entry at all. So §7.4's Quit asks about turns and background tasks and says
+    nothing about a pane with a live child, app termination closes the pty descriptors without
+    awaiting any pane teardown, and the alert's own advice — that *Open in terminal* is how you keep
+    a conversation — is wrong for the pane it hands you to. No state is corrupted (a relaunch
+    re-evaluates every channel from the registry) and the children are afleet's own, so §7.8 is not
+    breached; what is missing is the warning. Closer: the quit guard asks the session registry
+    whether any pane holds a live child, and the sentence names it. Owner: C6.2's `QuitGuard` with
+    C7.4; escalated to the architect at C7.4's merge.
+355. **Retired at the architect's ruling of 2026-09-09**, which gave C7.4 the range 384–393. It
+    had carried four unrelated residues under one number because the range had run out; each now
+    has its own, and its first clause was decided rather than filed. See 384 (closed), 385, 386
+    and 387.
+
+384. **Closed 2026-09-09 by the architect's ruling, in C7.4's merge-prep pass.** *Attach* and
+    *Logs* from a Background row used to start a pane in a channel the window was not showing: the
+    host selects the Terminal tab, but the panel column derives its channel from `shell.focus`, so
+    nothing brought that channel into view, and item 15's "*Attach* shows its screen" was not what
+    happened. Ruled: a row action acts on that row's channel, so it brings it into view — the
+    sidebar selects the channel, then the host selects the tab, then the request runs. A witness
+    asserts the selection precedes the run, and fails when the selection is dropped.
+385. **After `/cd`, a channel's new shell panes still open in the old directory.**
+    `ComposerRegistry.adoptDirectory` rebuilds the host's `ChannelContext`, but the host hands back
+    the session it already retains and `TerminalPanelSession` holds the context it was made with;
+    neither Cmd+Shift+T nor the pane bar's `+` passes a directory override. The channel moves and
+    its next shell does not. Closer: a context refresh a retained session can observe — a seam
+    between the host's cache and a live session rather than a change inside either. Owner: C7.4
+    with C5.
+    **A second entry point into the same wrongness was closed in wave F5**: the sidebar used to
+    seed a channel's context with a *job's* directory when the channel had no row, which recorded
+    that directory as the **channel's** own cwd — so every later Cmd+Shift+T shell opened there and
+    it was persisted into the W6 document. A job's channel is now resolved through its row only;
+    with no row the pane goes to the channel in view, and no cwd is recorded for anyone. What
+    remains here is the `/cd` case, which needs the context-refresh seam.
+386. **A shell opened while the initial document read is in flight is lost to a release in that
+    window.** `schedulePersist` deliberately writes nothing until the read reaches `.done`, and
+    `tearDown` deliberately writes nothing at all, so a pane created between those two facts is
+    recorded by neither and the replacement session reads the older document. Both halves are right
+    on their own; the gap is where they meet. Same family as 346 and 352 — ordering under teardown,
+    where each fix has revealed the next. Closer: a teardown that flushes what the read was
+    blocking rather than one that writes nothing. Owner: C7.4.
+387. **Closed 2026-09-09 in wave F5**, by the merge review round finding the sequence its closer
+    had only guessed at: main-window host A holds the surface, pop-out B steals it, a re-render C
+    steals it from B, and when the pop-out closes B — dismantled, in no window — is handed the view
+    while the live A draws nothing. `relinquish` now forgets **before** the ownership guard rather
+    than after it, and `survivingHost` skips any container with no window. The test that covered
+    this passed only by creation order; the reversed order and the dismantled-middle-host case are
+    covered now.
+    Recorded with it, benign today: `PaneSurfaceContainer.mounted` is **process-global with no
+    per-test reset**, so containers from earlier tests share one list. Harmless — every entry is
+    weak and windowless ones are now skipped — and worth knowing before someone reads a cross-test
+    interaction as a defect in the claim.
+388. **`TerminalSessionRegistry.isSameWorld` is inert in production.** It decides whether a
+    retained session belongs to the workspace being asked about by comparing the identity of the
+    context's `store`, but `identity(of:)` needs a class and the production `WorkbenchScopedStore`
+    is a **struct**, so the check answers "same world" for every context it is given. It is harmless
+    only because it stands *behind* `bindWorkspace`, which releases the whole registry before any
+    replacement context exists. Written as a guard, it currently guards nothing, and a reader will
+    trust it. Closer: a first-class world token on `ChannelContext` — a `PanelHostAPI` change and so
+    a parent revision — or a class-bound store. Same seam as entry 349. Owner: C7.4 with C5.
+
+406. **The neighbourhood's registry mirror is outside the timeline table's reload comparison.**
+     `TimelineTableController` decides a forced reload by comparing `toolCalls`,
+     `precedingTimestamps` and `agents`; `TimelineNeighbourhood.registry` joined the value in the
+     `corrective/c3-agent-tree-mirror` corrective and was not added, because that corrective's App
+     change was held to the one read it was for. A registry move with no accompanying item change
+     therefore does not re-key the `taskRun` row, and the card keeps the mirror snapshot it was built
+     with. Narrow in practice: a row appears with its `task_started`, which moves the item too, and
+     the foreground-to-background transition is one the card refreshes itself on — so the reachable
+     gap is a `background_tasks_changed` that unlists a row while nothing else about it moves. Closer:
+     add `registry` to the comparison, or key the card on the mirror's row rather than on the item.
+     Owner: C6.1. Filed 2026-09-09.
+     **Closed 2026-09-09 by the same corrective's fix wave, and it was wider than filed.** The reload
+     comparison was the second half; the first was `TaskCardSeam.identity(of:in:)`, which read the
+     task, the status and the channel's capability and never the mirror — so a row mounted before its
+     run's `task_started` reached the fold kept the card it built then, and *Move to background* was
+     absent for the whole of that run's foreground life whatever any comparison said. Both now fold in
+     the mirror's **eligibility** for the task (`TaskCardEligibility`, `TaskCardModel.isEligible`) and
+     not the mirror itself, which also takes the neighbourhood cache off the mirror: `lastFrameAt` is
+     stamped by every task frame, so keying on the whole value charged a chatty agent one O(items)
+     rebuild per heartbeat — the growth §8.3 forbids, arriving through a field a card reads four values
+     out of.
+
+407. **A tree node built from a `.meta.json` sidecar reads `.running` on a channel that ended long
+     ago.** Nothing on disk records an agent run's terminal status: the sidecar carries `agentType`,
+     `description`, `toolUseId`, `spawnDepth` and `parentAgentId` and no more, and the run's own
+     transcript ends without saying it ended. So the node a file-only open creates takes the type's
+     default, and C6.4's Agents tab will show every run of an archived or foreign session as running.
+     It is deliberately the *same* reading the record reducer already takes for a file-side `taskRun`
+     row with no spawning call (`RecordReducer.taskRun(for:spawnedBy:toolUseID:)`), because the two
+     halves of one channel disagreeing about one run is worse than both being conservative — but both
+     are wrong for a session that is over. Closer: derive the status from the spawning tool call when
+     the main transcript holds one (which is what the item side already does when it can), and treat a
+     channel the index reports dormant as ending its runs. Filed by the
+     `corrective/c3-agent-tree-mirror` corrective on `main`, 2026-09-09. Owner: C3, before C6.4 is
+     judged on foreign channels.
+     **Mostly closed the same day, in the same corrective's fix wave.** `StreamIngestion` reconciles
+     the tree against the merged projection's `taskRun` rows after every recompute, so a node no
+     `task_started` named takes the row's status and the row's start instant: an archived session's
+     runs now read *Completed* in both halves. What remains is narrower and is what this entry now
+     stands for: a run whose spawning call is nowhere in the merged line — a truncated window, an
+     agent stream whose `tool_use` block was compacted away — still reads running in both halves,
+     because nothing on disk says otherwise; and no node gets an `endedAt`, since neither the sidecar
+     nor the transcript records when a run ended, so a consumer that ticks elapsed to `endedAt ?? now`
+     has nothing to stop at. Closer: an end instant the file half can defend (the last record of the
+     run's own transcript is a *last activity*, not an end), and C4's dormancy as the second witness.

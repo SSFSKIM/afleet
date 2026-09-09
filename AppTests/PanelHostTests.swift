@@ -24,8 +24,11 @@ final class PanelHostTests: XCTestCase {
     /// R2: a protocol selection must invalidate the exact property the window renders.
     /// Reading host.selected alone would miss the original shell/host split entirely.
     func testProtocolSelectionUpdatesTheRenderedSelection() async throws {
-        let app = AppModel()
-        try app.panels.register(StubPanelTab(.terminal))
+        let app = AppModel(registry: RowRegistry())
+        // An id the app does **not** ship. It registers Thread, Files, Terminal and Browser in
+        // `init`, so a stub taking any of those is a duplicate; this test is about selection and
+        // any unshipped id proves it. `.sourceControl` is the free one until C7.7 lands.
+        try app.panels.register(StubPanelTab(.sourceControl))
         let changed = expectation(description: "rendered selection invalidated")
         withObservationTracking {
             _ = app.shell.panelTab
@@ -33,10 +36,10 @@ final class PanelHostTests: XCTestCase {
             changed.fulfill()
         }
         let host: any PanelHost = app.panels
-        host.select(.terminal)
+        host.select(.sourceControl)
         let result = await XCTWaiter.fulfillment(of: [changed], timeout: 1)
         XCTAssertEqual(result, .completed, "protocol selection did not invalidate the rendered tab")
-        XCTAssertEqual(app.shell.panelTab, .terminal, "window still renders the old selection")
+        XCTAssertEqual(app.shell.panelTab, .sourceControl, "window still renders the old selection")
 
         // Tab-bar writes use the same owner, and a refused id cannot split the two views.
         app.shell.panelTab = .thread
@@ -48,18 +51,20 @@ final class PanelHostTests: XCTestCase {
 
     /// R2: run must select the visible terminal, not just start a pane behind Thread.
     func testPaneRunUpdatesTheRenderedSelection() async throws {
-        let app = AppModel()
-        try app.panels.register(StubPanelTab(.terminal))
+        let rig = try await PanelRig(channels: 1)
+        let key = rig.keys[0]
+        _ = rig.host.context(for: key, cwd: PanelFixtures.cwd)
+        try rig.host.register(StubPanelTab(.terminal))
         let runner = RecordingPaneRunner()
-        app.panels.registerPaneRunner(runner, for: .terminal)
-        XCTAssertEqual(app.shell.panelTab, .thread, "test must begin on another tab")
+        rig.host.registerPaneRunner(runner, for: .terminal)
+        XCTAssertEqual(rig.shell.panelTab, .thread, "test must begin on another tab")
 
-        try await app.panels.run(PanelFixtures.paneRequest())
+        try await rig.host.run(PanelFixtures.paneRequest(), for: key)
 
         let count = await runner.received.count
         XCTAssertEqual(count, 1, "the registered runner never received the pane")
-        XCTAssertEqual(app.shell.panelTab, .terminal, "pane ran behind the old visible tab")
-        XCTAssertEqual(app.panels.selected, .terminal, "run did not select its registered tab")
+        XCTAssertEqual(rig.shell.panelTab, .terminal, "pane ran behind the old visible tab")
+        XCTAssertEqual(rig.host.selected, .terminal, "run did not select its registered tab")
     }
 
     // MARK: - G4a: registration and order
@@ -472,14 +477,15 @@ final class PanelHostTests: XCTestCase {
     /// permits a redraw, so a stale window cannot pass by querying the host directly.
     func testRemovedPopOutInvalidatesItsSceneAndReleasesTheRetainedSession() async throws {
         let rig = try await PanelRig(channels: 2)
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
-        try app.panels.register(StubPanelTab(.terminal, counter: counter))
+        // An unshipped id, for the reason the selection test above records.
+        try app.panels.register(StubPanelTab(.sourceControl, counter: counter))
         let key = rig.keys[0]
         _ = app.panels.context(for: key, cwd: PanelFixtures.cwd)
-        app.panels.popOut(.terminal, channel: key)
-        let panel = PoppedOutPanel(tab: .terminal, channel: key)
+        app.panels.popOut(.sourceControl, channel: key)
+        let panel = PoppedOutPanel(tab: .sourceControl, channel: key)
         let scene = PoppedOutPanelScene(app: app, panel: panel)
         let coordinator = try XCTUnwrap(app.coordinatorFactory(rig.workspace) as? FleetCoordinator)
         defer { coordinator.stop() }
@@ -987,11 +993,10 @@ final class PanelHostTests: XCTestCase {
         let context = try XCTUnwrap(rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd),
                                     "the host built no context")
         let runner = RecordingPaneRunner()
-        await runner.bind(context.reportPaneExit)
         rig.host.registerPaneRunner(runner, for: .terminal)
         let request = PanelFixtures.paneRequest()
 
-        try await rig.host.run(request)
+        try await rig.host.run(request, for: context.key)
 
         let received = await runner.received
         XCTAssertEqual(received.count, 1, "the runner received \(received.count) requests, not 1")
@@ -1002,6 +1007,131 @@ final class PanelHostTests: XCTestCase {
         XCTAssertTrue(exits.first?.request.id == request.id,
                       "the exit reaching the lifecycle carries a different request id")
         XCTAssertTrue(exits.first?.request == request, "the exit's request is not the one that was run")
+    }
+
+    /// A pane lands in the channel **the caller named**, and the runner is handed that channel's
+    /// context.
+    ///
+    /// The assertion is on `context.key` rather than on the fact that a run happened, because a host
+    /// resolving the channel from anywhere else — its focus, its selection, the first channel it
+    /// holds — also runs the request, and only the identity of the context says which channel the
+    /// pane opened in.
+    func testAPaneRunsInTheContextOfTheChannelTheCallerNamed() async throws {
+        let rig = try await PanelRig(channels: 2)
+        let named = rig.keys[1]
+        _ = rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd)
+        _ = rig.host.context(for: named, cwd: PanelFixtures.cwd)
+        let runner = RecordingPaneRunner()
+        rig.host.registerPaneRunner(runner, for: .terminal)
+
+        try await rig.host.run(PanelFixtures.paneRequest(), for: named)
+
+        let channels = await runner.channels
+        XCTAssertEqual(channels.count, 1, "the runner ran \(channels.count) pane(s), not 1")
+        XCTAssertTrue(channels.first == named, "the pane opened in a channel the caller did not name")
+    }
+
+    /// **The discriminating test.** Two resolvable channels, the window focused on one of them, and
+    /// the request run for the other: the pane opens in the channel the caller named.
+    ///
+    /// A host that resolved the channel from its own focus passes every other test in this group and
+    /// fails only this one. That is the failure the amendment exists to make unrepresentable —
+    /// `openInTerminal` suspends across a whole ownership handoff, so focus can move between the
+    /// click and the run, and X5 is waiting on a pane in the channel it released.
+    func testAPaneRunsInTheNamedChannelAndNotTheFocusedOne() async throws {
+        let rig = try await PanelRig(channels: 2)
+        let named = rig.keys[0]
+        let focused = rig.keys[1]
+        _ = rig.host.context(for: named, cwd: PanelFixtures.cwd)
+        _ = rig.host.context(for: focused, cwd: PanelFixtures.cwd)
+        rig.host.focusChannel(focused)
+        let runner = RecordingPaneRunner()
+        rig.host.registerPaneRunner(runner, for: .terminal)
+
+        try await rig.host.run(PanelFixtures.paneRequest(), for: named)
+
+        let channels = await runner.channels
+        XCTAssertEqual(channels.count, 1, "the runner ran \(channels.count) pane(s), not 1")
+        XCTAssertTrue(channels.first == named, "the pane opened in the focused channel, not the named one")
+    }
+
+    /// A channel the host can resolve no context for refuses: `.noChannelContext`, no runner reached,
+    /// and the selection where it was.
+    ///
+    /// The selection clause is half the claim. A host that moved to the Terminal tab and then threw
+    /// would leave the window showing an empty panel for a pane that never started.
+    func testAPaneForAnUnresolvableChannelRefusesAndReachesNoRunner() async throws {
+        let rig = try await PanelRig(channels: 1)
+        _ = rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd)
+        try rig.host.register(StubPanelTab(.terminal))
+        let runner = RecordingPaneRunner()
+        rig.host.registerPaneRunner(runner, for: .terminal)
+        let unknown = PanelFixtures.key(9)
+
+        do {
+            try await rig.host.run(PanelFixtures.paneRequest(), for: unknown)
+            XCTFail("a pane ran for a channel the host cannot resolve")
+        } catch let error as PanelHostError {
+            XCTAssertEqual(error, .noChannelContext, "the host refused with a different error")
+        }
+
+        let count = await runner.received.count
+        XCTAssertEqual(count, 0, "the runner received \(count) request(s) for an unresolvable channel")
+        XCTAssertNil(rig.host.selected, "the refused run moved the panel selection")
+    }
+
+    /// A request the host cannot place is **discharged**, and still throws.
+    ///
+    /// C4 has already installed `pendingHatch` by the time this runs, and it is cleared only by a
+    /// matching `paneExited`. The banner the caller draws changes nothing about that: no pane was
+    /// created, so nobody else will ever send the exit, and the channel stays released for ever.
+    /// So the host reports the request it cannot run as an exit with code 127 — the same status
+    /// and the same reasoning the child spec's Design §2 already fixes for a spawn that never
+    /// executed — and throws afterwards, so the caller's refusal is unchanged.
+    func testAPaneForAnUnresolvableChannelIsDischargedAsA127Exit() async throws {
+        let rig = try await PanelRig(channels: 1)
+        _ = rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd)
+        rig.host.registerPaneRunner(RecordingPaneRunner(), for: .terminal)
+        let request = PanelFixtures.paneRequest()
+
+        do {
+            try await rig.host.run(request, for: PanelFixtures.key(9))
+            XCTFail("a pane ran for a channel the host cannot resolve")
+        } catch let error as PanelHostError {
+            XCTAssertEqual(error, .noChannelContext, "the host refused with a different error")
+        }
+
+        let exits = await rig.lifecycle.paneExits
+        XCTAssertEqual(exits.count, 1, "the lifecycle received \(exits.count) pane exits, not 1")
+        // The id is the clause that matters: C4 discards an exit whose id it is not waiting on,
+        // silently, and a hatch discharged under a fresh id leaves the channel released.
+        XCTAssertTrue(exits.first?.request.id == request.id,
+                      "the discharge carries a different request id from the one that could not run")
+        XCTAssertTrue(exits.first?.request == request, "the discharge edited the request it echoes")
+        XCTAssertEqual(exits.first?.code, 127, "the discharge reported code \(exits.first?.code ?? -1), not 127")
+    }
+
+    /// The same for a window with no pane runner registered: item 47's stated degradation is a
+    /// banner, not a channel that can never be owned again.
+    func testAPaneWithNoRunnerIsDischargedAsA127Exit() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let key = rig.keys[0]
+        _ = rig.host.context(for: key, cwd: PanelFixtures.cwd)
+        let request = PanelFixtures.paneRequest()
+
+        do {
+            try await rig.host.run(request, for: key)
+            XCTFail("a pane ran with no runner registered")
+        } catch let error as PanelHostError {
+            XCTAssertEqual(error, .noPaneRunner(.terminal), "the host refused with a different error")
+        }
+
+        let exits = await rig.lifecycle.paneExits
+        XCTAssertEqual(exits.count, 1, "the lifecycle received \(exits.count) pane exits, not 1")
+        XCTAssertTrue(exits.first?.request.id == request.id,
+                      "the discharge carries a different request id from the one that could not run")
+        XCTAssertTrue(exits.first?.request == request, "the discharge edited the request it echoes")
+        XCTAssertEqual(exits.first?.code, 127, "the discharge reported code \(exits.first?.code ?? -1), not 127")
     }
     /// The tab reads the channel's identity, its working directory and X11's environment out of the
     /// context, and each is asserted.
@@ -1048,14 +1178,14 @@ final class PanelHostTests: XCTestCase {
     /// that built the coordinator over a second host would release nothing here.
     func testTheAppResolvesOnePanelHost() async throws {
         let rig = try await PanelRig(channels: 1)
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
-        // `.terminal` rather than `.files`: the app registers its own Files tab in `init`, and
-        // this test is about which host the coordinator holds, not about which tab it is.
-        try app.panels.register(StubPanelTab(.terminal, counter: counter))
+        // An id the app does not ship: it registers Thread, Files, Terminal and Browser in `init`,
+        // and this test is about which host the coordinator holds, not about which tab it is.
+        try app.panels.register(StubPanelTab(.sourceControl, counter: counter))
         let key = rig.keys[0]
-        _ = app.panels.session(for: .terminal, context: PanelFixtures.context(key))
+        _ = app.panels.session(for: .sourceControl, context: PanelFixtures.context(key))
         XCTAssertEqual(app.panels.liveChannelCount, 1,
                        "the host holds \(app.panels.liveChannelCount) channels, not 1")
 
@@ -1193,18 +1323,23 @@ private final class LinkRecorder {
     }
 }
 
-/// A `PaneRunning` that records what it was given and reports an exit through the context.
+/// A `PaneRunning` that records what it was given and reports an exit through the context it was
+/// handed.
+///
+/// The reporter is the *given* context's and never one bound beforehand: a runner that had to be
+/// told where to report could report from the wrong channel and no test would see it, which is the
+/// whole of what the amended seam removes.
 private actor RecordingPaneRunner: PaneRunning {
     private(set) var received: [PaneRequest] = []
-    private var report: (@Sendable (PaneExit) async -> Void)?
+    /// The channel each received request was run in, so a host that resolved the wrong one fails.
+    private(set) var channels: [ChannelKey] = []
 
-    func bind(_ report: @escaping @Sendable (PaneExit) async -> Void) { self.report = report }
-
-    func run(_ request: PaneRequest) async {
+    func run(_ request: PaneRequest, in context: ChannelContext) async {
         received.append(request)
+        channels.append(context.key)
         // The exit carries the request the runner was handed, unedited. Whether that is the request
         // the host was given is what the test asserts.
-        await report?(PaneExit(request: request, code: 0, observedAt: Date()))
+        await context.reportPaneExit(PaneExit(request: request, code: 0, observedAt: Date()))
     }
 }
 
@@ -1226,20 +1361,19 @@ private final class URLBox: @unchecked Sendable {
 enum PanelFixtures {
 
     static let configHome = URL(fileURLWithPath: "/invented/config-home")
-    static let cwd = URL(fileURLWithPath: "/invented/project")
+    /// Read from the rig, which now lives in `Support/PanelRig.swift` and is shared with C7.4's
+    /// journey suite. One spelling, so a suite and its rig cannot name two channels while meaning
+    /// one.
+    static let cwd = PanelRig.cwd
 
     /// A v4-shaped session id from an index, so twenty distinct channels read as twenty numbers.
-    static func session(_ index: Int) -> SessionID {
-        SessionID(String(format: "%08x-0000-4000-8000-%012x", index, index))!
-    }
+    static func session(_ index: Int) -> SessionID { PanelRig.session(index) }
 
     static func key(_ index: Int, configHome: URL = PanelFixtures.configHome) -> ChannelKey {
         ChannelKey(configHome: configHome, session: session(index))
     }
 
-    static func url(_ index: Int) -> URL {
-        URL(string: "https://invented.example/page-\(index)")!
-    }
+    static func url(_ index: Int) -> URL { PanelRig.url(index) }
 
     static let fileLink = WorkspaceLink.file(URL(fileURLWithPath: "/invented/project/file.swift"), line: nil)
 
@@ -1337,139 +1471,5 @@ private struct CoordinatorRig {
                                        index: StubIndex(persisted: nil, built: snapshot),
                                        model: browser,
                                        panels: host)
-    }
-}
-
-/// A workspace over a scratch config home, with the host and the timeline registry attached to it
-/// exactly as `AppModel.bindWorkspace` attaches them.
-///
-/// Built by hand rather than through `LaunchSequence` because what is under test is the panel host,
-/// and a launch would add a binary probe, a version gate and a sign-in gate, each of which can fail
-/// for reasons that say nothing about §7.
-@MainActor
-struct PanelRig {
-
-    let temp: TempTree
-    let home: ScratchConfigHome
-    let workspace: Workspace
-    let lifecycle: LifecycleDouble
-    let host: PanelHostModel
-    let timelines: ChannelTimelineRegistry
-    let browser: FleetBrowserModel
-    let shell: ShellModel
-    let watcher: StubWatcher
-    let keys: [ChannelKey]
-    let paths: [URL]
-
-    /// `urlsPerChannel` transcripts carry that many assistant messages naming an invented URL each;
-    /// zero writes the plain two-record transcript.
-    init(channels: Int, urlsPerChannel: Int = 0) async throws {
-        temp = try TempTree()
-        home = try ScratchConfigHome(tree: temp)
-        let configHome = home.configHome
-
-        var keys: [ChannelKey] = []
-        var paths: [URL] = []
-        for index in 0..<channels {
-            let session = PanelFixtures.session(index)
-            let url: URL
-            if urlsPerChannel > 0 {
-                url = try PanelRig.transcriptWithURLs(in: home.root, slug: "invented-\(index)",
-                                                      session: session, urls: urlsPerChannel)
-            } else {
-                url = try LaunchFixtures.transcript(in: home.root, slug: "invented-\(index)", session: session)
-            }
-            keys.append(ChannelKey(configHome: configHome.root, session: session))
-            paths.append(url)
-        }
-        self.keys = keys
-        self.paths = paths
-
-        let index = TranscriptIndex(configHome: configHome, storage: InMemoryIndexStorage())
-        _ = try await index.build()
-        let store = try FileStateStore(baseDirectory: temp.root.appending(path: "store", directoryHint: .isDirectory),
-                                       configHomes: [home.root])
-        watcher = StubWatcher()
-        let feed = TranscriptChangeFeed(source: watcher.changes)
-        await feed.start()
-
-        lifecycle = LifecycleDouble()
-        workspace = Workspace(configHome: configHome,
-                              environment: LaunchFixtures.environment(home: temp.root, configHome: home.root),
-                              binary: try temp.file("bin/claude", "#!/bin/sh\nexit 0\n"),
-                              installed: SemanticVersion(major: 2, minor: 1, patch: 263),
-                              store: store,
-                              index: index,
-                              fleet: StubFleet(),
-                              watcher: watcher,
-                              changes: feed,
-                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)),
-                              rawCapture: nil)
-
-        timelines = ChannelTimelineRegistry()
-        timelines.attach(to: workspace, lifecycle: lifecycle)
-        host = PanelHostModel()
-        shell = ShellModel(panels: host)
-        host.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
-        browser = FleetBrowserModel(lifecycle: lifecycle, configHome: configHome.root)
-        browser.paint(LaunchFixtures.snapshot(configHome: configHome.root, ids: keys.map(\.session)),
-                      listing: nil, origin: .built)
-    }
-
-    /// The row the channel column would hand the timeline model.
-    func row(_ index: Int) -> ChannelRow {
-        ChannelRow(key: keys[index],
-                   title: "an invented channel",
-                   titleSource: .firstPrompt,
-                   preview: "invented preview",
-                   cwd: PanelFixtures.cwd,
-                   gitBranch: nil,
-                   agentName: nil,
-                   mtime: Date(),
-                   isRecent: true,
-                   mode: .ownedCandidate,
-                   decidingRule: "invented",
-                   isProvisional: false,
-                   state: nil)
-    }
-
-    /// Appends one assistant message naming `PanelFixtures.url(index)`, and moves the leaf onto it.
-    ///
-    /// The leaf has to move: `RecordReducer` projects the chain the closing `last-prompt` names, so
-    /// a record appended past the named leaf applies cleanly and appears in no projection.
-    func appendURL(to channel: Int, index: Int) throws {
-        let handle = try FileHandle(forWritingTo: paths[channel])
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data(PanelRig.assistantWithURL(session: keys[channel].session,
-                                                                    index: index).utf8))
-    }
-
-    /// One user record and `count` assistant records, each naming its own invented URL, with the
-    /// leaf on the last of them.
-    private static func transcriptWithURLs(in configHome: URL, slug: String, session: SessionID,
-                                           urls count: Int) throws -> URL {
-        let directory = configHome.appending(path: "projects/\(slug)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var body = #"{"type":"user","sessionId":"\#(session)","uuid":"\#(uuid(0))","parentUuid":null,"isSidechain":false,"cwd":"/invented/project","timestamp":"2026-01-01T00:00:00.000Z","message":{"role":"user","content":"invented prompt"}}"# + "\n"
-        for index in 0..<count { body += assistantWithURL(session: session, index: index) }
-        let file = directory.appending(path: "\(session).jsonl")
-        try Data(body.utf8).write(to: file)
-        return file
-    }
-
-    /// An assistant record naming one invented URL, followed by the `last-prompt` that makes it the
-    /// projected leaf. Its parent is the record before it, so the chain stays one branch.
-    private static func assistantWithURL(session: SessionID, index: Int) -> String {
-        let me = uuid(index + 1)
-        let parent = uuid(index)
-        let text = "invented reply naming \(PanelFixtures.url(index).absoluteString)"
-        let record = #"{"type":"assistant","sessionId":"\#(session)","uuid":"\#(me)","parentUuid":"\#(parent)","isSidechain":false,"cwd":"/invented/project","timestamp":"2026-01-01T00:00:0\#(index + 1).000Z","message":{"id":"msg_invented\#(index)","role":"assistant","content":[{"type":"text","text":"\#(text)"}]}}"# + "\n"
-        let leaf = #"{"type":"last-prompt","sessionId":"\#(session)","leafUuid":"\#(me)","lastPrompt":"invented prompt"}"# + "\n"
-        return record + leaf
-    }
-
-    private static func uuid(_ index: Int) -> String {
-        String(format: "00000000-0000-4000-8000-%012x", index)
     }
 }

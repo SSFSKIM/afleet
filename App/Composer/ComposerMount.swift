@@ -54,7 +54,7 @@ final class ComposerRegistry {
     /// *Open in terminal*. A closure for the reason `contextProvider` is one: holding the host would
     /// put the app's whole object graph on the reflection walk that asserts the mounts, which is
     /// what crashed the bundle at Task 3's boundary (tracker 147).
-    var paneRunner: (@MainActor (PaneRequest) async throws -> Void)?
+    var paneRunner: (@MainActor (PaneRequest, ChannelKey) async throws -> Void)?
 
     /// How the composer reaches the channel's `ChannelTimelineModel` — C6.1's, read only.
     ///
@@ -145,7 +145,7 @@ final class ComposerRegistry {
     /// static with no rebind, which had exactly that defect; its worker flagged it.
     func attach(to workspace: Workspace, context: (@MainActor (ChannelKey, URL) -> ChannelContext?)? = nil,
                 timeline: (@MainActor (ChannelKey) -> ChannelTimelineModel?)? = nil,
-                paneRunner: (@MainActor (PaneRequest) async throws -> Void)? = nil,
+                paneRunner: (@MainActor (PaneRequest, ChannelKey) async throws -> Void)? = nil,
                 lifecycle: (any LifecycleAPI)? = nil) {
         releaseAll()
         generation += 1

@@ -84,7 +84,10 @@ final class ShellModel {
     /// Cmd+K's sheet.
     var isSwitcherPresented = false
 
-    private let panels: PanelHostModel
+    /// Contract X7's host, which this model was given so the shortcuts declared above the window
+    /// could reach it. Readable, because the sidebar's job rows place a pane through the same host
+    /// and a second route to it would be a second answer to which channel a pane landed in.
+    let panels: PanelHostModel
 
     init(panels: PanelHostModel = PanelHostModel()) {
         self.panels = panels
@@ -104,10 +107,6 @@ final class ShellModel {
 
     /// *All projects*: whether the sections the thirty-day default hides entirely are revealed.
     var showsAllProjects = false
-
-    /// The `PaneRequest` the last *Attach* produced. Nothing in C5 renders a pane — the Terminal
-    /// panel is C7's — so the request is held rather than dropped, and the sidebar says so.
-    var pendingPane: PaneRequest?
 
     // MARK: - The shortcuts' verbs
 

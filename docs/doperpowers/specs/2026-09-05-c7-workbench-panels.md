@@ -600,7 +600,13 @@ pane, C4 owns the transition.
 - **Contracts:** W2, W8, X5, X7.
 - **Design inheritance:** §9.3, §9.5, §7.4's hatch rows (binding), §7.2 rule 5 (binding).
 - **Required:** required.
-- **Status:** not-dispatched, blocked-by C7.1, C4, C5.G4. Branch `child/c7-terminal-panel`.
+- **Status:** **merged** 2026-09-09 at `054e42c` from `child/c7-terminal-panel` `385bbe1`
+  (43 commits). Spec `docs/doperpowers/specs/2026-09-09-c7.4-terminal-panel.md`.
+  **Outcome:** G1 met headlessly (a real child through the pane's own path; environment asserted by name; shell and request panes use their own cwds), the two lines on a screen a human leg; G2 met in both halves — the whole X5 path on a lifecycle double with every arm bought by mutation, and live under the scratch home at zero model turns: unprompted channel → sendToBackground → attach → real pane → Ctrl+Z → exit 0 at 522 and 530 ms with the `--hold` control passing and one PaneExit echoing the request; G3 met (request cwd, signal named, 127 on a failed spawn, close asks first, Restart on shell panes only); G4 met at model level (per-channel sessions across a switch, persistence under `panel.terminal.<configHomeHash>.<sessionId>`, the claimant stack), two real windows a human leg. Four whole-branch review rounds by the leaf (19 closed in four waves) and one at merge on two fresh reviewers (14 P2, six fixed in wave F5: hand-off never takes the keyboard, a windowless host is never handed the surface, focus debt paid on the grant, teardown waits until no close stands, a job row moves the window only where the pane will be visible and only after X5 answered, a job's channel is its row's). Tracker 262–276, 346–355 (355 retired into 384–387), 388; 350 and 354 stay filed as cross-child correctives for recomposition. Human legs: keystrokes into a pane after Cmd+Shift+T, the composer keeping the keyboard while a pop-out closes, two windows over one Terminal tab, Attach visibly bringing its channel into view. 85 `TerminalPanelTests`. As shipped: a pane's state
+  machine with `.failed` distinct from an exit; restart is a shell pane's button and nothing
+  else's (a `.command` restart would be the panel spawning `claude` on its own initiative — W8);
+  the pane view's window claim is a claimant stack; `awaitFeedCapacity()` made cancellable inside
+  `TerminalCore` (tracker 93, a C7.4 edit in a C7.1 target on purpose).
 
 ### C7.5: Files panel — tree, viewers, watcher, link targets — plan
 
@@ -713,7 +719,12 @@ pane, C4 owns the transition.
 - **W8 Host capabilities: recent-URL feed, pane request and exit report.** Owner: this
   document as a flow-back to the parent's X5 and X7 (C4 and C5 own the content). Binds
   C7.4, C7.6, C4, C5, C6. Written to outlive this unit: on closing, W8's two shapes are
-  promoted into X5 and X7 on the parent.
+  promoted into X5 and X7 on the parent. The exit report has a shape as well as an obligation
+  (amended 2026-09-09 at C7.4's merge, its `[parent-impact]`): the runner reports through the
+  `ChannelContext` it is handed — X7 as amended gives it `PaneRunning.run(_:in:)`, and
+  `PanelHost.run(_:for:)` resolves that context from the channel that asked, never from focus,
+  because a header action, a trust banner or a sidebar row already holds its channel and focus
+  can move during the handoff. The context-less `run(_:)` is dropped, not kept as a convenience.
 
 ## Ordering & Dependency Map
 
@@ -788,7 +799,7 @@ parent's decision); any write under `<configHome>` (X9); IDE registration.
 | C7.1 Terminal core | `2026-09-07-c7.1-terminal-core.md`; plan `plans/2026-09-07-c7.1-terminal-core.md`; Outcomes in the child spec | **merged** 2026-09-08 at `855b815` from `child/c7-terminal-core` `dc34b77` (45 commits); G1–G3 met, S1 promote GhosttyKit, provisionally (four legs await a human); 295 package tests; tracker 82–92; four human legs outstanding (shell prompt, TUI redraw and alternate-screen exit, live drag, CJK composition) |
 | C7.2 Editor core | `2026-09-07-c7.2-editor-core.md`; plan `plans/2026-09-07-c7.2-editor-core.md`; Outcomes in the child spec | **merged** 2026-09-08 at `a47788a` from `child/c7-editor-core` `a6fb302` (37 commits); G1 73 → 110 package tests, G2 route 1 promoted (cold load median 556 ms at the gate, 677 ms re-measured after the waves), G3 offline-proven; bundle 13,083,139 bytes / 111 files / 2.90 MB compressed; tracker 97–107 (97, 98 closed on the branch); its own review (astra high, four fixed) then three whole-diff panel rounds at merge and three fix waves (routing epochs and host ownership, bridge visible mode and navigation fence, harness evidence by attribution); human still to witness "no visible jank" |
 | C7.3 Source Control core | ledger `ledgers/2026-09-07-c7.3-scm-core.md`; Outcomes in the ledger | **merged** 2026-09-08 at `aa5df80` from `child/c7-scm-core` `20cdbc1` (41 commits); G1–G3 met, G3 live; 128 (package 128, 0 skipped) tests; tracker 112–126 (115 closed on the branch by `--decorate=full`; 125 is a `main` corrective on C2's `ProcessRunner`); six review rounds, the last two one pinned class (tracker 123, owner C7.7) |
-| C7.4 Terminal panel | plan on `child/c7-terminal-panel` | blocked-by C7.1, C4, C5.G4 |
+| C7.4 Terminal panel | `2026-09-09-c7.4-terminal-panel.md`; plan `plans/2026-09-09-c7.4-terminal-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `054e42c` from `child/c7-terminal-panel` `385bbe1` (43 commits); 85 tests; tracker 262–276, 346–355 and 384–393; X7 amended (`PanelHost.run(_:for:)`, `PaneRunning.run(_:in:)`); W8 gains the report's shape |
 | C7.5 Files panel | `2026-09-09-c7.5-files-panel.md`; plan `plans/2026-09-09-c7.5-files-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `517899d` from `child/c7-files-panel` `210d8eb` (56 commits); G1–G4 met headless, human legs outstanding; 185 tests; tracker 232–246; W1 row and W6 amended at its gate; X7 gap on the link's channel recorded (240) |
 | C7.6 Browser panel | ledger `2026-09-09-c7.6-browser-panel.md`; Outcomes in the ledger | **merged** 2026-09-09 at `6f8a8ec` from `child/c7-browser-panel` `c62124c` (46 commits); G1 structural + human leg, G2 met (click half conditional on C6.1), G3 met, G4 Debug met; 187 tests; tracker 247–255; X7 amended (pop-out declination; `PanelSurface` on `makeView`/`view`) |
 | C7.7 Source Control panel | plan on `child/c7-scm-panel` | blocked-by C7.3, C7.5, C7.6, C5.G4 |
@@ -1014,8 +1025,14 @@ retrospect.
   46 commits). Four `[parent-impact]`s applied: item 3 and W5 gain the browser exception
   with `LinkTarget.popsOutForNewWindow`; W1's `BrowserPanel` row gains `AfleetCore` and
   `SourceControlCore`; X7's `makeView` and `view(for:context:)` take a `PanelSurface`
-  (`.mainColumn` | `.poppedOutWindow(tab:channel:)`), no default, because a tab that owns an
+  (`.panel` | `.poppedOutWindow(tab:channel:)`), no default, because a tab that owns an
   `NSView` must know which hierarchy is drawing it. Advisory overturns: §9.4's quick-open and
   chrome detail as decided (feed limit, substring filter, Enter/Cmd-Enter, no web-search
   fallback); the inspector's mechanism; the URL bar's non-web schemes decided by the one
   `NavigationPolicy` with `javascript:` and `data:` refused; item 39 made structural. 
+- 2026-09-09 reconciliation of C7.4 (merge `054e42c` from `child/c7-terminal-panel` `385bbe1`,
+  43 commits). One `[parent-impact]` applied: X7's pane runner takes its channel's context
+  and the host resolves it from the caller (`PanelHost.run(_:for:)`, `PaneRunning.run(_:in:)`;
+  W8 records the shape). Advisory overturns applied on the parent: §17.4 C7's *Respawn* is an X5
+  action, not a pane; item 15's "the detach key returns" names what returns; tracker 93 closed by
+  this leaf inside `TerminalCore` by design. 
