@@ -482,14 +482,29 @@ final class AgentNodeActionTests: XCTestCase {
     func testARunWithNoTranscriptPathIsOfferedNoOpen() throws {
         let rig = try Rig(mirror: Rig.runningAgent())
         rig.model.select(Rig.runID)
-        // The tree that composes the path is gone; the read is not, because the node still stands in
-        // the timeline the row was built from.
+        // The row the outline built while the tree was there, kept: what is being asked is what the
+        // outline's own row expression offers for a run whose path the tree no longer composes, and
+        // a row rebuilt afterwards would not exist to ask.
+        let row = try XCTUnwrap(AgentTreeView.visibleRows(read: rig.model.read, collapsed: [])
+                                    .first { $0.id == Rig.runID },
+                                "the outline drew no row for the run")
         rig.published.timeline.agents = nil
 
         // A boolean and not `XCTAssertNil` (§11): the url is composed from the config home, the
         // session id and the project slug, and a failing `XCTAssertNil` prints its operand.
         XCTAssertTrue(rig.model.transcriptURL(of: Rig.runID) == nil,
                       "a channel with no tree composed a path anyway")
+
+        // **And the affordance is what is asserted**, not only the model behind it: a bar that drew
+        // *Open transcript file* whatever the path was would leave the user pressing a button that
+        // raises a link to nothing, and the clause above would not see it.
+        let drawn = AgentOutline.view(of: row, in: rig.model, selected: Rig.runID)
+        let bar = try XCTUnwrap(ViewTree.values(of: AgentNodeActionBar.self, in: drawn.body).first,
+                                "the open node drew no action bar at all")
+        XCTAssertNil(ViewTree.button("Open Transcript File", in: bar.body),
+                     "a run whose tree composes no path was offered the transcript file anyway")
+        XCTAssertNotNil(ViewTree.button("Copy Agent ID", in: bar.body),
+                        "the bar drew no actions at all, so the assertion above proves nothing")
     }
 
     /// **G3: *Copy agent id* puts the node id on the pasteboard, and logs nothing.**
