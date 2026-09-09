@@ -63,7 +63,7 @@ These legs are additions to the historical leaf checklist, not newly passed chec
       must lead to an owned spawn. Headless: the banner and terminal action have evidence,
       including routing to C7.4's pane runner; the required new-channel entry is absent.
 
-The same prerequisite blocks the isolated-settings setup used by items **4, 5 and 52**
+The same prerequisite blocks the isolated-settings setup used by items **4, 5, 41 and 52**
 and the card-diff leg below. Verify the Developer setting reaches the new channel's
 spawn (`--setting-sources ""`, plus `--strict-mcp-config` when §6.12 requires it).
 Isolation injected at a test process-factory seam does not prove this product setting.
@@ -322,7 +322,7 @@ turn, and prompted turns are refused by the scratch account's organisation polic
 composite records them as blocked and carried as a manual witness; the turns budgeted for
 them are **unspent** and travel forward. Do not attempt prompted turns on this account:
 the policy blocker requires an account change or an API key, not a re-run. That does not
-remove product blockers: items 4, 5 and 52 also depend on tracker 162's isolation consumer,
+remove product blockers: items 4, 5, 41 and 52 also depend on tracker 162's isolation consumer,
 and item 3's prompted half is listed with its missing new-channel implementation above.
 The recorded leaf turn budgets below are unchanged; the added coverage is not new spend
 or evidence that those budgets exercise every parent clause.
@@ -349,7 +349,8 @@ or evidence that those budgets exercise every parent clause.
       spaces`; a question card renders and selecting an option continues the turn.
 - [ ] BLOCKED **Item 7, Plan** — picker to `plan`, `Plan a hello-world script`; a plan card renders
       and *Approve* switches the picker back.
-- [ ] BLOCKED **Item 41, Deny** — *Deny…* on a `Write` card with `not now`; the file is not written,
+- [ ] POLICY + IMPLEMENTATION BLOCKED **Item 41, Deny** (tracker 162) — in the isolated
+      channel from item 4, click *Deny…* on a `Write` card with `not now`; the file is not written,
       the card shows denied, the summary lists the denial, "Claude's next message reflects the reason".
 
 **C6 integration — item 43's real-engine end-to-end leg remains unavailable.**
