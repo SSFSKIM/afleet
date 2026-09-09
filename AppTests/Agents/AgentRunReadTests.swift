@@ -28,13 +28,13 @@ final class AgentRunReadTests: XCTestCase {
     /// and this channel has no wire.
     func testANilTreeIsNotAnEmptyTree() {
         let noWire = AgentRunRead(timeline: ChannelTimeline())
-        XCTAssertEqual(noWire.state, .noWire, "a channel with no tree did not read as the no-wire state")
+        XCTAssertTrue(noWire.state == .noWire, "a channel with no tree did not read as the no-wire state")
 
         let empty = AgentRunRead(timeline: ChannelTimeline(agents: InventedAgents.tree()))
-        XCTAssertEqual(empty.state, .noRuns, "a channel with an empty tree did not read as the no-runs state")
+        XCTAssertTrue(empty.state == .noRuns, "a channel with an empty tree did not read as the no-runs state")
 
-        XCTAssertNotEqual(noWire.state, empty.state,
-                          "the two empty states are one value, so nothing downstream can word them apart")
+        XCTAssertTrue(noWire.state != empty.state,
+                      "the two empty states are one value, so nothing downstream can word them apart")
         XCTAssertEqual(noWire.roots.count, 0, "the no-wire state offered \(noWire.roots.count) root(s)")
         XCTAssertEqual(empty.roots.count, 0, "the no-runs state offered \(empty.roots.count) root(s)")
     }
@@ -105,10 +105,10 @@ final class AgentRunReadTests: XCTestCase {
         let filtered = AgentRunRead.items(of: "task_invented0001", in: timeline)
 
         XCTAssertEqual(filtered.count, 1, "the filter kept \(filtered.count) item(s) for a run that has 1")
-        XCTAssertEqual(filtered.compactMap(\.provenance.agentID), ["task_invented0001"],
-                       "the filter kept an item some other stream produced")
-        XCTAssertEqual(filtered.map(\.id.key), ["toolu_invented0010"],
-                       "the filter kept the wrong item")
+        XCTAssertTrue(filtered.compactMap(\.provenance.agentID) == ["task_invented0001"],
+                      "the filter kept an item some other stream produced")
+        XCTAssertTrue(filtered.map(\.id.key) == ["toolu_invented0010"],
+                      "the filter kept the wrong item")
         XCTAssertEqual(AgentRunRead.items(of: "task_invented0003", in: timeline).count, 0,
                        "a run the channel has no items for was given some")
     }

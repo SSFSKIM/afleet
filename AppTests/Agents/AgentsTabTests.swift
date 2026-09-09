@@ -51,8 +51,8 @@ final class AgentsTabTests: XCTestCase {
         // And the pane it makes for that channel states the *no-wire* fact rather than "no runs".
         let session = rig.host.session(for: .agents, context: foreign)
         let model = try XCTUnwrap(session as? AgentsModel, "the tab made something other than its own session")
-        XCTAssertEqual(model.read.state, .noWire,
-                       "a channel with no fold reads as a channel that simply has no runs")
+        XCTAssertTrue(model.read.state == .noWire,
+                      "a channel with no fold reads as a channel that simply has no runs")
     }
 
     /// A second launch registers the tab **once** and leaves contract Y4 installed.
@@ -176,10 +176,10 @@ final class AgentsTabTests: XCTestCase {
         let window = try XCTUnwrap(tab.panelView(session: session, surface: popped),
                                    "the tab built no view for a popped-out window")
 
-        XCTAssertEqual(panel.surface, .panel, "the main panel's view was built for another surface")
-        XCTAssertEqual(window.surface, popped, "the popped-out window's view was built for another surface")
-        XCTAssertNil(tab.panelView(session: OtherSession(), surface: .panel),
-                     "the tab built a view over a session that is not its own")
+        XCTAssertTrue(panel.surface == .panel, "the main panel's view was built for another surface")
+        XCTAssertTrue(window.surface == popped, "the popped-out window's view was built for another surface")
+        XCTAssertTrue(tab.panelView(session: OtherSession(), surface: .panel) == nil,
+                      "the tab built a view over a session that is not its own")
     }
 
     // MARK: - The `/agents` command link (child spec D15, tracker 207)

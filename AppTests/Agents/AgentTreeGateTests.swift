@@ -179,11 +179,11 @@ final class AgentTreeGateTests: XCTestCase {
         XCTAssertTrue(settled, "the replay never reached the model")
         XCTAssertNotNil(wired.model.timeline.agents,
                         "the replayed channel carries no tree at all, so this is not the no-runs arm")
-        XCTAssertEqual(wired.read().state, .noRuns,
-                       "a wire channel whose task frames are not agent runs did not read as having no runs")
+        XCTAssertTrue(wired.read().state == .noRuns,
+                      "a wire channel whose task frames are not agent runs did not read as having no runs")
 
         let noWire = AgentRunRead(timeline: ChannelTimeline())
-        XCTAssertEqual(noWire.state, .noWire, "a timeline with no tree did not read as having no wire")
+        XCTAssertTrue(noWire.state == .noWire, "a timeline with no tree did not read as having no wire")
 
         XCTAssertNotEqual(AgentTreeEmptyState.noRuns, AgentTreeEmptyState.noWire,
                           "the two empty states are one sentence, so a user told the first when the "

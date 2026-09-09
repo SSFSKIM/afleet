@@ -34,7 +34,8 @@ final class AgentNavigatorTests: XCTestCase {
         // The session is built only now, which is the case the store exists for.
         let model = try rig.session()
         XCTAssertTrue(model.selectedRun == run, "the session the host built afterwards did not read the selection")
-        XCTAssertEqual(model.selection, .run(run), "the pane reports a selection state other than the open run")
+        XCTAssertTrue(model.selection == .run(run),
+                      "the pane reports a selection state other than the open run")
     }
 
     /// A run in a channel that is **not** the one on screen focuses that channel **before** the tab.
@@ -68,9 +69,9 @@ final class AgentNavigatorTests: XCTestCase {
         rig.navigator.show(run: "task_invented9999", in: rig.key)
 
         let model = try rig.session()
-        XCTAssertEqual(model.selection, .unknownRun,
-                       "a run the tree does not hold did not read as an unknown run")
-        XCTAssertNil(model.selectedRun, "a run the tree does not hold was selected anyway")
+        XCTAssertTrue(model.selection == .unknownRun,
+                      "a run the tree does not hold did not read as an unknown run")
+        XCTAssertTrue(model.selectedRun == nil, "a run the tree does not hold was selected anyway")
         XCTAssertEqual(rig.host.selected, .agents,
                        "the tab was not brought forward, so the user is not where the message is")
     }
