@@ -27,7 +27,12 @@
 
 set -euo pipefail
 
-readonly SANDBOX_PROFILE='(version 1)(allow default)(deny network*)'
+# Loopback stays open: the Browser panel's tests serve their pages from a listener on
+# 127.0.0.1 (BrowserPanelTests/WebTestSupport.swift), which is the test process talking to
+# itself and reaches nothing. The external denial is still what the curl control below proves
+# (amended 2026-09-09 at C7's recomposition: with `(deny network*)` alone the 29 Browser tests
+# failed on `bind`, "Operation not permitted", which is not the failure this proof exists for).
+readonly SANDBOX_PROFILE='(version 1)(allow default)(deny network*)(allow network-bind (local ip "localhost:*"))(allow network-inbound (local ip "localhost:*"))(allow network-outbound (remote ip "localhost:*"))'
 readonly PROBE_URL='https://github.com'
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
