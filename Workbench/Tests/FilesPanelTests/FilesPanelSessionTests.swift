@@ -2111,6 +2111,75 @@ final class FilesPanelSessionTests: XCTestCase {
                        "the replacement text was written over the file's own bytes")
     }
 
+    // MARK: - 49. a reply is checked against the buffer's owner
+
+    /// A second window's `dirty` moves the owner and the focus, and the first window's `save` was
+    /// left standing: its reply passed the retirement and path checks, wrote the text the newer
+    /// window had already moved past, and broadcast it back over the newer edits.
+    func testAWriteReplyFromAWindowThatNoLongerOwnsTheBufferIsNotWritten() async throws {
+        let file = try tree.file("owned.swift", "on disk\n")
+        let harness = try makeHarness()
+        let poppedOut = RecordingSurface()
+        harness.session.attach(poppedOut)
+        await harness.session.openFile(at: file, line: nil)
+        let path = file.path(percentEncoded: false)
+
+        harness.surface.type("edited in the main window\n")
+        harness.surface.deliver(.dirty(path: path, isDirty: true))
+        harness.session.save()
+
+        // The user moves to the other window and types there: ownership moves with the report.
+        poppedOut.type("edited in the pop-out\n")
+        poppedOut.deliver(.dirty(path: path, isDirty: true))
+
+        // Only now does the first window answer what it was asked before any of that.
+        harness.surface.deliver(.saveRequested(path: path, text: "edited in the main window\n"))
+
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "on disk\n",
+                       "a window that no longer holds the buffer answered for it")
+        XCTAssertFalse(poppedOut.shapes.contains(.setText(text: "edited in the main window\n")),
+                       "the older window's text was broadcast over the newer edits")
+    }
+
+    // MARK: - 50. a capture is a replacement, and the buffer moves on from it
+
+    /// A capture recorded the text and left the revision where it was, so an older window's late
+    /// answer still matched the buffer it had been asked about — and replaced the capture the
+    /// newer window had just given.
+    func testALateCaptureDoesNotReplaceTheOneTakenAfterIt() async throws {
+        let file = try tree.file("captured.swift", "on disk\n")
+        let other = try tree.file("other.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        let poppedOut = RecordingSurface()
+        harness.session.attach(poppedOut)
+        await harness.session.openFile(at: file, line: nil)
+        await harness.session.openFile(at: other, line: nil)
+        await harness.session.select(file)
+        let path = file.path(percentEncoded: false)
+
+        // The pop-out holds the edits and never answers the stash this switch asks it for.
+        poppedOut.type("edited in the pop-out\n")
+        poppedOut.deliver(.dirty(path: path, isDirty: true))
+        await harness.session.select(other)
+        XCTAssertEqual(harness.session.issue, .editorDidNotAnswer)
+
+        // The main window takes the buffer over, and answers its own stash out of its model.
+        await harness.session.select(file)
+        harness.surface.type("edited in the main window\n")
+        harness.surface.deliver(.dirty(path: path, isDirty: true))
+        harness.surface.answersSave = true
+        await harness.session.select(other)
+        XCTAssertEqual(harness.session.openFiles.first { $0.name == "captured.swift" }?.text,
+                       "edited in the main window\n")
+
+        // ...and only then does the pop-out answer the stash that expired long ago.
+        poppedOut.deliver(.saveRequested(path: path, text: "edited in the pop-out\n"))
+
+        XCTAssertEqual(harness.session.openFiles.first { $0.name == "captured.swift" }?.text,
+                       "edited in the main window\n",
+                       "a capture from before the newer one was recorded over it")
+    }
+
     // MARK: - Harness
 
     /// A session and the recorder it drives, held together so a test cannot let the session go by

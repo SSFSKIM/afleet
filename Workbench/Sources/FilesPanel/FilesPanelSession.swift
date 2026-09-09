@@ -140,10 +140,14 @@ public struct BufferState: Sendable {
 
     /// The text the editor answered a stash with. The editor's flag is dropped with it: the
     /// capture *is* the buffer, so from here dirtiness is the disk baseline's answer alone.
+    /// A capture is a replacement, so the buffer **moves on from it**: the revision it was taken
+    /// against is over. Without that, two windows asked about one buffer both matched it, and an
+    /// older window's late answer replaced the capture the newer one had just given.
     @discardableResult
     mutating func capture(text: String, for path: String, from surface: SurfaceID,
                           expecting revision: Int) -> Bool {
         guard path == self.path, revision == self.revision else { return false }
+        self.revision += 1
         self.text = text
         editorReportsDirty = false
         owner = differsFromDiskBaseline ? surface : nil
@@ -1576,6 +1580,11 @@ public final class FilesPanelSession: PanelTabSession {
             switch request.kind {
             case .write:
                 guard !request.isRetired else { return }
+                // And the window that holds the buffer is the only one that may answer for it.
+                // Ownership moves while a reply is on its way, and writing the older window's
+                // text puts it over the edits the newer one is holding.
+                let holder = openFiles.first { $0.path == path }?.buffer.holder
+                guard holder == nil || holder == surface else { return }
                 write(path: path, text: text)
             case .stash:
                 // A capture is the one thing a late answer may still do: it records on the buffer
@@ -1627,10 +1636,19 @@ public final class FilesPanelSession: PanelTabSession {
             // delayed one of those moved the buffer's owner to the window that had just been given
             // something else to show.
             guard path == presentedPath,
-                  let index = openFiles.firstIndex(where: { $0.path == path }),
-                  openFiles[index].buffer.apply(event, from: surface) else { return }
+                  let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
+            // Who was holding the text *before* this report, which the report itself may move.
+            let previous = openFiles[index].buffer.holder
+            guard openFiles[index].buffer.apply(event, from: surface) else { return }
             if isDirty {
                 replacedBufferPath = nil
+                // The user has moved to this window, so what the window that was holding the
+                // buffer was asked about it is over: its answer describes text this buffer no
+                // longer holds, and a write reply still on its way would land on top of the edits
+                // being made here — and be broadcast back over them.
+                if let previous, previous != surface {
+                    retireRequests { $0.surface == previous && $0.path == path }
+                }
                 focused = surface
             }
         case .cursor(let line, let column):
