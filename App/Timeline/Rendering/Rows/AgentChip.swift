@@ -100,11 +100,6 @@ enum AgentChip {
         return siblings.isEmpty ? [call] : siblings
     }
 
-    /// The `tool_use_id`s of the group above, in the same order.
-    static func group(of call: ToolCallItem, in context: TimelineRenderContext?) -> [String] {
-        members(of: call, in: context).map(\.toolUseID)
-    }
-
     /// The status the group reads: running while any member is, failed when one failed and none is
     /// still running, denied on the same rule, and done only when every member is.
     ///
