@@ -196,6 +196,21 @@ final class AgentNodeActions {
     /// never the composer's, which a popped-out window and a read-only channel both lack (D14).
     private(set) var pending: AgentTreeConfirm?
 
+    /// Which raise the confirm slot currently belongs to.
+    ///
+    /// **Only *Stop everything* suspends before it can present.** It takes the fleet's census first,
+    /// because the count is what its dialog is for, and everything that touches the slot — the other
+    /// button, the affirmative, the decline — happens synchronously while that census is in the air.
+    /// So a census that came back late could write its dialog over a *Background all* the user
+    /// raised after pressing it, and the affirmative would then stop every running task for someone
+    /// who asked to background them. That is work `--resume` cannot restore, decided by a race.
+    ///
+    /// The counter moves on every one of those events, and a census whose number has moved answers
+    /// nothing: the slot belongs to whoever took it last, and a stale raise is dropped rather than
+    /// resolved. A generation and not a "is anything pending" check, because the second cannot tell
+    /// a slot that was taken and released from one that was never touched.
+    private var raise = 0
+
     /// Raises *Stop everything*'s confirm **after taking the census**, because the count is what the
     /// dialog is for: the user is being told the size of the work they are about to end.
     ///
@@ -205,16 +220,25 @@ final class AgentNodeActions {
     /// "nothing is running" for every one of those. A count reaches the dialog and the ids do not
     /// (§6.3, §11).
     func requestStopEverything() async {
+        raise += 1
+        let mine = raise
         let live = await lifecycle.liveTaskIDs(of: channel)
+        // Someone took the slot while the census was in the air. This dialog is for a press the user
+        // has moved on from, and presenting it now would replace what they are looking at.
+        guard mine == raise else { return }
         pending = .stopEverything(liveTaskCount: live.count)
     }
 
     /// *Background all*'s confirm. No census: the action stops nothing, so there is no cost to size.
-    func requestBackgroundAll() { pending = .backgroundAll }
+    func requestBackgroundAll() {
+        raise += 1
+        pending = .backgroundAll
+    }
 
     /// Takes the waiting confirm whole and leaves nothing behind, so a dismissal arriving after this
     /// has nothing left to clear.
     func claimPending() -> AgentTreeConfirm? {
+        raise += 1
         defer { pending = nil }
         return pending
     }
@@ -231,7 +255,10 @@ final class AgentNodeActions {
 
     /// Declined. **Nothing is performed** — the clause the confirm exists for, and the one a dialog
     /// wired to a no-op would pass every other way.
-    func cancelPending() { pending = nil }
+    func cancelPending() {
+        raise += 1
+        pending = nil
+    }
 
     /// A claimed confirm, run. The only place either action is issued, and neither is reimplemented:
     /// `Fleet` owns what *Stop everything* and *Background all* mean (contract Y5).

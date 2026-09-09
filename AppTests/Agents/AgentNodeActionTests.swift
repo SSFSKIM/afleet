@@ -277,6 +277,56 @@ final class AgentNodeActionTests: XCTestCase {
         }
     }
 
+    /// **A census that comes back late does not replace the confirm the user raised after it.**
+    ///
+    /// The scenario, and the reason this is the file's most serious clause: press *Stop everything*,
+    /// then press *Background all* while the fleet's census is still in the air. The census returns,
+    /// writes its own dialog into the slot, and the user — who is looking at a dialog they believe
+    /// says "nothing stops" — confirms `.stopEverything` and loses every running task, which is work
+    /// `--resume` cannot restore.
+    ///
+    /// Three clauses: the race actually ran, the waiting confirm is the one the user raised last,
+    /// and the affirmative performs **that** action. The third is the one that matters — a panel
+    /// that kept the right dialog and performed the other would pass the first two.
+    func testALateCensusDoesNotReplaceTheConfirmRaisedAfterIt() async throws {
+        let rig = try Rig(mirror: Rig.runningAgent())
+        await rig.lifecycle.always(.success(Self.state(rig.key)))
+        await rig.lifecycle.setLive(["task_invented_live_01", "task_invented_live_02"])
+        let raced = Pressed()
+        await rig.lifecycle.duringCensus {
+            await MainActor.run {
+                rig.model.actions?.requestBackgroundAll()
+                raced.note()
+            }
+        }
+
+        try pressTop(AgentTreeConfirm.stopEverythingTitle, in: rig)
+        let returned = await Self.settle { await rig.lifecycle.censusesReturned >= 1 }
+        XCTAssertTrue(returned, "the census never came back, so nothing here is about a late one")
+        XCTAssertTrue(raced.did, "the second press never happened, so the census raced nothing")
+
+        let pending = try XCTUnwrap(rig.model.actions?.pending, "no confirm is waiting")
+        XCTAssertTrue(pending == .backgroundAll,
+                      "the census's late completion replaced the confirm the user raised after it")
+
+        rig.model.actions?.answerPending()
+        await rig.settle(actions: 1)
+        let actions = await rig.lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "the affirmative performed \(actions.count) action(s)")
+        if case .backgroundAll = actions.first { } else {
+            XCTFail("a click that said background stopped every running task in the channel")
+        }
+    }
+
+    /// Whether the competing press happened at all. A flag rather than a count: the press has to
+    /// land **inside** the census's window, and a test that assumed it did would be asserting about
+    /// a race that never ran.
+    @MainActor
+    final class Pressed {
+        private(set) var did = false
+        func note() { did = true }
+    }
+
     // MARK: - A session that does no background work at all (§6.4)
 
     /// **G3: the refusal renders as a banner and hides *both* backgrounding affordances.**
@@ -667,6 +717,10 @@ actor ActionDouble: LifecycleAPI {
     /// happen in that window and nowhere else.
     private var interlude: (@Sendable () async -> Void)?
     func duringPerform(_ body: @escaping @Sendable () async -> Void) { interlude = body }
+    /// The same seam inside the census, which is the one suspension *Stop everything* has before it
+    /// can present its dialog — so it is the only window in which another raise can take the slot.
+    private var censusInterlude: (@Sendable () async -> Void)?
+    func duringCensus(_ body: @escaping @Sendable () async -> Void) { censusInterlude = body }
     func setLive(_ ids: [String]) { live = ids }
 
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
@@ -689,8 +743,16 @@ actor ActionDouble: LifecycleAPI {
 
     func liveTaskIDs(of key: ChannelKey) async -> [String] {
         censusCalls += 1
+        let running = censusInterlude
+        censusInterlude = nil
+        await running?()
+        censusesReturned += 1
         return live
     }
+
+    /// How many censuses have **come back**, which is not the same as how many were taken: what the
+    /// race below waits for is the late one completing, and a count of calls is one before it does.
+    private(set) var censusesReturned = 0
 
     func state(of key: ChannelKey) async -> ChannelState? { nil }
     func states() async -> [ChannelState] { [] }
