@@ -3070,6 +3070,12 @@ four whole-branch review rounds.
     its next shell does not. Closer: a context refresh a retained session can observe — a seam
     between the host's cache and a live session rather than a change inside either. Owner: C7.4
     with C5.
+    **A second entry point into the same wrongness was closed in wave F5**: the sidebar used to
+    seed a channel's context with a *job's* directory when the channel had no row, which recorded
+    that directory as the **channel's** own cwd — so every later Cmd+Shift+T shell opened there and
+    it was persisted into the W6 document. A job's channel is now resolved through its row only;
+    with no row the pane goes to the channel in view, and no cwd is recorded for anyone. What
+    remains here is the `/cd` case, which needs the context-refresh seam.
 386. **A shell opened while the initial document read is in flight is lost to a release in that
     window.** `schedulePersist` deliberately writes nothing until the read reaches `.done`, and
     `tearDown` deliberately writes nothing at all, so a pane created between those two facts is
@@ -3077,9 +3083,22 @@ four whole-branch review rounds.
     on their own; the gap is where they meet. Same family as 346 and 352 — ordering under teardown,
     where each fix has revealed the next. Closer: a teardown that flushes what the read was
     blocking rather than one that writes nothing. Owner: C7.4.
-387. **A dismantled pane container can be handed a surface it can no longer show.** `relinquish`
-    returns before it unregisters whenever another container owns the surface, so a container
-    SwiftUI has already dismantled stays in the mounted list; a later relinquish can pick it as the
-    newest survivor and reparent the surface into a view that is not on screen, and the host still
-    mounted cannot recover through `adoptIfUnheld` because the surface has a superview. Closer:
-    unregister on dismantle whether or not the container held the surface. Owner: C7.4.
+387. **Closed 2026-09-09 in wave F5**, by the merge review round finding the sequence its closer
+    had only guessed at: main-window host A holds the surface, pop-out B steals it, a re-render C
+    steals it from B, and when the pop-out closes B — dismantled, in no window — is handed the view
+    while the live A draws nothing. `relinquish` now forgets **before** the ownership guard rather
+    than after it, and `survivingHost` skips any container with no window. The test that covered
+    this passed only by creation order; the reversed order and the dismantled-middle-host case are
+    covered now.
+    Recorded with it, benign today: `PaneSurfaceContainer.mounted` is **process-global with no
+    per-test reset**, so containers from earlier tests share one list. Harmless — every entry is
+    weak and windowless ones are now skipped — and worth knowing before someone reads a cross-test
+    interaction as a defect in the claim.
+388. **`TerminalSessionRegistry.isSameWorld` is inert in production.** It decides whether a
+    retained session belongs to the workspace being asked about by comparing the identity of the
+    context's `store`, but `identity(of:)` needs a class and the production `WorkbenchScopedStore`
+    is a **struct**, so the check answers "same world" for every context it is given. It is harmless
+    only because it stands *behind* `bindWorkspace`, which releases the whole registry before any
+    replacement context exists. Written as a guard, it currently guards nothing, and a reader will
+    trust it. Closer: a first-class world token on `ChannelContext` — a `PanelHostAPI` change and so
+    a parent revision — or a class-bound store. Same seam as entry 349. Owner: C7.4 with C5.
