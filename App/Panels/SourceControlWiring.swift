@@ -1,6 +1,7 @@
 import Foundation
 import AfleetCore
 import PanelHostAPI
+import FleetKit
 import Workbench
 
 /// The app-side seam C7.7's two panels are built from: the pair of tabs `AppModel.init` registers,
@@ -52,5 +53,29 @@ enum SourceControlWiring {
     @MainActor
     static func registerLinkTargets(of tab: SourceControlTab, through links: any LinkRouterCapability) async {
         await tab.registerLinkTargets(through: links)
+    }
+
+    /// Connects the two tabs of one channel, in the one direction Design §8 names: the Source
+    /// Control panel learns the branch on every read cycle and its watch reports a checkout made
+    /// outside the app, and the GitHub tab re-reads on that.
+    ///
+    /// Without it `branchDidChange(to:)` has no caller and a retained GitHub tab shows the branch
+    /// it first read until the user presses *Refresh*.
+    ///
+    /// **It is a link and not a reference.** `BranchChangeLink` holds both sessions weakly and
+    /// resolves the GitHub side at delivery: X7 retains one session per (tab, channel) under an
+    /// LRU, a channel may never have shown the GitHub tab at all, and a hold from one session to
+    /// the other would make the pair evictable only together. Nothing is created here either — a
+    /// branch change for a channel whose GitHub tab has never been visited spends no round trip.
+    ///
+    /// It is fed from the host's session-creation hook because X7 hands a tab a `ChannelContext`
+    /// and no host, so a tab cannot say "this channel now has a session"; the app is the only
+    /// place both halves are visible.
+    @MainActor
+    static func connectBranchChanges(through link: BranchChangeLink<ChannelKey>,
+                                     on host: PanelHostModel) {
+        host.didMakeSession = { [weak link] _, context, session in
+            link?.sessionWasMade(session, for: context.key)
+        }
     }
 }

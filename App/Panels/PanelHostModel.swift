@@ -89,6 +89,17 @@ final class PanelHostModel: PanelHost {
     /// registry is the whole of the observable behaviour.
     @ObservationIgnored var presentWindow: (@MainActor (PoppedOutPanel) -> Void)?
 
+    /// Called immediately after a tab builds a session, so composition can connect two sessions of
+    /// **one channel** to each other. The host itself reads nothing from it and keeps no strong
+    /// reference on its behalf.
+    ///
+    /// It exists because X7 gives a tab a `ChannelContext` and no host, so a tab cannot tell the
+    /// app that a channel now has a session — and the pairing C7.7's Design §8 asks for (the
+    /// Source Control panel's branch reaching that channel's GitHub tab) has no other moment it
+    /// can be made at. Whoever sets it holds its sessions weakly.
+    @ObservationIgnored var didMakeSession:
+        (@MainActor (PanelTabID, ChannelContext, any PanelTabSession) -> Void)?
+
     /// One (tab, channel) pair: the session cache's key and the rendered subtree's SwiftUI identity.
     struct SessionSlot: Hashable {
         let tab: PanelTabID
@@ -334,6 +345,7 @@ final class PanelHostModel: PanelHost {
         guard let tab = tabs[id] else { return UnregisteredTabSession() }
         let made = tab.makeSession(for: context)
         sessions[slot] = made
+        didMakeSession?(id, context, made)
         evictIfNeeded()
         return made
     }

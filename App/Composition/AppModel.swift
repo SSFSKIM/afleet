@@ -93,6 +93,13 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
     /// feed in its context would watch a timeline nothing updates.
     let panels: PanelHostModel
 
+    /// C7.7's connection between the two Source Control tabs of one channel (spec Design §8).
+    ///
+    /// App-scoped and one instance, for the host's own reason: sessions are retained per (tab,
+    /// channel) here, so the pairing has to be too. It holds every session weakly and creates
+    /// none.
+    let branchChanges = BranchChangeLink<ChannelKey>()
+
     /// C7.4's map from a channel to its Terminal panes.
     ///
     /// **One instance, and it is the whole point of the property.** The registered tab and the
@@ -233,6 +240,11 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
         }
         Task { await files.registerLinkTargets(through: panels.links) }
         Task { await SourceControlWiring.registerLinkTargets(of: scm.sourceControl, through: panels.links) }
+        // Design §8: the GitHub tab re-reads when the branch changes, and the Source Control panel
+        // is what learns the branch — every cycle, and from its own watch when a `claude` session
+        // checks out somewhere else. The two tabs share no state, so what crosses between them is
+        // this message and nothing else; both sides are held weakly.
+        SourceControlWiring.connectBranchChanges(through: branchChanges, on: panels)
         // C7.6's Browser tab, under `.browser`, registered once (Q4). Not `try?` for the reason
         // above it: nothing else can hold `.browser` on a host built two lines ago, and a Browser
         // that vanished silently would leave every `.url` link falling through to W5's fallback and
