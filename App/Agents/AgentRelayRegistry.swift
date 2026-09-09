@@ -107,31 +107,39 @@ enum AgentRelayMachine {
         }
 
         var reply: String?
-        var relay: (index: Int, at: Date)?
-        var settled: AgentRelayState?
+        var sawCall = false
+        /// The first call of this turn that named **this** run, and what it says.
+        var ours: (index: Int, at: Date, verdict: CallVerdict)?
+        /// The model called `SendMessage` about some other agent and about nobody this record knows.
+        var wrongTarget = false
         var turnClosed = false
 
-        for index in items.index(after: sent)..<items.endIndex {
+        for index in items.index(after: sent)..<items.endIndex where !turnClosed {
             let item = items[index]
             // These arms are all about the **main** agent's turn. An item stamped with a run is that
             // run's, and reading one here is how the main stream and an agent's stream get confused.
             guard item.provenance.agentID == nil else { continue }
             switch item {
             case .assistantMessage(let message):
-                // The model's reply, for the arms item 51 says are shown with it. The last non-empty
-                // one before the relay settles: a refusal is explained where it happens.
-                if relay == nil, settled == nil {
+                // The model's reply, for the arms item 51 says are shown with it: the last thing it
+                // said before it started calling tools, which is where it explains a refusal.
+                if !sawCall {
                     let text = MessageText.text(of: message.blocks, fallback: "")
                     if !text.isEmpty { reply = TextSanitiser.sanitise(text) }
                 }
 
             case .toolCall(let call) where call.name == "SendMessage":
-                guard relay == nil, settled == nil, !turnClosed else { continue }
-                switch verdict(of: call, for: record) {
-                case .wrongTarget: settled = .notDelivered(.wrongTarget)
-                case .refused: settled = .notDelivered(.refused)
-                case .running: return Outcome(.pending, reply: reply)
-                case .relayed: relay = (index, call.timestamp ?? .distantPast)
+                sawCall = true
+                // **This run's own call wins over the order the calls arrived in.** A model asked to
+                // relay to two agents in one turn produces two calls, and reading the first as this
+                // record's would settle the wrong arm on whichever the model happened to write
+                // first. The wrong-target arm is what is left when the turn carried a `SendMessage`
+                // and none of them named this run — and because the state is re-derived from the
+                // whole timeline on every ask, a reading taken between the two calls corrects itself
+                // the moment this run's own call arrives.
+                let verdict = verdict(of: call, for: record)
+                if verdict == .wrongTarget { wrongTarget = true } else if ours == nil {
+                    ours = (index, call.timestamp ?? .distantPast, verdict)
                 }
 
             case .turnSummary(let turn):
@@ -144,10 +152,19 @@ enum AgentRelayMachine {
             }
         }
 
-        if let settled { return Outcome(settled, reply: reply) }
-        guard let relay else {
+        guard let ours else {
+            if wrongTarget { return Outcome(.notDelivered(.wrongTarget), reply: reply) }
             return Outcome(turnClosed ? .notDelivered(.noCall) : .pending, reply: reply)
         }
+        switch ours.verdict {
+        case .refused: return Outcome(.notDelivered(.refused), reply: reply)
+        case .running: return Outcome(.pending, reply: reply)
+        // Not stored above, and named here rather than defaulted so a fifth verdict cannot be
+        // absorbed by an `default:` that means whatever the last author assumed.
+        case .wrongTarget: return Outcome(.notDelivered(.wrongTarget), reply: reply)
+        case .relayed: break
+        }
+        let relay = (index: ours.index, at: ours.at)
         if let key = delivery(of: record, in: items, after: relay.index, claiming: claimed) {
             return Outcome(.delivered, reply: reply, claimedKey: key)
         }
@@ -166,7 +183,7 @@ enum AgentRelayMachine {
         return !record.promptUUID.isEmpty && message.promptUUID == record.promptUUID
     }
 
-    private enum CallVerdict { case relayed, wrongTarget, refused, running }
+    private enum CallVerdict: Equatable { case relayed, wrongTarget, refused, running }
 
     /// What one `SendMessage` call says about this record.
     ///

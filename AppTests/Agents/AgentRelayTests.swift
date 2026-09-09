@@ -67,6 +67,28 @@ final class AgentRelayTests: XCTestCase {
                       "a SendMessage naming a different agent did not settle the wrong-target arm")
     }
 
+    /// A turn that relays to two agents settles each record on **its own** call, whichever the model
+    /// wrote first.
+    ///
+    /// Without it, a user who messages two runs in the same turn is told one of them went to the
+    /// wrong agent — and the arm they are shown is a real arm, so nothing about the surface looks
+    /// wrong.
+    func testATurnRelayingToTwoAgentsSettlesThisRecordOnItsOwnCall() {
+        var wire = RelayWire()
+        wire.open()
+        let record = wire.record()
+
+        wire.sendMessageCall(to: RelayWire.otherAgent)
+        wire.toolResult(isError: false)
+        XCTAssertTrue(wire.state(of: record) == .notDelivered(.wrongTarget),
+                      "a turn whose only SendMessage named another agent did not settle the wrong-target arm")
+
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.toolResult(id: RelayWire.secondSendCall, isError: false)
+        XCTAssertTrue(wire.state(of: record) == .relayed,
+                      "this run's own call in the same turn did not take precedence over another's")
+    }
+
     // MARK: - Relayed → Delivered
 
     /// **G4: *Delivered* is the text in the target run's own items, and nothing else.**
