@@ -266,10 +266,14 @@ final class HeaderReadoutTests: XCTestCase {
         rig.model.startReadbacks()
         // Waited on the *subscription*, not on the readback alone: the frames below are pushed to
         // whoever is listening at the time, so a test that enqueued them before the header attached
-        // would be asserting on frames nothing received.
+        // would be asserting on frames nothing received. And then on the opening reading itself,
+        // because the subscription is taken **first** (scalpel-5 #1): the two are no longer one
+        // event, and reading the count at the subscription reads it before the readback lands.
         let attached = await LaunchFixtures.waitAsync { await double.memberSequence.contains("events") }
         XCTAssertTrue(attached, "the header never subscribed, so no turn could reach it")
+        let took = await LaunchFixtures.waitAsync { await Self.polls(double, of: "get_context_usage") >= 1 }
         let onOpen = await Self.polls(double, of: "get_context_usage")
+        XCTAssertTrue(took, "the header took \(onOpen) context reading(s) on open, not 1")
         XCTAssertEqual(onOpen, 1, "the header took \(onOpen) context reading(s) on open, not 1")
 
         let results = try Self.results("plain-two-turn")
