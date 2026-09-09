@@ -28,6 +28,7 @@ struct AgentRunRead: Hashable, Sendable {
 
     private let contents: [AgentRunID: AgentNodeContent]
     private let childIDs: [AgentRunID: [AgentRunID]]
+    private let parentIDs: [AgentRunID: AgentRunID]
 
     /// One pass over the tree and the overlay's decisions. Nothing else on the timeline is read.
     init(timeline: ChannelTimeline) {
@@ -35,6 +36,7 @@ struct AgentRunRead: Hashable, Sendable {
             state = .noWire
             contents = [:]
             childIDs = [:]
+            parentIDs = [:]
             return
         }
         // Pending decisions per run, counted once rather than per node: the overlay holds one
@@ -48,6 +50,7 @@ struct AgentRunRead: Hashable, Sendable {
 
         var contents: [AgentRunID: AgentNodeContent] = [:]
         var childIDs: [AgentRunID: [AgentRunID]] = [:]
+        var parentIDs: [AgentRunID: AgentRunID] = [:]
         contents.reserveCapacity(tree.nodes.count)
         childIDs.reserveCapacity(tree.nodes.count)
         for (id, node) in tree.nodes {
@@ -55,9 +58,11 @@ struct AgentRunRead: Hashable, Sendable {
                                             isParked: tree.isParked(id),
                                             waitingCount: waiting[id] ?? 0)
             childIDs[id] = tree.children(of: id)
+            parentIDs[id] = node.parent
         }
         self.contents = contents
         self.childIDs = childIDs
+        self.parentIDs = parentIDs
         // `roots` and not the depth-1 nodes (child spec D8, tracker 13). The two agree on every
         // well-formed session and diverge for exactly one case: a nested run whose parent no source
         // answered for. Filtering to depth 1 would drop that run out of the tree entirely; taking
@@ -75,6 +80,23 @@ struct AgentRunRead: Hashable, Sendable {
     func content(of id: AgentRunID) -> AgentNodeContent? { contents[id] }
 
     func children(of id: AgentRunID) -> [AgentRunID] { childIDs[id] ?? [] }
+
+    /// The run's parents, nearest first. Empty for a root and for an id the tree does not hold.
+    ///
+    /// What it is for: a run reached from a chip has to be *visible* when the panel lands on it, and
+    /// the branch above it may be one the user closed. The walk is cycle-guarded for the reason the
+    /// outline's is — `AgentRunTree.link` refuses to parent a node to itself and refuses nothing
+    /// longer, and a walk that met a longer cycle would not stop.
+    func ancestors(of id: AgentRunID) -> [AgentRunID] {
+        var found: [AgentRunID] = []
+        var seen: Set<AgentRunID> = [id]
+        var current = id
+        while let parent = parentIDs[current], seen.insert(parent).inserted {
+            found.append(parent)
+            current = parent
+        }
+        return found
+    }
 
     /// Whether this channel's tree holds the run. A chip clicked on a channel whose tree is nil
     /// resolves to nothing, and the pane says so rather than fabricating a selection (D5).

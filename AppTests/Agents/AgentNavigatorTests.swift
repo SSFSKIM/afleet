@@ -82,8 +82,9 @@ final class AgentNavigatorTests: XCTestCase {
         XCTAssertEqual(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count, 1,
                        "the pane drew the unknown-run sentence \(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count) time(s), not once")
         // And the tree the channel does hold is still drawn beneath it: the other runs stay openable.
-        XCTAssertTrue(ViewTree.scrollViewContent(in: AgentTreeView(model: model).body) != nil,
-                      "the notice replaced the channel's own runs instead of sitting above them")
+        let beneath = ViewTree.values(of: [AgentTreeView.Row].self, in: AgentTreeView(model: model).body).first
+        XCTAssertEqual(beneath?.count, 1,
+                       "the notice replaced the channel's own runs instead of sitting above them")
         XCTAssertEqual(drawn.filter { $0 == AgentTreeEmptyState.noRuns || $0 == AgentTreeEmptyState.noWire }.count, 0,
                        "a channel with a run in it drew one of the empty-state sentences")
     }
@@ -104,6 +105,40 @@ final class AgentNavigatorTests: XCTestCase {
         let drawn = ViewTree.values(of: String.self, in: AgentTreeView(model: model).body)
         XCTAssertEqual(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count, 0,
                        "an open run drew the unknown-run sentence \(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count) time(s)")
+    }
+
+    /// A chip click on a run whose branch the user closed **lands on the run**: the branch above it
+    /// is disclosed and the row is drawn.
+    ///
+    /// Failing-first against the panel before this: the selection landed, the session reported the
+    /// run open, and the outline kept it hidden under a closed parent — a pane that disagrees with
+    /// itself about what is open. Y4's sentence is that the click lands on the run, and a row that
+    /// is not on screen is not landed on.
+    func testAChipClickRevealsARunUnderAClosedBranch() throws {
+        let rig = try NavigationRig(tree: InventedAgents.nestedPair())
+        let parent = InventedAgents.run(0)
+        let nested = InventedAgents.run(1)
+        let model = try rig.session()
+        model.toggle(parent)
+        XCTAssertEqual(AgentTreeView.visibleRows(read: model.read, collapsed: model.collapsed).count, 1,
+                       "the closed branch still draws its child, so nothing below is about revealing it")
+
+        rig.navigator.show(run: nested, in: rig.key)
+
+        // The rows the *view* is about to draw, read off the outline it built — not a second call to
+        // the helper, which would prove only that the helper can reveal.
+        let drawn = try XCTUnwrap(ViewTree.values(of: [AgentTreeView.Row].self,
+                                                 in: AgentTreeView(model: model).body).first,
+                                  "the panel drew no outline at all")
+        XCTAssertEqual(drawn.count, 2,
+                       "the panel drew \(drawn.count) row(s), so the run the chip named is not on it")
+        XCTAssertTrue(drawn.last?.id == nested, "the row the chip's run needs is not the one drawn")
+        XCTAssertTrue(drawn.first?.disclosure == .expanded,
+                      "the branch above the open run is still closed, so the run is drawn under a shut parent")
+        // The user's own closed branch is remembered: the reveal is what the selection needs, not a
+        // rewrite of what they chose.
+        XCTAssertEqual(model.collapsed.count, 1,
+                       "revealing the run left \(model.collapsed.count) closed branch(es), so the user's own was discarded")
     }
 
     // MARK: - The rig

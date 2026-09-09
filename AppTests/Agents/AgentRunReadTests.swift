@@ -242,6 +242,17 @@ enum InventedAgents {
         return tree
     }
 
+    /// One depth-1 run with one depth-2 run under it, joined the way the wire joins them: the
+    /// nested run's spawning block was carried by a frame from inside its parent's block.
+    static func nestedPair() -> AgentRunTree {
+        var tree = treeOfRoots(1)
+        tree.apply(taskStarted: taskStarted(taskID: run(1), toolUseID: "toolu_invented0001",
+                                            agentType: "an-invented-nested-agent", depth: 2),
+                   at: epoch)
+        tree.observe(parentToolUseID: "toolu_invented0000", carryingToolUseIDs: ["toolu_invented0001"])
+        return tree
+    }
+
     /// The id `treeOfRoots(_:)` gives its nth run.
     static func run(_ index: Int) -> AgentRunID { "task_invented000\(index)" }
 

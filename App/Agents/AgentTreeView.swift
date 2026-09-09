@@ -30,19 +30,12 @@ struct AgentTreeView: View {
     private func tree(_ read: AgentRunRead) -> some View {
         switch read.state {
         case .tree:
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Self.visibleRows(read: read, collapsed: model.collapsed), id: \.id) { row in
-                        AgentNodeRow(content: row.content,
-                                     isSelected: model.selectedRun == row.id,
-                                     disclosure: row.disclosure,
-                                     toggle: { model.toggle(row.id) },
-                                     select: { model.select(row.id) })
-                            .id(Self.identity(of: row.id))
-                    }
-                }
-                .padding(8)
-            }
+            // The rows are built here and handed down as a value, not built inside the outline's
+            // own body: what the panel is about to draw is then a value — the shape of the tree, its
+            // order and its disclosure — rather than something only a rendered hierarchy knows.
+            AgentOutline(model: model,
+                         rows: Self.visibleRows(read: read, collapsed: model.collapsed,
+                                                revealing: model.selectedRun))
         case .noRuns:
             AgentTreeEmptyState(sentence: AgentTreeEmptyState.noRuns)
         case .noWire:
@@ -68,7 +61,18 @@ struct AgentTreeView: View {
     /// nesting that is the whole reason this surface exists. The cycle guard is not decoration —
     /// `AgentRunTree.link` refuses to parent a node to itself, but nothing in it refuses a longer
     /// cycle, and an outline that met one would recurse until the stack ran out.
-    static func visibleRows(read: AgentRunRead, collapsed: Set<AgentRunID>) -> [Row] {
+    /// **A selected run is never hidden.** `revealing` is the run the panel is open on, and the
+    /// branch above it is disclosed whatever the user closed — a chip click that selected a run
+    /// inside a closed branch otherwise reports the run as open while the panel does not show it,
+    /// which is a session that disagrees with its own screen.
+    ///
+    /// It is applied here, over the closed set, rather than by writing into it: the reveal is a
+    /// consequence of what is selected and holds however the selection was reached — including the
+    /// one that matters, a chip clicked before this pane's session existed — and the branch the user
+    /// closed is still closed when they open something else.
+    static func visibleRows(read: AgentRunRead, collapsed: Set<AgentRunID>,
+                            revealing: AgentRunID? = nil) -> [Row] {
+        let collapsed = revealing.map { collapsed.subtracting(read.ancestors(of: $0)) } ?? collapsed
         var rows: [Row] = []
         var seen: Set<AgentRunID> = []
         func walk(_ id: AgentRunID) {
@@ -87,6 +91,45 @@ struct AgentTreeView: View {
     /// The SwiftUI identity of a run's row. A task id is drawable and never printable (§11): it
     /// keys the row here and is stated in no report.
     static func identity(of run: AgentRunID) -> String { "agent-run:\(run)" }
+}
+
+/// The rows, drawn, with the open one brought into view.
+///
+/// Y4's sentence is that a chip click **lands on the run**. Disclosing the branch above it is half
+/// of that and `AgentTreeView.visibleRows(read:collapsed:revealing:)` does it; the other half is the
+/// row being where the user is looking, on a tree tall enough to have somewhere else to be. A
+/// `scrollTo` for an identity no row pinned scrolls nothing, which is what a run the outline is not
+/// drawing should do.
+struct AgentOutline: View {
+
+    let model: AgentsModel
+    let rows: [AgentTreeView.Row]
+
+    var body: some View {
+        let selected = model.selectedRun
+        ScrollViewReader { scroll in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows, id: \.id) { row in
+                        AgentNodeRow(content: row.content,
+                                     isSelected: selected == row.id,
+                                     disclosure: row.disclosure,
+                                     toggle: { model.toggle(row.id) },
+                                     select: { model.select(row.id) })
+                            .id(AgentTreeView.identity(of: row.id))
+                    }
+                }
+                .padding(8)
+            }
+            .onAppear { bring(selected, into: scroll) }
+            .onChange(of: selected) { _, run in bring(run, into: scroll) }
+        }
+    }
+
+    private func bring(_ run: AgentRunID?, into scroll: ScrollViewProxy) {
+        guard let run else { return }
+        scroll.scrollTo(AgentTreeView.identity(of: run), anchor: .center)
+    }
 }
 
 /// A run was asked for and this channel's tree does not hold it (child spec D5).
