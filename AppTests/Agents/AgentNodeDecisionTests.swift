@@ -27,6 +27,30 @@ final class AgentNodeDecisionTests: XCTestCase {
 
     // MARK: - The card is the shared component (Y2)
 
+    /// **Y2, stated against the source: this leaf declares no card view and produces no answer.**
+    ///
+    /// C6.3's G3 shape, because Y2 constrains the source rather than a run. The floor is the last
+    /// pair of clauses — the panel must actually reach the component and the shared answering object,
+    /// so a sweep over a directory that hosts neither cannot pass by being empty.
+    func testANodesCardIsTheSharedComponent() throws {
+        let sources = try AgentNodeActionTests.agentSources()
+        XCTAssertGreaterThan(sources.count, 0, "no source was found under the Agents panel")
+
+        for (name, code) in sources {
+            XCTAssertFalse(code.contains("InboundAnswer"), "\(name) names an answer type of its own")
+            XCTAssertFalse(code.contains(".permission(.allow"), "\(name) builds an allow of its own")
+            XCTAssertFalse(code.contains(".permission(.deny"), "\(name) builds a deny of its own")
+            XCTAssertFalse(code.contains("func allowOnce"), "\(name) declares an allow body of its own")
+            XCTAssertFalse(code.contains("func deny"), "\(name) declares a deny body of its own")
+            XCTAssertFalse(code.contains("classification:"), "\(name) classifies a decision of its own")
+            XCTAssertFalse(code.contains("controlResponse"), "\(name) encodes a response of its own")
+        }
+        XCTAssertTrue(sources.contains { $0.code.contains("DecisionCardView") },
+                      "no source here hosts the shared card, so the sweep proves nothing")
+        XCTAssertTrue(sources.contains { $0.code.contains("DecisionAnswering") },
+                      "no source here reaches the shared answering object")
+    }
+
     /// The card the node draws **is** `DecisionCardView`, in the compact presentation Activity's row
     /// uses, over the request the engine is waiting on for this run — and it is labelled with the
     /// run's own type and errand (item 52).
