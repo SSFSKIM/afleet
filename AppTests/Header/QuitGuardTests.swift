@@ -28,7 +28,7 @@ final class QuitGuardTests: XCTestCase {
             .owned("b", busy: true)
         ])
         var seen: [[QuitChannel]] = []
-        let guardModel = QuitGuard(fleet: fleet, confirm: { channels in seen.append(channels); return true })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { channels, _ in seen.append(channels); return true })
 
         let mayExit = await guardModel.quit()
 
@@ -50,7 +50,7 @@ final class QuitGuardTests: XCTestCase {
             .owned("a", busy: true, hasProcess: true),
             .owned("c", busy: false, hasProcess: true)
         ])
-        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _, _ in true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "the confirmed arm lets the app exit")
@@ -79,7 +79,7 @@ final class QuitGuardTests: XCTestCase {
     func testWithNothingBusyThereIsNoDialogAndTheSequenceStillRuns() async {
         let fleet = QuitFleetDouble(channels: [.owned("c", busy: false), .owned("d", busy: false)])
         var asks = 0
-        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in asks += 1; return true })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _, _ in asks += 1; return true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "nothing was busy, so nothing stands between the app and exit")
@@ -94,7 +94,7 @@ final class QuitGuardTests: XCTestCase {
     /// Cancelling terminates nothing and does not exit.
     func testCancellingTheDialogTerminatesNothingAndDoesNotExit() async {
         let fleet = QuitFleetDouble(channels: [.owned("a", busy: true), .owned("c", busy: false)])
-        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in false })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _, _ in false })
 
         let mayExit = await guardModel.quit()
         XCTAssertFalse(mayExit, "a cancelled quit does not let the app exit")
@@ -112,7 +112,7 @@ final class QuitGuardTests: XCTestCase {
             .owned("e", busy: false, hasProcess: false),
             .owned("f", busy: false, hasProcess: true)
         ])
-        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _, _ in true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "a processless channel does not hold the app open")
@@ -141,7 +141,7 @@ final class QuitGuardTests: XCTestCase {
         let fleet = QuitFleetDouble(channels: [.owned("a", busy: true)])
         // Lands after the first census is taken — the window the clause cannot close.
         fleet.arriving = [1: [.owned("b", busy: false)]]
-        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _, _ in true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "the clause ran to the end")
@@ -175,7 +175,7 @@ final class QuitGuardTests: XCTestCase {
         // Busy, and not in the first census: the window between the read and the pass that reads it.
         fleet.arriving = [1: [.owned("b", busy: true)]]
         var seen: [[QuitChannel]] = []
-        let guardModel = QuitGuard(fleet: fleet, confirm: { channels in seen.append(channels); return false })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { channels, _ in seen.append(channels); return false })
 
         let mayExit = await guardModel.quit()
 
@@ -196,7 +196,7 @@ final class QuitGuardTests: XCTestCase {
         let fleet = QuitFleetDouble(channels: [.owned("a", busy: true)])
         fleet.arriving = [1: [.owned("b", busy: true)]]
         var asks = 0
-        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in asks += 1; return true })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _, _ in asks += 1; return true })
 
         let mayExit = await guardModel.quit()
 
@@ -220,7 +220,7 @@ final class QuitGuardTests: XCTestCase {
                           3: [.owned("d", busy: false)],
                           4: [.owned("e", busy: false)],
                           5: [.owned("f", busy: false)]]
-        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _, _ in true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "a fleet that keeps spawning still lets the app exit")
@@ -238,7 +238,7 @@ final class QuitGuardTests: XCTestCase {
         // The double reports the same channel with a process on every census, as a fleet whose
         // state has not caught up would.
         let fleet = QuitFleetDouble(channels: [.owned("a", busy: false)])
-        let guardModel = QuitGuard(fleet: fleet, confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: fleet, confirm: { _, _ in true })
 
         _ = await guardModel.quit()
 
@@ -264,7 +264,7 @@ final class QuitGuardTests: XCTestCase {
             QuitRig.state(archived, origin: .archived)
         ])
         await double.alwaysPerform(.success(QuitRig.state(owned, origin: .owned(.dormant))))
-        let guardModel = QuitGuard(fleet: QuitRig.termination(double), confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: QuitRig.termination(double), confirm: { _, _ in true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "the sequence ran")
@@ -304,7 +304,7 @@ final class QuitGuardTests: XCTestCase {
         await double.stageLiveTasks(["invented-task-1", "invented-task-2"], for: shelling)
         var seen: [[QuitChannel]] = []
         let termination = QuitRig.termination(double, titles: { QuitRig.title(of: $0) })
-        let guardModel = QuitGuard(fleet: termination, confirm: { channels in seen.append(channels); return true })
+        let guardModel = QuitGuard(fleet: termination, confirm: { channels, _ in seen.append(channels); return true })
 
         _ = await guardModel.quit()
 
@@ -334,7 +334,7 @@ final class QuitGuardTests: XCTestCase {
         await double.alwaysPerform(.success(QuitRig.state(quiet, origin: .owned(.dormant))))
         var seen: [[QuitChannel]] = []
         let termination = QuitRig.termination(double, titles: { QuitRig.title(of: $0) })
-        let guardModel = QuitGuard(fleet: termination, confirm: { channels in seen.append(channels); return true })
+        let guardModel = QuitGuard(fleet: termination, confirm: { channels, _ in seen.append(channels); return true })
 
         _ = await guardModel.quit()
 
@@ -365,7 +365,7 @@ final class QuitGuardTests: XCTestCase {
             QuitRig.state(dormant, origin: .owned(.dormant))
         ])
         await double.alwaysPerform(.success(QuitRig.state(busy, origin: .owned(.dormant))))
-        let guardModel = QuitGuard(fleet: QuitRig.termination(double), confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: QuitRig.termination(double), confirm: { _, _ in true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "the confirmed quit completes")
@@ -403,7 +403,7 @@ final class QuitGuardTests: XCTestCase {
         await double.alwaysPerform(.success(QuitRig.state(quiet, origin: .owned(.dormant))))
         var seen: [[QuitChannel]] = []
         let termination = QuitRig.termination(double, titles: { QuitRig.title(of: $0) })
-        let guardModel = QuitGuard(fleet: termination, confirm: { channels in seen.append(channels); return true })
+        let guardModel = QuitGuard(fleet: termination, confirm: { channels, _ in seen.append(channels); return true })
 
         _ = await guardModel.quit()
 
@@ -435,7 +435,7 @@ final class QuitGuardTests: XCTestCase {
         let termination = FleetQuitTermination(lifecycle: double,
                                                shutdown: { await counter.note(await double.performCount) },
                                                title: { QuitRig.title(of: $0) })
-        let guardModel = QuitGuard(fleet: termination, confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: termination, confirm: { _, _ in true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "the sequence ran")
@@ -458,7 +458,7 @@ final class QuitGuardTests: XCTestCase {
     /// Deliberate break: leave the cancel out, or move it after `shutdownForQuit()`.
     func testTheRunningHostCommandsAreCancelledBeforeTheShutdown() async {
         let fleet = QuitFleetDouble(channels: [.owned("a", busy: false)])
-        let guardModel = QuitGuard(fleet: fleet, hostCommands: fleet, confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: fleet, hostCommands: fleet, confirm: { _, _ in true })
 
         let mayExit = await guardModel.quit()
         XCTAssertTrue(mayExit, "the confirmed arm lets the app exit")
@@ -471,7 +471,7 @@ final class QuitGuardTests: XCTestCase {
     /// The other arm: a declined quit leaves every `!` running, because the app is not exiting.
     func testADeclinedQuitCancelsNoHostCommand() async {
         let fleet = QuitFleetDouble(channels: [.owned("a", busy: true)])
-        let guardModel = QuitGuard(fleet: fleet, hostCommands: fleet, confirm: { _ in false })
+        let guardModel = QuitGuard(fleet: fleet, hostCommands: fleet, confirm: { _, _ in false })
 
         let mayExit = await guardModel.quit()
         XCTAssertFalse(mayExit, "a cancelled quit does not let the app exit")
@@ -514,7 +514,7 @@ final class QuitGuardTests: XCTestCase {
         defer { _ = kill(descendant, SIGKILL) }
 
         let fleet = QuitFleetDouble(channels: [])
-        let guardModel = QuitGuard(fleet: fleet, hostCommands: registry, confirm: { _ in true })
+        let guardModel = QuitGuard(fleet: fleet, hostCommands: registry, confirm: { _, _ in true })
         let mayExit = await guardModel.quit()
 
         XCTAssertTrue(mayExit, "the quit did not reach the exit")
@@ -557,7 +557,7 @@ final class QuitGuardTests: XCTestCase {
             let delegate = AfleetQuitDelegate()
             let replies = QuitReplyRecorder()
             delegate.reply = { replies.note($0) }
-            delegate.makeGuard = { QuitGuard(fleet: fleet, confirm: { _ in confirmed }) }
+            delegate.makeGuard = { QuitGuard(fleet: fleet, confirm: { _, _ in confirmed }) }
 
             let verdict = delegate.applicationShouldTerminate(NSApplication.shared)
             XCTAssertEqual(verdict, .terminateLater, "the hook defers while the guard decides")
@@ -585,7 +585,7 @@ final class QuitGuardTests: XCTestCase {
         let built = QuitGuardCounter()
         delegate.makeGuard = {
             built.note()
-            return QuitGuard(fleet: fleet, confirm: { _ in await gate.answer() })
+            return QuitGuard(fleet: fleet, confirm: { _, _ in await gate.answer() })
         }
 
         let first = delegate.applicationShouldTerminate(NSApplication.shared)
@@ -634,7 +634,7 @@ final class QuitGuardTests: XCTestCase {
                                        drained += 1
                                        shutdownHadHappened = fleet.memberSequence.contains("shutdown")
                                    },
-                                   confirm: { _ in true })
+                                   confirm: { _, _ in true })
 
         let mayExit = await guardModel.quit()
 
@@ -648,12 +648,125 @@ final class QuitGuardTests: XCTestCase {
     func testADeclinedQuitDrainsNothing() async {
         let fleet = QuitFleetDouble(channels: [.owned("a", busy: true, hasProcess: true)])
         var drained = 0
-        let guardModel = QuitGuard(fleet: fleet, drainPanels: { drained += 1 }, confirm: { _ in false })
+        let guardModel = QuitGuard(fleet: fleet, drainPanels: { drained += 1 }, confirm: { _, _ in false })
 
         let mayExit = await guardModel.quit()
 
         XCTAssertFalse(mayExit, "a declined quit does not exit")
         XCTAssertEqual(drained, 0, "a declined quit drained panel state anyway")
+    }
+
+    // MARK: - A Terminal pane with a live child (tracker 354)
+
+    /// **A running pane makes the quit ask, and the sentence names it.**
+    ///
+    /// The fleet is idle and every channel is dormant, so §7.4's own "busy" is false everywhere and
+    /// the clause used to walk straight past to the shutdown — closing the pty descriptor of a
+    /// command the user is watching, silently. The pane fact is read beside the fleet's, and either
+    /// one is enough to put the dialog on screen.
+    ///
+    /// Deliberate break: read `quitChannels()` alone.
+    func testARunningPaneMakesAnIdleFleetAskAndTheSentenceNamesThePanes() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: false, hasProcess: true)])
+        let panes = QuitPanesDouble(census: QuitPaneCensus(paneCount: 2, channelCount: 1))
+        var seen: [(channels: [QuitChannel], panes: QuitPaneCensus)] = []
+        let guardModel = QuitGuard(fleet: fleet, panes: panes,
+                                   confirm: { channels, panes in seen.append((channels, panes)); return true })
+
+        let mayExit = await guardModel.quit()
+        XCTAssertTrue(mayExit, "the confirmed quit runs to the end")
+
+        XCTAssertEqual(guardModel.askCount, 1,
+                       "the clause asked \(guardModel.askCount) time(s) with a pane still running")
+        XCTAssertEqual(seen.first?.channels.count, 0,
+                       "\(seen.first?.channels.count ?? -1) channel(s) were named; the fleet was idle")
+        XCTAssertEqual(seen.first?.panes.paneCount, 2,
+                       "the dialog was handed \(seen.first?.panes.paneCount ?? -1) of 2 running panes")
+        let sentence = QuitGuard.warning(seen.first?.channels ?? [], seen.first?.panes ?? .none)
+        XCTAssertTrue(sentence.contains("2 Terminal pane(s) in 1 channel(s)"),
+                      "the sentence did not name the running panes at all")
+    }
+
+    /// **Nothing running anywhere: no dialog.** The pane fact does not make the clause ask more
+    /// often than §7.4 says, and a guard that asked whenever a panel existed would put an alert in
+    /// front of every quit.
+    func testWithNoLivePaneAndAnIdleFleetTheQuitDoesNotAsk() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: false, hasProcess: true)])
+        let panes = QuitPanesDouble(census: .none)
+        var asks = 0
+        let guardModel = QuitGuard(fleet: fleet, panes: panes, confirm: { _, _ in asks += 1; return true })
+
+        let mayExit = await guardModel.quit()
+        XCTAssertTrue(mayExit, "nothing was running, so nothing stands between the app and exit")
+
+        XCTAssertEqual(asks, 0, "\(asks) dialog(s) reached the user with nothing running")
+        XCTAssertEqual(guardModel.askCount, 0, "the guard counted \(guardModel.askCount) ask(s)")
+        XCTAssertEqual(fleet.memberSequence.last, "shutdown", "the shutdown still runs, and runs last")
+    }
+
+    /// **A confirmed quit tears the panes down before the app goes.**
+    ///
+    /// Order, not timing: the teardown is recorded against the fleet's own log, and what it must
+    /// stand between is the terminations behind it and the shutdown in front. Without it the panes
+    /// are ended by the exit dropping their descriptors, with nothing having gone through the path
+    /// that reports a pane's exit and settles what its session had scheduled.
+    func testAConfirmedQuitTearsThePanesDownBeforeTheShutdown() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: false, hasProcess: true)])
+        let panes = QuitPanesDouble(census: QuitPaneCensus(paneCount: 1, channelCount: 1))
+        var shutdownHadHappened: Bool?
+        var terminationsHadRun: Int?
+        panes.onTearDown = {
+            shutdownHadHappened = fleet.memberSequence.contains("shutdown")
+            terminationsHadRun = fleet.memberSequence.filter { $0 == "terminated" }.count
+        }
+        let guardModel = QuitGuard(fleet: fleet, panes: panes, confirm: { _, _ in true })
+
+        let mayExit = await guardModel.quit()
+        XCTAssertTrue(mayExit, "the confirmed quit runs to the end")
+
+        XCTAssertEqual(panes.teardownCount, 1,
+                       "the quit tore the panes down \(panes.teardownCount) time(s), not once")
+        XCTAssertEqual(shutdownHadHappened, false, "the panes were torn down after the shutdown")
+        XCTAssertEqual(terminationsHadRun, 1,
+                       "\(terminationsHadRun ?? -1) of 1 termination(s) had run when the panes were torn down")
+        XCTAssertEqual(fleet.memberSequence.last, "shutdown", "the shutdown is not the last thing the clause does")
+    }
+
+    /// A declined quit ends no pane: the app is not going away, and the command the user just chose
+    /// to keep is still running.
+    func testADeclinedQuitTearsDownNoPane() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: false, hasProcess: true)])
+        let panes = QuitPanesDouble(census: QuitPaneCensus(paneCount: 1, channelCount: 1))
+        let guardModel = QuitGuard(fleet: fleet, panes: panes, confirm: { _, _ in false })
+
+        let mayExit = await guardModel.quit()
+
+        XCTAssertFalse(mayExit, "a declined quit let the app exit")
+        XCTAssertEqual(panes.teardownCount, 0, "a declined quit ended \(panes.teardownCount) pane set(s)")
+        XCTAssertEqual(fleet.terminatedTitles.count, 0,
+                       "\(fleet.terminatedTitles.count) channel(s) were terminated after a decline")
+    }
+
+    /// The two facts are asked in one dialog, and neither hides the other: a busy channel is still
+    /// named by title while the panes are named by count.
+    func testABusyChannelAndARunningPaneAreOneDialog() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: true, hasProcess: true)])
+        let panes = QuitPanesDouble(census: QuitPaneCensus(paneCount: 3, channelCount: 2))
+        var seen: [(channels: [QuitChannel], panes: QuitPaneCensus)] = []
+        let guardModel = QuitGuard(fleet: fleet, panes: panes,
+                                   confirm: { channels, panes in seen.append((channels, panes)); return true })
+
+        _ = await guardModel.quit()
+
+        XCTAssertEqual(guardModel.askCount, 1, "the clause asked \(guardModel.askCount) time(s) for one quit")
+        XCTAssertEqual(seen.first?.channels.map(\.title), ["a"], "the busy channel was not named")
+        XCTAssertEqual(seen.first?.panes.paneCount, 3,
+                       "\(seen.first?.panes.paneCount ?? -1) of 3 running panes reached the dialog")
+        let sentence = QuitGuard.warning(seen.first?.channels ?? [], seen.first?.panes ?? .none)
+        XCTAssertTrue(sentence.contains("3 Terminal pane(s) in 2 channel(s)"), "the panes went unmentioned")
+        XCTAssertTrue(sentence.contains("Open in terminal"), "the advice about keeping a conversation was dropped")
+        XCTAssertTrue(sentence.contains("terminal of your own"),
+                      "the advice still points the user at a pane this same quit ends")
     }
 }
 
@@ -853,5 +966,35 @@ enum QuitRig {
         case .storeWrite:
             nil
         }
+    }
+}
+
+/// The Terminal panel the quit reads and ends, recorded.
+///
+/// A census it is handed rather than one it computes: what this file asserts is the clause's own
+/// decision, and the count's own truth — that an exited child is not a running pane — belongs to the
+/// registry and is asserted there.
+@MainActor
+final class QuitPanesDouble: QuitTerminalPanes {
+
+    var census: QuitPaneCensus
+    /// How many times the clause read the pane fact. A count (§11).
+    private(set) var censusReads = 0
+    /// How many times it ended the panes. A count.
+    private(set) var teardownCount = 0
+    /// Run inside the teardown, so what the rest of the clause had done by then can be read off its
+    /// own log rather than guessed at from a clock.
+    var onTearDown: (@MainActor () -> Void)?
+
+    init(census: QuitPaneCensus) { self.census = census }
+
+    func livePaneCensus() -> QuitPaneCensus {
+        censusReads += 1
+        return census
+    }
+
+    func tearDownPanesForQuit() async {
+        teardownCount += 1
+        onTearDown?()
     }
 }

@@ -3,6 +3,7 @@ import Foundation
 import OSLog
 import AfleetCore
 import FleetKit
+import Workbench
 
 /// §7.4's *Quit* clause (tracker 71), and the one thing in this leaf that acts on the whole fleet
 /// rather than on one channel.
@@ -61,6 +62,44 @@ protocol QuitHostCommands: AnyObject {
     func cancelHostCommands() async
 }
 
+/// The Terminal panes that still hold a live child, as the *Quit* clause needs them.
+///
+/// **A second fact beside the fleet's, not an extension of it.** `quitChannels()` answers about
+/// owned channels, and a shell pane has no channel entry at all: it is a child afleet spawned into
+/// a pty, and the exit closes that descriptor whether or not anybody was warned. So the clause reads
+/// two facts and asks about either — the fleet's "busy" is unchanged, and a pane never becomes a
+/// channel the termination pass reaches.
+///
+/// Counts, because that is what the dialog says: §11 keeps a session id and a command line off every
+/// surface that is not the conversation itself, and "3 panes in 2 channels" is the whole of what a
+/// person needs to decide.
+struct QuitPaneCensus: Sendable, Hashable {
+    /// Panes whose child is still alive, across every channel.
+    let paneCount: Int
+    /// How many channels those panes stand in.
+    let channelCount: Int
+
+    static let none = QuitPaneCensus(paneCount: 0, channelCount: 0)
+
+    var isEmpty: Bool { paneCount == 0 }
+}
+
+/// The Terminal panel as the quit path uses it: what is still running, and the teardown that ends it.
+///
+/// Two members rather than the registry itself, so the clause can be driven headlessly — "the panes
+/// were torn down before the shutdown" is only a fact a test can fail on if the ordering is
+/// recordable.
+@MainActor
+protocol QuitTerminalPanes: AnyObject {
+    /// Taken now, by value. Asked twice over one quit — once to decide the dialog, and never to
+    /// decide a termination.
+    func livePaneCensus() -> QuitPaneCensus
+    /// Ends every pane through the panel's **own** teardown and waits for it, so a child is hung up
+    /// by the path that also settles its document, rather than by the exit dropping its descriptor.
+    /// Bounded by that path: a pane's close escalates and returns.
+    func tearDownPanesForQuit() async
+}
+
 /// The clause itself, over the seam.
 @MainActor
 final class QuitGuard {
@@ -72,7 +111,10 @@ final class QuitGuard {
     /// The dialog. Injected because an `NSAlert` cannot be answered in a headless runner, and
     /// because the clause's decision — ask once, and only about the busy owned channels — is worth
     /// asserting without one.
-    private let confirm: @MainActor ([QuitChannel]) async -> Bool
+    private let confirm: @MainActor ([QuitChannel], QuitPaneCensus) async -> Bool
+    /// The Terminal panes. Nil for a guard with no terminal panel behind it — a quit with no pane
+    /// to warn about and none to end.
+    private let panes: (any QuitTerminalPanes)?
     /// Panel state that is still on its way to disk. Nil for a guard with no panels behind it.
     private let drainPanels: (@MainActor () async -> Void)?
 
@@ -81,14 +123,18 @@ final class QuitGuard {
     private(set) var askCount = 0
     /// The channels the last ask named, in the order the dialog listed them.
     private(set) var lastAsked: [QuitChannel] = []
+    /// The panes the last ask named. `.none` when the ask was about channels alone.
+    private(set) var lastAskedPanes: QuitPaneCensus = .none
     private var isQuitting = false
 
     init(fleet: any QuitFleet,
          hostCommands: (any QuitHostCommands)? = nil,
+         panes: (any QuitTerminalPanes)? = nil,
          drainPanels: (@MainActor () async -> Void)? = nil,
-         confirm: @escaping @MainActor ([QuitChannel]) async -> Bool = QuitGuard.alert) {
+         confirm: @escaping @MainActor ([QuitChannel], QuitPaneCensus) async -> Bool = QuitGuard.alert) {
         self.fleet = fleet
         self.hostCommands = hostCommands
+        self.panes = panes
         self.drainPanels = drainPanels
         self.confirm = confirm
     }
@@ -104,7 +150,7 @@ final class QuitGuard {
         defer { isQuitting = false }
 
         let owned = await fleet.quitChannels()
-        guard await ask(about: owned) else { return false }
+        guard await ask(about: owned, panes: paneCensus()) else { return false }
         // **The census is repeated after the pass, and that is the whole answer to the race.** One
         // suspended read of the owned set is not atomic with the terminations that follow it: an
         // open, an adopt or a `paneExited` can hand a channel a process after its entry was taken or
@@ -129,7 +175,8 @@ final class QuitGuard {
             // this pass is about to close — X9's warning is owed for them exactly as it is owed for the ones the
             // first census saw. It is asked only if no dialog has been shown yet: the clause says *once*, and a
             // user who has already accepted is not asked again for the same quit.
-            guard await ask(about: census.filter { !terminated.contains($0.key) }) else { return false }
+            guard await ask(about: census.filter { !terminated.contains($0.key) }, panes: paneCensus())
+            else { return false }
             for channel in pending {
                 terminated.insert(channel.key)
                 await fleet.terminateForQuit(channel.key)
@@ -158,6 +205,18 @@ final class QuitGuard {
         // After the terminations, so a panel following a channel that just ended writes what it
         // finally saw; before the shutdown, because that is the last thing that happens.
         await drainPanels?()
+        // **The Terminal panes are ended by the panel's own teardown, here, and not by the exit.**
+        // A pane's child is afleet's — §7.8's never-kill rule is about a session running in the
+        // user's own terminal, and no pane holds one — but the exit ends it by dropping the pty
+        // descriptor, which hangs the child up with nothing having gone through the path that also
+        // reports the pane's exit and settles what the session had already scheduled. Awaited, so
+        // "torn down before the app went" is true rather than likely; bounded by the panel's own
+        // close, for the same reason every other wait in this clause is.
+        //
+        // In the same barrier as the panel drain and for the same reason: after the terminations, so
+        // a pane in a channel that has just ended is closed knowing it; before the shutdown, because
+        // that is the last thing that happens.
+        await panes?.tearDownPanesForQuit()
         await fleet.shutdownForQuit()
         return true
     }
@@ -168,13 +227,23 @@ final class QuitGuard {
     /// allowed has already been shown and accepted. A decline stops the termination passes and the app does not
     /// exit; channels this quit already ended are dormant and resumable, which is what the clause's own note says
     /// about a channel that has been quit.
-    private func ask(about channels: [QuitChannel]) async -> Bool {
+    private func ask(about channels: [QuitChannel], panes: QuitPaneCensus) async -> Bool {
         guard askCount == 0 else { return true }
         let busy = channels.filter(\.isBusy)
-        guard !busy.isEmpty else { return true }
+        // Either fact is enough. An idle fleet with a shell pane compiling something is exactly the
+        // case this clause used to walk past in silence.
+        guard !busy.isEmpty || !panes.isEmpty else { return true }
         askCount += 1
         lastAsked = busy
-        return await confirm(busy)
+        lastAskedPanes = panes
+        return await confirm(busy, panes)
+    }
+
+    /// The pane fact, read at each point the channel fact is read. `.none` for a guard with no
+    /// terminal panel behind it.
+    private func paneCensus() -> QuitPaneCensus {
+        guard let panes else { return .none }
+        return panes.livePaneCensus()
     }
 
     /// How many times the clause reads the owned set and terminates what it finds.
@@ -182,18 +251,43 @@ final class QuitGuard {
 
     /// The production dialog. Titles are what the user needs to recognise the conversation they are
     /// about to end, and the dialog is the surface they belong on.
-    static func alert(_ channels: [QuitChannel]) async -> Bool {
+    static func alert(_ channels: [QuitChannel], _ panes: QuitPaneCensus) async -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Quit afleet?"
-        alert.informativeText = """
-            \(channels.count) channel(s) are still working, and quitting ends them: \
-            \(channels.map(\.title).joined(separator: ", ")).
-            To keep a conversation running, cancel and release it with Open in terminal first.
-            """
+        alert.informativeText = Self.warning(channels, panes)
         alert.addButton(withTitle: "Quit")
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// What the dialog says, as a string rather than as an `NSAlert`, so the sentence itself is
+    /// assertable.
+    ///
+    /// Three shapes, because two independent facts reach it: busy channels, running panes, or both.
+    /// Channels are named — a title is what a person recognises the conversation by, and the dialog
+    /// is the surface a title belongs on. Panes are counted and not named: a pane's command line is
+    /// not a title, and §11 keeps it off every surface.
+    ///
+    /// **The advice is corrected here too.** *Open in terminal* hands the conversation to a pane
+    /// when it is afleet's own Terminal tab that opens it, and this quit ends that pane along with
+    /// everything else — so the old sentence pointed the user at the one place that does not
+    /// survive. What survives is a terminal outside afleet.
+    static func warning(_ channels: [QuitChannel], _ panes: QuitPaneCensus) -> String {
+        var lines: [String] = []
+        if !channels.isEmpty {
+            lines.append("\(channels.count) channel(s) are still working, and quitting ends them: "
+                         + channels.map(\.title).joined(separator: ", ") + ".")
+        }
+        if !panes.isEmpty {
+            lines.append("\(panes.paneCount) Terminal pane(s) in \(panes.channelCount) channel(s) "
+                         + "still have a command running, and quitting ends those too.")
+        }
+        if !channels.isEmpty {
+            lines.append("To keep a conversation running, cancel and release it with Open in terminal — "
+                         + "into a terminal of your own, since a pane inside afleet goes when afleet does.")
+        }
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -332,6 +426,10 @@ extension QuitGuard {
             title: { key in browser?.row(key.session)?.title }),
                          // The app's one composer registry, which is where every running `!` is held.
                          hostCommands: model.composers,
+                         // Tracker 354: the app's one Terminal session registry, which is where every
+                         // live pane is held. The fleet cannot answer for a pane — a shell pane has no
+                         // channel entry — so the clause asks the panel that owns them.
+                         panes: model.terminalSessions,
                          // C7.6's G3 — "tabs persist across relaunch" — is the reason this seam
                          // exists: the Browser coalesces URL and title commits over half a second,
                          // so a fast quit otherwise drops whatever that window was holding.
@@ -340,5 +438,26 @@ extension QuitGuard {
                          // tracking runs through all of it, so a drain that left the panel open
                          // would be a snapshot with work arriving behind it (C7.6 D62).
                          drainPanels: { await browserTab.model.closeForQuit() })
+    }
+}
+
+/// C7.4's registry answering §7.4's *Quit*: a census and a teardown, and nothing that lets the quit
+/// path reach a pane directly.
+///
+/// The teardown is `release()` itself — the same one `bindWorkspace` runs — because it is already the
+/// panel's answer to "this owner is going": the map is emptied at once so nothing can be handed a
+/// released session, and each session's `tearDown()` closes its panes, reports the exits X5 is still
+/// owed, and lets the writes the user's own actions had scheduled land. `settleRelease()` is what
+/// turns that into something the quit can wait on.
+extension TerminalSessionRegistry: QuitTerminalPanes {
+
+    func livePaneCensus() -> QuitPaneCensus {
+        let live = livePanes()
+        return QuitPaneCensus(paneCount: live.reduce(0) { $0 + $1.panes }, channelCount: live.count)
+    }
+
+    func tearDownPanesForQuit() async {
+        release()
+        await settleRelease()
     }
 }
