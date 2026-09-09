@@ -15,7 +15,7 @@ final class AgentNavigationTests: XCTestCase {
 
     /// The composition root installs the no-op, which is where C6.4's implementation goes.
     func testTheNoOpNavigationIsInstalledInTheCompositionRoot() {
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         XCTAssertTrue(app.agentNavigation is NoAgentNavigation,
                       "the chip's seam defaults to \(type(of: app.agentNavigation)), not the skeleton's no-op")
         // Calling it does nothing, which is the whole contract until C6.4 lands.
@@ -24,7 +24,7 @@ final class AgentNavigationTests: XCTestCase {
 
     /// Replacing it is one assignment, and the replacement is what the call reaches.
     func testAReplacementReceivesEveryNavigation() {
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         let double = CountingNavigation()
         app.agentNavigation = double
         app.agentNavigation.show(run: Self.run, in: Self.key)

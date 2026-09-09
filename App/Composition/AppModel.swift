@@ -158,7 +158,16 @@ final class AppModel: FilesTabHost {
     /// `coordinatorFactory` defaults to nil rather than to a literal closure because the production
     /// coordinator has to be handed *this* model's panel host — a delta that removed a channel
     /// releases that channel's panel sessions — and a default argument cannot reach `self`.
-    init(sequence: LaunchSequence = LaunchSequence(),
+    /// Contract Y1's registry, and the reason it is a parameter.
+    ///
+    /// `RowRegistry.register(kind:builder:)` traps on a second claim of a kind — two leaves owning
+    /// one row kind is a breach of the cut's fence, and the trap is what lets four worktrees build
+    /// one target. `AppModel.init` is where C6.1's eleven claims go, so on `RowRegistry.shared` the
+    /// second `AppModel` a process builds would die. Production builds one model and claims once on
+    /// the shared registry; a test gives each model its own; a genuine double claim still traps.
+    /// **Do not make `register` idempotent instead** — the trap is the contract.
+    init(registry: RowRegistry = .shared,
+         sequence: LaunchSequence = LaunchSequence(),
          coordinatorFactory: (@MainActor @Sendable (Workspace) -> any WorkspaceCoordinating)? = nil) {
         let panels = PanelHostModel()
         self.panels = panels
@@ -179,6 +188,12 @@ final class AppModel: FilesTabHost {
         // could is a future initialiser registering something first — in which case the placeholder
         // would vanish with no signal, and the tab C6 hands itself is the last thing that should
         // disappear quietly.
+        // **Superseded 2026-09-09 (C6.1 Task 8).** This was two claims: eleven kinds here and the
+        // remaining two — `decision` and `sentFile` — on `RowRegistry.shared` below, behind a
+        // once-per-process flag, because the leaf that owned those rows could not reach the per-row
+        // capability carrier. Contract Y7's mount closed that, so all thirteen are claimed in this
+        // one call and the once-per-process guard moved with them.
+        TimelineRowKinds.register(on: registry)
         //
         // C7.4's Terminal leaf takes `.terminal` here and registers its pane runner for the same
         // id, both over `terminalSessions` — see that property for why the two share one registry.
@@ -201,20 +216,6 @@ final class AppModel: FilesTabHost {
             try panels.register(files)
         } catch {
             assertionFailure("the shipped tabs are the first registrations on a freshly built host")
-        }
-        // Contract Y1: this child's two kinds, claimed on the app's one registry. Here rather than
-        // in `performLaunch` because registration is synchronous and needs nothing a launch
-        // produces — unlike the `.thread` handover above, whose `unregister` is `async` and whose
-        // tab cannot answer a card without a lifecycle.
-        //
-        // **Once per process.** `RowRegistry.register(kind:)` traps on a second claim, which is the
-        // contract working: two leaves owning one kind is a breach of the C6 cut. A second
-        // `AppModel` is not that — every test that launches builds one — so the claim is guarded by
-        // this flag and the trap is left to say the one thing it exists to say.
-        if !AppModel.hasClaimedRowKinds {
-            AppModel.hasClaimedRowKinds = true
-            RowRegistry.shared.register(kind: .decision) { AnyView(DecisionRowView(row: $0)) }
-            RowRegistry.shared.register(kind: .sentFile) { AnyView(SentFileRowView(row: $0)) }
         }
         Task { await files.registerLinkTargets(through: panels.links) }
         // C7.6's Browser tab, under `.browser`, registered once (Q4). Not `try?` for the reason
@@ -338,10 +339,6 @@ final class AppModel: FilesTabHost {
     func saveFilesPanel(inFocused window: PoppedOutPanel?) {
         filesSaveTarget(inFocused: window)?.save()
     }
-
-    /// Whether this process has already claimed Y1's two kinds. `@MainActor` on the type isolates
-    /// it, so the check and the claim cannot interleave.
-    private static var hasClaimedRowKinds = false
 
     /// Binds the two app-scoped, workspace-dependent owners to the workspace a launch reached.
     ///

@@ -24,7 +24,7 @@ final class PanelHostTests: XCTestCase {
     /// R2: a protocol selection must invalidate the exact property the window renders.
     /// Reading host.selected alone would miss the original shell/host split entirely.
     func testProtocolSelectionUpdatesTheRenderedSelection() async throws {
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         // An id the app does **not** ship. It registers Thread, Files, Terminal and Browser in
         // `init`, so a stub taking any of those is a duplicate; this test is about selection and
         // any unshipped id proves it. `.sourceControl` is the free one until C7.7 lands.
@@ -477,7 +477,7 @@ final class PanelHostTests: XCTestCase {
     /// permits a redraw, so a stale window cannot pass by querying the host directly.
     func testRemovedPopOutInvalidatesItsSceneAndReleasesTheRetainedSession() async throws {
         let rig = try await PanelRig(channels: 2)
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
         // An unshipped id, for the reason the selection test above records.
@@ -1178,7 +1178,7 @@ final class PanelHostTests: XCTestCase {
     /// that built the coordinator over a second host would release nothing here.
     func testTheAppResolvesOnePanelHost() async throws {
         let rig = try await PanelRig(channels: 1)
-        let app = AppModel()
+        let app = AppModel(registry: RowRegistry())
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
         // An id the app does not ship: it registers Thread, Files, Terminal and Browser in `init`,
