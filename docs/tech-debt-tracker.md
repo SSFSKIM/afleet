@@ -4098,3 +4098,16 @@ needs more. Nothing above is renumbered.
      channel-scoped refusal the Y8 note can draw beside the state, which is a new field on the
      reading rather than a rewording. Owner: C6.4's successor on the relay. Raised by C6.4 at fix
      wave C.
+
+## From the C6.4 merge on `main`, 2026-09-10 (numbered from 426)
+
+426. **`Fixtures/REVIEW.md` item 1 says `synthetic` is set "only for the two dialog fixtures".**
+     `send-message-delivery` — C6.4's G4 recording from the scripted stand-in, built by
+     `Tools/probe/synthetic/send_message.py` — is the third, accepted by the human at its review
+     with `hypothesis: false` beside the README's disclosed guess about the delivery wrapper. The
+     sentence described the corpus at checklist version 3; it was never a rule, and `verify`
+     enforces nothing of it. Amending it alone would bump `verify.CHECKLIST_VERSION` and force a
+     re-walk of every signed fixture, which the wording is not worth. Closer: at the next bump
+     that has a substantive reason, re-word item 1 to "set only for fixtures a generator under
+     `Tools/probe/synthetic/` builds, each saying so in its README", and read item 10 as the
+     item that carries them. Owner: the architect, with C1's fixture rules.

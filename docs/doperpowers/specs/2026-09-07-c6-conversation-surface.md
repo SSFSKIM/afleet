@@ -51,7 +51,14 @@ on `main` after the last leaf merges — not the sum of the leaves' gates:
   a human leg. The merge review's host-reuse fix (one hosting view per surviving row) moved the
   gate under the day's parallel load from 12.85 ms to 7.76 ms at p99 — a gain, not a cost.
 - With the `nested-depth-2` fixture the depth-2 tree renders from the two-step join before the
-  `.meta.json` is written and is corrected by it afterwards.
+  `.meta.json` is written and is corrected by it afterwards. Re-read 2026-09-09 at C6.4's gate
+  (C3's first-source-wins is not overturned from a surface): what is observable is the node's
+  `parentSource`, the other source's answer retained in `parentAnswers`, and a disagreement drawn
+  rather than hidden. On the recording opened as afleet opens it, with its `.meta.json` on disk, the
+  sidecar answers first and the join's agreeing answer is retained; with the sidecar withheld the join
+  answers first — C6.4's G1 asserts both orders and a disagreeing source (its parent revision 0).
+  The C3 corrective `b412f2e` made both metadata sources reach the tree for live and file-only
+  channels, which is what makes the clause checkable at all.
 - The differential invariant of §7.3 is untouched: this unit adds no reducer; every item the
   timeline shows is a `TimelineItem` or an overlay entry C3 produced.
 - X9 holds across the unit: the app-side write seam C5 landed (`AppFileWrites`) still observes
@@ -197,7 +204,12 @@ from C6.3's `[parent-impact]`: the handover happens once a `Workspace` exists �
 must be constructed with the lifecycle, which X7 keeps out of `ChannelContext` and which does not
 exist in `init`. C5's placeholder registration in `init` stays and serves the id until then, so
 the handover is real and `PlaceholderTab` stays live code. The two leaves still touch different
-statements in one file and merge in sequence; "one line each" is withdrawn.
+statements in one file and merge in sequence; "one line each" is withdrawn. Amended 2026-09-09 at
+C6.4's merge (its `[parent-impact]`): `.agents` was never held — `PlaceholderTab.id` is `.thread`
+alone, as this document's own Grounding Baseline said — so C6.4 *registers* it plainly at the same
+point in `performLaunch`, for the lifecycle reason alone; an `unregister` of an unheld id would have
+been a no-op that also dropped the panel selection, and the leaf would have read its own no-op as
+the contract holding.
 
 ### Contract Y4 — chip to run
 
@@ -533,7 +545,9 @@ leaves in one target could settle them.
 - **Design inheritance:** §8.8 (data model binding, rendering advisory), §7.3's registry
   mirror and task rules, `docs/tui-parity/areas/18-agents-subagents.md`.
 - **Track hint:** controlled. Tracker entries **172–186**.
-- **Status:** not-dispatched, blocked-by C6.1 and C6.3. Worktree `../afleet-c6/agents`.
+- **Status:** **merged** 2026-09-10 at `19b4127` from `child/c6-agents` `bac2cb1`
+  (71 commits). Spec `docs/doperpowers/specs/2026-09-09-c6.4-agents.md`, plan
+  `docs/doperpowers/plans/2026-09-09-c6.4-agents.md`. **Outcome:** G1–G5 met headless: G1 in three arms (the join alone when the sidecar is withheld, the sidecar first when present, a disagreeing source drawn rather than hidden), one node per repeated `task_started`, parking on the drawn row; G2 authorship and badge on the row that draws them, replayed through ingestion; G3 seven affordances each asserting its exact request or action, `{backgrounded: false}` as stale; G4's six arms with *Delivered* only from the target run's own items and both negative controls, the fixture half staged for the human's signature; G5 through the wiring `performLaunch` installs. G6's zero-turn half met with the config-home witness at zero; its prompted half blocked by organisation policy, six turns unspent. Live spend zero. Three gates were green before they were right (G2's hard-coded author, G1's source order, item 51's fourth arm), each corrected from running the code or reading the bundle at its definition sites. Three review rounds, two `astra-high` lenses each. Tracker 172–186 and 398–399; 13 closed by its consumer. Five seam states listed for recomposition. Floor 2,480 executed, 30 skipped, 0 failures.
 
 ## Cross-Child Contracts
 
@@ -545,14 +559,20 @@ leaves in one target could settle them.
   C6.1's `taskRun` row hosts C6.3's `TaskCardView` on the `decision` slot's terms, and C6.1's
   list consults C6.3's `RetractionRegistry` before drawing — §8.4's eviction of
   `retractedMessageUuids` is a render-time filter, not a reducer (C6.3's D11, D15).
-- **Y3 Tab handoff.** Owner: this document (X7 rides it). Binds C6.3 (`.thread`) and C6.4
-  (`.agents`).
+- **Y3 Tab handoff.** Owner: this document (X7 rides it). Binds C6.3 (`.thread`, a handover) and
+  C6.4 (`.agents`, a plain registration — amended 2026-09-10 at C6.4's merge).
 - **Y4 Chip-to-run navigation.** Owner: C6.4; C6.1 calls it. Binds both.
 - **Y5 Everything through X5.** Owner: this document (X5 and X9 ride it). Binds all four.
 - **Y6 Edit and the drift replacement across the row/composer seam.** Owner: C6.2 (the model
   side, landed); C6.1 calls and renders. Binds both. Named 2026-09-08 at C6.2's merge.
 - **Y7 The render context: links and the fold's signal reach a row.** Owner: C6.1 (the value),
   C6.3 (the components). Binds both and C6.4. Named 2026-09-09 at C6.3's merge.
+- **Y8 The relay's delivery state across the Agents-tab/row seam.** Item 51's message is an
+  ordinary prompt, so its *Pending → Relayed → Delivered* and four *Not delivered* arms are afleet's
+  reading of what the model did next, not an item; C6.4 writes the state and hands a reader keyed by
+  the sent message's identity onto `TimelineRenderContext`, and C6.1's user-message row draws it with
+  *Retry* (two declared edits under `App/Timeline/Rendering/`). Owner: C6.4; C6.1's row renders.
+  Binds both. Named 2026-09-09 at C6.4's gate.
 
 ## Ordering & Dependency Map
 
@@ -610,7 +630,7 @@ recomposition, it is a corrective child of this composite).
 | C6.1 Timeline renderer | `2026-09-08-c6.1-timeline-renderer.md`; Outcomes in the child spec | **merged** 2026-09-09 at `947c7cc` from `child/c6-timeline-renderer` `9e4420f` (95 commits); G1–G7 met, S7 p99 7.66 ms; floor 1626; tracker 127–141, 321–335, 375–383, 394–397 |
 | C6.2 Composer and header | `2026-09-08-c6.2-composer.md`; Outcomes in the child spec | **merged** 2026-09-08 at `c2dae0f` from `child/c6-composer` `4902242` (72 commits); G1–G5, G7 met, G6 half live and half blocked by organisation policy (manual witness); floor 1336 at the tip; tracker 142–156 (146, 151 closed by `main` correctives; 153 named as Y6; 147, 156 open) and 196–231 from the five-round merge review (208 and 218 closed; 209, 210 and 226 are recomposition items for C3/C4; five panel rounds, twelve waves) |
 | C6.3 Decision cards and threads | `2026-09-08-c6.3-decisions.md`; Outcomes in the child spec | **merged** 2026-09-09 at `0fe2797` from `child/c6-decisions` `79f4a9a` (79 commits); G1–G4 met; G5's prompted half blocked by organisation policy with six turns unspent (manual witness), its zero-turn half live; floor 1463 at the tip; tracker 157–171; the in-timeline row lands when C6.1 merges (Y1's registry) |
-| C6.4 Agents panel | spec and plan `…-c6.4-agents.md` on `child/c6-agents` | blocked-by C6.1, C6.3 |
+| C6.4 Agents panel | `2026-09-09-c6.4-agents.md`; plan `plans/2026-09-09-c6.4-agents.md`; Outcomes in the child spec | **merged** 2026-09-10 at `19b4127` from `child/c6-agents` `bac2cb1` (71 commits); floor 2,480 executed, 30 skipped, 0 failures; Y8 named; Y3 amended (plain registration); tracker 172–186 |
 
 ## Decision Log
 
@@ -687,3 +707,8 @@ Parent-Level Acceptance as written, then the retrospective.
   already speaks it). Y2's task-card host and Y7 were applied at C6.3's merge. The pattern the leaf
   named — state written for a reader that did not exist, four times across the cut — is the
   recomposition's first check. Three whole-diff panel rounds at merge (19 confirmed with three P1s → 21 P2 → 18 P2, the third the hard stop) and eight fix waves A–H; sixteen standing findings filed as tracker 333–335, 375–383 and 394–397, 397 (readbacks stopping for good after a drain) the first corrective for C6 recomposition.
+- 2026-09-10 reconciliation of C6.4 (merge `19b4127` from `child/c6-agents` `bac2cb1`,
+  71 commits). Two `[parent-impact]`s applied: Y3's `.agents` is a plain registration;
+  the tree's correction source and the registry mirror came from the C3 corrective `b412f2e` on
+  `main` (tracker 187, 321), with the acceptance clause re-read to what first-source-wins makes
+  observable. Y8 named. All four leaves merged; C6 recomposition due. Three more filings applied to the parent: item 51's third failure re-worded from "the tool result is an error" to "the tool result reports the resume refused" (§8.8 and the checklist item; `is_error` stays for the tool's own input refusals), §8.8's "nest by depth" corrected to the parent link, and the `b412f2e` amendment's source order corrected (the sidecar answers first when it is on disk). C6.4's fence extension into two declared `App/Timeline/Rendering/` files accepted as Y8's row side. The fixture `send-message-delivery` awaits the human's signature; its replay test skips until the signed directory lands.

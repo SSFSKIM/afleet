@@ -1388,7 +1388,9 @@ activity line. Elapsed is ticked locally from `task_started`, because `task_prog
 tool-paced and an agent thinking for forty seconds emits nothing; the activity line comes
 from `task_progress.description` and `last_tool_name`, replaced by the model-written
 summary that arrives about every thirty seconds when `agentProgressSummaries` is on.
-Nodes nest by depth. `task_started` carries `spawn_depth` but no parent id (fixture
+Nodes nest by parent link; depth is drawn, not structural (corrected 2026-09-10 at C6.4's merge —
+a tree built by depth would put two unrelated depth-2 runs under one depth-1 run). `task_started`
+carries `spawn_depth` but no parent id (fixture
 `nested-depth-2`). The parent link comes first from the `agent_metadata` entry the engine
 mirrors at the head of the agent stream (§7.3), which carries `parentAgentId` below depth
 1 before the sidecar file exists; the two-step join is the fallback for a host not reading
@@ -1402,8 +1404,12 @@ the run's node when no `task_started` has, which is what gives a channel with no
 such a node reads the status and instant of its `taskRun` row (completed when the spawning call's
 result is on disk, running only when no spawning call is anywhere in the merged line — tracker 407)
 until a `task_started` replaces them. First source wins: the tree records a later disagreeing source
-in `conflicts` and does not re-parent; on the depth-2 recording the join answers first and the
-mirror's agreeing answer is retained beside it in `parentAnswers`, which is what a reader draws.
+in `conflicts` and does not re-parent. Which source answers first is an order of arrival, not a rule
+(corrected 2026-09-10 from C6.4's parent revision 0): on the depth-2 recording opened as afleet opens
+it, the `.meta.json` is applied before the tap is drained, so the sidecar answers first and the
+join's agreeing answer is retained beside it in `parentAnswers`; with the sidecar withheld the join
+answers first and the sidecar's answer is the one retained. A reader draws the node's `parentSource`
+and whatever `parentAnswers` holds; C6.4's G1 asserts both orders and a disagreeing source.
 The engine re-emits `task_started` for the **same** `task_id` when an auto-turn re-engages
 a backgrounded agent, so a repeat is the same node, not a new one. Depth-1 tool calls and
 results are always forwarded; text, thinking and depth 2 and deeper need
@@ -1433,11 +1439,15 @@ the only path. Because the relay is a request to the model and not a delivery, a
 because the tool itself only queues (the live route answers "Message queued for delivery
 to <name> at its next tool round", *SPEC 18 §18.24*), the message carries a **delivery
 state**: *Pending* from send until the wire reducer sees a `SendMessage` `tool_use` whose
-target is this agent id followed by a non-error `tool_result`, then *Relayed*;
+target is this agent id followed by a `tool_result` whose body reports success, then *Relayed*;
 *Delivered* only when the message text appears in the agent's transcript, as a forwarded
 frame or a sidecar record, correlated one-to-one with the initiating message; *Not
-delivered* when the turn ends without the tool call, when the tool result is an error
-(for example a refused resume), or when the agent stops before its next tool round,
+delivered* when the turn ends without the tool call, when the tool result reports the resume
+refused (corrected 2026-09-10 from C6.4's `[parent-impact]`: the stopped-by-user branch returns
+`{success: false, message}` in an **ordinary, non-error** result, serialised into one text block
+like a success; `is_error` is set only for the tool's own input refusals, a different arm, so a
+host reading the flag alone would report *Relayed* for ever), or when the agent stops before its
+next tool round,
 shown with the model's reply and a *Retry*. The message appears in the main timeline with
 its state and, once delivered, in the agent's transcript. *Open transcript file* opens the JSONL in
 Files; *Copy agent id* copies the task id. *Stop everything* and *Background all* at the
@@ -1815,12 +1825,13 @@ Behavior a person can observe. Commands assume the app is built with
     shows stopped and the main timeline's task item shows the partial summary.
 51. **Send message to an agent.** *Send message* on a completed Explore node with `also
     list hidden files`: the message appears in the main timeline as *Pending*, turns
-    *Relayed* when the `SendMessage` tool call naming that agent id returns without
-    error, and *Delivered* when the agent's transcript gains the resumed exchange
+    *Relayed* when the `SendMessage` tool call naming that agent id returns reporting
+    success, and *Delivered* when the agent's transcript gains the resumed exchange
     containing the text. With `fake-claude` fixtures the same message shows *Not
     delivered* with the model's reply when the turn ends with no `SendMessage` call, when
-    the call names a different agent, when the tool result is an error because the
-    resume was refused, and when the agent's `task_notification` arrives after *Relayed*
+    the call names a different agent, when the tool result reports the resume refused
+    (`success: false` in a non-error result), and when the agent's `task_notification`
+    arrives after *Relayed*
     with no further tool round; *Retry* re-sends.
 52. **Subagent permission.** In the isolated channel, ask an agent to write a file; the
     permission card is labelled `Explore` with the run's description, the node in the
@@ -2719,7 +2730,7 @@ notarized distribution, and any write under `<configHome>` (X9).
 | C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` (v1 `916ce02`, parent-pin `ee94449`; v2.7 at merge `a758308`); plan `plans/2026-09-05-c3-fleetkit-timeline.md` (v5 `f9f0f2c`, 13 tasks); retrospective in the child spec's Outcomes & Retrospective | **merged** 2026-09-06 at `f4a8723` from `child/c3-timeline` `a758308` (57 commits of its own; only `FleetKit/Sources/FleetTimeline`, its tests and `docs/` touched, `FleetKit/Package.swift` byte-identical); G1–G4 green at the tip: `FleetTimelineTests` 165 tests, 4 skipped without `AFLEET_LOCAL_INDEX`, 0 failures, run twice in separate scratch paths; G1 check one over 20 mirrored streams and 518 entries, check two over 132 compared items across all twenty fixtures with no exclusion (two pinned differences on `compact-boundary`, named by shape); G2 measured opt-in on the author's config home: 365/366 ms cold build over 3,032 transcripts (limit 500), 1 ms incremental (limit 50), 667/679 ms largest history (limit 1,000); G3/G4 by the twelve named tests; X1 import graph green; X9 scratch-home fingerprint unchanged across the suite; one Codex whole-branch review (3 P1, 7 P2) and one adversarial review (6) closed by one fix wave (two dismissals logged as tracker 22 and 23); the twenty-fixture corpus surfaced three findings at merge, fixed red-first before any repin (boundary chain, `isSynthetic` union, recorded rewind); independent leak-risk review at merge (4 findings: three fixed, one logged as tracker 24); deferred debt entries 11–25 in `docs/tech-debt-tracker.md`; spend: no model turns (C3 spawns no process) |
 | C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md`; plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4, 12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-06 at `f1e35d9` from `child/c4-sessions-fleet` `26aa962` (owns `FleetKit/Package.swift`; `FleetSessions` and its tests, `docs/`, plus a C2 corrective to `ClaudeWire`'s process runner carried by the branch); suite at the tip: FleetKit 415 tests, 10 skipped without the live flags, ClaudeWire 243; G1 coverage gate 58/58 lifecycle scenarios; G2 over C3's real registry mirror, five boundary cases; G3, G4; G5 eight live scenarios green together twice on the installed 2.1.263 (runs 4 and 5: 136.6 s and 132.3 s, five turns each, $0.17 and $0.19; cumulative child live spend $1.58); two whole-branch Codex reviews (48 confirmed → 10) closed by one fix wave and two follow-up rounds under five architect rulings; four live-gate product defects found at Task 10 and three more at the merge gate; independent leak-risk review at merge: no findings; deferred debt 26–48 in `docs/tech-debt-tracker.md` |
 | C5 App shell, panel host, packaging | `2026-09-06-c5-app-shell.md`; plan `plans/2026-09-06-c5-app-shell.md` (v6, 10 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-07 at `78303c7` from `child/c5-app-shell` `4c4ede4` (212 commits; owns `App/`, `AppTests/`, `project.yml`, `Workbench/Sources/PanelHostAPI`, plus `main` correctives taken at its boundaries); G1–G4 green at the tip: test scheme 835 executed, 20 designed skips, 0 failures, zero compiler warnings at `5f3779f`, re-run green at `4c4ede4`; `make check-imports` and `make check-wiring` clean; first paint 2,505 ms median with no persisted snapshot and 2,121 ms with one, warm page cache, over 4,261 transcripts against the 5,000 ms budget; the cold case is unmeasured; three `[parent-impact]` filings reconciled (§11 per-domain logs, the per-write sink corrective `c31bebd`, the `.claude.json` sibling rule `6b3fc23`/`1c19d52`) and X7 amended as filed |
-| C6 Conversation surface and Agents panel | composite spec `2026-09-07-c6-conversation-surface.md` (four leaves, its own tracking map) | cut landed 2026-09-07 after C5's merge (`78303c7`), approved by the human 2026-09-08; Y1 skeleton on `main` at `5e24f1a`; C6.1 Timeline renderer **merged** 2026-09-09 at `947c7cc` (S7 met, p99 7.66 ms); C6.2 Composer and header **merged** 2026-09-08 at `c2dae0f` (Y6 named); C6.3 Decision cards and threads **merged** 2026-09-09 at `0fe2797` (Y3 corrected, §8.4 corrected); C6.4 Agents panel blocked-by C6.1 and C6.3 |
+| C6 Conversation surface and Agents panel | composite spec `2026-09-07-c6-conversation-surface.md` (four leaves, its own tracking map) | cut landed 2026-09-07 after C5's merge (`78303c7`), approved by the human 2026-09-08; Y1 skeleton on `main` at `5e24f1a`; C6.1 Timeline renderer **merged** 2026-09-09 at `947c7cc` (S7 met, p99 7.66 ms); C6.2 Composer and header **merged** 2026-09-08 at `c2dae0f` (Y6 named); C6.3 Decision cards and threads **merged** 2026-09-09 at `0fe2797` (Y3 corrected, §8.4 corrected); C6.4 Agents panel **merged** 2026-09-10 at `19b4127` (71 commits; Y8 named; the C3 corrective `b412f2e` for its tree sources) — all four leaves merged; C6 recomposition due |
 | C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core **dispatchable** — the cut approved by the human 2026-09-07, dispatch follows C6's; C7.4–C7.7 unblocked by C5's merge (`78303c7`) except where noted (C7.4 also by C4's X5, C7.6 by C4's store); C7.3 Source Control core **merged** 2026-09-08 at `aa5df80` (41 commits, 128 package tests, two whole-diff review rounds and three fix waves at merge; W7's command lines amended in the composite); C7.2 Editor core **merged** 2026-09-08 at `a47788a` (37 commits, 110 package tests; Monaco 0.56 on the custom scheme with workers proven by attribution; three whole-diff review rounds and three fix waves at merge; human still to witness "no visible jank"); C7.1 Terminal core **merged** 2026-09-08 at `855b815` (45 commits, S1 promotes GhosttyKit provisionally); C7.5 Files panel **merged** 2026-09-09 at `517899d` (56 commits); C7.6 Browser panel **merged** 2026-09-09 at `6f8a8ec` (46 commits, X7 amended twice); C7.4 Terminal panel **merged** 2026-09-09 at `054e42c` (43 commits, X7's pane runner amended); C7.7 Source Control and GitHub panel **merged** 2026-09-09 at `3ab455f` (27 commits; freshness by FSEvents; no editor import) — all seven leaves merged; **recomposed** 2026-09-09 at `2a04d9c` (six correctives on `main`, the evidence map in the composite's Outcomes); closes when the human walks the checklist's C7 legs |
 
 Each child's spec path is filled in when it is dispatched; a composite's row points at
@@ -4783,3 +4794,9 @@ Pending — written at finish.
   in a panel; §7.4's Quit names live panes; W6's host document exists; X7's link origin carries its
   channel to every target. The human-witness checklist under `docs/doperpowers/checklists/` is the
   remaining leg of C7's acceptance.
+- 2026-09-10 C6.4 merged (`19b4127`; composite Revision Note of the same date). §17.9's C6 row:
+  all four leaves merged, recomposition due. From C6.4's filings: §8.8's nesting sentence corrected
+  to the parent link; the `b412f2e` amendment's source order corrected (the sidecar answers first
+  when it is on disk, the join when it is withheld); *Relayed* requires a result body reporting
+  success and item 51's third failure is a refused resume in a non-error result, in §8.8 and in
+  checklist item 51 alike.

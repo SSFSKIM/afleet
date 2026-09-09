@@ -255,13 +255,36 @@ and FSEvents on the user's own directories is TCC-gated in a way no test could r
       loading in the Browser tab. Headless: exactly `.pullRequest(number)` is emitted through a
       real router and no URL is built in this panel.
 
-## C6.4 — Agents panel (in flight)
+## C6.4 — Agents panel (`19b4127`)
 
-Placeholder. C6.4 is blocked-by C6.1 and C6.3, both now merged, and has not landed. Its
-acceptance names items 9, 38, 49, 50, 51 and 52, and its G6 carries a live budget of six
-turns for items 9, 49, 50, 51's positive path and 52 — which the organisation policy below
-will also refuse on this account. Fill this section from the leaf's Outcomes when it merges;
-until then it has no legs to run.
+Three looks legs and one hand-off. G1–G5 are met headless and G6's zero-turn half rendered a
+run's transcript from a session's files alone with the config-home witness at zero; the leaf
+says plainly what the green does not cover: a `confirmationDialog`'s buttons and an
+`AgentRelayNote`'s placement cannot be reached by a `Mirror` walk (tracker 398), and the live
+half exercised a single-run tree (184). The prompted half of G6 is in the blocked section below.
+
+- [ ] **The fixture signature** — copy `/tmp/afleet-c64/send-message-delivery/` into `Fixtures/`,
+      walk `Fixtures/REVIEW.md` (item 2's two account-name hits are the English word inside the
+      engine's stopped-by-user sentence; item 1's "two dialog fixtures" and `hypothesis: false`
+      were accepted 2026-09-10, tracker 426), then `make sign FIXTURE=Fixtures/send-message-delivery
+      REVIEWER=<name>`. Passing is `make verify-fixtures` clean and `AgentRelayFixtureTests` no
+      longer skipping. Headless: the six arms are asserted on hand-built machines; the fixture
+      replay is the half that waits.
+- [ ] **The two confirms read as what they end** (items 50, 51's neighbours) — with a channel
+      that has two live runs, open the Agents tab and press *Stop everything*, then *Background
+      all*; each confirm names what it will end and *Cancel* performs nothing. Headless: declining
+      is asserted against a double that could have recorded an action; the buttons themselves are
+      asserted through the members they call, never as drawn (398).
+- [ ] **A relay note sits under its message** (item 51) — replay `send-message-delivery` through
+      `fake-claude` once it is signed, or send a message from a node against a live channel, and
+      look at the main timeline: the delivery state and *Retry* sit with the sent message, not
+      only in the Agents tab. Headless: the note's body and the row's reading are asserted by
+      value; where the row puts it is not (398).
+- [ ] **An archived run reads as its agent** (item 38) — open a channel from disk that ran an
+      `Explore` agent, select the run in the Agents tab and read its transcript: every message is
+      authored `Explore` with a model badge, and none says "Claude". Headless: G2 asserts the
+      author and badge on the row that draws them, replayed through the real ingestion; that a
+      reader sees them at the row's size is looks.
 
 ---
 
@@ -297,6 +320,29 @@ not the app, and the fix is "an account change or an API key, not a re-run".
       and *Approve* switches the picker back.
 - [ ] BLOCKED **Item 41, Deny** — *Deny…* on a `Write` card with `not now`; the file is not written,
       the card shows denied, the summary lists the denial, "Claude's next message reflects the reason".
+
+**C6.4 G6 — six turns unspent, zero of six spent.**
+
+- [ ] BLOCKED **Item 9, Agent chip and tree** — send `Use the Explore agent to list the top-level
+      directories`; the cluster shows an Explore chip with a running status, clicking it opens
+      the Agents tab with the run selected, its tool calls arriving live and, after completion,
+      the full transcript from its JSONL file. The chip-to-run wiring (G5) and a transcript from
+      disk (G6's zero-turn half) are proved; only the live arrival waits on a turn.
+- [ ] BLOCKED **Item 49, Nested agents** — with the fork setting off, send `Use a general-purpose
+      agent that itself uses the Explore agent to list this directory`; the tree shows the child
+      nested under its parent, selecting the child shows its own transcript, and the child's
+      `.meta.json` names the parent. Nesting and parking are proved on `nested-depth-2` (G1);
+      a live multi-run tree has not been seen (tracker 184).
+- [ ] BLOCKED **Item 50, Stop a node** — while an agent runs, *Stop* on its node sends
+      `stop_task`; the node shows stopped and the task item shows the partial summary. The exact
+      request is asserted on the lifecycle double (G3).
+- [ ] BLOCKED **Item 51, the positive path** — *Send message* on a completed Explore node with
+      `also list hidden files`: *Pending*, then *Relayed* when the `SendMessage` call naming the
+      run returns reporting success, then *Delivered* when the run's transcript gains the text.
+      All five arms replay from the staged fixture once it is signed (G4).
+- [ ] BLOCKED **Item 52, Subagent permission** — in the isolated channel, ask an agent to write
+      a file; the permission card is labelled `Explore` with the run's description, the node
+      shows a waiting badge, Activity lists it, and allowing it continues both.
 
 Every one of these has a `fake-claude` fixture arm that *is* proved — the cards, dialogs,
 cancellation, malformed answer and unknown request all replay headlessly. What the policy
