@@ -253,13 +253,17 @@ public final class TerminalPanelSession: PanelTabSession {
             await inFlight.value
             return
         }
+        // The entry is cleared inside the task and not after the await, so that by the time anyone
+        // waiting on this close is resumed the close is no longer standing. ``tearDown()`` reads
+        // the map to decide whether it may put the session away, and an entry outliving its own
+        // work would leave it looping over a close that has already finished.
         let close = Task { @MainActor [weak self] in
             guard let self else { return }
             await performClose(pane)
+            closes[identity] = nil
         }
         closes[identity] = close
         await close.value
-        closes[identity] = nil
     }
 
     private func performClose(_ pane: TerminalPane) async {
@@ -302,7 +306,11 @@ public final class TerminalPanelSession: PanelTabSession {
     /// written by the close that was already in flight, and the teardown still writes nothing of
     /// its own.
     func tearDown() async {
-        for close in closes.values { await close.value }
+        // The **live** map, not a snapshot of it. A user closing a second shell while this is
+        // waiting is an ordinary click, and a close begun inside the wait was not in the snapshot:
+        // emptying the stack under it left it unable to find its own pane, so it wrote nothing and
+        // the shell the user had closed came back the next time the channel opened.
+        while let close = closes.values.first { await close.value }
         isReleased = true
         paneCountDidChange = nil
         pendingClose = nil

@@ -176,7 +176,9 @@ public final class TerminalPane {
             await teardown.value
             return
         }
-        guard !isClosed else { return }
+        // No `isClosed` guard here: the flag and the task are set in the same turn, so a caller
+        // that finds no teardown standing is the first caller by construction. The flag stays
+        // because `hasLiveChild` reads it.
         isClosed = true
         // Strongly captured on purpose: a pane deallocated mid-teardown would otherwise leave the
         // child and the loop behind. The cycle it makes is released when the task completes.

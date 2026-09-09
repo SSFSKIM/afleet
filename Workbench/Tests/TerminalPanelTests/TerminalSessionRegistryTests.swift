@@ -213,6 +213,59 @@ final class TerminalSessionRegistryTests: XCTestCase {
                        "the document kept the shell the user closed and dropped the one they left")
     }
 
+    /// One step past the test above. Waiting for *the closes standing when the teardown began* is a
+    /// snapshot, and a close begun inside that wait is not in it — a user closing a second shell
+    /// while the workspace rebinds, which is a click and not a race they have to win. The teardown
+    /// then emptied the stack under that close, so its `performClose` came back to a pane it could
+    /// no longer find, wrote nothing, and the shell the user had explicitly closed was still in the
+    /// document to be opened again the next time the channel was.
+    ///
+    /// The first close is over a pane whose spawn failed, so it has no child to hang up and comes
+    /// back at once; the second is over a live shell, so it is still standing when the teardown
+    /// stops waiting. That is the interleaving, made by the panes rather than by a sleep.
+    ///
+    /// The session is built directly rather than through the registry: what is under test is the
+    /// ordering inside `tearDown()`, and the second close has to begin at a named moment inside it.
+    func testACloseBegunInsideTheTeardownIsWaitedForToo() async throws {
+        let store = PaneTestContext.RecordingStore()
+        let home = try PaneTestChild.temporaryDirectory()
+        let elsewhere = try PaneTestChild.temporaryDirectory()
+        directories.append(contentsOf: [home, elsewhere])
+        let fixture = PaneTestContext.fixture(session: SessionID(), cwd: home, store: store)
+        let session = TerminalPanelSession(context: fixture.context)
+        session.openShellPane(cwd: home)
+        let closing = session.openShellPane(cwd: elsewhere)
+        let unexecutable = session.run(PaneRequest(
+            executable: URL(filePath: "/invented/bin/nothing"),
+            arguments: [],
+            cwd: home,
+            environment: ["PATH": "/usr/bin:/bin"],
+            purpose: .logs(JobShort(rawValue: "jt4"))
+        ))
+        session.restoreOnce()
+        await session.settlePersistence()
+
+        let closingUnexecutable = Task { await session.close(unexecutable) }
+        let teardown = Task { await session.tearDown() }
+        // Both are enqueued before either runs, so the teardown sees exactly one close standing —
+        // and the second begins in the wait for it.
+        await Task.yield()
+        let closingShell = Task { await session.close(closing) }
+        await closingUnexecutable.value
+        await closingShell.value
+        await teardown.value
+        await session.settlePersistence()
+
+        let written = try await store.read(
+            TerminalPanelState.self,
+            key: TerminalPanelState.storeKey(for: fixture.key)
+        )
+        let document = try XCTUnwrap(written, "the channel's document is gone")
+        XCTAssertEqual(document.panes.count, 1, "panes=\(document.panes.count)")
+        XCTAssertEqual(document.panes.first?.cwd, home.path,
+                       "a shell closed inside the teardown came back in the document")
+    }
+
     func testTheRunnerPlacesAPaneInTheChannelTheContextNames() async throws {
         let registry = TerminalSessionRegistry()
         let jade = try fixture()
