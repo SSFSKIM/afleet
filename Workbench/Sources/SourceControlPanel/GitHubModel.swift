@@ -80,7 +80,18 @@ public final class GitHubModel: PanelTabSession {
     public private(set) var pullRequests: [PullRequest] = []
     /// Checks by pull-request number, and **absence means "not read"** rather than "none": a row
     /// whose checks have not been read says so and never shows a rollup it does not have.
-    public private(set) var checks: [Int: [CheckRun]] = [:]
+    ///
+    /// A read that was attempted and **failed** is a third thing again, and it is a case here
+    /// rather than another absence: stored as one, the panel went on to say "no checks were
+    /// reported for this pull request", which is an affirmative statement about a repository it
+    /// could not read. It names the tool for the reason every other notice does (§10).
+    public private(set) var checks: [Int: ChecksRead] = [:]
+
+    /// What one pull request's check read produced.
+    public enum ChecksRead: Hashable, Sendable {
+        case read([CheckRun])
+        case failed(tool: Tool)
+    }
     public private(set) var issues: [Issue] = []
     public private(set) var selectedPullRequest: Int?
     public private(set) var isLoading = false
@@ -144,7 +155,10 @@ public final class GitHubModel: PanelTabSession {
     /// repository (Design §8).
     public func select(pullRequest: Int?) async {
         selectedPullRequest = pullRequest
-        guard let pullRequest, let root, checks[pullRequest] == nil else { return }
+        guard let pullRequest, let root else { return }
+        // A read that failed is asked again when the user selects the row again — the click is a
+        // question, and the failure was about a moment rather than about this pull request.
+        if case .read = checks[pullRequest] { return }
         // Under the cycle that produced the list this row belongs to: a read starting while this
         // round trip is in flight owns the document from then on, and this answer is about a list
         // that is being replaced.
@@ -287,13 +301,19 @@ public final class GitHubModel: PanelTabSession {
                 let read = try await GhCommands.checks(root: root, pullRequest: number,
                                                        environment: environment, runner: runner)
                 guard mine == generation else { return }
-                checks[number] = read
+                checks[number] = .read(read)
             } catch {
                 // Deliberately not recorded as the tab's failure: one pull request's checks
                 // failing is a fact about that row, and turning it into the tab's error state
-                // would empty a list that read perfectly well.
+                // would empty a list that read perfectly well. It **is** recorded on the row,
+                // because a failure stored as an absence is rendered as an absence of checks.
                 guard mine == generation else { return }
-                checks[number] = nil
+                // A cancelled read is one this panel asked to stop and says nothing at all.
+                guard let classified = Self.failure(for: error, tool: .gh) else {
+                    checks[number] = nil
+                    continue
+                }
+                checks[number] = .failed(tool: Self.tool(of: classified) ?? .gh)
             }
         }
     }
@@ -363,6 +383,19 @@ public final class GitHubModel: PanelTabSession {
         }
     }
 
+    /// Which tool a classified failure was about, where it names one.
+    static func tool(of failure: Failure) -> Tool? {
+        switch failure {
+        case .toolMissing(let tool), .commandFailed(let tool, _), .timedOut(let tool),
+             .unreadable(let tool), .unavailable(let tool):
+            return tool
+        case .notAuthenticated:
+            return .gh
+        case .notARepository:
+            return nil
+        }
+    }
+
     /// Whether a `gh` failure is about not being signed in.
     ///
     /// Matched on the phrases rather than on an exit code, because `gh` exits 1 for a missing login
@@ -374,5 +407,63 @@ public final class GitHubModel: PanelTabSession {
             || lowered.contains("authentication")
             || lowered.contains("not logged in")
             || lowered.contains("no authentication token")
+    }
+}
+
+/// The connection Design §8 asks for: one channel's Source Control panel tells that channel's
+/// GitHub tab when the branch changed, so a checkout made outside the app is re-read instead of
+/// leaving a retained tab on the branch it first saw.
+///
+/// It is a small registry rather than a reference either session holds, because the two tabs share
+/// no state (Design §2) and neither may keep the other alive: X7 retains sessions per (tab,
+/// channel) under an LRU, and a strong hold from one to the other would make the pair evictable
+/// only together. Both sides are weak, and an entry whose sessions have both gone is dropped.
+///
+/// The app owns one of these and feeds it every session the panel host builds; nothing here knows
+/// about the host, and the panel package holds no reference to the app.
+///
+/// `Channel` is generic because the app's channel key is FleetKit's and this package does not
+/// import FleetKit (X1's package edges, W1's dependency row): the identity of a channel is the
+/// app's to name and all this type needs of it is equality.
+@MainActor
+public final class BranchChangeLink<Channel: Hashable> {
+
+    private struct Pair {
+        weak var sourceControl: SourceControlModel?
+        weak var github: GitHubModel?
+    }
+
+    private var pairs: [Channel: Pair] = [:]
+
+    public init() {}
+
+    /// Records a session the host has just built for `channel`, and connects the pair when both
+    /// halves of one channel exist. A session of any other kind is not this type's business.
+    public func sessionWasMade(_ session: any PanelTabSession, for channel: Channel) {
+        var pair = pairs[channel] ?? Pair()
+        switch session {
+        case let source as SourceControlModel: pair.sourceControl = source
+        case let github as GitHubModel: pair.github = github
+        default: return
+        }
+        pairs[channel] = pair
+        connect(channel)
+        pairs = pairs.filter { $0.value.sourceControl != nil || $0.value.github != nil }
+    }
+
+    /// How many channels are connected. A count and nothing identifying, for a diagnostic and for
+    /// the test of the weak half.
+    public var channelCount: Int { pairs.count }
+
+    private func connect(_ channel: Channel) {
+        guard let source = pairs[channel]?.sourceControl else { return }
+        source.onBranchChange = { [weak self] (branch: String?) in
+            // Resolved at delivery, weakly, through the registry: the GitHub tab for this channel
+            // may not have been visited yet, and may have been evicted since.
+            guard let github = self?.pairs[channel]?.github else { return }
+            // `branchDidChange(to:)` is `async` and this is not, so the read is spawned; it does
+            // nothing at all when the branch it is told about is the one it already holds.
+            Task { @MainActor in await github.branchDidChange(to: branch) }
+        }
     }
 }

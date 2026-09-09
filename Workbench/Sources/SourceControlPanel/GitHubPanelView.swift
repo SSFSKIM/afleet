@@ -115,8 +115,8 @@ public struct GitHubPanelView: View {
     private func checks(_ readout: GitHubReadout) -> some View {
         let rows = Self.checkPresentations(for: readout)
         VStack(alignment: .leading, spacing: 2) {
-            if rows.isEmpty {
-                Text("No checks were reported for this pull request.")
+            if let message = Self.checksMessage(for: readout) {
+                Text(message)
                     .font(.caption).foregroundStyle(.secondary)
             }
             ForEach(rows, id: \.self) { check in
@@ -144,16 +144,7 @@ public struct GitHubPanelView: View {
             Divider().padding(.vertical, 4)
             SectionHeading(text: rows.count == 1 ? "1 open issue" : "\(rows.count) open issues")
             ForEach(rows, id: \.number) { issue in
-                HStack(spacing: 6) {
-                    Text("#\(issue.number)").font(.caption).monospaced()
-                        .foregroundStyle(.secondary)
-                    Text(issue.title).font(.callout).lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 6)
-                    Text(issue.author).font(.caption).foregroundStyle(.secondary)
-                    Text(issue.relativeDate).font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 2)
+                GitHubIssueRow(issue: issue)
             }
         }
     }
@@ -209,6 +200,10 @@ public struct GitHubPanelView: View {
         case unknown
         /// Nobody has asked yet.
         case unread
+        /// Asked, and the answer did not come. Distinguished from `unread` because the two are
+        /// different facts, and from `negative` because a check read that failed is not a check
+        /// that failed.
+        case unreadable
     }
 
     static func colour(of tone: Tone) -> Color {
@@ -219,6 +214,7 @@ public struct GitHubPanelView: View {
         case .neutral: .secondary
         case .unknown: .purple
         case .unread: .secondary
+        case .unreadable: .orange
         }
     }
 
@@ -233,10 +229,32 @@ public struct GitHubPanelView: View {
         let isRollup: Bool
     }
 
+    /// What the check area says when it draws no rows, and **why** — or nil when it has rows.
+    ///
+    /// The three cases are the whole of `ChecksState`: nobody asked, the read failed, and the read
+    /// found none. Collapsing the first two into the third is how a panel comes to tell the user
+    /// their pull request has no checks over a repository it could not read (§10, Design §8).
+    static func checksMessage(for readout: GitHubReadout) -> String? {
+        switch readout.selectedChecksState {
+        case .notRead:
+            return "This pull request's checks have not been read."
+        case .failed:
+            // The state's own words, which name the tool and carry no byte it printed (§6.3).
+            return readout.selectedChecksState.label + "."
+        case .read:
+            return readout.selectedChecks.isEmpty
+                 ? "No checks were reported for this pull request."
+                 : nil
+        }
+    }
+
     static func badge(for checks: GitHubReadout.ChecksState) -> Badge {
         switch checks {
         case .notRead:
             return Badge(text: checks.label, tone: .unread, isRollup: false)
+        case .failed:
+            // Not a rollup, for the same reason `.notRead` is not one: there is nothing to roll up.
+            return Badge(text: checks.label, tone: .unreadable, isRollup: false)
         case .read(let rollup):
             // The words are the readout's, never this view's: a test asserting on the readout is
             // asserting on what the user reads.
@@ -436,6 +454,34 @@ private struct PullRequestRow: View {
         .contentShape(Rectangle())
         .padding(.horizontal, 10)
         .padding(.vertical, 3)
+    }
+}
+
+/// One issue, with the fields G2.4 names — number, title, author, **labels** and the date.
+///
+/// A view of its own rather than an inline `HStack`, for `PullRequestRow`'s reason: a row's
+/// drawing is a thing a test can reach, and a field the presentation carried and the body dropped
+/// is invisible to every assertion made on the presentation.
+struct GitHubIssueRow: View {
+
+    let issue: GitHubPanelView.IssuePresentation
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("#\(issue.number)").font(.caption).monospaced()
+                .foregroundStyle(.secondary)
+            Text(issue.title).font(.callout).lineLimit(1).truncationMode(.middle)
+            ForEach(issue.labels, id: \.self) { label in
+                Text(label).font(.caption2).foregroundStyle(.secondary)
+                    .padding(.horizontal, 4).padding(.vertical, 1)
+                    .background(Color.secondary.opacity(0.12), in: .rect(cornerRadius: 3))
+            }
+            Spacer(minLength: 6)
+            Text(issue.author).font(.caption).foregroundStyle(.secondary)
+            Text(issue.relativeDate).font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 2)
     }
 }
 

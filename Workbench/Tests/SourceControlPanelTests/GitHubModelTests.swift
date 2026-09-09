@@ -75,14 +75,72 @@ final class GitHubModelTests: XCTestCase {
     private func model(cwd: URL, environment: [String: String],
                        gh script: [(String, StubRunner.Answer)],
                        git: (any ToolRunning)? = nil,
-                       links: (any LinkRouterCapability)? = nil)
+                       links: (any LinkRouterCapability)? = nil,
+                       pendingChecks: Data? = nil)
         -> (model: GitHubModel, gh: StubRunner, git: RecordingRunner) {
-        let stub = StubRunner(script)
-        let recorder = RecordingRunner(underlying: git ?? ToolRunner())
-        let runner = SplitRunner(git: recorder, gh: stub)
+        let stub = register(StubRunner(script))
+        let recorder = register(RecordingRunner(underlying: git ?? ToolRunner()))
+        let runner = SplitRunner(git: recorder, gh: stub, pendingChecks: pendingChecks)
         let model = GitHubModel(cwd: cwd, environment: environment,
                                       runner: runner, links: links)
         return (model, stub, recorder)
+    }
+
+    /// The same over the fixture repository, with `gh pr checks` answering **exit 8 and the rows
+    /// behind it** — the shape a script cannot express, and the one G2.2 is about.
+    ///
+    /// It is a door on the harness rather than a runner built in a test, so that the exit-8 flow's
+    /// `git` and `gh` vectors belong to the same universe every other flow's do. A bare runner
+    /// there left the whole flow outside G3's and G4's structural claims.
+    private func model(_ repo: GitRepository, gh script: [(String, StubRunner.Answer)],
+                       pendingChecks: Data)
+        -> (model: GitHubModel, gh: StubRunner, git: RecordingRunner) {
+        model(cwd: repo.root, environment: repo.environment, gh: script,
+              pendingChecks: pendingChecks)
+    }
+
+    // MARK: - the argument-vector universe, enforced where it cannot be forgotten
+
+    /// Every runner any flow in this file made. G3's and G4's argv halves are claims about a
+    /// **universe of invocations**, so the enforcement below runs at teardown over all of them
+    /// rather than in the tests that remember to ask: a flow that discarded its recorder — the
+    /// absent-`gh` case, the logged-out case — used to be outside the claim entirely, and an
+    /// `auth login` spelled on one of those paths escaped every assertion in the file.
+    private var recorded: [any RecordedInvocations] = []
+
+    @discardableResult
+    private func register<Runner: RecordedInvocations>(_ runner: Runner) -> Runner {
+        recorded.append(runner)
+        return runner
+    }
+
+    override func tearDown() async throws {
+        assertEveryRecordedVectorWasARead()
+        try await super.tearDown()
+    }
+
+    /// The whole of G3's structural clause and G4's, for one test: no `gh` vector this file
+    /// produced names a verb outside the three, no `git` vector names a write verb, and a flow
+    /// that built a runner ran something through it.
+    private func assertEveryRecordedVectorWasARead(file: StaticString = #filePath,
+                                                   line: UInt = #line) {
+        guard !recorded.isEmpty else { return }
+        let invocations = recorded.flatMap(\.recordedInvocations)
+        XCTAssertFalse(invocations.isEmpty,
+                       "this flow built a runner and ran nothing through it; an argv assertion "
+                       + "over nothing passes vacuously",
+                       file: file, line: line)
+        for invocation in invocations where invocation.tool == .gh {
+            let vector = invocation.arguments.joined(separator: " ")
+            XCTAssertTrue(Self.allowedGhPrefixes.contains { vector.hasPrefix($0) },
+                          "a gh vector began with none of \(Self.allowedGhPrefixes)",
+                          file: file, line: line)
+        }
+        for invocation in invocations where invocation.tool == .git {
+            XCTAssertTrue(Self.allowedGitVerbs.contains(invocation.verb),
+                          "a git vector named a verb outside \(Self.allowedGitVerbs)",
+                          file: file, line: line)
+        }
     }
 
     /// The ordinary happy script: the branch-scoped list, checks for both of its pull requests,
@@ -251,35 +309,19 @@ final class GitHubModelTests: XCTestCase {
         }
     }
 
-    func testAPullRequestWhoseChecksCouldNotBeReadSaysSoRatherThanPassing() async throws {
-        let (tree, repo) = try await repository()
-        defer { tree.remove() }
-        // The list answers; `pr checks` does not.
-        let (model, stub, git) = model(
-            repo,
-            gh: [("pr list", .document(try GhSamples.data("branch-pull-requests"))),
-                 ("pr checks", .failure(code: 1, stderr: "no checks reported on this branch")),
-                 ("issue list", .document(try GhSamples.data("issues")))])
-
-        await model.appear()
-        let readout = model.readout
-        XCTAssertEqual(readout.pullRequests.map(\.checks), [.notRead, .notRead])
-        XCTAssertEqual(readout.pullRequests.first?.checksLabel, "Checks not read")
-        assertOnlyGhReadVerbs(stub, atLeast: 4)
-        assertOnlyGitReadVerbs(git, atLeast: 2)
-    }
+    // A pull request whose checks could not be read is group 15's subject: the row says which
+    // tool could not answer and draws no rollup, which is a strictly stronger statement than the
+    // "not read" this case used to be folded into.
 
     // MARK: - 3. exit 8
 
     func testExitEightFromGhPrChecksRendersThePendingRowsRatherThanAnError() async throws {
         let (tree, repo) = try await repository()
         defer { tree.remove() }
-        let stub = StubRunner(
-            [("pr list", .document(try GhSamples.data("branch-pull-requests"))),
-             ("issue list", .document(try GhSamples.data("issues")))])
-        let runner = SplitRunner(git: ToolRunner(), gh: stub,
-                                 pendingChecks: try GhSamples.data("checks-pending"))
-        let model = GitHubModel(cwd: repo.root, environment: repo.environment, runner: runner)
+        let (model, _, _) = model(repo,
+                                  gh: [("pr list", .document(try GhSamples.data("branch-pull-requests"))),
+                                       ("issue list", .document(try GhSamples.data("issues")))],
+                                  pendingChecks: try GhSamples.data("checks-pending"))
 
         await model.appear()
         let readout = model.readout
@@ -468,7 +510,7 @@ final class GitHubModelTests: XCTestCase {
     func testAGitTimeoutIsWordedForGitAndNotForTheGitHubCLI() async throws {
         let (tree, repo) = try await repository()
         defer { tree.remove() }
-        let git = ScriptedRunner()
+        let git = register(ScriptedRunner())
         git.thrown = .timedOut(tool: .git, afterMs: 30_000)
         let (model, _, _) = model(repo, gh: try happyScript(), git: git)
 
@@ -583,14 +625,14 @@ final class GitHubModelTests: XCTestCase {
     func testAReadSupersededByAScopeChangeAssignsNothingWhenItResumes() async throws {
         let (tree, repo) = try await repository()
         defer { tree.remove() }
-        let stub = StubRunner(
+        let stub = register(StubRunner(
             // The branch-scoped vector is the one carrying `--head`; the all-open vector is the
             // same verb without it, which is what makes these two prefixes distinguish the cycles.
             [("pr list --state open --limit \(GitHubModel.pullRequestLimit) --head",
               .document(try GhSamples.data("branch-pull-requests"))),
              ("pr list", .document(try GhSamples.data("all-open-pull-requests"))),
              ("pr checks", .document(try GhSamples.data("checks-passing"))),
-             ("issue list", .document(try GhSamples.data("issues")))])
+             ("issue list", .document(try GhSamples.data("issues")))]))
 
         let holder = ModelHolder()
         let hooked = HookRunner(underlying: stub, firstMatching: "pr list") { [holder] in
@@ -599,7 +641,7 @@ final class GitHubModelTests: XCTestCase {
             // cycle runs to its end before the first one is answered.
             await Task { @MainActor in await model.select(scope: .allOpen) }.value
         }
-        let git = RecordingRunner(underlying: ToolRunner())
+        let git = register(RecordingRunner(underlying: ToolRunner()))
         let model = GitHubModel(cwd: repo.root, environment: repo.environment,
                                 runner: SplitRunner(git: git, gh: hooked))
         holder.model = model
@@ -627,7 +669,7 @@ final class GitHubModelTests: XCTestCase {
         let (tree, repo) = try await repository()
         defer { tree.remove() }
         // The machine's `git` behind it, so the reads this test does not cancel are the real ones.
-        let git = ScriptedRunner(underlying: ToolRunner())
+        let git = register(ScriptedRunner(underlying: ToolRunner()))
         git.thrown = .cancelled(tool: .git)
         let (model, _, _) = model(repo, gh: try happyScript(), git: git)
 
@@ -656,7 +698,7 @@ final class GitHubModelTests: XCTestCase {
     func testARefreshDropsASelectionTheNewListNoLongerHolds() async throws {
         let (tree, repo) = try await repository()
         defer { tree.remove() }
-        let gh = ScriptedRunner(try happyScript())
+        let gh = register(ScriptedRunner(try happyScript()))
         let model = GitHubModel(cwd: repo.root, environment: repo.environment,
                                 runner: SplitRunner(git: ToolRunner(), gh: gh))
 
@@ -678,7 +720,7 @@ final class GitHubModelTests: XCTestCase {
     func testABranchChangeDropsASelectionTheNewListNoLongerHolds() async throws {
         let (tree, repo) = try await repository()
         defer { tree.remove() }
-        let gh = ScriptedRunner(try happyScript())
+        let gh = register(ScriptedRunner(try happyScript()))
         let model = GitHubModel(cwd: repo.root, environment: repo.environment,
                                 runner: SplitRunner(git: ToolRunner(), gh: gh))
 
@@ -751,6 +793,222 @@ final class GitHubModelTests: XCTestCase {
         assertOnlyGitReadVerbs(git, atLeast: 2)
     }
 
+    // MARK: - 15. what a row says about checks it does not have
+
+    /// Three states and not two. "Not read", "read and failed" and "read and genuinely empty" are
+    /// different facts, and a check read that failed used to be stored as an absence — which the
+    /// panel then rendered as an affirmative "no checks were reported for this pull request".
+    func testAFailedCheckReadIsItsOwnStateAndNotAnAbsenceOfChecks() async throws {
+        let (tree, repo) = try await repository()
+        defer { tree.remove() }
+        // The list answers; `pr checks` does not.
+        let (model, _, _) = model(
+            repo,
+            gh: [("pr list", .document(try GhSamples.data("branch-pull-requests"))),
+                 ("pr checks", .failure(code: 1, stderr: "could not resolve to a Repository")),
+                 ("issue list", .document(try GhSamples.data("issues")))])
+
+        await model.appear()
+        await model.select(pullRequest: 204)
+        let readout = model.readout
+
+        XCTAssertEqual(readout.pullRequests.map(\.checks),
+                       [.failed(tool: .gh), .failed(tool: .gh)],
+                       "a read that failed was recorded as checks nobody asked for")
+        XCTAssertEqual(readout.selectedChecksState, .failed(tool: .gh))
+        XCTAssertTrue(readout.selectedChecks.isEmpty)
+        let badge = GitHubPanelView.badge(for: try XCTUnwrap(readout.pullRequests.first).checks)
+        XCTAssertFalse(badge.isRollup, "a failed read drew a rollup it does not have")
+        let message = try XCTUnwrap(GitHubPanelView.checksMessage(for: readout),
+                                    "the check area said nothing about a read that failed")
+        XCTAssertTrue(message.contains("GitHub CLI"), "the failure did not name its tool (§10)")
+        XCTAssertFalse(message.contains("No checks"),
+                       "a read that failed was rendered as an absence of checks")
+    }
+
+    /// The discriminating other half: a pull request whose checks were read and are **genuinely
+    /// empty** says so, in words the failure above must not share.
+    func testAPullRequestWithNoChecksSaysNoneWereReported() async throws {
+        let (tree, repo) = try await repository()
+        defer { tree.remove() }
+        let (model, _, _) = model(repo, gh: try happyScript(checks: "checks-none"))
+
+        await model.appear()
+        await model.select(pullRequest: 204)
+        let readout = model.readout
+
+        XCTAssertEqual(readout.pullRequests.first?.checks, .read(.none))
+        XCTAssertEqual(readout.selectedChecksState, .read(.none))
+        let message = try XCTUnwrap(GitHubPanelView.checksMessage(for: readout))
+        XCTAssertTrue(message.contains("No checks were reported"),
+                      "a read that found nothing did not say so")
+    }
+
+    /// And a row nobody has read is a third thing again: in the all-open scope only the selected
+    /// row earns a round trip, so the others must say "not read" and never a rollup.
+    func testAnUnreadRowSaysItsChecksAreUnreadAndDrawsNoRollup() async throws {
+        let (tree, repo) = try await repository()
+        defer { tree.remove() }
+        let (model, _, _) = model(
+            repo,
+            gh: [("pr list", .document(try GhSamples.data("all-open-pull-requests"))),
+                 ("pr checks", .document(try GhSamples.data("checks-passing"))),
+                 ("issue list", .document(try GhSamples.data("issues")))])
+
+        await model.appear()
+        await model.select(scope: .allOpen)
+        let readout = model.readout
+
+        XCTAssertTrue(readout.pullRequests.allSatisfy { $0.checks == .notRead },
+                      "an unselected row in the all-open scope claimed a rollup")
+        XCTAssertEqual(readout.selectedChecksState, .notRead)
+        let message = try XCTUnwrap(GitHubPanelView.checksMessage(for: readout))
+        XCTAssertFalse(message.contains("No checks were reported"),
+                       "a row nobody read was rendered as one with no checks")
+    }
+
+    // MARK: - 16. exit 8's rows, and not only its rollup
+
+    /// G2.2 is that the rows **are shown**. A rollup asserted alone survives a panel that kept the
+    /// pending rows and dropped the completed one, which is the half of exit 8 a user reads.
+    func testExitEightsRowsAreTheOnesGhPrinted() async throws {
+        let (tree, repo) = try await repository()
+        defer { tree.remove() }
+        let (model, _, _) = model(repo, gh: [("pr list", .document(try GhSamples.data("branch-pull-requests"))),
+                                             ("issue list", .document(try GhSamples.data("issues")))],
+                                  pendingChecks: try GhSamples.data("checks-pending"))
+
+        await model.appear()
+        await model.select(pullRequest: 204)
+        let readout = model.readout
+
+        XCTAssertNil(readout.notice, "exit 8 was rendered as a failure")
+        XCTAssertEqual(readout.pullRequests.map(\.checks), [.read(.pending), .read(.pending)])
+        let rows = GitHubPanelView.checkPresentations(for: readout)
+        XCTAssertEqual(rows.map(\.name), ["build (macos-26)", "integration (samples)"],
+                       "exit 8's rows are not the ones gh printed")
+        XCTAssertEqual(rows.map(\.workflow), ["Workbench", "Workbench"])
+        XCTAssertEqual(rows.map(\.state), ["Passed", "Running"],
+                       "a completed check vanished from an exit-8 listing")
+        XCTAssertEqual(rows.map(\.tone), [.positive, .running])
+        XCTAssertNil(GitHubPanelView.checksMessage(for: readout),
+                     "rows were drawn and a no-rows message was drawn with them")
+    }
+
+    // MARK: - 17. an issue row draws its labels
+
+    /// G2's issue clause names labels. The presentation carried them and the row that draws it
+    /// dropped them, which no assertion on `IssuePresentation.labels` can see.
+    func testAnIssueRowDrawsTheLabelsItCarries() async throws {
+        let (tree, repo) = try await repository()
+        defer { tree.remove() }
+        let (model, _, _) = model(repo, gh: try happyScript())
+
+        await model.appear()
+        let rows = GitHubPanelView.issuePresentations(for: model.readout)
+        let labelled = try XCTUnwrap(rows.first { !$0.labels.isEmpty },
+                                     "no issue in the sample carries a label")
+
+        let drawn = Self.renderedStrings(of: GitHubIssueRow(issue: labelled).body)
+        for label in labelled.labels {
+            XCTAssertTrue(drawn.contains(label),
+                          "the issue row drew every field but its labels")
+        }
+        // Discriminating: the same reflection sees the fields the row does draw, so a body that
+        // rendered nothing at all would not pass the assertion above.
+        XCTAssertTrue(drawn.contains(labelled.title))
+        XCTAssertTrue(drawn.contains(labelled.author))
+    }
+
+    // MARK: - 18. the branch change reaches this tab (Design §8)
+
+    /// Design §8 promises this tab re-reads when the branch changes, and `branchDidChange(to:)`
+    /// had no caller. `BranchChangeLink` is what the app connects, and this is that connection
+    /// driven end to end: a checkout under the Source Control panel, and a GitHub list re-read for
+    /// the branch the channel is now on. No human leg, and no polling — the same branch twice
+    /// reads once.
+    func testACheckoutUnderTheSourceControlPanelReReadsTheGitHubTabForTheNewBranch() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        // Built inline rather than through `repository()`: a `GitRepository` returned by a
+        // main-actor method belongs to the main actor's region, and this test runs `git` again
+        // after the two sessions exist.
+        let repo = try await GitRepository(tree)
+        try await repo.commit("the first commit", files: ["README.md": "loom\n"])
+        try await repo.branch(Self.branch)
+        try await repo.checkout(Self.branch)
+        let stub = register(StubRunner([("pr list", .document(try GhSamples.data("branch-pull-requests"))),
+                               ("pr checks", .document(try GhSamples.data("checks-passing"))),
+                               ("issue list", .document(try GhSamples.data("issues")))]))
+        let git = register(RecordingRunner(underlying: ToolRunner()))
+        // Values, not the builder: handing a `GitRepository` to a main-actor initialiser merges it
+        // into the main actor's region and every later `await repo.run(…)` becomes a send.
+        let root = repo.root
+        let variables = repo.environment
+        let environment = ResolvedEnvironment(variables: variables, shell: "/bin/zsh",
+                                              capturedAt: Date(timeIntervalSince1970: 1_614_800_000),
+                                              mode: .processFallback)
+        let github = GitHubModel(cwd: root, environment: variables,
+                                 runner: SplitRunner(git: git, gh: stub))
+        let sourceControl = SourceControlModel(cwd: root, environment: environment,
+                                               runner: git, links: nil,
+                                               windowLimit: GitLog.defaultLimit,
+                                               watchesForChanges: false)
+        // The link is keyed by whatever names a channel; the app hands it FleetKit's channel key
+        // and this target does not import FleetKit, so the identity here is a string of its own.
+        let key = "c7.7-branch-link"
+        let link = BranchChangeLink<String>()
+        link.sessionWasMade(sourceControl, for: key)
+        link.sessionWasMade(github, for: key)
+
+        // The GitHub tab reads first, which is the order a user produces: the tab is visited, and
+        // the branch changes later.
+        await github.appear()
+        await sourceControl.activate()
+        XCTAssertEqual(github.branch, Self.branch)
+        let afterFirstRead = stub.invocations.count
+
+        // A `claude` session checks out another branch; the panel's own watch reports it.
+        try await repo.run(["checkout", "--quiet", "-b", "feature/another-question"])
+        await sourceControl.handle(.changed(.history))
+        try await waitUntil("the GitHub tab re-reads for the new branch") {
+            github.branch == "feature/another-question"
+        }
+
+        XCTAssertGreaterThan(stub.invocations.count, afterFirstRead,
+                             "the branch change read nothing")
+        let heads = stub.invocations.filter { $0.arguments.starts(with: ["pr", "list"]) }
+            .compactMap { arguments -> String? in
+                guard let index = arguments.arguments.firstIndex(of: "--head"),
+                      index + 1 < arguments.arguments.count else { return nil }
+                return arguments.arguments[index + 1]
+            }
+        XCTAssertEqual(heads.last, "feature/another-question",
+                       "the re-read asked about the branch the channel had left")
+
+        // And the same branch reported twice does not read again: these are network round trips
+        // on the user's own rate limit and Design §8 forbids polling them.
+        try await waitUntil("the re-read finishes") { !github.isLoading }
+        let afterTheChange = stub.invocations.count
+        await sourceControl.refresh()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(stub.invocations.count, afterTheChange,
+                       "a cycle that found the same branch read GitHub again")
+    }
+
+    /// A delivery-fulfilled wait, so a connection made through a spawned task is asserted on its
+    /// effect rather than on a sleep.
+    private func waitUntil(_ what: String, guard limit: Duration = .seconds(10),
+                           file: StaticString = #filePath, line: UInt = #line,
+                           _ condition: @MainActor () -> Bool) async throws {
+        let started = ContinuousClock.now
+        while started.duration(to: .now) < limit {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("timed out waiting for \(what)", file: file, line: line)
+    }
+
     // MARK: - the live leg (conditional, G2's live half; tracker 118)
 
     /// Gate G2's live leg: the three verbs against a **real, public** repository return documents
@@ -772,58 +1030,121 @@ final class GitHubModelTests: XCTestCase {
     /// resolves a repository from that variable outside a working tree.
     ///
     /// **It asserts no value.** Everything it reads belongs to a real account, so the assertions
-    /// are counts and shapes only (§6.3, §11).
+    /// are shapes and counts only (§6.3, §11) — but they are assertions: a leg whose three
+    /// `count >= 0` lines can never fail is a leg that proves nothing.
+    ///
+    /// **An environment that cannot answer skips; a document this leaf cannot decode fails.** The
+    /// distinction is the whole point of a live leg. `gh` absent, logged out or off the network is
+    /// a fact about this machine at this moment and is named in the skip. A command that ran and
+    /// answered, whose document this leaf's decoders reject, is a regression in this leaf and a
+    /// catch-all skip would swallow it — which it did: changing a decoder's required key made the
+    /// leg *skip*.
     func testTheLiveReadsDecodeIntoThisLeafsModels() async throws {
         // A directory this test created, and never one it merely found: `gh` is spawned with this
         // as its cwd, and handing a child a directory nobody owns is what the spec's TCC clause is
         // about. `ScratchTree` also refuses to sit inside a config home (X9).
         let tree = try ScratchTree()
         defer { tree.remove() }
-        let runner = RecordingRunner()
+        let runner = register(RecordingRunner())
         // `cli/cli` for the reason C7.3 chose it: large, public, reliably carrying open pull
         // requests, and `gh`'s own project — so a field it stopped emitting is a real break.
         var environment = ProcessInfo.processInfo.environment
         environment["GH_REPO"] = "cli/cli"
         let root = tree.root
 
-        // **The whole leg is inside the gate, not just its first read.** A network that dropped
-        // between the issue list and a pull request's checks failed a suite whose floor is that it
-        // passes from a clean checkout with no network and no login; every read here is subject to
-        // the same three conditions, so every read is skipped by the same named reason.
-        var reachedACheckInFlight = false
+        // The gate: one of the three allowed verbs, never `gh auth status` — no `auth` verb may
+        // exist anywhere in this leaf's diff, and a gate that spelled one would be the single
+        // counterexample to the structural claim G3 makes. `issue list` failing covers the same
+        // three causes the skip names.
+        let issues: [Issue]
         do {
-            let issues = try await GhCommands.issues(root: root, limit: 5,
-                                                     environment: environment, runner: runner)
-            XCTAssertGreaterThanOrEqual(issues.count, 0)
-
-            let pulls = try await GhCommands.pullRequests(root: root, head: nil, state: "open",
-                                                          limit: 5, environment: environment,
-                                                          runner: runner)
-            XCTAssertGreaterThanOrEqual(pulls.count, 0)
-
-            for pull in pulls {
-                let checks = try await GhCommands.checks(root: root, pullRequest: pull.number,
-                                                         environment: environment, runner: runner)
-                XCTAssertGreaterThanOrEqual(checks.count, 0)
-                if CheckRollup.of(checks) == .pending { reachedACheckInFlight = true }
-            }
+            issues = try await GhCommands.issues(root: root, limit: 5, environment: environment,
+                                                 runner: runner)
         } catch {
+            guard Self.isEnvironmental(error, ghHasAnswered: false) else {
+                return XCTFail("gh answered and this leaf could not decode its issue list")
+            }
             throw XCTSkip("gh could not read a public repository — it is not installed, not "
                           + "logged in, or there is no network; G2's live leg needs all three")
         }
-        // The live leg's own invocations belong to the same universe as every other one in this
-        // file: the vectors it produced are read verbs, and the count says it produced some.
+        // From here `gh` has proved it is installed, logged in and on the network, so a failure is
+        // this leaf's until it is a transport that dropped mid-leg.
+        for issue in issues {
+            XCTAssertGreaterThan(issue.number, 0, "an issue decoded without a number")
+            XCTAssertFalse(issue.title.isEmpty, "an issue decoded without a title")
+        }
+
+        let pulls: [PullRequest]
+        do {
+            pulls = try await GhCommands.pullRequests(root: root, head: nil, state: "open",
+                                                      limit: 5, environment: environment,
+                                                      runner: runner)
+        } catch {
+            guard Self.isEnvironmental(error, ghHasAnswered: true) else {
+                return XCTFail("gh answered and this leaf could not decode its pull-request list")
+            }
+            throw XCTSkip("the network dropped between two live reads")
+        }
+        guard !pulls.isEmpty else {
+            throw XCTSkip("the live repository has no open pull request to read checks for")
+        }
+        for pull in pulls {
+            XCTAssertGreaterThan(pull.number, 0, "a pull request decoded without a number")
+            XCTAssertFalse(pull.title.isEmpty, "a pull request decoded without a title")
+            XCTAssertFalse(pull.author.login.isEmpty, "a pull request decoded without an author")
+        }
+
+        var reachedACheckInFlight = false
+        for pull in pulls {
+            do {
+                let checks = try await GhCommands.checks(root: root, pullRequest: pull.number,
+                                                         environment: environment, runner: runner)
+                for check in checks {
+                    XCTAssertFalse(check.name.isEmpty, "a check decoded without a name")
+                }
+                if CheckRollup.of(checks) == .pending { reachedACheckInFlight = true }
+            } catch {
+                guard Self.isEnvironmental(error, ghHasAnswered: true) else {
+                    return XCTFail("gh answered and this leaf could not decode its check list")
+                }
+                throw XCTSkip("the network dropped between two live reads")
+            }
+        }
+
+        // **All three verbs ran**, which is what makes this a leg rather than whatever part of it
+        // the machine happened to reach: a run that listed issues and stopped is not the evidence
+        // G2's live half asks for.
         let vectors = runner.invocations(of: .gh).map { $0.arguments.joined(separator: " ") }
-        XCTAssertGreaterThanOrEqual(vectors.count, 2,
+        for prefix in Self.allowedGhPrefixes {
+            XCTAssertTrue(vectors.contains { $0.hasPrefix(prefix) },
+                          "the live leg never ran one of the three verbs it is about")
+        }
+        // The vectors themselves belong to the same universe as every other one in this file, and
+        // the teardown enforcement reads them off the recorder registered above.
+        XCTAssertGreaterThanOrEqual(vectors.count, 3,
                                     "the live leg asserted its argv over \(vectors.count) "
                                     + "invocations")
-        for vector in vectors {
-            XCTAssertTrue(Self.allowedGhPrefixes.contains { vector.hasPrefix($0) },
-                          "a live gh vector began with none of \(Self.allowedGhPrefixes)")
-        }
         // Reported, never asserted: tracker 118 closes only if a check in flight was reached, and
         // whether one was is a property of GitHub at this moment rather than of this leaf.
         print("live leg: reached a check in flight = \(reachedACheckInFlight)")
+    }
+
+    /// Whether a live failure is about this machine and this moment rather than about this leaf.
+    ///
+    /// `decodeFailed` is never one: a command that ran and answered with a document this leaf
+    /// cannot read is exactly the regression a live leg exists to catch, and skipping on it turns
+    /// the leg into a formality. Once `gh` has answered once, the machine-shaped causes are ruled
+    /// out and only a transport that dropped mid-leg remains.
+    private static func isEnvironmental(_ error: any Error, ghHasAnswered: Bool) -> Bool {
+        guard let error = error as? ToolError else { return !ghHasAnswered }
+        switch error {
+        case .timedOut, .spawnFailed, .cancelled:
+            return true
+        case .binaryNotFound, .commandFailed, .notARepository, .outputLimitExceeded:
+            return !ghHasAnswered
+        case .decodeFailed, .pathOutsideRepository, .unreadableWorkingTreeEntry:
+            return false
+        }
     }
 }
 
@@ -994,4 +1315,23 @@ private final class SplitRunner: ToolRunning, @unchecked Sendable {
         return try await underlying.run(tool, arguments: arguments, cwd: cwd,
                                         environment: environment, timeout: timeout)
     }
+}
+
+/// What the teardown enforcement reads. Declared here rather than on Support's runners because it
+/// is this file's own claim — the universe of invocations G3 and G4 are assertions about — and the
+/// two recorders it is worn by are shared with every other suite in this target.
+protocol RecordedInvocations: AnyObject, Sendable {
+    var recordedInvocations: [RecordingRunner.Invocation] { get }
+}
+
+extension RecordingRunner: RecordedInvocations {
+    var recordedInvocations: [Invocation] { invocations }
+}
+
+extension StubRunner: RecordedInvocations {
+    var recordedInvocations: [RecordingRunner.Invocation] { invocations }
+}
+
+extension ScriptedRunner: RecordedInvocations {
+    var recordedInvocations: [RecordingRunner.Invocation] { invocations }
 }

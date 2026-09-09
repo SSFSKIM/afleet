@@ -37,11 +37,16 @@ public struct GitHubReadout: Equatable, Sendable {
     public enum ChecksState: Hashable, Sendable {
         case notRead
         case read(CheckRollup)
+        /// Read, and the read failed. Deliberately not folded into either of the others: "nobody
+        /// asked" and "there are none" are both statements this panel would be making without
+        /// having read anything, and the second of them is the reassuring one.
+        case failed(tool: Tool)
 
         public var label: String {
             switch self {
             case .notRead: "Checks not read"
             case .read(let rollup): rollup.label
+            case .failed(let tool): "\(GitHubReadout.name(of: tool)) could not read these checks"
             }
         }
     }
@@ -117,8 +122,11 @@ public struct GitHubReadout: Equatable, Sendable {
     public let pullRequests: [PullRequestRow]
     public let selectedPullRequest: Int?
     /// The selected pull request's checks, in the order `gh` printed them. Empty when nothing is
-    /// selected or its checks have not been read.
+    /// selected, when its checks have not been read, and when reading them failed.
     public let selectedChecks: [CheckRow]
+    /// **Why** `selectedChecks` is empty, which the rows alone cannot say. The three cases are the
+    /// whole of it: nobody asked, the read failed, or the read found none.
+    public let selectedChecksState: ChecksState
     public let issues: [IssueRow]
     public let notice: Notice?
     public let actions: [Action]
@@ -137,11 +145,12 @@ public struct GitHubReadout: Equatable, Sendable {
                            isDraft: pull.isDraft,
                            reviewDecision: Self.label(for: pull.reviewDecision),
                            labels: pull.labels.map(\.name),
-                           checks: session.checks[pull.number].map { .read(CheckRollup.of($0)) }
-                                   ?? .notRead,
+                           checks: Self.state(of: session.checks[pull.number]),
                            isSelected: pull.number == session.selectedPullRequest)
         }
-        selectedChecks = (session.selectedPullRequest.flatMap { session.checks[$0] } ?? [])
+        let selected = session.selectedPullRequest.flatMap { session.checks[$0] }
+        selectedChecksState = Self.state(of: selected)
+        selectedChecks = (Self.runs(of: selected) ?? [])
             .map { CheckRow(name: $0.name, workflow: $0.workflow,
                             bucket: CheckBucket(bucket: $0.bucket)) }
         issues = session.issues.map {
@@ -151,6 +160,20 @@ public struct GitHubReadout: Equatable, Sendable {
         notice = Self.notice(for: session.failure)
         // Complete, always, for the reason `Action` states.
         actions = Action.allCases
+    }
+
+    /// One row's check state: absent is "nobody asked", and the two read outcomes are their own.
+    static func state(of read: GitHubModel.ChecksRead?) -> ChecksState {
+        switch read {
+        case .none: .notRead
+        case .read(let runs): .read(CheckRollup.of(runs))
+        case .failed(let tool): .failed(tool: tool)
+        }
+    }
+
+    static func runs(of read: GitHubModel.ChecksRead?) -> [CheckRun]? {
+        guard case .read(let runs) = read else { return nil }
+        return runs
     }
 
     /// GitHub's review decision in this panel's words.
@@ -223,7 +246,7 @@ public struct GitHubReadout: Equatable, Sendable {
     /// Every notice that can be about either tool is worded from here. Two of this tab's three
     /// reads are `git`'s, and a notice that named the other one sent the user to look at a tool
     /// that was working.
-    static func name(of tool: Tool) -> String {
+    nonisolated static func name(of tool: Tool) -> String {
         switch tool {
         case .gh: "GitHub CLI"
         case .git: "Git"
