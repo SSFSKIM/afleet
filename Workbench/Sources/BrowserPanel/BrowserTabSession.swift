@@ -139,6 +139,17 @@ public final class BrowserTabSession: PanelTabSession {
         }
     }
 
+    /// A surface stopped drawing this panel: the quick-open it was presenting goes with it (D61).
+    ///
+    /// The session is cached per (tab, channel) and outlives every surface that draws it, so
+    /// neither `deinit` nor a dismissal is reached when a subtree is simply taken away — and the
+    /// sheet was left presented on a surface that is no longer there, following a feed nobody is
+    /// looking at. Nothing else is: a sheet on another surface is that surface's, and
+    /// `closeQuickOpen` already refuses to touch it.
+    public func surfaceDisappeared(_ surface: PanelSurface) {
+        closeQuickOpen(from: surface)
+    }
+
     /// Closes the sheet and cancels the subscription. Q8 says the feed is followed *while it is up*
     /// and no longer: a panel that kept N channels' subscriptions alive for the life of the window
     /// would be following feeds nobody is looking at.

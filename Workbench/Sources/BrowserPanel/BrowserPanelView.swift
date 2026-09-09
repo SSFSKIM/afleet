@@ -34,7 +34,13 @@ public struct BrowserPanelView: View {
         // The pop-out lifecycle, and the whole of what connects it to the web views: a window that
         // appears takes them, and one that goes away hands them back.
         .onAppear { model.surfaceAppeared(surface) }
-        .onDisappear { model.surfaceDisappeared(surface) }
+        // Quick-open goes with the surface presenting it: the session is cached per (tab,
+        // channel) and outlives this view, so a sheet nobody can see would otherwise stay
+        // presented on a surface that is gone, with its feed watcher still running (D61).
+        .onDisappear {
+            model.surfaceDisappeared(surface)
+            session.surfaceDisappeared(surface)
+        }
         // Not `$session.isPresented`: the sheet is closed through `closeQuickOpen`, which is also
         // what cancels the feed subscription (Q8). A binding that only flipped the flag would leave
         // a channel's subscription running behind a sheet nobody can see.
