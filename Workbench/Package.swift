@@ -139,7 +139,35 @@ let package = Package(
         // MARK: - end of C7.6
 
         // MARK: - C7.7 source control panel (owner: C7.7)
-        .target(name: "SourceControlPanel", dependencies: ["SourceControlCore", "EditorCore", "LinkRouting", "PanelHostAPI", fleet], swiftSettings: v6),
+        // `EditorCore` is **gone** from this row and `core` has taken its place. W1 put EditorCore
+        // here while C7.7's purpose line still read "commit detail with changed files and Monaco
+        // diffs"; the composite amended that line at C7.5's merge — this leaf shows a diff by
+        // emitting a `.diff` `WorkspaceLink` the Files tab's target opens, and never imports
+        // `FilesPanel`. Under that ruling nothing here constructs a `MonacoEditorView`, sends an
+        // `EditorCommand` or names a language id, and a dependency edge with no import site is a
+        // claim in the manifest a later reader believes. `core` is required for the
+        // member-import-visibility reason C5 recorded for `PanelHostAPITests` and C7.2 for
+        // `LinkRoutingTests`: this target names `WorkspaceLink` and `DiffRef`, and neither
+        // `LinkRouting` nor `PanelHostAPI` re-exports the module that defines them — the same
+        // amendment C7.5's and C7.6's rows already took. Filed as C7.7's `[parent-impact]`
+        // (child spec, 2026-09-09) and accepted by the architect; W4 loses its C7.7 half with it.
+        .target(name: "SourceControlPanel",
+                dependencies: [core, "SourceControlCore", "LinkRouting", "PanelHostAPI", fleet],
+                swiftSettings: v6),
+        // W1: "every panel target gets one [test target] when a panel leaf lands". The dependencies
+        // past `SourceControlPanel` are the ones the tests name types from directly — `ToolRunning`,
+        // `GitCommit`, `GraphRow` and `ToolError` from SourceControlCore, `LinkRouter` from
+        // LinkRouting, `LinkTarget` and `ChannelContext` from PanelHostAPI, `WorkspaceLink` and
+        // `DiffRef` from AfleetCore, `ChannelKey` from FleetKit — under that same visibility rule.
+        //
+        // The `Samples` directory holds the authored `gh --json` documents this leaf's GitHub tab
+        // decodes: real field names, invented values, never a recorded account (§11, and the shape
+        // `SourceControlCoreTests/Samples` already takes). `.copy` rather than `.process` — the
+        // tests read them back as bytes, so the build system must not rewrite them.
+        .testTarget(name: "SourceControlPanelTests",
+                    dependencies: ["SourceControlPanel", "SourceControlCore", "LinkRouting",
+                                   "PanelHostAPI", core, fleet],
+                    resources: [.copy("Samples")], swiftSettings: v6),
         // MARK: - end of C7.7
 
         // The umbrella: the app imports Workbench and nothing below it.
