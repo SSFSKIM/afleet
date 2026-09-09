@@ -91,6 +91,11 @@ let package = Package(
 
         // MARK: - C7.4 terminal panel (owner: C7.4)
         .target(name: "TerminalPanel", dependencies: ["TerminalCore", "LinkRouting", "PanelHostAPI", fleet], swiftSettings: v6),
+        // `TerminalCore`, `fleet` and `core` for the member-import-visibility reason C5 recorded
+        // for PanelHostAPITests: TerminalPanel re-exports none of them, so a test that names a
+        // `TerminalSize`, a `PaneRequest` or the `SessionID` inside `.hatch` must import the
+        // module that defines it.
+        .testTarget(name: "TerminalPanelTests", dependencies: ["TerminalPanel", "TerminalCore", fleet, core], swiftSettings: v6),
         // MARK: - end of C7.4
 
         // MARK: - C7.5 files panel (owner: C7.5)

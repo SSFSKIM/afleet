@@ -49,8 +49,9 @@ TESTS = ROOT / "AppTests"
 # Members that are legitimately declared here and called from somewhere this check cannot
 # see. Each entry carries its reason; an entry with no reason is not an allowlist entry.
 ALLOWLIST: dict[str, str] = {
-    # Seams whose caller is a later child.
-    "registerPaneRunner": "X7's seam for C7's Terminal leaf, which is the caller and has not landed",
+    # `registerPaneRunner`'s entry was retired 2026-09-09 by C7.4, the leaf its reason named:
+    # `AppModel.init` registers the Terminal panel's pane runner, so X7's seam has a production
+    # caller. Retired rather than re-worded, for the reason the C6 entries below record.
     # Contract Y1 and Y4's skeleton entries — `register`, `show` and `agentNavigation` — were
     # retired 2026-09-09 by C6.1 Task 4, which is the leaf that supplies all three call sites:
     # `AppModel.init` claims the eleven row kinds through `RowRegistry.register(kind:builder:)`, and

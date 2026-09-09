@@ -1,5 +1,6 @@
 import SwiftUI
 import PanelHostAPI
+import Workbench
 
 /// The application entry point: one window routed on `AppModel.route`, the Settings scene the
 /// system's Settings… menu item opens, and the shell's keyboard shortcuts.
@@ -54,14 +55,18 @@ struct AfleetApp: App {
         }
     }
 
-    /// §8.7's shortcuts: the four C5 owns, and C7.5's Cmd+S.
+    /// §8.7's shortcuts: the four C5 owns, C7.4's Cmd+Shift+T and C7.5's Cmd+S.
     ///
     /// **Cmd+, is absent on purpose and is not missing.** SwiftUI gives a `Settings` scene the
     /// standard *Settings…* item under the application menu with Cmd+, already bound; declaring a
     /// second one would put two items in the menu bar competing for one key.
     ///
-    /// Esc, Cmd+Enter, Shift+Tab and Cmd+Shift+Esc belong to the composer and are C6's;
-    /// Cmd+Shift+T is C7's. None is declared here, so neither child inherits a key already taken.
+    /// Esc, Cmd+Enter, Shift+Tab and Cmd+Shift+Esc belong to the composer and are C6's. None is
+    /// declared here, so that child does not inherit a key already taken.
+    ///
+    /// **Cmd+Shift+T is declared here and not inside the Terminal panel**, because a shortcut
+    /// declared in the panel's own view would only work while the Terminal tab was already showing,
+    /// which is not what a user pressing it from the Thread tab means.
     @CommandsBuilder
     private var shellCommands: some Commands {
         CommandGroup(after: .sidebar) {
@@ -69,6 +74,8 @@ struct AfleetApp: App {
                 .keyboardShortcut("k", modifiers: .command)
             Button("Activity") { shell.showActivity() }
                 .keyboardShortcut("a", modifiers: [.command, .shift])
+            Button("New Terminal Pane") { Self.openTerminalPane(host: model.panels) }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
             Divider()
             // **Over the tabs the panel host says this channel can show, not over `allCases`.**
             // Cmd+N is the Nth *registered and available* tab (X7, gate G4a), so the item that
@@ -99,6 +106,28 @@ struct AfleetApp: App {
         CommandGroup(after: .saveItem) {
             FilesSaveButton(model: model)
         }
+    }
+
+    /// Cmd+Shift+T (§8.7): a new shell pane in the channel the window is showing.
+    ///
+    /// **A static function taking its collaborator**, the precedent `PanelColumnView
+    /// .resolvePendingPanelIndex` set: a `commands` closure is outside every view body and cannot
+    /// be reached by a test, so what the menu item calls is this and the test calls the same thing
+    /// without a window.
+    ///
+    /// It grows no protocol member. `PanelHost.session(for:context:)` already vends the channel's
+    /// panel session and the Terminal tab's session is the object that owns its panes, so asking
+    /// that object for a pane is the whole of the action.
+    ///
+    /// **With no focused channel it does nothing**, on the same rule as Cmd+1…7: a key combination
+    /// is not an assertion, and there is no channel for a pane to belong to. A tab that is not
+    /// registered lands in the same place — the host vends a session that is not the panel's, the
+    /// cast fails, and nothing moves.
+    static func openTerminalPane(host: PanelHostModel) {
+        guard let channel = host.selectedChannel, let context = host.context(for: channel) else { return }
+        guard let session = host.session(for: .terminal, context: context) as? TerminalPanelSession else { return }
+        host.select(.terminal)
+        session.openShellPane()
     }
 
     /// `KeyEquivalent` for 1…7. The tab set is closed at seven cases by contract X7, so the

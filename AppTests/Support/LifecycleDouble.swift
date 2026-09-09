@@ -162,8 +162,34 @@ actor LifecycleDouble: LifecycleAPI {
     func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { unreachable("resolvedForkKey") }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey, ui: any StrategyUI) async throws -> StrategyOutcome { unreachable("run") }
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
-    func attach(_ job: JobShort) async throws -> PaneRequest { unreachable("attach") }
-    func logs(_ job: JobShort) async throws -> PaneRequest { unreachable("logs") }
+    /// What the next `attach` or `logs` answers, in order, and what each verb was asked for.
+    ///
+    /// One queue for both verbs, because what a caller does with the answer is the same in both
+    /// cases and the *calls* are recorded separately: a surface that ran *Logs* through `attach` is
+    /// caught by `attachedJobs` and `loggedJobs` disagreeing, not by which request came back.
+    private var paneRequests: [Result<PaneRequest, LifecycleError>] = []
+    private(set) var attachedJobs: [JobShort] = []
+    private(set) var loggedJobs: [JobShort] = []
+
+    func stagePane(_ outcome: Result<PaneRequest, LifecycleError>) { paneRequests.append(outcome) }
+
+    func attach(_ job: JobShort) async throws -> PaneRequest {
+        attachedJobs.append(job)
+        return try takePane()
+    }
+
+    func logs(_ job: JobShort) async throws -> PaneRequest {
+        loggedJobs.append(job)
+        return try takePane()
+    }
+
+    /// Nothing staged is a refusal rather than a trap: a test that expects a verb never to be
+    /// reached asserts on the two call lists, and a surface that reached it anyway must not end the
+    /// suite before those assertions run.
+    private func takePane() throws -> PaneRequest {
+        guard !paneRequests.isEmpty else { throw LifecycleError.notOwned }
+        return try paneRequests.removeFirst().get()
+    }
     /// Every `PaneExit` the app forwarded, in order.
     ///
     /// Recorded rather than dropped because G4d's discriminating clause is the `request.id`: C4

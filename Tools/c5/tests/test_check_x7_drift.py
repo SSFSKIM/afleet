@@ -35,8 +35,13 @@ INJECTIONS = [
      "    func available(for context: ChannelContext) -> [PanelTabID]\n",
      "    func available(for context: ChannelContext) async -> [PanelTabID]\n"),
     ("run loses async",
-     "    func run(_ request: PaneRequest) async throws\n",
-     "    func run(_ request: PaneRequest) throws\n"),
+     "    func run(_ request: PaneRequest, for channel: ChannelKey) async throws\n",
+     "    func run(_ request: PaneRequest, for channel: ChannelKey) throws\n"),
+    # The channel is the whole point of X7's 2026-09-09 amendment: a document that still spells
+    # the channel-less form describes a seam in which no caller can say where a pane belongs.
+    ("run loses its channel",
+     "    func run(_ request: PaneRequest, for channel: ChannelKey) async throws\n",
+     "    func run(_ request: PaneRequest) async throws\n"),
     ("popOut is deleted",
      "    func popOut(_ id: PanelTabID, channel: ChannelKey)\n",
      None),
