@@ -190,21 +190,35 @@ extension TimelineRenderContext {
 
     /// Contract Y2's second host: the model behind `TaskCardView` on the `taskRun` row.
     ///
-    /// **The registry mirror is empty, and that is a known gap rather than a placeholder.** §8.4
-    /// offers *Move to background* only for a task C3's `RegistryMirror` knows, and no mirror is
-    /// reachable from the timeline's read model — `ChannelTimeline` carries the overlay, the durable
-    /// half and the preview, and the fold's mirror is inside the ingestion. So the card offers
-    /// *Stop*, which reads the item's own status, and never offers the backgrounding action.
-    /// Tracker 321.
+    /// **The registry mirror is the channel's own, read from the same snapshot the rows came from.**
+    /// §8.4 offers *Move to background* only for a running Bash call or agent run C3's
+    /// `RegistryMirror` knows, with a `tool_use_id` to name in the `background_tasks` request, so a
+    /// card built over an empty mirror can only ever offer *Stop* — which is what this did until the
+    /// mirror reached `ChannelTimeline` (tracker 321). It comes through the neighbourhood, with the
+    /// other reads of the timeline a row makes, and **not** from `ChannelEventPump.mirror`, which is
+    /// Activity's: reaching that from a row would be the second capability path C6's cut exists to
+    /// prevent. A channel with no fold carries an empty mirror and the action is absent, which is
+    /// the same reading it had before — absent rather than wrong.
+    ///
+    /// This is contract Y2's rule, held by both hosts at once: the Thread tab's card and this one
+    /// are the same component over the same mirror, so they offer the same action on the same run.
     ///
     /// **Gated on the channel as well as on the process.** `TaskCardModel.offersStop` reads the
     /// item's status alone, and a `taskRun` item is read out of the transcript — so a colleague's
     /// session shows a running task as readily as ours does. Nil for a channel afleet does not own,
     /// and the row then draws its reading, which is exactly what it draws for an archived one.
+    /// **`refresh` is wired to this channel's own neighbourhood.** §8.4's `{backgrounded: false}` arm is
+    /// the engine saying the entry the card was reading is stale or ineligible, and the card then takes
+    /// whatever the timeline now says the run is. Left at its default the closure answers nil and the
+    /// card keeps the item and the mirror it was built with, which is the reading the engine has just
+    /// contradicted. It reads the neighbourhood — the same snapshot the row itself came from — so the
+    /// card cannot be handed a run from a publish the rows around it never saw.
     @MainActor
     func makeTaskCard(_ item: TaskRunItem) -> TaskCardModel? {
         guard offersTaskCard, let lifecycle else { return nil }
-        return TaskCardModel(item: item, registry: RegistryMirror(), lifecycle: lifecycle, channel: key)
+        let card = TaskCardModel(item: item, registry: neighbourhood.registry, lifecycle: lifecycle, channel: key)
+        card.refresh = { [taskRuns = neighbourhood.taskRuns, taskID = item.taskID] in taskRuns[taskID] }
+        return card
     }
 
     /// Whether a task on this channel gets a card at all — the gate above, named so that the row
@@ -226,6 +240,10 @@ struct TimelineNeighbourhood {
     /// `Agent` chip finds its parallel siblings through it.
     var toolCalls: [String: ToolCallItem] = [:]
 
+    /// Every task run in the channel, by its `task_id` — what a card re-reads when the engine
+    /// contradicts the item it was built with (§8.4's `{backgrounded: false}` arm).
+    var taskRuns: [String: TaskRunItem] = [:]
+
     /// The timestamp of the item before each item, by `ItemID.key`.
     ///
     /// Keyed by the **key string** and never by `ItemID`, which carries the config home (§11).
@@ -234,18 +252,35 @@ struct TimelineNeighbourhood {
     /// The channel's agent-run tree, consulted by the chip for one thing only: the run id
     /// `AgentNavigating.show(run:in:)` takes.
     ///
-    /// **Nil is the ordinary case, not the edge.** A channel opened from its files — every archived
-    /// channel and every foreign session — has no tree at all (tracker 187 on `main`), so the chip
-    /// is designed for nil: it renders from what the call carries and simply does not navigate,
-    /// because navigating to a fabricated run id would land C6.4 on a node that does not exist.
+    /// **Nil means the channel has not opened yet, and the chip is designed for it**: it renders
+    /// from what the call carries and simply does not navigate, because navigating to a fabricated
+    /// run id would land C6.4 on a node that does not exist. It is no longer the ordinary reading
+    /// for a channel opened from its files — those are fed from their `.meta.json` sidecars and
+    /// carry a tree like any other (tracker 187, closed).
     var agents: AgentRunTree?
 
+    /// The channel's background-task registry mirror, for the one thing §8.4 gates on it: whether a
+    /// task card offers *Move to background*, and the `tool_use_id` the request names.
+    ///
+    /// Here rather than a field of its own on the context, because it is a read of the published
+    /// timeline taken once per publish, which is exactly what this value is for. Empty for a channel
+    /// with no fold, which offers the action on nothing.
+    var registry = RegistryMirror()
+
+    /// The part of that mirror anything downstream is allowed to compare — what a card can read of it.
+    /// The cache below and the table's reload comparison are both keyed by this and never by the
+    /// mirror, so a run's heartbeat costs nothing and a run's *eligibility* still re-keys the card.
+    private(set) var eligibility = TaskCardEligibility()
+
     /// The neighbourhood of one channel's items.
-    init(items: [TimelineItem] = [], agents: AgentRunTree? = nil) {
+    init(items: [TimelineItem] = [], agents: AgentRunTree? = nil, registry: RegistryMirror = RegistryMirror()) {
         self.agents = agents
+        self.registry = registry
+        self.eligibility = TaskCardEligibility(registry)
         var previous: Date?
         for item in items {
             if case .toolCall(let call) = item { toolCalls[call.toolUseID] = call }
+            if case .taskRun(let run) = item { taskRuns[run.taskID] = run }
             if let previous { precedingTimestamps[item.id.key] = previous }
             previous = item.timestamp ?? previous
         }
@@ -267,10 +302,17 @@ struct TimelineNeighbourhood {
 /// was paid per delta grew with the history the reader had accumulated, which is the growth §8.3
 /// forbids. Held for the channel's lifetime and asked per publish.
 ///
-/// The key is the published timeline with its preview taken off: any change that can move an item,
-/// an overlay or the agent tree changes it, and the preview alone does not. Comparing it is cheap
-/// where it matters — the collections behind an unchanged half are the same storage, which their
-/// equality answers on identity without walking them.
+/// The key is the published timeline with its preview and its registry mirror taken off, and the
+/// mirror's *eligibility* beside it: any change that can move an item, an overlay or the agent tree
+/// changes the first, and the preview alone does not. Comparing it is cheap where it matters — the
+/// collections behind an unchanged half are the same storage, which their equality answers on
+/// identity without walking them.
+///
+/// **The mirror is out of the key on purpose.** `RegistryMirror` stamps `lastFrameAt` on every task
+/// frame, so a chatty agent moved the key thirty times a second and paid an O(items) rebuild for each
+/// — the growth §8.3 forbids, reintroduced by a field a card reads four values out of. What the card
+/// can read is `TaskCardEligibility`, and that is what is compared. The reused neighbourhood keeps the
+/// mirror it was built with, which differs from the current one only in what nothing reads.
 @MainActor
 final class TimelineNeighbourhoodCache {
 
@@ -284,8 +326,10 @@ final class TimelineNeighbourhoodCache {
     func neighbourhood(for timeline: ChannelTimeline) -> TimelineNeighbourhood {
         var key = timeline
         key.preview = nil
-        if let held = self.key, held == key { return cached }
-        cached = TimelineNeighbourhood(items: timeline.items, agents: timeline.agents)
+        key.registry = RegistryMirror()
+        let eligibility = TaskCardEligibility(timeline.registry)
+        if let held = self.key, held == key, eligibility == cached.eligibility { return cached }
+        cached = TimelineNeighbourhood(items: timeline.items, agents: timeline.agents, registry: timeline.registry)
         self.key = key
         builds += 1
         return cached

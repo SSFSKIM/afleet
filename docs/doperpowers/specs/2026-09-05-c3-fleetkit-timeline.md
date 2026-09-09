@@ -589,7 +589,7 @@ The arbitration table:
 | mirror entry buffered while `open` read | the alignment below does not claim it (then it is a mirror entry past the cursor, next row) | the alignment claims it against a line the open read (a duplicate, counted) |
 | mirror entry, from the tap | its key is not yet applied and the resolved stream is this session's — for a uuid-less entry, the file holds no unclaimed line of that hash past the cursor | key already applied (a duplicate, counted); the file's earliest unclaimed line of that hash past the cursor is claimed instead (a duplicate, counted); path resolves to another session (a routing fault, a notice); state is `fileOnly` for this epoch |
 | file record, on watcher change | its key is not yet applied — for a uuid-less record, no mirror delivery of that hash past the cursor is still unconfirmed | key already applied by the mirror (the locator is bound to that key) |
-| `agent_metadata` entry | always, as the stream's metadata (not a timeline record) | — |
+| `agent_metadata` entry | always, as the stream's metadata (not a timeline record) **and as a parent source for `AgentRunTree`** — the mirror's entry through `apply(agentMetadata:for:)`, the `.meta.json` on disk through `apply(metaFile:)` (amended 2026-09-09) | — |
 | mirror entry naming a stream with no open file | opens the stream lazily (an agent starting) | — |
 | file rewritten: a shorter length, a changed `(st_dev, st_ino)`, or a tail anchor that no longer reads back | the stream is rebuilt whole through `WindowedTranscript`: records, applied set, locators and ordinals replaced; one `TimelineNotice.fileRewritten` | — (nothing is read from the stale offset) |
 | `loadEarlier` | the next window back, prepended with fresh keys and locators; the marker moves | `earlierAvailable == false` (an empty effect) |
@@ -753,6 +753,8 @@ the other lists in X4.
 /// The read model the renderer holds: the durable projection, the overlay and the preview, merged in order.
 public struct ChannelTimeline: Sendable, Hashable {
   public var durable: DurableProjection; public var overlay: Overlay; public var preview: StreamingPreview?
+  public var agents: AgentRunTree?                               // the channel's agent-run tree (amended 2026-09-08)
+  public var registry: RegistryMirror                            // the fold's registry mirror (amended 2026-09-09)
   public var items: [TimelineItem] { get }                       // merged, ordered; what the renderer reads
   public func recentURLs(limit: Int) -> [SeenURL]                // most recent first, de-duplicated
 }
@@ -873,7 +875,19 @@ public struct AgentRunTree: Hashable, Sendable {
 
 A node is created at the first `task_started` whose `task_type` is `local_agent` (a shell's
 `task_started` carries no `spawn_depth` and no `subagent_type` and creates no node), keyed by
-`task_id`; a repeat for the same id increments `startedCount` and re-arms status. The parent
+`task_id`; a repeat for the same id increments `startedCount` and re-arms status. **Amended
+2026-09-09:** a node is created just as well by either metadata source for a run no `task_started`
+has named, because both name an agent stream and an agent stream *is* a `local_agent` run — without
+that a channel with no wire has no tree at all. Such a node is created `.running`,
+which is the type's default and not an assertion, and holds that reading only until the channel's
+own file half states otherwise: after every projection the ingestion **reconciles** the nodes no
+`task_started` has named against the merged line's `taskRun` rows, which the record reducer derives
+from the spawning call — completed or failed as its result says, running only where the merged line
+holds no spawning call for the run — so the tree and the row of one channel never disagree about
+one run. `elapsedOrigin` is the source's own instant until the same reconciliation, or the run's
+first `task_started`, replaces it with when the run began; `order` — and so `roots` — is **sorted**
+by it, so a channel opened from its files lists its runs in start order rather than in the order
+the directory enumerates their sidecars, which is by file name. The parent
 link is set from the first source that answers and recorded as such: the `agent_metadata`
 mirror entry at the head of the agent stream, then the `.meta.json` when read, then the
 two-step join (a frame's `parent_tool_use_id` names the `tool_use` block that spawned it;
@@ -1583,6 +1597,34 @@ when a review finding is real but has no oracle, log it with the recording that 
 one; entry 23 is worth more to C1 than a guessed fix would have been to C6.
 
 ## Revision Notes
+
+- 2026-09-09, the same corrective's fix wave (tracker 407 re-stated): **the tree and the file half
+  agree about a run, and the roots read in start order.** A node a metadata source created has no
+  status and no start of its own — neither the sidecar nor the mirror entry carries either — so
+  `StreamIngestion` reconciles those nodes against the merged projection's `taskRun` rows after every
+  recompute (`WireReducer.reconcile(fileRuns:)`, `AgentRunTree.reconcile(fileReadings:)`), taking the
+  row's status and the row's instant. A run the wire started is untouched: its frames are the only
+  source that can say a run ended while the channel is live. `AgentRunTree.order` is sorted by
+  `elapsedOrigin` rather than appended to, because the file half hears of its runs in file-name order
+  and the wire hears of them in start order, and one session must not have two trees.
+
+- 2026-09-09 corrective on `main` (`corrective/c3-agent-tree-mirror`, tracker 187 and 321):
+  **the metadata sources reach the tree, and the fold's registry mirror reaches the read model.**
+  `StreamIngestion` routes each decoded `agent_metadata` record to `AgentRunTree` — the mirror's
+  entry through `apply(agentMetadata:for:)` in `applyMirror`, the `.meta.json` sidecars through
+  `apply(metaFile:)` in `loadMetadata`, which both the open read and the watcher call — so the two
+  entry points that had only test callers now have production ones, and a channel opened from its
+  files alone has the same tree the same corpus produces live. `AgentRunTree.absorb` creates the node
+  when no `task_started` has, which is the change that makes a wire-less channel possible at all;
+  first-source-wins is untouched and a later disagreeing source still lands in `conflicts` without
+  moving the parent. Nothing new is published: the tree's movement is `TimelineChange.agentsChanged`,
+  as before. `ChannelTimeline` gains `registry`, a value snapshot of the fold's `RegistryMirror` taken
+  in the same read as the items — the way it carries `overlay` — which is what §8.4's *Move to
+  background* is gated on and what the renderer had no way to reach. Discriminating suite:
+  `FleetTimelineTests/Agents/AgentTreeSourcesTests` (six cases over `nested-depth-2` and invented
+  frames) and `AppTests/TaskCardBackgroundingTests` (four). Left standing: tracker 406 (the
+  neighbourhood's registry is outside the table's reload comparison) and 407 (a node the sidecars
+  created reads `.running` on a session that is over).
 
 - 2026-09-09 corrective on `main` (tracker 194, 161): the two `FleetTimelineTests` waits that read
   a loaded host as a product failure are delivery-fulfilled — the whole-wire-stream test awaits the

@@ -1957,6 +1957,12 @@ numbered from 321. Nothing above is renumbered.
      pump's mirror. Found at C6.1 Task 8, mounting contract Y2's second host. Closer: `ChannelTimeline`
      carries the mirror the fold already holds, and the context reads it where it reads the overlay.
      Owner: C3 for the field, C6.1 for the read.
+     **Closed 2026-09-09 by the `corrective/c3-agent-tree-mirror` corrective on `main`, commit
+     `6c964e1`.** `ChannelTimeline.registry` carries the fold's mirror as a value snapshot per publish,
+     the way it carries the overlay; `TimelineNeighbourhoodCache` puts it on the neighbourhood with the
+     other reads a row makes of its timeline, and `makeTaskCard` builds the model over it. Activity's
+     `ChannelEventPump.mirror` is untouched, so the second capability path the C6 cut forbids was not
+     opened. Left standing: entry 406.
 
 322. **The timeline's task card takes its item by value and is rebuilt only when the task's status
      changes, so a card's text lags its `task_progress`.** `TaskCardModel` stores the `TaskRunItem`
@@ -2415,6 +2421,14 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      metadata into the reducer's tree (or a file-only tree the ingestion owns when there is no
      wire) through the two existing, tested entry points; then C6.4 reads one tree for every
      channel kind. Owner: C3, before C6.4's Agents tab is judged on foreign channels.
+     **Closed 2026-09-09 by the `corrective/c3-agent-tree-mirror` corrective on `main`, commit
+     `d670f3f`.** `StreamIngestion` feeds both sources: a mirror-delivered `agent_metadata` entry goes
+     to `AgentRunTree.apply(agentMetadata:for:)` from `applyMirror`, and every `.meta.json` the file
+     path enumerates goes to `apply(metaFile:)` from `loadMetadata` — which the open read and the
+     watcher both call, so a live channel and a file-only one reach the same tree. `absorb` creates
+     the node when no `task_started` has, which is what a channel with no wire needed; first-source-
+     wins is unchanged and a later disagreeing source still lands in `conflicts`. Left standing: a
+     node the metadata created reads `.running` (entry 407).
 
 188. **`make test` rewrites `Workbench/Package.resolved` with the app's own dependency pins.**
      Since C6.1's seam range added HighlightKit to `project.yml` (`exactVersion: 0.2.0`), the
@@ -3526,3 +3540,49 @@ four whole-branch review rounds.
     replacement context exists. Written as a guard, it currently guards nothing, and a reader will
     trust it. Closer: a first-class world token on `ChannelContext` — a `PanelHostAPI` change and so
     a parent revision — or a class-bound store. Same seam as entry 349. Owner: C7.4 with C5.
+
+406. **The neighbourhood's registry mirror is outside the timeline table's reload comparison.**
+     `TimelineTableController` decides a forced reload by comparing `toolCalls`,
+     `precedingTimestamps` and `agents`; `TimelineNeighbourhood.registry` joined the value in the
+     `corrective/c3-agent-tree-mirror` corrective and was not added, because that corrective's App
+     change was held to the one read it was for. A registry move with no accompanying item change
+     therefore does not re-key the `taskRun` row, and the card keeps the mirror snapshot it was built
+     with. Narrow in practice: a row appears with its `task_started`, which moves the item too, and
+     the foreground-to-background transition is one the card refreshes itself on — so the reachable
+     gap is a `background_tasks_changed` that unlists a row while nothing else about it moves. Closer:
+     add `registry` to the comparison, or key the card on the mirror's row rather than on the item.
+     Owner: C6.1. Filed 2026-09-09.
+     **Closed 2026-09-09 by the same corrective's fix wave, and it was wider than filed.** The reload
+     comparison was the second half; the first was `TaskCardSeam.identity(of:in:)`, which read the
+     task, the status and the channel's capability and never the mirror — so a row mounted before its
+     run's `task_started` reached the fold kept the card it built then, and *Move to background* was
+     absent for the whole of that run's foreground life whatever any comparison said. Both now fold in
+     the mirror's **eligibility** for the task (`TaskCardEligibility`, `TaskCardModel.isEligible`) and
+     not the mirror itself, which also takes the neighbourhood cache off the mirror: `lastFrameAt` is
+     stamped by every task frame, so keying on the whole value charged a chatty agent one O(items)
+     rebuild per heartbeat — the growth §8.3 forbids, arriving through a field a card reads four values
+     out of.
+
+407. **A tree node built from a `.meta.json` sidecar reads `.running` on a channel that ended long
+     ago.** Nothing on disk records an agent run's terminal status: the sidecar carries `agentType`,
+     `description`, `toolUseId`, `spawnDepth` and `parentAgentId` and no more, and the run's own
+     transcript ends without saying it ended. So the node a file-only open creates takes the type's
+     default, and C6.4's Agents tab will show every run of an archived or foreign session as running.
+     It is deliberately the *same* reading the record reducer already takes for a file-side `taskRun`
+     row with no spawning call (`RecordReducer.taskRun(for:spawnedBy:toolUseID:)`), because the two
+     halves of one channel disagreeing about one run is worse than both being conservative — but both
+     are wrong for a session that is over. Closer: derive the status from the spawning tool call when
+     the main transcript holds one (which is what the item side already does when it can), and treat a
+     channel the index reports dormant as ending its runs. Filed by the
+     `corrective/c3-agent-tree-mirror` corrective on `main`, 2026-09-09. Owner: C3, before C6.4 is
+     judged on foreign channels.
+     **Mostly closed the same day, in the same corrective's fix wave.** `StreamIngestion` reconciles
+     the tree against the merged projection's `taskRun` rows after every recompute, so a node no
+     `task_started` named takes the row's status and the row's start instant: an archived session's
+     runs now read *Completed* in both halves. What remains is narrower and is what this entry now
+     stands for: a run whose spawning call is nowhere in the merged line — a truncated window, an
+     agent stream whose `tool_use` block was compacted away — still reads running in both halves,
+     because nothing on disk says otherwise; and no node gets an `endedAt`, since neither the sidecar
+     nor the transcript records when a run ended, so a consumer that ticks elapsed to `endedAt ?? now`
+     has nothing to stop at. Closer: an end instant the file half can defend (the last record of the
+     run's own transcript is a *last activity*, not an end), and C4's dormancy as the second witness.
