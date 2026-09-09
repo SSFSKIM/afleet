@@ -82,12 +82,15 @@ final class TerminalPanelWiringTests: XCTestCase {
         XCTAssertEqual(rig.shell.focus, .channel(session), "the row did not leave its channel in view")
     }
 
+    /// The row-first branch, over a rig whose fleet really holds a row for the job's session: the
+    /// pane goes to that channel and the directory it is made resolvable with is the **row's**.
     func testAttachRunsTheRequestItWasGivenInTheChannelTheRowNames() async throws {
         let rig = try await WiringRig()
         defer { rig.stop() }
         let runner = rig.replaceTerminalRunner()
         let session = WiringFixtures.session(7)
-        let job = WiringFixtures.job("jattach", session: session, cwd: rig.cwd)
+        let job = WiringFixtures.job("jattach", session: session)
+        rig.paintRows([(session, rig.cwd)])
         let staged = WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)
         await rig.lifecycle.stagePane(.success(staged))
 
@@ -156,7 +159,8 @@ final class TerminalPanelWiringTests: XCTestCase {
         defer { rig.stop() }
         let runner = rig.replaceTerminalRunner()
         let session = WiringFixtures.session(9)
-        let job = WiringFixtures.job("jlogs", session: session, cwd: rig.cwd)
+        let job = WiringFixtures.job("jlogs", session: session)
+        rig.paintRows([(session, rig.cwd)])
         let staged = WiringFixtures.request(purpose: .logs(job.short), cwd: rig.cwd)
         await rig.lifecycle.stagePane(.success(staged))
 
@@ -211,15 +215,16 @@ final class TerminalPanelWiringTests: XCTestCase {
         XCTAssertNil(rig.browser.jobBanners[job.short.rawValue], "a placed pane left a refusal on the row")
     }
 
-    /// And the refusal is unchanged where there is genuinely no directory to name: a job whose
-    /// channel nothing has rendered and whose roster entry carries no working directory cannot be
-    /// made resolvable, so the host refuses and the row says so.
+    /// And the refusal is unchanged where there is genuinely no directory to name: a channel whose
+    /// row carries no working directory, and which nothing has rendered, cannot be made resolvable,
+    /// so the host refuses and the row says so.
     func testAJobWhoseChannelHasNoDirectoryAnywhereStillRefusesOnTheRow() async throws {
         let rig = try await WiringRig()
         defer { rig.stop() }
         let runner = rig.replaceTerminalRunner()
         let session = WiringFixtures.session(11)
         let job = WiringFixtures.job("jnocwd", session: session)
+        rig.paintRows([(session, nil)])
         let staged = WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)
         await rig.lifecycle.stagePane(.success(staged))
 
@@ -228,6 +233,32 @@ final class TerminalPanelWiringTests: XCTestCase {
         XCTAssertNotNil(rig.browser.jobBanners[job.short.rawValue], "the host refused without saying so")
         let received = await runner.received
         XCTAssertEqual(received.count, 0, "a pane opened in a channel the host could not resolve")
+    }
+
+    /// A job whose session has left the index has no row, so it has no channel of its own to be
+    /// placed in either — and seeding the host from the **job's** directory recorded that directory
+    /// as the channel's own, so every later Cmd+Shift+T shell in it opened in the job's tree and W6
+    /// wrote that down. A job's channel is the one its row names; with no row the pane goes where
+    /// the window is looking, which is the fallback an exec job already takes.
+    func testAJobWithNoRowOpensInTheChannelInViewAndRecordsNoCWDForItsOwn() async throws {
+        let rig = try await WiringRig()
+        defer { rig.stop() }
+        let runner = rig.replaceTerminalRunner()
+        let session = WiringFixtures.session(14)
+        let job = WiringFixtures.job("jgone", session: session, cwd: rig.cwd)
+        await rig.lifecycle.stagePane(.success(WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)))
+        _ = rig.app.panels.context(for: rig.key, cwd: rig.cwd)
+        rig.app.panels.focusChannel(rig.key)
+
+        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, shell: rig.shell)
+
+        // Sessions rather than whole keys: XCTAssertEqual prints both operands and a `ChannelKey`
+        // carries a config home path (§6.3).
+        let channels = await runner.channels
+        XCTAssertEqual(channels.map(\.session), [rig.key.session],
+                       "the pane did not land in the channel the window is showing")
+        XCTAssertFalse(rig.app.panels.canResolveChannel(ChannelKey(configHome: rig.configHome, session: session)),
+                       "the job's own directory was recorded as its channel's")
     }
 
     // MARK: - Group 5: Cmd+Shift+T

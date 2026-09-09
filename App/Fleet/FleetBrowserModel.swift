@@ -528,16 +528,24 @@ final class FleetBrowserModel {
     ///
     /// A job that runs a session names that session's channel under this browser's own config home
     /// — the same key *Adopt* builds one method above, so the two verbs cannot disagree about which
-    /// channel a job is. A job with no session at all, which is what an exec job is, falls back to
-    /// `inView`, the channel the window is showing. When neither exists there is nothing to name,
-    /// and the row says so rather than running a `claude attach` whose pane could never be placed.
+    /// channel a job is — **and only while this browser has a row for it**. A channel with no row
+    /// is not one the app can show: `PanelColumnView` resolves what it draws through `row(_:)`, and
+    /// the channel's own working directory is the row's, so a job whose session has left the index
+    /// has neither a place to be seen nor a directory of its own to be built from.
+    ///
+    /// With no row the pane goes to `inView`, the channel the window is showing — the same fallback
+    /// an exec job takes, which has no session at all. When neither exists there is nothing to
+    /// name, and the row says so rather than running a `claude attach` whose pane could never be
+    /// placed.
     ///
     /// **The refusal is a banner and never a thrown error** (§10): a job action that cannot happen
     /// is the row's news, not the channel's.
     func paneChannel(for job: JobEntry, inView: ChannelKey?) -> ChannelKey? {
-        if let session = job.sessionID { return ChannelKey(configHome: configHome, session: session) }
+        if let session = job.sessionID, row(session) != nil {
+            return ChannelKey(configHome: configHome, session: session)
+        }
         if let inView { return inView }
-        jobBanners[job.short.rawValue] = "This job runs no session, and no channel is open to show its pane in."
+        jobBanners[job.short.rawValue] = "This job has no channel in the fleet, and none is open to show its pane in."
         return nil
     }
 
@@ -546,11 +554,13 @@ final class FleetBrowserModel {
     ///
     /// The panel host holds a context only for a channel it has rendered, and drops it again under
     /// LRU pressure. A job's channel is very often neither: the sidebar's Background section is
-    /// full of channels no window has ever shown. The row's own directory comes first, because it
-    /// is the channel's; the job's is the fallback for a channel with no row — an exec job's, and
-    /// a job whose session left the index.
+    /// full of channels no window has ever shown. So the directory comes from the channel's own
+    /// row, and from nowhere else. **The job's own directory is not a candidate**: seeding a
+    /// channel with it records it as that channel's, and every later shell opened there — a
+    /// Cmd+Shift+T pane, and then the W6 document — inherits a directory that belongs to a job
+    /// rather than to the channel.
     func paneCWD(for job: JobEntry, in channel: ChannelKey) -> URL? {
-        row(channel.session)?.cwd ?? job.cwd
+        row(channel.session)?.cwd
     }
 
     /// A job action that failed after X5 had already answered — the pane could not be placed. It
