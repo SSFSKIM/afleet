@@ -1262,6 +1262,16 @@ symlink-containment debt in entry 78 is unchanged.
      the shell is not on it. Closer: each surface registers a `LinkTarget` for its own command name
      as it lands, and the shell registers one for the switcher. Owner: C6.4 (agents), C5 (the
      switcher). Raised by C6.2's fix wave.
+     **Its first third closed 2026-09-09 by the `corrective/c6-link-activation` corrective on
+     `main`**: a command link is claimed. `CommandLinkTarget` is registered on the app's one registry
+     beside the Browser's targets — against `.thread`, after that tab's handover, so the withdrawal
+     that installs the tab cannot drop it — and delivers a `.command` to the composer of the channel
+     the link was raised in (`LinkOrigin`), which opens the named surface through the same member a
+     typed line reaches. So the router no longer answers a command link with a diagnostic, and the
+     link is the working route C7's acceptance item 3 describes. What stays open is the two thirds
+     this cannot supply: `agents` and `tasks` set `ComposerModel.openSurface` and there is still no
+     screen behind either name, and the switcher is still unreachable from a composer. Owners
+     unchanged.
 
 208. **The mode half of §7.4's readback races the handshake that carries it.** The only readback
      permission mode has is the handshake's, which reaches the pickers through the composer's own
@@ -3701,3 +3711,24 @@ four whole-branch review rounds.
      apart deliberately — but the asymmetry is real and a human tester will meet it at G1's leg.
      Closer: list untracked paths from the status alongside the diff, marked as untracked.
      Owner: C7.7.
+
+## From the `corrective/c6-link-activation` corrective on `main`, 2026-09-09
+
+424. **A Cmd-clicked `.command` link would pop the Thread tab out for a surface that is not in it.**
+     `CommandLinkTarget` takes X7's default `popsOutForNewWindow`, so a `.command` delivered as
+     `.newWindow` pops `.thread` out of the origin channel first and then hands the command to that
+     channel's composer — which is app-scoped, so the surface the command names appears wherever the
+     composer is drawn and not necessarily in the window the pop-out just made. It is latent: the
+     only raiser of a command link today is the composer's own `.native` arm, which opens it as
+     `.currentPanel`. The honest answer is not obviously the Browser's (`false`, no window at all)
+     either, because two of the three named surfaces do not exist yet and neither their window nor
+     their host is decided. Closer: whichever child lands the first `agents`/`tasks` surface decides
+     what a new-window command means and sets the flag with it. Owner: C6.4.
+
+425. **`LinkActivation.modifiers` is one process-wide seam.** The modifier reading a timeline click
+     resolves through is a mutable static on the main actor, so a test that replaces it replaces it
+     for the whole process and must put it back; `LinkActivationTests` does, in `tearDown`. The
+     alternative — carrying the reading down through the render context to every row — is a field on
+     a value four leaves construct, for a question whose production answer is the same everywhere.
+     Closer: none proposed; it is recorded so the next test that reaches for it knows the rule.
+     Owner: C6.1.
