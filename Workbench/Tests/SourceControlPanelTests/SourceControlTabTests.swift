@@ -270,7 +270,11 @@ final class SourceControlTabTests: XCTestCase {
         XCTAssertEqual(afterSession, before + 1, "building a session registered a second target")
 
         await router.open(.commit(Self.hash), from: .currentPanel)
-        XCTAssertEqual(host.showing?.deliveryNotice, .noRepository(hash: Self.hash))
+        // `pathlessEnvironment()` leaves `git` unresolvable, so this channel's repository could not
+        // be **read**; it is not a folder in no repository, and §5/§7 as amended at T5's review
+        // keep the two apart — a row that says "not a repository" over a `git` that failed sends
+        // the user to look at a repository that is fine.
+        XCTAssertEqual(host.showing?.deliveryNotice, .notReadable(hash: Self.hash, tool: .git))
     }
 
     // MARK: - 5. G4's inventory: every action this tab's surfaces offer

@@ -96,9 +96,14 @@ public struct SourceControlReadout: Equatable, Sendable {
     public struct CommitDetail: Hashable, Sendable {
         public let hash: String
         public let abbreviatedHash: String
-        public let authorName: String
-        public let authorDate: Date
-        public let subject: String
+        /// The three fields that come from the commit's own row in the window, and are **nil**
+        /// when this panel does not hold that row — a commit selected and then paged out of the
+        /// window. An empty author, an empty subject and the epoch are values git never reported,
+        /// and inventing them is the mirror of §6.3's failure; the pane draws the hash and the
+        /// file list it does hold, and says nothing about the rest.
+        public let authorName: String?
+        public let authorDate: Date?
+        public let subject: String?
         /// Selectable rows in the view; selecting one is `Action.selectParentCommit`.
         public let parents: [String]
         public let badges: [RefBadge]
@@ -151,6 +156,10 @@ public struct SourceControlReadout: Equatable, Sendable {
     /// The remedy for a watch that could not be armed: the panel says the rows are not refreshing
     /// themselves rather than presenting a stale tree as a fresh one.
     public nonisolated static let refreshHint = "Choose Refresh to re-read this repository."
+    /// The empty state's own remedy (§5, as amended). A root that was deleted, moved or replaced
+    /// reaches the empty state routinely, and an empty state with no way out is a panel that has
+    /// to be restarted — so it carries the one action that recovers it.
+    public nonisolated static let lookAgainHint = "Choose Refresh to look for a repository again."
 
     public let isEmptyState: Bool
     public let isLoading: Bool
@@ -219,10 +228,13 @@ public struct SourceControlReadout: Equatable, Sendable {
         case .commit(let hash):
             guard let commit = session.state.commits.first(where: { $0.hash == hash }) else {
                 // Selected and then paged out of the window — the detail is still the commit's,
-                // and the row's own fields are what this panel no longer holds.
+                // and the row's own fields are what this panel no longer holds. They are **nil**
+                // and not blank: an empty author, an empty subject and the epoch are values git
+                // never reported, and drawing them beside a real hash is the same fabrication
+                // §6.3 forbids on the other side.
                 return .commit(CommitDetail(hash: hash, abbreviatedHash: String(hash.prefix(8)),
-                                            authorName: "", authorDate: Date(timeIntervalSince1970: 0),
-                                            subject: "", parents: [], badges: [], files: files))
+                                            authorName: nil, authorDate: nil, subject: nil,
+                                            parents: [], badges: [], files: files))
             }
             return .commit(CommitDetail(hash: commit.hash,
                                         abbreviatedHash: String(commit.hash.prefix(8)),
@@ -263,7 +275,10 @@ public struct SourceControlReadout: Equatable, Sendable {
             return Notice(placement: .emptyState,
                           message: "This channel's folder is not a Git repository, so there is no "
                                  + "history to show.",
-                          hint: nil)
+                          // §5, as amended: the empty state is reached by a root that was moved,
+                          // replaced or pruned as routinely as by a folder that was never in a
+                          // repository, so it carries the action that gets out of it.
+                          hint: lookAgainHint)
         }
         if let error = session.state.error { return notice(for: error) }
         if session.watchFailedToArm {
@@ -291,10 +306,24 @@ public struct SourceControlReadout: Equatable, Sendable {
                                  + "history, so this panel did not pick one.",
                           hint: nil)
         case .noRepository(let hash):
+            // The **empty state** and not a row: there is nothing behind this notice to float it
+            // over, and the placement rule this type states is about exactly that. The message
+            // carries both halves — what the folder is, and what became of the commit clicked —
+            // because it replaces the empty state's own message rather than sitting above it.
+            return Notice(placement: .emptyState,
+                          message: "This channel's folder is not a Git repository, so commit "
+                                 + "\(abbreviate(hash)) cannot be shown.",
+                          hint: lookAgainHint)
+        case .notReadable(let hash, let tool):
             return Notice(placement: .row,
-                          message: "Commit \(abbreviate(hash)) cannot be shown: this channel's "
-                                 + "folder is not a Git repository.",
-                          hint: nil)
+                          message: "Commit \(abbreviate(hash)) cannot be shown: "
+                                 + "\(name(of: tool)) could not read this repository.",
+                          hint: refreshHint)
+        case .searchInterrupted(let hash):
+            return Notice(placement: .row,
+                          message: "This panel did not finish looking for commit "
+                                 + "\(abbreviate(hash)); the repository was being re-read.",
+                          hint: refreshHint)
         }
     }
 

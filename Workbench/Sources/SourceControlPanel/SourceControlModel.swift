@@ -44,6 +44,15 @@ public final class SourceControlModel: PanelTabSession {
         case ambiguousPrefix(prefix: String, matches: Int)
         /// A delivery into a channel whose folder is in no repository at all.
         case noRepository(hash: String)
+        /// A delivery into a channel whose repository could not be **read**. Distinct from
+        /// `noRepository`, which says the folder is in none: telling the user their folder is not
+        /// a repository when `git` merely failed sends them to look at the wrong thing, so this
+        /// row names the tool it was about.
+        case notReadable(hash: String, tool: Tool)
+        /// The search was interrupted — superseded by a background cycle, or cancelled — and the
+        /// retry was interrupted too. §7 is binding that a click is owed an answer, so an
+        /// interruption is reported rather than dropped.
+        case searchInterrupted(hash: String)
     }
 
     /// How many pages beyond the loaded window a `.commit` delivery searches (Design §7).
@@ -81,25 +90,56 @@ public final class SourceControlModel: PanelTabSession {
     /// Whether the FSEvents stream is armed. False before the first read, after `deactivate()`,
     /// and after a root that went away.
     public private(set) var isWatchArmed = false
+    /// The root the armed stream is watching. It is a field of its own because a cycle that
+    /// resolves a *different* repository must re-arm on it (§7), and "a watch exists" cannot say
+    /// whether it is the right one.
+    public private(set) var watchedRoot: URL?
     /// A watch that was **asked for** and could not be created. It is kept apart from
     /// `isWatchArmed` because a model built without a watch at all is not a panel with a broken
     /// one, and only the second has something to say to the user.
     public private(set) var watchFailedToArm = false
 
-    /// The cycle that owns the repository document. Claimed synchronously before the first await
-    /// and re-checked after every one: four doors open a read — `activate`, `refresh`, the watch and
-    /// a `.commit` delivery's paging — and each of them is a suspension the next can start inside.
+    /// **Supersession is claimed per field group** (§5, as amended at T5's review).
     ///
-    /// Without it two cycles interleave and the *loser* writes last: a watch-driven re-read that
-    /// started first finishes after the user's Refresh and assigns a window read before the commit
-    /// the user was waiting to see.
-    private var generation = 0
-    /// The **detail** read's own generation, kept apart from the cycle's on purpose. A commit's
-    /// changed-file list does not depend on the window around it, so a watch delivery landing while
-    /// the list is in flight must not throw the list away — a repository under an active `claude`
-    /// session delivers often enough that a shared counter would leave the detail pane empty
-    /// whenever the user clicked at the wrong moment.
-    private var detailGeneration = 0
+    /// A single counter makes every read a peer of every other, and the two reads here are not
+    /// peers: a cycle writes the window, the status and the lanes, while the watch's working-tree
+    /// answer writes the status alone. Given one counter the cheap read wins by starting later —
+    /// it supersedes the cycle, re-assigns lanes over the *old* window, and the commit the user
+    /// pressed Refresh to see never appears with nothing on screen saying so.
+    ///
+    /// So whoever will write the window claims `windowEpoch`, whoever will write the status claims
+    /// `statusEpoch`, and a read publishes only the groups it still holds. A partial write can no
+    /// longer invalidate a document that holds strictly more than it does.
+    private var windowEpoch = 0
+    private var statusEpoch = 0
+    /// The **detail** read's own epoch. A commit's changed-file list does not depend on the window
+    /// around it, so a watch delivery landing while the list is in flight must not throw the list
+    /// away — a repository under an active `claude` session delivers often enough that a shared
+    /// counter would empty the detail pane whenever the user clicked at the wrong moment.
+    ///
+    /// It is bumped by every **selection** change as well as by every root change, because those
+    /// are the two things that make an answer in flight the wrong answer, and neither is visible
+    /// to a counter the detail read claims for itself.
+    private var detailEpoch = 0
+
+    /// How many reads have claimed an epoch and not yet settled. `isLoading` is a function of it
+    /// rather than a flag each path remembers to clear: a flag cleared on the success path alone
+    /// latches on the path that skips it, and a latched flag here also disables `activate()`'s
+    /// first read for the rest of the session.
+    private var readsInFlight = 0
+    private var detailReadsInFlight = 0
+
+    /// Set by `deactivate()` and cleared by `activate()`. It fences a read suspended across the
+    /// teardown: without it a `load()` that resumes afterwards arms an FSEvents stream nobody will
+    /// stop while the session sits in the host's cache.
+    private var isTornDown = false
+
+    /// One read's claim on the field groups it will write. Nil is "this read does not write that
+    /// group and has no say in it".
+    private struct Claim {
+        var window: Int?
+        var status: Int?
+    }
 
     public init(cwd: URL, environment: ResolvedEnvironment, runner: any ToolRunning = ToolRunner(),
                 links: (any LinkRouterCapability)? = nil,
@@ -127,58 +167,90 @@ public final class SourceControlModel: PanelTabSession {
     // MARK: - the doors
 
     /// The tab has been shown for this channel. Reads once and not again, and arms the watch.
+    ///
+    /// The watch is armed on every activation, not only on the one that read: a session that was
+    /// deactivated and shown again holds its document and still needs a stream.
     public func activate() async {
-        guard !hasRead, !isLoading else { return }
-        await load()
+        isTornDown = false
+        if !hasRead, readsInFlight == 0 { await load() }
         armWatchIfNeeded()
     }
 
-    /// The user asked, or the watch reported history. Always reads.
+    /// The user asked. Always reads.
+    ///
+    /// It is also the answer to a delivery notice's own hint, so it clears one — which the
+    /// background cycle deliberately does not (§7).
     public func refresh() async {
+        deliveryNotice = nil
         await load()
         armWatchIfNeeded()
     }
 
-    /// Tears the watch down. The host calls it when the session goes away; nothing else in this
-    /// model needs stopping, because every read is a child task of the call that started it.
+    /// Tears the watch down and fences every read in flight. The host calls it when the session
+    /// goes away.
     public func deactivate() {
-        watch?.stop()
-        watch = nil
-        isWatchArmed = false
+        isTornDown = true
+        invalidateEveryEpoch()
+        stopWatch()
     }
 
     /// Selects row zero and reads what the working tree holds that `HEAD` does not.
     public func selectWorkingTree() async {
         deliveryNotice = nil
-        selection = .workingTree
-        changes = []
+        select(.workingTree)
         await loadDetail(for: .workingTree)
     }
 
     /// The `.commit` delivery (Design §7), and the door a graph row's click takes.
     ///
     /// `hash` may be abbreviated — a timeline row is likelier to carry seven characters than forty
-    /// — and is resolved by **unambiguous** prefix. Four answers and no fifth: selected from the
-    /// window, selected after paging (with the window extended so the selected row is on screen),
-    /// a named row for a hash no page within the bound holds, and a named row for a prefix that
-    /// names several commits.
+    /// — and is resolved by **unambiguous** prefix.
+    ///
+    /// **A click is owed an answer** (§7, as amended). §5's rule that a cancelled read publishes
+    /// no notice governs the *background* reads the user did not ask for; this one the user made,
+    /// so a delivery whose search was superseded or cancelled is retried, and reported if the
+    /// retry cannot get through either. It is never dropped: a link that reached a live target and
+    /// produced nothing on screen is the failure §17.7 exists to prevent.
     public func select(commit hash: String) async {
         deliveryNotice = nil
+        for _ in 0...Self.deliveryRetries {
+            guard !isTornDown else { return }
+            if case .answered = await deliver(commit: hash) { return }
+        }
+        guard !isTornDown else { return }
+        deliveryNotice = .searchInterrupted(hash: hash)
+    }
+
+    /// How many times a superseded or cancelled delivery is tried again before it is reported.
+    ///
+    /// One retry and not a loop: the thing that interrupts a delivery is a background cycle or a
+    /// cancellation, both of which are over by the time the retry starts, and a panel that kept
+    /// re-reading until it won would spend a repository's worth of `git log` on a click.
+    public static let deliveryRetries = 1
+
+    /// Whether one attempt at a delivery reached an answer, or was interrupted by something the
+    /// user did not do.
+    private enum Delivery {
+        case answered
+        case interrupted
+    }
+
+    private func deliver(commit hash: String) async -> Delivery {
         guard let root = state.root else {
-            deliveryNotice = .noRepository(hash: hash)
-            return
+            // The two are not the same thing to say. A folder in no repository is the empty state;
+            // a root that did not resolve because `git` failed is a failure that must name the
+            // tool it was about, or the user is sent to look at a repository that is fine.
+            deliveryNotice = state.error.map { .notReadable(hash: hash, tool: $0.tool) }
+                          ?? .noRepository(hash: hash)
+            return .answered
         }
-        switch Self.match(hash, in: state.commits) {
-        case .one(let found):
-            await choose(found)
-            return
-        case .ambiguous(let count):
-            deliveryNotice = .ambiguousPrefix(prefix: hash, matches: count)
-            return
-        case .none:
-            break
+        // A **full** hash is decided against the window at once: it cannot become ambiguous
+        // further down the history. A prefix can, and is walked (§7).
+        if let exact = state.commits.first(where: { $0.hash == hash }) {
+            await choose(exact)
+            return .answered
         }
-        await page(for: hash, root: root)
+        return await page(for: hash, root: root)
     }
 
     /// Clicking a changed file. It emits `.diff` and does **nothing else**: no tab selection, no
@@ -233,42 +305,111 @@ public final class SourceControlModel: PanelTabSession {
     /// something the user did on purpose — `rm -rf`, a `mv`, a worktree pruned. The watch is torn
     /// down with it, because a stream armed on an inode nobody will write again goes quiet and the
     /// panel would then show a stale repository for ever.
+    ///
+    /// **And it does not latch** (§5, as amended). A `mv`, a `git worktree` churn or a checkout
+    /// that replaces the directory reaches this routinely, so the read flag is cleared and the
+    /// next activation reads again; the empty state's own notice carries the action that recovers
+    /// it. An empty state with no way out is a panel that has to be restarted.
     private func rootWentAway() {
-        generation += 1
-        detailGeneration += 1
-        deactivate()
+        invalidateEveryEpoch()
+        stopWatch()
         state = RepositoryState()
-        selection = nil
-        changes = []
+        select(nil)
         deliveryNotice = nil
-        isLoading = false
-        isLoadingDetail = false
+        hasRead = false
     }
 
+    /// Arms the stream, or moves it onto a root that has changed under the panel (§7).
+    ///
+    /// `watch == nil` is not the condition: a cycle that resolves a *different* repository leaves
+    /// the old stream on the old root, and edits in the new one then produce no working-tree row
+    /// and `.rootGone` can never fire.
     private func armWatchIfNeeded() {
-        guard watchesForChanges, watch == nil, let root = state.root else { return }
+        guard watchesForChanges, !isTornDown, let root = state.root else { return }
+        guard watchedRoot != root else { return }
+        stopWatch()
         let watch = RepositoryWatch(root: root) { [weak self] event in
             // The watch invokes this under its own lock and forbids re-entry, so the work is
             // handed to the main actor rather than done here.
             Task { @MainActor [weak self] in await self?.handle(event) }
         }
         self.watch = watch
+        watchedRoot = root
         isWatchArmed = watch.start()
         watchFailedToArm = !isWatchArmed
-        if !isWatchArmed { self.watch = nil }
+        if !isWatchArmed {
+            self.watch = nil
+            watchedRoot = nil
+        }
+    }
+
+    private func stopWatch() {
+        watch?.stop()
+        watch = nil
+        watchedRoot = nil
+        isWatchArmed = false
+        watchFailedToArm = false
+    }
+
+    // MARK: - the epochs, and the one place a loading flag is cleared
+
+    private func claim(window: Bool, status: Bool) -> Claim {
+        var claim = Claim()
+        if window {
+            windowEpoch += 1
+            claim.window = windowEpoch
+        }
+        if status {
+            statusEpoch += 1
+            claim.status = statusEpoch
+        }
+        return claim
+    }
+
+    private func holdsWindow(_ claim: Claim) -> Bool { claim.window == windowEpoch }
+    private func holdsStatus(_ claim: Claim) -> Bool { claim.status == statusEpoch }
+    /// True when a read holds none of the groups it claimed, and therefore has nothing to say.
+    private func isSuperseded(_ claim: Claim) -> Bool { !holdsWindow(claim) && !holdsStatus(claim) }
+
+    /// Every read in flight is about a document that no longer exists: a different root, a
+    /// teardown, a root that went away.
+    private func invalidateEveryEpoch() {
+        windowEpoch += 1
+        statusEpoch += 1
+        detailEpoch += 1
+    }
+
+    /// The one door in and the one door out of a read, so that **every** terminal path — published,
+    /// superseded, cancelled, failed — clears the flag the spinner is drawn from.
+    private func beginRead() {
+        readsInFlight += 1
+        isLoading = true
+    }
+
+    private func endRead() {
+        readsInFlight = max(0, readsInFlight - 1)
+        isLoading = readsInFlight > 0
+    }
+
+    private func beginDetailRead() {
+        detailReadsInFlight += 1
+        isLoadingDetail = true
+    }
+
+    private func endDetailRead() {
+        detailReadsInFlight = max(0, detailReadsInFlight - 1)
+        isLoadingDetail = detailReadsInFlight > 0
     }
 
     // MARK: - the read cycle (Design §3)
 
     private func load() async {
-        generation += 1
-        let mine = generation
-        isLoading = true
+        let claim = claim(window: true, status: true)
+        beginRead()
+        defer { endRead() }
 
         let loaded = await reader.load(limit: windowLimit)
-        guard mine == generation else { return }
-        isLoading = false
-
+        guard !isSuperseded(claim) else { return }
         if let error = loaded.error, Self.isCancellation(error) {
             // A cancelled read is one this panel asked to stop, not a failure the user is owed a
             // row about: the document that was on screen stands, nothing is published, and
@@ -276,11 +417,48 @@ public final class SourceControlModel: PanelTabSession {
             // `activate()` never reads again.
             return
         }
-        state = loaded
+        publish(loaded, claim: claim)
+    }
+
+    /// Writes only the groups this read still holds.
+    ///
+    /// A **different root** is the one case that is not a merge of two documents: the window, the
+    /// status, the selection and the changed-file list of the repository that was on screen all
+    /// describe a repository this panel is no longer showing, and a `.diff` link assembled from
+    /// two of them would hand C7.5's resolver a triple that never existed (§7).
+    private func publish(_ loaded: RepositoryState, claim: Claim) {
+        if holdsWindow(claim), loaded.root != state.root {
+            invalidateEveryEpoch()
+            state = loaded
+            select(nil)
+            deliveryNotice = nil
+            hasRead = true
+            // A new root is watched; *no* root leaves nothing to watch, and the stream that was
+            // armed on the old one has to go with it.
+            if state.root == nil { stopWatch() } else { armWatchIfNeeded() }
+            return
+        }
+        if let error = loaded.error {
+            // A failed cycle has no window and no status to publish: it publishes the row.
+            if holdsWindow(claim) { state.root = loaded.root }
+            state.error = error
+            hasRead = true
+            return
+        }
+        if holdsWindow(claim) {
+            state.root = loaded.root
+            state.commits = loaded.commits
+            state.error = nil
+        }
+        if holdsStatus(claim) {
+            state.status = loaded.status
+            state.error = nil
+        }
+        state.assignment = LaneAssignment.assign(commits: state.commits,
+                                                 headOID: state.status?.headOID,
+                                                 workingTreeIsDirty: state.status?.isClean == false)
         hasRead = true
-        deliveryNotice = nil
         reconcileSelection()
-        await refreshWorkingTreeDetailIfSelected()
     }
 
     /// §5's working-tree answer: **the status only**, and the lanes recomputed over the window
@@ -288,11 +466,13 @@ public final class SourceControlModel: PanelTabSession {
     ///
     /// It is one `git status` and no `git log`, because a working-tree write cannot change the
     /// history — and `LaneAssignment.assign` is a pure function, so row zero appears and vanishes
-    /// without a second process. That is what G1.5's one-second bound is bought with.
+    /// without a second process. That is what G1.5's one-second bound is bought with. It claims
+    /// the status group and nothing else, so a cycle reading the window alongside it survives.
     private func readStatus() async {
         guard let root = state.root else { return }
-        generation += 1
-        let mine = generation
+        let claim = claim(window: false, status: true)
+        beginRead()
+        defer { endRead() }
 
         let status: WorkingTreeStatus
         do {
@@ -300,19 +480,19 @@ public final class SourceControlModel: PanelTabSession {
                                                       environment: environment.variables,
                                                       runner: runner)
         } catch ToolError.notARepository {
-            guard mine == generation else { return }
+            guard holdsStatus(claim) else { return }
             // The root stopped being a repository between two reads. The empty state is the
             // truthful answer, and the same one `.rootGone` gives.
             rootWentAway()
             return
         } catch {
-            guard mine == generation else { return }
+            guard holdsStatus(claim) else { return }
             let failure = RepositoryError(error)
             guard !Self.isCancellation(failure) else { return }
             state.error = failure
             return
         }
-        guard mine == generation else { return }
+        guard holdsStatus(claim) else { return }
         state.status = status
         state.error = nil
         state.assignment = LaneAssignment.assign(commits: state.commits, headOID: status.headOID,
@@ -326,17 +506,27 @@ public final class SourceControlModel: PanelTabSession {
     /// Only two of them: the empty state holds no rows at all, and a working tree that went clean
     /// no longer has a row zero to keep selected. A commit selected and then paged out of the
     /// window keeps its detail — the commit still exists, and the pane it is drawn in is not the
-    /// graph.
+    /// graph. (A change of root is not reconciled here: it drops the selection outright, in
+    /// `publish`, because the commit itself is one this panel is no longer showing.)
     private func reconcileSelection() {
         if state.isEmptyState {
-            selection = nil
-            changes = []
+            select(nil)
             return
         }
         if selection == .workingTree, state.status?.isClean != false {
-            selection = nil
-            changes = []
+            select(nil)
         }
+    }
+
+    /// The one place `selection` is written.
+    ///
+    /// It bumps the detail epoch, because a selection change invalidates a detail read in flight
+    /// through a channel that read cannot otherwise see — and a detail read that returns to find
+    /// its selection gone would leave its loading flag set for ever.
+    private func select(_ next: Selection?) {
+        detailEpoch += 1
+        selection = next
+        changes = []
     }
 
     private func refreshWorkingTreeDetailIfSelected() async {
@@ -347,17 +537,17 @@ public final class SourceControlModel: PanelTabSession {
     // MARK: - the detail (Design §6)
 
     private func choose(_ commit: GitCommit) async {
-        selection = .commit(commit.hash)
-        changes = []
+        select(.commit(commit.hash))
         await loadDetail(for: .commit(commit.hash))
     }
 
     /// One read per selection, and the answer is published only if it is still the selection.
     private func loadDetail(for selection: Selection) async {
         guard let root = state.root else { return }
-        detailGeneration += 1
-        let mine = detailGeneration
-        isLoadingDetail = true
+        detailEpoch += 1
+        let mine = detailEpoch
+        beginDetailRead()
+        defer { endDetailRead() }
 
         let result: RepositoryResult<[FileChange]>
         switch selection {
@@ -366,12 +556,9 @@ public final class SourceControlModel: PanelTabSession {
         case .commit(let hash):
             result = await reader.changes(in: hash, root: root)
         }
-        // The selection may have moved on, the whole repository may have been re-read under a
-        // different root, or the panel may have been torn down; a stale answer writes nothing.
-        guard mine == detailGeneration, self.selection == selection, state.root == root else {
-            return
-        }
-        isLoadingDetail = false
+        // The selection may have moved on, or the whole repository may have been re-read under a
+        // different root; both bump this epoch, and a stale answer writes nothing.
+        guard mine == detailEpoch else { return }
         switch result {
         case .value(let changes):
             self.changes = changes
@@ -395,49 +582,54 @@ public final class SourceControlModel: PanelTabSession {
     /// question nobody asked. The walk also stops early when a page returns no more commits than
     /// the last one: the history has ended, and four more reads of the same listing would say the
     /// same thing.
-    private func page(for hash: String, root: URL) async {
-        generation += 1
-        let mine = generation
-        isLoading = true
+    ///
+    /// **A prefix is unique in the history the walk covered, not in one page** (§7, as amended).
+    /// One match on page one and another on page two is an ambiguous prefix, and deciding at the
+    /// first page that yields a single match is exactly the arbitrary pick §7 forbids — so the
+    /// walk reaches its bound, or the end of the history, before it calls a prefix unique. A full
+    /// hash is the one answer settled early, in `deliver`, because it cannot become ambiguous.
+    private func page(for hash: String, root: URL) async -> Delivery {
+        let claim = claim(window: true, status: false)
+        beginRead()
+        defer { endRead() }
 
         var window = state.commits
-        for _ in 0..<Self.pagingBound {
+        pages: for _ in 0..<Self.pagingBound {
             let result = await reader.page(after: window, root: root, limit: windowLimit)
-            guard mine == generation else { return }
+            guard holdsWindow(claim) else { return .interrupted }
             switch result {
             case .notARepository:
                 rootWentAway()
                 deliveryNotice = .noRepository(hash: hash)
-                return
+                return .answered
             case .failed(let error):
-                isLoading = false
-                guard !Self.isCancellation(error) else { return }
+                guard !Self.isCancellation(error) else { return .interrupted }
                 state.error = error
-                return
+                deliveryNotice = .notReadable(hash: hash, tool: error.tool)
+                return .answered
             case .value(let paged):
                 let grew = paged.count > window.count
                 window = paged
-                switch Self.match(hash, in: window) {
-                case .one(let found):
-                    isLoading = false
+                if let exact = window.first(where: { $0.hash == hash }) {
                     publish(window: window)
-                    await choose(found)
-                    return
-                case .ambiguous(let count):
-                    isLoading = false
-                    deliveryNotice = .ambiguousPrefix(prefix: hash, matches: count)
-                    return
-                case .none:
-                    guard grew else {
-                        isLoading = false
-                        deliveryNotice = .commitNotFound(hash: hash)
-                        return
-                    }
+                    await choose(exact)
+                    return .answered
                 }
+                // Two matches settle the question as surely as the bound does.
+                if window.filter({ $0.hash.hasPrefix(hash) }).count > 1 { break pages }
+                if !grew { break pages }
             }
         }
-        isLoading = false
-        deliveryNotice = .commitNotFound(hash: hash)
+        switch Self.match(hash, in: window) {
+        case .one(let found):
+            publish(window: window)
+            await choose(found)
+        case .ambiguous(let count):
+            deliveryNotice = .ambiguousPrefix(prefix: hash, matches: count)
+        case .none:
+            deliveryNotice = .commitNotFound(hash: hash)
+        }
+        return .answered
     }
 
     /// Replaces the window and re-assigns lanes over it. The status is the one already held: a

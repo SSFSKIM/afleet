@@ -191,9 +191,14 @@ final class SourceControlModelTests: XCTestCase {
         guard case .diff(let ref) = opened.link else { return XCTFail("the link is not a diff") }
         XCTAssertEqual(ref.path, "src/one.txt")
         XCTAssertEqual(ref.base, .commitAgainstParent(head))
-        XCTAssertEqual(ref.repository.standardizedFileURL.resolvingSymlinksInPath(),
-                       (model.state.root ?? URL(filePath: "/"))
-                           .standardizedFileURL.resolvingSymlinksInPath())
+        // Folded into a `Bool`: `XCTAssertEqual` on two `URL`s prints both temporary paths into
+        // the failure log, which is the dump this file's own header forbids (§6.3).
+        let namesTheRepositoryThatWasRead =
+            ref.repository.standardizedFileURL.resolvingSymlinksInPath()
+                == (model.state.root ?? URL(filePath: "/"))
+                    .standardizedFileURL.resolvingSymlinksInPath()
+        XCTAssertTrue(namesTheRepositoryThatWasRead,
+                      "the link named a repository other than the one that was read")
         XCTAssertEqual(opened.destination, .newWindow,
                        "the destination the click carried did not reach open(_:from:)")
         XCTAssertTrue(links.registrations.isEmpty,
@@ -342,6 +347,13 @@ final class SourceControlModelTests: XCTestCase {
         await model.handle(.changed(.history))
         XCTAssertEqual(model.readout.rows.count, 3)
         XCTAssertFalse(model.readout.hasWorkingTreeRow)
+
+        // And the exclusion §5 calls load-bearing: an ignored path drives no read at all. The
+        // watch provably never delivers one today, so this is the classification's second fence.
+        let beforeIgnore = recorder.verbs(of: .git).count
+        await model.handle(.changed(.ignore))
+        XCTAssertEqual(recorder.verbs(of: .git).count, beforeIgnore,
+                       "an ignored path drove a read")
         assertOnlyReadVerbs(recorder, atLeast: 6)
     }
 
@@ -406,6 +418,13 @@ final class SourceControlModelTests: XCTestCase {
         XCTAssertTrue(model.readout.rows.contains { $0.commit?.hash == wanted },
                       "the window was not extended, so the selected row is not on screen")
         XCTAssertTrue(model.readout.rows.contains { $0.isSelected })
+        // And it is still a **window**: an ordered, newest-first slice of the history. A paging
+        // read that reversed or re-ordered what it assigned satisfies "the row is on screen" and
+        // draws every lane and edge backwards.
+        let onScreen = model.readout.rows.compactMap { $0.commit?.hash }
+        XCTAssertEqual(onScreen, Array(hashes.reversed().prefix(onScreen.count)),
+                       "the extended window is not the newest-first slice git listed")
+        XCTAssertGreaterThanOrEqual(onScreen.count, 7, "the window did not reach the wanted row")
         XCTAssertGreaterThan(recorder.verbs(of: .git).filter { $0 == "log" }.count, 1,
                              "nothing was paged")
         assertOnlyReadVerbs(recorder, atLeast: 4)
@@ -492,7 +511,14 @@ final class SourceControlModelTests: XCTestCase {
         XCTAssertNil(model.selection)
         XCTAssertEqual(model.deliveryNotice,
                        .noRepository(hash: "0123456789abcdef0123456789abcdef01234567"))
-        XCTAssertEqual(model.readout.notice?.placement, .row)
+        // The **empty state**, not a row floated over nothing: the placement rule is about what
+        // is behind the notice, and behind this one there is no graph at all. The message answers
+        // both questions the user has, which is why it replaces the empty state's own.
+        let notice = try XCTUnwrap(model.readout.notice)
+        XCTAssertEqual(notice.placement, .emptyState)
+        XCTAssertTrue(notice.message.contains("not a Git repository"))
+        XCTAssertTrue(notice.message.contains("0123456789ab"), "the row did not name the commit")
+        XCTAssertEqual(notice.hint, SourceControlReadout.lookAgainHint)
     }
 
     // MARK: - 8. a failure names its tool, and carries no byte the tool printed
@@ -591,7 +617,8 @@ final class SourceControlModelTests: XCTestCase {
         XCTAssertTrue(model.readout.isEmptyState)
         XCTAssertNil(model.state.error, "the empty state was rendered as an error")
         XCTAssertEqual(model.readout.notice?.placement, .emptyState)
-        XCTAssertNil(model.readout.notice?.hint)
+        XCTAssertEqual(model.readout.notice?.hint, SourceControlReadout.lookAgainHint,
+                       "the empty state offers no way out of itself")
         XCTAssertTrue(model.readout.rows.isEmpty)
         XCTAssertNil(model.readout.detail)
         assertOnlyReadVerbs(recorder, atLeast: 1)
@@ -643,6 +670,541 @@ final class SourceControlModelTests: XCTestCase {
 
         assertOnlyReadVerbs(recorder, atLeast: 12)
         XCTAssertFalse(links.opened.isEmpty, "no door emitted a link, so the sweep missed one")
+    }
+
+    // MARK: - 10. state and lifecycle: the epochs, the loading flags, and the doors
+
+    /// §5, as amended: supersession is claimed **per field group**. A status-only read writes the
+    /// status; it does not discard the window a full cycle is in flight for, and a full cycle does
+    /// not write a status older than the one on screen.
+    ///
+    /// The gate is on `status`, which makes the ordering a fact rather than a race: the gated
+    /// invocation's own process has already returned when the gate reports it is holding, so the
+    /// edit below is strictly after the cycle's status read and strictly before the status-only
+    /// read that supersedes it.
+    func testAStatusReadDoesNotDiscardTheCycleItInterrupts() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        try await repo.commit("commit 1", files: ["notes/1.txt": "line 1\n"])
+        let gate = GatedRunner(verb: "status", skipping: 1)
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: gate, links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: false)
+        await model.activate()
+        XCTAssertEqual(model.readout.rows.count, 2)
+
+        try await repo.commit("commit 2", files: ["notes/2.txt": "line 2\n"])
+        let cycle = Task { await model.refresh() }
+        _ = try await waitUntil("the cycle's status read is held") { gate.isHolding }
+
+        // A working-tree write, and the status-only read §5 answers it with.
+        try repo.write("notes/3.txt", "line 3\n")
+        await model.handle(.changed(.workingTree))
+        gate.release()
+        await cycle.value
+
+        XCTAssertEqual(model.readout.rows.count, 4,
+                       "three commits and a working-tree row; the cycle's window or the "
+                       + "status-only read's status was thrown away")
+        XCTAssertTrue(model.readout.hasWorkingTreeRow,
+                      "the cycle published a status older than the one on screen")
+        XCTAssertFalse(model.isLoading)
+    }
+
+    /// T-d's other half: a cycle that really was superseded writes nothing. Both reads are in
+    /// flight at once, which is what makes the epoch guard falsifiable at all.
+    func testASupersededCycleDoesNotPublishItsStaleWindow() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        try await repo.commit("commit 1", files: ["notes/1.txt": "line 1\n"])
+        let gate = GatedRunner(verb: "log", skipping: 1)
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: gate, links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: false)
+        await model.activate()
+
+        let stale = Task { await model.refresh() }
+        _ = try await waitUntil("the first cycle's window read is held") { gate.isHolding }
+        try await repo.commit("commit 2", files: ["notes/2.txt": "line 2\n"])
+        await model.refresh()
+        XCTAssertEqual(model.readout.rows.count, 3, "the second cycle did not publish")
+
+        gate.release()
+        await stale.value
+        XCTAssertEqual(model.readout.rows.count, 3,
+                       "a superseded cycle published the window it read before the newer one")
+        XCTAssertFalse(model.isLoading)
+    }
+
+    /// S2/T-g: the loading flag is a function of the reads in flight, not a memory of whichever
+    /// read finished last.
+    ///
+    /// Both halves are the defect: a flag the superseded path never clears latches on for ever —
+    /// which also disables `activate()`'s first read for the rest of the session — and a flag the
+    /// *newer* read clears while an older one is still running draws an idle panel over a read.
+    func testTheLoadingFlagFollowsTheReadsInFlightAndNotTheLastToFinish() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        let gate = GatedRunner(verb: "log", skipping: 1)
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: gate, links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: false)
+        await model.activate()
+        XCTAssertFalse(model.isLoading)
+
+        let held = Task { await model.refresh() }
+        _ = try await waitUntil("the first cycle's window read is held") { gate.isHolding }
+        await model.refresh()
+        XCTAssertTrue(model.isLoading,
+                      "the panel drew itself idle with a read still in flight")
+
+        gate.release()
+        await held.value
+        XCTAssertFalse(model.isLoading, "a superseded read left the loading flag latched")
+        XCTAssertFalse(model.readout.isLoading)
+        XCTAssertTrue(model.hasRead)
+        XCTAssertEqual(model.readout.rows.count, 1)
+    }
+
+    /// S4/T-g: a selection change invalidates a detail read through a channel the detail epoch
+    /// cannot see, so the flag must be cleared by the read itself and not by its success path.
+    func testASelectionDroppedMidDetailReadDoesNotLatchTheDetailFlag() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        try repo.write("notes/0.txt", "edited\n")
+        let gate = GatedRunner(verb: "diff", skipping: 0)
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: gate, links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: false)
+        await model.activate()
+        XCTAssertTrue(model.readout.hasWorkingTreeRow)
+
+        let selecting = Task { await model.selectWorkingTree() }
+        _ = try await waitUntil("the detail read is held") { gate.isHolding }
+        // The edit is reverted, so row zero goes away and the selection with it.
+        try repo.write("notes/0.txt", "line 0\n")
+        await model.handle(.changed(.workingTree))
+        gate.release()
+        await selecting.value
+
+        XCTAssertNil(model.selection)
+        XCTAssertTrue(model.changes.isEmpty,
+                      "the answer to a selection that is gone was published anyway")
+        XCTAssertNil(model.readout.detail)
+        XCTAssertFalse(model.isLoadingDetail, "the detail flag latched on a dropped selection")
+        XCTAssertFalse(model.readout.isLoadingDetail)
+    }
+
+    /// T-e: the detail's epoch is its own. A background cycle re-reads the window and must not
+    /// throw away the changed-file list the user is waiting for.
+    func testADetailReadSurvivesABackgroundCycle() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        let head = try await repo.commit("commit 1", files: ["notes/1.txt": "line 1\n"])
+        let gate = GatedRunner(verb: "show", skipping: 0)
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: gate, links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: false)
+        await model.activate()
+
+        let selecting = Task { await model.select(commit: head) }
+        _ = try await waitUntil("the detail read is held") { gate.isHolding }
+        await model.handle(.changed(.history))
+        gate.release()
+        await selecting.value
+
+        XCTAssertEqual(model.selection, .commit(head))
+        XCTAssertEqual(model.readout.detail?.files.map(\.path), ["notes/1.txt"],
+                       "a background cycle threw the detail read away")
+        XCTAssertFalse(model.isLoadingDetail)
+    }
+
+    /// §7, as amended: a `.commit` link is a click, so a delivery superseded by a background cycle
+    /// is retried rather than dropped. The panel showing nothing at all is the failure the four
+    /// answers exist to prevent.
+    func testADeliverySupersededMidPagingIsRetriedAndStillAnswers() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        var hashes: [String] = []
+        for index in 0..<6 {
+            hashes.append(try await repo.commit("commit \(index)",
+                                                files: ["notes/\(index).txt": "line \(index)\n"]))
+        }
+        // One `log` for the activation, and the delivery's first paging read is the gated one.
+        let gate = GatedRunner(verb: "log", skipping: 1)
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: gate, links: nil, windowLimit: 2,
+                                       watchesForChanges: false)
+        await model.activate()
+        let wanted = hashes[0]
+        XCTAssertFalse(model.readout.rows.contains { $0.commit?.hash == wanted })
+
+        let delivering = Task { await model.select(commit: wanted) }
+        _ = try await waitUntil("the paging read is held") { gate.isHolding }
+        await model.handle(.changed(.history))
+        gate.release()
+        await delivering.value
+
+        XCTAssertEqual(model.selection, .commit(wanted),
+                       "a superseded delivery produced nothing on screen")
+        XCTAssertNil(model.deliveryNotice)
+        XCTAssertFalse(model.isLoading)
+    }
+
+    /// The same clause where the retry cannot get through either: reported, never silent.
+    func testADeliveryWhoseReadsAreCancelledIsReportedAndNotDropped() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let (repo, hashes) = try await linearRepository(tree, commits: 6)
+        let cancelling = ThrowingRunner(underlying: ToolRunner())
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: cancelling, links: nil, windowLimit: 2,
+                                       watchesForChanges: false)
+        await model.activate()
+        let wanted = try XCTUnwrap(hashes.first)
+        cancelling.thrown = .cancelled(tool: .git)
+
+        await model.select(commit: wanted)
+
+        XCTAssertNil(model.selection)
+        XCTAssertEqual(model.deliveryNotice, .searchInterrupted(hash: wanted),
+                       "a cancelled delivery ended in silence")
+        XCTAssertEqual(model.readout.notice?.placement, .row)
+        XCTAssertFalse(model.isLoading)
+    }
+
+    /// §7, as amended: a background cycle does not clear a delivery notice the user has not
+    /// answered, and the user's own Refresh does.
+    func testABackgroundCycleKeepsAnUnansweredDeliveryNoticeAndRefreshClearsIt() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        let absent = "0123456789abcdef0123456789abcdef01234567"
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: RecordingRunner(), links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: false)
+        await model.activate()
+        await model.select(commit: absent)
+        XCTAssertEqual(model.deliveryNotice, .commitNotFound(hash: absent))
+
+        try await repo.commit("a commit somebody else made", files: ["notes/1.txt": "line 1\n"])
+        await model.handle(.changed(.history))
+        XCTAssertEqual(model.deliveryNotice, .commitNotFound(hash: absent),
+                       "a background cycle wiped a notice the user had not answered")
+        XCTAssertEqual(model.readout.rows.count, 2, "the background cycle did not publish")
+        await model.handle(.changed(.workingTree))
+        XCTAssertEqual(model.deliveryNotice, .commitNotFound(hash: absent))
+
+        await model.refresh()
+        XCTAssertNil(model.deliveryNotice, "the user's own Refresh did not clear the notice")
+    }
+
+    /// §7, as amended: a prefix is unique in the history the walk covered, not in one page.
+    ///
+    /// The corpus is built so the two commits sharing the prefix straddle the loaded window: one
+    /// inside it, one only reachable by paging. Deciding at the first page that yields a single
+    /// match is the arbitrary pick §7 forbids.
+    func testAPrefixAmbiguousBeyondTheWindowIsNotAnArbitraryPick() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let (repo, hashes) = try await linearRepository(tree, commits: 20)
+        // Newest first, which is the order the window holds.
+        let ordered = hashes.reversed().map { $0 }
+
+        var found: (prefix: String, first: Int, second: Int)?
+        for length in 1...4 where found == nil {
+            for (index, hash) in ordered.enumerated() {
+                let prefix = String(hash.prefix(length))
+                let matches = ordered.enumerated().filter { $0.element.hasPrefix(prefix) }
+                guard matches.count == 2, matches[0].offset == index else { continue }
+                found = (prefix, matches[0].offset, matches[1].offset)
+                break
+            }
+        }
+        let pair = try XCTUnwrap(found, "no two of the twenty hashes share a short prefix")
+        // A window that holds the first match and not the second, and a bound that still reaches
+        // the second: the reader grows the window by `limit` on each of five pages.
+        let limit = max(pair.first + 1, (pair.second + 6) / 6)
+        try XCTSkipUnless(limit <= pair.second, "the two matches are adjacent in this corpus")
+        let (model, _) = model(repo, windowLimit: limit)
+        await model.activate()
+        XCTAssertTrue(model.readout.rows.contains { $0.commit?.hash == ordered[pair.first] })
+        XCTAssertFalse(model.readout.rows.contains { $0.commit?.hash == ordered[pair.second] })
+
+        await model.select(commit: pair.prefix)
+
+        XCTAssertNil(model.selection, "a prefix ambiguous in the history picked a commit")
+        XCTAssertEqual(model.deliveryNotice, .ambiguousPrefix(prefix: pair.prefix, matches: 2))
+    }
+
+    /// S10: a delivery into a channel whose read **failed** names the tool, and never tells the
+    /// user their folder is not a repository.
+    func testADeliveryIntoAChannelWhoseReadFailedNamesTheTool() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        // A failure that is **not** `notARepository`: `rev-parse` exiting non-zero is how a folder
+        // in no repository answers, so a read that failed for another reason is the case here.
+        let failing = ThrowingVerbRunner(verb: "rev-parse",
+                                         error: .spawnFailed(tool: .git, message: "unreachable"),
+                                         underlying: ToolRunner())
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: failing, links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: false)
+        await model.activate()
+        XCTAssertNotNil(model.state.error, "the read did not fail, so this proves nothing")
+        XCTAssertFalse(model.readout.isEmptyState)
+        let absent = "0123456789abcdef0123456789abcdef01234567"
+
+        await model.select(commit: absent)
+
+        XCTAssertEqual(model.deliveryNotice, .notReadable(hash: absent, tool: .git),
+                       "a failed read was reported as a folder in no repository")
+        let notice = try XCTUnwrap(model.readout.notice)
+        XCTAssertEqual(notice.placement, .row)
+        XCTAssertTrue(notice.message.contains("Git"), "the row did not name the tool")
+    }
+
+    /// §5, as amended: `.rootGone` is recoverable — the read latch clears, the next activation
+    /// reads, and the empty state carries the one action that gets out of it.
+    func testRootGoneIsRecoverableByTheNextActivation() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let (repo, _) = try await linearRepository(tree, commits: 2)
+        let (model, _) = model(repo, watching: true)
+        await model.activate()
+        XCTAssertTrue(model.isWatchArmed)
+
+        await model.handle(.rootGone)
+
+        XCTAssertFalse(model.hasRead, "the empty state latched the read flag")
+        XCTAssertFalse(model.isLoading)
+        let notice = try XCTUnwrap(model.readout.notice)
+        XCTAssertEqual(notice.placement, .emptyState)
+        XCTAssertEqual(notice.hint, SourceControlReadout.lookAgainHint,
+                       "the empty state offers no way out of itself")
+
+        await model.activate()
+
+        XCTAssertEqual(model.readout.rows.count, 2, "the next activation never read again")
+        XCTAssertTrue(model.isWatchArmed, "the watch was not re-armed on the recovered root")
+        model.deactivate()
+    }
+
+    /// The same rule where the new root is **no** root: a cycle that finds the empty state tears
+    /// the stream down, because a stream armed on a repository that is not there any more goes
+    /// quiet and the panel would show a stale graph for ever.
+    func testACycleThatFindsTheEmptyStateStopsTheWatch() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: RecordingRunner(), links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: true)
+        await model.activate()
+        XCTAssertTrue(model.isWatchArmed)
+
+        // The repository stops being one under the panel. The armed stream sees the removal and
+        // re-reads on its own, so the wait is for the burst to end rather than for a duration:
+        // half-removed, `rev-parse` still answers and the two reads behind it do not, which is a
+        // failure row and not the empty state, and this test is about neither.
+        try repo.remove(".git")
+        try await Task.sleep(for: .milliseconds(800))
+        await model.refresh()
+
+        XCTAssertTrue(model.readout.isEmptyState)
+        XCTAssertFalse(model.isWatchArmed,
+                       "the stream stayed armed on a repository that is no longer one")
+        XCTAssertNil(model.watchedRoot?.lastPathComponent,
+                     "a stream is armed on a root this panel is not showing")
+        model.deactivate()
+    }
+
+    /// §7, as amended: a cycle that resolves a different repository invalidates the selection and
+    /// re-arms the watch on the new root. Otherwise a `.diff` link would carry a repository, a
+    /// path and a base that were never read together.
+    func testACycleResolvingADifferentRootDropsTheSelectionAndReArmsTheWatch() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        let head = try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        let nested = try repo.directory("nested")
+        let model = SourceControlModel(cwd: nested, environment: Self.environment(repo),
+                                       runner: RecordingRunner(), links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: true)
+        await model.activate()
+        XCTAssertEqual(model.state.root?.lastPathComponent, "repo")
+        XCTAssertEqual(model.watchedRoot?.lastPathComponent, "repo")
+        await model.select(commit: head)
+        XCTAssertEqual(model.selection, .commit(head))
+
+        // The channel's own directory becomes a repository of its own — a `git init` a session
+        // ran, a submodule swapped, a worktree churned.
+        try await repo.run(["init", "-b", "main"], in: nested)
+        try repo.write("nested/inside.txt", "inside\n")
+        try await repo.run(["add", "-A"], in: nested)
+        try await repo.run(["commit", "-m", "the nested repository's own commit"], in: nested,
+                           extraEnvironment: ["GIT_AUTHOR_DATE": "1614800100 +0000",
+                                              "GIT_COMMITTER_DATE": "1614800100 +0000"])
+        await model.refresh()
+
+        XCTAssertEqual(model.state.root?.lastPathComponent, "nested", "the new root was not read")
+        XCTAssertNil(model.selection, "a selection survived a change of root")
+        XCTAssertTrue(model.changes.isEmpty, "a changed-file list survived a change of root")
+        XCTAssertTrue(model.isWatchArmed)
+        XCTAssertEqual(model.watchedRoot?.lastPathComponent, "nested",
+                       "the watch stayed armed on the repository that is no longer on screen")
+        model.deactivate()
+    }
+
+    /// S7: `deactivate()` fences a read suspended across it, so nothing arms a stream nobody will
+    /// stop while the session sits in the host's cache.
+    func testDeactivateFencesAnActivationInFlight() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        let gate = GatedRunner(verb: "log", skipping: 0)
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: gate, links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: true)
+
+        let activating = Task { await model.activate() }
+        _ = try await waitUntil("the cycle's window read is held") { gate.isHolding }
+        model.deactivate()
+        gate.release()
+        await activating.value
+
+        XCTAssertFalse(model.isWatchArmed,
+                       "a cycle suspended across the teardown armed a watch nobody will stop")
+        XCTAssertNil(model.watchedRoot?.lastPathComponent,
+                     "a stream is armed on a root this panel is not showing")
+        XCTAssertFalse(model.hasRead, "a fenced cycle published its document")
+        XCTAssertTrue(model.readout.rows.isEmpty)
+        XCTAssertFalse(model.isLoading)
+    }
+
+    /// S12: a commit selected and then paged out of the window draws the hash and the files it
+    /// holds, and **nothing it did not read**. An empty author and `1970-01-01` are values git
+    /// never reported (§6.3's mirror).
+    func testACommitPagedOutOfTheWindowDrawsNoInventedAuthorOrDate() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        var hashes: [String] = []
+        for index in 0..<3 {
+            hashes.append(try await repo.commit("commit \(index)",
+                                                files: ["notes/\(index).txt": "line \(index)\n"]))
+        }
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: RecordingRunner(), links: nil, windowLimit: 3,
+                                       watchesForChanges: false)
+        await model.activate()
+        await model.select(commit: hashes[0])
+        guard case .commit(let held)? = model.readout.detail else {
+            return XCTFail("the detail is not a commit's")
+        }
+        XCTAssertEqual(held.subject, "commit 0")
+        XCTAssertEqual(held.authorName, GitRepository.authorName)
+
+        for index in 3..<6 {
+            try await repo.commit("commit \(index)",
+                                  files: ["notes/\(index).txt": "line \(index)\n"])
+        }
+        await model.handle(.changed(.history))
+
+        XCTAssertEqual(model.selection, .commit(hashes[0]), "the detail was dropped, not paged out")
+        guard case .commit(let detail)? = model.readout.detail else {
+            return XCTFail("the detail is not a commit's")
+        }
+        XCTAssertEqual(detail.hash, hashes[0])
+        XCTAssertEqual(detail.files.map(\.path), ["notes/0.txt"], "the file list it did read")
+        XCTAssertNil(detail.authorName, "the panel drew an author it never read")
+        XCTAssertNil(detail.subject, "the panel drew a subject it never read")
+        XCTAssertNil(detail.authorDate, "the panel drew a date it never read")
+    }
+
+    // MARK: - 11. a rename's link, and a failure with no exit code
+
+    /// T-a: the link a rename emits carries the **new** path — `FileChange.path` — because that is
+    /// the side C7.5's resolver opens as the working one.
+    func testARenamedFileEmitsADiffLinkCarryingTheNewPath() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("the first commit", files: ["src/one.txt": String(repeating: "line\n", count: 40)])
+        try await repo.rename("src/one.txt", to: "src/two.txt")
+        let head = try await repo.commitStaged("a rename")
+        let links = RecordingLinks()
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: RecordingRunner(), links: links,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: false)
+        await model.activate()
+        await model.select(commit: head)
+
+        let files = try XCTUnwrap(model.readout.detail?.files)
+        let renamed = try XCTUnwrap(files.first { if case .renamed = $0.status { return true }
+                                                  return false },
+                                    "the commit's list carries no renamed row")
+        XCTAssertEqual(renamed.path, "src/two.txt", "the row named the side it came from")
+        guard case .renamed(let from, _) = renamed.status else { return XCTFail("not a rename") }
+        XCTAssertEqual(from, "src/one.txt")
+
+        await model.openDiff(for: change(named: renamed.path, in: model))
+        XCTAssertEqual(links.opened.count, 1)
+        guard case .diff(let ref) = try XCTUnwrap(links.opened.first?.link) else {
+            return XCTFail("the link is not a diff")
+        }
+        XCTAssertEqual(ref.path, "src/two.txt", "the link carried the old side of a rename")
+        XCTAssertEqual(ref.base, .commitAgainstParent(head))
+    }
+
+    /// T-c: the notice branch that renders `RepositoryError.detail` verbatim, driven with a seeded
+    /// token. It is reached only by failures with **no exit code**, and the sweep above never
+    /// touched it, so nothing proved that composing a detail out of a tool's output would be
+    /// caught (§6.3, §11).
+    func testAFailureWithNoExitCodeRendersNoByteTheToolPrinted() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("the first commit", files: ["README.md": "loom\n"])
+        // Invented, and belonging to nobody (§11).
+        let token = "GRIMSBORO-7712"
+        let throwing = ThrowingVerbRunner(verb: "status",
+                                          error: .spawnFailed(tool: .git, message: token),
+                                          underlying: ToolRunner())
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: throwing, links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: false)
+
+        await model.activate()
+
+        let error = try XCTUnwrap(model.state.error, "a failed read raised no row")
+        XCTAssertNil(error.exitCode,
+                     "this case must have no exit code, or it drives the other notice branch")
+        let notice = try XCTUnwrap(model.readout.notice)
+        XCTAssertEqual(notice.placement, .row)
+        XCTAssertTrue(notice.message.contains("Git"), "the row did not name the tool")
+        let rendered = Self.renderedStrings(of: model.readout)
+        XCTAssertFalse(rendered.isEmpty, "the readout rendered nothing to search")
+        for string in rendered {
+            XCTAssertFalse(string.contains(token),
+                           "a rendered string carried a byte the tool printed")
+        }
     }
 
     // MARK: - helpers
@@ -725,6 +1287,77 @@ final class FailingVerbRunner: ToolRunning, @unchecked Sendable {
             return ToolOutput(stdout: Data(), stderr: Data(stderr.utf8), exitCode: exitCode,
                               timedOut: false)
         }
+        return try await underlying.run(tool, arguments: arguments, cwd: cwd,
+                                        environment: environment, timeout: timeout)
+    }
+}
+
+/// Runs everything for real, and holds the answer of **one** invocation of one verb until a test
+/// releases it.
+///
+/// The seam every interleaving test in this file needs. Without it each door is awaited to
+/// completion before the next is opened, no two reads are ever in flight together, and the epoch
+/// guards are unfalsifiable — a mutation replacing every one of them with `true` passed the whole
+/// suite. The gate closes *after* the underlying process has answered, so a test that observes
+/// `isHolding` knows that invocation's own read happened strictly before whatever it does next.
+final class GatedRunner: ToolRunning, @unchecked Sendable {
+
+    private let verb: String
+    private let skipping: Int
+    private let underlying: any ToolRunning
+    private let lock = NSLock()
+    private var seen = 0
+    private var reached = false
+    private var released = false
+
+    init(verb: String, skipping: Int = 0, underlying: any ToolRunning = ToolRunner()) {
+        self.verb = verb
+        self.skipping = skipping
+        self.underlying = underlying
+    }
+
+    /// True once the gated invocation has its answer and is waiting to hand it back.
+    var isHolding: Bool { lock.withLock { reached && !released } }
+
+    func release() { lock.withLock { released = true } }
+
+    func run(_ tool: Tool, arguments: [String], cwd: URL, environment: [String: String],
+             timeout: Duration) async throws -> ToolOutput {
+        let mine = lock.withLock { () -> Bool in
+            guard RecordingRunner.Invocation(tool: tool, arguments: arguments).verb == verb else {
+                return false
+            }
+            seen += 1
+            return seen == skipping + 1
+        }
+        let output = try await underlying.run(tool, arguments: arguments, cwd: cwd,
+                                              environment: environment, timeout: timeout)
+        guard mine else { return output }
+        lock.withLock { reached = true }
+        while !lock.withLock({ released }) { try await Task.sleep(for: .milliseconds(2)) }
+        return output
+    }
+}
+
+/// Throws one authored `ToolError` for one subcommand, and runs everything else for real.
+///
+/// `FailingVerbRunner`'s sibling for the failures that never reach an exit code — a spawn that
+/// failed, a budget that expired — which are the only ones whose `detail` a notice renders.
+final class ThrowingVerbRunner: ToolRunning, @unchecked Sendable {
+
+    private let verb: String
+    private let error: ToolError
+    private let underlying: any ToolRunning
+
+    init(verb: String, error: ToolError, underlying: any ToolRunning) {
+        self.verb = verb
+        self.error = error
+        self.underlying = underlying
+    }
+
+    func run(_ tool: Tool, arguments: [String], cwd: URL, environment: [String: String],
+             timeout: Duration) async throws -> ToolOutput {
+        if RecordingRunner.Invocation(tool: tool, arguments: arguments).verb == verb { throw error }
         return try await underlying.run(tool, arguments: arguments, cwd: cwd,
                                         environment: environment, timeout: timeout)
     }
