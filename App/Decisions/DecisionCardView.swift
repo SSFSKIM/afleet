@@ -32,6 +32,9 @@ struct DecisionCardView: View {
     /// Where a resolved refusal dialog's retracted uuids go (spec D11). A host with no list to
     /// filter passes none.
     let retraction: RetractionRegistry?
+    /// Where the refusal dialog's *Edit the prompt* puts the prompt back (contract Y6's fourth
+    /// site). A host with no composer passes none, and the answer still goes out.
+    let composer: (any ComposerSite)?
     /// An override of the `system/model_consent_fallback` frame the card already carries, for a host
     /// that holds one the fold has not attached.
     ///
@@ -49,6 +52,7 @@ struct DecisionCardView: View {
          isActive: Bool = false,
          answering: DecisionAnswering,
          retraction: RetractionRegistry? = nil,
+         composer: (any ComposerSite)? = nil,
          consentFallback: ModelConsentFallback? = nil) {
         self.card = card
         self.presentation = presentation
@@ -57,6 +61,7 @@ struct DecisionCardView: View {
         self.isActive = isActive
         self.answering = answering
         self.retraction = retraction
+        self.composer = composer
         self.consentFallback = consentFallback
     }
 
@@ -95,7 +100,8 @@ struct DecisionCardView: View {
                                 channel: channel, answering: answering)
         case .dialog(let request):
             DialogCardView(card: card, request: request, presentation: presentation,
-                           channel: channel, answering: answering, retraction: retraction)
+                           channel: channel, answering: answering, retraction: retraction,
+                           composer: composer)
         default:
             Text(card.summaryLine)
                 .font(presentation == .full ? .body : .callout)

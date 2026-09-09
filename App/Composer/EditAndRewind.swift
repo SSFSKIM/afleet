@@ -39,6 +39,20 @@ extension ComposerModel {
     /// one, and nil only for a composer whose timeline holds no user message at all.
     var lastSeenUserMessageUUID: String? { renderedUserMessages.last?.promptUUID }
 
+    /// The refusal dialog's *Edit the prompt*: the last prompt goes back into the field.
+    ///
+    /// **Only into an empty field, which is the engine's own guard** (`cli.pretty.js:523717`
+    /// requires the input box to be empty before it restores). A user who typed while the dialog
+    /// was up is looking at words the restore would silently replace, and the prompt they would
+    /// lose is the one still visible in the conversation above.
+    ///
+    /// The text is the newest rendered user message's, because that is the message the refused
+    /// turn was for — the engine reads the same thing out of its transcript.
+    func restoreLastPrompt() {
+        guard draft.isEmpty, let last = renderedUserMessages.last else { return }
+        draft = last.text
+    }
+
     /// *Edit* on one rendered user message.
     ///
     /// Honoured → the field is prefilled with `prefillText` **exactly as the engine returned it**,

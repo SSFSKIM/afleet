@@ -393,6 +393,33 @@ final class EditAndRewindTests: XCTestCase {
         await rig.finish()
     }
 
+    // MARK: - Site 4, the refusal dialog's *Edit the prompt*
+
+    /// Which text goes back into the field, and when it does not.
+    ///
+    /// The engine restores **the last human-typed message of the transcript**, and only while the
+    /// input box is empty (2.1.263 `cli.pretty.js:523717`, reached from the `refusal-fallback-edit`
+    /// abort at `:770399`). Both halves are asserted against the fold's own messages: an empty field
+    /// takes the newest rendered user message's text, and a field the user has typed into is left
+    /// exactly as it was — the words in front of the user were never given to anything and the
+    /// prompt they would replace is still in the conversation above.
+    func testRestoringTheLastPromptFillsAnEmptyFieldAndLeavesATypedOneAlone() async throws {
+        let rig = try await Rig()
+        let newest = try XCTUnwrap(rig.renderedUserMessages().last, "the fixture folded no user message to restore")
+
+        rig.composer.draft = ""
+        rig.composer.restoreLastPrompt()
+        XCTAssertTrue(rig.composer.draft == newest.text,
+                      "the restored field is not the newest of the fold's \(rig.renderedUserMessages().count) rendered message(s)")
+
+        let typed = "an invented half-typed reply"
+        rig.composer.draft = typed
+        rig.composer.restoreLastPrompt()
+        XCTAssertTrue(rig.composer.draft == typed,
+                      "restoring the prompt overwrote a \(typed.count)-character draft the user had typed")
+        await rig.finish()
+    }
+
     // MARK: - Nothing to fork from
 
     /// An edited message with no assistant record before it has no fork point: nothing is offered,

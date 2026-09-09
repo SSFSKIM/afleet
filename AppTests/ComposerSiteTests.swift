@@ -193,5 +193,10 @@ final class RecordingComposerSite: ComposerSite {
     var editNote: String?
     var interceptedReplacements: [String: String] = [:]
 
+    /// How many times site 4 was asked to put the last prompt back.
+    private(set) var restores = 0
+
     func edit(_ target: UserMessageItem) async { edits.append(target.promptUUID) }
+
+    func restoreLastPrompt() { restores += 1 }
 }

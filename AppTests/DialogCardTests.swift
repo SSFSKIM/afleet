@@ -87,12 +87,14 @@ final class DialogCardTests: XCTestCase {
     private func dialogView(_ card: DecisionCard,
                             _ answering: DecisionAnswering,
                             retraction: RetractionRegistry? = nil,
+                            composer: (any ComposerSite)? = nil,
                             deadline: DialogDeadline = .standard) throws -> DialogCardView {
         guard case .dialog(let request) = card.payload else {
             throw XCTSkip("a recorded dialog request no longer decodes as one")
         }
         return DialogCardView(card: card, request: request, presentation: .full, channel: Self.channel,
-                              answering: answering, retraction: retraction, deadline: deadline)
+                              answering: answering, retraction: retraction, composer: composer,
+                              deadline: deadline)
     }
 
     private func press(_ label: String, in body: Any) throws {
@@ -217,6 +219,56 @@ final class DialogCardTests: XCTestCase {
         let none = CardTree.texts(in: try dialogView(nulled, answering).body)
         XCTAssertFalse(none.contains(where: { $0.hasPrefix("Category:") }),
                        "a null category still drew a category line")
+    }
+
+    /// §8.4's dialog table: `edit_prompt` — "the engine aborts the turn; the composer is prefilled
+    /// with the last user text". The answer alone is not the behaviour; without the prefill the user
+    /// presses *Edit the prompt* and is left with an aborted turn and an empty field.
+    ///
+    /// All four actions, because the prefill belongs to one of them: three resolutions that must
+    /// leave the field alone are as much of the clause as the one that must fill it. And the refused
+    /// arm, because the prefill rides the same success branch the retraction does — a composer
+    /// filled for an answer the engine was never told is a prompt restored for a dialog still open.
+    func testOnlyEditThePromptRestoresTheLastPromptAndOnlyOnSuccess() async throws {
+        let expected: [(label: String, restores: Int)] = [
+            ("Edit the prompt", 1),
+            ("Retry on the fallback model", 0),
+            ("Keep the refusal", 0),
+            ("Close", 0),
+        ]
+        for (label, restores) in expected {
+            let composer = RecordingComposerSite()
+            let (_, answering) = await hosted()
+            let raised = try card("dialog-refusal-fallback", at: 0)
+            try press(label, in: try dialogView(raised, answering, composer: composer).body)
+            await answering.whenIdle()
+            XCTAssertEqual(composer.restores, restores,
+                           "\(label) restored the last prompt \(composer.restores) time(s), not \(restores)")
+        }
+
+        let refusing = LifecycleDouble()
+        await refusing.always(.failure(.notOwned))
+        let answering = DecisionAnswering(lifecycle: refusing)
+        let composer = RecordingComposerSite()
+        let raised = try card("dialog-refusal-fallback", at: 0)
+        try press("Edit the prompt", in: try dialogView(raised, answering, composer: composer).body)
+        await answering.whenIdle()
+        XCTAssertNotNil(answering.banner, "the refused answer raised no banner, so nothing was refused")
+        XCTAssertEqual(composer.restores, 0,
+                       "a refused answer restored the last prompt \(composer.restores) time(s)")
+    }
+
+    /// A host with no composer answers exactly as it did: the seam is optional and its absence
+    /// removes nothing from the wire (C6.3's rule for a host with no list to filter, applied to the
+    /// composer).
+    func testEditThePromptStillAnswersWhereTheHostHasNoComposer() async throws {
+        let (lifecycle, answering) = await hosted()
+        let raised = try card("dialog-refusal-fallback", at: 0)
+        try press("Edit the prompt", in: try dialogView(raised, answering).body)
+        await answering.whenIdle()
+        let sent = try await sentBody(lifecycle, "Edit the prompt")
+        XCTAssertTrue(sent == (try json(#"{"behavior":"completed","result":"edit_prompt"}"#)),
+                      "a host with no composer did not send the engine's edit_prompt body")
     }
 
     // MARK: - Retraction
