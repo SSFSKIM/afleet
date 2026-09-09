@@ -134,6 +134,17 @@ final class PanelHostModel: PanelHost {
     /// same `RecentURLFeed` instance — rather than two feeds over one timeline.
     @ObservationIgnored private var contexts: [ChannelKey: ChannelContext] = [:]
 
+    /// The tab each channel was last showing, and the authority for the rest of this run.
+    ///
+    /// The document is what survives a relaunch; this is what makes returning to a channel
+    /// immediate. A load is asynchronous and the coalescing writer lands on its own interval, so a
+    /// host that asked the store on every focus would show the wrong tab for a frame or restore a
+    /// value it had just replaced. One `PanelTabID` per channel visited, which is the same set W6
+    /// already writes a document for.
+    @ObservationIgnored private var selectionByChannel: [ChannelKey: PanelTabID] = [:]
+    /// W6's documents. Nil until `attach(to:…)`, which is also the call that binds the store.
+    @ObservationIgnored private var documents: PanelHostStore?
+
     @ObservationIgnored private var workspace: Workspace?
     @ObservationIgnored private var timelines: ChannelTimelineRegistry?
     @ObservationIgnored private var lifecycle: (any LifecycleAPI)?
@@ -153,11 +164,17 @@ final class PanelHostModel: PanelHost {
     /// `lifecycle` is the seam pane exits leave through. Production passes nil and gets
     /// `workspace.fleet`; a test passes a double, which is the only way an exit's journey can be
     /// asserted on.
+    /// `document` is the same kind of seam for W6's selection document. Production passes nil and
+    /// gets the workspace's own store, scoped to `workbench` exactly as a panel's is; a test passes
+    /// a double, which is the only way a refused write can be asserted on.
     func attach(to workspace: Workspace, timelines: ChannelTimelineRegistry,
-                lifecycle: (any LifecycleAPI)? = nil) {
+                lifecycle: (any LifecycleAPI)? = nil,
+                document: (any ScopedStore)? = nil) {
         self.workspace = workspace
         self.timelines = timelines
         self.lifecycle = lifecycle ?? workspace.fleet
+        self.documents = PanelHostStore(store: document ?? WorkbenchScopedStore(store: workspace.store))
+        selectionByChannel = [:]
         sessions = [:]
         recency = []
         cwds = [:]
