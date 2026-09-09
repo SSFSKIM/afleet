@@ -91,13 +91,76 @@ final class PaneClaimHolder {
     }
 }
 
-/// The surface's own `NSView`, unwrapped. It carries no state of its own: the pane owns the
-/// surface, the read loop and the child, and this only puts the view on screen.
+/// The container one mounted representable owns, and the surface view it holds while it holds it.
+///
+/// A container of its own per representable is what keeps two hosts' lifetimes from crossing over
+/// one `NSView`. SwiftUI may make the incoming host's view before it dismantles the outgoing one's,
+/// and a teardown that removed the surface view unconditionally would take it out of the hierarchy
+/// the incoming host had already put it in — with nothing left to notice: `updateNSView` is handed
+/// the container, and the container it is handed is not the one the view is missing from.
+final class PaneSurfaceContainer: NSView {
+
+    /// Takes the surface view, from whichever container was holding it. The newest host is the one
+    /// the claim has just been given to, so taking it is what "this host draws the pane" means in
+    /// AppKit terms.
+    func adopt(_ surfaceView: NSView) {
+        guard surfaceView.superview !== self else { return }
+        surfaceView.removeFromSuperview()
+        surfaceView.frame = bounds
+        surfaceView.autoresizingMask = [.width, .height]
+        addSubview(surfaceView)
+    }
+
+    /// Takes it only while nobody holds it. This is the repair arm: a host that is still mounted
+    /// after the host that held the view went away puts it back, and a host that is merely being
+    /// laid out again never pulls it out of a newer one.
+    func adoptIfUnheld(_ surfaceView: NSView) {
+        guard surfaceView.superview == nil else { return }
+        adopt(surfaceView)
+    }
+
+    /// Removes the surface view **only if this container is still the one holding it** — the whole
+    /// of the overlap rule: a host removes what it added, and never what its successor added.
+    func relinquish(_ surfaceView: NSView) {
+        guard surfaceView.superview === self else { return }
+        surfaceView.removeFromSuperview()
+    }
+}
+
+/// The surface's `NSView`, in a container of this representable's own. It carries no state beyond
+/// that container: the pane owns the surface, the read loop and the child, and this only puts the
+/// view on screen. The claim decides which host is eligible to render; where the view is attached
+/// is this type's, and the two are not the same question (spec Design §8).
 struct PaneSurfaceView: NSViewRepresentable {
 
     let surface: GhosttyTerminalSurface
 
-    func makeNSView(context: Context) -> NSView { surface.view }
+    /// The surface, held so the static teardown — which is handed no representable — can name the
+    /// view it is being asked to release.
+    @MainActor
+    final class Coordinator {
+        let surface: GhosttyTerminalSurface
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+        init(surface: GhosttyTerminalSurface) { self.surface = surface }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(surface: surface) }
+
+    func makeNSView(context: Context) -> PaneSurfaceContainer { makeContainer() }
+
+    func updateNSView(_ container: PaneSurfaceContainer, context: Context) {
+        container.adoptIfUnheld(surface.view)
+    }
+
+    static func dismantleNSView(_ container: PaneSurfaceContainer, coordinator: Coordinator) {
+        container.relinquish(coordinator.surface.view)
+    }
+
+    /// This representable's own container, holding the surface view. Named so that "each host gets
+    /// its own" is an assertion rather than a claim about code SwiftUI alone can call.
+    func makeContainer() -> PaneSurfaceContainer {
+        let container = PaneSurfaceContainer()
+        container.adopt(surface.view)
+        return container
+    }
 }

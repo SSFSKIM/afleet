@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import TerminalCore
 @testable import TerminalPanel
 import XCTest
 
@@ -148,5 +150,51 @@ final class PaneViewClaimTests: XCTestCase {
         XCTAssertEqual(pane.viewClaim.claimantCount, 0,
                        "the pane kept \(pane.viewClaim.claimantCount) claimant(s) after its host went away")
         XCTAssertFalse(holder.holdsView(of: pane), "an unmounted host still draws the pane")
+    }
+
+    // MARK: Group 2c — the AppKit container under the claim
+
+    /// The claim decides which host is *eligible* to render a pane; it says nothing about where
+    /// the surface's `NSView` is attached. A representable that handed SwiftUI the surface's view
+    /// itself gave two hosts one object, so when their lifetimes overlap the outgoing host's
+    /// teardown removes the view the incoming host has already taken, and `updateNSView` — which
+    /// is handed that same shared view — has nothing to repair it with.
+    ///
+    /// Each representable takes a container of its own; the surface's view moves into the newest
+    /// one, and a container only ever removes a view it is still holding.
+    func testEachRepresentableTakesItsOwnContainerAndTheOutgoingOneLeavesTheIncomingAlone() {
+        let surface = GhosttyTerminalSurface()
+        let representable = PaneSurfaceView(surface: surface)
+
+        let outgoing = representable.makeContainer()
+        let incoming = representable.makeContainer()
+
+        XCTAssertFalse(outgoing === incoming, "two hosts were handed one AppKit view")
+        XCTAssertTrue(surface.view.superview === incoming, "the newest host does not hold the surface")
+
+        // The overlap: SwiftUI dismantles the outgoing host after the incoming one is made.
+        outgoing.relinquish(surface.view)
+
+        XCTAssertTrue(surface.view.superview === incoming,
+                      "the outgoing host's teardown removed the view the incoming host holds")
+    }
+
+    /// A container that has lost the surface to a newer host removes nothing when it goes away,
+    /// and a host mounted while nobody holds the view takes it back.
+    func testAContainerRemovesOnlyAViewItStillHoldsAndRepairsAnUnheldOne() {
+        let surface = GhosttyTerminalSurface()
+        let representable = PaneSurfaceView(surface: surface)
+        let container = representable.makeContainer()
+
+        container.relinquish(surface.view)
+        XCTAssertNil(surface.view.superview, "the container that held the view did not release it")
+
+        let repaired = PaneSurfaceContainer()
+        repaired.adoptIfUnheld(surface.view)
+        XCTAssertTrue(surface.view.superview === repaired, "no host took an unheld surface view")
+
+        // And a host laid out again never pulls the view out of the one that has it now.
+        container.adoptIfUnheld(surface.view)
+        XCTAssertTrue(surface.view.superview === repaired, "a re-laid-out host stole the surface back")
     }
 }
