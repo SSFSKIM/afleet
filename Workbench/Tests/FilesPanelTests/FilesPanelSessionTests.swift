@@ -2180,6 +2180,44 @@ final class FilesPanelSessionTests: XCTestCase {
                        "a capture from before the newer one was recorded over it")
     }
 
+    // MARK: - 51. the window that held the buffer is gone
+
+    /// A stash answered after its bound updates the record and broadcasts nothing, and `detach`
+    /// clears the focus — so the save target became the surviving window, which had never held
+    /// the buffer. It answered out of the text it was last given and that was written over the
+    /// capture.
+    func testASaveAfterTheHolderDetachedWritesTheRecordAndNotASurvivingWindowsBuffer() async throws {
+        let file = try tree.file("held.swift", "on disk\n")
+        let other = try tree.file("other.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        harness.surface.answersSave = true
+        let poppedOut = RecordingSurface()
+        harness.session.attach(poppedOut)
+        await harness.session.openFile(at: file, line: nil)
+        await harness.session.openFile(at: other, line: nil)
+        await harness.session.select(file)
+        let path = file.path(percentEncoded: false)
+
+        poppedOut.type("edited in the pop-out\n")
+        poppedOut.deliver(.dirty(path: path, isDirty: true))
+        await harness.session.select(other)
+        XCTAssertEqual(harness.session.issue, .editorDidNotAnswer)
+        // The pop-out answers after the bound: the record is updated and nothing is drawn.
+        poppedOut.deliver(.saveRequested(path: path, text: "edited in the pop-out\n"))
+        XCTAssertEqual(harness.session.selected?.text, "edited in the pop-out\n")
+
+        harness.surface.reset()
+        harness.session.detach(poppedOut)
+
+        XCTAssertTrue(harness.surface.shapes.contains(.setText(text: "edited in the pop-out\n")),
+                      "the surviving window was left showing text the session had replaced")
+
+        harness.session.save()
+
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "edited in the pop-out\n",
+                       "a window that never held the buffer answered for it")
+    }
+
     // MARK: - Harness
 
     /// A session and the recorder it drives, held together so a test cannot let the session go by

@@ -505,6 +505,37 @@ public final class FilesPanelSession: PanelTabSession {
         if let focused, leaving.contains(focused) { self.focused = nil }
         for id in leaving { retireRequests { $0.surface == id } }
         prune()
+        republishPresentedBuffer()
+    }
+
+    /// Brings the windows that are still here up to date with the buffer the session holds, when
+    /// the window that was holding the text is not attached any more.
+    ///
+    /// What that window held is whatever the session captured from it, and a capture draws
+    /// nothing: a surviving window that never held the buffer goes on showing the text it was
+    /// last given. Left there, the user's next keystroke in it takes ownership of the buffer with
+    /// the stale text underneath, and the reply to the next `save` writes that over the capture.
+    /// A window that *is* holding the text is not told anything — it is the copy.
+    private func republishPresentedBuffer() {
+        guard let path = presentedPath,
+              let file = openFiles.first(where: { $0.path == path }),
+              let holder = file.buffer.holder, !isAttached(holder) else { return }
+        let live = surfaces.compactMap(\.surface)
+        guard !live.isEmpty else { return }
+        // Not through `send`, which prunes: this is called *from* the paths that prune.
+        let command = EditorCommand.setText(text: file.text)
+        note(command)
+        for surface in live { surface.send(command) }
+        if file.line > 1 || file.column > 1 {
+            let cursor = EditorCommand.gotoLine(line: file.line, column: file.column)
+            note(cursor)
+            for surface in live { surface.send(cursor) }
+        }
+    }
+
+    /// Whether the window an identity names is still drawing for this session.
+    private func isAttached(_ id: SurfaceID) -> Bool {
+        surfaces.contains { $0.id == id && $0.surface != nil }
     }
 
     /// What a newly attached surface has to be told to show what the session is already showing:
@@ -1069,11 +1100,21 @@ public final class FilesPanelSession: PanelTabSession {
             requestBuffer(.refusalOnly, path: file.path)
             return
         }
-        // With no surface attached there is no buffer to ask for and nothing to be refused by:
-        // the record is the only copy of the text, and it is what is written.
-        if presentedPath == file.path, requestBuffer(.write, path: file.path) { return }
+        // With no surface attached — or none that is holding this buffer — there is nothing to
+        // ask: the record is the only copy of the text, and it is what is written. A surviving
+        // window that never held the buffer would answer out of the text it was last given, and
+        // that answer is not this file's contents.
+        if presentedPath == file.path, holderIsAttached(file),
+           requestBuffer(.write, path: file.path) { return }
         guard file.isDirty else { return }
         write(path: file.path, text: file.text)
+    }
+
+    /// Whether the window holding this buffer's text is still here, and `true` for a buffer no
+    /// window is holding — where every window's model is what the session last gave it.
+    private func holderIsAttached(_ file: OpenFile) -> Bool {
+        guard let holder = file.buffer.holder else { return true }
+        return isAttached(holder)
     }
 
     /// Asks the editor for the buffer and records it on the open file **without writing it**.
@@ -1175,8 +1216,14 @@ public final class FilesPanelSession: PanelTabSession {
     /// Records the buffer the editor answered a stash with, on the buffer that **names that path**
     /// and on no other.
     private func stash(path: String, text: String, from surface: SurfaceID, revision: Int) {
-        guard let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
-        openFiles[index].buffer.capture(text: text, for: path, from: surface, expecting: revision)
+        guard let index = openFiles.firstIndex(where: { $0.path == path }),
+              openFiles[index].buffer.capture(text: text, for: path, from: surface,
+                                              expecting: revision)
+        else { return }
+        // A capture from a window that is not here any more is the last thing that window held,
+        // and nothing has drawn it: the windows that are still here are showing what they were
+        // last given (see `republishPresentedBuffer`).
+        republishPresentedBuffer()
     }
 
     /// Resumes the presentation waiting for stash `request`, once.
