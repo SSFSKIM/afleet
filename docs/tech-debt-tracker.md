@@ -1993,9 +1993,12 @@ is renumbered.
      action in it. Found by C7.5's second merge round. Closer: a `dirty` event carrying the text, or
      a periodic stash while a buffer is dirty. Owner: C7.5's follow-up.
 
-243. **Cmd+S resolves the main window's channel, not the focused one.** `AppModel.filesSaveTarget`
-     reads `PanelHostModel.selectedChannel` and `selected`, which describe the main window;
-     `PoppedOutPanelScene` keeps its own channel and does not update them. With a Files pop-out
+243. **Cmd+S resolves the main window's channel, not the focused one.** *Closed at C7.5's fix
+     wave D: the pop-out scene publishes its identity as a focused scene value, and the Save item
+     resolves both its target and its enablement against the key window through it.*
+     `AppModel.filesSaveTarget` read `PanelHostModel.selectedChannel` and `selected`, which
+     describe the main window; `PoppedOutPanelScene` keeps its own channel and does not update
+     them. With a Files pop-out
      focused, the menu item's enabled state and its action both speak about the main window's
      channel. The pop-out's own *Save* button is unaffected. Found by C7.5's second merge round.
      Closer: the host tracking which scene is key, which is C5's fence. Owner: C5.
