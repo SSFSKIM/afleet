@@ -22,6 +22,18 @@ struct AgentTreeView: View {
     var body: some View {
         let read = model.read
         VStack(alignment: .leading, spacing: 0) {
+            // The channel's two actions above the tree, because they are the channel's and not any
+            // node's: they are offered even where the tree has nothing in it yet.
+            if let actions = model.actions {
+                AgentTreeActionBar(actions: actions)
+                if let banner = actions.banner {
+                    Text(banner.text)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 4)
+                }
+            }
             if model.selection == .unknownRun { AgentUnknownRunNotice() }
             tree(read)
         }

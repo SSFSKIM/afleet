@@ -168,6 +168,60 @@ final class AgentNodeActions {
         Task { await links.open(.file(url, line: nil), from: .currentPanel) }
     }
 
+    // MARK: - The two channel-wide actions, and the confirm in front of them
+
+    /// The confirm this channel is waiting on, or nil. One at a time, and the **panel's own** —
+    /// never the composer's, which a popped-out window and a read-only channel both lack (D14).
+    private(set) var pending: AgentTreeConfirm?
+
+    /// Raises *Stop everything*'s confirm **after taking the census**, because the count is what the
+    /// dialog is for: the user is being told the size of the work they are about to end.
+    ///
+    /// The census is X5's own — `LifecycleAPI.liveTaskIDs(of:)`, the fleet's fact — and not the
+    /// fold's, for the reason the header's handoff takes it there: the action ends work in a channel
+    /// whether or not this window has ever drawn its timeline, and a fold-derived count answers
+    /// "nothing is running" for every one of those. A count reaches the dialog and the ids do not
+    /// (§6.3, §11).
+    func requestStopEverything() async {
+        let live = await lifecycle.liveTaskIDs(of: channel)
+        pending = .stopEverything(liveTaskCount: live.count)
+    }
+
+    /// *Background all*'s confirm. No census: the action stops nothing, so there is no cost to size.
+    func requestBackgroundAll() { pending = .backgroundAll }
+
+    /// Takes the waiting confirm whole and leaves nothing behind, so a dismissal arriving after this
+    /// has nothing left to clear.
+    func claimPending() -> AgentTreeConfirm? {
+        defer { pending = nil }
+        return pending
+    }
+
+    /// The waiting confirm, answered yes: **claimed synchronously**, run in a task.
+    ///
+    /// The two halves are separate calls because SwiftUI runs the dialog's dismissal — which is
+    /// `cancelPending()` — before the affirmative button's own work has a chance to begin. An action
+    /// that read `pending` when its `Task` started would read a value already cleared and do nothing.
+    func answerPending() {
+        guard let claim = claimPending() else { return }
+        Task { await perform(claim) }
+    }
+
+    /// Declined. **Nothing is performed** — the clause the confirm exists for, and the one a dialog
+    /// wired to a no-op would pass every other way.
+    func cancelPending() { pending = nil }
+
+    /// A claimed confirm, run. The only place either action is issued, and neither is reimplemented:
+    /// `Fleet` owns what *Stop everything* and *Background all* mean (contract Y5).
+    private func perform(_ confirm: AgentTreeConfirm) async {
+        do {
+            _ = try await lifecycle.perform(confirm.action, on: channel)
+            banner = nil
+        } catch {
+            banner = TaskCardModel.banner(for: error)
+        }
+    }
+
     /// *Copy agent id*: the node's id on the pasteboard, and nothing logged (child spec D12).
     ///
     /// It is the one place a task id legitimately leaves the app, at the user's explicit request.

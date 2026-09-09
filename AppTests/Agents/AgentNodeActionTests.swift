@@ -137,6 +137,137 @@ final class AgentNodeActionTests: XCTestCase {
                        "\(actions.staleBackgrounding.count) run(s) were marked stale by a reply that moved one")
     }
 
+    // MARK: - The two confirms (child spec D9 and D14)
+
+    /// **G3, and the clause the whole confirm exists for: declining performs nothing.**
+    ///
+    /// A dialog wired straight to the action passes every other assertion in this file — the button
+    /// is there, the dialog comes up, the affirmative works — and ends a user's turn because they
+    /// pressed *Cancel*. So the first thing asserted is the double's action list at zero.
+    func testDecliningTheConfirmPerformsNothing() async throws {
+        for opening in [AgentTreeConfirm.stopEverythingTitle, AgentTreeConfirm.backgroundAllTitle] {
+            let rig = try Rig(mirror: Rig.runningAgent())
+            // The double **can** answer a `perform`, so a decline that performed anyway would be
+            // recorded rather than trapping: what is asserted is an empty action list, not a crash.
+            await rig.lifecycle.always(.success(Self.state(rig.key)))
+            await rig.lifecycle.setLive(["task_invented_live_01", "task_invented_live_02"])
+
+            try pressTop(opening, in: rig)
+            await rig.settleConfirm()
+            XCTAssertNotNil(rig.model.actions?.pending, "\(opening) raised no confirm at all")
+            let beforeDecline = await rig.lifecycle.actions.count
+            XCTAssertEqual(beforeDecline, 0, "\(opening) performed \(beforeDecline) action(s) before it was answered")
+
+            // The dialog's *Cancel*, which is the member its button calls. A
+            // `confirmationDialog`'s content is a closure and `Mirror` does not enter one, so the
+            // affirmative and the decline are driven through the members the bar wires them to —
+            // and the wiring itself is asserted from the source below.
+            rig.model.actions?.cancelPending()
+            await Task.yield()
+
+            let performed = await rig.lifecycle.actions.count
+            XCTAssertEqual(performed, 0, "declining \(opening) performed \(performed) action(s)")
+            XCTAssertNil(rig.model.actions?.pending, "declining \(opening) left the confirm waiting")
+        }
+    }
+
+    /// **G3: *Stop everything* performs `.stopEverything`, and only after the affirmative.**
+    func testStopEverythingPerformsTheActionOnlyAfterTheConfirm() async throws {
+        let rig = try Rig(mirror: Rig.runningAgent())
+        await rig.lifecycle.always(.success(Self.state(rig.key)))
+        await rig.lifecycle.setLive(["task_invented_live_01"])
+
+        try pressTop(AgentTreeConfirm.stopEverythingTitle, in: rig)
+        await rig.settleConfirm()
+        let beforeAnswer = await rig.lifecycle.actions.count
+        XCTAssertEqual(beforeAnswer, 0, "the action ran \(beforeAnswer) time(s) before the user answered")
+
+        rig.model.actions?.answerPending()
+        await rig.settle(actions: 1)
+
+        let actions = await rig.lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "the affirmative performed \(actions.count) action(s)")
+        if case .stopEverything = actions.first { } else { XCTFail("the affirmative performed something else") }
+        let sent = await rig.lifecycle.sent.count
+        XCTAssertEqual(sent, 0, "Stop everything took X5's send route \(sent) time(s) instead of perform")
+    }
+
+    /// The same shape for *Background all* — and its copy must not imply that anything stops, which
+    /// is C6.2's sentence and is reused rather than rewritten (D14).
+    func testBackgroundAllPerformsTheActionOnlyAfterTheConfirm() async throws {
+        let rig = try Rig(mirror: Rig.runningAgent())
+        await rig.lifecycle.always(.success(Self.state(rig.key)))
+
+        try pressTop(AgentTreeConfirm.backgroundAllTitle, in: rig)
+        await rig.settleConfirm()
+        let beforeAnswer = await rig.lifecycle.actions.count
+        XCTAssertEqual(beforeAnswer, 0, "the action ran \(beforeAnswer) time(s) before the user answered")
+
+        rig.model.actions?.answerPending()
+        await rig.settle(actions: 1)
+
+        let actions = await rig.lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "the affirmative performed \(actions.count) action(s)")
+        if case .backgroundAll = actions.first { } else { XCTFail("the affirmative performed something else") }
+        let message = AgentTreeConfirm.backgroundAll.message
+        XCTAssertTrue(message == ComposerConfirmation.backgroundAll.message,
+                      "the panel writes its own Background all copy instead of reusing C6.2's")
+        XCTAssertTrue(message.contains("Nothing stops"),
+                      "the Background all confirm no longer says that nothing stops")
+    }
+
+    /// **§11: the *Stop everything* confirm names a count and no ids.**
+    ///
+    /// The census is X5's own — `liveTaskIDs(of:)`, the fleet's fact rather than the fold's, because
+    /// the action ends work in a channel this window may never have drawn. The discriminating half
+    /// is the second: two invented ids are staged and neither appears in the sentence.
+    func testTheStopEverythingConfirmNamesACountAndNoIDs() async throws {
+        let ids = ["task_invented_live_01", "task_invented_live_02", "task_invented_live_03"]
+        let rig = try Rig(mirror: Rig.runningAgent())
+        // Answerable, so a panel that performed the action instead of asking is recorded rather
+        // than trapping — a crashed bundle reports "Executed 0" and says nothing.
+        await rig.lifecycle.always(.success(Self.state(rig.key)))
+        await rig.lifecycle.setLive(ids)
+
+        try pressTop(AgentTreeConfirm.stopEverythingTitle, in: rig)
+        await rig.settleConfirm()
+
+        let census = await rig.lifecycle.censusCalls
+        XCTAssertEqual(census, 1, "the confirm took the fleet's census \(census) time(s)")
+        let pending = try XCTUnwrap(rig.model.actions?.pending, "no confirm is waiting")
+        XCTAssertTrue(pending == .stopEverything(liveTaskCount: ids.count),
+                      "the confirm carries a count other than the fleet's own")
+        let message = pending.message
+        XCTAssertTrue(message.contains("\(ids.count) running task(s)"),
+                      "the confirm's sentence does not state the count of what it ends")
+        for id in ids {
+            XCTAssertFalse(message.contains(id), "the confirm's sentence names a task id")
+        }
+        XCTAssertTrue(message.hasPrefix(ComposerConfirmation.stopEverything.message),
+                      "the panel writes its own Stop everything copy instead of reusing C6.2's")
+    }
+
+    /// The dialog's own wiring, checked against the source because `Mirror` cannot reach it.
+    ///
+    /// A `confirmationDialog`'s content is a `@ViewBuilder` closure, and reflection does not enter a
+    /// closure — so the two buttons above are driven through the members the bar wires them to, and
+    /// this is what says those are the members. The synchronous claim is the load-bearing half: the
+    /// affirmative must take the answer whole in the button's own call, because SwiftUI runs the
+    /// dismissal — the cancel path — before the button's `Task` body begins (C6.2's rule, D14).
+    func testTheDialogsAffirmativeClaimsSynchronously() throws {
+        let bar = try XCTUnwrap(try Self.agentSources().first { $0.name == "AgentTreeConfirm.swift" },
+                                "the tree's confirm no longer lives where the check looks")
+        XCTAssertTrue(bar.code.contains("confirmationDialog"), "the panel presents no dialog of its own")
+        XCTAssertTrue(bar.code.contains("{ actions.answerPending() }"),
+                      "the affirmative does not claim the answer synchronously")
+        XCTAssertTrue(bar.code.contains("{ actions.cancelPending() }"), "the decline is wired to something else")
+        // And it does not route through the composer, which a popped-out window and a read-only
+        // channel both lack (D14).
+        for (name, code) in try Self.agentSources() {
+            XCTAssertFalse(code.contains("ComposerModel"), "\(name) reaches the composer for its confirm")
+        }
+    }
+
     // MARK: - The two that send nothing
 
     /// **G3: *Open transcript file* is one `WorkspaceLink.file`, and no descriptor is opened.**
@@ -272,6 +403,17 @@ final class AgentNodeActionTests: XCTestCase {
             while model.actions?.inFlight == true { await Task.yield() }
         }
 
+        /// The same, for the half of Y5 that goes out as a `LifecycleAction`.
+        func settle(actions count: Int) async {
+            while await lifecycle.actions.count < count { await Task.yield() }
+        }
+
+        /// Waits for the confirm to be raised. *Stop everything* takes the fleet's census first, so
+        /// the dialog appears one suspension after the button was pressed.
+        func settleConfirm() async {
+            while model.actions?.pending == nil { await Task.yield() }
+        }
+
         /// One running, foreground agent run — the shape §8.4 makes *Move to background* available
         /// for — folded from a `task_started` rather than assembled, so what the panel reads is what
         /// the fold would have produced.
@@ -323,6 +465,35 @@ final class AgentNodeActionTests: XCTestCase {
         let bar = try XCTUnwrap(ViewTree.values(of: AgentNodeActionBar.self, in: drawn.body).first,
                                 "the open node drew no action bar at all")
         return bar.body
+    }
+
+    /// The tree's own top bar, through the panel's real body. The second descent is the action bar's
+    /// `body`, which reflection does not evaluate for a nested view.
+    static func topBarBody(in rig: Rig) throws -> Any {
+        let bar = try XCTUnwrap(ViewTree.values(of: AgentTreeActionBar.self, in: AgentTreeView(model: rig.model).body).first,
+                                "the tree drew no channel-wide actions")
+        return bar.body
+    }
+
+    /// Presses one of the tree's channel-wide buttons.
+    func pressTop(_ label: String, in rig: Rig,
+                  file: StaticString = #filePath, line: UInt = #line) throws {
+        let button = try XCTUnwrap(ViewTree.button(label, in: try Self.topBarBody(in: rig)),
+                                   "the tree offers no \(label) button", file: file, line: line)
+        XCTAssertTrue(ViewTree.press(button), "the \(label) button carried no action", file: file, line: line)
+    }
+
+    /// A channel state for a double that has to answer `perform`. Invented throughout (§11).
+    static func state(_ key: ChannelKey) -> ChannelState {
+        ChannelState(key: key,
+                     origin: .owned(.ready),
+                     desired: .owned,
+                     observed: HolderSet(holders: [], observedAt: InventedAgents.epoch),
+                     epoch: .first,
+                     identity: .known(key.session),
+                     presence: .idle,
+                     pendingDecisions: [],
+                     lastActivity: InventedAgents.epoch)
     }
 
     /// Presses a button the outline's row offers, failing when the row does not offer it — an
