@@ -40,6 +40,23 @@ final class AgentsModel: PanelTabSession {
     /// The read, held only as long as the two values it is derived from stand still (child spec D7).
     @ObservationIgnored private let reads = AgentRunReadCache()
 
+    /// The per-run transcript's renderer, and with it its table, its row heights and its scroll
+    /// position (child spec D4). The **session** owns it and not the view: a SwiftUI view value
+    /// preserves nothing across a body evaluation, and the host retains this session across a
+    /// channel switch, which is what keeps the run the user was reading where they left it.
+    ///
+    /// It is not the channel column's renderer and could not be: two tables cannot share one
+    /// controller's row heights and scroll position.
+    @ObservationIgnored let transcript = NativeTimelineRenderer()
+
+    /// The transcript's own folding and edit state, for the reason the channel column's are the
+    /// column's: a cluster folded while it is off screen must still be folded when it scrolls back,
+    /// and the row value that folded it has been discarded many times over by then. They are the
+    /// pane's own rather than the channel's, because a fold is a property of the surface it was made
+    /// on and the same item can be on screen in both.
+    @ObservationIgnored let transcriptCollapse = TimelineCollapseState()
+    @ObservationIgnored let transcriptEditing = TimelineEditState()
+
     /// Which branches the user has **closed**. Per channel, so a tree opened in one channel does
     /// not collapse because another channel's was.
     ///
@@ -91,4 +108,25 @@ final class AgentsModel: PanelTabSession {
     /// Opening a node from inside the pane writes the same store the chip's navigation does, so one
     /// channel has one open run however it was reached.
     func select(_ run: AgentRunID?) { store.select(run, in: channel) }
+
+    /// What the per-run transcript is handed: the channel's own rows whose provenance names this
+    /// run, in the timeline's order (child spec D4, gate G2).
+    ///
+    /// **The preview is not passed through.** `StreamingPreview` carries no agent attribution at all
+    /// — the fold keeps one preview per channel and the reducer drops the stream event's
+    /// `parent_tool_use_id` when it opens one — so a tail handed to a run's pane would be the main
+    /// thread's words in the subagent's mouth. Nil is the honest answer until a preview can say
+    /// whose it is; the gap is filed rather than guessed at.
+    ///
+    /// **Retracted rows are filtered here too.** A refusal dialog that settled on the channel took
+    /// the frame back for the channel, and a run's transcript drawing it again would show a message
+    /// the engine has said stopped being true (C6.3's D11). The registry is the **channel model's
+    /// own**, handed in by the pane, because a second one would filter nothing; nil is "no channel
+    /// model to ask", and then nothing is filtered rather than everything being dropped.
+    func input(of run: AgentRunID, retainedBy retraction: RetractionRegistry?) -> TimelineRenderInput {
+        let timeline = timelines(channel) ?? ChannelTimeline()
+        let rows = AgentRunRead.items(of: run, in: timeline).map(TimelineRow.init)
+        return TimelineRenderInput(rows: retraction.map { TimelineListView.retained(rows, by: $0) } ?? rows,
+                                   preview: nil)
+    }
 }

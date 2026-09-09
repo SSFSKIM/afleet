@@ -82,8 +82,12 @@ final class AgentsTab: PanelTab {
     }
 }
 
-/// What the panel draws: the run tree, or one of the two sentences a channel with nothing to draw
-/// gets. Later tasks of this leaf put the per-run transcript beside it.
+/// What the panel draws: the run tree, and the selected run's transcript beside it (root §8.8).
+///
+/// Split rather than stacked, and resizable, because the two halves are read at different widths:
+/// the tree is a list of short rows and the transcript is C6.1's message list, which is the same
+/// content the channel column draws. `HSplitView` holds no state this leaf has to carry — what
+/// survives a channel switch is on the session, which the host retains.
 struct AgentsPanelView: View {
 
     let model: AgentsModel
@@ -92,6 +96,11 @@ struct AgentsPanelView: View {
     let surface: PanelSurface
 
     var body: some View {
-        AgentTreeView(model: model)
+        HSplitView {
+            AgentTreeView(model: model)
+                .frame(minWidth: 200)
+            AgentTranscriptPane(model: model)
+                .frame(minWidth: 240)
+        }
     }
 }

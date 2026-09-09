@@ -3695,3 +3695,21 @@ needs more. Nothing above is renumbered.
      the element type as a second parameter — and run the whole app bundle behind it, since the
      helper is used by every panel's tests. Owner: whoever owns `AppTests/Support/`, ahead of the
      next child that walks for an array. Raised by C6.4 Wave A, filed by Wave B.
+
+177. **A subagent's live tail is never drawn under the subagent, because the fold keeps one
+     unattributed streaming preview per channel.** `WireReducer` opens and appends to a single
+     `preview` on every `stream_event`
+     (`FleetKit/Sources/FleetTimeline/Reduce/WireReducer.swift:250–255`) and drops the frame's
+     `parentToolUseID` while doing it, and `StreamingPreview`
+     (`Reduce/StreamingPreview.swift:28–39`) carries no agent field at all — so nothing on the
+     value says whose the tail is. `ChannelTimeline.preview` is therefore the channel's, with no
+     way to ask whether it belongs to a run. C6.4's transcript pane passes **nil**: a tail with
+     no attribution is the main thread's, and drawing it under a subagent would put the parent's
+     words in the child's mouth, which is worse than not drawing it. The consequence is bounded —
+     a depth-1 run's text is forwarded and lands as items the moment the message closes, so the
+     run's transcript is complete a beat later and only the *live* typing is missing — but it
+     means a subagent that is thinking looks idle in its own pane while the tree row beside it
+     shows it running. Closer: carry the stream event's `parent_tool_use_id` onto the preview (the
+     wire has it; the reducer discards it) and keep one preview per agent stream, then the pane
+     passes the preview whose agent is the run's. Owner: C3, with whoever next touches the
+     preview's shape. Raised by C6.4 Task 4.
