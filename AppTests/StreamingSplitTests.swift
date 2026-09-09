@@ -106,6 +106,49 @@ final class StreamingSplitTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 0.2,
                           "a single delta after quiet took \(Int(Date().timeIntervalSince(started) * 1000)) ms to publish")
     }
+
+    // MARK: - The completed message
+
+    /// A message that is no longer streaming is parsed in full: the boundary rule is the live
+    /// tail's alone (§4).
+    ///
+    /// **Discriminating.** `MarkdownBody` is the one path every durable message row draws through,
+    /// and it settled the message the way the streaming path settles a fragment — everything after
+    /// the last blank line stayed an unparsed tail. A message ending in `**Done**` therefore showed
+    /// its own asterisks for ever, with nothing left to arrive that would finalise it. The floor is
+    /// the assertion that the prose before the boundary is still there, so a body that parsed
+    /// nothing at all would not pass by dropping the tail instead.
+    func testACompletedMessageIsParsedInFull() {
+        let drawn = Self.completed("Working on it.\n\n**Done**")
+        let rendered = drawn.blocks.joined()
+        XCTAssertTrue(drawn.tail.isEmpty,
+                      "a completed message kept a \(drawn.tail.count)-character tail unparsed")
+        XCTAssertFalse(rendered.contains("**"),
+                       "the completed message drew its own delimiters; \(rendered.count) character(s) were rendered")
+        XCTAssertTrue(rendered.contains("Done"), "the completed message's last block was lost")
+        XCTAssertTrue(rendered.contains("Working on it."),
+                      "the completed message's first block was lost")
+        XCTAssertTrue(drawn.isBold, "the completed message's last block was parsed but not emphasised")
+    }
+
+    /// What `MarkdownBody` draws for one source, reduced to what an assertion needs.
+    ///
+    /// `nonisolated`, and returning strings rather than the row: `RenderedRow` holds
+    /// `NSAttributedString`s and is not `Sendable`, so the reduction happens where the row is built
+    /// and only the answers cross back.
+    nonisolated private static func completed(_ source: String) -> (blocks: [String], tail: String, isBold: Bool) {
+        let row = MarkdownBody(key: "row-under-test", source: source).settled
+        var bold = false
+        for block in row.settled {
+            let range = (block.string as NSString).range(of: "Done")
+            guard range.location != NSNotFound else { continue }
+            block.enumerateAttribute(.font, in: range) { value, _, _ in
+                if let font = value as? NSFont,
+                   font.fontDescriptor.symbolicTraits.contains(.bold) { bold = true }
+            }
+        }
+        return (row.settled.map(\.string), row.tail, bold)
+    }
 }
 
 /// What a coalescer publishes into, for the rate assertion above.

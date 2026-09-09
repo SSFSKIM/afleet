@@ -2677,3 +2677,26 @@ C6.1's and C6.2's reservations and is expected.
      the gate's own printed counts (agent chips 0). Closer: the scratch home holds a recorded
      session whose history contains an `Agent` call, which is a fixture-corpus job rather than a
      code one. Owner: C1 for the recording, C6.1 for adopting it.
+
+330. **A settled block picks up its highlight on the next render of it, and nothing schedules one.**
+     C6.1's markdown cache now notices that a cold highlight has landed and rebuilds the block over
+     the styled code, so the *next* render of a fenced block is highlighted. What no longer holds a
+     stale block is the cache; what still can is the screen. A row already visible when the fill
+     lands is redrawn only when the controller reloads it — which a streaming channel does within a
+     frame and a quiet one may not do at all, so a fenced block in the last message of an idle
+     channel can stay unhighlighted until the reader scrolls it out and back. Found at C6.1's fix
+     wave, verifying the cache fix against what a reader sees. Closer: the highlighter tells the
+     table which keys filled and the table reloads the rows holding them, which is a change in
+     `TimelineTableController` and belongs with whoever owns the reload path. Owner: C6.1.
+
+331. **The controller's own `settle` callers keep the streaming boundary rule for text that has
+     stopped arriving.** `MarkdownBody` — the path every durable message row draws through — now
+     finalises, so a completed message ending in `**Done**` is parsed in full. The two callers in
+     `TimelineTableController` that re-settle a source-backed row, the preference flip's rebuild and
+     `setRows`, still call `settle`, so a row carrying its own source can keep an unparsed tail. No
+     channel row is affected — an item row carries no source of its own — but the S7 corpus path
+     does, and a corpus document ending mid-block renders its own delimiters. Found at C6.1's fix
+     wave, deciding which callers `finalise` replaces. Closer: those two call sites finalise, which
+     is correct for both — neither is drawing text that is still arriving, and the streaming preview
+     beside them is the one caller that must keep the boundary rule. Owner: C6.1, in the file that
+     owns the controller.

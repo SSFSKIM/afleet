@@ -38,6 +38,17 @@ final class MarkdownRenderingTests: XCTestCase {
         return seen.count
     }
 
+    /// The link destinations the rendered text carries, as strings. Strings rather than URLs, so a
+    /// failure prints one invented destination and not a URL's whole description.
+    private func destinations(_ text: NSAttributedString) -> [String] {
+        var found: [String] = []
+        text.enumerateAttribute(.link, in: NSRange(location: 0, length: text.length)) { value, _, _ in
+            if let url = value as? URL { found.append(url.relativeString) }
+            if let string = value as? String { found.append(string) }
+        }
+        return found
+    }
+
     /// Whether any run of this string is struck through.
     private func isStruckThrough(_ text: NSAttributedString) -> Bool {
         var found = false
@@ -207,7 +218,7 @@ final class MarkdownRenderingTests: XCTestCase {
         let highlighter = CodeHighlighter()
         await highlighter.warm(samples.map { (code: $0.value, language: $0.key) })
         for (language, code) in samples {
-            let styled = highlighter.styled(code: code, language: language)
+            let styled = highlighter.styling(code: code, language: language).text
             XCTAssertGreaterThanOrEqual(runs(styled), 2,
                                         "\(language) produced \(runs(styled)) attribute run(s) over a \(code.count)-character sample")
             XCTAssertGreaterThanOrEqual(colours(styled), 2,
@@ -220,7 +231,7 @@ final class MarkdownRenderingTests: XCTestCase {
     func testAnUnknownLanguageFallsBackToPlainMonospaced() {
         let highlighter = CodeHighlighter()
         let code = "++>>[.]<<--"
-        let styled = highlighter.styled(code: code, language: "a-language-with-no-grammar")
+        let styled = highlighter.styling(code: code, language: "a-language-with-no-grammar").text
         XCTAssertEqual(styled.string, code,
                        "the fallback rendered \(styled.length) character(s) of a \(code.count)-character block")
         XCTAssertEqual(runs(styled), 1, "the fallback produced \(runs(styled)) attribute run(s), not one")
@@ -237,7 +248,7 @@ final class MarkdownRenderingTests: XCTestCase {
     /// main thread while a message streams — is asserted never to have been entered.
     func testHighlightingNeverRunsOnTheMainThread() async {
         let highlighter = CodeHighlighter()
-        _ = highlighter.styled(code: "let x = 1\nlet y = x + 1", language: "swift")
+        _ = highlighter.styling(code: "let x = 1\nlet y = x + 1", language: "swift")
         let ran = await wait(upTo: 5) { highlighter.offMainHighlights + highlighter.mainThreadHighlights > 0 }
         XCTAssertTrue(ran, "no highlight ran within the wait; \(highlighter.highlightRequests) were requested")
         XCTAssertEqual(highlighter.mainThreadHighlights, 0,
@@ -267,5 +278,181 @@ final class MarkdownRenderingTests: XCTestCase {
         row.append("```\n\nafter", markdown: markdown, highlighter: highlighter, phases: &phases)
         XCTAssertEqual(highlighter.highlightRequests, 1,
                        "the closing fence asked for \(highlighter.highlightRequests) highlight(s)")
+    }
+
+    // MARK: - Breaks and links
+
+    /// A soft break is a space and a hard break is a newline — in prose, inside emphasis, and inside
+    /// a heading (§5).
+    ///
+    /// **Discriminating.** `SoftBreak` and `LineBreak` are childless nodes, so the walk's plain-text
+    /// projection of both was the empty string: two words either side of a wrapped line were
+    /// concatenated into one, and a hard break was deleted outright. The engine renders with
+    /// `breaks` off, which makes a soft break a space and not a newline — so both halves are
+    /// asserted, or a renderer that turned every break into a newline would pass half of this.
+    func testBreaksKeepTheWhitespaceTheyStandFor() {
+        let soft = build("alpha\nbeta")
+        XCTAssertTrue(soft.string.contains("alpha beta"),
+                      "a soft break did not render as a space; \(soft.length) character(s) were rendered")
+
+        let hard = build("alpha  \nbeta")
+        XCTAssertTrue(hard.string.contains("alpha\nbeta"),
+                      "a hard break did not render as a newline; \(hard.length) character(s) were rendered")
+        XCTAssertFalse(hard.string.contains("alphabeta"), "a hard break was deleted rather than drawn")
+
+        // Inside emphasis and inside a heading, which take the plain-text projection rather than the
+        // inline walk: the same childless nodes, the same defect, two more paths.
+        let strong = build("**alpha\nbeta**")
+        XCTAssertTrue(strong.string.contains("alpha beta"),
+                      "a soft break inside emphasis was dropped; \(strong.length) character(s) were rendered")
+        let heading = build("alpha\nbeta\n===")
+        XCTAssertTrue(heading.string.contains("alpha beta"),
+                      "a soft break inside a heading was dropped; \(heading.length) character(s) were rendered")
+    }
+
+    /// A labelled link carries its destination, so the row has something to activate (§5).
+    ///
+    /// **Discriminating.** Pre-fix the link branch emitted the label, the font and the link colour
+    /// and nothing else: the destination was discarded at the walk, so no attribute on the rendered
+    /// text named where the link went and no activation could route it anywhere. The floor is the
+    /// label beside it — a renderer that attached a destination and lost the text would be no more
+    /// usable than one that did the reverse.
+    func testALinkCarriesItsDestination() {
+        let rendered = build("see [the page](https://example.invalid/page) now")
+        XCTAssertEqual(destinations(rendered), ["https://example.invalid/page"],
+                       "the link's destination reached the reader as \(destinations(rendered))")
+        XCTAssertTrue(rendered.string.contains("the page"),
+                      "the link's label was lost; \(rendered.length) character(s) were rendered")
+        XCTAssertFalse(rendered.string.contains("https://"),
+                       "the destination was drawn as text rather than carried as an attribute")
+
+        // A path destination is carried exactly as written: resolving it needs the channel's cwd,
+        // which the content-keyed cache must never see.
+        let path = build("open [the file](docs/invented/notes.md) please")
+        XCTAssertEqual(destinations(path), ["docs/invented/notes.md"],
+                       "a relative destination reached the reader as \(destinations(path))")
+    }
+
+    // MARK: - The cache behind the highlighter
+
+    /// A block that settled while its highlight was cold is rebuilt once the fill lands (§6).
+    ///
+    /// **Discriminating.** `styled` returns plain monospaced text on a cold request and fills behind
+    /// the caller, and the markdown cache used to keep that plain fallback for ever: the fill landed
+    /// in the highlighter's own cache and every later render of that block read the stale markdown
+    /// entry instead, so a fenced block seen once was never highlighted at all. The floor is the
+    /// cold render below it — a pipeline that highlighted synchronously would fail that assertion
+    /// and make this one vacuous.
+    func testASettledBlockIsRebuiltWhenItsHighlightLands() async {
+        let markdown = MarkdownText()
+        let highlighter = CodeHighlighter()
+        var phases = RenderPhases()
+        let source = "```swift\nlet invented = 1\nlet other = invented + 1\n```"
+
+        let cold = markdown.attributed(source, highlighter: highlighter, phases: &phases)
+        XCTAssertEqual(colours(cold), 0, "a cold request drew \(colours(cold)) colour(s) rather than plain text")
+
+        let landed = await wait(upTo: 5) { highlighter.offMainHighlights >= 1 }
+        XCTAssertTrue(landed, "no highlight landed within the wait; \(highlighter.highlightRequests) were requested")
+
+        let warm = markdown.attributed(source, highlighter: highlighter, phases: &phases)
+        XCTAssertGreaterThan(colours(warm), 1,
+                             "the block still draws \(colours(warm)) colour(s) after its highlight landed")
+    }
+
+    /// The process-wide highlight cache is bounded, and bounded by use (§6).
+    ///
+    /// **Discriminating.** The cache retained every distinct source and its attributed result with
+    /// no eviction at all, so a day-long session accumulated one entry per fenced block it ever
+    /// drew. The floor is the second half: a cache bounded by throwing everything away would also
+    /// re-highlight the block asked for most recently.
+    func testTheHighlightCacheIsBounded() async {
+        let highlighter = CodeHighlighter()
+        let blocks = (0..<300).map { (code: "let invented\($0) = \($0)", language: Optional("swift")) }
+        await highlighter.warm(blocks)
+        let warmed = highlighter.offMainHighlights
+        XCTAssertEqual(warmed, blocks.count, "warming \(blocks.count) block(s) ran \(warmed) highlight(s)")
+
+        _ = highlighter.styling(code: blocks[0].code, language: "swift")
+        let evicted = await wait(upTo: 5) { highlighter.offMainHighlights > warmed }
+        XCTAssertTrue(evicted, "the oldest of \(blocks.count) entries survived, so the cache is unbounded")
+
+        _ = highlighter.styling(code: blocks[blocks.count - 1].code, language: "swift")
+        let refilled = await wait(upTo: 0.5) { highlighter.offMainHighlights > warmed + 1 }
+        XCTAssertFalse(refilled, "the most recent entry was evicted too, so the bound is not by use")
+    }
+
+
+    /// A destination is routed by its shape, through the one capability every link in this leaf
+    /// leaves by (contract Y7).
+    ///
+    /// **Discriminating.** Nothing routed a markdown link at all before this: the walk kept no
+    /// destination and the row installed no handler, so pressing one did nothing. The three arms
+    /// are the three answers that differ — a URL the router hands on, a path the router opens as a
+    /// file, and a relative path in a channel whose working directory is unknown, which is the one
+    /// case that must resolve to nothing rather than to the app's own directory.
+    @MainActor
+    func testALinkIsRoutedByTheShapeOfItsDestination() async throws {
+        let cwd = URL(filePath: "/invented/project")
+        let absolute = try XCTUnwrap(TimelineLinkDestination.url(for: "/invented/project/notes.md"))
+        XCTAssertEqual(TimelineLinkDestination.link(for: absolute, cwd: nil),
+                       .file(URL(filePath: "/invented/project/notes.md"), line: nil),
+                       "an absolute path did not route as a file link")
+
+        let relative = try XCTUnwrap(TimelineLinkDestination.url(for: "notes.md"))
+        XCTAssertEqual(TimelineLinkDestination.link(for: relative, cwd: cwd),
+                       .file(cwd.appending(path: "notes.md"), line: nil),
+                       "a relative path was not resolved against the channel's directory")
+        XCTAssertNil(TimelineLinkDestination.link(for: relative, cwd: nil),
+                     "a relative path was resolved in a channel with no directory to resolve it against")
+
+        let remote = try XCTUnwrap(TimelineLinkDestination.url(for: "https://example.invalid/page"))
+        XCTAssertEqual(TimelineLinkDestination.link(for: remote, cwd: cwd),
+                       .url(URL(string: "https://example.invalid/page")!),
+                       "a URL destination did not route as a URL link")
+
+        // And the activation reaches the capability, which is what makes the routing above more
+        // than a pure function nobody calls.
+        let router = RecordingLinkRouter()
+        let context = InventedItems.context(links: router, cwd: cwd)
+        XCTAssertTrue(TimelineLinkDestination.open(remote, in: context), "the URL link was not accepted")
+        var delivered = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await router.opened.count == 1 { delivered = true; break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(delivered, "the router received nothing within the wait")
+        let opened = await router.openedURLs
+        XCTAssertEqual(opened, ["https://example.invalid/page"], "the router was given \(opened.count) URL link(s)")
+
+        // The floor: no context is no capability, so the row draws a link that does nothing rather
+        // than reaching for a stand-in.
+        XCTAssertFalse(TimelineLinkDestination.open(remote, in: nil),
+                       "a row outside the timeline's subtree routed a link anyway")
+    }
+
+    /// A build that began under the previous styling is refused at the write (§6).
+    ///
+    /// **Discriminating.** `warm` read the cache, built and wrote with no check between them, so a
+    /// preference flip landing mid-build repopulated the cache it had just cleared with the styling
+    /// the flip existed to remove — and every row drawn afterwards read it back. The floor is the
+    /// second half: a write that refused everything would satisfy the first assertion and leave the
+    /// warm-up filling nothing at all.
+    func testAWriteFromTheOldStylingIsRefused() {
+        let markdown = MarkdownText()
+        let stale = markdown.styling
+        markdown.clear()
+        XCTAssertFalse(markdown.write("an invented block", NSAttributedString(string: "x"),
+                                      pending: [], ifStyling: stale),
+                       "a build from the previous styling was written into the cache the flip cleared")
+        XCTAssertEqual(markdown.parseCount, 0,
+                       "the refused write still counted \(markdown.parseCount) parse(s)")
+
+        XCTAssertTrue(markdown.write("an invented block", NSAttributedString(string: "x"),
+                                     pending: [], ifStyling: markdown.styling),
+                      "a build from the current styling was refused too")
+        XCTAssertEqual(markdown.parseCount, 1,
+                       "the accepted write counted \(markdown.parseCount) parse(s)")
     }
 }
