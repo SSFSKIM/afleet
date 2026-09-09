@@ -147,9 +147,13 @@ final class QuitGuard {
         // trying to reach a channel that has just been quit, and a declined quit has already returned
         // above with every command still running.
         await hostCommands?.cancelHostCommands()
-        // **Panel state that is still on its way to disk goes with it.** A Workbench panel commits
-        // through a trailing window — the Browser's tab set does, by Q6 — so an edit made in the
-        // last half-second is held in memory by design, and `shutdown()` does not know about it.
+        // **Panel state that is still on its way to disk goes with it, and the panel is closed as
+        // it goes.** A Workbench panel commits through a trailing window — the Browser's tab set
+        // does, by Q6 — so an edit made in the last half-second is held in memory by design, and
+        // `shutdown()` does not know about it. The shutdown below has suspension points and a panel
+        // that is still following its pages keeps submitting work through them, so what this call
+        // does is close the panel to new work *and then* drain it: a drain that returned with the
+        // panel still open would be a snapshot, and the edit behind it dies with the process.
         // Nothing else in this clause reaches it: the terminations end conversations, not panels.
         // After the terminations, so a panel following a channel that just ended writes what it
         // finally saw; before the shutdown, because that is the last thing that happens.
@@ -331,6 +335,10 @@ extension QuitGuard {
                          // C7.6's G3 — "tabs persist across relaunch" — is the reason this seam
                          // exists: the Browser coalesces URL and title commits over half a second,
                          // so a fast quit otherwise drops whatever that window was holding.
-                         drainPanels: { await browserTab.model.flush() })
+                         // **It closes the panel and then drains it**, rather than draining alone:
+                         // the shutdown below suspends several times and the panel's chrome
+                         // tracking runs through all of it, so a drain that left the panel open
+                         // would be a snapshot with work arriving behind it (C7.6 D61).
+                         drainPanels: { await browserTab.model.closeForQuit() })
     }
 }

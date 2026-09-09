@@ -617,6 +617,62 @@ final class BrowserModelTests: XCTestCase {
                        "the flush returned with \(3 - atReturn) commit(s) made while it waited unwritten")
     }
 
+    /// **The quit drain is the last word, not a snapshot** (E4/E2).
+    ///
+    /// `QuitGuard` drains and then awaits `shutdownForQuit()`, which has suspension points of its
+    /// own. `trackChrome` is still running through all of them: a page's title reaches the web view
+    /// runloop turns after its navigation settles, so an edit can be submitted *after* the drain has
+    /// returned and sit in the coalescer's trailing window until the process exits under it. This is
+    /// the page settling late, and the question it asks is whether anything was left outstanding.
+    func testAPageThatSettlesAfterTheQuitDrainIsNotLeftPending() async throws {
+        let server = try await startServer()
+        defer { server.stop() }
+        let (model, backing, _) = await makeModel()
+        await settling(model, "the page loads") { model.openNewTab(url: server.url("/one")) }
+
+        await model.closeForQuit()
+        let written = await backing.attemptedWrites
+
+        // What `trackChrome` does while `shutdownForQuit` is suspended.
+        await settling(model, "a second page settles after the drain") {
+            model.selected?.web?.navigate(to: server.url("/two"))
+        }
+        await model.persistenceSettled()
+        // A second drain, which production does not have: it is how this test asks whether the
+        // first one left anything behind.
+        await model.flush()
+
+        let after = await backing.attemptedWrites
+        XCTAssertEqual(after, written,
+                       "\(after - written) write(s) were still outstanding after the final drain")
+    }
+
+    /// The same barrier at the other door: a mutation made after the drain.
+    ///
+    /// A structural change writes at once, so this one is not merely left pending — it is a write
+    /// racing the exit, and whether the document survives it is up to how far `shutdownForQuit`
+    /// gets. A closed panel accepts neither.
+    func testAMutationMadeAfterTheQuitDrainChangesNothing() async throws {
+        let (model, backing, _) = await makeModel()
+        let saved = URL(string: "https://saved.example.invalid/")!
+        model.openNewTab(url: saved)
+
+        await model.closeForQuit()
+        let written = await backing.attemptedWrites
+
+        model.openNewTab(url: URL(string: "https://after-the-drain.example.invalid/")!)
+        await model.persistenceSettled()
+        await model.flush()
+
+        let after = await backing.attemptedWrites
+        XCTAssertEqual(after, written,
+                       "a mutation made after the final drain reached the store")
+        let document = try await backing.document(BrowserTabSetDocument.self,
+                                                  key: BrowserTabStore.storeKey)
+        XCTAssertEqual(document?.tabs.map(\.url), [saved],
+                       "the document a quit left behind is \(String(describing: document?.tabs.map(\.url)))")
+    }
+
     /// The order the user made two mutations in survives the restoration boundary.
     ///
     /// The gate is only half of first-in-first-out. `performRestore` opens the gate *before* the

@@ -284,6 +284,9 @@ public final class BrowserModel {
     /// of one store read on every channel switch, and it would drop a keystroke rather than delay
     /// it: deferring keeps the user's action, which is the honest half of the two.
     private func gated(_ operation: @escaping @MainActor () -> Void) {
+        // Closed is closed (D61): after the quit drain nothing may enqueue work the drain cannot
+        // have waited for.
+        guard !isClosed else { return }
         guard !isRestored || gatedOperationsOutstanding > 0 else { return operation() }
         // **A mutation nobody has restored for starts the restoration.** Joining one that has
         // already been asked for is not enough: the first thing a mutation does is enqueue a
@@ -500,6 +503,29 @@ public final class BrowserModel {
         }
     }
 
+    /// **Closes this panel to new persistence work, and then drains what is left** (D61).
+    ///
+    /// What `QuitGuard` calls, and the reason `flush` alone was not enough: the drain returns, and
+    /// the app then awaits `shutdownForQuit()`, which suspends several times. `trackChrome` is
+    /// running through all of it — a page's title reaches the web view runloop turns after its
+    /// navigation settles — so an edit submitted after the drain sat in the coalescer's trailing
+    /// window until the process exited under it. A drain is a moment, and a moment cannot be the
+    /// last word while the thing it drains is still accepting work.
+    ///
+    /// Closing before draining, and not draining twice: a second drain is the same moment again,
+    /// one suspension later, and the work that outruns the first outruns the second for exactly the
+    /// same reason. What is refused after this is a mutation the user cannot see the result of —
+    /// the app is on its way out — and refusing it is what makes the document the app leaves behind
+    /// the one the drain wrote.
+    public func closeForQuit() async {
+        isClosed = true
+        await flush()
+    }
+
+    /// Set by `closeForQuit`, never cleared: the process is exiting, and a panel that reopened
+    /// would be a panel writing behind the drain that closed it.
+    public private(set) var isClosed = false
+
     /// The condition a drain returns on: nothing has been enqueued since `observed` was read, so
     /// the two chains this call just waited out are still the whole of them and the store has been
     /// drained behind them. Anything else means work arrived while it was suspended, and a drain
@@ -686,6 +712,9 @@ public final class BrowserModel {
     }
 
     private func commit(_ body: @escaping @Sendable (BrowserTabStore, BrowserTabSet) async -> Void) {
+        // The barrier's other door, and the one the finding is about: `recordPageState` reaches
+        // this directly from `trackChrome`, with no gate in front of it (D61).
+        guard !isClosed else { return }
         let set = snapshot()
         let store = store
         enqueuedWork += 1
