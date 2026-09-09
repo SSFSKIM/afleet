@@ -152,10 +152,21 @@ final class PaneCloseConfirmationTests: XCTestCase {
         let second = session.openShellPane()
         XCTAssertEqual(session.selectedIndex, 1, "the pane being restarted did not begin selected")
 
+        let gate = PaneTestGate()
+        second.heldTeardown = { await gate.hold() }
+
         let restarting = Task { await session.restart(second) }
-        await Task.yield()
-        await Task.yield()
+        await gate.awaitEntry()
+        // The rendezvous the two yields only hoped for. A run in which the restart had already
+        // finished by this line passed against the very defect this exists to pin, because the
+        // fresh pane was then selected by the append that made it and no unconditional assignment
+        // was ever reached. The gate makes "the restart has not resumed" a fact of the run.
+        XCTAssertTrue(gate.isHolding, "the restart was not inside the teardown when the user chose")
+        XCTAssertTrue(session.panes.contains { $0 === second },
+                      "the restart had already dropped the pane it is replacing")
+
         session.select(0)
+        gate.open()
         let restarted = await restarting.value
         let fresh = try XCTUnwrap(restarted, "the shell pane did not restart")
 
