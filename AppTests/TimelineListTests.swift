@@ -152,6 +152,107 @@ final class TimelineListTests: XCTestCase {
         }
     }
 
+    /// **When the anchored row is evicted the correction falls back to its nearest survivor.**
+    ///
+    /// A retraction removes rows rather than adding them — a refusal's `supersedes`, a rewind, a
+    /// repair — and it can take the row the reader was anchored to along with the rows above it.
+    /// The correction then had no anchor to find and gave up, so the viewport kept its raw offset
+    /// while the document above it got shorter: the reader's place jumps by the whole height of what
+    /// left, which is the same failure content arriving above the viewport causes and the one
+    /// parity §41.8 is written about.
+    ///
+    /// Discriminating on the survivor and not on the count: a list that simply scrolled somewhere
+    /// after the eviction passes any "the offset changed" assertion there is.
+    func testTheScrollFallsBackToTheNearestSurvivorWhenTheAnchorIsEvicted() throws {
+        let controller = TimelineTableController()
+        try FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { hosting in
+            Self.commit(Self.rows(60, from: 100), to: controller, in: hosting)
+            XCTAssertGreaterThan(controller.tableView.bounds.height, Self.viewport.height,
+                                 "the table is no taller than its viewport, so nothing here could scroll")
+
+            // Off a row boundary deliberately: the row nearest the top edge is then part-scrolled off
+            // it, which is the ordinary case and the one a correction that ignored the offset passes.
+            Self.scroll(controller, to: controller.tableView.bounds.height / 2 + 11)
+            XCTAssertFalse(controller.scroll.isPinnedToBottom,
+                           "the viewport still reports itself pinned after scrolling into the middle")
+
+            let anchored = try XCTUnwrap(Self.topRowKey(of: controller),
+                                         "no row was found at the viewport's top edge, so there is no anchor to hold")
+            let position = try XCTUnwrap(controller.rows.firstIndex { $0.key == anchored },
+                                         "the anchored row is not in the table it was read from")
+            XCTAssertGreaterThan(position, 2,
+                                 "the anchor sits at row \(position), too near the top for a surviving predecessor")
+            let survivor = controller.rows[position - 3].key
+            let before = try XCTUnwrap(Self.offset(ofRowKeyed: anchored, in: controller),
+                                       "the anchored row has no rectangle before the commit")
+            XCTAssertNotEqual(before, 0, accuracy: 0.5,
+                              "the anchored row sits exactly on the viewport's top edge, so this asserts "
+                              + "nothing about the offset being carried")
+
+            // The retraction: the anchored row and the two rows above it leave.
+            let evicted = Set([position - 2, position - 1, position].map { 100 + $0 })
+            Self.commit((100..<160).filter { !evicted.contains($0) }.map { Self.row(index: $0) },
+                        to: controller, in: hosting)
+            XCTAssertEqual(controller.rows.count, 57,
+                           "the table holds \(controller.rows.count) row(s) after 3 of 60 were retracted")
+            XCTAssertNil(Self.offset(ofRowKeyed: anchored, in: controller),
+                         "the anchored row survived the retraction, so the fallback below is never reached")
+
+            let after = try XCTUnwrap(Self.offset(ofRowKeyed: survivor, in: controller),
+                                      "the survivor this correction must fall back to is not in the table")
+            XCTAssertEqual(after, before, accuracy: 1,
+                           "the reader's place moved \(Int(abs(after - before))) point(s) when the row it was "
+                           + "anchored to was retracted")
+        }
+    }
+
+    /// **The fallback lands on the survivor and not somewhere past it.**
+    ///
+    /// The offset the correction carries is a distance measured *inside* the anchored row, and a
+    /// reader parked deep in a long message has a large one. Carrying it unchanged onto a short
+    /// predecessor scrolls the viewport past that row's own bottom edge and drops the reader into
+    /// rows they were never looking at — or at the document's end, which is the one place the
+    /// silent re-pin then starts following the stream again.
+    func testTheFallbackDoesNotScrollPastTheSurvivingRow() throws {
+        let controller = TimelineTableController()
+        try FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { hosting in
+            // One very long message among short ones, which is what a reader parks inside.
+            let rows = (100..<160).map { Self.row(index: $0, text: $0 == 130 ? Self.paragraph : nil) }
+            Self.commit(rows, to: controller, in: hosting)
+            let tall = try XCTUnwrap(controller.rows.firstIndex { $0.key == rows[30].id.key },
+                                     "the long message is not in the table")
+            let tallHeight = controller.tableView(controller.tableView, heightOfRow: tall)
+            XCTAssertGreaterThan(tallHeight, Self.viewport.height,
+                                 "the long message is \(Int(tallHeight)) point(s) tall and does not overflow the "
+                                 + "viewport, so nobody can park inside it")
+
+            // Parked deep inside it.
+            Self.scroll(controller, to: controller.tableView.rect(ofRow: tall).minY + tallHeight / 2)
+            XCTAssertFalse(controller.scroll.isPinnedToBottom,
+                           "the viewport still reports itself pinned after scrolling into the long message")
+            let anchored = try XCTUnwrap(Self.topRowKey(of: controller),
+                                         "no row was found at the viewport's top edge")
+            XCTAssertTrue(anchored == rows[30].id.key, "the row at the viewport's top edge is not the long message")
+            let survivor = controller.rows[tall - 1].key
+
+            // The long message is retracted.
+            Self.commit(rows.filter { $0.id.key != rows[30].id.key }, to: controller, in: hosting)
+            XCTAssertEqual(controller.rows.count, 59,
+                           "the table holds \(controller.rows.count) row(s) after 1 of 60 was retracted")
+
+            let offset = try XCTUnwrap(Self.offset(ofRowKeyed: survivor, in: controller),
+                                       "the survivor this correction must fall back to is not in the table")
+            let index = try XCTUnwrap(controller.rows.firstIndex { $0.key == survivor },
+                                      "the survivor is not in the table it was just read from")
+            let height = controller.tableView(controller.tableView, heightOfRow: index)
+            // The furthest the correction may go is the survivor's bottom edge — which is exactly
+            // where the retracted content began, so everything below it is where it was.
+            XCTAssertGreaterThanOrEqual(offset + height, -0.5,
+                                        "the viewport landed \(Int(-(offset + height))) point(s) past the bottom "
+                                        + "of the row the correction fell back to")
+        }
+    }
+
     // MARK: - The column's one-expression swap
 
     /// The column draws the renderer for a populated channel and its placeholders for the other

@@ -48,6 +48,16 @@ enum AgentRelayState: Hashable, Sendable {
         case stoppedBeforeNextRound
     }
 
+    /// Whether the reading has reached a conclusion rather than a state it is still waiting out.
+    /// *Pending* and *Relayed* are both "nothing that answers this has happened yet"; the other two
+    /// are answers, and an answer is what the registry settles on (D2's durable half).
+    var isTerminal: Bool {
+        switch self {
+        case .pending, .relayed: false
+        case .delivered, .notDelivered: true
+        }
+    }
+
     /// Whether this reading is one the user can act on with *Retry*.
     var offersRetry: Bool {
         if case .notDelivered = self { return true }

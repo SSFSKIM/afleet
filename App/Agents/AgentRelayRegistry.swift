@@ -62,12 +62,27 @@ enum AgentRelayMachine {
         /// record that took a call an older record had already settled on would report the older
         /// send's outcome for the newer one. Nil where no call named this run.
         var claimedCall: String?
+        /// Whether the turn this record's prompt started has closed — the `result` attributed to
+        /// this prompt uuid. It is what says the evidence is **complete**: until the turn closes the
+        /// model may still call `SendMessage`, call it again after a refusal, or call it for a
+        /// different run, and every one of those revises the arm.
+        var turnClosed: Bool
 
         init(_ state: AgentRelayState, reply: String? = nil, claimedKey: String? = nil,
-             claimedCall: String? = nil) {
+             claimedCall: String? = nil, turnClosed: Bool = false) {
             self.state = state; self.reply = reply; self.claimedKey = claimedKey
-            self.claimedCall = claimedCall
+            self.claimedCall = claimedCall; self.turnClosed = turnClosed
         }
+
+        /// Whether this conclusion is one no later frame can take back, and therefore one the
+        /// registry keeps rather than re-deriving.
+        ///
+        /// **A terminal arm alone is not enough.** *Not delivered* mid-turn is provisional by
+        /// design — the wrong-target arm is what is left while this run's own call has not arrived,
+        /// and a refusal the model retries in the same turn becomes a relay — so the arm settles
+        /// only once the turn has closed. *Delivered* settles on its own: the message is in the
+        /// agent's transcript and a transcript is not un-written.
+        var isSettled: Bool { state.isTerminal && (turnClosed || state == .delivered) }
     }
 
     /// Every record of one channel, advanced together.
@@ -76,17 +91,62 @@ enum AgentRelayMachine {
     /// same run are two messages and one forwarded frame is evidence for one of them; advancing each
     /// record in isolation would let a single frame deliver both. Records are advanced oldest first,
     /// so the earlier send claims the earlier frame.
-    static func advance(_ records: [AgentRelayRecord], in timeline: ChannelTimeline) -> [AgentRelayRecord.ID: Outcome] {
+    ///
+    /// **`settled` is the conclusions the registry already holds**, and they are held rather than
+    /// re-derived: the turn boundary a *Not delivered* was read from lives in the overlay, and a
+    /// timeline rebuilt from the transcript files carries no overlay at all (§7.3), so a record
+    /// re-derived after *Check again* would scan straight past its own turn into a later one and
+    /// claim a later send's call. A settled record's own claims are taken first, so nothing that is
+    /// re-derived can take a call or a delivery frame that already belongs to one.
+    static func advance(_ records: [AgentRelayRecord], in timeline: ChannelTimeline,
+                        settled: [AgentRelayRecord.ID: Outcome] = [:]) -> [AgentRelayRecord.ID: Outcome] {
+        let items = timeline.items
+        let ordered = records.sorted { $0.sentAt < $1.sentAt }
         var claimed: Set<String> = []
         var calls: Set<String> = []
         var outcomes: [AgentRelayRecord.ID: Outcome] = [:]
-        for record in records.sorted(by: { $0.sentAt < $1.sentAt }) {
-            let outcome = advance(record, in: timeline, claiming: claimed, callsClaimed: calls)
+        for record in ordered {
+            guard let held = settled[record.id] else { continue }
+            let outcome = overtakenByDelivery(held, of: record, in: items, claiming: claimed) ?? held
+            if let key = outcome.claimedKey { claimed.insert(key) }
+            if let call = outcome.claimedCall { calls.insert(call) }
+            outcomes[record.id] = outcome
+        }
+        for (position, record) in ordered.enumerated() where outcomes[record.id] == nil {
+            // **What a younger send has already asked for.** A record must not settle on a call
+            // that lies after a younger record's own prompt echo and carries the younger record's
+            // message: that call is the younger send's, and the prompt echo is a transcript record,
+            // so this holds on a timeline rebuilt from the files where the turn boundary does not.
+            let younger = ordered[ordered.index(after: position)...]
+            let contested = younger.compactMap { later in
+                items.firstIndex { isPromptEcho($0, of: later) }
+            }.min()
+            let outcome = advance(record, in: timeline, claiming: claimed, callsClaimed: calls,
+                                  contestedFrom: contested, contestedBy: younger.map(\.textDigest))
             if let key = outcome.claimedKey { claimed.insert(key) }
             if let call = outcome.claimedCall { calls.insert(call) }
             outcomes[record.id] = outcome
         }
         return outcomes
+    }
+
+    /// A settled *Not delivered* the message has since overtaken, or nil.
+    ///
+    /// **The one revision a settlement yields to.** The fourth arm concludes that a run stopped
+    /// without taking the message, and the message can still turn up in that run's own transcript
+    /// afterwards; a settlement that froze it would leave *Not delivered* and a *Retry* on a message
+    /// that had arrived, and the retry would send it twice. It applies only to a record that settled
+    /// on a **call of its own** and scans only after that call, so it cannot take a delivery frame
+    /// that belongs to some other send — which is the correlation the settlement exists to protect.
+    private static func overtakenByDelivery(_ held: Outcome, of record: AgentRelayRecord,
+                                            in items: [TimelineItem], claiming claimed: Set<String>) -> Outcome? {
+        guard case .notDelivered = held.state, let call = held.claimedCall else { return nil }
+        guard let index = items.firstIndex(where: {
+            if case .toolCall(let made) = $0 { return made.toolUseID == call } else { return false }
+        }) else { return nil }
+        guard let key = delivery(of: record, in: items, after: index, claiming: claimed) else { return nil }
+        return Outcome(.delivered, reply: held.reply, claimedKey: key, claimedCall: call,
+                       turnClosed: held.turnClosed)
     }
 
     /// One record, against the timeline and the delivery frames earlier records have already claimed.
@@ -107,7 +167,9 @@ enum AgentRelayMachine {
     ///   `task_notification` arriving after the relay with nothing of the target's carrying the text.
     static func advance(_ record: AgentRelayRecord, in timeline: ChannelTimeline,
                         claiming claimed: Set<String> = [],
-                        callsClaimed calls: Set<String> = []) -> Outcome {
+                        callsClaimed calls: Set<String> = [],
+                        contestedFrom contested: Int? = nil,
+                        contestedBy youngerDigests: [String] = []) -> Outcome {
         let items = timeline.items
         guard let sent = items.firstIndex(where: { isPromptEcho($0, of: record) }) else {
             // The engine has not echoed the prompt yet. Nothing has happened that could be read as
@@ -152,8 +214,11 @@ enum AgentRelayMachine {
                 let verdict = verdict(of: call, for: record)
                 if verdict == .wrongTarget { wrongTarget = true }
                 else if !calls.contains(call.toolUseID) {
+                    let claimedByAYounger = contested.map { index > $0 } == true
+                        && youngerDigests.contains { carries($0, call) }
                     ours.append(Call(id: call.toolUseID, index: index, at: call.timestamp ?? .distantPast,
-                                     verdict: verdict, carriesThisMessage: carries(record.textDigest, call)))
+                                     verdict: verdict, carriesThisMessage: carries(record.textDigest, call),
+                                     claimedByAYounger: claimedByAYounger))
                 }
 
             case .turnSummary(let turn):
@@ -167,24 +232,31 @@ enum AgentRelayMachine {
         }
 
         guard let ours = settling(among: ours) else {
-            if wrongTarget { return Outcome(.notDelivered(.wrongTarget), reply: reply) }
-            return Outcome(turnClosed ? .notDelivered(.noCall) : .pending, reply: reply)
+            if wrongTarget {
+                return Outcome(.notDelivered(.wrongTarget), reply: reply, turnClosed: turnClosed)
+            }
+            return Outcome(turnClosed ? .notDelivered(.noCall) : .pending, reply: reply, turnClosed: turnClosed)
         }
         switch ours.verdict {
-        case .refused: return Outcome(.notDelivered(.refused), reply: reply, claimedCall: ours.id)
-        case .running: return Outcome(.pending, reply: reply, claimedCall: ours.id)
+        case .refused:
+            return Outcome(.notDelivered(.refused), reply: reply, claimedCall: ours.id, turnClosed: turnClosed)
+        case .running:
+            return Outcome(.pending, reply: reply, claimedCall: ours.id, turnClosed: turnClosed)
         // Not stored above, and named here rather than defaulted so a fifth verdict cannot be
         // absorbed by an `default:` that means whatever the last author assumed.
-        case .wrongTarget: return Outcome(.notDelivered(.wrongTarget), reply: reply)
+        case .wrongTarget:
+            return Outcome(.notDelivered(.wrongTarget), reply: reply, turnClosed: turnClosed)
         case .relayed: break
         }
         if let key = delivery(of: record, in: items, after: ours.index, claiming: claimed) {
-            return Outcome(.delivered, reply: reply, claimedKey: key, claimedCall: ours.id)
+            return Outcome(.delivered, reply: reply, claimedKey: key, claimedCall: ours.id,
+                           turnClosed: turnClosed)
         }
         if stoppedBeforeNextRound(record.target, in: timeline, after: ours.at) {
-            return Outcome(.notDelivered(.stoppedBeforeNextRound), reply: reply, claimedCall: ours.id)
+            return Outcome(.notDelivered(.stoppedBeforeNextRound), reply: reply, claimedCall: ours.id,
+                           turnClosed: turnClosed)
         }
-        return Outcome(.relayed, reply: reply, claimedCall: ours.id)
+        return Outcome(.relayed, reply: reply, claimedCall: ours.id, turnClosed: turnClosed)
     }
 
     /// One `SendMessage` call of the turn, as this record reads it.
@@ -200,6 +272,9 @@ enum AgentRelayMachine {
         /// paraphrased answers no and the call is still a candidate, because the alternative — no
         /// candidate at all — would report *no call* for a relay that happened.
         let carriesThisMessage: Bool
+        /// The call lies after a younger record's own prompt echo and carries that record's message.
+        /// It is that send's, and this record settles on it only if there is nothing else at all.
+        let claimedByAYounger: Bool
     }
 
     /// Which of this turn's candidate calls this record settles on.
@@ -212,9 +287,15 @@ enum AgentRelayMachine {
     /// again in the same turn relayed the message; settling on the refusal because it came first
     /// would report *Not delivered* for text that arrived, and the delivery scan below would never
     /// be reached to contradict it.
+    /// **A call a younger send has already asked for is not a candidate at all.** Two sends of one
+    /// text to one run are told apart by the turn they were made in, and the turn boundary lives in
+    /// the overlay — so on a timeline rebuilt from the transcript files the older send would take the
+    /// younger one's call and report the younger send's outcome for both. The younger record's own
+    /// prompt echo is a transcript record and is the boundary that survives.
     private static func settling(among calls: [Call]) -> Call? {
-        let mine = calls.filter(\.carriesThisMessage)
-        let candidates = mine.isEmpty ? calls : mine
+        let free = calls.filter { !$0.claimedByAYounger }
+        let mine = free.filter(\.carriesThisMessage)
+        let candidates = mine.isEmpty ? free : mine
         return candidates.first { $0.verdict == .relayed }
             ?? candidates.first { $0.verdict == .running }
             ?? candidates.first
@@ -338,9 +419,21 @@ enum AgentRelayMachine {
     /// arm stays as it is: it is right whenever the run's own frames moved after the relay, and the
     /// way it is wrong is the visible direction — a *Not delivered* with a *Retry* offered on a
     /// message that may still be queued, rather than a *Relayed* on one that will never arrive.
+    ///
+    /// **And the run's own node where the mirror has no row for it.** Only a live process fills the
+    /// mirror, and the fold empties it when that process exits — so reading the mirror alone reports
+    /// *Relayed* for ever about a message that will never arrive, the moment the process behind the
+    /// relay is gone. The tree's node is the evidence that is left, and it is read narrowly: the run
+    /// is terminal and its **end instant is after the relay**, which is the same reading by the same
+    /// rule. A node the tree stamped before the relay, and a file-only channel's node, which carries
+    /// no end instant at all, both answer no — so this adds no arm where the mirror had none.
     private static func stoppedBeforeNextRound(_ target: AgentRunID, in timeline: ChannelTimeline,
                                                after relay: Date) -> Bool {
-        guard let entry = timeline.registry.entries[target] else { return false }
+        guard let entry = timeline.registry.entries[target] else {
+            guard let node = timeline.agents?.node(target), node.status != .running,
+                  let ended = node.endedAt else { return false }
+            return ended > relay
+        }
         return entry.notified && entry.status != .running && entry.lastFrameAt > relay
     }
 }
@@ -374,6 +467,22 @@ final class AgentRelayRegistry {
     /// retry opens belongs to the registry the press came from.
     private var resends: [AgentRelayRecord.ID: @MainActor (AgentRelayRecord.ID, AgentRelayRegistry) async -> Void] = [:]
 
+    /// The conclusions already reached, kept for the life of the app.
+    ///
+    /// **The one thing the derivation cannot re-derive.** The state is read from the timeline on
+    /// every ask, and that is right while the evidence is still arriving — but the evidence a *Not
+    /// delivered* is read from includes the turn's `result`, which lives in the ephemeral overlay
+    /// and in no transcript record (§7.3). *Check again* rebuilds the workspace and the channel's
+    /// timeline comes back from the files with no turn boundary in it, so a record that had already
+    /// concluded would go back to *Pending* and then read the **next** send's `SendMessage` call as
+    /// its own — two messages settled on one call, which is exactly the correlation item 51 asks
+    /// for one-to-one. So a conclusion is kept, and re-derivation touches the unsettled records only.
+    ///
+    /// `@ObservationIgnored` because it is the derivation's own memory and not state a surface
+    /// draws: the reading a row shows is published by `records` and by the timeline it is derived
+    /// from, and a write here during a body evaluation must not invalidate that body.
+    @ObservationIgnored private var settlements: [AgentRelayRecord.ID: AgentRelayMachine.Outcome] = [:]
+
     /// Opens a record for a send that has already happened. Called after `sendPrompt` returned its
     /// uuid, never before: a record for a send the engine refused would be a message with a state and
     /// no message.
@@ -399,7 +508,13 @@ final class AgentRelayRegistry {
     /// Every record of a channel with its state, derived from the timeline in one pass so that
     /// delivery stays correlated one-to-one.
     func outcomes(in channel: ChannelKey, of timeline: ChannelTimeline) -> [AgentRelayRecord.ID: AgentRelayMachine.Outcome] {
-        AgentRelayMachine.advance(records(in: channel), in: timeline)
+        let records = records(in: channel)
+        let outcomes = AgentRelayMachine.advance(records, in: timeline, settled: settlements)
+        for record in records {
+            guard let outcome = outcomes[record.id], outcome.isSettled else { continue }
+            settlements[record.id] = outcome
+        }
+        return outcomes
     }
 
     /// What the row for one sent message draws (contract Y8), or nil where this prompt sent no relay

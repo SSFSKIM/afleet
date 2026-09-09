@@ -87,7 +87,14 @@ final class AgentsTab: PanelTab {
         let fleet = lifecycle()
         return AgentsModel(channel: context.key, timelines: timelines, store: selection,
                            actions: fleet.map {
-                               AgentNodeActions(lifecycle: $0, channel: context.key, links: context.links,
+                               AgentNodeActions(lifecycle: $0,
+                                                // The send resolves the fleet at the press, through
+                                                // this tab's own reach: a *Retry* is app-scoped and
+                                                // outlives the session, so it must follow the
+                                                // workspace *Check again* attached rather than the
+                                                // one this session was built over.
+                                                reaching: lifecycle,
+                                                channel: context.key, links: context.links,
                                                 pasteboard: pasteboard, relay: relay,
                                                 // The `HostSignal.promptSent` raise that is
                                                 // inseparable from a send, on this channel's own

@@ -516,6 +516,69 @@ final class AgentTreeSourcesTests: XCTestCase {
         await fileOnly.close()
     }
 
+    // MARK: - The process behind the runs is gone (recomposition finding 4)
+
+    /// **A process exit ends the runs it was running, empties the mirror, and a respawn inherits
+    /// nothing of it.**
+    ///
+    /// `task_notification` is the only frame that ever says a run ended, and a process that dies
+    /// sends none. So the node kept `.running` with its elapsed timer ticking, and the registry
+    /// mirror — which only a live process can fill — kept every row it had: the Agents tab went on
+    /// advertising a dead run as running and offering *Stop* and *Move to background* for it, on a
+    /// process that is not there. The reading a run takes when its process is gone is §8.8's
+    /// precedent for a run the wire cannot speak for: the row's own, and a run that never completed
+    /// is one that stopped.
+    ///
+    /// The respawn is the second half, and it is what a plain "mark them ended" would still get
+    /// wrong: the live half belongs to the process that produced it, so the new one starts from
+    /// nothing rather than from the dead process's overlay.
+    func testAProcessExitEndsItsRunsAndARespawnInheritsNothing() async throws {
+        let session = try XCTUnwrap(SessionID("33333333-3333-4333-8333-333333333333"),
+                                    "an invented session id did not parse")
+        let before = InventedRun(taskID: "invented-run-before-exit", toolUseID: "toolu_invented0011", at: 60)
+        let after = InventedRun(taskID: "invented-run-after-respawn", toolUseID: "toolu_invented0012", at: 240)
+        let tree = try TempTree()
+        let mainPath = try tree.write(Data(), session: session, slug: "invented")
+        let ingestion = StreamIngestion(session: session, configHome: tree.root, mode: .filePrimary)
+        let tap = Tap()
+        try await ingestion.open(file: mainPath, events: tap.events)
+
+        tap.send(.frame(Self.taskStarted(before, session: session), .first))
+        _ = try await awaitTree(ingestion, "the run started") { $0.node(before.taskID)?.status == .running }
+        let live = await ingestion.timeline.registry
+        XCTAssertFalse(live.entries.isEmpty,
+                       "the task frame folded into no registry row, so emptying it below would prove nothing")
+
+        // The process dies. No `task_notification` is coming: nothing else can say the run ended.
+        tap.send(.exited(.code(0, stderrTail: ""), .first))
+        let ended = try await awaitTree(ingestion, "the exit ended the run") {
+            $0.node(before.taskID)?.status != .running
+        }
+        XCTAssertNotNil(ended.node(before.taskID)?.endedAt,
+                        "a run whose process is gone carries no end instant, so its elapsed still ticks")
+        let afterExit = await ingestion.timeline.registry
+        XCTAssertEqual(afterExit.entries.count, 0,
+                       "the mirror kept \(afterExit.entries.count) row(s) after the process that fills it exited")
+        let staleOverlay = await ingestion.overlay.stale
+        XCTAssertTrue(staleOverlay, "the exit did not mark the live half stale, so the reset below proves nothing")
+
+        // The respawn: the supervisor takes the next epoch, and its first event is the replacement.
+        tap.send(.frame(Self.taskStarted(after, session: session), ProcessEpoch.first.next()))
+        let respawned = try await awaitTree(ingestion, "the respawned process started a run") {
+            $0.node(after.taskID)?.status == .running
+        }
+        XCTAssertEqual(respawned.node(before.taskID)?.status, ended.node(before.taskID)?.status,
+                       "the respawn put the dead process's run back to running")
+        let freshOverlay = await ingestion.overlay.stale
+        XCTAssertFalse(freshOverlay, "the new process inherited the dead one's live half")
+        let mirror = await ingestion.timeline.registry
+        XCTAssertEqual(Set(mirror.entries.keys), [after.taskID],
+                       "the mirror holds \(mirror.entries.count) row(s) after the respawn, not the new run's alone")
+
+        tap.finish()
+        await ingestion.close()
+    }
+
     // MARK: - Invented corpus
 
     /// One agent run of the invented corpus: its task id, the `tool_use` block that spawned it, and the second the

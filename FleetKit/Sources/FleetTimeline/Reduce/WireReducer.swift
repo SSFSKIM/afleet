@@ -146,6 +146,10 @@ public struct WireReducer: Sendable {
             preview = nil
             outstandingPrompts = []
             retainedAnswers = []
+            // The replacement is also the proof that the process before it is gone. `exited` is the
+            // ordinary route and this is the one that has to hold when it never arrived — a process
+            // the supervisor replaced without the tap seeing it die.
+            processGone(at: now)
 
         case .relocated(let mainPath):
             if let (resolved, kind) = TranscriptPath.resolve(mainPath, under: stream.configHome),
@@ -200,7 +204,21 @@ public struct WireReducer: Sendable {
             for (id, decision) in overlay.decisions where decision.state == .pending {
                 overlay.decisions[id]?.state = .inert
             }
+            processGone(at: now)
         }
+    }
+
+    /// What is true of the live half the moment the process behind it is gone.
+    ///
+    /// The runs it was running ended with it — `task_notification` is the only frame that ever says a
+    /// run ended and a dead process sends none — and the background-task registry mirror goes empty,
+    /// because only a live process can fill it and every affordance it gates (*Stop*, *Move to
+    /// background*, reap eligibility) is a request to that process. The agent-run **tree** stays: it
+    /// is the session's own history, drawn from the transcript as much as from the wire, and a
+    /// resumed session's runs are still its runs.
+    private mutating func processGone(at now: Date) {
+        agents.processExited(at: now)
+        registry = RegistryMirror()
     }
 
     // MARK: - Frames
