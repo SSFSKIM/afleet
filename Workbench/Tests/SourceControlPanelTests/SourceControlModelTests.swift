@@ -24,7 +24,13 @@ final class SourceControlModelTests: XCTestCase {
     /// C7.5's resolver fetches the sides. `add`, `commit`, `checkout`, `switch`, `branch`,
     /// `restore`, `stash`, `reset`, `push` and `merge` are unrepresentable rather than merely
     /// unused, which is the whole of §9.2's enforcement. Extending this set is a deliberate edit.
-    static let allowedGitVerbs: Set<String> = ["rev-parse", "log", "status", "diff", "show"]
+    /// `hash-object` is here for one reason, recorded on the line: a repository with an **unborn
+    /// `HEAD`** has no commit to diff the working tree against, so C7.3's `GitDiff` names the
+    /// repository's empty-tree object with `hash-object -t tree /dev/null` — **without** `-w`, so
+    /// it computes a name and writes nothing into the object database. It is a read, and the
+    /// inventory says so rather than the reader being treated as a violation.
+    static let allowedGitVerbs: Set<String> = ["rev-parse", "log", "status", "diff", "show",
+                                               "hash-object"]
 
     /// Asserts G4's argv half for one recorder, naming the set and the count it saw.
     ///
@@ -1207,6 +1213,399 @@ final class SourceControlModelTests: XCTestCase {
         }
     }
 
+
+    // MARK: - 12. a delivery that arrives before the first read
+
+    /// The host creates the session, schedules `activate()` **separately**, and delivers the
+    /// `.commit` link. G3's headline clause — "a `.commit` link selects that commit" — is about
+    /// the very first click, and a delivery that raced the first read answered `.noRepository`
+    /// against a state that had not been read yet.
+    ///
+    /// The fix belongs here rather than in the tab: a delivery must work whatever order the host
+    /// does things in, so it waits for the first read instead of racing it.
+    func testACommitDeliveredWhileTheFirstReadIsInFlightWaitsForItAndSelects() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let (repo, hashes) = try await linearRepository(tree, commits: 3)
+        let (model, _) = model(repo)
+        let head = try XCTUnwrap(hashes.last)
+
+        // Exactly the host's order: `activate()` is spawned, and the delivery is made against a
+        // session whose first read has not finished.
+        let activating = Task { await model.activate() }
+        await model.select(commit: head)
+        await activating.value
+
+        XCTAssertEqual(model.selection, .commit(head),
+                       "a delivery arriving during the first read selected nothing")
+        XCTAssertNil(model.deliveryNotice, "the delivery answered before the repository was read")
+        XCTAssertEqual(model.readout.detail?.files.map(\.path), ["notes/2.txt"])
+        XCTAssertTrue(model.hasRead)
+    }
+
+    /// The same clause where the delivery arrives **first**: nothing has activated the session at
+    /// all, and the link is still owed its commit.
+    func testACommitDeliveredBeforeAnyActivationReadsAndSelects() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let (repo, hashes) = try await linearRepository(tree, commits: 3)
+        let (model, recorder) = model(repo)
+        let wanted = try XCTUnwrap(hashes.first)
+
+        await model.select(commit: wanted)
+
+        XCTAssertEqual(model.selection, .commit(wanted),
+                       "a delivery into a session nobody had activated selected nothing")
+        XCTAssertNil(model.deliveryNotice)
+        XCTAssertEqual(model.readout.rows.count, 3, "the delivery did not read the window")
+
+        // And the activation that follows does not read a second time: the delivery's read is the
+        // session's first read, not a read of its own.
+        let afterDelivery = recorder.invocations(of: .git).count
+        await model.activate()
+        XCTAssertEqual(recorder.invocations(of: .git).count, afterDelivery,
+                       "the activation after a delivery re-read the repository")
+        assertOnlyReadVerbs(recorder, atLeast: 3)
+    }
+
+    // MARK: - 13. G1.3's corpus, at the selected commit's readout
+
+    /// G1.3 names the corpus — a modification, an add, a delete, a rename, a binary file and a
+    /// submodule gitlink — and the assertion is at the **readout the user reads**, not at the
+    /// reader. A detail path that filtered a kind out of a commit's list left every reader test
+    /// green.
+    func testTheSelectedCommitReadoutListsTheWholeCorpusOfChangeKinds() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let inner = try await GitRepository(tree, name: "inner")
+        try await inner.commit("the submodule's own commit", files: ["inner.txt": "inner\n"])
+        let repo = try await GitRepository(tree)
+        try await repo.commit("the first commit",
+                              files: ["src/modified.txt": "one\n",
+                                      "src/deleted.txt": "gone soon\n",
+                                      "src/old-name.txt": String(repeating: "line\n", count: 40)])
+        try await repo.addSubmodule(inner, at: "vendor/inner")
+
+        // One commit carrying all six.
+        try repo.write("src/modified.txt", "one, edited\n")
+        try repo.remove("src/deleted.txt")
+        try await repo.rename("src/old-name.txt", to: "src/new-name.txt")
+        try repo.write("src/added.txt", "added\n")
+        try repo.write("assets/blob.bin", bytes: Data([0x00, 0x01, 0x02, 0x00, 0xff]))
+        try await repo.commitInsideSubmodule(at: "vendor/inner", files: ["more.txt": "more\n"])
+        let head = try await repo.commitStaged("the corpus commit")
+
+        let (model, _) = model(repo)
+        await model.activate()
+        await model.select(commit: head)
+
+        guard case .commit(let detail)? = model.readout.detail else {
+            return XCTFail("the detail is not a commit's")
+        }
+        XCTAssertEqual(detail.hash, head)
+        let files = detail.files
+        let modified = try XCTUnwrap(files.first { $0.path == "src/modified.txt" },
+                                     "the commit's readout lists no modification")
+        XCTAssertEqual(modified.status, .modified)
+        let added = try XCTUnwrap(files.first { $0.path == "src/added.txt" },
+                                  "the commit's readout lists no add")
+        XCTAssertEqual(added.status, .added)
+        let deleted = try XCTUnwrap(files.first { $0.path == "src/deleted.txt" },
+                                    "the commit's readout lists no delete")
+        XCTAssertEqual(deleted.status, .deleted)
+        let renamed = try XCTUnwrap(files.first { $0.path == "src/new-name.txt" },
+                                    "the commit's readout lists no rename")
+        guard case .renamed(let from, _) = renamed.status else {
+            return XCTFail("the renamed row does not carry the side it came from")
+        }
+        XCTAssertEqual(from, "src/old-name.txt")
+        let binary = try XCTUnwrap(files.first { $0.path == "assets/blob.bin" },
+                                   "the commit's readout lists no binary file")
+        XCTAssertTrue(binary.isBinary, "the binary row was listed as a text file")
+        XCTAssertFalse(binary.opensADiff)
+        let gitlink = try XCTUnwrap(files.first { $0.path == "vendor/inner" },
+                                    "the commit's readout lists no submodule gitlink")
+        XCTAssertEqual(gitlink.kind, .gitlink)
+        XCTAssertFalse(gitlink.opensADiff)
+        XCTAssertEqual(Set(files.map(\.path)),
+                       ["src/modified.txt", "src/added.txt", "src/deleted.txt",
+                        "src/new-name.txt", "assets/blob.bin", "vendor/inner"],
+                       "the commit's readout lists something other than the corpus")
+    }
+
+    /// The corpus's other half: a **root** commit lists its whole tree, at the same readout.
+    func testARootCommitsReadoutListsItsWholeTreeAsAdded() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        let root = try await repo.commit("the root commit",
+                                         files: ["README.md": "loom\n", "src/one.txt": "one\n"])
+        try await repo.commit("the second commit", files: ["src/two.txt": "two\n"])
+        let (model, _) = model(repo)
+        await model.activate()
+
+        await model.select(commit: root)
+
+        guard case .commit(let detail)? = model.readout.detail else {
+            return XCTFail("the detail is not a commit's")
+        }
+        XCTAssertEqual(detail.files.map(\.path).sorted(), ["README.md", "src/one.txt"],
+                       "a root commit's readout does not list its whole tree")
+        XCTAssertEqual(Set(detail.files.map(\.status)), [.added])
+    }
+
+    // MARK: - 14. a reactivated session watches again (G1.5)
+
+    /// G1.5's re-arm, discriminated. A session the host retains is deactivated when its channel
+    /// goes away and activated again when it comes back; it has read already, so nothing on the
+    /// read path arms the stream for it, and only `activate()`'s own re-arm does.
+    func testASessionDeactivatedAndActivatedAgainStillDeliversAWorkingTreeRow() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("the first commit", files: ["src/one.txt": "one\n"])
+        let (model, _) = model(root: repo.root, environment: Self.environment(repo), watching: true)
+
+        await model.activate()
+        XCTAssertTrue(model.isWatchArmed)
+        model.deactivate()
+        XCTAssertFalse(model.isWatchArmed)
+
+        await model.activate()
+        XCTAssertTrue(model.hasRead, "the reactivation dropped the document it had read")
+        XCTAssertTrue(model.isWatchArmed, "a reactivated session never watches again")
+        try await Task.sleep(for: .milliseconds(300))
+
+        try repo.write("src/one.txt", "one, edited\n")
+        let appeared = try await waitUntil("the working-tree row appears after a reactivation") {
+            model.readout.hasWorkingTreeRow
+        }
+        XCTAssertLessThan(appeared, 1.0,
+                          "the reactivated session's row took "
+                          + "\(String(format: "%.3f", appeared)) s")
+        model.deactivate()
+    }
+
+    // MARK: - 15. what a superseded cycle may write
+
+    /// A paging read claims the window; a full refresh that has resolved a **different**
+    /// repository and lost that claim must publish nothing at all. Publishing its status alone
+    /// leaves repository B's branch beside repository A's root, window and watcher.
+    func testACycleThatLostTheWindowDoesNotPublishAnotherRepositorysStatus() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        var hashes: [String] = []
+        for index in 0..<6 {
+            hashes.append(try await repo.commit("commit \(index)",
+                                                files: ["notes/\(index).txt": "line \(index)\n"]))
+        }
+        let nested = try repo.directory("nested")
+        // The activation's status read is skipped; the refresh's is the gated one.
+        let gate = GatedRunner(verb: "status", skipping: 1)
+        let model = SourceControlModel(cwd: nested, environment: Self.environment(repo),
+                                       runner: gate, links: nil, windowLimit: 2,
+                                       watchesForChanges: false)
+        await model.activate()
+        XCTAssertEqual(model.state.root?.lastPathComponent, "repo")
+        XCTAssertEqual(model.readout.branch, "main")
+
+        // The channel's own directory becomes a repository, on a branch of its own.
+        try await repo.run(["init", "-b", "nested-branch"], in: nested)
+        try repo.write("nested/inside.txt", "inside\n")
+        try await repo.run(["add", "-A"], in: nested)
+        try await repo.run(["commit", "-m", "the nested repository's own commit"], in: nested,
+                           extraEnvironment: ["GIT_AUTHOR_DATE": "1614800100 +0000",
+                                              "GIT_COMMITTER_DATE": "1614800100 +0000"])
+
+        let refreshing = Task { await model.refresh() }
+        _ = try await waitUntil("the refresh's status read is held") { gate.isHolding }
+        // A `.commit` delivery against the repository on screen, which claims the window.
+        await model.select(commit: try XCTUnwrap(hashes.first))
+        gate.release()
+        await refreshing.value
+
+        XCTAssertEqual(model.state.root?.lastPathComponent, "repo",
+                       "a cycle that lost the window moved the root anyway")
+        XCTAssertEqual(model.readout.branch, "main",
+                       "another repository's status was published beside this one's window")
+        XCTAssertFalse(model.isLoading)
+    }
+
+    /// An explicit selection invalidates an outstanding paging search: the user pointed somewhere
+    /// newer, and an older search resuming must not select over them.
+    func testAnOlderPagedDeliveryDoesNotOverwriteANewerSelection() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        var hashes: [String] = []
+        for index in 0..<6 {
+            hashes.append(try await repo.commit("commit \(index)",
+                                                files: ["notes/\(index).txt": "line \(index)\n"]))
+        }
+        try repo.write("notes/0.txt", "edited\n")
+        // One `log` for the activation; the delivery's first paging read is the gated one.
+        let gate = GatedRunner(verb: "log", skipping: 1)
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: gate, links: nil, windowLimit: 2,
+                                       watchesForChanges: false)
+        await model.activate()
+        XCTAssertTrue(model.readout.hasWorkingTreeRow)
+        let wanted = try XCTUnwrap(hashes.first)
+
+        let delivering = Task { await model.select(commit: wanted) }
+        _ = try await waitUntil("the paging read is held") { gate.isHolding }
+        await model.selectWorkingTree()
+        gate.release()
+        await delivering.value
+
+        XCTAssertEqual(model.selection, .workingTree,
+                       "an older paged delivery selected over the user's newer selection")
+        XCTAssertEqual(model.readout.detail?.files.map(\.path), ["notes/0.txt"],
+                       "the newer selection's changed-file list was replaced")
+        XCTAssertFalse(model.isLoading)
+    }
+
+    // MARK: - 16. the watch's own deliveries are fenced
+
+    /// A queued delivery carries the watcher that raised it. An old watcher's `.rootGone`,
+    /// enqueued before its stream was replaced, must not erase the repository that replaced it.
+    func testAQueuedDeliveryFromAReplacedWatcherIsWithdrawn() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let (repo, _) = try await linearRepository(tree, commits: 2)
+        let (model, _) = model(repo, watching: true)
+        await model.activate()
+        let stale = model.armedWatchGeneration
+
+        // The stream is replaced — a teardown and a re-arm, which is what a root that moved does.
+        model.deactivate()
+        await model.activate()
+        XCTAssertNotEqual(model.armedWatchGeneration, stale, "the watch was not re-armed")
+
+        await model.handle(.rootGone, from: stale)
+
+        XCTAssertFalse(model.readout.isEmptyState,
+                       "a replaced watcher's queued event erased the repository on screen")
+        XCTAssertEqual(model.readout.rows.count, 2)
+        XCTAssertTrue(model.isWatchArmed)
+        model.deactivate()
+    }
+
+    /// And a delivery enqueued before `deactivate()` claims no epoch and publishes nothing: the
+    /// session is in the host's cache and has no stream anybody would stop.
+    func testADeliveryEnqueuedBeforeATeardownIsFenced() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("commit 0", files: ["notes/0.txt": "line 0\n"])
+        let recorder = RecordingRunner()
+        let model = SourceControlModel(cwd: repo.root, environment: Self.environment(repo),
+                                       runner: recorder, links: nil,
+                                       windowLimit: GitLog.defaultLimit, watchesForChanges: true)
+        await model.activate()
+        let generation = model.armedWatchGeneration
+        model.deactivate()
+        let before = recorder.invocations(of: .git).count
+
+        await model.handle(.changed(.history), from: generation)
+        await model.handle(.changed(.workingTree), from: generation)
+
+        XCTAssertEqual(recorder.invocations(of: .git).count, before,
+                       "a delivery queued before the teardown read through the fence")
+        XCTAssertFalse(model.isWatchArmed)
+        XCTAssertFalse(model.isLoading)
+    }
+
+    // MARK: - 17. a full cycle refreshes the working tree's changed files
+
+    /// The list is drawn against `HEAD`, and an external commit moves `HEAD`. Only the status-only
+    /// path refreshed it, so a commit made by a `claude` session left the detail listing a file
+    /// that is now in the history.
+    func testAFullCycleRefreshesASelectedWorkingTreesChangedFiles() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("the first commit", files: ["src/one.txt": "one\n",
+                                                          "src/two.txt": "two\n"])
+        try repo.write("src/one.txt", "one, edited\n")
+        try repo.write("src/two.txt", "two, edited\n")
+        let (model, _) = model(root: repo.root, environment: Self.environment(repo))
+        await model.activate()
+        await model.selectWorkingTree()
+        XCTAssertEqual(model.readout.detail?.files.map(\.path).sorted(),
+                       ["src/one.txt", "src/two.txt"])
+
+        // Somebody else commits one of the two edits. The tree stays dirty, so row zero and the
+        // selection survive, and the list against `HEAD` is now one file shorter.
+        try await repo.run(["add", "src/two.txt"])
+        try await repo.run(["commit", "-m", "a commit somebody else made"],
+                           extraEnvironment: ["GIT_AUTHOR_DATE": "1614800200 +0000",
+                                              "GIT_COMMITTER_DATE": "1614800200 +0000"])
+        await model.handle(.changed(.history))
+
+        XCTAssertEqual(model.selection, .workingTree)
+        XCTAssertEqual(model.readout.detail?.files.map(\.path), ["src/one.txt"],
+                       "the working tree's detail was left listing a file HEAD now holds")
+    }
+
+    // MARK: - 18. the branch this panel reports to whoever asked
+
+    /// Design §8: the GitHub tab re-reads when the branch changes, and this model is what learns
+    /// it. The notification fires on a change and stays quiet otherwise, so a tab wired to it does
+    /// not spend the user's rate limit on every cycle.
+    func testTheBranchNotificationFiresOnAChangeAndNotOnEveryCycle() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try await repo.commit("the first commit", files: ["src/one.txt": "one\n"])
+        let (model, _) = model(root: repo.root, environment: Self.environment(repo))
+        let reported = Reported()
+        model.onBranchChange = { branch in reported.append(branch) }
+
+        await model.activate()
+        XCTAssertEqual(reported.branches, ["main"], "the first read reported no branch")
+
+        await model.refresh()
+        XCTAssertEqual(reported.branches, ["main"], "a cycle on the same branch reported again")
+
+        try await repo.run(["checkout", "--quiet", "-b", "feature/other"])
+        await model.handle(.changed(.history))
+        XCTAssertEqual(reported.branches, ["main", "feature/other"],
+                       "a checkout under the panel reported no branch change")
+
+        // A detached `HEAD` has no branch, which is a change and is reported as one.
+        try await repo.run(["checkout", "--quiet", "--detach", "HEAD"])
+        await model.handle(.changed(.history))
+        XCTAssertEqual(reported.branches.count, 3)
+        XCTAssertNil(reported.branches.last ?? "still on a branch")
+    }
+
+    // MARK: - 19. G4's inventory covers the unborn `HEAD` read
+
+    /// A repository with no commits reads the working tree against the empty tree, and C7.3 names
+    /// that object with `hash-object -t tree /dev/null` — **without** `-w`, so it computes and
+    /// writes nothing. It is a read verb this leaf can produce and the allowlist says so.
+    func testAnUnbornHeadReadsTheEmptyTreeObjectAndStaysAllRead() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        try repo.write("src/one.txt", "one\n")
+        // Staged, because the empty tree is what the working tree is diffed against and an
+        // untracked file is in neither side of that diff.
+        try await repo.run(["add", "-A"])
+        let (model, recorder) = model(repo)
+
+        await model.activate()
+        await model.selectWorkingTree()
+
+        XCTAssertEqual(model.readout.detail?.files.map(\.path), ["src/one.txt"],
+                       "an unborn HEAD listed nothing the working tree holds")
+        XCTAssertTrue(recorder.verbs(of: .git).contains("hash-object"),
+                      "the unborn-HEAD path did not reach the empty-tree read")
+        assertOnlyReadVerbs(recorder, atLeast: 4)
+    }
+
     // MARK: - helpers
 
     /// The `FileChange` behind a readout row, which is what a click carries.
@@ -1232,6 +1631,14 @@ final class SourceControlModelTests: XCTestCase {
         XCTFail("timed out waiting for \(what)", file: file, line: line)
         return .infinity
     }
+}
+
+/// A main-actor sink for the branch notification, so a test can assert the sequence of branches
+/// the panel reported rather than the last one it happens to hold.
+@MainActor
+final class Reported {
+    private(set) var branches: [String?] = []
+    func append(_ branch: String?) { branches.append(branch) }
 }
 
 /// A `LinkRouterCapability` that records instead of routing.

@@ -134,6 +134,42 @@ public final class SourceControlModel: PanelTabSession {
     /// stop while the session sits in the host's cache.
     private var isTornDown = false
 
+    /// Which armed stream a queued delivery belongs to.
+    ///
+    /// The watch's callback hands its event to the main actor rather than handling it there, so a
+    /// delivery outlives the stream that raised it: `stop()` cannot withdraw a task already
+    /// queued. Bumping this on every arm and every stop is that withdrawal — an old watcher's
+    /// `.rootGone` can no longer erase the repository that replaced it, and nothing enqueued
+    /// before a teardown reads through the fence.
+    public private(set) var armedWatchGeneration = 0
+
+    /// The first read, held so that a `.commit` delivery arriving **before or during** it waits
+    /// for it instead of racing it (Design §7, G3's headline clause).
+    ///
+    /// The host creates the session, schedules `activate()` separately and delivers the link; a
+    /// delivery that read `state.root` in between answered `.noRepository` about a repository
+    /// nobody had looked at yet. Whoever needs the first read takes this door, and the read
+    /// happens once however the host orders the two.
+    private var firstRead: Task<Void, Never>?
+
+    /// The branch this panel last reported, and `nil` for "never reported one" — which is not the
+    /// same as having reported a detached `HEAD`.
+    private var reportedBranch: String??
+
+    /// Called whenever the branch the panel is showing changes, including to none (Design §5,
+    /// §8). The GitHub tab's session is wired to it by the app, so an external checkout re-reads
+    /// that tab instead of leaving it on the branch it read first.
+    ///
+    /// A closure rather than a reference to the other session: the two tabs share no state (§2),
+    /// and what crosses between them is a message. Whoever installs it captures weakly.
+    @ObservationIgnored public var onBranchChange: (@MainActor (String?) -> Void)?
+
+    /// Bumped by the one place `selection` is written, so a paging search that resumes after the
+    /// user selected something else can tell that it is answering a question they have moved on
+    /// from (§7). A detail read cannot see this through `detailEpoch` alone, which its own reads
+    /// bump as well.
+    private var selectionEpoch = 0
+
     /// One read's claim on the field groups it will write. Nil is "this read does not write that
     /// group and has no say in it".
     private struct Claim {
@@ -172,8 +208,26 @@ public final class SourceControlModel: PanelTabSession {
     /// deactivated and shown again holds its document and still needs a stream.
     public func activate() async {
         isTornDown = false
-        if !hasRead, readsInFlight == 0 { await load() }
+        if !hasRead, readsInFlight == 0 || firstRead != nil { await readFirst() }
         armWatchIfNeeded()
+    }
+
+    /// The first read, shared by whoever gets here first.
+    ///
+    /// `activate()` and a `.commit` delivery both need the document to exist, and the host runs
+    /// them in whichever order it likes — so the read is a task both await rather than work either
+    /// one owns. Nothing about it re-reads: a second caller joins the flight, and a caller that
+    /// arrives after it finished sees `hasRead` and asks for nothing.
+    private func readFirst() async {
+        let mine: Task<Void, Never>
+        if let firstRead {
+            mine = firstRead
+        } else {
+            mine = Task { @MainActor [weak self] in await self?.load() }
+            firstRead = mine
+        }
+        await mine.value
+        if firstRead == mine { firstRead = nil }
     }
 
     /// The user asked. Always reads.
@@ -213,6 +267,10 @@ public final class SourceControlModel: PanelTabSession {
     /// produced nothing on screen is the failure §17.7 exists to prevent.
     public func select(commit hash: String) async {
         deliveryNotice = nil
+        // A delivery into a session whose first read has not finished waits for that read rather
+        // than answering `.noRepository` about a repository nobody has looked at yet. It is here
+        // and not in the tab because a delivery must work whatever order the host does things in.
+        if !hasRead, !isTornDown { await readFirst() }
         for _ in 0...Self.deliveryRetries {
             guard !isTornDown else { return }
             if case .answered = await deliver(commit: hash) { return }
@@ -283,6 +341,17 @@ public final class SourceControlModel: PanelTabSession {
     ///
     /// `.ignore` never arrives — the watch does not deliver it — and is answered with nothing here
     /// so that the exhaustive switch says so in one place.
+    /// The door the stream's callback takes, carrying the stream it came from.
+    ///
+    /// Two things a queued delivery cannot otherwise know: that the session was torn down while it
+    /// waited — and would then claim fresh epochs and publish through the teardown fence — and
+    /// that its stream has been replaced, whose `.rootGone` would erase the repository that
+    /// replaced it.
+    func handle(_ event: RepositoryWatch.Event, from generation: Int) async {
+        guard !isTornDown, generation == armedWatchGeneration else { return }
+        await handle(event)
+    }
+
     func handle(_ event: RepositoryWatch.Event) async {
         switch event {
         case .changed(.workingTree):
@@ -317,6 +386,19 @@ public final class SourceControlModel: PanelTabSession {
         select(nil)
         deliveryNotice = nil
         hasRead = false
+        reportBranchIfChanged()
+    }
+
+    /// Tells whoever asked that the branch changed, and stays quiet when it did not.
+    ///
+    /// Quiet is the load-bearing half: the GitHub tab's reads are network round trips on the
+    /// user's own rate limit and Design §8 forbids polling them, so a notification on every cycle
+    /// would be a poll by another name.
+    private func reportBranchIfChanged() {
+        let branch = state.status?.branch
+        guard reportedBranch != .some(branch) else { return }
+        reportedBranch = .some(branch)
+        onBranchChange?(branch)
     }
 
     /// Arms the stream, or moves it onto a root that has changed under the panel (§7).
@@ -328,10 +410,13 @@ public final class SourceControlModel: PanelTabSession {
         guard watchesForChanges, !isTornDown, let root = state.root else { return }
         guard watchedRoot != root else { return }
         stopWatch()
+        armedWatchGeneration += 1
+        let generation = armedWatchGeneration
         let watch = RepositoryWatch(root: root) { [weak self] event in
             // The watch invokes this under its own lock and forbids re-entry, so the work is
-            // handed to the main actor rather than done here.
-            Task { @MainActor [weak self] in await self?.handle(event) }
+            // handed to the main actor rather than done here — which is why the delivery carries
+            // the stream it came from: a queued task outlives `stop()`.
+            Task { @MainActor [weak self] in await self?.handle(event, from: generation) }
         }
         self.watch = watch
         watchedRoot = root
@@ -344,6 +429,9 @@ public final class SourceControlModel: PanelTabSession {
     }
 
     private func stopWatch() {
+        // Withdraws whatever this stream has already queued: `stop()` ends the stream and cannot
+        // reach a task the main actor has not run yet.
+        armedWatchGeneration += 1
         watch?.stop()
         watch = nil
         watchedRoot = nil
@@ -418,6 +506,10 @@ public final class SourceControlModel: PanelTabSession {
             return
         }
         publish(loaded, claim: claim)
+        // The working tree's list is drawn against `HEAD`, and a cycle is how this panel learns
+        // that `HEAD` moved: without this, an external commit leaves the detail listing files
+        // against a `HEAD` the graph has already replaced.
+        await refreshWorkingTreeDetailIfSelected()
     }
 
     /// Writes only the groups this read still holds.
@@ -427,6 +519,12 @@ public final class SourceControlModel: PanelTabSession {
     /// describe a repository this panel is no longer showing, and a `.diff` link assembled from
     /// two of them would hand C7.5's resolver a triple that never existed (§7).
     private func publish(_ loaded: RepositoryState, claim: Claim) {
+        defer { reportBranchIfChanged() }
+        // A read that resolved a **different** repository and no longer owns the window has
+        // nothing to say about the document on screen: its status describes repository B, and
+        // writing it beside A's root, window and watcher composes a document that never existed.
+        // The group that would have handled the change of root is the one it lost.
+        if loaded.error == nil, loaded.root != state.root, !holdsWindow(claim) { return }
         if holdsWindow(claim), loaded.root != state.root {
             invalidateEveryEpoch()
             state = loaded
@@ -498,6 +596,7 @@ public final class SourceControlModel: PanelTabSession {
         state.assignment = LaneAssignment.assign(commits: state.commits, headOID: status.headOID,
                                                  workingTreeIsDirty: !status.isClean)
         reconcileSelection()
+        reportBranchIfChanged()
         await refreshWorkingTreeDetailIfSelected()
     }
 
@@ -525,6 +624,7 @@ public final class SourceControlModel: PanelTabSession {
     /// its selection gone would leave its loading flag set for ever.
     private func select(_ next: Selection?) {
         detailEpoch += 1
+        selectionEpoch += 1
         selection = next
         changes = []
     }
@@ -593,10 +693,15 @@ public final class SourceControlModel: PanelTabSession {
         beginRead()
         defer { endRead() }
 
+        let selectionWhenAsked = selectionEpoch
         var window = state.commits
         pages: for _ in 0..<Self.pagingBound {
             let result = await reader.page(after: window, root: root, limit: windowLimit)
             guard holdsWindow(claim) else { return .interrupted }
+            // The user selected something else while this search was out. They answered the
+            // question themselves, and a search that selected over them would move the panel off
+            // the row they are looking at — so this is answered, and silently.
+            guard selectionEpoch == selectionWhenAsked else { return .answered }
             switch result {
             case .notARepository:
                 rootWentAway()
@@ -620,6 +725,7 @@ public final class SourceControlModel: PanelTabSession {
                 if !grew { break pages }
             }
         }
+        guard selectionEpoch == selectionWhenAsked else { return .answered }
         switch Self.match(hash, in: window) {
         case .one(let found):
             publish(window: window)
