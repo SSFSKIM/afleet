@@ -197,6 +197,16 @@ final class AppModel {
     /// prevent. `lifecycle` is the seam pane exits leave through; production passes nil and gets
     /// `workspace.fleet`.
     func bindWorkspace(_ workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
+        // The Terminal registry goes the same way as the host's sessions and contexts, and for the
+        // same reason: a session kept across the rebind holds the previous workspace's store and
+        // its `reportPaneExit`, so its panes would write where nothing reads and report exits to a
+        // lifecycle nobody is listening to. Releasing it also ends those panes, which is the only
+        // moment anything can — after this line nothing holds them.
+        //
+        // A channel *removed* from the fleet wants the same treatment and does not get it here:
+        // `FleetCoordinator.release` would have to reach this registry, and that seam is filed as
+        // tech debt rather than opened in a fix wave.
+        terminalSessions.release()
         timelines.attach(to: workspace, lifecycle: lifecycle)
         panels.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
         composers.attach(to: workspace,

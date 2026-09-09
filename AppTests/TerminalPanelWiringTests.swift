@@ -196,6 +196,33 @@ final class TerminalPanelWiringTests: XCTestCase {
         // `PaneRequest` carries a working directory (§6.3).
         XCTAssertTrue(session.panes.first?.request == request, "the pane holds a request the host did not run")
     }
+
+    // MARK: - Group 7: a rebind
+
+    /// `bindWorkspace` rebuilds the host's world — its contexts and its sessions go with the
+    /// workspace that built them — and the Terminal registry has to go the same way. A session
+    /// kept across the rebind holds the previous workspace's store and its `reportPaneExit`, so
+    /// its panes write to a store nobody reads and report exits to a lifecycle nobody is listening
+    /// to, and nothing can reach those children to close them.
+    func testRebindingTheWorkspaceReleasesTheTerminalSessionsAndTheirPanes() async throws {
+        let rig = try await WiringRig()
+        defer { rig.stop() }
+        let context = try XCTUnwrap(rig.app.panels.context(for: rig.key, cwd: rig.cwd),
+                                    "the bound host could not build a context for its own channel")
+        let before = try XCTUnwrap(rig.app.panels.session(for: .terminal, context: context) as? TerminalPanelSession,
+                                   "the host did not vend the Terminal tab's own session")
+        before.openShellPane()
+        XCTAssertEqual(before.panes.count, 1, "panes=\(before.panes.count)")
+
+        rig.app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
+        await rig.app.terminalSessions.settleRelease()
+
+        XCTAssertEqual(before.panes.count, 0, "panes=\(before.panes.count)")
+        let rebound = try XCTUnwrap(rig.app.panels.context(for: rig.key, cwd: rig.cwd),
+                                    "the rebound host could not build a context for its own channel")
+        let after = rig.app.panels.session(for: .terminal, context: rebound) as? TerminalPanelSession
+        XCTAssertFalse(after === before, "a rebind handed back the previous workspace's session")
+    }
 }
 
 // MARK: - Values
@@ -255,6 +282,9 @@ private struct WiringRig {
     let temp: TempTree
     let home: ScratchConfigHome
     let app: AppModel
+    /// Kept so a test can bind it a second time, which is what *Check again* and a second launch
+    /// do to a model that is already bound.
+    let workspace: Workspace
     let lifecycle: LifecycleDouble
     /// The sidebar's model, over the same config home and the same lifecycle the app is bound to —
     /// which is what `FleetCoordinator` builds in production.
@@ -295,17 +325,17 @@ private struct WiringRig {
                                           shell: "/usr/bin/true",
                                           capturedAt: environment.capturedAt,
                                           mode: environment.mode)
-        let workspace = Workspace(configHome: configHome,
-                                  environment: environment,
-                                  binary: try temp.file("bin/claude", "#!/bin/sh\nexit 0\n"),
-                                  installed: SemanticVersion(major: 2, minor: 1, patch: 263),
-                                  store: store,
-                                  index: index,
-                                  fleet: StubFleet(),
-                                  watcher: watcher,
-                                  changes: feed,
-                                  diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)),
-                                  rawCapture: nil)
+        workspace = Workspace(configHome: configHome,
+                              environment: environment,
+                              binary: try temp.file("bin/claude", "#!/bin/sh\nexit 0\n"),
+                              installed: SemanticVersion(major: 2, minor: 1, patch: 263),
+                              store: store,
+                              index: index,
+                              fleet: StubFleet(),
+                              watcher: watcher,
+                              changes: feed,
+                              diagnostics: DiagnosticsComposer(directory: temp.root.appending(path: "logs", directoryHint: .isDirectory)),
+                              rawCapture: nil)
 
         lifecycle = LifecycleDouble()
         app = AppModel()

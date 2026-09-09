@@ -69,6 +69,48 @@ final class TerminalSessionRegistryTests: XCTestCase {
         XCTAssertNil(observed, "the registry grew by a channel that owns nothing")
     }
 
+    /// A workspace goes away and its contexts go with it: the store a session writes through and
+    /// the `reportPaneExit` it reports to both name a lifecycle nobody is listening to any more.
+    /// Handing that session back for the same channel would put a new pane in the dead one, so an
+    /// ask carrying a context the session was not made from replaces it.
+    func testASessionMadeFromAnotherContextIsReplacedRatherThanHandedBack() async throws {
+        let registry = TerminalSessionRegistry()
+        let directory = try PaneTestChild.temporaryDirectory()
+        directories.append(directory)
+        let id = SessionID()
+        // One channel, two contexts: the same key, and a store and a reporter of its own each,
+        // which is what a rebound workspace hands the host.
+        let before = PaneTestContext.fixture(session: id, cwd: directory)
+        let after = PaneTestContext.fixture(session: id, cwd: directory)
+        let stale = registry.session(for: before.context)
+        stale.openShellPane()
+
+        let fresh = registry.session(for: after.context)
+
+        XCTAssertFalse(fresh === stale, "the registry handed back the previous workspace's session")
+        await registry.settleRelease()
+        XCTAssertTrue(stale.panes.isEmpty, "panes=\(stale.panes.count)")
+
+        for pane in fresh.panes { await fresh.close(pane) }
+    }
+
+    /// The same rule from the owner's side: `AppModel.bindWorkspace` releases the registry, and a
+    /// release ends the panes it held — a child nothing can reach again is a child nothing can
+    /// ever close.
+    func testReleasingTheRegistryClosesItsPanesAndTheNextAskIsANewSession() async throws {
+        let registry = TerminalSessionRegistry()
+        let fixture = try fixture()
+        let session = registry.session(for: fixture.context)
+        session.openShellPane()
+
+        registry.release()
+        await registry.settleRelease()
+
+        XCTAssertTrue(session.panes.isEmpty, "panes=\(session.panes.count)")
+        let fresh = registry.session(for: fixture.context)
+        XCTAssertFalse(fresh === session, "a released session was handed out again")
+    }
+
     func testTheRunnerPlacesAPaneInTheChannelTheContextNames() async throws {
         let registry = TerminalSessionRegistry()
         let jade = try fixture()
