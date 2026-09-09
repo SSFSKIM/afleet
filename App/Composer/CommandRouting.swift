@@ -229,13 +229,11 @@ extension ComposerModel {
             ghostText = nil
             return true
         case .native(let surface):
-            // Nothing reaches the lifecycle: a picker, a list or the switcher is afleet's own screen.
-            openSurface = surface
             // The two picker surfaces are the header's own and open here. Every other destination is
             // another leaf's screen, and the app's one way to ask for one by name is the workspace's
-            // link router — which today answers a `.command` nothing has claimed with a diagnostic
-            // rather than with silence (tracker 207).
-            if !pickers.present(surface) {
+            // link router — which `CommandLinkTarget` brings back to this same member, in whichever
+            // channel the link belongs to (tracker 207).
+            if !present(native: surface) {
                 await context?.links.open(.command(surface), from: .currentPanel)
             }
             return true
@@ -244,6 +242,26 @@ extension ComposerModel {
             refusal = explanation
             return false
         }
+    }
+
+    /// One `.native` destination opened on this channel, and whether a surface in front of the user
+    /// took it. Nothing reaches the lifecycle: a picker, a list or the switcher is afleet's own screen.
+    ///
+    /// **The one member both ways in.** A typed `/tasks` reaches it from the arm above, and a
+    /// `WorkspaceLink.command` raised anywhere in the app reaches it through `CommandLinkTarget` —
+    /// which is what "the composer's registered target" means in C7's acceptance item 3, and what
+    /// makes a link run the command the way a typed one does rather than through a second path that
+    /// could answer differently. The name is the table's own string and no mapping is written here
+    /// (contract X10); `openSurface` is set whether or not a picker claims it, because the surface
+    /// the row asked for is what the composer's view reads.
+    ///
+    /// Re-entry is not a hazard and is worth stating: the link the arm above raises comes back here,
+    /// finds the same answer from `pickers`, and stops — the link is raised by the *arm* and never
+    /// by this member.
+    @discardableResult
+    func present(native surface: String) -> Bool {
+        openSurface = surface
+        return pickers.present(surface)
     }
 
     /// One lifecycle action, behind the confirm when it is one of the three that need one.

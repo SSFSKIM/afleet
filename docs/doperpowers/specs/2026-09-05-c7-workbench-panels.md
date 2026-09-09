@@ -41,11 +41,18 @@ sum of its leaves:
    switch). Items 15 and 17 are seams with C4 and are verified here, not in either leaf
    alone.
 2. **Routes from other children land here**: `/login`'s automatic URL (item 59's `/login`
-   step) and the overage card's *Set up usage credits…* (item 62's false branch) open in the
-   Browser tab, and *Review trust in terminal* (item 47) runs `claude` in a Terminal pane
+   step) opens in the Browser tab — the overage card's *Set up usage credits…* (item 62's false
+   branch) does not: no billing URL exists anywhere in the protocol, so the card stays pending
+   rather than inventing a destination (the parent's §8.4 recorded this at C6.3's merge; this item
+   brought to match at C7's recomposition) — and *Review trust in terminal* (item 47) runs `claude` in a Terminal pane
    in the project directory; all three arrive as `WorkspaceLink` or pane requests emitted by
    C6, never as Workbench code that knows about login, overage or trust.
-3. **Every `WorkspaceLink` case routes end to end** from a click in the timeline: `.file`
+3. **Every `WorkspaceLink` case routes end to end** from its emitter — the timeline for `.file`
+   and `.url`, Files and Source Control for `.diff`, Source Control and the GitHub tab for
+   `.commit` and `.pullRequest`, any native surface for `.command` (re-worded at C7's
+   recomposition: the timeline does not invent commit, diff or PR links from prose; the
+   recomposition found no production target claiming `.command` and the timeline never sending
+   `.newWindow`, both closed by correctives on `main`): `.file`
    to Files at the line, `.diff` to a Files diff view, `.url` to a Browser tab, `.commit` to
    the Source Control commit detail, `.pullRequest` to the Browser tab on the PR page, and
    `.command` to the composer through C6's registered target; Cmd-click on any of them
@@ -63,12 +70,17 @@ sum of its leaves:
    C7.2's merge: the bound is two caches — repositories for `libghostty-spm` and its
    transitive `MSDisplayLink`, artifacts for `GhosttyKit.xcframework.zip` — and `swift test`
    takes `--disable-sandbox` inside `sandbox-exec`, which drops only SwiftPM's inner
-   sandbox; `Tools/verify-offline-build.sh` is the proof, with a positive control), covering the PTY layer's spawn, resize and exit, `LinkRouter`
+   sandbox; `Tools/verify-offline-build.sh` is the proof, with a positive control; amended at C7's
+   recomposition: the sandbox denies the network but leaves loopback open, because the Browser
+   tests serve their pages from a listener on 127.0.0.1 — 958 tests passed so on the merged tree),
+   covering the PTY layer's spawn, resize and exit, `LinkRouter`
    over every case, lane assignment for a merge, an octopus merge and a detached tag, the
    Monaco bridge's message codec, and the git and gh parsers; an import test proves that no
    Workbench module imports `ClaudeWire` (X1) — the package-wide walk over `Workbench/Sources`
-   is C7.1's, with the manifest (ruled 2026-09-08 at C7.3's merge); each leaf keeps a local
-   walk over its own sources.
+   is C7.1's, with the manifest (ruled 2026-09-08 at C7.3's merge); the local walks the leaves were
+   to keep are replaced (C7's recomposition) by one per-target rule beside the X1 walk,
+   `DeclaredEdgeTests`: every non-system import in every target and test target names an edge the
+   manifest declares, read through `swift package dump-package` — W1's table is that manifest.
 7. **The spikes are settled** with a Revision Note either way: S1 promoted or SwiftTerm
    adopted behind `TerminalSurface`; S3 promoted or its fallback adopted.
 8. Because C7 is code-bearing, recomposition ends with an independent review of the merged
@@ -221,21 +233,23 @@ import test over `Workbench/Sources` (amended 2026-09-08 at C7.3's merge):
 
 | Target | Owner | Depends on | Notes |
 |---|---|---|---|
-| `TerminalCore` | C7.1 | AfleetCore, `GhosttyTerminal`, `GhosttyKit`, `GhosttyTheme` | `TerminalSurface`, the PTY layer, the GhosttyKit adapter (`GhosttyTheme` added 2026-09-09 at C7.1's merge for the appearance mapping — a product of the same pinned package, no new edge); SwiftTerm was not needed (S1 promoted GhosttyKit) |
+| `TerminalCore` | C7.1 | `CDarwinWaitStatus` (the C shim, its own target), AfleetCore, `GhosttyTerminal`, `GhosttyKit`, `GhosttyTheme` | `TerminalSurface`, the PTY layer, the GhosttyKit adapter (`GhosttyTheme` added 2026-09-09 at C7.1's merge for the appearance mapping — a product of the same pinned package, no new edge); SwiftTerm was not needed (S1 promoted GhosttyKit) |
 | `EditorCore` | C7.2 | AfleetCore | `MonacoEditorView` (an `NSView` over `WKWebView`), the bridge, the committed bundle as a resource |
 | `LinkRouting` | C7.2 | AfleetCore, PanelHostAPI | `LinkRouter` and its target registry (row amended 2026-09-08 at C7.2's merge: the registry is over X7's `LinkTarget` and `PanelTabID`, which live in `PanelHostAPI`; the edge is acyclic) |
 | `SourceControlCore` | C7.3 | AfleetCore | `git log` and `git status` parsers, lane assignment, diff model, `gh` JSON models and runner |
 | `PanelHostAPI` | C5 (see the flow-back below) | AfleetCore, FleetKit | X7's tab-registration and channel-context protocol; declared here so both Workbench and the app can import it |
-| `TerminalPanel` | C7.4 | TerminalCore, LinkRouting, PanelHostAPI, FleetKit | panes, job attach, the hatch, `claude logs` |
+| `TerminalPanel` | C7.4 | AfleetCore, TerminalCore, LinkRouting, PanelHostAPI, FleetKit | panes, job attach, the hatch, `claude logs` (row brought to the manifest at C7's recomposition: `TerminalPanelSession` names AfleetCore types) |
 | `FilesPanel` | C7.5 | AfleetCore, EditorCore, SourceControlCore, LinkRouting, PanelHostAPI, FleetKit | tree, viewers, watcher, banners; the `.diff` target reads its two texts through C7.3's `GitDiff` (row amended 2026-09-09 at C7.5's gate: W7 makes every git invocation C7.3's, and `AfleetCore` is needed to name `WorkspaceLink`/`DiffRef` under member-import visibility) |
 | `BrowserPanel` | C7.6 | AfleetCore, SourceControlCore, LinkRouting, PanelHostAPI, FleetKit | shared tabs, quick-open, persistence; `.pullRequest(Int)` resolves through `gh pr view --json url` on C7.3's `ToolRunner` (row amended 2026-09-09 at C7.6's merge; a panel-local error row with the `gh auth login` hint otherwise, never a prompt) |
-| `SourceControlPanel` | C7.7 | SourceControlCore, EditorCore, LinkRouting, PanelHostAPI, FleetKit | graph, detail, diffs, GitHub tab |
-| `Workbench` | umbrella | all of the above | `@_exported import` of each |
+| `SourceControlPanel` | C7.7 | AfleetCore, SourceControlCore, LinkRouting, PanelHostAPI, FleetKit | graph, detail, GitHub tab; a diff is an emitted `.diff` link the Files tab opens, so `EditorCore` has no import site here (row amended 2026-09-09 at C7.7's merge, its `[parent-impact]`) |
+| `Workbench` | umbrella | all of the above, plus AfleetCore and FleetKit directly | `@_exported import` of each (the two direct edges named at C7's recomposition) |
 | `S1Harness`, `S3Harness` | C7.1, C7.2 | their core | `executableTarget`s under `Workbench/Spikes/`, not in the product; each opens an `NSWindow` from `swift run` without an app bundle |
 
 Test targets mirror the core targets (`TerminalCoreTests`, `EditorCoreTests`,
 `LinkRoutingTests`, `SourceControlCoreTests`) and every panel target gets one when a panel
-leaf lands. The orchestrator lands this skeleton on `main` before dispatching C7.1 through
+leaf lands; a test target declares every module it imports (`TerminalCoreTests` → `GhosttyTerminal`,
+`SourceControlCoreTests` → AfleetCore, `TerminalPanelTests` → `PanelHostAPI`, made explicit at C7's
+recomposition; eight declared edges no source imports are tracker 416, each a candidate removal). The orchestrator lands this skeleton on `main` before dispatching C7.1 through
 C7.3, exactly as it did for FleetKit, with one placeholder source per target so the empty
 package builds; that landing is the first row of the Tracking Map.
 
@@ -416,7 +430,14 @@ is the classic single pass over topological order (a commit takes its first chil
 when it is that child's first parent, otherwise the first free lane; merges close lanes
 when their extra parents are reached; the working tree occupies row zero above `HEAD`),
 tested on a merge, an octopus merge and a detached tag. Advisory: the exact algorithm,
-refresh cadence, and pagination.
+refresh cadence, and pagination. As shipped 2026-09-09 (C7.7): freshness is FSEvents, not a
+poll — paths outside `.git` re-read the status, `.git/HEAD`, `packed-refs`, `refs/` and `logs/`
+re-read the history, and everything else under `.git` is ignored, because `git status` writes
+`.git/index` and an unclassified watcher would re-read the status because it just read it;
+pagination is closed only for the `.commit` lookup (paged in 2,000-commit steps, five pages,
+a named row past the bound), not for graph scroll (tracker 114 stands); each `GraphRow` draws the
+lower half of its own edges and the upper half of its predecessor's, edges iterated and never
+keyed by `toLane`, `truncated` drawn as a line that continues.
 
 ### Store namespaces (contract W6)
 
@@ -702,7 +723,13 @@ pane, C4 owns the transition.
 - **Contracts:** W4, W5, W7, X7, X11.
 - **Design inheritance:** §9.2 (scope binding, algorithm advisory), W7.
 - **Required:** required.
-- **Status:** not-dispatched, blocked-by C7.3, C7.5, C7.6, C5.G4. Branch `child/c7-scm-panel`.
+- **Status:** **merged** 2026-09-09 at `3ab455f` from `child/c7-scm-panel` `300cac4`
+  (27 commits). Spec `docs/doperpowers/specs/2026-09-09-c7.7-scm-panel.md`.
+  **Outcome:** G1 met headlessly (lanes named with their commits over merge, octopus and detached-tag repositories; the rendering contract asserted as the Canvas's draw operations; the commit-file corpus at the selected-commit readout; a file click emitting its `.diff` through a real `LinkRouter`; the one-second working-tree clause 5 of 5 inside the bound, ~0.23 s to appear and ~0.50 s to clear), the graph on screen a human leg; G2 met headlessly over authored `gh` documents and live (all three verbs decoded); G3 met (a routed `.commit` selects in-window, outside-window by paging, by unambiguous prefix; a delivery before the first read waits; `gh` absent and logged-out are distinct hints, no `auth` verb representable); G4 met by three proofs (argv allowlist, `Action.allCases` both ways, a source scan for stray buttons). Package 958 (from 673); App floor 19 bundles green. One cross-fence edit accepted at merge: `PanelHostModel.didMakeSession`, twelve additive lines on C5's host, the one moment a channel's two tab sessions can be paired for branch-change wiring — no protocol change. Human legs: the graph with lanes, badges and dates; the commit detail; the diff click opening Monaco; a real `claude` edit making the working-tree row appear; the PR row with check status; the PR loading in the Browser tab. Tracker 277–291 (277: a linked worktree's pointer-file `.git` puts history events outside the watched root — C7.3's; 289: tracker 118 stays open, no check in flight was reached). 196 `SourceControlPanelTests`. As shipped: two tabs
+  (`.sourceControl`, `.github`) with two sessions and no shared state; `.pullRequest` left to the
+  Browser under W5; no store document under the reserved key (nothing keeps its meaning across a
+  relaunch); G4 proved by an argv allowlist that makes write verbs unrepresentable plus a readout
+  action inventory asserted against a written-out list.
 
 ## Cross-Child Contracts
 
@@ -712,7 +739,8 @@ pane, C4 owns the transition.
 - **W2 `TerminalSurface` and the PTY layer's observable contract.** The protocol as written;
   exit reported once as an observed event; environment and cwd taken from the request and
   nothing else. Owner: C7.1. Binds C7.4 and the S1 fallback.
-- **W4 Monaco bundle, bridge vocabulary and view.** Owner: C7.2. Binds C7.5, C7.7.
+- **W4 Monaco bundle, bridge vocabulary and view.** Owner: C7.2. Binds C7.5 (C7.7's half fell
+  away 2026-09-09 with the `.diff`-link ruling: it emits the link and imports no editor).
 - **W5 `LinkRouter` registration.** Owner: C7.2. Binds C7.4 through C7.7 and C6.
 - **W6 Store keys.** Owner: C7 as a whole (declared here). Binds C7.5, C7.6; rides X6.
 - **W7 Source Control and GitHub data types and the tool runner.** Owner: C7.3. Binds C7.7.
@@ -802,7 +830,18 @@ parent's decision); any write under `<configHome>` (X9); IDE registration.
 | C7.4 Terminal panel | `2026-09-09-c7.4-terminal-panel.md`; plan `plans/2026-09-09-c7.4-terminal-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `054e42c` from `child/c7-terminal-panel` `385bbe1` (43 commits); 85 tests; tracker 262–276, 346–355 and 384–393; X7 amended (`PanelHost.run(_:for:)`, `PaneRunning.run(_:in:)`); W8 gains the report's shape |
 | C7.5 Files panel | `2026-09-09-c7.5-files-panel.md`; plan `plans/2026-09-09-c7.5-files-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `517899d` from `child/c7-files-panel` `210d8eb` (56 commits); G1–G4 met headless, human legs outstanding; 185 tests; tracker 232–246; W1 row and W6 amended at its gate; X7 gap on the link's channel recorded (240) |
 | C7.6 Browser panel | ledger `2026-09-09-c7.6-browser-panel.md`; Outcomes in the ledger | **merged** 2026-09-09 at `6f8a8ec` from `child/c7-browser-panel` `c62124c` (46 commits); G1 structural + human leg, G2 met (click half conditional on C6.1), G3 met, G4 Debug met; 187 tests; tracker 247–255; X7 amended (pop-out declination; `PanelSurface` on `makeView`/`view`) |
-| C7.7 Source Control panel | plan on `child/c7-scm-panel` | blocked-by C7.3, C7.5, C7.6, C5.G4 |
+| C7.7 Source Control panel | `2026-09-09-c7.7-scm-panel.md`; plan `plans/2026-09-09-c7.7-scm-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `3ab455f` from `child/c7-scm-panel` `300cac4` (27 commits); 196 tests; W1 row and W4 amended (no editor import); freshness by FSEvents |
+
+**Lineage check (2026-09-09, at recomposition).** Each leaf's parent-pin against this document's
+final revision: C7.1, C7.2 and C7.3 pinned `b775842` — every later revision they did not see (W1 rows,
+X7's amendments, W7's command lines, the `.diff`-link ruling) was applied at or after their merges and
+none touched their own contracts; incorporated. C7.4 pinned `a37fa8e` — X7's `run(_:for:)` and
+`PaneRunning.run(_:in:)` are its own `[parent-impact]`, applied at its merge; the `PanelSurface` amendment
+it took in its merge-prep; incorporated. C7.5 pinned `9757171` — its W1 row and W6 amendments applied at
+its gate; 240's link-channel gap it named closed by the recomposition's corrective; incorporated. C7.6
+pinned `f52777a` — the pop-out declination and `PanelSurface` are its own amendments; incorporated. C7.7
+pinned `1cc7629` — the W1 row and W4 amendments applied at its merge; incorporated. No child's pin
+predates a binding decision it executed against differently; no corrective child is owed for lineage.
 
 Spike outcomes (S1, S3), the exit-or-stop finding, the worker-loading finding and the
 measured bundle size are recorded in the Revision Notes and summarised on the leaf's row
@@ -928,9 +967,33 @@ when it lands.
 
 ## Outcomes & Retrospective
 
-Pending — written when the unit closes. Closing is a RECOMPOSITION check: verify
-Parent-Level Acceptance as written — all leaves landed is not the same event — then
-retrospect.
+**Recomposition 2026-09-09 on `main` `a7cc8e6`** (App floor 2384 across 19 bundles, 26 skipped, 0 failures, Workbench package 963, offline proof 958
+with the network denied). Seven leaves merged between 2026-09-08 and 2026-09-09; the verification ran
+against the eight items above, not the sum of the gates.
+
+| Item | How it stands on the merged tree |
+|---|---|
+| 1 panel items 15, 17, 23–28, 39 | The pane request/exit seam with C4 (15, 17) proven headlessly end to end (`TerminalPanelJourneyTests`, `LifecycleRowTests`) and live at zero turns; 23–28 and 39 proven at model level by each leaf's suites; every on-screen half is a human leg in the checklist |
+| 2 routes from C6 | `/login`'s URL and *Review trust in terminal* proven (`ComposerRouterTests`, `ConsentAndTrustTests`); the credits clause corrected — no billing URL exists, the card stays pending |
+| 3 every link case | Registered targets: Files (`.file`, `.diff`), Browser (`.url`, `.pullRequest`), Source Control (`.commit`), the composer (`.command`, added by corrective); the timeline now sends `.newWindow` on Cmd-click (corrective); a delivery lands in the channel it was raised for (240 closed) |
+| 4 one environment | Structural + `PTYSpawnTests`, `ToolRunnerTests`; the `echo $PATH` comparison is a human leg |
+| 5 the panel as a panel | Per-channel sessions, pop-outs with channel context and the shared browser proven by `PanelHostTests` and the Browser suites; the host's own W6 document (selected tab per channel) was missing and is now written (corrective); two real windows are a human leg |
+| 6 the package stands alone | `Tools/verify-offline-build.sh` PASSED after its sandbox learned to leave loopback open; `DeclaredEdgeTests` makes W1's table the manifest; the X1 walk covers every module |
+| 7 spikes settled | S1 GhosttyKit promoted provisionally (four human legs), S3 Monaco on the custom scheme promoted — both as Revision Notes |
+| 8 independent review | Two astra-high readers over the merged tree (seams; package rules): six and six findings, all closed by the correctives above or corrected in the text |
+
+**What the recomposition found that no leaf could.** Every gap was a seam: two consumers of a link
+ignored the channel the router already carried; the host never wrote the document its own contract
+named; nothing claimed `.command`; the timeline had no way to ask for a new window; the package
+compiled on transitive edges the table never listed; the composer's keys and Quit knew nothing about
+panes. None was wrong inside its leaf. **What the leaves taught.** The findings that mattered most in
+every leaf's review rounds were tests that could not fail, not code that was wrong; a review round
+converges when its findings are all small, and the third round is the hard stop; one xcodebuild per
+checkout and a floor whose verdict is read from its file, never its exit code. **What remains.** The
+human-witness checklist (`docs/doperpowers/checklists/2026-09-09-human-witness-legs.md`, 53 legs across
+C6 and C7); the tracker entries the correctives filed (408, 409, 416, 420–425) and the leaves' own,
+each with an owner; the Codex review route once its quota resets. The composite closes when the
+checklist's C7 legs are walked and nothing new is filed against an item.
 
 ## Revision Notes
 
@@ -1036,3 +1099,20 @@ retrospect.
   W8 records the shape). Advisory overturns applied on the parent: §17.4 C7's *Respawn* is an X5
   action, not a pane; item 15's "the detach key returns" names what returns; tracker 93 closed by
   this leaf inside `TerminalCore` by design. 
+- 2026-09-09 reconciliation of C7.7 (merge `3ab455f` from `child/c7-scm-panel` `300cac4`,
+  27 commits). Two `[parent-impact]`s applied: W1's `SourceControlPanel` row takes
+  `AfleetCore` in place of `EditorCore`; W4 loses its C7.7 half — both follow from the `.diff`-link
+  ruling at C7.5's merge. Advisory overturns applied: §9.2's "Monaco diffs" phrasing on the parent;
+  W7's refresh cadence answered by a watcher; pagination closed only for the `.commit` lookup
+  (tracker 114 stands). Reviews ran on the fallback route for wave A and T5 (opus, after 429s) and on astra-high for the whole-branch round; the human's fixture signature was not needed by this leaf.
+- 2026-09-09 **C7 recomposition** on `main` `a7cc8e6` (floor 2384 across 19 bundles, 26 skipped, 0 failures). Verification against items 1–8:
+  the pane/lifecycle seam (items 15, 17), the environment (item 4), per-channel sessions and the
+  shared browser (item 5) and the X1 walk proven by tests on the merged tree; item 6 proven by the
+  offline script after its sandbox learned to leave loopback open; item 7 settled by the S1 and S3
+  Revision Notes; item 8's review (two astra-high readers) found and the correctives closed: links
+  landing in the wrong channel after the window moved (240), the host's W6 document missing, no
+  `.command` target, the timeline never sending `.newWindow`, undeclared import edges, expired
+  wiring exemptions; plus the two cross-child correctives the leaves escalated (350 composer keys,
+  354 Quit and live panes). Item 2's credits clause and item 3's wording corrected above. What only a
+  human can witness is `docs/doperpowers/checklists/2026-09-09-human-witness-legs.md`; the composite
+  closes when those legs are walked. Floors over the six correctives: App 2384/0, Workbench package 963/0, checks clean (17 allowlisted).

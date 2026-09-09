@@ -72,11 +72,17 @@ enum FileLink {
     /// Fire-and-forget on purpose: `LinkRouterCapability.open` is `async` and a row's tap gesture is
     /// not, and the router's own delivery is what reports failure — a row that awaited it would hold
     /// the main actor open for a panel that may be constructing a session.
+    ///
+    /// **The destination is read here, synchronously, and not inside the task.** It is the modifier
+    /// state of the click that caused this call (`LinkActivation`), and by the time a spawned task
+    /// runs the user has let the key go — a Cmd-click would then open in the current panel about as
+    /// often as it opened a window.
     @MainActor
     static func open(_ path: String, line: Int?, in context: TimelineRenderContext) {
         guard let url = canonical(path, relativeTo: context.cwd) else { return }
         let links = context.links
-        Task { await links.open(.file(url, line: line), from: .currentPanel) }
+        let destination = LinkActivation.destination
+        Task { await links.open(.file(url, line: line), from: destination) }
     }
 }
 

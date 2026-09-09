@@ -1268,6 +1268,16 @@ symlink-containment debt in entry 78 is unchanged.
      the shell is not on it. Closer: each surface registers a `LinkTarget` for its own command name
      as it lands, and the shell registers one for the switcher. Owner: C6.4 (agents), C5 (the
      switcher). Raised by C6.2's fix wave.
+     **Its first third closed 2026-09-09 by the `corrective/c6-link-activation` corrective on
+     `main`**: a command link is claimed. `CommandLinkTarget` is registered on the app's one registry
+     beside the Browser's targets — against `.thread`, after that tab's handover, so the withdrawal
+     that installs the tab cannot drop it — and delivers a `.command` to the composer of the channel
+     the link was raised in (`LinkOrigin`), which opens the named surface through the same member a
+     typed line reaches. So the router no longer answers a command link with a diagnostic, and the
+     link is the working route C7's acceptance item 3 describes. What stays open is the two thirds
+     this cannot supply: `agents` and `tasks` set `ComposerModel.openSurface` and there is still no
+     screen behind either name, and the switcher is still unreachable from a composer. Owners
+     unchanged.
 
 208. **The mode half of §7.4's readback races the handshake that carries it.** The only readback
      permission mode has is the handshake's, which reaches the pickers through the composer's own
@@ -2735,17 +2745,6 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      `COPYFILE_ACL | COPYFILE_XATTR` onto the temporary, or an exchange primitive. Closer: that
      call, once someone edits a file whose ACL matters. Owner: C7.5's follow-up.
 
-240. **`LinkRouterCapability.open` does not say which channel the link came from.** Every channel's
-     Files session registers a `.file` and a `.diff` target with the same tab and specificity, and
-     `LinkRouter.mostSpecific` compares specificity and tab order — never channel identity. So the
-     registry alone cannot deliver a link to the session it came from. C5 recorded the same gap in
-     `HostLinkRouter` ("`LinkRouterCapability.open(_:from:)` carrying the channel would remove the
-     case altogether, and that is an X7 amendment"); C7.5 mitigates it by registering **once per
-     tab** and routing to the channel the panel is presenting, which is right for a click the user
-     just made and wrong for a link delivered to a channel that is not on screen. Closer: the X7
-     amendment of C7.5's Parent revision 4 — the capability carries the originating `ChannelKey`
-     and `LinkTarget` may match on it. Owner: C5's fence; C7.6 and C7.7 register per channel too.
-
 241. **Re-baselining the editor after a save can overwrite a keystroke.** W4's vocabulary is closed
      and `readBuffer` deliberately leaves the dirty flag alone, so the only way to tell Monaco "this
      is the saved state now" is `setText` — which replaces the buffer. A character typed between the
@@ -2863,15 +2862,6 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      number of scratch files live. Closer: ask per component and exempt the aliases by name, if a
      case ever appears that needs it. Owner: C7.5's follow-up. Found by C7.5's fix wave D.
 
-362. **The channel a `.newWindow` delivery lands in is carried by one slot, so two such links in
-     flight at once can cross.** `PanelHostModel.lastPopOut` records the pop-out the router just
-     prepared and the Files tab resolves its channel from it, which is what stops a delivery from
-     following a window that has moved on. Two `.newWindow` opens overlapping — two Cmd-clicks
-     before the first delivery lands — leave the second's pop-out in that slot for both, and the
-     first file opens in the second's channel. The real closer is entry 240's X7 amendment: the
-     capability carrying the originating `ChannelKey` makes the delivery name its own channel and
-     the slot disappear. Owner: X7's amendment, whichever leaf opens it. Found by C7.5's fix wave D.
-
 343. **Two presentations dispatched concurrently cannot be ordered by intent.** The presentation
      generation says which call claimed the surface last, and a call that has been dispatched but
      has not run yet has claimed nothing — so a suspension taken *before* a presentation (opening a
@@ -2940,23 +2930,15 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      and re-arms when they disagree. File: `FileWatch.swift`. Owner: C7.5.
      Filed 2026-09-09 at C7.5's third review round (hard stop).
 
-370. **Two `.newWindow` preparations in flight can deliver one window's file into the other's
-     session.** `PanelHostModel.lastPopOut` is a single slot, so overlapping A and B pop-out
-     preparations leave B's window in it for both deliveries and A's file opens in B's channel —
-     where the next save writes it. This is entry 362 seen from the delivery side rather than the
-     channel side: same slot, same crossing, and the same closer, which is entry 240's X7
-     amendment carrying the originating `ChannelKey` on the delivery so the slot disappears.
-     File: `PanelHostModel` (C5) with `FilesTab.swift` as the consumer. Owner: C5/C7.2.
-     Filed 2026-09-09 at C7.5's third review round (hard stop).
-
 371. **A `.newWindow` delivery whose pop-out closed first opens the file in a hidden session.**
-     The delivery resolves its channel from the prepared pop-out, and when that window has gone by
-     the time the link lands the resolution falls back to the main window's selection — so the file
-     opens in a session no window is drawing, and the user sees nothing happen. A fallback is right
-     for a link that never named a window; it is wrong for one that named a window which is gone.
-     Closer: refuse the delivery outright when the prepared window is no longer there, which is the
-     same shape as fix wave D's "with a host, a lookup that answers nothing opens nothing".
-     File: `FilesTab.swift`. Owner: C7.5. Filed 2026-09-09 at C7.5's third review round (hard stop).
+     Restated 2026-09-09 by the C7 recomposition corrective that closed entry 240: the delivery no
+     longer follows the main window's selection — it lands in the channel the action was raised in,
+     which is the channel the closed window was showing — so the file is at least in the right
+     session. It is still a session nothing is drawing when the main window has moved elsewhere, and
+     the user sees nothing happen. Closer: refuse the delivery outright when the prepared window is
+     no longer there, which is the same shape as fix wave D's "with a host, a lookup that answers
+     nothing opens nothing". File: `FilesTab.swift`. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
 
 372. **Cmd+S from a window that is not a Files scene saves the main window's buffer.**
      `FilesSaveButton` reads the focused-scene value and treats its *absence* as "this is the main
@@ -3462,6 +3444,15 @@ four whole-branch review rounds.
     in C7.4: the shortcut bar is C6.2's, and suppressing it needs a focus signal that crosses the
     two children. Closer: the composer's shortcuts stand down while the panel holds first
     responder. Owner: C6.2 with C7.4; escalated to the architect at C7.4's merge.
+    **Closed 2026-09-09 (`99d00a7`), by the `corrective/350-composer-keys-stand-down` corrective on
+    `main`.** `PanelKeyboardFocus` (`App/Shell/PanelKeyboardFocus.swift`) publishes one fact — is the
+    keyboard in the panel — from the key window's first responder and the regions the drawn panels
+    register, and `ComposerShortcutBar` binds Escape and Shift+Tab only while it is false. The panel
+    column installs a region as a `.background`; a popped-out panel window installs one that spans
+    its window. Nothing crossed a child boundary: `PanelHostAPI` is unchanged and neither
+    `TerminalCore` nor `TerminalPanel` was touched. Cmd+Shift+Esc keeps its binding throughout — a
+    Command chord no terminal child competes for, and the panic stop, which would be missing exactly
+    when it is wanted. What the closer rests on rather than proves is entry 408.
 351. **`continueStopped()` signals a process-group number it read across an actor hop.** The pane
     re-checks its own state and its pty before signalling (round three's fix), but not the pty
     layer's ownership gate, which closes before the reap; the pane learns of `.ended` later, through
@@ -3485,7 +3476,19 @@ four whole-branch review rounds.
     caller that cannot name a cwd still refuses. Recorded because the dependency is not obvious
     from the seam's shape and the next caller will meet it. Closer: `run(_:for:)` taking the cwd, or
     the host resolving a channel through the fleet's own row. Owner: C7.4 with C5.
-354. **Quit does not know a Terminal pane is running.** `QuitGuard.forApp` is built from the fleet
+354. **Closed 2026-09-09 by corrective `e90c626` on `main`.** The quit guard now reads a second
+    fact beside the fleet's: `TerminalSessionRegistry.livePanes()` answers, by value and per
+    channel, how many panes still hold a *live child* — a pane whose child exited counts as
+    nothing — and `QuitTerminalPanes` puts that answer wherever §7.4's census is taken, so either
+    fact alone raises the dialog. The sentence names the panes by count (§11) and its advice is
+    corrected: *Open in terminal* keeps a conversation only in a terminal outside afleet, because a
+    pane inside it goes when afleet does. On a confirmed quit the panes are torn down through the
+    registry's own `release()`, awaited, in the same barrier that drains the panels — after the
+    terminations and before the shutdown — so a child is hung up by the path that also reports its
+    exit rather than by the exit dropping a descriptor. The fleet's "busy" is unchanged and no pane
+    became a channel; `PanelHostAPI` was not touched. The original entry:
+
+    **Quit does not know a Terminal pane is running.** `QuitGuard.forApp` is built from the fleet
     and the composers; `FleetQuitTermination.quitChannels` filters to owned channels, and a shell
     pane has no fleet entry at all. So §7.4's Quit asks about turns and background tasks and says
     nothing about a pane with a live child, app termination closes the pty descriptors without
@@ -3592,6 +3595,230 @@ four whole-branch review rounds.
      nor the transcript records when a run ended, so a consumer that ticks elapsed to `endedAt ?? now`
      has nothing to stop at. Closer: an end instant the file half can defend (the last record of the
      run's own transcript is a *last activity*, not an end), and C4's dormancy as the second witness.
+
+408. **What tracker 350's closer rests on: a rect, and an undocumented observation.** Two things
+     hold the composer's stand-down up, and neither is a proof.
+     *The region is geometric.* The natural question — is the first responder a descendant of the
+     panel column's view — has no view to be a descendant of: SwiftUI flattens
+     `NSViewRepresentable`s into siblings under the window's one hosting view, measured here with a
+     marker installed as a panel's `.background`, which is not an ancestor of the pane's surface.
+     So `PanelKeyboardFocus.isInPanel` asks the descendant question first and falls back to the
+     column's rect. The consequence is that anything drawn *over* the column and focusable — a
+     popover, a sheet anchored there, a floating panel — is counted as inside the panel and would
+     take Escape from the composer while it stood in front of it. Nothing in the app does that
+     today, and the fallback stops being needed the moment SwiftUI gives a representable a real
+     container ancestor, which is not something this repository can arrange.
+     *The trigger is KVO on `NSWindow.firstResponder`*, which Apple does not document as
+     observable. Every `makeFirstResponder(_:)` emits a change on this machine — grant, hand-back
+     and resignation alike — and that is the whole of the evidence. If it ever stopped emitting,
+     the fact would go stale and the composer would keep the two keys, which is the pre-fix
+     behaviour arriving silently; the tests cover the recompute and not the trigger, because a
+     test that asserts KVO fires is a test of the framework. Closer: a first-responder signal the
+     panel itself reports, which is an X7 amendment and the architect's ruling to make.
+     Filed by the `corrective/350-composer-keys-stand-down` corrective on `main`, 2026-09-09.
+     Owner: C5, with C7.4 as the consumer that would notice first.
+
+409. **A hatch pane's exit at quit reaches a lifecycle that is already ending.** Tracker 354 put the
+    pane teardown after the termination passes and before the shutdown, which is where a pane in a
+    channel that has just ended should be closed. A `PaneRequest` pane still reports its one
+    `PaneExit` from there — `TerminalPanelSession.tearDown()` owes it whatever the reason for the
+    teardown — so a hatch pane's exit asks C4 to re-adopt a channel the pass has just quit, moments
+    before `shutdown()`. Harmless: the re-adoption changes an in-memory state nobody reads again, a
+    relaunch re-evaluates every channel from the registry, and no state on disk is touched. Filed
+    because the ordering looks wrong on first reading and the next person to move either half should
+    know it was chosen: the alternative — tearing panes down *before* the terminations — closes a
+    pane while its channel is still live, which is the case the ordering exists to avoid. Closer:
+    nothing, unless a future clause makes the exit observable after the shutdown begins, at which
+    point the teardown should suppress the re-adoption report for a quit. Owner: C6.2's `QuitGuard`
+    with C7.4.
+
+## From C7.7 (Source Control and GitHub panel, `child/c7-scm-panel`)
+
+277. **A linked worktree's or a submodule's history changes outside the watched root.** Design §5
+     rests on "history changes only through `.git`, and `.git` is watched", which holds for an
+     ordinary repository and not for a linked worktree or a submodule: there `.git` is a *pointer
+     file* and the real HEAD, refs and reflogs live elsewhere, so an empty commit in a linked
+     worktree can generate no event beneath the watched root and the graph goes stale until the
+     user refreshes. `RepositoryWatch` follows the limitation deliberately rather than reaching for
+     a git command this leaf is not allowed to write (W7). Closer: a C7.3 reader that reports the
+     real git directory (`rev-parse --git-common-dir`), watched alongside the working tree — which
+     is a core capability decision, not a panel fix. Found by C7.7's whole-branch review.
+     Owner: C7.3, with C7.7 as first consumer.
+
+278. **`NoDefer` is carried as an API contract, not as a mechanism.** The plan named dropping
+     `kFSEventStreamCreateFlagNoDefer` as a mutation that must turn G1.5 red; measured on this
+     machine it does not — deliveries arrive in 11–14 ms with the flag and without it at a
+     0.5–1 s latency, and the deferral only shows at a 3 s latency, where it costs 1.79 s. The
+     one-second bound is bought by the latency sitting well under it. Recorded so a later reader
+     does not re-derive it and does not treat the mutation as an outstanding obligation.
+     Owner: C7.7.
+
+279. **The `gh` not-authenticated classification is written twice.** `GitHubModel` classifies a
+     `gh` failure into a message plus an optional `gh auth login` hint, duplicating C7.6's
+     `PullRequestURLResolver`, because panel targets cannot import each other. Two copies of one
+     rule diverge the first time either is edited. Design §8 anticipates the duplication and files
+     it rather than working around it. Closer: the classification belongs in `SourceControlCore`
+     beside the `ToolError` it reads. Owner: whichever leaf next needs a third copy.
+
+280. **The third copy of the git fixture builder, and now a fourth thing inside it.** Entry 232
+     named the duplication of a scratch guard, a repository builder and a recording runner across
+     test targets; C7.7 wrote the third copy, and added a *correct* argv verb extractor to it —
+     one that skips options taking a separate value (`-c key=value`, `-C`, `--git-dir`, …). The
+     first version of that extractor read `git -c diff.renameLimit=1000 status` as a
+     `diff.renameLimit=1000`, which would have made a G4 allowlist either fail spuriously or, as a
+     denylist, silently accept `git -c anything=x commit`. C7.3's own copy should be checked for
+     the same wrong reading. Closer: entry 232's `WorkbenchTestSupport` target. Owner: the next
+     leaf to add a copy.
+
+     **Two divergences inside this leaf, found at its own fix wave and left standing.**
+     `RepositoryReaderTests` keeps a *second* copy of the git verb allowlist which does not carry
+     `hash-object` — harmless only because no test there reaches `GitDiff`'s unborn-`HEAD` path
+     today, so the two lists have quietly drifted and the next test to reach it fails in a way that
+     looks like a violation rather than a stale list. And `SourceControlModelTests` still asserts
+     argv per test, where `GitHubModelTests` moved the same claim into `tearDown()` so it cannot be
+     forgotten — the weaker form is exactly what let a whole flow escape the gate until the
+     whole-branch review found it.
+
+281. **`GitRepository`'s `name:` defaults to `"repo"`, so two fixtures in one scratch tree collide.**
+     The second `git init` builds its history on top of the first's, silently — it cost one real
+     red during C7.7's readout tests, presenting as a fixture reporting three lanes where two were
+     expected. Closer: default the name to a unique value, or have the initialiser refuse a
+     directory that already exists. Owner: whoever owns the shared fixture under entry 232.
+
+282. **A prefix `.commit` delivery costs up to five `git log` reads.** Design §7's ruling forbids
+     calling a prefix unique before the walk reaches its bound, and W7 leaves this leaf no
+     object-existence reader, so an abbreviated hash outside the window walks. If C7.3 shipped a
+     `rev-parse --verify` / `--disambiguate` wrapper the whole walk collapses to one lookup.
+     Owner: C7.3, with C7.7 as first consumer.
+
+283. **`deliveryRetries` is one.** A `.commit` delivery superseded twice — a repository being
+     written continuously — answers `.searchInterrupted` rather than the commit. Bounded by
+     design, since a click must not spend a repository's worth of `git log`, but it is a real if
+     rare second-best answer. Owner: C7.7.
+
+284. **A cancellation is recognised by comparing against a mapping, not by a tag.** `RepositoryError`
+     classifies a `ToolError` into a detail string and keeps no structural marker, so the model
+     identifies a cancelled read by comparing against the reader's own mapping of
+     `ToolError.cancelled`. It works and is pinned by a test; the honest shape is a case or a flag
+     on `RepositoryError`. Owner: C7.7.
+
+285. **`AppModel.filesSession(for:)` and `sourceControlSession(for:)` are the same six lines twice**,
+     differing only in a tab id and a cast; a third panel host makes it three. The generic that
+     removes the duplication needs `PanelTabSession` subtype resolution the host does not expose.
+     Both now resolve through one private `channel(for:poppedOutAs:)`, which is where the link's
+     originating channel is read, so the duplication is the two public wrappers and their casts.
+     Owner: C5's fence.
+
+286. **G4's source-level surface gate is scoped to two file names.** The scan that closes "a
+     `Button` written into a view body with no `Control` behind it" reads
+     `SourceControlPanelView.swift` and `GitHubPanelView.swift` by name through `#filePath`. A
+     third view file added to the panel directory is silently unscanned. The durable form is a scan
+     of every `*View.swift` in the directory, which needs a rule for what counts as a `Control`
+     door per file. Owner: C7.7, or whoever adds the third view.
+
+287. **The G4 surface gate is textual and models no indirection.** It cannot see a session captured
+     into a local (`let s = session; s.commit()`), an interactive element introduced by a helper
+     view type living in another file, or a mutating action added *inside* `Control.perform` — that
+     last one remains the enum inventory's job. It closes the mutation it was written for and is
+     not a proof about rendered SwiftUI; a body walk would need an inspection facility this
+     repository does not have. Owner: C7.7.
+
+288. **The live `gh` leg names a public repository through `GH_REPO`.** It runs in a scratch tree
+     and reads only, but it remains network- and account-dependent; if CI ever runs with a token,
+     that token's rate limit is spent here. Owner: C7.7.
+
+289. **`gh pr checks`' documented exit code 8 still has no live confirmation** — this leaf's live
+     leg ran and reached no repository with a check in flight, so entry 118 stays open and is
+     restated here as C7.7's own unfinished business rather than left on C7.3's row. The behaviour
+     is asserted against an authored document and a stub. Owner: C7.7 or whoever next runs the
+     live leg while CI is in flight somewhere.
+
+290. **Four workers in one worktree cannot each show a test failing first.** A task that lands its
+     tests before its implementation makes `swift test` unbuildable for every sibling, so two of
+     C7.7's four Wave A tasks took their failing-first evidence in a throwaway copy of the package.
+     The evidence is sound; the shape is not, and it also cost several later runs to sibling
+     compile breaks. Closer: a worktree per parallel task, or a rule that tests and implementation
+     land in one commit. Owner: whoever dispatches the next parallel wave.
+
+291. **A user's brand-new file appears in the working-tree row but not in its file list.** The row
+     is driven by `git status` (which sees untracked files) and the list by `git diff HEAD` (which
+     does not), so an unstaged new file makes the panel say the tree is dirty and then shows a list
+     that does not contain it. Both halves are correct about their own question — §6 keeps them
+     apart deliberately — but the asymmetry is real and a human tester will meet it at G1's leg.
+     Closer: list untracked paths from the status alongside the diff, marked as untracked.
+     Owner: C7.7.
+
+## From the C7 recomposition correctives on `main`, 2026-09-09 (numbered from 416)
+
+416. **Eight rows of W1's table declare an edge no source imports.** The per-target check added
+     with `DeclaredEdgeTests` is deliberately one-directional: it proves every import is a
+     declared edge, and says nothing about a declared edge with no import site. Running the same
+     data the other way names eight — `TerminalCore` → AfleetCore and GhosttyKit, `EditorCore`
+     and `EditorCoreTests` → AfleetCore, `TerminalPanel`, `BrowserPanel` and `SourceControlPanel`
+     → LinkRouting, `FilesPanel` and `SourceControlPanel` → FleetKit. C7.7's own manifest comment
+     states the cost ("a dependency edge with no import site is a claim in the manifest a later
+     reader believes"), and it argued its way out of exactly one such row. The other direction is
+     not mechanical, though: an edge can be load-bearing at link time without an import — the
+     GhosttyKit row carries a binary target — and each removal is a W1 table amendment rather
+     than a manifest tidy. Closer: rule on each row, then let the check assert both directions
+     with the survivors named where they are declared. Owner: the architect, with W1's table.
+     Related bound worth knowing before that walk: the check reads a product dependency as a
+     module of the product's own name, which is true of every dependency this package declares
+     and would misreport a product that exports differently-named modules.
+
+## From the `corrective/c6-link-activation` corrective on `main`, 2026-09-09
+
+424. **A Cmd-clicked `.command` link would pop the Thread tab out for a surface that is not in it.**
+     `CommandLinkTarget` takes X7's default `popsOutForNewWindow`, so a `.command` delivered as
+     `.newWindow` pops `.thread` out of the origin channel first and then hands the command to that
+     channel's composer — which is app-scoped, so the surface the command names appears wherever the
+     composer is drawn and not necessarily in the window the pop-out just made. It is latent: the
+     only raiser of a command link today is the composer's own `.native` arm, which opens it as
+     `.currentPanel`. The honest answer is not obviously the Browser's (`false`, no window at all)
+     either, because two of the three named surfaces do not exist yet and neither their window nor
+     their host is decided. Closer: whichever child lands the first `agents`/`tasks` surface decides
+     what a new-window command means and sets the flag with it. Owner: C6.4.
+
+425. **`LinkActivation.modifiers` is one process-wide seam.** The modifier reading a timeline click
+     resolves through is a mutable static on the main actor, so a test that replaces it replaces it
+     for the whole process and must put it back; `LinkActivationTests` does, in `tearDown`. The
+     alternative — carrying the reading down through the render context to every row — is a field on
+     a value four leaves construct, for a question whose production answer is the same everywhere.
+     Closer: none proposed; it is recorded so the next test that reaches for it knows the rule.
+     Owner: C6.1.
+
+420. **The host's remembered selection grows with the channels one run visits.** `PanelHostModel`
+     keeps a `[ChannelKey: PanelTabID]` so returning to a channel is immediate rather than a store
+     round trip, and nothing but the channel leaving the index takes an entry out of it — where the
+     session cache next to it is bounded at sixteen channels. The value is one enum and the set is
+     the same one W6 already writes a document per channel for, so the cost is bytes rather than
+     PTYs; it is still the one per-channel map in the host with no bound on it. Closer: an LRU over
+     the same order the session cache uses, once a measurement says it is worth the second eviction
+     path. Owner: C5's fence.
+
+421. **A W6 document outlives the channel it belongs to.** `releaseChannel(_:)` forgets the
+     channel's remembered tab and leaves `panel.host.<configHomeHash>.<sessionId>` on disk, and the
+     Files and Terminal documents have the same shape — nothing sweeps a panel document for a
+     session that has left the index. Harmless per document and unbounded across a long-lived config
+     home. Closer: a sweep at launch over `workbench`'s keys against the index, which is one pass and
+     wants to be written once for all three panels rather than three times. Owner: C7 as a whole,
+     under W6.
+
+422. **A selection made in the last quarter-second of a run is not written.** The host's document
+     writer coalesces on the panels' own interval and nothing flushes it at termination, so quitting
+     immediately after Cmd+3 relaunches on the previous tab. It is the shape every panel store has —
+     `FilesPanelStore` and `TerminalPanelState` included — and the flush would have to reach all of
+     them from one place the app does not have yet. Closer: a termination hook that flushes every
+     panel store, or an interval short enough that the window does not matter. Owner: C5's fence,
+     with C7's stores as the other half.
+
+423. **The host keys its own document with the Files panel's hash function.** §11's twelve-hex
+     config-home hash is spelled three times — `RawCapture.configHomeHash` in ClaudeWire, and once
+     each in `FilesPanelStore` and `TerminalPanelState`, which cannot import it because X1 forbids
+     Workbench a ClaudeWire dependency. The host needs the same hash and the URL a `ChannelKey`
+     carries, so it borrows `FilesPanelStore`'s rather than adding a fourth copy: correct, and an
+     edge from C5's host to a C7 leaf that exists only for a string. Closer: the hash on a type in
+     `PanelHostAPI` or `AfleetCore`, which every one of the four can reach. Owner: C7 under W6.
 
 ## From C6.4 (`child/c6-agents`)
 
@@ -3746,3 +3973,21 @@ needs more. Nothing above is renumbered.
      when the epoch moves — `HostSignal.processReplaced` already carries the epoch to the fold, so
      the fact is on the wire the panel already reads. Owner: C6.4's successor. Raised by C6.4
      Task 5.
+
+180. **Two `WorkspaceLink.command` targets now overlap, and the older one's comment says they
+     cannot.** `CommandLinkTarget` (`App/Composer/CommandLinkTarget.swift:30–37`, C7's acceptance
+     item 3) claims **every** `.command` link at specificity 1, and its comment reasons from
+     "nothing else claims `.command`, so there is no tie to break, and a higher number would be a
+     claim about a competition that does not exist." At C6.4's merge that stops being true:
+     `AgentsTab.linkTargets` claims `command("agents")` at specificity 50, so the router's
+     most-specific rule sends `/agents` to the Agents tab and every other command to the channel's
+     composer. That is the outcome tracker **207** asked for — it named C6.4 as the owner of the
+     `agents` half precisely because `composer.present(native:)` had nowhere to send it — so the
+     behaviour is right and only the reasoning is stale. The risk it leaves is a silent one: the
+     next child to claim a command link will read that comment, take specificity 1, and tie with
+     C7's target on a link both claim, where the winner is whichever the registry compares first.
+     Closer: reword the comment to say a specific claim outranks the catch-all, and say what a
+     second catch-all would mean. Owner: C7's composer leaf for the comment; the C6 composite if
+     it would rather state the rule once where link targets are described. Raised by C6.4 at the
+     `2b9c18d` merge.
+

@@ -403,12 +403,18 @@ enum TimelineLinkDestination {
     ///
     /// Fire-and-forget for `FileLink.open`'s reason: the capability is `async`, a press is not, and
     /// awaiting it would hold the main actor open for a panel that may be constructing a session.
+    ///
+    /// The destination is `FileLink.open`'s too, and read on the same terms: synchronously, from the
+    /// press in flight (`LinkActivation`). A Cmd-clicked `.url` is where the two paths part company
+    /// afterwards and not here — the Browser's target declines the pop-out, so that one leaves for
+    /// the user's own browser while a `.file` gets a window (X7's `popsOutForNewWindow`).
     @MainActor
     @discardableResult
     static func open(_ url: URL, in context: TimelineRenderContext?) -> Bool {
         guard let context, let link = link(for: url, cwd: context.cwd) else { return false }
         let links = context.links
-        Task { await links.open(link, from: .currentPanel) }
+        let destination = LinkActivation.destination
+        Task { await links.open(link, from: destination) }
         return true
     }
 }

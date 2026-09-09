@@ -84,6 +84,14 @@ final class ShellModel {
     /// Cmd+K's sheet.
     var isSwitcherPresented = false
 
+    /// Where the keyboard is pointed, for the one question two children disagreed about: whether
+    /// the composer's Escape and Shift+Tab are the composer's *right now* (spec §8.5, tracker 350).
+    ///
+    /// It lives here because this is the model that already answers what the window is looking at,
+    /// and because the fact belongs above both children: the panel column publishes it and the
+    /// composer reads it, and neither has to know the other exists.
+    let keyboard = PanelKeyboardFocus()
+
     /// Contract X7's host, which this model was given so the shortcuts declared above the window
     /// could reach it. Readable, because the sidebar's job rows place a pane through the same host
     /// and a second route to it would be a second answer to which channel a pane landed in.

@@ -1,0 +1,88 @@
+[
+  {
+    "additions": 214,
+    "author": {
+      "id": "MDQ6VXNlcjEwMDAwMDAx",
+      "is_bot": false,
+      "login": "fennel-varro",
+      "name": "Fennel Varro"
+    },
+    "baseRefName": "main",
+    "changedFiles": 7,
+    "createdAt": "2026-05-11T08:02:14Z",
+    "deletions": 63,
+    "headRefName": "feature/scope-control",
+    "isDraft": false,
+    "labels": [
+      {
+        "id": "LA_kwDOinvented0011",
+        "name": "panel",
+        "description": "Touches a workbench panel",
+        "color": "1d76db"
+      }
+    ],
+    "mergeStateStatus": "CLEAN",
+    "mergeable": "MERGEABLE",
+    "number": 204,
+    "reviewDecision": "APPROVED",
+    "state": "OPEN",
+    "title": "Scope the pull-request list to the checked-out branch",
+    "updatedAt": "2026-05-12T16:41:09Z",
+    "url": "https://github.com/nimbus-atelier/parchment-loom/pull/204"
+  },
+  {
+    "additions": 18,
+    "author": {
+      "id": "MDQ6VXNlcjEwMDAwMDAy",
+      "is_bot": false,
+      "login": "dune-pellwick",
+      "name": "Dune Pellwick"
+    },
+    "baseRefName": "main",
+    "changedFiles": 2,
+    "createdAt": "2026-05-12T09:30:00Z",
+    "deletions": 4,
+    "headRefName": "feature/scope-control",
+    "isDraft": true,
+    "labels": [],
+    "mergeStateStatus": "BLOCKED",
+    "mergeable": "UNKNOWN",
+    "number": 207,
+    "reviewDecision": "",
+    "state": "OPEN",
+    "title": "Carry the check rollup into the pull-request row",
+    "updatedAt": "2026-05-12T09:30:00Z",
+    "url": "https://github.com/nimbus-atelier/parchment-loom/pull/207"
+  },
+  {
+    "additions": 6,
+    "author": {
+      "id": "MDQ6VXNlcjEwMDAwMDAz",
+      "is_bot": true,
+      "login": "loom-upkeep-bot",
+      "name": ""
+    },
+    "baseRefName": "main",
+    "changedFiles": 1,
+    "createdAt": "2026-05-09T04:15:52Z",
+    "deletions": 6,
+    "headRefName": "chore/refresh-samples",
+    "isDraft": false,
+    "labels": [
+      {
+        "id": "LA_kwDOinvented0012",
+        "name": "chore",
+        "description": "",
+        "color": "cfd3d7"
+      }
+    ],
+    "mergeStateStatus": "UNKNOWN",
+    "mergeable": "UNKNOWN",
+    "number": 199,
+    "reviewDecision": "REVIEW_REQUIRED",
+    "state": "OPEN",
+    "title": "Refresh the authored sample documents",
+    "updatedAt": "2026-05-10T11:07:31Z",
+    "url": "https://github.com/nimbus-atelier/parchment-loom/pull/199"
+  }
+]

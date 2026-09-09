@@ -74,19 +74,21 @@ final class BrowserWiringTests: XCTestCase {
         XCTAssertEqual(again, after, "a second registration added \(again - after) more targets")
     }
 
-    /// The app's registry is shared, and C7.5's Files tab claims its own pair from a `Task` spawned
-    /// in `AppModel.init` — so a count read at an arbitrary moment is a race between two children.
-    /// Waiting for that pair to land is what makes the Browser's two a *delta*. A count, never a
-    /// target (§11).
+    /// The app's registry is shared, and C7.5's Files tab and C7.7's Source Control tab each claim
+    /// their targets from a `Task` spawned in `AppModel.init` — so a count read at an arbitrary
+    /// moment is a race between three children. Waiting for all of them to land is what makes the
+    /// Browser's two a *delta*. **Three since C7.7**: the Files pair plus one `.commit`. A count,
+    /// never a target (§11).
     private func settledTargetCount(_ app: AppModel,
                                     file: StaticString = #filePath, line: UInt = #line) async throws -> Int {
         let deadline = ContinuousClock().now + .seconds(10)
         while ContinuousClock().now < deadline {
             let count = await app.panels.links.targetCount
-            if count >= 2 { return count }
+            if count >= 3 { return count }
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTFail("the Files tab's own link targets never registered", file: file, line: line)
+        XCTFail("the tabs registered in the initialiser never registered their link targets",
+                file: file, line: line)
         return 0
     }
 
@@ -111,8 +113,8 @@ final class BrowserWiringTests: XCTestCase {
         await app.launch()
 
         let after = await app.panels.links.targetCount
-        XCTAssertEqual(before, 2,
-                       "\(before) targets were registered before the launch, not the Files tab's pair alone")
+        XCTAssertEqual(before, 3,
+                       "\(before) targets were registered before the launch, not the initialiser's three")
         XCTAssertEqual(after - before, 2,
                        "the launch added \(after - before) targets, not the Browser's two")
         XCTAssertNil(app.route.workspace,
