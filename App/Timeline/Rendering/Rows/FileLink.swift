@@ -45,13 +45,26 @@ enum FileLink {
     /// `realpath` follows symlinks and resolves `..` for a path that exists; a path that does not
     /// exist — a file the engine wrote and the reader has since moved — is standardised lexically,
     /// so the link still points somewhere a router can reason about rather than being dropped.
-    static func canonical(_ path: String) -> URL? {
+    ///
+    /// **A relative path is resolved against `base`, the channel's own working directory, and
+    /// against nothing else.** The engine writes whatever the model typed into a tool input, so a
+    /// relative path is ordinary; resolving one against the app process's directory — which is what
+    /// both `realpath(3)` and `URL(filePath:)` do with no base — names a file in a different
+    /// project, or none. With no base to resolve against it is not resolved at all, which is the
+    /// rule `TimelineRenderContext.cwd` already states: opening the wrong file is worse than
+    /// opening none.
+    static func canonical(_ path: String, relativeTo base: URL? = nil) -> URL? {
         guard !path.isEmpty else { return nil }
-        if let resolved = realpath(path, nil) {
+        var subject = path
+        if !path.hasPrefix("/") {
+            guard let base else { return nil }
+            subject = base.appending(path: path).path
+        }
+        if let resolved = realpath(subject, nil) {
             defer { free(resolved) }
             return URL(filePath: String(cString: resolved))
         }
-        return URL(filePath: path).standardizedFileURL
+        return URL(filePath: subject).standardizedFileURL
     }
 
     /// Opens one path through contract Y7's link capability.
@@ -61,7 +74,7 @@ enum FileLink {
     /// the main actor open for a panel that may be constructing a session.
     @MainActor
     static func open(_ path: String, line: Int?, in context: TimelineRenderContext) {
-        guard let url = canonical(path) else { return }
+        guard let url = canonical(path, relativeTo: context.cwd) else { return }
         let links = context.links
         Task { await links.open(.file(url, line: line), from: .currentPanel) }
     }
