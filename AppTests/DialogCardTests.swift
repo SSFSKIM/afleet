@@ -21,9 +21,12 @@ import FleetKit
 /// dialog the binary owns, that path cannot be executed to prove it wrong, so the assertion is that
 /// `perform` was never reached at all (§6.3).
 ///
-/// A `ChannelKey` holds a config home and an item id holds a session, and `XCTAssertEqual` prints
-/// both operands (§6.3, §11), so every comparison over one of those is spelled as a boolean with a
-/// written message. Failure messages carry counts and action names.
+/// **No assertion here prints an operand that carries content.** `XCTAssertEqual` prints both sides
+/// on failure, and a `ChannelKey` holds a config home, an item id holds a session, and a card's
+/// reading, an answer body and a fixture's frame all hold engine bytes (§6.3, §11). Every comparison
+/// over one of those is therefore spelled as a boolean with a written message; the equality
+/// assertions that remain compare counts and the engine's own millisecond constants, which carry
+/// nothing. Failure messages carry counts and action names.
 @MainActor
 final class DialogCardTests: XCTestCase {
 
@@ -167,7 +170,7 @@ final class DialogCardTests: XCTestCase {
             try press(label, in: try dialogView(raised, answering).body)
             await answering.whenIdle()
             let sent = try await sentBody(lifecycle, label)
-            XCTAssertEqual(sent, try json(body), "the body sent for \(label) is not the engine's spelling")
+            XCTAssertTrue(sent == (try json(body)), "the body sent for \(label) is not the engine's spelling")
         }
     }
 
@@ -215,7 +218,8 @@ final class DialogCardTests: XCTestCase {
             "originalModel": "invented-original", "fallbackModel": "invented-fallback",
             "apiRefusalCategory": NSNull(),
         ])
-        XCTAssertNil(nulled.refusalFallback?.apiRefusalCategory, "an explicit null decoded as a category")
+        XCTAssertTrue(nulled.refusalFallback?.apiRefusalCategory == nil,
+                      "an explicit null decoded as a category")
         let none = CardTree.texts(in: try dialogView(nulled, answering).body)
         XCTAssertFalse(none.contains(where: { $0.hasPrefix("Category:") }),
                        "a null category still drew a category line")
@@ -368,8 +372,8 @@ final class DialogCardTests: XCTestCase {
         let retired = DecisionCard(try XCTUnwrap(reducer.overlay.decisions[request.id],
                                                  "the cancelled dialog left the overlay"))
         XCTAssertTrue(retired.state == .cancelled, "a retired dialog did not reach the cancelled state")
-        XCTAssertEqual(retired.reading(inStaleOverlay: false)?.text, "Answered elsewhere.",
-                       "a retired dialog does not read as answered elsewhere")
+        XCTAssertTrue(retired.reading(inStaleOverlay: false)?.text == "Answered elsewhere.",
+                      "a retired dialog does not read as answered elsewhere")
 
         registry.resolved(retired, in: Self.channel)
         XCTAssertTrue(doomed.allSatisfy { !registry.retains($0) },
@@ -394,8 +398,8 @@ final class DialogCardTests: XCTestCase {
         try press("Use usage credits", in: enabledBody)
         await answering.whenIdle()
         let consent = try await sentBody(lifecycle, "Use usage credits")
-        XCTAssertEqual(consent, try json(#"{"behavior":"completed","result":"consent"}"#),
-                       "the consent answer is not the engine's spelling")
+        XCTAssertTrue(consent == (try json(#"{"behavior":"completed","result":"consent"}"#)),
+                      "the consent answer is not the engine's spelling")
 
         let (_, second) = await hosted()
         let disabled = try card("dialog-fable-overage", at: 1)
@@ -436,8 +440,8 @@ final class DialogCardTests: XCTestCase {
             try press(label, in: try dialogView(fresh, answers).body)
             await answers.whenIdle()
             let sent = try await sentBody(resolver, label)
-            XCTAssertEqual(sent, try json(expected),
-                           "the body sent for \(label) is not the engine's spelling")
+            XCTAssertTrue(sent == (try json(expected)),
+                          "the body sent for \(label) is not the engine's spelling")
         }
     }
 
@@ -450,15 +454,15 @@ final class DialogCardTests: XCTestCase {
         // No frame: the card still settles, and it reads its own outcome.
         let alone = try XCTUnwrap(settled.reading(inStaleOverlay: false, consentFallback: nil),
                                   "an answered overage card is still waiting with no fallback frame")
-        XCTAssertEqual(alone.text, "switch_default", "the settled card does not read its own outcome")
+        XCTAssertTrue(alone.text == "switch_default", "the settled card does not read its own outcome")
 
         // The frame the recording carries: its content is the outcome, verbatim.
         let frame = try XCTUnwrap(Self.consentFallbacks(try FixtureRunner.frames("dialog-fable-overage")).first,
                                   "the fixture records no model_consent_fallback frame")
         let withFrame = try XCTUnwrap(settled.reading(inStaleOverlay: false, consentFallback: frame),
                                       "the card with a fallback frame is still waiting")
-        XCTAssertEqual(withFrame.text, frame.fields.content,
-                       "the fallback frame's content is not the card's outcome")
+        XCTAssertTrue(withFrame.text == frame.fields.content,
+                      "the fallback frame's content is not the card's outcome")
 
         let (_, answering) = await hosted()
         let drawn = CardTree.texts(in: DecisionCardView(card: settled, presentation: .full, in: Self.channel,
@@ -475,7 +479,7 @@ final class DialogCardTests: XCTestCase {
 
         // The disabled arm the fixture records carries explicit nulls.
         let nulled = try card("dialog-fable-overage", at: 1)
-        XCTAssertNil(nulled.overageConsent?.balanceCents, "an explicit null decoded as a balance")
+        XCTAssertTrue(nulled.overageConsent?.balanceCents == nil, "an explicit null decoded as a balance")
         XCTAssertFalse(CardTree.texts(in: try dialogView(nulled, answering).body)
                            .contains(where: { $0.hasPrefix("Balance:") }),
                        "a null balance still drew a balance line")
@@ -484,9 +488,9 @@ final class DialogCardTests: XCTestCase {
         // because no recording carries it.
         let unfed = try card("dialog-fable-overage", at: 0,
                              payload: ["overagesEnabled": true, "modelName": "invented-model"])
-        XCTAssertNil(DialogCardView.balanceText(try XCTUnwrap(unfed.overageConsent,
-                                                              "the overage payload no longer decodes")),
-                     "a payload with no balance key drew a balance")
+        XCTAssertTrue(DialogCardView.balanceText(try XCTUnwrap(unfed.overageConsent,
+                                                               "the overage payload no longer decodes")) == nil,
+                      "a payload with no balance key drew a balance")
 
         // And the positive case, so a card that drew nothing at all could not pass.
         let fed = try card("dialog-fable-overage", at: 0)
@@ -495,7 +499,7 @@ final class DialogCardTests: XCTestCase {
                                                                           "the overage payload no longer decodes")),
                                  "a fed balance drew no line")
         XCTAssertTrue(line.hasPrefix("Balance:"), "a fed balance is not drawn as a balance")
-        XCTAssertEqual(balance, 0, "the recorded enabled arm's balance is not the one this clause was written against")
+        XCTAssertTrue(balance == 0, "the recorded enabled arm's balance is not the one this clause was written against")
     }
 
     // MARK: - The kind afleet never declared
@@ -519,17 +523,18 @@ final class DialogCardTests: XCTestCase {
         _ = reducer.apply(.unansweredDialog(undeclared))
         let item = try XCTUnwrap(reducer.overlay.decisions[undeclared.id], "the reducer opened no item for it")
         let opaque = DecisionCard(item)
-        XCTAssertNil(opaque.dialogKind, "an undeclared kind decoded as one afleet declares")
+        XCTAssertTrue(opaque.dialogKind == nil, "an undeclared kind decoded as one afleet declares")
         XCTAssertTrue(opaque.state == .inert, "an unanswered dialog did not open inert")
-        XCTAssertEqual(opaque.reading(inStaleOverlay: false)?.text,
-                       "Left to the binary: afleet does not handle this kind.",
-                       "an undeclared dialog does not read as left to the binary")
+        XCTAssertTrue(opaque.reading(inStaleOverlay: false)?.text
+                          == "Left to the binary: afleet does not handle this kind.",
+                      "an undeclared dialog does not read as left to the binary")
 
         let every: [DecisionAction] = [.retryOnFallbackModel, .editPrompt, .keepTheRefusal,
                                        .useUsageCredits, .switchToDefaultModel, .notNow,
                                        .setUpUsageCredits, .closeDialog]
         for action in every {
-            XCTAssertNil(opaque.answer(action), "the mapping produced an answer for an undeclared dialog kind")
+            XCTAssertTrue(opaque.answer(action) == nil,
+                          "the mapping produced an answer for an undeclared dialog kind")
             answering.send(action, on: opaque, in: Self.channel)
         }
         await answering.whenIdle()
