@@ -55,6 +55,48 @@ final class AgentsTabTests: XCTestCase {
                        "a channel with no fold reads as a channel that simply has no runs")
     }
 
+    /// A second launch registers the tab **once** and leaves contract Y4 installed.
+    ///
+    /// `launch()` runs again on *Check again*, and this is the case a plain `register` gets wrong:
+    /// `PanelHost.register` traps on a duplicate by design, so the second pass took the app down.
+    /// Found by the floor rather than by reading — `ChannelRegistrarTests`' second-launch test is
+    /// what crashed — and asserted here where the registration lives.
+    ///
+    /// Keeping the *first* tab is right rather than merely safe: everything it holds is app-scoped
+    /// and outlives a launch, so the tab registered by the first pass reads the workspace the second
+    /// pass attached.
+    func testASecondLaunchRegistersTheTabOnceAndKeepsY4Installed() async throws {
+        let tree = try TempTree()
+        let scratch = try ScratchConfigHome(tree: tree)
+        try scratch.writeClaudeJSON(projects: [])
+        let built = SidebarFixtures.snapshot(configHome: LaunchFixtures.directoryURL(scratch.root), entries: [])
+        let sequence = try ChannelRegistrarTests.sequence(tree: tree, configHome: scratch.root,
+                                                          fleet: FleetDouble(),
+                                                          index: StubIndex(persisted: nil, built: built))
+        let app = AppModel(registry: RowRegistry(), sequence: sequence,
+                           coordinatorFactory: { _ in StoppableCoordinatorDouble() })
+
+        await app.launch()
+        XCTAssertTrue(app.panels.isRegistered(.agents), "the first launch registered no Agents tab")
+        XCTAssertTrue(app.agentNavigation is AgentNavigator,
+                      "the first launch left the chip's seam at \(type(of: app.agentNavigation))")
+        let targetsAfterOne = await app.panels.links.targetCount
+
+        await app.launch()
+
+        XCTAssertTrue(app.panels.isRegistered(.agents), "the second launch left no Agents tab registered")
+        XCTAssertTrue(app.agentNavigation is AgentNavigator,
+                      "the second launch left the chip's seam at \(type(of: app.agentNavigation))")
+        // And the `/agents` target was registered once, not once per launch: two of them would tie
+        // on specificity and the router would have nothing to pick between.
+        let targetsAfterTwo = await app.panels.links.targetCount
+        XCTAssertEqual(targetsAfterTwo, targetsAfterOne,
+                       "the second launch left \(targetsAfterTwo) link target(s) where the first left "
+                       + "\(targetsAfterOne)")
+        XCTAssertTrue(app.panels.available(for: PanelFixtures.context(PanelFixtures.key(7))).contains(.agents),
+                      "the host no longer offers .agents to a channel after a second launch")
+    }
+
     // MARK: - The session the host retains (X7)
 
     /// The host answers the same `AgentsModel` for one channel after another channel's session was

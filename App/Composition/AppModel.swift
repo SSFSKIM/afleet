@@ -440,28 +440,37 @@ final class AppModel: FilesTabHost {
             // The registry reaches it as a closure and not as a reference: a panel holding the
             // app's one `ChannelTimelineRegistry` is the duplicate-capability path the C6 cut
             // exists to prevent, and X7 hands panels capabilities rather than the host.
-            let agents = AgentsTab(timelines: { [timelines] key in timelines.model(for: key).timeline },
-                                   selection: agentSelection)
-            do {
-                try panels.register(agents)
-            } catch {
-                assertionFailure("the Agents tab is registered on a host where nothing holds .agents")
-            }
-            // Contract Y4, installed: the `Agent` chip's seam, which has been `NoAgentNavigation`
-            // since C6.1 landed it. It focuses the run's channel, selects this tab and writes the
-            // run into the app-scoped store the session reads when the host builds it — the shell
-            // and the host through closures, never references.
-            agentNavigation = AgentNavigator(selection: agentSelection,
-                                             focusChannel: { [shell] key in shell.select(key.session) },
-                                             selectTab: { [panels] in panels.select(.agents) })
-            // Its `/agents` command target (child spec D15, tracker 207), registered **with the
-            // tab** and awaited — a session is built lazily for rendering, so a link raised before
-            // anyone opened the tab must still resolve. It cannot go beside the Browser's at the
-            // top of this call: the tab does not exist until the lifecycle does, three lines above.
-            // Awaiting here is still strictly before the first link that can be raised, because
-            // nothing this launch reached is on screen until `route` is published below.
-            for target in agents.linkTargets(through: { [panels] in panels.select(.agents) }) {
-                await panels.links.register(target)
+            //
+            // **Once for the process, like the Browser's targets.** `launch()` runs again on
+            // *Check again*, and a plain second `register` would trap on the duplicate. Keeping the
+            // first registration is right rather than merely safe: everything this tab holds is
+            // app-scoped and outlives a launch — the registry closure reads whichever workspace
+            // `bindWorkspace` last attached, and the selection store is the same one either way.
+            if !panels.isRegistered(.agents) {
+                let agents = AgentsTab(timelines: { [timelines] key in timelines.model(for: key).timeline },
+                                       selection: agentSelection)
+                do {
+                    try panels.register(agents)
+                } catch {
+                    assertionFailure("the Agents tab is registered on a host where nothing holds .agents")
+                }
+                // Contract Y4, installed: the `Agent` chip's seam, which has been
+                // `NoAgentNavigation` since C6.1 landed it. It focuses the run's channel, selects
+                // this tab and writes the run into the app-scoped store the session reads when the
+                // host builds it — the shell and the host through closures, never references.
+                agentNavigation = AgentNavigator(selection: agentSelection,
+                                                 focusChannel: { [shell] key in shell.select(key.session) },
+                                                 selectTab: { [panels] in panels.select(.agents) })
+                // Its `/agents` command target (child spec D15, tracker 207), registered **with the
+                // tab** and awaited — a session is built lazily for rendering, so a link raised
+                // before anyone opened the tab must still resolve. It cannot go beside the
+                // Browser's at the top of this call: the tab does not exist until the lifecycle
+                // does, a few lines above. Awaiting here is still strictly before the first link
+                // that can be raised, because nothing this launch reached is on screen until
+                // `route` is published below.
+                for target in agents.linkTargets(through: { [panels] in panels.select(.agents) }) {
+                    await panels.links.register(target)
+                }
             }
         }
         await startActivity(over: reached)
