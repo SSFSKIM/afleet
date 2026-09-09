@@ -91,4 +91,41 @@ final class PaneTeardownTests: XCTestCase {
         XCTAssertFalse(pane.hasRunningReadLoop, "read-loop=still-running-after-close")
         XCTAssertFalse(PaneTestChild.isRunning(child), "child=still-running-after-close")
     }
+
+    /// A pane that never attached and is then closed leaves nothing running behind it.
+    ///
+    /// The pane is deliberately **not** in a window, which is the discarded-pane shape: the
+    /// adapter's drain holds the backlog back until a surface appears and re-asks every 10 ms,
+    /// rescheduling a closure that captures itself — so the drain, the backend session and the
+    /// backlog outlive a pane nobody will ever look at again, for the life of the process.
+    ///
+    /// Asserted on the adapter's own poll count rather than on a timer nothing can see: after the
+    /// close it does not move again, across many times the poll interval.
+    func testClosingANeverAttachedPaneLeavesNoRepeatingWorkScheduled() async throws {
+        let directory = try PaneTestChild.temporaryDirectory()
+        defer { PaneTestChild.remove(directory) }
+        let pane = TerminalPane()
+        pane.start(PaneRequest(
+            executable: URL(filePath: "/bin/sh"),
+            arguments: ["-c", "printf 'afleet-pane-unattached\\n'"],
+            cwd: directory,
+            environment: ["PATH": "/usr/bin:/bin"],
+            purpose: .command
+        ))
+        try await PaneTestChild.waitUntil(seconds: 15, "drain-polling-for-attachment") {
+            pane.surface.feedDrainAttachmentPollCount > 0
+        }
+
+        await pane.close()
+
+        let polls = pane.surface.feedDrainAttachmentPollCount
+        XCTAssertEqual(pane.surface.outstandingFeedByteCount, 0,
+                       "backlog=\(pane.surface.outstandingFeedByteCount) bytes-after-close")
+        // Twenty times the adapter's own attachment-poll interval.
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(pane.surface.feedDrainAttachmentPollCount, polls,
+                       "drain-polls after-close=\(polls) later=\(pane.surface.feedDrainAttachmentPollCount)")
+        XCTAssertEqual(pane.surface.outstandingFeedByteCount, 0,
+                       "backlog=\(pane.surface.outstandingFeedByteCount) bytes-after-disposal")
+    }
 }

@@ -111,6 +111,17 @@ final class GhosttyFeedQueue: Sendable {
         /// Cancellation and registration race, so the cancellation is recorded against the
         /// identifier and the registration that follows refuses rather than parking for ever.
         var cancelledWaiters: Set<UUID> = []
+        /// Set by ``abandon()``. Nothing is queued after it and no drain begins again: the surface
+        /// it fed has been disposed of.
+        var isAbandoned = false
+    }
+
+    /// What ``abandon()`` leaves its caller to finish outside the lock.
+    struct Abandonment {
+        let waiters: [CheckedContinuation<Void, Never>]
+        /// The process exit still waiting in the backlog, if the drain never reached it. Whoever
+        /// holds the item tells the session, so the session is finished exactly once.
+        let pendingExitCode: Int32?
     }
 
     private let state = Mutex(State())
@@ -147,6 +158,7 @@ final class GhosttyFeedQueue: Sendable {
     /// becomes one growing allocation. Reports whether this caller starts the drain.
     func append(_ data: Data) -> Bool {
         state.withLock { state in
+            guard !state.isAbandoned else { return false }
             state.outstandingByteCount += data.count
             if case let .output(existing, isExtendable: true) = state.pending.last,
                existing.count < chunkByteLimit {
@@ -164,12 +176,31 @@ final class GhosttyFeedQueue: Sendable {
     /// terminal is told the process ended.
     func appendProcessExit(code: Int32) -> Bool {
         state.withLock { state in
+            guard !state.isAbandoned else { return false }
             state.pending.append(.processExit(code))
             return Self.beginDrainIfIdle(&state)
         }
     }
 
+    /// Drops everything queued, releases every waiter, and refuses whatever arrives later. Called
+    /// once, from the surface's disposal.
+    func abandon() -> Abandonment {
+        state.withLock { state in
+            state.isAbandoned = true
+            let exitCode: Int32? = state.pending.reversed().compactMap {
+                if case let .processExit(code) = $0 { code } else { nil }
+            }.first
+            state.pending.removeAll()
+            state.outstandingByteCount = 0
+            state.isDraining = false
+            let waiters = Array(state.waiters.values)
+            state.waiters.removeAll()
+            return Abandonment(waiters: waiters, pendingExitCode: exitCode)
+        }
+    }
+
     private static func beginDrainIfIdle(_ state: inout State) -> Bool {
+        guard !state.isAbandoned else { return false }
         guard !state.isDraining else { return false }
         state.isDraining = true
         return true
@@ -288,6 +319,12 @@ private final class GhosttyFeedDrain: Sendable {
     private let finish: GhosttySessionFinisher
     private let runtimeMilliseconds: @Sendable () -> UInt64
     private let isAttached: GhosttySurfaceAttachmentProbe
+    private let polls = Mutex(0)
+    private let stopped = Mutex(false)
+
+    /// How many times the drain has re-asked whether a surface has appeared. Diagnostic: it exists
+    /// so "nothing is still scheduled" can be an assertion rather than a recollection.
+    var attachmentPollCount: Int { polls.withLock { $0 } }
 
     init(
         queue: DispatchQueue,
@@ -311,11 +348,28 @@ private final class GhosttyFeedDrain: Sendable {
         queue.async { self.run() }
     }
 
+    /// Ends the drain, and tells the session the process ended if the backlog was still holding
+    /// that item. Both go on the drain's own queue, so they are ordered behind whatever iteration
+    /// is running rather than racing it.
+    ///
+    /// This is what stops the attachment poll, which is the only thing that keeps a discarded
+    /// unattached surface — its drain, its session and its backlog — alive for the life of the
+    /// process. Nothing restarts afterwards: the backlog refuses every later append.
+    func stop(finishingWith exitCode: Int32?) {
+        stopped.withLock { $0 = true }
+        guard let exitCode else { return }
+        queue.async {
+            self.finish(self.session, UInt32(bitPattern: exitCode), self.runtimeMilliseconds())
+        }
+    }
+
     private func run() {
         while true {
+            guard !stopped.withLock({ $0 }) else { return }
             if !backlog.isAttached {
                 guard !backlog.suspendIfIdle() else { return }
                 guard isAttached(session) else {
+                    polls.withLock { $0 += 1 }
                     queue.asyncAfter(deadline: .now() + Self.attachmentPollSeconds) {
                         self.run()
                     }
@@ -498,6 +552,12 @@ public final class GhosttyTerminalSurface: TerminalSurface {
         feedQueue.retainedStorageByteCount
     }
 
+    /// How many times the drain has re-asked whether this surface has a view to parse into. See
+    /// ``GhosttyFeedDrain``: an unattached surface polls, and this is what says it has stopped.
+    public var feedDrainAttachmentPollCount: Int {
+        feedDrain.attachmentPollCount
+    }
+
     public func feed(_ output: Data) {
         guard !output.isEmpty else { return }
         guard feedQueue.append(output) else { return }
@@ -529,6 +589,21 @@ public final class GhosttyTerminalSurface: TerminalSurface {
             feedQueue.releaseWaiter(identifier)?.resume()
         }
         feedQueue.forgetWaiter(identifier)
+    }
+
+    /// Ends this surface for good: the drain stops, the backlog is abandoned and released, and
+    /// the backend session is told the process ended if nobody has told it yet.
+    ///
+    /// C7.4's **second** recorded change to C7.1's adapter (the first is tracker 93's cancellable
+    /// `awaitFeedCapacity()`). A pane that is closed before its surface ever attached — discarded
+    /// while off screen, or closed from a window it was never put in — otherwise leaves the drain
+    /// re-asking for a surface every 10 ms through a closure that captures itself, holding the
+    /// session and the backlog for the life of the process. A pane's surface has a lifetime, and
+    /// this is where it ends; feeding a disposed surface is a no-op rather than a resurrection.
+    public func dispose() {
+        let abandonment = feedQueue.abandon()
+        for waiter in abandonment.waiters { waiter.resume() }
+        feedDrain.stop(finishingWith: abandonment.pendingExitCode)
     }
 
     public func processDidExit(code: Int32) {

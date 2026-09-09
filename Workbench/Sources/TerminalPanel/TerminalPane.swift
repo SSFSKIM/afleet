@@ -169,6 +169,10 @@ public final class TerminalPane {
         await readLoop?.value
         readLoop = nil
         reportExitToSurface(code: observedTermination?.paneExitCode ?? Self.closedExitCode)
+        // The pane is going: every caller of `close()` drops it straight afterwards. Disposal is
+        // what ends the renderer's own work — a surface that never attached would otherwise keep
+        // its drain polling for a view that will never come (C7.1's adapter, `dispose()`).
+        surface.dispose()
     }
 
     // MARK: Spawning
