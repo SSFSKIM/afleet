@@ -293,6 +293,43 @@ final class PaneViewClaimTests: XCTestCase {
                       "the pane never got the keyboard the window had refused it")
     }
 
+    /// And a window that refuses once and then never moves.
+    ///
+    /// `viewDidMoveToWindow` was the only thing that asked again, so a container already sitting in
+    /// its window — which is every container after the first layout pass — never retried, and
+    /// `adoptIfUnheld` returns at once because the surface is still attached to it. The debt stood
+    /// for ever in a window nothing moved it out of, and the pane never got the keyboard.
+    ///
+    /// The container here stays exactly where it is; what comes round is an ordinary layout pass.
+    func testARefusedFocusRequestIsRetriedByTheNextLayoutWithoutMovingWindows() throws {
+        let surface = GhosttyTerminalSurface()
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
+        let stubborn = StubbornResponder(frame: NSRect(x: 0, y: 0, width: 600, height: 100))
+        let container = PaneSurfaceContainer(frame: NSRect(x: 0, y: 100, width: 600, height: 400))
+        root.addSubview(stubborn)
+        root.addSubview(container)
+        window = PaneTestChild.window(around: root)
+        window?.makeFirstResponder(stubborn)
+        XCTAssertTrue(window?.firstResponder === stubborn, "the test did not begin with the focus held")
+
+        container.adopt(surface.view)
+        XCTAssertTrue(container.owesSurfaceFocus, "a refused focus request was written off as paid")
+        let stationary = try XCTUnwrap(container.window, "the container was in no window to be refused by")
+
+        // The responder lets go, and the pane is laid out again — a resize, a divider dragged, a
+        // status bar appearing under it. Nothing puts the container into a window: it is in one.
+        stubborn.yields = true
+        container.needsLayout = true
+        container.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(container.window === stationary, "the container left the window that refused it")
+        XCTAssertFalse(container.owesSurfaceFocus, "the debt outlived the layout that paid it")
+        XCTAssertEqual(container.focusHandoffCount, 1, "handoffs=\(container.focusHandoffCount)")
+        let responder = window?.firstResponder as? NSView
+        XCTAssertTrue(responder === surface.view || responder?.isDescendant(of: surface.view) == true,
+                      "the pane never got the keyboard the window had refused it")
+    }
+
     /// Which of two standing hosts the view goes to is the newest, which is what the top of a
     /// claimant stack means — and it is a fact about registration order, not about which container
     /// happened to be made first. Asserted in the order the existing hand-off test does not cover:
