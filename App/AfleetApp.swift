@@ -30,6 +30,11 @@ struct AfleetApp: App {
                 // further edits, so the model reaches `ChannelRowView` through the environment
                 // rather than through four more initialiser arguments.
                 .environment(model)
+                // Where the keyboard is pointed, for the composer's shortcut bar (tracker 350).
+                // The object rather than its boolean, so a focus move re-evaluates the one view
+                // that reads it instead of the whole window.
+                .environment(shell.keyboard)
+                .task { shell.keyboard.startObserving() }
                 // The guard is built at quit time, not here: `bindWorkspace` may not have run when
                 // the window first appears, and a guard captured before it would hold no fleet.
                 .task { quitDelegate.makeGuard = { QuitGuard.forApp(model) } }

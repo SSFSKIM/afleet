@@ -3456,6 +3456,15 @@ four whole-branch review rounds.
     in C7.4: the shortcut bar is C6.2's, and suppressing it needs a focus signal that crosses the
     two children. Closer: the composer's shortcuts stand down while the panel holds first
     responder. Owner: C6.2 with C7.4; escalated to the architect at C7.4's merge.
+    **Closed 2026-09-09 (`99d00a7`), by the `corrective/350-composer-keys-stand-down` corrective on
+    `main`.** `PanelKeyboardFocus` (`App/Shell/PanelKeyboardFocus.swift`) publishes one fact — is the
+    keyboard in the panel — from the key window's first responder and the regions the drawn panels
+    register, and `ComposerShortcutBar` binds Escape and Shift+Tab only while it is false. The panel
+    column installs a region as a `.background`; a popped-out panel window installs one that spans
+    its window. Nothing crossed a child boundary: `PanelHostAPI` is unchanged and neither
+    `TerminalCore` nor `TerminalPanel` was touched. Cmd+Shift+Esc keeps its binding throughout — a
+    Command chord no terminal child competes for, and the panic stop, which would be missing exactly
+    when it is wanted. What the closer rests on rather than proves is entry 408.
 351. **`continueStopped()` signals a process-group number it read across an actor hop.** The pane
     re-checks its own state and its pty before signalling (round three's fix), but not the pty
     layer's ownership gate, which closes before the reap; the pane learns of `.ended` later, through
@@ -3586,6 +3595,28 @@ four whole-branch review rounds.
      nor the transcript records when a run ended, so a consumer that ticks elapsed to `endedAt ?? now`
      has nothing to stop at. Closer: an end instant the file half can defend (the last record of the
      run's own transcript is a *last activity*, not an end), and C4's dormancy as the second witness.
+
+408. **What tracker 350's closer rests on: a rect, and an undocumented observation.** Two things
+     hold the composer's stand-down up, and neither is a proof.
+     *The region is geometric.* The natural question — is the first responder a descendant of the
+     panel column's view — has no view to be a descendant of: SwiftUI flattens
+     `NSViewRepresentable`s into siblings under the window's one hosting view, measured here with a
+     marker installed as a panel's `.background`, which is not an ancestor of the pane's surface.
+     So `PanelKeyboardFocus.isInPanel` asks the descendant question first and falls back to the
+     column's rect. The consequence is that anything drawn *over* the column and focusable — a
+     popover, a sheet anchored there, a floating panel — is counted as inside the panel and would
+     take Escape from the composer while it stood in front of it. Nothing in the app does that
+     today, and the fallback stops being needed the moment SwiftUI gives a representable a real
+     container ancestor, which is not something this repository can arrange.
+     *The trigger is KVO on `NSWindow.firstResponder`*, which Apple does not document as
+     observable. Every `makeFirstResponder(_:)` emits a change on this machine — grant, hand-back
+     and resignation alike — and that is the whole of the evidence. If it ever stopped emitting,
+     the fact would go stale and the composer would keep the two keys, which is the pre-fix
+     behaviour arriving silently; the tests cover the recompute and not the trigger, because a
+     test that asserts KVO fires is a test of the framework. Closer: a first-responder signal the
+     panel itself reports, which is an X7 amendment and the architect's ruling to make.
+     Filed by the `corrective/350-composer-keys-stand-down` corrective on `main`, 2026-09-09.
+     Owner: C5, with C7.4 as the consumer that would notice first.
 
 ## From C7.7 (Source Control and GitHub panel, `child/c7-scm-panel`)
 
