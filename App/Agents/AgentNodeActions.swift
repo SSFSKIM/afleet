@@ -362,28 +362,57 @@ final class AgentNodeActions {
         guard let relay, !message.isEmpty, !inFlight else { return false }
         inFlight = true
         defer { inFlight = false }
+        return await Self.relay(message, to: content, through: send, recordingIn: relay, retryOf: retryOf,
+                                reporting: { [weak self] banner in self?.banner = banner })
+    }
+
+    /// The send's app-scoped half, as one value: the fleet, the channel and the fold's raise. All
+    /// three outlive this object, which is what lets a *Retry* run after the panel is gone.
+    private var send: AgentRelaySend {
+        AgentRelaySend(lifecycle: lifecycle, channel: channel, raiseSignal: raiseSignal)
+    }
+
+    /// The send itself, **held by nothing that a panel host can evict**.
+    ///
+    /// The relay registry is app-scoped because the delivery state is drawn on the main timeline's
+    /// row, which outlives the Agents tab — so the *Retry* the row offers has to outlive it too. A
+    /// resend that captured this object captures a per-(tab, channel) session the host releases the
+    /// moment the channel's panel is dropped or *Check again* rebuilds the workspace: the record
+    /// goes on offering *Retry*, and pressing it sends nothing at all. So the resend captures the
+    /// three app-scoped capabilities and takes the registry as an argument; the panel is reached
+    /// only through `report`, which is weak and does nothing more than word a banner on a surface
+    /// that may no longer be on screen.
+    @MainActor
+    @discardableResult
+    static func relay(_ message: String, to content: AgentNodeContent, through send: AgentRelaySend,
+                      recordingIn relay: AgentRelayRegistry, retryOf: AgentRelayRecord.ID? = nil,
+                      reporting report: @escaping @MainActor (RowBanner?) -> Void) async -> Bool {
         do {
-            let minted = try await lifecycle.sendPrompt(UserInput(text: Self.prompt(relaying: message, to: content)),
-                                                        on: channel)
-            await raiseSignal(channel, .promptSent(uuid: minted.uuidString.lowercased(), at: Date()))
-            banner = nil
+            let minted = try await send.lifecycle.sendPrompt(UserInput(text: prompt(relaying: message, to: content)),
+                                                             on: send.channel)
+            await send.raiseSignal(send.channel, .promptSent(uuid: minted.uuidString.lowercased(), at: Date()))
+            report(nil)
             relay.open(promptUUID: minted.uuidString.lowercased(),
                        target: content.id,
                        textDigest: AgentRelayDigest.of(message),
-                       in: channel,
+                       in: send.channel,
                        retryOf: retryOf,
                        // *Retry* re-sends by this same path. The text lives in this capture and
-                       // nowhere a report can reach (§11); the record keeps a digest.
-                       resend: { [weak self] previous in
-                           await self?.sendMessage(message, to: content, retryOf: previous)
+                       // nowhere a report can reach (§11); the record keeps a digest. The registry
+                       // arrives as an argument rather than in the capture, so the closure the
+                       // registry stores does not hold the registry.
+                       resend: { previous, registry in
+                           await AgentNodeActions.relay(message, to: content, through: send,
+                                                        recordingIn: registry, retryOf: previous,
+                                                        reporting: report)
                        })
             return true
         } catch let error as LifecycleError {
             // afleet's own refusal rather than the engine's, worded where C5 already words it.
-            banner = RowBanner(error)
+            report(RowBanner(error))
             return false
         } catch {
-            banner = TaskCardModel.banner(for: error)
+            report(TaskCardModel.banner(for: error))
             return false
         }
     }
@@ -411,6 +440,19 @@ final class AgentNodeActions {
         \(message)
         """
     }
+}
+
+/// What a *Send message* needs that is **not** the panel's: X5's fleet, the channel it acts on, and
+/// the fold's `HostSignal.promptSent` raise that is inseparable from the send (contract Y5).
+///
+/// A value rather than three captures, so the retry path and the first press take the same three
+/// things by the same name — and so that what a stored resend closure holds is legible at the one
+/// place it is built.
+@MainActor
+struct AgentRelaySend {
+    let lifecycle: any LifecycleAPI
+    let channel: ChannelKey
+    let raiseSignal: (ChannelKey, HostSignal) async -> Void
 }
 
 /// The actions on the open node, drawn (gate G3).

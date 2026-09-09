@@ -7,9 +7,10 @@ import SwiftUI
 /// afleet composes an ordinary main-session prompt asking the main agent to relay the message to a
 /// run by id; there is no host-initiated resume or messaging control in the protocol at all (parity
 /// §18.25), so this relay is the only path and every step of it is the model's choice. The model may
-/// not call `SendMessage`; it may call it naming a different agent; the call may come back an error,
-/// which is what a refused resume looks like (parity §18.25.4, §18.26.2); and the target may stop
-/// before its next tool round. The engine's own success string only says the message is *queued for
+/// not call `SendMessage`; it may call it naming a different agent; the call may report that it did
+/// not send — which is what a refused resume looks like, and it is a **non-error** result whose body
+/// says `success: false`, never an `is_error` one (parity §18.25.4, §18.26.2, corrected from the
+/// pinned bundle); and the target may stop before its next tool round. The engine's own success string only says the message is *queued for
 /// the agent's next tool round* (parity §18.26.2) — so even a clean call is not delivery.
 ///
 /// **Four named reasons and never a generic one.** A fifth way to fail would have to be named to be
@@ -37,7 +38,10 @@ enum AgentRelayState: Hashable, Sendable {
         /// The model called `SendMessage`, naming another agent. The message went somewhere else, or
         /// nowhere; either way it did not go here.
         case wrongTarget
-        /// The `tool_result` was an error. A refused resume is this arm.
+        /// The `tool_result` reports that the message was not sent. A **refused resume** is this arm
+        /// and it carries no error flag: the engine serialises `{success: false, message}` into an
+        /// ordinary result, and `is_error` is reserved for the tool's validate-input refusals —
+        /// which are this arm too, from the other shape.
         case refused
         /// The target's `task_notification` arrived after the relay and no round of the target's own
         /// carried the text.
@@ -63,7 +67,7 @@ enum AgentRelayState: Hashable, Sendable {
         case .delivered: "Delivered — the message is in the agent's own transcript."
         case .notDelivered(.noCall): "Not delivered — the turn ended with no SendMessage call."
         case .notDelivered(.wrongTarget): "Not delivered — the SendMessage call named a different agent."
-        case .notDelivered(.refused): "Not delivered — the SendMessage call came back an error."
+        case .notDelivered(.refused): "Not delivered — the SendMessage call reported the message was not sent."
         case .notDelivered(.stoppedBeforeNextRound): "Not delivered — the agent stopped before its next tool round."
         }
     }

@@ -57,9 +57,16 @@ enum AgentRelayMachine {
         /// The item this record concluded *Delivered* from, as its key string — never the `ItemID`,
         /// which carries the config home (§11). Nil on every other arm.
         var claimedKey: String?
+        /// The `SendMessage` call this record settled on, by its `tool_use` id. **A call belongs to
+        /// one record**: a turn that relays two messages to one run produces two calls, and a
+        /// record that took a call an older record had already settled on would report the older
+        /// send's outcome for the newer one. Nil where no call named this run.
+        var claimedCall: String?
 
-        init(_ state: AgentRelayState, reply: String? = nil, claimedKey: String? = nil) {
+        init(_ state: AgentRelayState, reply: String? = nil, claimedKey: String? = nil,
+             claimedCall: String? = nil) {
             self.state = state; self.reply = reply; self.claimedKey = claimedKey
+            self.claimedCall = claimedCall
         }
     }
 
@@ -71,10 +78,12 @@ enum AgentRelayMachine {
     /// so the earlier send claims the earlier frame.
     static func advance(_ records: [AgentRelayRecord], in timeline: ChannelTimeline) -> [AgentRelayRecord.ID: Outcome] {
         var claimed: Set<String> = []
+        var calls: Set<String> = []
         var outcomes: [AgentRelayRecord.ID: Outcome] = [:]
         for record in records.sorted(by: { $0.sentAt < $1.sentAt }) {
-            let outcome = advance(record, in: timeline, claiming: claimed)
+            let outcome = advance(record, in: timeline, claiming: claimed, callsClaimed: calls)
             if let key = outcome.claimedKey { claimed.insert(key) }
+            if let call = outcome.claimedCall { calls.insert(call) }
             outcomes[record.id] = outcome
         }
         return outcomes
@@ -97,7 +106,8 @@ enum AgentRelayMachine {
     ///   call in it; the call naming another run; an error `tool_result`; and the target's own
     ///   `task_notification` arriving after the relay with nothing of the target's carrying the text.
     static func advance(_ record: AgentRelayRecord, in timeline: ChannelTimeline,
-                        claiming claimed: Set<String> = []) -> Outcome {
+                        claiming claimed: Set<String> = [],
+                        callsClaimed calls: Set<String> = []) -> Outcome {
         let items = timeline.items
         guard let sent = items.firstIndex(where: { isPromptEcho($0, of: record) }) else {
             // The engine has not echoed the prompt yet. Nothing has happened that could be read as
@@ -107,9 +117,9 @@ enum AgentRelayMachine {
         }
 
         var reply: String?
-        var sawCall = false
-        /// The first call of this turn that named **this** run, and what it says.
-        var ours: (index: Int, at: Date, verdict: CallVerdict)?
+        /// Every call of this turn that named **this** run and that no older record has settled on,
+        /// in the order the model wrote them.
+        var ours: [Call] = []
         /// The model called `SendMessage` about some other agent and about nobody this record knows.
         var wrongTarget = false
         var turnClosed = false
@@ -121,25 +131,29 @@ enum AgentRelayMachine {
             guard item.provenance.agentID == nil else { continue }
             switch item {
             case .assistantMessage(let message):
-                // The model's reply, for the arms item 51 says are shown with it: the last thing it
-                // said before it started calling tools, which is where it explains a refusal.
-                if !sawCall {
-                    let text = MessageText.text(of: message.blocks, fallback: "")
-                    if !text.isEmpty { reply = TextSanitiser.sanitise(text) }
-                }
+                // The model's reply, for the arms item 51 says are shown with it: **the last thing
+                // it said in the turn**, and not the last thing it said before its first tool call.
+                // On the arms that need the reply the explanation comes *after* the call — the
+                // model learns the resume was refused from the tool result and says so — and a
+                // reading that stopped at the first call keeps the announcement ("I'll pass that
+                // on") and drops the explanation, which is the sentence item 51 asks to be shown.
+                let text = MessageText.text(of: message.blocks, fallback: "")
+                if !text.isEmpty { reply = TextSanitiser.sanitise(text) }
 
             case .toolCall(let call) where call.name == "SendMessage":
-                sawCall = true
-                // **This run's own call wins over the order the calls arrived in.** A model asked to
-                // relay to two agents in one turn produces two calls, and reading the first as this
-                // record's would settle the wrong arm on whichever the model happened to write
-                // first. The wrong-target arm is what is left when the turn carried a `SendMessage`
-                // and none of them named this run — and because the state is re-derived from the
-                // whole timeline on every ask, a reading taken between the two calls corrects itself
-                // the moment this run's own call arrives.
+                // **This run's own call wins over the order the calls arrived in, and one call
+                // belongs to one record.** A model asked to relay two messages produces two calls;
+                // reading "the first call naming this run" settles two sends on one call and
+                // reports the first send's outcome for both. The wrong-target arm is what is left
+                // when the turn carried a `SendMessage` and none of them named this run — and
+                // because the state is re-derived from the whole timeline on every ask, a reading
+                // taken between the two calls corrects itself the moment this run's own call
+                // arrives.
                 let verdict = verdict(of: call, for: record)
-                if verdict == .wrongTarget { wrongTarget = true } else if ours == nil {
-                    ours = (index, call.timestamp ?? .distantPast, verdict)
+                if verdict == .wrongTarget { wrongTarget = true }
+                else if !calls.contains(call.toolUseID) {
+                    ours.append(Call(id: call.toolUseID, index: index, at: call.timestamp ?? .distantPast,
+                                     verdict: verdict, carriesThisMessage: carries(record.textDigest, call)))
                 }
 
             case .turnSummary(let turn):
@@ -152,26 +166,66 @@ enum AgentRelayMachine {
             }
         }
 
-        guard let ours else {
+        guard let ours = settling(among: ours) else {
             if wrongTarget { return Outcome(.notDelivered(.wrongTarget), reply: reply) }
             return Outcome(turnClosed ? .notDelivered(.noCall) : .pending, reply: reply)
         }
         switch ours.verdict {
-        case .refused: return Outcome(.notDelivered(.refused), reply: reply)
-        case .running: return Outcome(.pending, reply: reply)
+        case .refused: return Outcome(.notDelivered(.refused), reply: reply, claimedCall: ours.id)
+        case .running: return Outcome(.pending, reply: reply, claimedCall: ours.id)
         // Not stored above, and named here rather than defaulted so a fifth verdict cannot be
         // absorbed by an `default:` that means whatever the last author assumed.
         case .wrongTarget: return Outcome(.notDelivered(.wrongTarget), reply: reply)
         case .relayed: break
         }
-        let relay = (index: ours.index, at: ours.at)
-        if let key = delivery(of: record, in: items, after: relay.index, claiming: claimed) {
-            return Outcome(.delivered, reply: reply, claimedKey: key)
+        if let key = delivery(of: record, in: items, after: ours.index, claiming: claimed) {
+            return Outcome(.delivered, reply: reply, claimedKey: key, claimedCall: ours.id)
         }
-        if stoppedBeforeNextRound(record.target, in: timeline, after: relay.at) {
-            return Outcome(.notDelivered(.stoppedBeforeNextRound), reply: reply)
+        if stoppedBeforeNextRound(record.target, in: timeline, after: ours.at) {
+            return Outcome(.notDelivered(.stoppedBeforeNextRound), reply: reply, claimedCall: ours.id)
         }
-        return Outcome(.relayed, reply: reply)
+        return Outcome(.relayed, reply: reply, claimedCall: ours.id)
+    }
+
+    /// One `SendMessage` call of the turn, as this record reads it.
+    private struct Call {
+        /// The call's `tool_use` id — the engine's own name for it, and not the `ItemID`, which
+        /// carries the config home (§11). It is compared and claimed here and stated nowhere.
+        let id: String
+        let index: Int
+        let at: Date
+        let verdict: CallVerdict
+        /// Whether the call's own `message` carries this record's text. The relay prompt asks for
+        /// the message exactly as written, so the ordinary case answers yes; a model that
+        /// paraphrased answers no and the call is still a candidate, because the alternative — no
+        /// candidate at all — would report *no call* for a relay that happened.
+        let carriesThisMessage: Bool
+    }
+
+    /// Which of this turn's candidate calls this record settles on.
+    ///
+    /// **The message decides before the order does.** Two calls to one run in one turn are two
+    /// different messages, and matching the call that carries *this* record's text is what stops
+    /// the second send from reading the first send's result.
+    ///
+    /// **A call that went through outranks one that did not.** A model that was refused and called
+    /// again in the same turn relayed the message; settling on the refusal because it came first
+    /// would report *Not delivered* for text that arrived, and the delivery scan below would never
+    /// be reached to contradict it.
+    private static func settling(among calls: [Call]) -> Call? {
+        let mine = calls.filter(\.carriesThisMessage)
+        let candidates = mine.isEmpty ? calls : mine
+        return candidates.first { $0.verdict == .relayed }
+            ?? candidates.first { $0.verdict == .running }
+            ?? candidates.first
+    }
+
+    /// Whether a call's own `message` carries the text this record sent, by the same digest the
+    /// delivery scan uses. A call whose input does not decode, or that carries no message, answers
+    /// false and is judged by its order alone.
+    private static func carries(_ digest: String, _ call: ToolCallItem) -> Bool {
+        guard case .sendMessage(let input) = call.input, let message = input.message else { return false }
+        return AgentRelayDigest.matches(digest, in: message)
     }
 
     // MARK: - The evidence, one reading at a time
@@ -272,6 +326,18 @@ enum AgentRelayMachine {
     /// run) carries a stamp from before the relay for ever. `RegistryEntry.notified` is the fact —
     /// the host has seen the notification that hands the result back — and `lastFrameAt` is when any
     /// frame naming this task last arrived, which is what places it after the relay.
+    ///
+    /// **Its stated limitation (tracker 186).** `lastFrameAt` moves for *any* frame naming the task,
+    /// a `task_progress` and a `background_tasks_changed` listing included, so a run that was already
+    /// complete and already notified before the relay reads this arm the first time it appears in a
+    /// later listing — reported *Not delivered* on the strength of a notification that is not new.
+    /// The mirror publishes no instant for the notification and no count of them, and `endedAt` is
+    /// stamped once and keeps its first value, so nothing this leaf can read tells a new
+    /// notification from an old one. Closing it needs one field on `RegistryEntry` — `notifiedAt`,
+    /// or a notification count — which is FleetKit's to publish and not this leaf's to invent. The
+    /// arm stays as it is: it is right whenever the run's own frames moved after the relay, and the
+    /// way it is wrong is the visible direction — a *Not delivered* with a *Retry* offered on a
+    /// message that may still be queued, rather than a *Relayed* on one that will never arrive.
     private static func stoppedBeforeNextRound(_ target: AgentRunID, in timeline: ChannelTimeline,
                                                after relay: Date) -> Bool {
         guard let entry = timeline.registry.entries[target] else { return false }
@@ -303,7 +369,10 @@ final class AgentRelayRegistry {
     /// compare. `AgentRelayRecord` carries a digest and stays printable.
     /// It is handed the id of the record it is retrying, because that is the lineage the new record
     /// records and the send site cannot know it at the moment it captures the closure.
-    private var resends: [AgentRelayRecord.ID: @MainActor (AgentRelayRecord.ID) async -> Void] = [:]
+    /// The registry hands itself to the closure rather than being captured by it: a resend that
+    /// held the registry would be a cycle through the very object that stores it, and the record a
+    /// retry opens belongs to the registry the press came from.
+    private var resends: [AgentRelayRecord.ID: @MainActor (AgentRelayRecord.ID, AgentRelayRegistry) async -> Void] = [:]
 
     /// Opens a record for a send that has already happened. Called after `sendPrompt` returned its
     /// uuid, never before: a record for a send the engine refused would be a message with a state and
@@ -311,7 +380,7 @@ final class AgentRelayRegistry {
     @discardableResult
     func open(promptUUID: String, target: AgentRunID, textDigest: String, in channel: ChannelKey,
               at sentAt: Date = Date(), retryOf: AgentRelayRecord.ID? = nil,
-              resend: (@MainActor (AgentRelayRecord.ID) async -> Void)? = nil) -> AgentRelayRecord {
+              resend: (@MainActor (AgentRelayRecord.ID, AgentRelayRegistry) async -> Void)? = nil) -> AgentRelayRecord {
         let record = AgentRelayRecord(id: AgentRelayRecord.ID(raw: UUID()), promptUUID: promptUUID,
                                       target: target, textDigest: textDigest, sentAt: sentAt, retryOf: retryOf)
         records[channel, default: []].append(record)
@@ -361,6 +430,9 @@ final class AgentRelayRegistry {
     /// did.
     func retry(_ id: AgentRelayRecord.ID) {
         guard let resend = resends[id] else { return }
-        Task { await resend(id) }
+        Task { [weak self] in
+            guard let self else { return }
+            await resend(id, self)
+        }
     }
 }

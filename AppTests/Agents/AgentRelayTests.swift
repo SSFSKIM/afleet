@@ -99,6 +99,7 @@ final class AgentRelayTests: XCTestCase {
     func testRelayedBecomesDeliveredOnlyOnTheTextInTheAgentsTranscript() {
         var wire = RelayWire()
         wire.open()
+        wire.openOther()
         let record = wire.record()
         wire.sendMessageCall(to: RelayWire.target)
         wire.toolResult(isError: false)
@@ -106,6 +107,17 @@ final class AgentRelayTests: XCTestCase {
         wire.mainStreamMessage(RelayWire.message)
         XCTAssertTrue(wire.state(of: record) == .relayed,
                       "the message text appearing in the main stream was read as delivery")
+
+        // The two negative controls, and they are the whole discrimination. A machine that accepted
+        // **any** frame of the target run passes on the first; one that accepted the record's own
+        // text **wherever** it landed passes on the second. Both are near misses a live channel
+        // produces: an agent goes on working after the relay, and a turn relays to two runs.
+        wire.forwarded(RelayWire.secondMessage)
+        XCTAssertTrue(wire.state(of: record) == .relayed,
+                      "a frame of the target run that carries some other text was read as this message arriving")
+        wire.forwardedToOther(RelayWire.message)
+        XCTAssertTrue(wire.state(of: record) == .relayed,
+                      "this message arriving in another run's transcript was read as delivery to the target")
 
         wire.forwarded(RelayWire.message)
         XCTAssertTrue(wire.state(of: record) == .delivered,
@@ -159,13 +171,13 @@ final class AgentRelayTests: XCTestCase {
                       "the no-call arm dropped the model's own reply")
     }
 
-    /// **G4, arm two: the `tool_result` is an error — a refused resume — and the model's reply is
+    /// **G4, arm two in its flagged shape: an `is_error` `tool_result`, with the model's reply
     /// kept.**
     ///
-    /// Parity §18.25.4 lists the refusals the engine answers a resume with (user-stopped, missing
-    /// transcript, forked-skill scoping, worktree gone) and §18.26.2 says the same text arrives as
-    /// the `SendMessage` tool result. The arm is the error flag on the result and not the sentence,
-    /// which is the engine's to word and not this leaf's to match.
+    /// This is the tool's **validate-input** refusal — an empty message, a malformed recipient —
+    /// which is the one thing the engine flags. A *refused resume* is the same arm arriving in the
+    /// other shape and is asserted below. Either way the reading is taken from the result and never
+    /// from the engine's sentence, which is the engine's to word and not this leaf's to match.
     func testAnErrorToolResultIsNotDeliveredAndKeepsTheModelsReply() {
         var wire = RelayWire()
         wire.open()
@@ -276,6 +288,78 @@ final class AgentRelayTests: XCTestCase {
                        "\(4 - sentences.count) of the four arms share a sentence with another")
     }
 
+    /// **One turn, two sends to one run: each record settles on its own call.**
+    ///
+    /// The model relays two messages in one turn; the first call is refused and the second goes
+    /// through. A machine that took "the first `SendMessage` naming this run" settles **both**
+    /// records on the refused call, so the second message is reported *Not delivered* while it is
+    /// on its way — and the arm shown is a real arm, so nothing about the surface looks wrong.
+    func testTwoSendsToOneRunInOneTurnSettleOnTheirOwnCalls() {
+        var wire = RelayWire()
+        wire.open()
+        let first = wire.record()
+        let second = wire.record(promptUUID: RelayWire.secondPromptUUID, message: RelayWire.secondMessage)
+
+        wire.sendMessageCall(to: RelayWire.target, message: RelayWire.message)
+        wire.sendMessageResult(success: false)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall, message: RelayWire.secondMessage)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+
+        XCTAssertTrue(wire.state(of: first) == .notDelivered(.refused),
+                      "the refused send did not settle on the call that carried its own message")
+        XCTAssertTrue(wire.state(of: second) == .relayed,
+                      "the second send settled on the first send's call rather than on its own")
+    }
+
+    /// **A refusal the model retried in the same turn is not a refusal.**
+    ///
+    /// The model calls `SendMessage`, is told the resume failed, calls again and succeeds; the text
+    /// then arrives in the run's own transcript. A machine that settled on the first call naming
+    /// this run reports *Not delivered* about a message that was delivered — and never reaches the
+    /// delivery scan that would contradict it.
+    func testARefusalRetriedInTheSameTurnSettlesOnTheCallThatWentThrough() {
+        var wire = RelayWire()
+        wire.open()
+        let record = wire.record()
+
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: false)
+        XCTAssertTrue(wire.state(of: record) == .notDelivered(.refused),
+                      "the refused call did not settle the refused arm, so the retry below changes nothing")
+
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        XCTAssertTrue(wire.state(of: record) == .relayed,
+                      "a call that went through in the same turn was outranked by the refusal before it")
+
+        wire.forwarded(RelayWire.message)
+        XCTAssertTrue(wire.state(of: record) == .delivered,
+                      "the message arrived in the run's transcript and the record stayed at a refusal")
+    }
+
+    /// **The reply shown is what the model said after it learned the outcome.**
+    ///
+    /// Item 51 shows a *Not delivered* arm "with the model's reply", and on the refused arm the
+    /// reply that explains anything is the one *after* the tool result: before the call the model
+    /// has only announced what it is about to do. A reading that stopped at the first tool call
+    /// keeps the announcement and drops the explanation.
+    func testTheReplyIsWhatTheModelSaidAfterTheCall() {
+        var wire = RelayWire()
+        wire.open()
+        let record = wire.record()
+        wire.assistantText(RelayWire.reply)
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: false)
+        wire.assistantText(RelayWire.explanation)
+        wire.result()
+
+        XCTAssertTrue(wire.state(of: record) == .notDelivered(.refused),
+                      "the refused resume did not settle the refused arm, so the reply below is from another arm")
+        XCTAssertTrue(wire.reading(of: record).reply == RelayWire.explanation,
+                      "the arm shows what the model said before it called the tool, not what it said "
+                      + "once the tool answered")
+    }
+
     // MARK: - The send, and Retry
 
     /// **The send is X5 and the raise that goes with it, and nothing else** (contract Y5).
@@ -291,6 +375,19 @@ final class AgentRelayTests: XCTestCase {
         XCTAssertTrue(sent, "the send reported failure with a lifecycle that accepted it")
         let prompts = await rig.lifecycle.prompts
         XCTAssertEqual(prompts.count, 1, "one press sent \(prompts.count) prompt(s)")
+        // **The input, and not the count.** A count is satisfied by an empty request, by a prompt
+        // naming another run and by one carrying different text — three sends that all reach the
+        // engine and none of which is this one. Read off the recorded `UserInput` and stated as
+        // booleans, because the operands are the message text and the run's id (§11); and derived
+        // from the three facts the prompt has to carry rather than from `prompt(relaying:to:)`,
+        // which would make the expectation agree with whatever that expression happens to compose.
+        let input = prompts.first
+        XCTAssertTrue(input.map { AgentRelayDigest.matches(AgentRelayDigest.of(RelayWire.message), in: $0.text) } == true,
+                      "the prompt the engine was given does not carry the message the user typed")
+        XCTAssertTrue(input?.text.contains(rig.content.id) == true,
+                      "the prompt the engine was given does not name the run it is for")
+        XCTAssertTrue(input?.text.contains("SendMessage") == true,
+                      "the prompt the engine was given does not ask for the tool that does the relaying")
         let onTheNodesChannel = await rig.lifecycle.channels.allSatisfy { $0 == rig.key }
         XCTAssertTrue(onTheNodesChannel, "the prompt went out on a channel other than the node's")
         XCTAssertEqual(rig.raised.count, 1, "the send raised \(rig.raised.count) host signal(s), not 1")
@@ -320,12 +417,26 @@ final class AgentRelayTests: XCTestCase {
     ///
     /// The failed record keeps its state and its place — a relay that failed is a thing that happened
     /// — and the new one records what it descended from.
-    func testRetryOpensANewRecord() async {
+    func testRetryOpensANewRecordAndTheFailedOneKeepsItsState() async throws {
         let rig = SendRig()
         await rig.actions.sendMessage(RelayWire.message, to: rig.content)
         let first = rig.relay.records(in: rig.key)[0]
 
-        rig.relay.retry(first.id)
+        // **A relay that actually failed**, on the channel's own frames: the turn this send started
+        // closed with no `SendMessage` in it. Without it there is no failure for the retry to
+        // preserve and no *Retry* to press — the reading offers one only on a *Not delivered* arm.
+        var wire = RelayWire()
+        wire.open()
+        wire.echo(promptUUID: first.promptUUID)
+        wire.result()
+        rig.timeline = wire.timeline
+        XCTAssertTrue(rig.reading(of: first).state == .notDelivered(.noCall),
+                      "the first relay did not fail, so nothing below is about a retry")
+
+        // Pressed through the reading the row draws, not through the registry's member: what item
+        // 51 offers is a button, and a reading that offered none would pass a direct call.
+        let retry = try XCTUnwrap(rig.reading(of: first).retry, "a failed relay offered no Retry to press")
+        retry()
         let opened = await Self.settle { rig.relay.records(in: rig.key).count == 2 }
         XCTAssertTrue(opened, "Retry opened \(rig.relay.records(in: rig.key).count) record(s), not 2")
 
@@ -335,6 +446,98 @@ final class AgentRelayTests: XCTestCase {
         XCTAssertTrue(records[1].textDigest == first.textDigest, "the retry re-sent something other than the message")
         let prompts = await rig.lifecycle.prompts
         XCTAssertEqual(prompts.count, 2, "Retry sent \(prompts.count) prompt(s) in total, not 2")
+
+        // **The retry's own turn, and the failure that survives it.** The re-sent message is
+        // relayed and arrives; the record that failed keeps its arm and its *Retry*. A delivery
+        // scan that awarded the retry's forwarded frame to the older record would report the first
+        // send as delivered — erasing the only evidence the user has that it was not.
+        wire.echo(promptUUID: records[1].promptUUID)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.message)
+        rig.timeline = wire.timeline
+
+        XCTAssertTrue(rig.reading(of: records[1]).state == .delivered,
+                      "the retry's own relay did not conclude from the run's transcript")
+        XCTAssertTrue(rig.reading(of: first).state == .notDelivered(.noCall),
+                      "the retry's frames moved the record that failed, so the failed relay's history is gone")
+        XCTAssertTrue(rig.reading(of: first).retry != nil,
+                      "the record that failed stopped offering a retry once its retry succeeded")
+    }
+
+    // MARK: - The sheet's draft
+
+    /// **A refused send keeps the draft and says why** (item 51, `ComposerModel.post(_:)`'s rule).
+    ///
+    /// The field is the only copy of what the user typed until `sendPrompt` answers: no record is
+    /// open, so a sheet that dismissed before awaiting the answer destroys the message on every
+    /// transport failure and every ownership refusal, leaving nothing to retry from. The press
+    /// answers a sentence exactly when it did **not** send, and the sheet closes on nil alone.
+    ///
+    /// Discriminating: a press that ignored the send's result answers nil on both halves, so the
+    /// refused half is what fails against it.
+    func testARefusedPressKeepsTheDraftAndSaysWhy() async {
+        let refusing = SendRig()
+        await refusing.lifecycle.refuse(.notOwned)
+
+        let refusal = await SendMessageSheet.send(RelayWire.message, to: refusing.content,
+                                                  through: refusing.actions)
+
+        XCTAssertTrue(refusal != nil,
+                      "a refused send answered no sentence, so the sheet closes and the draft is gone")
+        XCTAssertTrue(refusal?.isEmpty == false, "the refused press answered an empty sentence")
+        XCTAssertEqual(refusing.relay.records(in: refusing.key).count, 0,
+                       "a refused send opened \(refusing.relay.records(in: refusing.key).count) relay record(s)")
+
+        // The other half, on a lifecycle that accepts: the press answers nil, which is the only
+        // thing that closes the sheet — without it the clause above passes on a sheet that never
+        // closes at all.
+        let accepting = SendRig()
+        let accepted = await SendMessageSheet.send(RelayWire.message, to: accepting.content,
+                                                   through: accepting.actions)
+        XCTAssertTrue(accepted == nil, "an accepted send answered a refusal, so the sheet stays open on a sent message")
+        XCTAssertEqual(accepting.relay.records(in: accepting.key).count, 1,
+                       "an accepted send opened \(accepting.relay.records(in: accepting.key).count) relay record(s), not 1")
+    }
+
+    /// **G4: *Retry* survives the panel session that sent the message.**
+    ///
+    /// The relay record and the row that draws it are app-scoped — the row is on the channel column,
+    /// which is not this tab — so the *Retry* the row offers has to be too. A resend that captured
+    /// the panel's own action object goes silent the moment the host evicts that channel's session
+    /// or *Check again* replaces the workspace: the record still offers *Retry*, and pressing it
+    /// sends nothing at all, which is the silent non-delivery item 51 exists to prevent.
+    ///
+    /// Discriminating: the action object is released before the press, and the assertion is that a
+    /// second prompt reached the engine anyway.
+    func testRetrySurvivesTheEvictedPanelSession() async {
+        let lifecycle = PromptDouble()
+        let relay = AgentRelayRegistry()
+        let key = ChannelKey(configHome: RelayWire.configHome, session: RelayWire.session)
+        let box = RaiseBox()
+        var actions: AgentNodeActions? = AgentNodeActions(lifecycle: lifecycle, channel: key, relay: relay,
+                                                          raiseSignal: { _, signal in await box.record(signal) })
+        weak var evicted = actions
+        await actions?.sendMessage(RelayWire.message, to: SendRig.content)
+        let first = relay.records(in: key)[0]
+
+        // The eviction: the host releases the panel's session for this channel and nothing else
+        // holds its actions. A boolean, not `XCTAssertNil` — the operand is an object holding the
+        // channel and the fleet (§11).
+        actions = nil
+        XCTAssertTrue(evicted == nil,
+                      "something still holds the panel's action object, so the press below proves nothing")
+
+        relay.retry(first.id)
+
+        let opened = await Self.settle { relay.records(in: key).count == 2 }
+        XCTAssertTrue(opened, "Retry after the session was evicted opened \(relay.records(in: key).count) "
+                      + "record(s), not 2")
+        let prompts = await lifecycle.prompts
+        XCTAssertEqual(prompts.count, 2, "Retry after the session was evicted sent \(prompts.count) prompt(s), not 2")
+        XCTAssertTrue(prompts.last?.text == AgentNodeActions.prompt(relaying: RelayWire.message,
+                                                                    to: SendRig.content),
+                      "the retry sent something other than the relay the record descended from")
     }
 
     // MARK: - §11
@@ -370,7 +573,7 @@ final class AgentRelayTests: XCTestCase {
     /// Two rows, one context: the message that sent the relay draws the reading, and a second message
     /// of the same channel draws nothing extra. A row that drew the app's one relay on every message
     /// passes the first assertion alone.
-    func testTheRowDrawsTheStateForItsOwnPromptUUID() {
+    func testTheRowDrawsTheStateForItsOwnPromptUUID() throws {
         var wire = RelayWire()
         wire.open()
         let record = wire.record()
@@ -383,11 +586,23 @@ final class AgentRelayTests: XCTestCase {
                                         timelines: { [wire] key in key == wire.key ? wire.timeline : nil })
         let context = InventedItems.context(agents: navigation, key: wire.key)
 
-        let sending = ViewTree.values(of: String.self,
-                                      in: UserMessageBody(item: Self.message(promptUUID: record.promptUUID),
-                                                          context: context).content)
+        let row = UserMessageBody(item: Self.message(promptUUID: record.promptUUID), context: context).content
+        let sending = ViewTree.values(of: String.self, in: row)
         XCTAssertTrue(sending.contains(AgentRelayState.notDelivered(.noCall).sentence),
                       "the row that sent the relay drew no delivery state")
+
+        // **And the note's own body, evaluated.** The clause above reads the strings the note
+        // stores, which is what a `Mirror` walk can reach — it does not enter a `@ViewBuilder`, so
+        // the row's own body is as far as reflection goes. The note is a view this test can hold,
+        // and a held view's `body` can be built: a note that stored the sentence and drew something
+        // else passes the clause above and fails here.
+        let note = try XCTUnwrap(ViewTree.values(of: AgentRelayNote.self, in: row).first,
+                                 "the row drew no delivery note at all")
+        let drawnByTheNote = ViewTree.values(of: String.self, in: note.body)
+        XCTAssertTrue(drawnByTheNote.contains(AgentRelayState.notDelivered(.noCall).sentence),
+                      "the note's own body draws no delivery sentence")
+        XCTAssertTrue(drawnByTheNote.contains("Retry"),
+                      "a Not delivered note draws no Retry, so the arm offers nothing to act on")
 
         let other = ViewTree.values(of: String.self,
                                     in: UserMessageBody(item: Self.message(promptUUID: RelayWire.secondPromptUUID,
@@ -500,11 +715,18 @@ struct RelayWire {
     static let target: AgentRunID = "task_invented_relay01"
     static let targetToolUse = "toolu_invented_run01"
     static let otherAgent: AgentRunID = "task_invented_relay02"
+    static let otherToolUse = "toolu_invented_run02"
     static let promptUUID = "aaaaaaa1-1111-4111-8111-aaaaaaaaaaa1"
     static let secondPromptUUID = "aaaaaaa2-2222-4222-8222-aaaaaaaaaaa2"
     static let sendCall = "toolu_invented_send01"
     static let secondSendCall = "toolu_invented_send02"
     static let message = "an invented errand for the agent"
+    /// A second errand, for a turn that relays twice: two messages to one run are two sends, and a
+    /// machine that assigned calls by their order alone cannot tell them apart.
+    static let secondMessage = "a second invented errand for the same agent"
+    /// What the model says **after** the tool result tells it the resume was refused. The sentence
+    /// item 51 asks to be shown, and the one a reply read up to the first call never sees.
+    static let explanation = "an invented sentence the model explained the refusal with"
     static let reply = "an invented sentence the model answered with"
     static let epoch = Date(timeIntervalSince1970: 1_800_000_000)
 
@@ -542,22 +764,55 @@ struct RelayWire {
     /// The `promptSent` raise goes in first, exactly as the send path raises it, because it is what
     /// the reducer attributes the turn's `result` to.
     @discardableResult
-    mutating func record(promptUUID: String = RelayWire.promptUUID) -> AgentRelayRecord {
+    mutating func record(promptUUID: String = RelayWire.promptUUID,
+                         message: String = RelayWire.message) -> AgentRelayRecord {
+        echo(promptUUID: promptUUID)
+        // A resend closure, because production always installs one: the send site captures the text
+        // it would re-send, and a record opened without one could not offer *Retry* at all.
+        return relay.open(promptUUID: promptUUID, target: Self.target,
+                          textDigest: AgentRelayDigest.of(message), in: key, at: stamp(),
+                          resend: { _, _ in })
+    }
+
+    /// The engine's echo of one prompt, and the `promptSent` raise the send path makes inseparable
+    /// from it — what the reducer attributes the turn's `result` to. Split out of `record(…)` so a
+    /// prompt **the send path itself minted** can be echoed here, which is what a test of the real
+    /// send needs: the uuid is the lifecycle's and no test can choose it.
+    mutating func echo(promptUUID: String) {
         _ = reducer.apply(.promptSent(uuid: promptUUID, at: Self.epoch), at: stamp())
         push(["type": .string("user"), "uuid": .string(promptUUID),
               "session_id": .string(Self.session.description),
               "origin": .object(["kind": .string("human")]),
               "message": .object(["role": .string("user"),
                                   "content": .string("an invented composed relay prompt")])])
-        // A resend closure, because production always installs one: the send site captures the text
-        // it would re-send, and a record opened without one could not offer *Retry* at all.
-        return relay.open(promptUUID: promptUUID, target: Self.target,
-                          textDigest: AgentRelayDigest.of(Self.message), in: key, at: stamp(),
-                          resend: { _ in })
     }
 
-    /// The main agent's `SendMessage` call, naming `to`.
-    mutating func sendMessageCall(to agent: AgentRunID, id: String = RelayWire.sendCall) {
+    /// A **second** run of this channel, so a frame can be routed to an agent that is not the
+    /// target. Without it "the text in another run's transcript is not delivery" cannot be stated:
+    /// there is nowhere else for it to be.
+    mutating func openOther() {
+        push(["type": .string("system"), "subtype": .string("task_started"),
+              "task_id": .string(Self.otherAgent), "tool_use_id": .string(Self.otherToolUse),
+              "description": .string("a second invented errand"), "subagent_type": .string("an-invented-agent"),
+              "spawn_depth": .integer(1), "task_type": .string("local_agent"),
+              "uuid": .string("bbbbbbb2-2222-4222-8222-bbbbbbbbbbb2"),
+              "session_id": .string(Self.session.description)])
+    }
+
+    /// The same forwarded frame, into the **other** run's stream.
+    mutating func forwardedToOther(_ text: String) {
+        push(["type": .string("user"), "uuid": .string("acacacac-\(tick)111-4111-8111-acacacacacac"),
+              "session_id": .string(Self.session.description),
+              "parent_tool_use_id": .string(Self.otherToolUse),
+              "message": .object(["role": .string("user"),
+                                  "content": .string("Relayed message:\n\n\(text)")])])
+    }
+
+    /// The main agent's `SendMessage` call, naming `to` and carrying `message` — which is what the
+    /// relay prompt asks the model to send exactly as written, and what tells one send's call from
+    /// another's in a turn that relays twice.
+    mutating func sendMessageCall(to agent: AgentRunID, id: String = RelayWire.sendCall,
+                                  message: String = RelayWire.message) {
         push(["type": .string("assistant"), "uuid": .string("cccccccc-\(tick)111-4111-8111-cccccccccccc"),
               "session_id": .string(Self.session.description),
               "message": .object(["id": .string("msg_invented\(tick)"), "type": .string("message"),
@@ -566,7 +821,7 @@ struct RelayWire {
                                     .object(["type": .string("tool_use"), "id": .string(id),
                                              "name": .string("SendMessage"),
                                              "input": .object(["to": .string(agent),
-                                                               "message": .string(Self.message)])])])])])
+                                                               "message": .string(message)])])])])])
     }
 
     /// The `tool_result` for that call.
@@ -685,20 +940,38 @@ final class SendRig {
     let actions: AgentNodeActions
     let model: AgentsModel
 
-    let content = AgentNodeContent(node: AgentRunNode(id: RelayWire.target, agentType: "an-invented-agent",
+    var content: AgentNodeContent { Self.content }
+
+    static let content = AgentNodeContent(node: AgentRunNode(id: RelayWire.target, agentType: "an-invented-agent",
                                                      description: "an invented errand",
                                                      status: .completed, depth: 1,
                                                      elapsedOrigin: RelayWire.epoch,
                                                      toolUseID: RelayWire.targetToolUse, startedCount: 1),
                                    entry: nil, isParked: false, waitingCount: 0, parentDisputed: false)
 
+    /// The channel's published timeline, as the fold publishes it: one value, replaced in place,
+    /// which is what the model's closure and every reading reach for on every access. Mutable so a
+    /// test can settle a relay against real frames rather than against an empty channel.
+    let published = TimelineBox()
+
+    var timeline: ChannelTimeline {
+        get { published.timeline }
+        set { published.timeline = newValue }
+    }
+
     init() {
         let box = RaiseBox()
         actions = AgentNodeActions(lifecycle: lifecycle, channel: key, relay: relay,
                                    raiseSignal: { _, signal in await box.record(signal) })
-        model = AgentsModel(channel: key, timelines: { _ in ChannelTimeline() },
+        let published = self.published
+        model = AgentsModel(channel: key, timelines: { [published] _ in published.timeline },
                             store: AgentSelectionStore(), actions: actions, relay: relay)
         self.box = box
+    }
+
+    /// What a surface draws for one record, over the channel's published timeline.
+    func reading(of record: AgentRelayRecord) -> AgentRelayReading {
+        relay.reading(of: record, in: key, of: published.timeline)
     }
 
     private let box: RaiseBox
@@ -712,6 +985,13 @@ final class SendRig {
         guard case .promptSent(let uuid, _)? = box.signals.first, let minted else { return false }
         return uuid == minted.uuidString.lowercased()
     }
+}
+
+/// The channel's timeline, in a box the rig's closures read through: a `ChannelTimeline` is a value
+/// and a closure that captured one could never see it move.
+@MainActor
+final class TimelineBox {
+    var timeline = ChannelTimeline()
 }
 
 /// A single-owner box for the raises, serialised by the main actor: every write is inside the send's
@@ -834,7 +1114,7 @@ final class AgentRelayFixtureTests: XCTestCase {
         let records = (0..<5).map { arm in
             replay.relay.open(promptUUID: replay.promptUUIDs[arm + 1], target: Self.target,
                               textDigest: AgentRelayDigest.of(Self.messages[arm]), in: replay.key,
-                              at: Replay.epoch.addingTimeInterval(TimeInterval(arm)), resend: { _ in })
+                              at: Replay.epoch.addingTimeInterval(TimeInterval(arm)), resend: { _, _ in })
         }
         let expected: [AgentRelayState] = [.delivered,
                                            .notDelivered(.noCall),
