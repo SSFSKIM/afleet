@@ -142,7 +142,10 @@ final class AgentTranscriptTests: XCTestCase {
 
         let input = rig.model.input(of: InventedAgents.run(0), retainedBy: nil)
 
-        XCTAssertNil(input.preview, "the channel's streaming tail is drawn inside a subagent's transcript")
+        // A boolean and not `XCTAssertNil` (§11): a `StreamingPreview` carries the message being
+        // streamed and the tool-use ids inside it, and a failing `XCTAssertNil` prints its operand.
+        XCTAssertTrue(input.preview == nil,
+                      "the channel's streaming tail is drawn inside a subagent's transcript")
     }
 
     // MARK: - Authorship and the badge (G2, item 38)

@@ -399,7 +399,10 @@ final class AgentNodeActionTests: XCTestCase {
         // the timeline the row was built from.
         rig.published.timeline.agents = nil
 
-        XCTAssertNil(rig.model.transcriptURL(of: Rig.runID), "a channel with no tree composed a path anyway")
+        // A boolean and not `XCTAssertNil` (§11): the url is composed from the config home, the
+        // session id and the project slug, and a failing `XCTAssertNil` prints its operand.
+        XCTAssertTrue(rig.model.transcriptURL(of: Rig.runID) == nil,
+                      "a channel with no tree composed a path anyway")
     }
 
     /// **G3: *Copy agent id* puts the node id on the pasteboard, and logs nothing.**
