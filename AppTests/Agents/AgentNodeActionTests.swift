@@ -528,7 +528,7 @@ final class AgentNodeActionTests: XCTestCase {
             host = PanelHostModel()
             try host.register(AgentsTab(timelines: { [published] _ in published.timeline },
                                         selection: AgentSelectionStore(),
-                                        lifecycle: lifecycle,
+                                        lifecycle: { [lifecycle] in lifecycle },
                                         pasteboard: pasteboard))
             // The channel's own capabilities, which is where a panel's link goes (X7).
             let context = ComposerContextFixtures.context(key, links: links)

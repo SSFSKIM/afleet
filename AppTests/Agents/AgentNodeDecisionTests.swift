@@ -235,7 +235,7 @@ final class AgentNodeDecisionTests: XCTestCase {
             let recorder = raised
             try host.register(AgentsTab(timelines: { [published] _ in published.timeline },
                                         selection: AgentSelectionStore(),
-                                        lifecycle: lifecycle,
+                                        lifecycle: { [lifecycle] in lifecycle },
                                         fold: ChannelFold(raise: { key, signal in recorder.note(key, signal) },
                                                           decision: { _, _ in nil }),
                                         reservations: reservations))

@@ -477,7 +477,13 @@ final class AppModel: FilesTabHost {
                 // send them by anywhere earlier.
                 let agents = AgentsTab(timelines: { [timelines] key in timelines.model(for: key).timeline },
                                        selection: agentSelection,
-                                       lifecycle: workspace.fleet,
+                                       // Through the registry and not by value: `launch()` runs
+                                       // again on *Check again* and this first registration is the
+                                       // one that stays, so a fleet captured here would be the
+                                       // fleet of a workspace the app has since replaced.
+                                       // `attach` updates the registry's, which is what every other
+                                       // closure on this tab already follows.
+                                       lifecycle: { [timelines] in timelines.lifecycle },
                                        // Contract Y2 and Y7: a card answered on a node raises
                                        // `HostSignal.decisionAnswered` on the channel's own fold —
                                        // the engine sends no frame back for an answer — and it

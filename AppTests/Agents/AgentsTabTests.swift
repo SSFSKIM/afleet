@@ -98,6 +98,51 @@ final class AgentsTabTests: XCTestCase {
                       "the host no longer offers .agents to a channel after a second launch")
     }
 
+    /// **A session built after a second launch acts on the fleet that launch attached.**
+    ///
+    /// `launch()` runs again on *Check again* and the tab registered by the first pass is the one
+    /// that stays, which is right — everything it holds is app-scoped. It is right only while
+    /// everything it holds *follows* the app: a fleet captured by value at the first registration
+    /// outlives the workspace it belonged to, and every stop, backgrounding and card answer this
+    /// panel sends would go to it while the runs on screen came from the new one. The registry's
+    /// lifecycle is what `attach` updates, so it is what the tab reaches through.
+    ///
+    /// Driven at the registry rather than through two launches, because the launch sequence's
+    /// doubles hand back one fleet both times and a test that cannot tell the two apart asserts
+    /// nothing. §11: the two fleets are told apart by what they were sent, never by printing either.
+    func testASessionBuiltAfterTheFleetMovedActsOnTheNewOne() async throws {
+        let first = ActionDouble()
+        let second = ActionDouble()
+        let registry = ChannelTimelineRegistry()
+        registry.lifecycle = first
+        let host = PanelHostModel()
+        try host.register(AgentsTab(timelines: { _ in nil }, selection: AgentSelectionStore(),
+                                    lifecycle: { [registry] in registry.lifecycle }))
+
+        let before = try XCTUnwrap(host.session(for: .agents, context: PanelFixtures.context(PanelFixtures.key(3)))
+                                     as? AgentsModel, "the tab made something other than its own session")
+        registry.lifecycle = second
+        let after = try XCTUnwrap(host.session(for: .agents, context: PanelFixtures.context(PanelFixtures.key(4)))
+                                    as? AgentsModel, "the tab made no session for the second channel")
+
+        await before.actions?.stop(Self.running)
+        await after.actions?.stop(Self.running)
+
+        let toTheFirst = await first.sent.count
+        let toTheSecond = await second.sent.count
+        XCTAssertEqual(toTheFirst, 1, "the session built before the fleet moved sent \(toTheFirst) request(s), not 1")
+        XCTAssertEqual(toTheSecond, 1,
+                       "the session built after the fleet moved sent \(toTheSecond) request(s) to the fleet the "
+                       + "app now holds, not 1")
+    }
+
+    /// One running run, as a node's content. Invented throughout (§11).
+    private static var running: AgentNodeContent {
+        AgentNodeContent(node: AgentRunNode(id: "task_invented_tab_01", status: .running,
+                                            elapsedOrigin: InventedAgents.epoch),
+                         entry: nil, isParked: false, waitingCount: 0)
+    }
+
     // MARK: - The session the host retains (X7)
 
     /// The host answers the same `AgentsModel` for one channel after another channel's session was

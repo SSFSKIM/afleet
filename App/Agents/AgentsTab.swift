@@ -31,7 +31,16 @@ final class AgentsTab: PanelTab {
     /// X5, for the node actions of §8.8 (contract Y5). Nil before a launch reaches a workspace: a
     /// pane that reads runs and offers no action on them is the honest state for a tab with no fleet
     /// behind it, and it is the state each action's own guard already answers for.
-    private let lifecycle: (any LifecycleAPI)?
+    ///
+    /// **A closure and not the fleet itself**, like `timelines` and `fold` beside it. `launch()`
+    /// runs again on *Check again* and the tab registered by the first pass is the one that stays —
+    /// so a fleet captured by value at that registration is the fleet of a workspace the app has
+    /// since replaced, and every stop, backgrounding and answer this panel sent would go to it while
+    /// the runs on screen came from the new one. `ChannelTimelineRegistry.lifecycle` is what
+    /// `attach` updates, so it is the natural thing to reach for.
+    typealias LifecycleReach = @MainActor () -> (any LifecycleAPI)?
+
+    private let lifecycle: LifecycleReach
     /// Where *Copy agent id* writes (child spec D12). The general board in the app; a suite hands in
     /// a named one, because a test that took the user's clipboard while it ran would be a side effect
     /// nobody asked for.
@@ -49,7 +58,7 @@ final class AgentsTab: PanelTab {
     private let reservations: DecisionReservations
 
     init(timelines: @escaping AgentsModel.TimelineReach, selection: AgentSelectionStore,
-         lifecycle: (any LifecycleAPI)? = nil, pasteboard: NSPasteboard = .general,
+         lifecycle: @escaping LifecycleReach = { nil }, pasteboard: NSPasteboard = .general,
          fold: ChannelFold = ChannelFold(), reservations: DecisionReservations = DecisionReservations()) {
         self.timelines = timelines
         self.selection = selection
@@ -67,12 +76,14 @@ final class AgentsTab: PanelTab {
     func makeSession(for context: ChannelContext) -> any PanelTabSession {
         // The link router is the **channel's own** — X7 hands a tab its capabilities through the
         // context, and *Open transcript file* raises a `.file` link on it (child spec D12).
-        AgentsModel(channel: context.key, timelines: timelines, store: selection,
-                    actions: lifecycle.map {
-                        AgentNodeActions(lifecycle: $0, channel: context.key, links: context.links,
-                                         pasteboard: pasteboard)
-                    },
-                    answering: lifecycle.map(makeAnswering))
+        // Read once, so the session's two objects cannot be built over two different fleets.
+        let fleet = lifecycle()
+        return AgentsModel(channel: context.key, timelines: timelines, store: selection,
+                           actions: fleet.map {
+                               AgentNodeActions(lifecycle: $0, channel: context.key, links: context.links,
+                                                pasteboard: pasteboard)
+                           },
+                           answering: fleet.map(makeAnswering))
     }
 
     func makeView(session: any PanelTabSession, context: ChannelContext,
