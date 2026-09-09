@@ -229,6 +229,10 @@ public final class FilesPanelSession: PanelTabSession {
         public var keepsMine: Bool
         /// The file was there when it was opened and is not there now.
         public var isMissing: Bool
+        /// The bytes did not round-trip through UTF-8, so this file is drawn and never edited
+        /// (see `read`). It is not derivable from the kind: an image and a file above the cap are
+        /// `.binary` too, and neither of them is a file the user asked to edit and cannot.
+        public var isNotText: Bool
         /// The text, the baseline it is dirty against, the surface that owns it and the cursor.
         public var buffer: BufferState
 
@@ -267,6 +271,10 @@ public final class FilesPanelSession: PanelTabSession {
     public enum Issue: Equatable, Sendable {
         /// The file could not be read at all — gone, unreadable, or above the panel's cap.
         case unreadableFile
+        /// The file's bytes are not text, so it is drawn rather than edited: a buffer filled from
+        /// bytes that do not round-trip is not the file, and saving it would replace what is
+        /// there with something the user never typed.
+        case fileIsNotText
         /// The write did not land. The buffer is still dirty and nothing was saved.
         case saveFailed
         /// The destination is inside a Claude Code config home. afleet never writes there
@@ -623,13 +631,14 @@ public final class FilesPanelSession: PanelTabSession {
             if !openFiles[index].isDirty {
                 openFiles[index].kind = loaded.kind
                 openFiles[index].language = loaded.language
+                openFiles[index].isNotText = loaded.isNotText
                 openFiles[index].buffer.load(text: loaded.text, holdsText: loaded.holdsText,
                                              snapshot: loaded.snapshot)
             }
         } else {
             openFiles.append(OpenFile(url: url, kind: loaded.kind, language: loaded.language,
                                       rendersMarkdown: true, hasConflict: false, keepsMine: false,
-                                      isMissing: false,
+                                      isMissing: false, isNotText: loaded.isNotText,
                                       buffer: BufferState(path: path, text: loaded.text,
                                                           holdsText: loaded.holdsText,
                                                           lastLoaded: loaded.snapshot,
@@ -640,7 +649,7 @@ public final class FilesPanelSession: PanelTabSession {
         }
         guard presented == mark else { return }
         let generation = beginPresentation()
-        issue = nil
+        issue = note(for: path)
         selectedPath = path
         await present(url, revealing: line, under: generation)
         await persist()
@@ -651,9 +660,15 @@ public final class FilesPanelSession: PanelTabSession {
         guard openFiles.contains(where: { $0.url == url }) else { return }
         let generation = beginPresentation()
         selectedPath = url.path(percentEncoded: false)
-        issue = nil
+        issue = note(for: selectedPath)
         await present(url, revealing: nil, under: generation)
         await persist()
+    }
+
+    /// What the panel-local area says about a file being opened, which for a file whose bytes are
+    /// not text is why it is drawn rather than edited. Nothing else survives a presentation.
+    private func note(for path: String?) -> Issue? {
+        openFiles.first { $0.path == path }?.isNotText == true ? .fileIsNotText : nil
     }
 
     /// Closes a file: its watcher stops with it, its banner goes with it (§8), and so does anything
@@ -820,7 +835,7 @@ public final class FilesPanelSession: PanelTabSession {
     /// `.unreadableFile` is kept for the file that genuinely could not be read: a path that is not
     /// a regular file, and a text file whose bytes would not come back.
     private func read(_ url: URL) -> (kind: FileKind, language: String, text: String,
-                                      holdsText: Bool, snapshot: FileSnapshot?)? {
+                                      holdsText: Bool, snapshot: FileSnapshot?, isNotText: Bool)? {
         let kind = FileKind.of(url: url)
         let language = switch kind {
         case .code(let language): language
@@ -835,13 +850,24 @@ public final class FilesPanelSession: PanelTabSession {
             // files, and a file replaced between two reads leaves the panel drawing text no
             // baseline covers — invisible to §8's rule and overwritten by the next save.
             guard let read = FileSnapshot.readWithContents(url) else { return nil }
-            return (kind, language, String(decoding: read.contents, as: UTF8.self), true,
-                    read.snapshot)
+            // **Strictly, and confirmed by the round trip.** `String(decoding:as:)` replaces an
+            // invalid sequence with U+FFFD and a byte-order mark is dropped by the decoder, so
+            // the buffer held text the file does not contain: it measured dirty against the very
+            // digest it had been read from, the file opened with an unsaved marker nobody had
+            // earned, and *Save* passed the preflight against those original bytes and wrote the
+            // replacement over them. A file whose bytes do not come back is not text this panel
+            // may edit: it is drawn by `UnsupportedFileViewer` like any other opaque file, with
+            // no buffer to be dirty and nothing for a save to write (Design §4, §7).
+            guard let text = String(data: read.contents, encoding: .utf8),
+                  Data(text.utf8) == read.contents else {
+                return (.binary, language, "", false, read.snapshot, true)
+            }
+            return (kind, language, text, true, read.snapshot, false)
         default:
             // Not read into a buffer at all: its viewer draws it from the file, so the buffer
             // holds no text and has nothing to be dirty against.
             guard Self.isRegularFile(url) else { return nil }
-            return (kind, language, "", false, FileSnapshot.read(url))
+            return (kind, language, "", false, FileSnapshot.read(url), false)
         }
     }
 
@@ -1403,6 +1429,7 @@ public final class FilesPanelSession: PanelTabSession {
               let loaded = read(url) else { return false }
         openFiles[index].kind = loaded.kind
         openFiles[index].language = loaded.language
+        openFiles[index].isNotText = loaded.isNotText
         // The last write no longer describes what is on disk, so it stops answering for it.
         openFiles[index].buffer.load(text: loaded.text, holdsText: loaded.holdsText,
                                              snapshot: loaded.snapshot)
@@ -1728,6 +1755,7 @@ public final class FilesPanelSession: PanelTabSession {
             openFiles.append(OpenFile(url: url, kind: loaded.kind, language: loaded.language,
                                       rendersMarkdown: record.rendersMarkdown,
                                       hasConflict: false, keepsMine: false, isMissing: false,
+                                      isNotText: loaded.isNotText,
                                       buffer: BufferState(path: url.path(percentEncoded: false),
                                                           text: loaded.text,
                                                           holdsText: loaded.holdsText,

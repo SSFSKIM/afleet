@@ -2081,6 +2081,36 @@ final class FilesPanelSessionTests: XCTestCase {
         XCTAssertEqual(harness.session.openFiles.first { $0.name == "notes.swift" }?.isDirty, false)
     }
 
+    // MARK: - 48. a file whose bytes are not text
+
+    /// The buffer was filled with `String(decoding:as:)`, which *replaces* an invalid sequence
+    /// rather than refusing it. The text was then not the file's bytes: it measured dirty against
+    /// the digest it had just been read from, the file opened with an unsaved marker nobody had
+    /// earned, and *Save* passed the preflight against the original bytes and wrote the
+    /// replacement over them.
+    func testAFileWhoseBytesDoNotRoundTripOpensReadOnlyAndIsNeverWritten() async throws {
+        let file = tree.root.appending(path: "broken.swift")
+        // An invented byte sequence: a two-byte lead with no continuation, inside ordinary text.
+        let bytes = Data([0x6C, 0x65, 0x74, 0x20, 0x61, 0x20, 0x3D, 0x20, 0xC3, 0x28, 0x0A])
+        try bytes.write(to: file)
+        let harness = try makeHarness()
+        harness.surface.answersSave = true
+
+        await harness.session.openFile(at: file, line: nil)
+
+        let readout = FilesPanelReadout(session: harness.session)
+        XCTAssertEqual(readout.viewer, .unsupported, "bytes the file does not contain were drawn")
+        XCTAssertFalse(readout.isDirty, "the replacement text measured dirty against the bytes")
+        XCTAssertEqual(harness.session.issue, .fileIsNotText, "the panel says why it is read-only")
+        XCTAssertNotNil(readout.notice)
+        XCTAssertTrue(harness.surface.commands.isEmpty, "the replacement text reached the editor")
+
+        harness.session.save()
+
+        XCTAssertEqual(try Data(contentsOf: file), bytes,
+                       "the replacement text was written over the file's own bytes")
+    }
+
     // MARK: - Harness
 
     /// A session and the recorder it drives, held together so a test cannot let the session go by
