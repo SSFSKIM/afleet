@@ -2079,3 +2079,33 @@ is renumbered.
      for `refresh(_:)` or `children(of:)` would silently enumerate a second time or refresh
      nothing. Closer: normalise on the way into `loaded`. Owner: whichever leaf next adds a caller
      that names a directory rather than walking to it. Found by C7.5's fix wave B.
+
+343. **Two presentations dispatched concurrently cannot be ordered by intent.** The presentation
+     generation says which call claimed the surface last, and a call that has been dispatched but
+     has not run yet has claimed nothing — so a suspension taken *before* a presentation (opening a
+     file arms its watcher first) is checked against the last generation that actually reached the
+     surface rather than against a ticket. That answers the question that matters, but it is a
+     weaker order than intent: two calls that suspend before drawing can still resolve in either
+     order, and a watcher refresh landing in the same window is indistinguishable from a user
+     action. Closer: a single serialised presentation queue on the session, so intent order is
+     entry order — worth doing when a second panel needs the same shape. Owner: C7.5's follow-up.
+     Found by C7.5's fix wave C.
+
+344. **A stash's late answer is exempt from generation retirement by argument, not by
+     construction.** Every other request kind is retired when its presentation is superseded; a
+     stash is not, because its answer is a capture that a *newer* presentation may itself be
+     waiting on, and retiring it would leave that waiter to time out. What makes the exemption safe
+     is that a capture records only what the editor holds for a named buffer, checked against the
+     path and the buffer's revision. That is a proof about the operation rather than a restriction
+     on it, so a future capture that did more than record text would silently lose the guarantee.
+     Closer: a request id on the wire (entries 241, 338) would let a stash be retired without
+     stranding its observers. Owner: C7.2's contract.
+
+345. **`BufferState` fences the fields that were being mutated out of turn, and only those.** The
+     text, the baselines, the dirty flag, the owner and the cursor cannot be assigned from the
+     session; `hasConflict`, `keepsMine`, `isMissing`, `kind` and the markdown toggle still can,
+     because no defect has involved them. The boundary is therefore a judgment about where the
+     defects were, not a principle, and a new field of genuine buffer state added to `OpenFile`
+     rather than to `BufferState` would sit outside the fence without anything saying so. Closer:
+     move the remaining per-file flags behind operations too, once one of them earns it. Owner:
+     C7.5's follow-up, or C7.7 if it adds per-file state.
