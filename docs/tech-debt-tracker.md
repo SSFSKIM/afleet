@@ -3701,3 +3701,21 @@ four whole-branch review rounds.
      apart deliberately — but the asymmetry is real and a human tester will meet it at G1's leg.
      Closer: list untracked paths from the status alongside the diff, marked as untracked.
      Owner: C7.7.
+
+## From the C7 recomposition correctives on `main`, 2026-09-09 (numbered from 416)
+
+416. **Eight rows of W1's table declare an edge no source imports.** The per-target check added
+     with `DeclaredEdgeTests` is deliberately one-directional: it proves every import is a
+     declared edge, and says nothing about a declared edge with no import site. Running the same
+     data the other way names eight — `TerminalCore` → AfleetCore and GhosttyKit, `EditorCore`
+     and `EditorCoreTests` → AfleetCore, `TerminalPanel`, `BrowserPanel` and `SourceControlPanel`
+     → LinkRouting, `FilesPanel` and `SourceControlPanel` → FleetKit. C7.7's own manifest comment
+     states the cost ("a dependency edge with no import site is a claim in the manifest a later
+     reader believes"), and it argued its way out of exactly one such row. The other direction is
+     not mechanical, though: an edge can be load-bearing at link time without an import — the
+     GhosttyKit row carries a binary target — and each removal is a W1 table amendment rather
+     than a manifest tidy. Closer: rule on each row, then let the check assert both directions
+     with the survivors named where they are declared. Owner: the architect, with W1's table.
+     Related bound worth knowing before that walk: the check reads a product dependency as a
+     module of the product's own name, which is true of every dependency this package declares
+     and would misreport a product that exports differently-named modules.
