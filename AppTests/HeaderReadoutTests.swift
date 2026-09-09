@@ -208,6 +208,109 @@ final class HeaderReadoutTests: XCTestCase {
         rig.model.close()
     }
 
+    // MARK: - An idle replacement is read (round 2, scalpel-5 #1)
+
+    /// **A replacement process that says nothing has its mode read anyway.**
+    ///
+    /// Clearing the live precedence on a new epoch is only half of a restart: the mode standing in
+    /// the readout is still the one the *replaced* process reported, and nothing re-reads it. A
+    /// handshake is not a turn end, so the one thing that re-takes a readback never fires, and an
+    /// idle replacement — one that runs no turn after it comes up — leaves the header naming a mode
+    /// nothing is running. So an epoch increase re-takes the readback itself.
+    ///
+    /// Discriminating against the wave-C fix, which reset the precedence and stopped there: the last
+    /// assertion fails, because no `result` frame follows the restart here. The existing restart test
+    /// feeds the replacement's turns and so cannot tell the two apart. The count is the second half —
+    /// two readbacks, the opening one and the one the epoch took, and no turn ended in between.
+    func testARestartWithNoTurnEndStillReadsTheReplacementsMode() async throws {
+        let rig = try await Rig()
+        let double = rig.double
+        let key = rig.key
+        await double.stageSend("get_settings", .success(try Self.answer("control-shapes", to: "get_settings")))
+        await double.stageEngineReport(handshake: try Self.handshake("exit-plan-mode"), systemInitFrom: nil)
+
+        rig.model.startReadbacks()
+        let attached = await LaunchFixtures.waitAsync { await double.memberSequence.contains("events") }
+        XCTAssertTrue(attached, "the header never subscribed, so no frame could reach it")
+        let opened = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .plan }
+        XCTAssertTrue(opened, "the first process's handshake never reached the readout")
+
+        for status in try Self.modeStatuses("exit-plan-mode") { double.enqueue(status, to: key) }
+        let moved = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .acceptEdits }
+        XCTAssertTrue(moved, "the readout did not follow the first process's status frame")
+
+        // The restart, and nothing after it: the fleet retains the replacement's handshake, one
+        // event carries the new epoch, and no turn ends on the new process.
+        await double.stageEngineReport(handshake: try Self.handshake("control-shapes"), systemInitFrom: nil)
+        double.enqueue(try Self.handshake("control-shapes", epoch: ProcessEpoch.first.next()), to: key)
+
+        let followed = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .default }
+        XCTAssertTrue(followed,
+                      "an idle replacement left the readout showing the mode the replaced process reported")
+
+        let taken = await Self.polls(double, of: "get_settings")
+        XCTAssertEqual(taken, 2,
+                       "\(taken) settings readback(s) were taken, not the opening one and the one the new epoch took")
+
+        rig.model.close()
+    }
+
+    // MARK: - The process identity outlives the subscription (round 2, scalpel-5 #2)
+
+    /// **A re-subscription compares against the process the readout's mode came from, not against
+    /// nothing.**
+    ///
+    /// Archival finishes every subscriber and the subscription ends; the model and its readout are
+    /// what the registry retains, so the live precedence outlives the process it was a claim about.
+    /// A subscription that starts its epoch at nil treats whatever it sees first as the baseline and
+    /// never resets, so the dead process's live mode rejects the replacement's handshake — at the
+    /// opening readback and at every settings poll after it. The epoch is therefore recorded beside
+    /// the mode it belongs to, and outlives the subscription with it.
+    ///
+    /// Discriminating: the readout is left holding a live mode across the archival on purpose, and
+    /// the replacement's handshake names a third mode. Against a per-subscription epoch the last
+    /// assertion fails and the header keeps a mode two processes old.
+    func testTheProcessIdentityOutlivesTheSubscription() async throws {
+        let rig = try await Rig()
+        let double = rig.double
+        let key = rig.key
+        await double.stageSend("get_settings", .success(try Self.answer("control-shapes", to: "get_settings")))
+        await double.stageEngineReport(handshake: try Self.handshake("exit-plan-mode"), systemInitFrom: nil)
+
+        rig.model.startReadbacks()
+        let attached = await LaunchFixtures.waitAsync { await double.memberSequence.contains("events") }
+        XCTAssertTrue(attached, "the header never subscribed, so no frame could reach it")
+        let opened = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .plan }
+        XCTAssertTrue(opened, "the first process's handshake never reached the readout")
+
+        for status in try Self.modeStatuses("exit-plan-mode") { double.enqueue(status, to: key) }
+        let moved = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .acceptEdits }
+        XCTAssertTrue(moved, "the readout did not follow the first process's status frame")
+
+        // The channel goes down: the stream is finished under the subscriber, exactly as archival
+        // finishes it. The model, and the live mode in its readout, stay.
+        await double.finishEvents(of: key)
+
+        // It comes back up on a replacement, and the strip subscribes again. Retried because the
+        // second subscription can only be taken once the first task has wound itself up.
+        await double.stageEngineReport(handshake: try Self.handshake("control-shapes"), systemInitFrom: nil)
+        let resubscribed = await LaunchFixtures.waitAsync { @MainActor in
+            rig.model.startReadbacks()
+            return await Self.subscriptions(double) >= 2
+        }
+        XCTAssertTrue(resubscribed, "the strip never subscribed a second time, so nothing below is a re-subscription")
+
+        let replacement = try Self.handshake("control-shapes", epoch: ProcessEpoch.first.next())
+        let followed = await LaunchFixtures.waitAsync { @MainActor in
+            double.enqueue(replacement, to: key)
+            return rig.model.readout.mode == .default
+        }
+        XCTAssertTrue(followed,
+                      "the mode a process replaced before the re-subscription reported went on outranking the replacement's handshake")
+
+        rig.model.close()
+    }
+
     // MARK: - The rendering preferences (round 1, scalpel-4 #7)
 
     /// **`get_settings`' two rendering preferences reach the render context.**
@@ -430,6 +533,12 @@ final class HeaderReadoutTests: XCTestCase {
             row.state = state
             return row
         }
+    }
+
+    /// How many times the strip has subscribed. A count, and the only way a test can tell a second
+    /// subscription from the first one still running.
+    static func subscriptions(_ double: ComposerLifecycleDouble) async -> Int {
+        await double.memberSequence.filter { $0 == "events" }.count
     }
 
     /// How many readbacks of one subtype the double has been asked for. A count, never a value.
