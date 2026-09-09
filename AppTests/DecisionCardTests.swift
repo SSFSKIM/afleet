@@ -130,6 +130,85 @@ final class DecisionCardTests: XCTestCase {
         XCTAssertTrue(ViewTree.press(button), "the \(label) button carried no action")
     }
 
+    // MARK: - Item 43's Developer action
+
+    /// Item 43: "With the Developer action *Send malformed answer to next permission* armed,
+    /// approve a card: the timeline shows the binary's own text … as the tool's denial, and the
+    /// channel continues."
+    ///
+    /// The shape is chosen from the engine's own validator (2.1.263: the response is parsed against
+    /// a union of `{behavior:"allow", updatedInput?: record}` and `{behavior:"deny", message:
+    /// string}`, and the failure produces "The canUseTool callback returned an invalid permission
+    /// result. …" as a tool denial — `cli.pretty.js:282901`, `:282904`, `:283032`, `:283039`).
+    /// `updatedInput` as a **string** fails `z.record(string, unknown)` in the allow arm and the
+    /// literal in the deny arm, so the union is exhausted and the rejection is certain. Extra keys
+    /// are stripped rather than rejected and a bad `updatedPermissions` is swallowed by a `catch`,
+    /// so neither of those would do.
+    ///
+    /// Three clauses, because the arm is one-shot and each is a way for it to be quietly wrong: the
+    /// armed answer is the malformed shape, the answer after it is the ordinary one, and an unarmed
+    /// answer is untouched.
+    func testTheArmedDeveloperActionSendsOneMalformedPermissionAnswer() async throws {
+        let reservations = DecisionReservations()
+        let card = try card("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa7")
+
+        // Unarmed: the ordinary answer, and the shape below must not be it.
+        let (plainLifecycle, plain) = await armed(reservations, false)
+        try press("Allow once", in: try permissionView(card, .full, plain).body)
+        await plain.whenIdle()
+        let ordinary = try await Self.sentBody(plainLifecycle)
+        let armedShape = try Self.body(of: DecisionAnswering.malformedPermissionAnswer)
+        XCTAssertFalse(ordinary == armedShape,
+                       "an unarmed answer already sends the malformed shape, so the arm proves nothing")
+
+        // Armed: exactly the shape the engine rejects.
+        let (lifecycle, answering) = await armed(reservations, true)
+        try press("Allow once", in: try permissionView(card, .full, answering).body)
+        await answering.whenIdle()
+        let malformed = try await Self.sentBody(lifecycle)
+        XCTAssertTrue(malformed == armedShape,
+                      "the armed answer is not the shape the engine's validator rejects")
+        XCTAssertFalse(reservations.malformedNextPermissionAnswer,
+                       "the one-shot arm survived the answer it was armed for")
+
+        // And the next answer is ordinary again.
+        let (afterLifecycle, after) = await armed(reservations, false)
+        try press("Allow once", in: try permissionView(card, .full, after).body)
+        await after.whenIdle()
+        let restored = try await Self.sentBody(afterLifecycle)
+        XCTAssertTrue(restored == ordinary,
+                      "the answer after the armed one is not the ordinary answer")
+    }
+
+    /// An answering object over a shared reservation set, armed or not.
+    private func armed(_ reservations: DecisionReservations, _ arm: Bool) async -> (LifecycleDouble, DecisionAnswering) {
+        let lifecycle = LifecycleDouble()
+        await lifecycle.always(.success(ActivityFixtures.state(Self.channel)))
+        reservations.malformedNextPermissionAnswer = arm
+        return (lifecycle, DecisionAnswering(lifecycle: lifecycle, reservations: reservations))
+    }
+
+    /// The one answer body a double received.
+    private static func sentBody(_ lifecycle: LifecycleDouble) async throws -> JSONValue {
+        let actions = await lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "one press produced \(actions.count) action(s)")
+        guard case .answer(_, let answer)? = actions.first?.action else {
+            XCTFail("the action emitted was not an answer")
+            return .null
+        }
+        return try body(of: answer)
+    }
+
+    /// The body the transport would write for an answer.
+    private static func body(of answer: InboundAnswer) throws -> JSONValue {
+        guard case .success(let success) = answer.controlResponse(for: RequestID(rawValue: "invented-1")).body,
+              let response = success.response else {
+            XCTFail("the answer did not encode as a success body")
+            return .null
+        }
+        return response
+    }
+
     // MARK: - Item 52's label
 
     /// Item 52: "the permission card is labelled `Explore` with the run's description".

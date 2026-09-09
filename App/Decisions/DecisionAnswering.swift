@@ -52,6 +52,22 @@ final class DecisionReservations {
         observers[ObjectIdentifier(host)] = settled
     }
 
+    /// Item 43's one-shot Developer arm: the **next** permission answer goes out in a shape the
+    /// engine rejects, and the arm clears.
+    ///
+    /// **Here rather than in a persisted setting or a per-host flag.** It has to be app-scoped —
+    /// three surfaces can answer one request and the arm is about whichever answers next — and this
+    /// object is the one every host already shares. It is deliberately not written to the store: a
+    /// "next answer" that survived a relaunch would fire days later on a card nobody was testing.
+    var malformedNextPermissionAnswer = false
+
+    /// Spends the arm, if it is set. One call, one malformed answer.
+    func takeMalformedArm() -> Bool {
+        guard malformedNextPermissionAnswer else { return false }
+        malformedNextPermissionAnswer = false
+        return true
+    }
+
     /// Announces an answer the engine accepted.
     func settled(_ id: RequestID, in channel: ChannelKey, as state: ChannelState) {
         for observer in observers.values { observer(id, channel, state) }
@@ -117,6 +133,27 @@ final class DecisionAnswering {
     /// makes the second of two hosts refuse rather than send a duplicate. The card disables on it.
     func isAnswering(_ id: RequestID) -> Bool { reservations.isAnswering(id) }
 
+    /// The permission response item 43 arms — a shape the engine's own validator rejects.
+    ///
+    /// The engine parses a `can_use_tool` response against a union of
+    /// `{behavior: "allow", updatedInput?: record<string, unknown>}` and
+    /// `{behavior: "deny", message: string}` (2.1.263 `cli.pretty.js:282901`). A **string**
+    /// `updatedInput` fails the record in the allow arm and the literal in the deny arm, so the
+    /// union is exhausted and the rejection is certain; the engine then denies the tool with "The
+    /// canUseTool callback returned an invalid permission result. …" and the turn continues
+    /// (`:283032`, `:283039`).
+    ///
+    /// **Chosen over the other rejectable shapes for what it avoids.** Unknown extra keys are
+    /// stripped rather than rejected and a malformed `updatedPermissions` is swallowed by the
+    /// engine's own `catch`, so neither reaches the validator; a payload carrying a mismatched
+    /// `toolName`, or a malformed outer envelope, is dropped before the validator and would hang the
+    /// tool instead of denying it. This one is well-formed everywhere the engine looks before it
+    /// parses, and invalid exactly where it parses.
+    static let malformedPermissionAnswer: InboundAnswer =
+        .permission(.allow(updatedInput: .string("afleet developer action: an invalid permission result"),
+                           updatedPermissions: nil,
+                           classification: nil))
+
     /// A card's action, on its way to the engine.
     ///
     /// Synchronous, and it claims the request id before it returns: the second of two clicks in one
@@ -129,10 +166,17 @@ final class DecisionAnswering {
     /// refused answer leaves the surface exactly as it found it.
     func send(_ action: DecisionAction, on card: DecisionCard, in channel: ChannelKey,
               onSuccess: (@MainActor () -> Void)? = nil) {
-        guard let answer = card.answer(action) else { return }
+        guard let mapped = card.answer(action) else { return }
         let id = card.requestID
         guard reservations.claim(id) else { return }
-        let outcome = Self.outcome(of: answer, for: card.kind)
+        // Item 43's Developer action, spent here and nowhere else: the arm is app-scoped because any
+        // of the three surfaces may be the one that answers next, and it is taken **after** the
+        // reservation so a press that sent nothing does not spend it. The outcome is still read from
+        // the answer the card meant — the malformed reply produces no outcome of its own, and what
+        // the timeline shows for it is the engine's denial coming back as a tool result.
+        let malformed = card.kind == .permission && reservations.takeMalformedArm()
+        let answer = malformed ? Self.malformedPermissionAnswer : mapped
+        let outcome = Self.outcome(of: mapped, for: card.kind)
         Task { await self.deliver(answer, to: id, in: channel, as: outcome, then: onSuccess) }
     }
 
