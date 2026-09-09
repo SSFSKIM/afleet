@@ -81,7 +81,18 @@ public final class BrowserTabSession: PanelTabSession {
     /// Q8's snapshot size.
     public static let quickOpenLimit = 50
 
-    public private(set) var isPresented = false
+    /// The surface quick-open is up on, or `nil` when it is not up at all.
+    ///
+    /// **Presentation is per surface, and the session is not** (D59). X7 caches one of these per
+    /// (tab, channel), which is right — the feed is the channel's — but the main panel and a
+    /// same-channel pop-out are two surfaces sharing it, and each binds a sheet. A boolean here
+    /// asked *both* sheets to present for one Cmd-Shift-L, and either one's dismissal cleared it
+    /// for the other. The surface a sheet is on is the identity `PanelSurface` already carries; no
+    /// second notion of "which one" is introduced for this.
+    public private(set) var presentedOn: PanelSurface?
+
+    /// Whether quick-open is up on `surface`. What a surface's sheet binds to.
+    public func isPresented(on surface: PanelSurface) -> Bool { presentedOn == surface }
 
     /// What the user has typed into the sheet's field.
     public var query = ""
@@ -106,9 +117,13 @@ public final class BrowserTabSession: PanelTabSession {
     /// **The subscription is taken before the snapshot**, the ordering C5's placeholder records and
     /// for the same reason: `updates` does not replay, `current(limit:)` is an actor hop, and a
     /// publication landing between them would reach nobody.
-    public func openQuickOpen() {
-        guard !isPresented else { return }
-        isPresented = true
+    /// A request from a surface that is already showing it is a no-op; one from another surface
+    /// **moves** the sheet there, taking its single subscription with it. Two sheets over one
+    /// channel's feed would be two answers to "what did this session print" and one of them stale.
+    public func openQuickOpen(on surface: PanelSurface) {
+        guard presentedOn != surface else { return }
+        watcher?.cancel()
+        presentedOn = surface
         query = ""
         entries = []
         let updates = recentURLs.updates
@@ -127,8 +142,11 @@ public final class BrowserTabSession: PanelTabSession {
     /// Closes the sheet and cancels the subscription. Q8 says the feed is followed *while it is up*
     /// and no longer: a panel that kept N channels' subscriptions alive for the life of the window
     /// would be following feeds nobody is looking at.
-    public func closeQuickOpen() {
-        isPresented = false
+    /// Only the surface showing it can close it: a dismissal from anywhere else is not this
+    /// sheet's, and acting on it would close the one the user is looking at.
+    public func closeQuickOpen(from surface: PanelSurface) {
+        guard presentedOn == surface else { return }
+        presentedOn = nil
         watcher?.cancel()
         watcher = nil
     }

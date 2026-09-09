@@ -25,7 +25,7 @@ public struct BrowserPanelView: View {
         VStack(spacing: 0) {
             BrowserTabStrip(model: model)
             Divider()
-            BrowserURLBar(model: model, session: session)
+            BrowserURLBar(model: model, session: session, surface: surface)
             Divider()
             content
         }
@@ -38,9 +38,9 @@ public struct BrowserPanelView: View {
         // Not `$session.isPresented`: the sheet is closed through `closeQuickOpen`, which is also
         // what cancels the feed subscription (Q8). A binding that only flipped the flag would leave
         // a channel's subscription running behind a sheet nobody can see.
-        .sheet(isPresented: Binding(get: { session.isPresented },
-                                    set: { if !$0 { session.closeQuickOpen() } })) {
-            BrowserQuickOpenSheet(model: model, session: session)
+        .sheet(isPresented: Binding(get: { session.isPresented(on: surface) },
+                                    set: { if !$0 { session.closeQuickOpen(from: surface) } })) {
+            BrowserQuickOpenSheet(model: model, session: session, surface: surface)
         }
     }
 
@@ -85,7 +85,7 @@ public struct BrowserPanelView: View {
                 .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
             HStack(spacing: 8) {
                 Button("New Tab") { model.openNewTab(url: nil) }
-                Button("Recent URLs…") { session.openQuickOpen() }
+                Button("Recent URLs…") { session.openQuickOpen(on: surface) }
             }
         }
         .padding(24)
@@ -158,6 +158,9 @@ struct BrowserURLBar: View {
 
     @Bindable var model: BrowserModel
     @Bindable var session: BrowserTabSession
+    /// Which of Q5's surfaces this bar is drawn on. Quick-open is presented per surface, so the
+    /// control that opens it has to say which one is asking.
+    let surface: PanelSurface
     /// The field's own state, and never a mirror of the page: see `BrowserAddressField` for the two
     /// rules it holds and why neither of them can live in an `onChange`.
     @State private var field = BrowserAddressField()
@@ -191,7 +194,7 @@ struct BrowserURLBar: View {
                         model.submitURLBar(typed)
                     }
 
-                Button { session.openQuickOpen() } label: { Image(systemName: "clock.arrow.circlepath") }
+                Button { session.openQuickOpen(on: surface) } label: { Image(systemName: "clock.arrow.circlepath") }
                     .help("Recent URLs from this session")
                     .keyboardShortcut("l", modifiers: [.command, .shift])
             }
@@ -271,6 +274,9 @@ struct BrowserQuickOpenSheet: View {
 
     @Bindable var model: BrowserModel
     @Bindable var session: BrowserTabSession
+    /// The surface this sheet is up on: what it closes is its own presentation and not another
+    /// surface's.
+    let surface: PanelSurface
     /// The row the keyboard is on. The rule lives in the value type, not here: a `@State` integer
     /// moved inside a gesture is not something a test can drive, and Q8's "Enter opens the selected
     /// URL" is a rule (C2 of fix wave C).
@@ -290,7 +296,7 @@ struct BrowserQuickOpenSheet: View {
                 Text("Return opens in this tab · ⌘Return in a new one")
                     .font(.caption2).foregroundStyle(.secondary)
                 Spacer()
-                Button("Close") { session.closeQuickOpen() }
+                Button("Close") { session.closeQuickOpen(from: surface) }
                     .keyboardShortcut(.cancelAction)
             }
             .padding(8)
@@ -348,7 +354,7 @@ struct BrowserQuickOpenSheet: View {
         let results = session.results
         guard let chosen = selection.chosenIndex(resultCount: results.count) else { return }
         model.open(results[chosen].url, in: .quickOpenSubmission(commandHeld: commandHeld))
-        session.closeQuickOpen()
+        session.closeQuickOpen(from: surface)
     }
 }
 

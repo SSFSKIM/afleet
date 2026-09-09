@@ -114,7 +114,7 @@ final class BrowserModelTests: XCTestCase {
         let session = BrowserTabSession(recentURLs: StubRecentURLFeed(seeded: []))
         let labels = Set(Mirror(reflecting: session).children.compactMap(\.label))
             .subtracting(["_$observationRegistrar"])
-        XCTAssertEqual(labels, ["recentURLs", "_isPresented", "_query", "_entries", "watcher"],
+        XCTAssertEqual(labels, ["recentURLs", "_presentedOn", "_query", "_entries", "watcher"],
                        "BrowserTabSession's member set changed; Q20 says it holds no web view and "
                        + "no tab set")
     }
