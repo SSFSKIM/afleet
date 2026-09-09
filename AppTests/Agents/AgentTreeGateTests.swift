@@ -34,6 +34,10 @@ final class AgentTreeGateTests: XCTestCase {
     /// Two nodes, one per task id, the depth-2 run **under** the depth-1 run, with the parent link
     /// answered by C3's two-step join.
     ///
+    /// The recording carries one depth-1 run, so the *nesting* half of this gate is discriminated by
+    /// `AgentRunReadTests.testANestedRunGoesUnderTheRunThatSpawnedItAndNotTheNewestRoot`, whose
+    /// corpus has two roots and nests the depth-2 run under the older one.
+    ///
     /// `parentSource` is the discriminating field: `task_started` carries no parent id and
     /// `spawn_depth` says how deep a run is without saying *under which* run, so a tree built from
     /// either alone answers `.none` here. The outline's own half is the last clause — closing the

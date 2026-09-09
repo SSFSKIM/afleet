@@ -47,6 +47,10 @@ final class AgentRunReadTests: XCTestCase {
     /// Failing-first against a read that answers every node as a root — which is what a tree built
     /// from `spawn_depth` alone, or from `task_started` alone, would produce, since `task_started`
     /// carries no parent id.
+    ///
+    /// The recording holds **one** depth-1 run, so this arm cannot separate a read that follows the
+    /// parent link from one that hangs every nested run off the newest root; the test below is the
+    /// corpus that does.
     func testADepthTwoNodeIsNotARoot() throws {
         let read = try InventedAgents.nestedDepthTwo()
 
@@ -59,6 +63,49 @@ final class AgentRunReadTests: XCTestCase {
         let child = try XCTUnwrap(read.content(of: try XCTUnwrap(children.first, "the root has no child")),
                                   "the tree holds no content for its own child")
         XCTAssertEqual(child.depth, 2, "the nested run draws depth \(child.depth), not 2")
+    }
+
+    /// A nested run goes under the run that **spawned** it, and not under whichever root started
+    /// most recently.
+    ///
+    /// Discriminating, and the reason this corpus exists at all: every nesting assertion this leaf
+    /// had ran over a tree with **one** depth-1 root, where "the parent the link names" and "the
+    /// newest root" are the same node — so a read that inferred nesting from `spawn_depth` and
+    /// arrival order passed all of them. Here there are two depth-1 roots and the join names the
+    /// **first**, which is the one case the two readings answer differently.
+    func testANestedRunGoesUnderTheRunThatSpawnedItAndNotTheNewestRoot() throws {
+        var tree = InventedAgents.tree()
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_inventedaaa1", toolUseID: "toolu_inventedaaa1",
+                                                 agentType: "an-invented-first-root", depth: 1),
+                   at: InventedAgents.epoch)
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_inventedbbb2", toolUseID: "toolu_inventedbbb2",
+                                                 agentType: "an-invented-later-root", depth: 1),
+                   at: InventedAgents.epoch)
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_inventedccc3", toolUseID: "toolu_inventedccc3",
+                                                 agentType: "an-invented-nested-run", depth: 2),
+                   at: InventedAgents.epoch)
+        // The two-step join, on the older root: the block that spawned the nested run was carried by
+        // a frame from inside the *first* root's own spawning block.
+        tree.observe(parentToolUseID: "toolu_inventedaaa1", carryingToolUseIDs: ["toolu_inventedccc3"])
+
+        let read = AgentRunRead(timeline: ChannelTimeline(agents: tree))
+
+        XCTAssertEqual(read.roots.count, 2,
+                       "the tree read as \(read.roots.count) root(s) for the 2 runs no source parented")
+        XCTAssertTrue(read.children(of: "task_inventedaaa1") == ["task_inventedccc3"],
+                      "the nested run is not under the root whose block spawned it")
+        XCTAssertEqual(read.children(of: "task_inventedbbb2").count, 0,
+                       "the later root was given \(read.children(of: "task_inventedbbb2").count) child(ren) it never spawned")
+
+        // And the outline draws it there: three rows, the nested run second — between its own parent
+        // and the root that started after it — and closing the first root takes it away.
+        let rows = AgentTreeView.visibleRows(read: read, collapsed: [])
+        XCTAssertEqual(rows.count, 3, "the outline drew \(rows.count) row(s) for 3 runs")
+        XCTAssertTrue(rows.map(\.id) == ["task_inventedaaa1", "task_inventedccc3", "task_inventedbbb2"],
+                      "the outline drew the nested run somewhere other than under the run that spawned it")
+        let closed = AgentTreeView.visibleRows(read: read, collapsed: ["task_inventedaaa1"])
+        XCTAssertEqual(closed.count, 2,
+                       "closing the spawning root left \(closed.count) row(s), so the nested run is not under it")
     }
 
     /// A node whose parent **no source answered** surfaces in `roots`, with its own depth stated
