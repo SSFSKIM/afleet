@@ -285,7 +285,7 @@ public actor StreamIngestion {
             let buffered = buffer ?? []
             alignBuffer(buffered)
             buffer = nil
-            projectionCache = recompute()
+            projectionCache = recomputeReconciled(into: &bufferedLiveChanges)
             if !bufferedLiveChanges.isEmpty {
                 publish(Effect(), adding: bufferedLiveChanges)
                 bufferedLiveChanges = []
@@ -1049,6 +1049,28 @@ public actor StreamIngestion {
         return RecordReducer.merge(projections, main: main)
     }
 
+    /// The projection, with the agent tree reconciled against it (parent §7.3).
+    ///
+    /// **The two halves of one channel must not disagree about one run.** A node no `task_started` ever named — every
+    /// node of a channel opened from its files — has no status of its own: the sidecar carries none and the run's
+    /// transcript ends without saying it ended. The merged projection's `taskRun` row for the same task *does* have
+    /// one, derived from the spawning call's result, so the row is what the node takes. A run the wire started keeps
+    /// the wire's reading, which is the only one that can say a run ended while the channel is live.
+    ///
+    /// Here rather than inside `recompute()`, which answers with a value and mutates nothing, and at both of the
+    /// places the projection is rebuilt, because a node created during the open must not be published as running once.
+    private func recomputeReconciled(into changes: inout [TimelineChange]) -> DurableProjection {
+        let projection = recompute()
+        var readings: [String: AgentRunTree.FileReading] = [:]
+        for item in projection.items {
+            guard case .taskRun(let run) = item, run.kind == .localAgent else { continue }
+            readings[run.taskID] = AgentRunTree.FileReading(status: run.status, startedAt: run.timestamp)
+        }
+        guard !readings.isEmpty else { return projection }
+        changes += wire?.reconcile(fileRuns: readings) ?? []
+        return projection
+    }
+
     /// `adding` is the live half's own changes — a host signal's, which no durable diff can show.
     @discardableResult
     private func publish(_ effect: Effect, adding overlayChanges: [TimelineChange] = []) -> Effect {
@@ -1058,11 +1080,13 @@ public actor StreamIngestion {
         }
         pendingStateChange = nil
         let previous = projectionCache
-        projectionCache = recompute()
+        var reconciled: [TimelineChange] = []
+        projectionCache = recomputeReconciled(into: &reconciled)
         // `effect.changes` is not cleared: a caller that already folded the live half — the mirror's `agent_metadata`
         // entries, a sidecar the watcher reported — has reported what moved there, and the durable diff below cannot
         // see it.
-        effect.changes = Self.changes(from: previous, to: projectionCache) + effect.changes + overlayChanges
+        effect.changes = Self.changes(from: previous, to: projectionCache) + reconciled + effect.changes
+            + overlayChanges
         sink.yield(effect)
         return effect
     }

@@ -68,8 +68,18 @@ public struct AgentRunTree: Hashable, Sendable {
 
     private let configHome: URL
     private let sessionID: SessionID
-    /// Node ids in the order their first `task_started` arrived — the tree's start order.
+    /// Node ids in **start order**: every node by its `elapsedOrigin`, which is when the run began for a node a
+    /// `task_started` named and the source's own instant for one a metadata source created, until the file half's
+    /// reading or a later `task_started` takes it back. Ties break by the order the tree first heard of the ids.
+    ///
+    /// Sorted rather than appended because the two channel kinds hear of their runs in different orders — a live
+    /// channel in `task_started` order, a file-only one in whatever order the directory enumerates its sidecars, which
+    /// is by file name — and a tree whose roots read differently depending on how the channel was opened is a
+    /// different tree.
     private var order: [String]
+    /// The order the tree first heard of each id, which breaks a tie between two equal instants.
+    private var sequence: [String: Int]
+    private var nextSequence: Int
     /// The two-step join's index: a tool-use id → the `parent_tool_use_id` of the frame that carried that block.
     /// `.some(nil)` is "carried by a top-level frame"; a missing key is "never observed".
     private var carriedBy: [String: String?]
@@ -77,7 +87,7 @@ public struct AgentRunTree: Hashable, Sendable {
     public init(configHome: URL, sessionID: SessionID, slug: String) {
         self.nodes = [:]; self.conflicts = []; self.parentAnswers = [:]; self.slug = slug
         self.configHome = configHome.standardizedFileURL; self.sessionID = sessionID
-        self.order = []; self.carriedBy = [:]
+        self.order = []; self.carriedBy = [:]; self.sequence = [:]; self.nextSequence = 0
     }
 
     // MARK: - Task frames
@@ -88,7 +98,7 @@ public struct AgentRunTree: Hashable, Sendable {
         guard f.taskType == "local_agent" else { return }
         if nodes[f.taskID] == nil {
             nodes[f.taskID] = AgentRunNode(id: f.taskID, elapsedOrigin: now)
-            order.append(f.taskID)
+            insert(f.taskID)
         } else if nodes[f.taskID]!.startedCount == 0 {
             // A metadata source created this node and stamped it with its own arrival. The run's first `task_started`
             // is when the run actually began, so it takes the origin back; a *repeat* start does not, because the
@@ -102,6 +112,7 @@ public struct AgentRunTree: Hashable, Sendable {
         nodes[f.taskID]!.status = .running
         nodes[f.taskID]!.endedAt = nil
         nodes[f.taskID]!.startedCount += 1
+        resort()
         resolveJoins()
     }
 
@@ -223,17 +234,21 @@ public struct AgentRunTree: Hashable, Sendable {
     /// opened from its files alone is permanently empty: no wire means no `task_started`, and every node the sidecars
     /// describe would be dropped by a guard that exists only because `task_started` used to be the sole creator.
     ///
-    /// A node created here reads `.running`, which is the same reading the record reducer's file-side `taskRun` row
-    /// takes for an agent stream whose spawning call it cannot see: neither the sidecar nor the transcript records a
-    /// terminal status, and the two halves of one channel must not disagree about the same run.
+    /// A node created here reads `.running` and keeps that reading **only until something says otherwise**. Neither
+    /// the sidecar nor the mirror entry carries a status, so `.running` is what the type defaults to and not an
+    /// assertion; `reconcile(fileReadings:)` then hands the node the file half's own reading of the same run, which
+    /// is the `taskRun` row's — completed or failed as the spawning call's result says, running only where the merged
+    /// line holds no spawning call for it. Saying `.running` and stopping there is what made an archived channel's
+    /// row read *Completed* beside a tree node that read running.
     ///
-    /// `elapsedOrigin` is this source's instant, and `apply(taskStarted:)` replaces it on the first `task_started`
-    /// the node ever sees: the metadata's arrival is when the *host learned of* the run, not when the run began.
+    /// `elapsedOrigin` is this source's instant, and it is replaced by the first `task_started` the node ever sees or
+    /// by the file half's reading of when the run began: the metadata's arrival is when the *host learned of* the
+    /// run, not when the run began, and the start order the tree is sorted in has to be the run's.
     private mutating func absorb(_ m: AgentMetadataFields, taskID: String, source: AgentRunNode.ParentSource,
                                  at now: Date) {
         if nodes[taskID] == nil {
             nodes[taskID] = AgentRunNode(id: taskID, elapsedOrigin: now)
-            order.append(taskID)
+            insert(taskID)
         }
         if nodes[taskID]!.agentType == nil { nodes[taskID]!.agentType = m.agentType }
         if nodes[taskID]!.description.isEmpty { nodes[taskID]!.description = m.description }
@@ -249,6 +264,59 @@ public struct AgentRunTree: Hashable, Sendable {
         if let depth = m.spawnDepth { nodes[taskID]!.depth = depth }
         if let parent = m.parentAgentId { link(taskID, to: parent, from: source) }
         if learnedToolUse { resolveJoins() }
+    }
+
+    /// The file half's reading of one agent run, as the merged projection's `taskRun` row states it.
+    ///
+    /// The row is derived in `RecordReducer.taskRun(for:spawnedBy:toolUseID:)` and the two halves of one channel must
+    /// not disagree about the same run, so the row is the authority for a node no `task_started` has named.
+    public struct FileReading: Hashable, Sendable {
+        /// The spawning call's own status, or `.running` where the merged line holds no spawning call for the run.
+        public var status: TaskStatus
+        /// When the run began, as the row places it — the spawning call's instant. Nil where the row carries none.
+        public var startedAt: Date?
+        public init(status: TaskStatus, startedAt: Date? = nil) {
+            self.status = status; self.startedAt = startedAt
+        }
+    }
+
+    /// The file half's readings, applied to the nodes **no `task_started` has named** (`startedCount == 0`).
+    ///
+    /// A run the wire started is the wire's: its frames carry a status the transcript cannot, and `task_notification`
+    /// is the only thing that ever says a run ended. A run only the metadata named has no such source, and the row
+    /// the same channel already draws for it is the honest reading — so the node takes it rather than defaulting to
+    /// running for ever. Returns whether anything moved, so a caller publishes only a real change.
+    @discardableResult
+    public mutating func reconcile(fileReadings: [String: FileReading]) -> Bool {
+        var moved = false
+        for (id, reading) in fileReadings {
+            guard var node = nodes[id], node.startedCount == 0 else { continue }
+            if node.status != reading.status { node.status = reading.status; moved = true }
+            if let startedAt = reading.startedAt, node.elapsedOrigin != startedAt {
+                node.elapsedOrigin = startedAt; moved = true
+            }
+            nodes[id] = node
+        }
+        if moved { resort() }
+        return moved
+    }
+
+    /// A node the tree has just created takes its place in start order.
+    private mutating func insert(_ id: String) {
+        sequence[id] = nextSequence
+        nextSequence += 1
+        order.append(id)
+        resort()
+    }
+
+    /// `order` by `elapsedOrigin`, ties broken by the order the tree first heard of the ids. Called after anything
+    /// that can create a node or move one's origin; the array holds one entry per agent run of one session.
+    private mutating func resort() {
+        order.sort { a, b in
+            guard let first = nodes[a], let second = nodes[b] else { return false }
+            if first.elapsedOrigin != second.elapsedOrigin { return first.elapsedOrigin < second.elapsedOrigin }
+            return (sequence[a] ?? 0) < (sequence[b] ?? 0)
+        }
     }
 
     /// Every node without a parent whose spawning block has been observed. Runs after each fold step that could

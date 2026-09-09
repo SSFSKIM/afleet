@@ -3358,3 +3358,13 @@ them), four new below. Numbers 384–393 are C7.4's; C6.1 continues from 394.
      channel the index reports dormant as ending its runs. Filed by the
      `corrective/c3-agent-tree-mirror` corrective on `main`, 2026-09-09. Owner: C3, before C6.4 is
      judged on foreign channels.
+     **Mostly closed the same day, in the same corrective's fix wave.** `StreamIngestion` reconciles
+     the tree against the merged projection's `taskRun` rows after every recompute, so a node no
+     `task_started` named takes the row's status and the row's start instant: an archived session's
+     runs now read *Completed* in both halves. What remains is narrower and is what this entry now
+     stands for: a run whose spawning call is nowhere in the merged line — a truncated window, an
+     agent stream whose `tool_use` block was compacted away — still reads running in both halves,
+     because nothing on disk says otherwise; and no node gets an `endedAt`, since neither the sidecar
+     nor the transcript records when a run ended, so a consumer that ticks elapsed to `endedAt ?? now`
+     has nothing to stop at. Closer: an end instant the file half can defend (the last record of the
+     run's own transcript is a *last activity*, not an end), and C4's dormancy as the second witness.

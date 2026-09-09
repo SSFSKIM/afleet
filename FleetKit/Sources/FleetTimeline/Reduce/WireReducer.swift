@@ -107,6 +107,16 @@ public struct WireReducer: Sendable {
         return before.difference(to: Snapshot(self))
     }
 
+    /// The file half's readings of the agent runs, from the merged projection's `taskRun` rows — parent §7.3's
+    /// reconciliation. Only the nodes no `task_started` has named take one, and a reading that moved nothing
+    /// rebuilds nothing.
+    public mutating func reconcile(fileRuns: [String: AgentRunTree.FileReading]) -> [TimelineChange] {
+        let before = Snapshot(self)
+        guard agents.reconcile(fileReadings: fileRuns) else { return [] }
+        rebuild()
+        return before.difference(to: Snapshot(self))
+    }
+
     public mutating func apply(_ signal: HostSignal, at now: Date = Date()) -> [TimelineChange] {
         let before = Snapshot(self)
         switch signal {

@@ -878,9 +878,16 @@ A node is created at the first `task_started` whose `task_type` is `local_agent`
 `task_id`; a repeat for the same id increments `startedCount` and re-arms status. **Amended
 2026-09-09:** a node is created just as well by either metadata source for a run no `task_started`
 has named, because both name an agent stream and an agent stream *is* a `local_agent` run — without
-that a channel with no wire has no tree at all. Such a node reads `.running` (the type's default,
-and the same reading the record reducer's file-side `taskRun` row takes) and its `elapsedOrigin` is
-the source's own instant until the run's first `task_started` replaces it. The parent
+that a channel with no wire has no tree at all. Such a node is created `.running`,
+which is the type's default and not an assertion, and holds that reading only until the channel's
+own file half states otherwise: after every projection the ingestion **reconciles** the nodes no
+`task_started` has named against the merged line's `taskRun` rows, which the record reducer derives
+from the spawning call — completed or failed as its result says, running only where the merged line
+holds no spawning call for the run — so the tree and the row of one channel never disagree about
+one run. `elapsedOrigin` is the source's own instant until the same reconciliation, or the run's
+first `task_started`, replaces it with when the run began; `order` — and so `roots` — is **sorted**
+by it, so a channel opened from its files lists its runs in start order rather than in the order
+the directory enumerates their sidecars, which is by file name. The parent
 link is set from the first source that answers and recorded as such: the `agent_metadata`
 mirror entry at the head of the agent stream, then the `.meta.json` when read, then the
 two-step join (a frame's `parent_tool_use_id` names the `tool_use` block that spawned it;
@@ -1590,6 +1597,16 @@ when a review finding is real but has no oracle, log it with the recording that 
 one; entry 23 is worth more to C1 than a guessed fix would have been to C6.
 
 ## Revision Notes
+
+- 2026-09-09, the same corrective's fix wave (tracker 407 re-stated): **the tree and the file half
+  agree about a run, and the roots read in start order.** A node a metadata source created has no
+  status and no start of its own — neither the sidecar nor the mirror entry carries either — so
+  `StreamIngestion` reconciles those nodes against the merged projection's `taskRun` rows after every
+  recompute (`WireReducer.reconcile(fileRuns:)`, `AgentRunTree.reconcile(fileReadings:)`), taking the
+  row's status and the row's instant. A run the wire started is untouched: its frames are the only
+  source that can say a run ended while the channel is live. `AgentRunTree.order` is sorted by
+  `elapsedOrigin` rather than appended to, because the file half hears of its runs in file-name order
+  and the wire hears of them in start order, and one session must not have two trees.
 
 - 2026-09-09 corrective on `main` (`corrective/c3-agent-tree-mirror`, tracker 187 and 321):
   **the metadata sources reach the tree, and the fold's registry mirror reaches the read model.**

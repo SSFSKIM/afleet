@@ -395,6 +395,219 @@ final class AgentTreeSourcesTests: XCTestCase {
         await ingestion.close()
     }
 
+    // MARK: - The status a metadata-created node reads
+
+    /// **A node the metadata created reads what the channel's own `taskRun` row reads.**
+    ///
+    /// `absorb` creates the node with the type's default, `.running`. The record reducer derives the row's status
+    /// from the *spawning call*: completed or failed as its result says, running only when the merged line holds no
+    /// spawning call at all. On an archived session the call and its result are both on disk, so the row said
+    /// *Completed* while the tree node said running with an elapsed timer running from the moment the channel was
+    /// opened — one channel disagreeing with itself about one run.
+    ///
+    /// The pair is the discrimination: every node agrees with its row, **and** at least one row is terminal, without
+    /// which a tree that still read running everywhere would pass.
+    func testAMetadataCreatedNodeAgreesWithItsTaskRunRow() async throws {
+        let fx = try FixtureCorpus.named(Self.fixtureName)
+        let tree = try TempTree()
+        let mainPath = try tree.add(fx, slug: "nested")
+        let ingestion = StreamIngestion(session: fx.sessionID, configHome: tree.root, mode: .filePrimary)
+        let (events, continuation) = AsyncStream<WireEvent>.makeStream()
+        continuation.finish()
+        try await ingestion.open(file: mainPath, events: events)
+
+        let timeline = await ingestion.timeline
+        let agents = try XCTUnwrap(timeline.agents, "a file-only channel built no tree")
+        var rows: [String: TaskRunItem] = [:]
+        for item in timeline.durable.items {
+            guard case .taskRun(let run) = item, run.kind == .localAgent else { continue }
+            rows[run.taskID] = run
+        }
+        XCTAssertEqual(Set(rows.keys), Set(try sidecarTaskIDs(fx)),
+                       "the file half drew a row for a different set of runs than the sidecars name")
+        XCTAssertTrue(rows.values.contains { $0.status != .running },
+                      "no row of this corpus is terminal, so agreeing with them proves nothing")
+        for (taskID, row) in rows {
+            let node = try XCTUnwrap(agents.node(taskID), "the tree has no node for the run its row draws")
+            XCTAssertEqual(node.status, row.status,
+                           "the tree and the row of one channel disagree about run \(taskID)")
+            XCTAssertEqual(node.elapsedOrigin, try XCTUnwrap(row.timestamp),
+                           "the node's elapsed runs from when the host read the file, not from when the run began")
+        }
+
+        await ingestion.close()
+    }
+
+    /// **And running is still the reading when no spawning call is there to say otherwise.** An invented sidecar
+    /// whose `toolUseId` names no block of this session: the merge appends its row rather than dropping it, with no
+    /// call to take a status from, so `.running` is what both halves read — which is the clause the fix must not
+    /// flatten into "everything a file names is finished".
+    func testARunWithNoSpawningCallStillReadsRunning() async throws {
+        let fx = try FixtureCorpus.named(Self.fixtureName)
+        let tree = try TempTree()
+        let mainPath = try tree.add(fx, slug: "nested")
+        let orphan = "task-invented-orphan-01"
+        try writeSidecar(taskID: orphan, toolUseID: "toolu_invented9999", spawnDepth: 1,
+                         beside: mainPath, session: fx.sessionID)
+
+        let ingestion = StreamIngestion(session: fx.sessionID, configHome: tree.root, mode: .filePrimary)
+        let (events, continuation) = AsyncStream<WireEvent>.makeStream()
+        continuation.finish()
+        try await ingestion.open(file: mainPath, events: events)
+
+        let timeline = await ingestion.timeline
+        let row = try XCTUnwrap(timeline.durable.items.compactMap { item -> TaskRunItem? in
+            guard case .taskRun(let run) = item, run.taskID == orphan else { return nil }
+            return run
+        }.first, "the merge dropped the run whose spawning call is nowhere")
+        XCTAssertEqual(row.status, .running, "a row with no spawning call reads running")
+        let node = try XCTUnwrap(timeline.agents?.node(orphan), "the sidecar named no node")
+        XCTAssertEqual(node.status, .running, "the node took a status the file half never stated")
+
+        await ingestion.close()
+    }
+
+    // MARK: - The order the roots read in
+
+    /// **Two roots read in the same order live and from files.**
+    ///
+    /// The file half enumerates its sidecars by file name, so a tree built from them alone listed its roots in task-id
+    /// order while the live channel listed them in start order — the same session, two different trees, decided by how
+    /// the channel happened to be opened. The invented corpus is built so the two orders differ: `alpha` sorts first
+    /// by name and starts second.
+    func testTheRootsReadInStartOrderAndNotInFileNameOrder() async throws {
+        let session = try XCTUnwrap(SessionID("22222222-2222-4222-8222-222222222222"))
+        let first = InventedRun(taskID: "beta-invented-run", toolUseID: "toolu_invented0002", at: 60)
+        let second = InventedRun(taskID: "alpha-invented-run", toolUseID: "toolu_invented0001", at: 120)
+        XCTAssertLessThan("agent-\(second.taskID).meta.json", "agent-\(first.taskID).meta.json",
+                          "the corpus must name the second run first, or file order and start order agree by accident")
+
+        // The file-only channel: the two runs' sidecars, and a main transcript whose Task calls place them.
+        let fileTree = try TempTree()
+        let mainPath = try fileTree.write(Self.transcript(session: session, runs: [first, second]),
+                                          session: session, slug: "invented")
+        for run in [first, second] {
+            try writeSidecar(taskID: run.taskID, toolUseID: run.toolUseID, spawnDepth: 1,
+                             beside: mainPath, session: session)
+        }
+        let fileOnly = StreamIngestion(session: session, configHome: fileTree.root, mode: .filePrimary)
+        let (closed, continuation) = AsyncStream<WireEvent>.makeStream()
+        continuation.finish()
+        try await fileOnly.open(file: mainPath, events: closed)
+        let built = await fileOnly.agents
+        let fromFiles = try XCTUnwrap(built, "the file-only channel built no tree")
+
+        // The live channel: the same two runs, as the engine announces them, in the order they started.
+        let liveTree = try TempTree()
+        let livePath = try liveTree.write(Data(), session: session, slug: "invented")
+        let live = StreamIngestion(session: session, configHome: liveTree.root, mode: .filePrimary)
+        let tap = Tap()
+        try await live.open(file: livePath, events: tap.events)
+        for run in [first, second] { tap.send(.frame(Self.taskStarted(run, session: session), .first)) }
+        tap.finish()
+        let fromWire = try await awaitTree(live, "both runs started") { $0.nodes.count == 2 }
+
+        XCTAssertEqual(fromWire.roots, [first.taskID, second.taskID],
+                       "the live channel's roots are not in the order the runs started")
+        XCTAssertEqual(fromFiles.roots, fromWire.roots,
+                       "the same two runs read in one order live and another from files")
+
+        await live.close()
+        await fileOnly.close()
+    }
+
+    // MARK: - Invented corpus
+
+    /// One agent run of the invented corpus: its task id, the `tool_use` block that spawned it, and the second the
+    /// spawning call is stamped with.
+    private struct InventedRun {
+        let taskID: String
+        let toolUseID: String
+        let at: Int
+    }
+
+    /// A main transcript that spawns each run in turn: an `assistant` carrying the `Task` block and the `user`
+    /// carrying its result, so the merge has a completed spawning call to place each row against.
+    ///
+    /// **One chain, not two roots.** The reducer renders the branch its leaf is on, so a second record with a null
+    /// `parentUuid` would read as a rewind and everything on the first branch would be off the rendered line.
+    ///
+    /// Built through `JSONValue` and its canonical encoder — generated bytes throughout, no recording read (§11).
+    private static func transcript(session: SessionID, runs: [InventedRun]) -> Data {
+        var lines: [Data] = []
+        var parent: JSONValue = .null
+        for (index, run) in runs.enumerated() {
+            let call = uuid(index * 2 + 1), result = uuid(index * 2 + 2)
+            let toolUse: JSONValue = .object([
+                "type": .string("tool_use"), "id": .string(run.toolUseID), "name": .string("Task"),
+                "input": .object(["description": .string("an invented errand"),
+                                  "subagent_type": .string("InventedAgentType")]),
+            ])
+            lines.append(record(["type": .string("assistant"), "uuid": .string(call), "parentUuid": parent,
+                                 "sessionId": .string("\(session)"), "timestamp": .string(stamp(run.at)),
+                                 "message": .object(["id": .string("msg_invented\(index)"),
+                                                     "type": .string("message"), "role": .string("assistant"),
+                                                     "model": .string("invented-model"),
+                                                     "content": .array([toolUse]),
+                                                     "stop_reason": .string("tool_use")])]))
+            let toolResult: JSONValue = .object(["type": .string("tool_result"),
+                                                 "tool_use_id": .string(run.toolUseID),
+                                                 "content": .string("an invented result")])
+            lines.append(record(["type": .string("user"), "uuid": .string(result), "parentUuid": .string(call),
+                                 "sessionId": .string("\(session)"), "timestamp": .string(stamp(run.at + 1)),
+                                 "message": .object(["role": .string("user"), "content": .array([toolResult])])]))
+            parent = .string(result)
+        }
+        var data = Data()
+        for line in lines { data.append(line); data.append(UInt8(ascii: "\n")) }
+        return data
+    }
+
+    /// One transcript record, canonically encoded. `isSidechain` is on every record the engine writes.
+    private static func record(_ fields: [String: JSONValue]) -> Data {
+        var object = fields
+        object["isSidechain"] = .bool(false)
+        return (try? JSONValue.object(object).canonicalData()) ?? Data()
+    }
+
+    /// The engine's `task_started` for one invented run, decoded from JSON for the reason every invented frame is:
+    /// the field structs' memberwise initialisers are internal, and the decoder is the shape the wire uses.
+    private static func taskStarted(_ run: InventedRun, session: SessionID) -> Frame {
+        let object: [String: JSONValue] = [
+            "type": .string("system"), "subtype": .string("task_started"),
+            "task_id": .string(run.taskID), "tool_use_id": .string(run.toolUseID),
+            "description": .string("an invented errand"), "subagent_type": .string("InventedAgentType"),
+            "spawn_depth": .integer(1), "task_type": .string("local_agent"),
+            "uuid": .string(uuid(run.at)), "session_id": .string("\(session)"),
+        ]
+        return FrameDecoder.decode(line: (try? JSONValue.object(object).canonicalData()) ?? Data())
+    }
+
+    /// `projects/<slug>/<session>/subagents/agent-<taskId>.meta.json`, with an empty transcript beside it — which is
+    /// the pair the engine leaves on disk for a run.
+    private func writeSidecar(taskID: String, toolUseID: String, spawnDepth: Int, parent: String? = nil,
+                              beside mainPath: URL, session: SessionID) throws {
+        let directory = mainPath.deletingLastPathComponent()
+            .appendingPathComponent("\(session)", isDirectory: true)
+            .appendingPathComponent("subagents", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var fields: [String: JSONValue] = ["agentType": .string("InventedAgentType"),
+                                           "description": .string("an invented errand"),
+                                           "toolUseId": .string(toolUseID),
+                                           "spawnDepth": .integer(Int64(spawnDepth))]
+        if let parent { fields["parentAgentId"] = .string(parent) }
+        try JSONValue.object(fields).canonicalData()
+            .write(to: directory.appendingPathComponent("agent-\(taskID).meta.json"))
+        let transcript = directory.appendingPathComponent("agent-\(taskID).jsonl")
+        if !FileManager.default.fileExists(atPath: transcript.path) { try Data().write(to: transcript) }
+    }
+
+    private static func uuid(_ counter: Int) -> String { "00000000-0000-4000-8000-" + String(format: "%012d", counter) }
+
+    private static func stamp(_ second: Int) -> String {
+        String(format: "2026-01-01T%02d:%02d:%02d.000Z", (second / 3600) % 24, (second / 60) % 60, second % 60)
+    }
+
     // MARK: - Waiting
 
     /// The tree once it satisfies `until`. **Delivery-fulfilled, never a fixed span**: the tap is consumed on
