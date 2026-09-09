@@ -88,6 +88,31 @@ final class AgentRunReadTests: XCTestCase {
         XCTAssertTrue(read.roots.contains("task_invented0002"), "the orphan is not among the tree's roots")
     }
 
+    // MARK: - The item filter
+
+    /// One run's items are the channel's items whose provenance names that run — and **both** a
+    /// main-thread item and a *sibling run's* item are absent.
+    ///
+    /// Discriminating: the sibling half is the whole test. A filter that only excluded the
+    /// unattributed main thread passes the naive assertion and puts one subagent's work in another
+    /// subagent's transcript.
+    func testTheItemFilterExcludesTheMainThreadAndEverySibling() {
+        let mine = Self.call("toolu_invented0010", agent: "task_invented0001")
+        let siblings = Self.call("toolu_invented0011", agent: "task_invented0002")
+        let mainThread = Self.call("toolu_invented0012", agent: nil)
+        let timeline = ChannelTimeline(durable: DurableProjection(items: [mainThread, mine, siblings]))
+
+        let filtered = AgentRunRead.items(of: "task_invented0001", in: timeline)
+
+        XCTAssertEqual(filtered.count, 1, "the filter kept \(filtered.count) item(s) for a run that has 1")
+        XCTAssertEqual(filtered.compactMap(\.provenance.agentID), ["task_invented0001"],
+                       "the filter kept an item some other stream produced")
+        XCTAssertEqual(filtered.map(\.id.key), ["toolu_invented0010"],
+                       "the filter kept the wrong item")
+        XCTAssertEqual(AgentRunRead.items(of: "task_invented0003", in: timeline).count, 0,
+                       "a run the channel has no items for was given some")
+    }
+
     // MARK: - Sanitising and the waiting count
 
     /// Every wire string a node draws passes `TextSanitiser` once, where the content is built
@@ -193,6 +218,17 @@ final class AgentRunReadTests: XCTestCase {
 
     private static var stream: LogicalStream {
         LogicalStream(configHome: URL(fileURLWithPath: "/invented/config-home"), sessionID: session, name: .main)
+    }
+
+    /// A tool call attributed to one agent stream, or to the main thread when `agent` is nil.
+    static func call(_ toolUseID: String, agent: String?) -> TimelineItem {
+        .toolCall(ToolCallItem(id: ItemID(stream: stream, key: toolUseID),
+                               timestamp: epoch,
+                               provenance: Provenance(stream: stream, agentID: agent, origin: .wire),
+                               toolUseID: toolUseID,
+                               name: "Read",
+                               rawInput: .object([:]),
+                               status: .completed))
     }
 
     static func decision(_ request: String, agent: String) -> DecisionItem {

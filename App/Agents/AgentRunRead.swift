@@ -80,4 +80,16 @@ struct AgentRunRead: Hashable, Sendable {
     /// resolves to nothing, and the pane says so rather than fabricating a selection (D5).
     func knows(_ id: AgentRunID) -> Bool { contents[id] != nil }
 
+    /// One run's items: the channel's items whose provenance names this agent, in the timeline's
+    /// own order.
+    ///
+    /// **A filter, never a reduction** (child spec D4, root §7.3). The wire reducer keeps one
+    /// `ItemBuilder` per agent and stamps `Provenance.agentID` on every item of that stream, and
+    /// the file half stamps the same field — so this one expression is the run's transcript live and
+    /// from disk, and the items are C3's, unmodified.
+    ///
+    /// Static and pure so the transcript pane's contents are testable without a render pass.
+    static func items(of run: AgentRunID, in timeline: ChannelTimeline) -> [TimelineItem] {
+        timeline.items.filter { $0.provenance.agentID == run }
+    }
 }
